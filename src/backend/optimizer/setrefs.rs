@@ -34,18 +34,26 @@ struct IndexedTlist {
 impl IndexedTlist {
     fn search_expr(&self, root: Option<&PlannerInfo>, expr: &Expr) -> Option<&IndexedTlistEntry> {
         match expr {
-            Expr::Var(var) => self.entries.iter().find(|entry| {
-                entry.match_exprs.iter().any(|candidate| match candidate {
-                    Expr::Var(candidate_var) => {
-                        candidate_var == var
-                            || root.is_some_and(|root| {
+            Expr::Var(var) => self
+                .entries
+                .iter()
+                .find(|entry| {
+                    entry
+                        .match_exprs
+                        .iter()
+                        .any(|candidate| matches!(candidate, Expr::Var(candidate_var) if candidate_var == var))
+                })
+                .or_else(|| {
+                    self.entries.iter().find(|entry| {
+                        entry.match_exprs.iter().any(|candidate| match candidate {
+                            Expr::Var(candidate_var) => root.is_some_and(|root| {
                                 flatten_join_alias_vars(root, Expr::Var(candidate_var.clone()))
                                     == flatten_join_alias_vars(root, expr.clone())
-                            })
-                    }
-                    _ => output_component_matches_expr(candidate, expr),
-                })
-            }),
+                            }),
+                            _ => output_component_matches_expr(candidate, expr),
+                        })
+                    })
+                }),
             _ => self.entries.iter().find(|entry| {
                 entry
                     .match_exprs

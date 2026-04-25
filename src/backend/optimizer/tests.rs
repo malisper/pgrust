@@ -1011,6 +1011,37 @@ fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
 }
 
 #[test]
+fn cartesian_join_plans_as_cross_join_without_hidden_order_by() {
+    let catalog = catalog_with_people_and_pets();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select p.id, q.owner_id from people p, pets q",
+        &catalog,
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| {
+            matches!(
+                plan,
+                Plan::NestedLoopJoin {
+                    kind: JoinType::Cross,
+                    ..
+                }
+            )
+        }),
+        "expected cartesian join to stay a cross/nested-loop join, got {:?}",
+        planned.plan_tree
+    );
+    assert!(
+        !plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::OrderBy { .. }
+        )),
+        "unordered cartesian join must not synthesize a final sort, got {:?}",
+        planned.plan_tree
+    );
+}
+
+#[test]
 fn outer_join_preserved_side_where_qual_pushes_to_base_scan() {
     let catalog = catalog_with_people_and_pets();
     let planned = planned_stmt_for_sql_with_catalog(
@@ -2530,6 +2561,30 @@ fn extract_hash_join_clauses_splits_residual_predicates() {
     );
     assert_eq!(clauses.outer_hash_keys, vec![var(1, 1)]);
     assert_eq!(clauses.inner_hash_keys, vec![var(2, 1)]);
+    assert_eq!(
+        clauses.join_clauses,
+        vec![restrict(gt(var(1, 2), var(2, 2)))]
+    );
+}
+
+#[test]
+fn extract_merge_join_clauses_splits_residual_predicates() {
+    let clauses = super::extract_merge_join_clauses(
+        &[
+            restrict(eq(var(1, 1), var(2, 1))),
+            restrict(gt(var(1, 2), var(2, 2))),
+        ],
+        &[1],
+        &[2],
+    )
+    .expect("merge join clauses");
+
+    assert_eq!(
+        clauses.merge_clauses,
+        vec![restrict(eq(var(1, 1), var(2, 1)))]
+    );
+    assert_eq!(clauses.outer_merge_keys, vec![var(1, 1)]);
+    assert_eq!(clauses.inner_merge_keys, vec![var(2, 1)]);
     assert_eq!(
         clauses.join_clauses,
         vec![restrict(gt(var(1, 2), var(2, 2)))]

@@ -535,6 +535,7 @@ pub struct MergeJoinState {
     pub(crate) right_rows: Option<Vec<MergeJoinBufferedRow>>,
     pub(crate) output_rows: Option<Vec<MaterializedRow>>,
     pub(crate) next_output_index: usize,
+    pub(crate) slot: TupleSlot,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
