@@ -570,6 +570,7 @@ pub enum BuiltinScalarFunction {
     DateTrunc,
     IsFinite,
     MakeDate,
+    MakeTime,
     Abs,
     Log,
     Log10,

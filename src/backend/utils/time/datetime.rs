@@ -141,22 +141,26 @@ pub fn postgres_date_from_julian_day(julian_day: i32) -> i32 {
     julian_day - POSTGRES_EPOCH_JDATE
 }
 
-pub fn days_from_ymd(year: i32, month: u32, day: u32) -> Option<i32> {
+pub fn postgres_date_from_ymd_i64(year: i32, month: u32, day: u32) -> Option<i64> {
     if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
         return None;
     }
-    let year_adj = year - i32::from(month <= 2);
+    let year_adj = i64::from(year) - i64::from(month <= 2);
     let era = if year_adj >= 0 {
         year_adj
     } else {
         year_adj - 399
     } / 400;
     let yoe = year_adj - era * 400;
-    let month = month as i32;
-    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day as i32 - 1;
+    let month = i64::from(month);
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let unix_days = era as i64 * 146_097 + doe as i64 - 719_468;
-    Some(postgres_date_from_unix_days(unix_days))
+    let unix_days = era * 146_097 + doe - 719_468;
+    Some(unix_days - UNIX_EPOCH_TO_POSTGRES_EPOCH_DAYS)
+}
+
+pub fn days_from_ymd(year: i32, month: u32, day: u32) -> Option<i32> {
+    i32::try_from(postgres_date_from_ymd_i64(year, month, day)?).ok()
 }
 
 pub fn ymd_from_days(pg_days: i32) -> (i32, u32, u32) {
