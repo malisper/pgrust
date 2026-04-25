@@ -2131,6 +2131,7 @@ fn render_dynamic_query_param_base_sql(
         Value::InternalChar(byte) => {
             quote_sql_string(&crate::backend::executor::render_internal_char_text(*byte))
         }
+        Value::EnumOid(v) => v.to_string(),
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)
@@ -2636,6 +2637,7 @@ fn render_raise_value(value: &Value) -> String {
         Value::Uuid(v) => crate::backend::executor::value_io::render_uuid_text(v),
         Value::Bit(v) => crate::backend::executor::render_bit_text(v),
         Value::InternalChar(v) => char::from(*v).to_string(),
+        Value::EnumOid(v) => v.to_string(),
         Value::Json(text) | Value::JsonPath(text) => text.to_string(),
         Value::Xml(text) => text.to_string(),
         Value::Jsonb(bytes) => String::from_utf8_lossy(bytes).into_owned(),

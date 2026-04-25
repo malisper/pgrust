@@ -13,7 +13,7 @@ use crate::include::catalog::{
     BootstrapCatalogKind, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
     PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
 };
-use crate::include::nodes::datum::IntervalValue;
+use crate::include::nodes::datum::{ArrayValue, IntervalValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
@@ -16518,8 +16518,9 @@ fn foreign_keys_reject_unsupported_cross_type_columns() {
         .unwrap();
     assert!(matches!(
         db.execute(1, "create table numeric_children (parent_id numeric references int_parents)"),
-        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature)))
-            if feature == "FOREIGN KEY with cross-type columns"
+        Err(ExecError::Parse(ParseError::DetailedError { message, detail: Some(detail), sqlstate: "42804", .. }))
+            if message == "foreign key constraint \"numeric_children_parent_id_fkey\" cannot be implemented"
+                && detail.contains("incompatible types")
     ));
 }
 
@@ -28591,7 +28592,7 @@ fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
 
     db.execute(1, "create type mood as enum ('sad', 'ok')")
         .unwrap();
-    db.execute(1, "create table feelings(current_mood mood)")
+    db.execute(1, "create table feelings (current_mood mood)")
         .unwrap();
 
     let visible = db.lazy_catalog_lookup(1, None, None);
@@ -28609,7 +28610,236 @@ fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
     assert_eq!(mood_type.typelem, 0);
     assert_eq!(mood_type.typarray, mood_array_type.oid);
     assert_eq!(mood_array_type.typelem, mood_type.oid);
-    assert_eq!(mood_type.sql_type.kind, SqlTypeKind::Text);
+    assert_eq!(mood_type.sql_type.kind, SqlTypeKind::Enum);
+    assert_eq!(mood_type.sql_type.type_oid, mood_type.oid);
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select enumlabel, enumsortorder from pg_enum \
+             where enumtypid = 'mood'::regtype order by enumsortorder",
+        ),
+        vec![
+            vec![Value::Text("sad".into()), Value::Float64(1.0)],
+            vec![Value::Text("ok".into()), Value::Float64(2.0)],
+        ]
+    );
+
+    db.execute(1, "alter type mood add value 'happy' after 'ok'")
+        .unwrap();
+    db.execute(1, "alter type mood rename value 'ok' to 'fine'")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select enumlabel, enumsortorder from pg_catalog.pg_enum \
+             where enumtypid = 'mood'::regtype order by enumsortorder",
+        ),
+        vec![
+            vec![Value::Text("sad".into()), Value::Float64(1.0)],
+            vec![Value::Text("fine".into()), Value::Float64(2.0)],
+            vec![Value::Text("happy".into()), Value::Float64(3.0)],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select 'sad'::mood::text, pg_input_is_valid('fine', 'mood'), \
+             pg_input_is_valid('missing', 'mood')",
+        ),
+        vec![vec![
+            Value::Text("sad".into()),
+            Value::Bool(true),
+            Value::Bool(false),
+        ]]
+    );
+    db.execute(1, "insert into feelings values ('sad'), ('happy')")
+        .unwrap();
+    db.execute(
+        1,
+        "create unique index feelings_mood_idx on feelings using btree (current_mood)",
+    )
+    .unwrap();
+    db.execute(1, "drop index feelings_mood_idx").unwrap();
+    db.execute(
+        1,
+        "create index feelings_mood_hash_idx on feelings using hash (current_mood)",
+    )
+    .unwrap();
+    db.execute(1, "drop index feelings_mood_hash_idx").unwrap();
+    db.execute(1, "create table enum_parents (id mood primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table enum_children (parent mood references enum_parents)",
+    )
+    .unwrap();
+    db.execute(1, "insert into enum_parents values ('happy')")
+        .unwrap();
+    db.execute(1, "insert into enum_children values ('happy')")
+        .unwrap();
+    assert!(
+        db.execute(1, "insert into enum_children values ('sad')")
+            .is_err()
+    );
+    db.execute(
+        1,
+        "create function echo_enum(anyenum) returns text as $$ begin return $1::text || 'omg'; end $$ language plpgsql",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select echo_enum('happy'::mood)"),
+        vec![vec![Value::Text("happyomg".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select current_mood from feelings order by current_mood",
+        ),
+        vec![
+            vec![Value::EnumOid(
+                visible.enum_label_oid(mood_type.oid, "sad").unwrap()
+            )],
+            vec![Value::EnumOid(
+                visible.enum_label_oid(mood_type.oid, "happy").unwrap()
+            )],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select 'sad'::mood = 'sad'::mood, 'sad'::mood < 'happy'::mood",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select '{sad,fine}'::mood[], enum_first(null::mood), enum_last(null::mood), \
+             enum_range(null::mood)",
+        ),
+        vec![vec![
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::EnumOid(visible.enum_label_oid(mood_type.oid, "sad").unwrap()),
+                    Value::EnumOid(visible.enum_label_oid(mood_type.oid, "fine").unwrap()),
+                ])
+                .with_element_type_oid(mood_type.oid)
+            ),
+            Value::EnumOid(visible.enum_label_oid(mood_type.oid, "sad").unwrap()),
+            Value::EnumOid(visible.enum_label_oid(mood_type.oid, "happy").unwrap()),
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::EnumOid(visible.enum_label_oid(mood_type.oid, "sad").unwrap()),
+                    Value::EnumOid(visible.enum_label_oid(mood_type.oid, "fine").unwrap()),
+                    Value::EnumOid(visible.enum_label_oid(mood_type.oid, "happy").unwrap()),
+                ])
+                .with_element_type_oid(mood_type.oid)
+            ),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select enumlabel from pg_enum where enumtypid = 'mood'::regtype \
+             order by enumlabel::mood",
+        ),
+        vec![
+            vec![Value::Text("sad".into())],
+            vec![Value::Text("fine".into())],
+            vec![Value::Text("happy".into())],
+        ]
+    );
+
+    clear_backend_notices();
+    db.execute(1, "alter type mood add value if not exists 'sad'")
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(r#"enum label "sad" already exists, skipping"#)]
+    );
+
+    db.execute(1, "create type insenum as enum ('L1', 'L2')")
+        .unwrap();
+    for index in 1..=30 {
+        db.execute(
+            1,
+            &format!("alter type insenum add value 'i{index}' before 'L2'"),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select enumlabel, case when enumsortorder > 20 then null else enumsortorder end \
+             from pg_enum where enumtypid = 'insenum'::regtype order by enumsortorder",
+        )
+        .into_iter()
+        .take(4)
+        .collect::<Vec<_>>(),
+        vec![
+            vec![Value::Text("L1".into()), Value::Float64(1.0)],
+            vec![Value::Text("i1".into()), Value::Float64(2.0)],
+            vec![Value::Text("i2".into()), Value::Float64(3.0)],
+            vec![Value::Text("i3".into()), Value::Float64(4.0)],
+        ]
+    );
+    db.execute(1, "create type rename_me as enum ('one', 'two')")
+        .unwrap();
+    db.execute(1, "alter type rename_me rename to renamed_enum")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select 'one'::renamed_enum::text"),
+        vec![vec![Value::Text("one".into())]]
+    );
+    assert!(db.execute(1, "select 'one'::rename_me").is_err());
+}
+
+#[test]
+fn enum_pg_enum_cleanup_query_keeps_select_star_width() {
+    let dir = temp_dir("enum_pg_enum_cleanup_query_width");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type rainbow as enum ('red', 'green', 'blue')")
+        .unwrap();
+    db.execute(1, "create type planets as enum ('venus', 'earth', 'mars')")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select typname from pg_type where oid = 'planets'::regtype",
+        ),
+        vec![vec![Value::Text("planets".into())]]
+    );
+    db.execute(1, "drop type rainbow").unwrap();
+
+    let result = db
+        .execute(
+            1,
+            "select * from pg_enum where not exists \
+             (select 1 from pg_type where pg_type.oid = enumtypid)",
+        )
+        .unwrap();
+    let StatementResult::Query { columns, rows, .. } = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        columns.len(),
+        4,
+        "columns={:?} rows={:?}",
+        columns.iter().map(|col| &col.name).collect::<Vec<_>>(),
+        rows
+    );
+    assert!(rows.iter().all(|row| row.len() == columns.len()));
+    assert!(rows.is_empty());
 }
 
 #[test]

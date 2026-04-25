@@ -11,25 +11,29 @@ use crate::backend::utils::cache::system_views::{
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
-    PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
+    PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgEnumRow,
     PgForeignDataWrapperRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
     PgOperatorRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow,
     PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTsConfigRow,
     PgTsDictRow, PgTypeRow, bootstrap_pg_aggregate_rows, bootstrap_pg_amproc_rows,
     bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_database_rows,
-    bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
-    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, bootstrap_pg_ts_config_rows,
-    bootstrap_pg_ts_dict_rows, builtin_range_rows, builtin_type_rows,
+    bootstrap_pg_enum_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
+    bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, builtin_range_rows, builtin_type_rows,
     synthetic_range_proc_rows_by_name,
 };
 use crate::pgrust::database::DatabaseStatsStore;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone)]
 pub struct VisibleCatalog {
     relcache: RelCache,
     catcache: Option<CatCache>,
     search_path: Vec<String>,
+    enum_rows: Vec<PgEnumRow>,
+    uncommitted_enum_label_oids: BTreeSet<u32>,
+    domain_checks: BTreeMap<u32, (String, Vec<u32>)>,
+    dynamic_type_rows: Vec<PgTypeRow>,
 }
 
 impl VisibleCatalog {
@@ -46,11 +50,35 @@ impl VisibleCatalog {
             relcache,
             catcache,
             search_path,
+            enum_rows: Vec::new(),
+            uncommitted_enum_label_oids: BTreeSet::new(),
+            domain_checks: BTreeMap::new(),
+            dynamic_type_rows: Vec::new(),
         }
     }
 
     pub fn relcache(&self) -> &RelCache {
         &self.relcache
+    }
+
+    pub fn with_enum_rows(mut self, enum_rows: Vec<PgEnumRow>) -> Self {
+        self.enum_rows = enum_rows;
+        self
+    }
+
+    pub fn with_uncommitted_enum_label_oids(mut self, label_oids: Vec<u32>) -> Self {
+        self.uncommitted_enum_label_oids = label_oids.into_iter().collect();
+        self
+    }
+
+    pub fn with_domain_checks(mut self, checks: BTreeMap<u32, (String, Vec<u32>)>) -> Self {
+        self.domain_checks = checks;
+        self
+    }
+
+    pub fn with_dynamic_type_rows(mut self, rows: Vec<PgTypeRow>) -> Self {
+        self.dynamic_type_rows = rows;
+        self
     }
 
     pub fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {
@@ -476,11 +504,60 @@ impl CatalogLookup for VisibleCatalog {
                 rows.push(composite);
             }
         }
+        for dynamic in &self.dynamic_type_rows {
+            if rows.iter().all(|existing| existing.oid != dynamic.oid) {
+                rows.push(dynamic.clone());
+            }
+        }
         rows
     }
 
     fn range_rows(&self) -> Vec<PgRangeRow> {
         builtin_range_rows()
+    }
+
+    fn enum_label_oid(&self, type_oid: u32, label: &str) -> Option<u32> {
+        self.enum_rows
+            .iter()
+            .find(|row| row.enumtypid == type_oid && row.enumlabel == label)
+            .map(|row| row.oid)
+    }
+
+    fn enum_label(&self, type_oid: u32, label_oid: u32) -> Option<String> {
+        self.enum_rows
+            .iter()
+            .find(|row| row.enumtypid == type_oid && row.oid == label_oid)
+            .map(|row| row.enumlabel.clone())
+    }
+
+    fn enum_label_by_oid(&self, label_oid: u32) -> Option<String> {
+        self.enum_rows
+            .iter()
+            .find(|row| row.oid == label_oid)
+            .map(|row| row.enumlabel.clone())
+    }
+
+    fn enum_rows(&self) -> Vec<PgEnumRow> {
+        if self.enum_rows.is_empty() {
+            return bootstrap_pg_enum_rows().to_vec();
+        }
+        self.enum_rows.clone()
+    }
+
+    fn enum_label_is_committed(&self, _type_oid: u32, label_oid: u32) -> bool {
+        !self.uncommitted_enum_label_oids.contains(&label_oid)
+    }
+
+    fn domain_allowed_enum_label_oids(&self, domain_oid: u32) -> Option<Vec<u32>> {
+        self.domain_checks
+            .get(&domain_oid)
+            .map(|(_, allowed)| allowed.clone())
+    }
+
+    fn domain_check_name(&self, domain_oid: u32) -> Option<String> {
+        self.domain_checks
+            .get(&domain_oid)
+            .map(|(name, _)| name.clone())
     }
 
     fn language_rows(&self) -> Vec<PgLanguageRow> {

@@ -5,7 +5,7 @@ use crate::backend::parser::SqlTypeKind;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
-    ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYMULTIRANGEOID, ANYRANGEOID,
+    ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID, ANYRANGEOID,
     ARRAYMULTIRANGE_ARRAY_TYPE_OID, ARRAYMULTIRANGE_TYPE_OID, ARRAYRANGE_ARRAY_TYPE_OID,
     ARRAYRANGE_TYPE_OID, BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
     BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
@@ -99,6 +99,7 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             ANYMULTIRANGEOID,
             SqlType::new(SqlTypeKind::AnyMultirange),
         ),
+        builtin_type_row("anyenum", ANYENUMOID, SqlType::new(SqlTypeKind::AnyEnum)),
         builtin_type_row(
             "anycompatible",
             ANYCOMPATIBLEOID,

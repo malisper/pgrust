@@ -2,11 +2,11 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    ANYARRAYOID, ANYMULTIRANGEOID, BIT_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
-    BOX_TYPE_OID, BPCHAR_TYPE_OID, BRIN_AM_OID, BRIN_BIT_MINMAX_FAMILY_OID,
-    BRIN_BPCHAR_MINMAX_FAMILY_OID, BRIN_BYTEA_MINMAX_FAMILY_OID, BRIN_CHAR_MINMAX_FAMILY_OID,
-    BRIN_DATETIME_MINMAX_FAMILY_OID, BRIN_FLOAT_MINMAX_FAMILY_OID, BRIN_INTEGER_MINMAX_FAMILY_OID,
-    BRIN_MACADDR_BLOOM_FAMILY_OID, BRIN_MACADDR_MINMAX_FAMILY_OID,
+    ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, BIT_TYPE_OID, BOOL_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID, BPCHAR_TYPE_OID, BRIN_AM_OID,
+    BRIN_BIT_MINMAX_FAMILY_OID, BRIN_BPCHAR_MINMAX_FAMILY_OID, BRIN_BYTEA_MINMAX_FAMILY_OID,
+    BRIN_CHAR_MINMAX_FAMILY_OID, BRIN_DATETIME_MINMAX_FAMILY_OID, BRIN_FLOAT_MINMAX_FAMILY_OID,
+    BRIN_INTEGER_MINMAX_FAMILY_OID, BRIN_MACADDR_BLOOM_FAMILY_OID, BRIN_MACADDR_MINMAX_FAMILY_OID,
     BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID, BRIN_MACADDR8_BLOOM_FAMILY_OID,
     BRIN_MACADDR8_MINMAX_FAMILY_OID, BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID,
     BRIN_OID_MINMAX_FAMILY_OID, BRIN_TEXT_MINMAX_FAMILY_OID, BRIN_TIME_MINMAX_FAMILY_OID,
@@ -60,6 +60,7 @@ pub const MACADDR8_BTREE_OPCLASS_OID: u32 = 76043;
 pub const MULTIRANGE_BTREE_OPCLASS_OID: u32 = 10033;
 pub const CIDR_BTREE_OPCLASS_OID: u32 = 10034;
 pub const INET_BTREE_OPCLASS_OID: u32 = 10035;
+pub const ENUM_BTREE_OPCLASS_OID: u32 = 76170;
 pub const BOX_GIST_OPCLASS_OID: u32 = 76010;
 pub const POINT_GIST_OPCLASS_OID: u32 = 76015;
 pub const RANGE_GIST_OPCLASS_OID: u32 = 76011;
@@ -112,7 +113,8 @@ pub const TIME_HASH_OPCLASS_OID: u32 = 76216;
 pub const TIMETZ_HASH_OPCLASS_OID: u32 = 76217;
 pub const BYTEA_HASH_OPCLASS_OID: u32 = 76218;
 pub const UUID_HASH_OPCLASS_OID: u32 = 76219;
-pub const MULTIRANGE_HASH_OPCLASS_OID: u32 = 76220;
+pub const ENUM_HASH_OPCLASS_OID: u32 = 76220;
+pub const MULTIRANGE_HASH_OPCLASS_OID: u32 = 76221;
 pub const MACADDR_HASH_OPCLASS_OID: u32 = 76232;
 pub const MACADDR8_HASH_OPCLASS_OID: u32 = 76233;
 pub const INT4RANGE_GIST_OPCLASS_OID: u32 = RANGE_GIST_OPCLASS_OID;
@@ -161,6 +163,17 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             opcowner: BOOTSTRAP_SUPERUSER_OID,
             opcfamily: BTREE_ARRAY_FAMILY_OID,
             opcintype: ANYARRAYOID,
+            opcdefault: true,
+            opckeytype: 0,
+        },
+        PgOpclassRow {
+            oid: ENUM_BTREE_OPCLASS_OID,
+            opcmethod: BTREE_AM_OID,
+            opcname: "enum_ops".into(),
+            opcnamespace: PG_CATALOG_NAMESPACE_OID,
+            opcowner: BOOTSTRAP_SUPERUSER_OID,
+            opcfamily: BTREE_OID_FAMILY_OID,
+            opcintype: ANYENUMOID,
             opcdefault: true,
             opckeytype: 0,
         },
@@ -649,6 +662,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             "uuid_ops",
             HASH_UUID_FAMILY_OID,
             UUID_TYPE_OID,
+        ),
+        hash_row(
+            ENUM_HASH_OPCLASS_OID,
+            "enum_ops",
+            HASH_OID_FAMILY_OID,
+            ANYENUMOID,
         ),
         hash_row(
             MULTIRANGE_HASH_OPCLASS_OID,

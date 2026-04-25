@@ -20,7 +20,7 @@ use crate::backend::executor::value_io::{decode_value_with_toast, missing_column
 use crate::backend::executor::window::execute_window_clause;
 use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::libpq::pqformat::format_float8_text;
-use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
+use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::backend::storage::lmgr::RowLockMode;
 use crate::backend::storage::page::bufpage::{
     ItemIdFlags, page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number,
@@ -728,7 +728,8 @@ impl PlanNode for MergeAppendState {
                 set_outer_expr_bindings(ctx, row.slot.tts_values.clone(), &row.system_bindings);
                 let mut keys = Vec::with_capacity(self.items.len());
                 for item in &self.items {
-                    keys.push(eval_expr(&item.expr, &mut row.slot, ctx)?);
+                    let key = eval_expr(&item.expr, &mut row.slot, ctx)?;
+                    keys.push(order_by_runtime_key(item, key, ctx));
                 }
                 keyed_rows.push((keys, row));
             }
@@ -3543,7 +3544,8 @@ impl PlanNode for OrderByState {
                 set_outer_expr_bindings(ctx, row.slot.tts_values.clone(), &row.system_bindings);
                 let mut keys = Vec::with_capacity(self.items.len());
                 for item in &self.items {
-                    keys.push(eval_expr(&item.expr, &mut row.slot, ctx)?);
+                    let key = eval_expr(&item.expr, &mut row.slot, ctx)?;
+                    keys.push(order_by_runtime_key(item, key, ctx));
                 }
                 keyed_rows.push((keys, row));
             }
@@ -3663,6 +3665,48 @@ impl PlanNode for OrderByState {
     ) {
         format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
     }
+}
+
+fn order_by_runtime_key(
+    item: &crate::include::nodes::primnodes::OrderByEntry,
+    value: Value,
+    ctx: &ExecutorContext,
+) -> Value {
+    let Some(sql_type) = crate::include::nodes::primnodes::expr_sql_type_hint(&item.expr) else {
+        return enum_order_key_by_label_oid(value, ctx);
+    };
+    if !matches!(sql_type.kind, SqlTypeKind::Enum) {
+        return enum_order_key_by_label_oid(value, ctx);
+    }
+    let Value::EnumOid(label_oid) = value else {
+        return value;
+    };
+    ctx.catalog
+        .as_ref()
+        .and_then(|catalog| {
+            catalog
+                .enum_rows()
+                .into_iter()
+                .find(|row| row.enumtypid == sql_type.type_oid && row.oid == label_oid)
+                .map(|row| Value::Float64(row.enumsortorder))
+        })
+        .unwrap_or(Value::EnumOid(label_oid))
+}
+
+fn enum_order_key_by_label_oid(value: Value, ctx: &ExecutorContext) -> Value {
+    let Value::EnumOid(label_oid) = value else {
+        return value;
+    };
+    ctx.catalog
+        .as_ref()
+        .and_then(|catalog| {
+            catalog
+                .enum_rows()
+                .into_iter()
+                .find(|row| row.oid == label_oid)
+                .map(|row| Value::Float64(row.enumsortorder))
+        })
+        .unwrap_or(Value::EnumOid(label_oid))
 }
 
 impl PlanNode for LimitState {
