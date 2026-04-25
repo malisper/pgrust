@@ -1,5 +1,7 @@
 use crate::include::catalog::RangeCanonicalization;
-use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
+use crate::include::nodes::datetime::{
+    DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY,
+};
 use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
 use crate::include::nodes::tsearch::{TsQuery, TsVector};
 use crate::pgrust::compact_string::CompactString;
@@ -490,6 +492,113 @@ pub struct MultirangeValue {
     pub ranges: Vec<RangeValue>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IntervalValue {
+    pub time_micros: i64,
+    pub days: i32,
+    pub months: i32,
+}
+
+impl IntervalValue {
+    pub const fn zero() -> Self {
+        Self {
+            time_micros: 0,
+            days: 0,
+            months: 0,
+        }
+    }
+
+    pub const fn neg_infinity() -> Self {
+        Self {
+            time_micros: i64::MIN,
+            days: i32::MIN,
+            months: i32::MIN,
+        }
+    }
+
+    pub const fn infinity() -> Self {
+        Self {
+            time_micros: i64::MAX,
+            days: i32::MAX,
+            months: i32::MAX,
+        }
+    }
+
+    pub const fn is_neg_infinity(self) -> bool {
+        self.time_micros == i64::MIN && self.days == i32::MIN && self.months == i32::MIN
+    }
+
+    pub const fn is_infinity(self) -> bool {
+        self.time_micros == i64::MAX && self.days == i32::MAX && self.months == i32::MAX
+    }
+
+    pub const fn is_finite(self) -> bool {
+        !self.is_neg_infinity() && !self.is_infinity()
+    }
+
+    pub fn cmp_key(self) -> i128 {
+        if self.is_neg_infinity() {
+            return i128::MIN;
+        }
+        if self.is_infinity() {
+            return i128::MAX;
+        }
+        ((self.months as i128 * 30) + self.days as i128) * USECS_PER_DAY as i128
+            + self.time_micros as i128
+    }
+
+    pub fn is_negative(self) -> bool {
+        self.cmp_key() < 0
+    }
+
+    pub fn negate(self) -> Self {
+        if self.is_neg_infinity() {
+            return Self::infinity();
+        }
+        if self.is_infinity() {
+            return Self::neg_infinity();
+        }
+        Self {
+            time_micros: self.time_micros.saturating_neg(),
+            days: self.days.saturating_neg(),
+            months: self.months.saturating_neg(),
+        }
+    }
+
+    pub fn abs_for_display(self) -> (Self, bool) {
+        if self.is_negative() {
+            (self.negate(), true)
+        } else {
+            (self, false)
+        }
+    }
+
+    pub fn checked_add(self, rhs: Self) -> Option<Self> {
+        if !self.is_finite() || !rhs.is_finite() {
+            return match (
+                self.is_infinity(),
+                self.is_neg_infinity(),
+                rhs.is_infinity(),
+                rhs.is_neg_infinity(),
+            ) {
+                (true, _, _, true) | (_, true, true, _) => None,
+                (true, _, _, _) | (_, _, true, _) => Some(Self::infinity()),
+                (_, true, _, _) | (_, _, _, true) => Some(Self::neg_infinity()),
+                _ => None,
+            };
+        }
+        Some(Self {
+            time_micros: self.time_micros.checked_add(rhs.time_micros)?,
+            days: self.days.checked_add(rhs.days)?,
+            months: self.months.checked_add(rhs.months)?,
+        })
+    }
+
+    pub fn checked_sub(self, rhs: Self) -> Option<Self> {
+        self.checked_add(rhs.negate())
+    }
+}
+
 impl BitString {
     pub fn new(bit_len: i32, mut bytes: Vec<u8>) -> Self {
         let required = Self::byte_len(bit_len);
@@ -532,6 +641,7 @@ pub enum Value {
     TimeTz(TimeTzADT),
     Timestamp(TimestampADT),
     TimestampTz(TimestampTzADT),
+    Interval(IntervalValue),
     Bit(BitString),
     Bytea(Vec<u8>),
     Inet(InetValue),
@@ -901,6 +1011,7 @@ impl Value {
             Value::TimeTz(v) => Value::TimeTz(*v),
             Value::Timestamp(v) => Value::Timestamp(*v),
             Value::TimestampTz(v) => Value::TimestampTz(*v),
+            Value::Interval(v) => Value::Interval(*v),
             Value::Bit(v) => Value::Bit(v.clone()),
             Value::Bytea(v) => Value::Bytea(v.clone()),
             Value::Inet(v) => Value::Inet(v.clone()),
@@ -997,6 +1108,7 @@ impl Value {
             Value::TimeTz(_) => Some(SqlType::new(SqlTypeKind::TimeTz)),
             Value::Timestamp(_) => Some(SqlType::new(SqlTypeKind::Timestamp)),
             Value::TimestampTz(_) => Some(SqlType::new(SqlTypeKind::TimestampTz)),
+            Value::Interval(_) => Some(SqlType::new(SqlTypeKind::Interval)),
             Value::Bit(bits) => Some(SqlType::with_bit_len(SqlTypeKind::VarBit, bits.bit_len)),
             Value::Bytea(_) => Some(SqlType::new(SqlTypeKind::Bytea)),
             Value::Inet(_) => Some(SqlType::new(SqlTypeKind::Inet)),
@@ -1065,6 +1177,7 @@ impl PartialEq for Value {
             (Value::TimeTz(a), Value::TimeTz(b)) => a == b,
             (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
             (Value::TimestampTz(a), Value::TimestampTz(b)) => a == b,
+            (Value::Interval(a), Value::Interval(b)) => a == b,
             (Value::Bit(a), Value::Bit(b)) => a == b,
             (Value::Bytea(a), Value::Bytea(b)) => a == b,
             (Value::Inet(a), Value::Inet(b)) => a == b,
@@ -1179,6 +1292,10 @@ impl std::hash::Hash for Value {
             }
             Value::TimestampTz(v) => {
                 19u8.hash(state);
+                v.hash(state);
+            }
+            Value::Interval(v) => {
+                28u8.hash(state);
                 v.hash(state);
             }
             Value::Bit(v) => {

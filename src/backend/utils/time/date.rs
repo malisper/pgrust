@@ -641,12 +641,29 @@ pub fn parse_time_text(text: &str, config: &DateTimeConfig) -> Result<TimeADT, D
 }
 
 pub fn parse_timetz_text(text: &str, config: &DateTimeConfig) -> Option<TimeTzADT> {
-    let (time_text, offset_text) = split_time_and_offset(text);
+    let trimmed = text.trim();
+    let (time_text, offset_seconds) = match split_time_and_offset(trimmed) {
+        (time_text, Some(offset_text)) => (time_text, parse_offset_seconds(offset_text)?),
+        _ => {
+            let zone_split = trimmed
+                .char_indices()
+                .rev()
+                .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx));
+            if let Some(idx) = zone_split {
+                let time_text = trimmed[..idx].trim();
+                let zone_text = trimmed[idx..].trim();
+                let offset = match parse_timezone_spec(zone_text).ok()? {
+                    Some(TimeZoneSpec::FixedOffset(offset)) => offset,
+                    _ => return None,
+                };
+                (time_text, offset)
+            } else {
+                (trimmed, timezone_offset_seconds(config))
+            }
+        }
+    };
     let (hour, minute, second, micros) = parse_time_components(time_text)?;
     let time = TimeADT(time_usecs_from_hms(hour, minute, second, micros)?);
-    let offset_seconds = offset_text
-        .and_then(parse_offset_seconds)
-        .unwrap_or_else(|| timezone_offset_seconds(config));
     Some(TimeTzADT {
         time,
         offset_seconds,
@@ -1153,6 +1170,18 @@ mod tests {
         assert_eq!(
             parse_time_text("23:59:60.01", &config),
             Err(DateTimeParseError::FieldOutOfRange)
+        );
+    }
+
+    #[test]
+    fn parse_timetz_text_accepts_fixed_abbreviations() {
+        let config = DateTimeConfig::default();
+        assert_eq!(
+            parse_timetz_text("10:00 BST", &config),
+            Some(TimeTzADT {
+                time: TimeADT(10 * 60 * 60 * 1_000_000),
+                offset_seconds: 60 * 60,
+            })
         );
     }
 }

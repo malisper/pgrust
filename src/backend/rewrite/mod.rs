@@ -358,12 +358,24 @@ fn rewrite_window_frame_bound(
     active_policy_relations: &mut Vec<u32>,
 ) -> Result<WindowFrameBound, ParseError> {
     Ok(match bound {
-        WindowFrameBound::OffsetPreceding(expr) => WindowFrameBound::OffsetPreceding(
-            rewrite_semantic_expr(expr, catalog, expanded_views, active_policy_relations)?,
-        ),
-        WindowFrameBound::OffsetFollowing(expr) => WindowFrameBound::OffsetFollowing(
-            rewrite_semantic_expr(expr, catalog, expanded_views, active_policy_relations)?,
-        ),
+        WindowFrameBound::OffsetPreceding(offset) => {
+            let expr = rewrite_semantic_expr(
+                offset.expr.clone(),
+                catalog,
+                expanded_views,
+                active_policy_relations,
+            )?;
+            WindowFrameBound::OffsetPreceding(offset.with_expr(expr))
+        }
+        WindowFrameBound::OffsetFollowing(offset) => {
+            let expr = rewrite_semantic_expr(
+                offset.expr.clone(),
+                catalog,
+                expanded_views,
+                active_policy_relations,
+            )?;
+            WindowFrameBound::OffsetFollowing(offset.with_expr(expr))
+        }
         other => other,
     })
 }

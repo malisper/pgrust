@@ -13,6 +13,7 @@ use crate::include::catalog::{
     BootstrapCatalogKind, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
     PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
 };
+use crate::include::nodes::datum::IntervalValue;
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
@@ -1743,6 +1744,19 @@ fn take_backend_notice_messages() -> Vec<String> {
 
 fn explain_lines(db: &Database, client_id: u32, sql: &str) -> Vec<String> {
     match db.execute(client_id, &format!("explain {sql}")).unwrap() {
+        StatementResult::Query { rows, .. } => rows
+            .into_iter()
+            .map(|row| match row.first() {
+                Some(Value::Text(text)) => text.to_string(),
+                other => panic!("expected explain text row, got {:?}", other),
+            })
+            .collect(),
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+fn session_explain_lines(session: &mut Session, db: &Database, sql: &str) -> Vec<String> {
+    match session.execute(db, &format!("explain {sql}")).unwrap() {
         StatementResult::Query { rows, .. } => rows
             .into_iter()
             .map(|row| match row.first() {
@@ -4176,6 +4190,44 @@ fn hash_partitioned_tables_route_rows_and_validate_bounds() {
             == "every hash partition modulus must be a factor of the next larger modulus"
             && sqlstate == "42P17" => {}
         other => panic!("expected hash modulus factor rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn enable_partitionwise_join_explains_append_of_child_joins() {
+    let dir = temp_dir("partitionwise_join_explain");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "set max_stack_depth = '32768kB'")
+        .unwrap();
+    for sql in [
+        "create table pwj_l (k int4, v int4) partition by range (k)",
+        "create table pwj_l1 partition of pwj_l for values from (0) to (10)",
+        "create table pwj_l2 partition of pwj_l for values from (10) to (20)",
+        "create table pwj_r (k int4, v int4) partition by range (k)",
+        "create table pwj_r1 partition of pwj_r for values from (0) to (10)",
+        "create table pwj_r2 partition of pwj_r for values from (10) to (20)",
+        "set enable_partitionwise_join = on",
+    ] {
+        session.execute(&db, sql).unwrap();
+    }
+
+    for sql in [
+        "select * from pwj_l join pwj_r on pwj_l.k = pwj_r.k",
+        "select * from pwj_l left join pwj_r on pwj_l.k = pwj_r.k",
+        "select * from pwj_l full join pwj_r on pwj_l.k = pwj_r.k",
+    ] {
+        let lines = session_explain_lines(&mut session, &db, sql);
+        let rendered = lines.join("\n");
+        assert!(
+            rendered.contains("Append"),
+            "expected partitionwise append in explain for {sql}, got:\n{rendered}"
+        );
+        assert!(
+            rendered.matches("Join").count() >= 2,
+            "expected child joins under append for {sql}, got:\n{rendered}"
+        );
     }
 }
 
@@ -11546,7 +11598,11 @@ fn alter_table_add_column_supports_tid_xid_and_interval() {
                 vec![vec![
                     Value::Text("(1,1)".into()),
                     Value::Int64(512),
-                    Value::Text("@ 1 hour 10 secs".into())
+                    Value::Interval(IntervalValue {
+                        time_micros: 3_610_000_000,
+                        days: 0,
+                        months: 0,
+                    })
                 ]]
             );
         }

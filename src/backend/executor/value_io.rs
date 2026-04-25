@@ -5,7 +5,7 @@ use super::exec_expr::parse_numeric_text;
 use super::expr_bit::{coerce_bit_string, render_bit_text};
 use super::expr_casts::{
     cast_numeric_value, cast_text_value, cast_value, parse_text_array_literal_with_options,
-    render_internal_char_text,
+    render_internal_char_text, render_interval_text,
 };
 use super::expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 use super::expr_geometry::{
@@ -72,6 +72,7 @@ const INTERNAL_VALUE_TAG_RECORD: u8 = 31;
 const INTERNAL_VALUE_TAG_MULTIRANGE: u8 = 32;
 const INTERNAL_VALUE_TAG_INET: u8 = 34;
 const INTERNAL_VALUE_TAG_CIDR: u8 = 35;
+const INTERNAL_VALUE_TAG_INTERVAL: u8 = 36;
 const COMPOSITE_DATUM_VERSION: u8 = 1;
 
 pub(crate) fn format_record_text(record: &crate::include::nodes::datum::RecordValue) -> String {
@@ -133,6 +134,7 @@ pub(crate) fn format_record_text_with_options(
                                 _ => v.to_string(),
                             },
                             Value::Numeric(v) => v.render(),
+                            Value::Interval(v) => render_interval_text(*v),
                             Value::Bytea(v) => {
                                 let mut rendered = String::from("\\\\x");
                                 for byte in v {
@@ -261,6 +263,7 @@ fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> 
         Value::Bool(true) => "t".to_string(),
         Value::Bool(false) => "f".to_string(),
         Value::Numeric(v) => v.render(),
+        Value::Interval(v) => render_interval_text(*v),
         Value::Text(text) => text.to_string(),
         Value::TextRef(_, _) => value.as_text().unwrap_or_default().to_string(),
         Value::Json(text) => text.to_string(),
@@ -817,6 +820,12 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
             out.push(INTERNAL_VALUE_TAG_TIMESTAMPTZ);
             out.extend_from_slice(&v.0.to_le_bytes());
         }
+        Value::Interval(v) => {
+            out.push(INTERNAL_VALUE_TAG_INTERVAL);
+            out.extend_from_slice(&v.time_micros.to_le_bytes());
+            out.extend_from_slice(&v.days.to_le_bytes());
+            out.extend_from_slice(&v.months.to_le_bytes());
+        }
         Value::Bit(v) => {
             out.push(INTERNAL_VALUE_TAG_BIT);
             out.extend_from_slice(&v.bit_len.to_le_bytes());
@@ -1056,6 +1065,19 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
                     })?,
             )),
         ),
+        INTERNAL_VALUE_TAG_INTERVAL => {
+            if rest.len() != 16 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "invalid interval record payload".into(),
+                });
+            }
+            Value::Interval(crate::include::nodes::datum::IntervalValue {
+                time_micros: i64::from_le_bytes(rest[0..8].try_into().unwrap()),
+                days: i32::from_le_bytes(rest[8..12].try_into().unwrap()),
+                months: i32::from_le_bytes(rest[12..16].try_into().unwrap()),
+            })
+        }
         INTERNAL_VALUE_TAG_BIT => {
             if rest.len() < 8 {
                 return Err(ExecError::InvalidStorageValue {
@@ -1363,6 +1385,13 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
         (ScalarType::TimestampTz, Value::TimestampTz(v)) => {
             Ok(TupleValue::Bytes(v.0.to_le_bytes().to_vec()))
         }
+        (ScalarType::Interval, Value::Interval(v)) => {
+            let mut bytes = Vec::with_capacity(16);
+            bytes.extend_from_slice(&v.time_micros.to_le_bytes());
+            bytes.extend_from_slice(&v.days.to_le_bytes());
+            bytes.extend_from_slice(&v.months.to_le_bytes());
+            Ok(TupleValue::Bytes(bytes))
+        }
         (ScalarType::Range(_), Value::Range(range)) => {
             Ok(TupleValue::Bytes(encode_range_bytes(&range)?))
         }
@@ -1588,6 +1617,7 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
         Value::TimeTz(v) => cast_value(Value::TimeTz(*v), target),
         Value::Timestamp(v) => cast_value(Value::Timestamp(*v), target),
         Value::TimestampTz(v) => cast_value(Value::TimestampTz(*v), target),
+        Value::Interval(v) => cast_value(Value::Interval(*v), target),
         Value::Bit(bits) => match target.kind {
             SqlTypeKind::Bit | SqlTypeKind::VarBit => {
                 Ok(Value::Bit(coerce_bit_string(bits.clone(), target, false)?))
@@ -1828,6 +1858,22 @@ pub(crate) fn decode_value_with_toast(
                 crate::include::nodes::datetime::TimestampTzADT(i64::from_le_bytes(
                     bytes.try_into().unwrap(),
                 )),
+            ))
+        }
+        ScalarType::Interval => {
+            if column.storage.attlen != 16 || bytes.len() != 16 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Interval(
+                crate::include::nodes::datum::IntervalValue {
+                    time_micros: i64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                    days: i32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+                    months: i32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+                },
             ))
         }
         ScalarType::BitString => {

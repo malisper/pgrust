@@ -7,6 +7,7 @@ mod constfold;
 mod inherit;
 mod joininfo;
 mod partition_prune;
+mod partitionwise;
 mod path;
 mod pathnodes;
 mod plan;
@@ -22,7 +23,7 @@ mod util;
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType};
 use crate::include::catalog::PgStatisticRow;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query};
-use crate::include::nodes::pathnodes::{Path, PlannerInfo, RestrictInfo};
+use crate::include::nodes::pathnodes::{Path, PlannerConfig, PlannerInfo, RestrictInfo};
 use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument, Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{Expr, JoinType, OpExprKind};
 
@@ -381,6 +382,14 @@ pub(crate) fn planner(
     plan::planner(query, catalog)
 }
 
+pub(crate) fn planner_with_config(
+    query: Query,
+    catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
+) -> Result<PlannedStmt, crate::backend::parser::ParseError> {
+    plan::planner_with_config(query, catalog, config)
+}
+
 pub(crate) fn fold_query_constants(
     query: Query,
 ) -> Result<Query, crate::backend::parser::ParseError> {
@@ -393,6 +402,15 @@ pub(crate) fn planner_with_param_base(
     next_param_id: usize,
 ) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
     plan::planner_with_param_base(query, catalog, next_param_id)
+}
+
+pub(crate) fn planner_with_param_base_and_config(
+    query: Query,
+    catalog: &dyn CatalogLookup,
+    next_param_id: usize,
+    config: PlannerConfig,
+) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
+    plan::planner_with_param_base_and_config(query, catalog, next_param_id, config)
 }
 
 pub(crate) fn finalize_expr_subqueries(

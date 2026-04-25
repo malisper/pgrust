@@ -21,6 +21,7 @@ pub enum ScalarType {
     TimeTz,
     Timestamp,
     TimestampTz,
+    Interval,
     BitString,
     Bytea,
     Inet,
@@ -1109,10 +1110,32 @@ pub struct WindowClause {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowFrameBound {
     UnboundedPreceding,
-    OffsetPreceding(Expr),
+    OffsetPreceding(WindowFrameOffset),
     CurrentRow,
-    OffsetFollowing(Expr),
+    OffsetFollowing(WindowFrameOffset),
     UnboundedFollowing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowFrameOffset {
+    pub expr: Expr,
+    pub offset_type: SqlType,
+    pub in_range_func: Option<u32>,
+}
+
+impl WindowFrameOffset {
+    pub fn rows_or_groups(expr: Expr) -> Self {
+        let offset_type = expr_sql_type_hint(&expr).unwrap_or(SqlType::new(SqlTypeKind::Int8));
+        Self {
+            expr,
+            offset_type,
+            in_range_func: None,
+        }
+    }
+
+    pub fn with_expr(self, expr: Expr) -> Self {
+        Self { expr, ..self }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
