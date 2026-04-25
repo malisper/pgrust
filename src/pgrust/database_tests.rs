@@ -14349,27 +14349,30 @@ fn explain_cte_self_join_pushes_single_rel_filter_below_join() {
     );
     let nested_loop_pos = lines
         .iter()
-        .position(|line| line.starts_with("Nested Loop  (cost="))
+        .position(|line| line.trim_start().starts_with("Nested Loop  (cost="))
         .unwrap_or_else(|| panic!("expected nested loop explain output, got {lines:?}"));
     let filtered_child_pos = lines
         .iter()
-        .position(|line| line.starts_with("  Filter  (cost="))
+        .position(|line| line.trim_start().starts_with("Filter  (cost="))
         .unwrap_or_else(|| panic!("expected filtered child node in explain output, got {lines:?}"));
     let top_level_cte_pos = lines
         .iter()
-        .position(|line| line.starts_with("  CTE Scan  (cost="))
+        .enumerate()
+        .skip(filtered_child_pos + 1)
+        .find(|(_, line)| line.trim_start().starts_with("CTE Scan  (cost="))
+        .map(|(idx, _)| idx)
         .unwrap_or_else(|| panic!("expected unfiltered cte scan in explain output, got {lines:?}"));
     let pushed_filter_pos = lines
         .iter()
-        .position(|line| line.starts_with("    Filter: (x2 <>"))
+        .position(|line| line.trim_start().starts_with("Filter: (x2 <>"))
         .unwrap_or_else(|| {
             panic!("expected pushed-down filter detail in explain output, got {lines:?}")
         });
 
     assert!(
-        !lines
+        !lines[nested_loop_pos + 1..filtered_child_pos]
             .iter()
-            .any(|line| line.starts_with("  Filter: (x2 <>")),
+            .any(|line| line.trim_start().starts_with("Filter: (x2 <>")),
         "expected filter to be attached below the join, got {lines:?}"
     );
     assert!(
@@ -21902,6 +21905,29 @@ fn create_index_supports_temp_tables_when_temp_is_first_visible() {
     let temp_index = db.temp_entry(1, "items_temp_idx").unwrap();
     let index_meta = temp_index.index.as_ref().unwrap();
     assert_eq!(index_meta.indrelid, temp_table.relation_oid);
+}
+
+#[test]
+fn temp_primary_key_indexes_are_visible_through_catalog_lookup() {
+    let base = temp_dir("temp_primary_key_indexes_visible");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create temp table items (id int4 primary key, note int4)",
+        )
+        .unwrap();
+
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("items").unwrap();
+    let indexes = lookup.index_relations_for_heap(relation.relation_oid);
+
+    assert_eq!(indexes.len(), 1);
+    assert!(indexes[0].index_meta.indisprimary);
+    assert!(indexes[0].index_meta.indisready);
+    assert!(indexes[0].index_meta.indisvalid);
 }
 
 #[test]

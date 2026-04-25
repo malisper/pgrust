@@ -14,6 +14,7 @@ use crate::include::nodes::primnodes::{
 
 use super::super::bestpath;
 use super::super::create_plan_with_param_base;
+use super::super::groupby_rewrite;
 use super::super::has_grouping;
 use super::super::path::{query_planner, relation_ordered_index_paths, residual_where_qual};
 use super::super::pathnodes::{next_synthetic_slot_id, window_output_columns};
@@ -102,6 +103,7 @@ fn aggregate_path(
     slot_id: usize,
     input: Path,
     group_by: Vec<Expr>,
+    passthrough_exprs: Vec<Expr>,
     accumulators: Vec<crate::include::nodes::primnodes::AggAccum>,
     having: Option<Expr>,
     output_columns: Vec<crate::include::nodes::primnodes::QueryColumn>,
@@ -117,6 +119,7 @@ fn aggregate_path(
             pathkeys,
             input: Box::new(input),
             group_by,
+            passthrough_exprs,
             accumulators,
             having,
             output_columns,
@@ -147,8 +150,13 @@ fn make_aggregate_rel(
     );
     for path in input_rel.pathlist {
         let group_by = root
-            .parse
-            .group_by
+            .aggregate_group_by()
+            .iter()
+            .cloned()
+            .map(|expr| expand_join_rte_vars(root, expr))
+            .collect::<Vec<_>>();
+        let passthrough_exprs = root
+            .aggregate_passthrough_exprs()
             .iter()
             .cloned()
             .map(|expr| expand_join_rte_vars(root, expr))
@@ -175,7 +183,8 @@ fn make_aggregate_rel(
             .having_qual
             .clone()
             .map(|expr| expand_join_rte_vars(root, expr));
-        let output_columns = build_aggregate_output_columns(&group_by, &accumulators);
+        let output_columns =
+            build_aggregate_output_columns(&group_by, &passthrough_exprs, &accumulators);
         if group_by.is_empty() {
             rel.add_path(aggregate_path(
                 AggregateStrategy::Plain,
@@ -183,6 +192,7 @@ fn make_aggregate_rel(
                 slot_id,
                 path,
                 group_by,
+                passthrough_exprs,
                 accumulators,
                 having,
                 output_columns,
@@ -200,6 +210,7 @@ fn make_aggregate_rel(
                 slot_id,
                 ordered_group_input(path, &group_pathkeys),
                 group_by,
+                passthrough_exprs,
                 accumulators,
                 having,
                 output_columns,
@@ -215,6 +226,7 @@ fn make_aggregate_rel(
                 slot_id,
                 path.clone(),
                 group_by.clone(),
+                passthrough_exprs.clone(),
                 accumulators.clone(),
                 having.clone(),
                 output_columns.clone(),
@@ -228,6 +240,7 @@ fn make_aggregate_rel(
                     slot_id,
                     path,
                     group_by,
+                    passthrough_exprs,
                     accumulators,
                     having,
                     output_columns,
@@ -1230,7 +1243,8 @@ fn standard_planner_with_param_base(
     let mut glob = PlannerGlobal::new();
     let query = root::prepare_query_for_planning(root::prepare_query_for_locking(query)?, catalog);
     let query = pull_up_sublinks(query);
-    let mut root = PlannerInfo::new_with_config(query, config);
+    let aggregate_layout = groupby_rewrite::build_aggregate_layout(&query, catalog);
+    let mut root = PlannerInfo::new_with_config(query, aggregate_layout, config);
     let command_type = root.parse.command_type;
     let scanjoin_rel = query_planner(&mut root, catalog);
     let final_rel = grouping_planner(&mut root, scanjoin_rel, catalog);

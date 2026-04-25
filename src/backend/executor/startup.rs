@@ -260,12 +260,14 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         Plan::Aggregate {
             input,
             group_by,
+            passthrough_exprs,
             accumulators,
             having,
             ..
         } => {
             plan_uses_outer_columns(input)
                 || group_by.iter().any(expr_uses_outer_columns)
+                || passthrough_exprs.iter().any(expr_uses_outer_columns)
                 || accumulators.iter().any(agg_accum_uses_outer_columns)
                 || having.as_ref().is_some_and(expr_uses_outer_columns)
         }
@@ -1088,6 +1090,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             strategy,
             input,
             group_by,
+            passthrough_exprs,
             accumulators,
             having,
             output_columns,
@@ -1098,6 +1101,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 input: executor_start(*input),
                 strategy,
                 group_by,
+                passthrough_exprs,
                 accumulators,
                 having,
                 output_columns: output_column_names,
