@@ -2054,13 +2054,17 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
                 relcache.insert(format!("{}.{}", temp_namespace.name, name), entry.entry);
             }
         }
+        let mut dynamic_type_rows = self.db.domain_type_rows_for_search_path(&self.search_path);
+        dynamic_type_rows.extend(self.db.enum_type_rows_for_search_path(&self.search_path));
+        dynamic_type_rows.extend(self.db.range_type_rows_for_search_path(&self.search_path));
         Some(
             VisibleCatalog::with_search_path(
                 relcache.with_search_path(&self.search_path),
                 Some(catcache),
                 self.search_path.clone(),
             )
-            .with_enum_rows(self.db.enum_rows_for_catalog()),
+            .with_enum_rows(self.db.enum_rows_for_catalog())
+            .with_dynamic_type_rows(dynamic_type_rows),
         )
     }
 }

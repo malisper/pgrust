@@ -31,6 +31,7 @@ pub struct VisibleCatalog {
     catcache: Option<CatCache>,
     search_path: Vec<String>,
     enum_rows: Vec<PgEnumRow>,
+    dynamic_type_rows: Vec<PgTypeRow>,
 }
 
 impl VisibleCatalog {
@@ -48,6 +49,7 @@ impl VisibleCatalog {
             catcache,
             search_path,
             enum_rows: Vec::new(),
+            dynamic_type_rows: Vec::new(),
         }
     }
 
@@ -57,6 +59,11 @@ impl VisibleCatalog {
 
     pub fn with_enum_rows(mut self, enum_rows: Vec<PgEnumRow>) -> Self {
         self.enum_rows = enum_rows;
+        self
+    }
+
+    pub fn with_dynamic_type_rows(mut self, rows: Vec<PgTypeRow>) -> Self {
+        self.dynamic_type_rows = rows;
         self
     }
 
@@ -481,6 +488,11 @@ impl CatalogLookup for VisibleCatalog {
         for composite in composite_type_rows_from_relcache(&self.relcache) {
             if rows.iter().all(|existing| existing.oid != composite.oid) {
                 rows.push(composite);
+            }
+        }
+        for dynamic in &self.dynamic_type_rows {
+            if rows.iter().all(|existing| existing.oid != dynamic.oid) {
+                rows.push(dynamic.clone());
             }
         }
         rows

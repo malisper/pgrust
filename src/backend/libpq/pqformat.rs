@@ -234,6 +234,7 @@ pub(crate) fn send_query_result(
     relation_names: Option<&HashMap<u32, String>>,
     proc_names: Option<&HashMap<u32, String>>,
     namespace_names: Option<&HashMap<u32, String>>,
+    enum_labels: Option<&HashMap<(u32, u32), String>>,
 ) -> io::Result<()> {
     send_row_description(stream, columns)?;
     let mut row_buf = Vec::new();
@@ -249,6 +250,7 @@ pub(crate) fn send_query_result(
             relation_names,
             proc_names,
             namespace_names,
+            enum_labels,
         )?;
     }
     send_command_complete(stream, tag)
@@ -713,6 +715,7 @@ pub(crate) fn send_typed_data_row(
     relation_names: Option<&HashMap<u32, String>>,
     proc_names: Option<&HashMap<u32, String>>,
     namespace_names: Option<&HashMap<u32, String>>,
+    enum_labels: Option<&HashMap<(u32, u32), String>>,
 ) -> io::Result<()> {
     buf.clear();
     buf.extend_from_slice(&(values.len() as i16).to_be_bytes());
@@ -1025,7 +1028,11 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(rendered.as_bytes());
             }
             Value::EnumOid(v) => {
-                let rendered = v.to_string();
+                let rendered = sql_type
+                    .filter(|ty| matches!(ty.kind, SqlTypeKind::Enum))
+                    .and_then(|ty| enum_labels.and_then(|labels| labels.get(&(ty.type_oid, *v))))
+                    .cloned()
+                    .unwrap_or_else(|| v.to_string());
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
@@ -2338,6 +2345,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -2369,6 +2377,7 @@ mod tests {
             None,
             Some(&proc_names),
             None,
+            None,
         )
         .unwrap();
 
@@ -2394,6 +2403,7 @@ mod tests {
             &[],
             &mut row_buf,
             FloatFormatOptions::default(),
+            None,
             None,
             None,
             None,
@@ -2424,6 +2434,7 @@ mod tests {
             FloatFormatOptions::default(),
             None,
             Some(&relation_names),
+            None,
             None,
             None,
         )
@@ -2457,6 +2468,7 @@ mod tests {
             None,
             None,
             Some(&namespace_names),
+            None,
         )
         .unwrap();
 
@@ -2485,6 +2497,7 @@ mod tests {
             &[],
             &mut row_buf,
             FloatFormatOptions::default(),
+            None,
             None,
             None,
             None,

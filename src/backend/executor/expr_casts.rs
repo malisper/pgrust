@@ -1239,7 +1239,10 @@ impl<'a> ArrayTextParser<'a> {
     }
 }
 
-fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> {
+fn parse_input_type_name(
+    type_name: &str,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Option<SqlType>, ExecError> {
     let parsed = match parse_type_name(type_name.trim()) {
         Ok(ty) => ty,
         Err(_) => return Ok(None),
@@ -1247,10 +1250,20 @@ fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> 
     let resolved = match parsed {
         RawTypeName::Builtin(ty) => Some(ty),
         RawTypeName::Named { name, array_bounds } => {
-            let base = builtin_type_rows()
-                .into_iter()
-                .find(|row| row.typrelid == 0 && row.typname.eq_ignore_ascii_case(&name))
+            let base = catalog
+                .and_then(|catalog| catalog.type_by_name(&name))
+                .or_else(|| {
+                    builtin_type_rows()
+                        .into_iter()
+                        .find(|row| row.typrelid == 0 && row.typname.eq_ignore_ascii_case(&name))
+                })
                 .map(|row| row.sql_type.with_identity(row.oid, row.typrelid));
+            let base = base.or_else(|| {
+                builtin_type_rows()
+                    .into_iter()
+                    .find(|row| row.typrelid == 0 && row.typname.eq_ignore_ascii_case(&name))
+                    .map(|row| row.sql_type.with_identity(row.oid, row.typrelid))
+            });
             base.map(|ty| {
                 if array_bounds == 0 {
                     ty
@@ -1269,6 +1282,9 @@ fn input_type_name_supported(parsed: SqlType) -> bool {
         return true;
     }
     if !parsed.is_array && (parsed.is_range() || parsed.is_multirange()) {
+        return true;
+    }
+    if !parsed.is_array && matches!(parsed.kind, SqlTypeKind::Enum) && parsed.type_oid != 0 {
         return true;
     }
     let Some(type_oid) = builtin_type_oid(parsed) else {
@@ -1636,9 +1652,11 @@ pub(crate) fn soft_input_error_info_with_catalog_and_config(
         return soft_parse_oidvector_input(text);
     }
 
-    let ty = parse_input_type_name(type_name)?.ok_or_else(|| ExecError::InvalidStorageValue {
-        column: type_name.to_string(),
-        details: format!("unsupported type: {type_name}"),
+    let ty = parse_input_type_name(type_name, catalog)?.ok_or_else(|| {
+        ExecError::InvalidStorageValue {
+            column: type_name.to_string(),
+            details: format!("unsupported type: {type_name}"),
+        }
     })?;
     if !ty.is_array
         && matches!(
@@ -1690,7 +1708,13 @@ pub(crate) fn soft_input_error_info_with_catalog_and_config(
         | SqlTypeKind::Name
         | SqlTypeKind::Char
         | SqlTypeKind::Varchar => cast_text_value_with_config(text, ty, false, config),
-        _ => cast_value_with_config(Value::Text(text.into()), ty, config),
+        _ => cast_value_with_source_type_catalog_and_config(
+            Value::Text(text.into()),
+            Some(SqlType::new(SqlTypeKind::Text)),
+            ty,
+            catalog,
+            config,
+        ),
     };
     match parsed {
         Ok(_) => Ok(None),
@@ -1833,6 +1857,11 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
     {
         if let Some(text) = regclass_text_input(&value, source_type) {
             return expr_reg::cast_text_to_reg_object(text, ty.kind, catalog);
+        }
+    }
+    if matches!(ty.kind, SqlTypeKind::Enum) && !ty.is_array {
+        if let Some(text) = value.as_text() {
+            return cast_text_to_enum(text, ty, catalog);
         }
     }
     if matches!(ty.kind, SqlTypeKind::Text)
@@ -3136,8 +3165,12 @@ fn cast_text_to_enum(
     if let Some(label_oid) = catalog.and_then(|catalog| catalog.enum_label_oid(ty.type_oid, text)) {
         return Ok(Value::EnumOid(label_oid));
     }
+    let type_name = catalog
+        .and_then(|catalog| catalog.type_by_oid(ty.type_oid))
+        .map(|row| row.typname)
+        .unwrap_or_else(|| ty.type_oid.to_string());
     Err(ExecError::DetailedError {
-        message: format!("invalid input value for enum {}: \"{}\"", ty.type_oid, text),
+        message: format!("invalid input value for enum {type_name}: \"{text}\""),
         detail: None,
         hint: None,
         sqlstate: "22P02",
@@ -3276,10 +3309,7 @@ pub(crate) fn cast_text_value_with_config(
         SqlTypeKind::Int8 => cast_text_to_int8(text),
         SqlTypeKind::Money => money_parse_text(text).map(Value::Money),
         SqlTypeKind::Oid => cast_text_to_oid(text),
-        SqlTypeKind::Enum => cast_text_to_oid(text).map(|value| match value {
-            Value::Int64(v) => Value::EnumOid(v as u32),
-            other => other,
-        }),
+        SqlTypeKind::Enum => cast_text_to_enum(text, ty, None),
         SqlTypeKind::Float4 | SqlTypeKind::Float8 => parse_pg_float(text, ty.kind).map(|v| {
             Value::Float64(if matches!(ty.kind, SqlTypeKind::Float4) {
                 (v as f32) as f64
@@ -3925,34 +3955,34 @@ mod tests {
     #[test]
     fn parse_input_type_name_uses_text_input_cast_surface() {
         assert_eq!(
-            parse_input_type_name("jsonb").unwrap(),
+            parse_input_type_name("jsonb", None).unwrap(),
             Some(SqlType::new(SqlTypeKind::Jsonb))
         );
         assert_eq!(
-            parse_input_type_name("jsonpath").unwrap(),
+            parse_input_type_name("jsonpath", None).unwrap(),
             Some(SqlType::new(SqlTypeKind::JsonPath))
         );
         assert_eq!(
-            parse_input_type_name("timestamp").unwrap(),
+            parse_input_type_name("timestamp", None).unwrap(),
             Some(SqlType::new(SqlTypeKind::Timestamp))
         );
         assert_eq!(
-            parse_input_type_name("varchar(4)").unwrap(),
+            parse_input_type_name("varchar(4)", None).unwrap(),
             Some(SqlType::with_char_len(SqlTypeKind::Varchar, 4))
         );
         assert_eq!(
-            parse_input_type_name("int4[]").unwrap(),
+            parse_input_type_name("int4[]", None).unwrap(),
             Some(SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
         );
         assert_eq!(
-            parse_input_type_name("varchar(4)[]").unwrap(),
+            parse_input_type_name("varchar(4)[]", None).unwrap(),
             Some(SqlType::array_of(SqlType::with_char_len(
                 SqlTypeKind::Varchar,
                 4
             )))
         );
         assert_eq!(
-            parse_input_type_name("int4[][]").unwrap(),
+            parse_input_type_name("int4[][]", None).unwrap(),
             Some(SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
         );
     }

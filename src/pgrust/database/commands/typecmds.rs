@@ -515,7 +515,7 @@ impl Database {
             .map(|(index, label)| EnumLabelEntry {
                 oid: oid.saturating_add(2 + index as u32),
                 label: label.clone(),
-                sort_order: (index as u32).saturating_add(1),
+                sort_order: (index as f64) + 1.0,
                 committed: true,
             })
             .collect();
@@ -580,13 +580,15 @@ impl Database {
             });
         }
         let sort_order = match &stmt.position {
-            None => entry
-                .labels
-                .iter()
-                .map(|label| label.sort_order)
-                .max()
-                .unwrap_or(0)
-                .saturating_add(1),
+            None => {
+                entry
+                    .labels
+                    .iter()
+                    .map(|label| label.sort_order)
+                    .max_by(f64::total_cmp)
+                    .unwrap_or(0.0)
+                    + 1.0
+            }
             Some(AlterEnumValuePosition::Before(neighbor)) => {
                 let index = entry
                     .labels
@@ -597,9 +599,13 @@ impl Database {
                     .checked_sub(1)
                     .and_then(|prev| entry.labels.get(prev))
                     .map(|label| label.sort_order)
-                    .unwrap_or(0);
+                    .unwrap_or(0.0);
                 let current = entry.labels[index].sort_order;
-                midpoint_or_renumber(&mut entry.labels, previous, current)
+                if index == 0 {
+                    current - 1.0
+                } else {
+                    midpoint_or_renumber(&mut entry.labels, previous, current)
+                }
             }
             Some(AlterEnumValuePosition::After(neighbor)) => {
                 let index = entry
@@ -612,7 +618,7 @@ impl Database {
                     .labels
                     .get(index + 1)
                     .map(|label| label.sort_order)
-                    .unwrap_or_else(|| current.saturating_add(2));
+                    .unwrap_or(current + 2.0);
                 midpoint_or_renumber(&mut entry.labels, current, next)
             }
         };
@@ -622,7 +628,9 @@ impl Database {
             sort_order,
             committed: false,
         });
-        entry.labels.sort_by_key(|label| label.sort_order);
+        entry
+            .labels
+            .sort_by(|left, right| left.sort_order.total_cmp(&right.sort_order));
         self.plan_cache.invalidate_all();
         Ok(StatementResult::AffectedRows(0))
     }
@@ -936,15 +944,29 @@ fn enum_neighbor_missing_error(type_name: &str, label: &str) -> ExecError {
     }
 }
 
-fn midpoint_or_renumber(labels: &mut [EnumLabelEntry], low: u32, high: u32) -> u32 {
-    if high > low.saturating_add(1) {
-        return low + ((high - low) / 2);
+fn midpoint_or_renumber(labels: &mut [EnumLabelEntry], low: f64, high: f64) -> f64 {
+    let midpoint = ((low as f32 + high as f32) / 2.0) as f64;
+    if midpoint > low && midpoint < high {
+        return midpoint;
     }
-    labels.sort_by_key(|label| label.sort_order);
+    labels.sort_by(|left, right| left.sort_order.total_cmp(&right.sort_order));
+    let high_index = labels
+        .iter()
+        .position(|label| label.sort_order >= high)
+        .unwrap_or(labels.len());
     for (idx, label) in labels.iter_mut().enumerate() {
-        label.sort_order = ((idx as u32) + 1).saturating_mul(2);
+        label.sort_order = (idx as f64) + 1.0;
     }
-    low.saturating_add(1)
+    let renumbered_low = high_index
+        .checked_sub(1)
+        .and_then(|idx| labels.get(idx))
+        .map(|label| label.sort_order)
+        .unwrap_or(0.0);
+    let renumbered_high = labels
+        .get(high_index)
+        .map(|label| label.sort_order)
+        .unwrap_or(renumbered_low + 2.0);
+    ((renumbered_low as f32 + renumbered_high as f32) / 2.0) as f64
 }
 
 fn range_type_display_name(stmt: &CreateRangeTypeStatement) -> String {
