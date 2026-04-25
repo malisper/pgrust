@@ -103,6 +103,12 @@ Render recent local history:
 python scripts/run_bench.py --report-history .bench-history
 ```
 
+Generate a standalone local dashboard:
+
+```bash
+python scripts/run_bench.py --report-history .bench-history --history-dashboard .bench-history/dashboard.html
+```
+
 The history report shows recent runs plus the latest pgrust/PostgreSQL ratios
 and the delta from the most recent earlier recorded run with the same workload.
 This is intentionally lightweight tracking; dashboard publishing and regression
