@@ -3,6 +3,8 @@ use crate::include::nodes::datetime::{
     POSTGRES_EPOCH_JDATE, SECS_PER_DAY, USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE,
     USECS_PER_SEC,
 };
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Offset, TimeZone};
+use chrono_tz::Tz;
 use std::path::Path;
 
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
@@ -583,55 +585,48 @@ pub fn named_timezone_offset_seconds(name: &str) -> Option<i32> {
         "pst" | "america/los_angeles" => Some(-8 * 3600),
         "pdt" => Some(-7 * 3600),
         "bst" => Some(3600),
+        "mmt" => Some(-(3 * 3600 + 44 * 60 + 51)),
+        "ist" => Some(5 * 3600 + 30 * 60),
         _ => None,
     }
 }
 
-fn first_sunday_on_or_after(year: i32, month: u32, day: u32) -> Option<i32> {
-    let start = days_from_ymd(year, month, day)?;
-    let dow = day_of_week_from_julian_day(julian_day_from_postgres_date(start));
-    Some(start + (7 - dow as i32).rem_euclid(7))
-}
-
-fn last_sunday_on_or_before(year: i32, month: u32, day: u32) -> Option<i32> {
-    let start = days_from_ymd(year, month, day)?;
-    let dow = day_of_week_from_julian_day(julian_day_from_postgres_date(start));
-    Some(start - dow as i32)
-}
-
-fn new_york_offset_seconds(pg_days: i32) -> Option<i32> {
-    let (year, _, _) = ymd_from_days(pg_days);
-    let dst_start = if year >= 2007 {
-        first_sunday_on_or_after(year, 3, 8)?
-    } else if year >= 1987 {
-        first_sunday_on_or_after(year, 4, 1)?
-    } else {
-        return Some(-5 * 3600);
-    };
-    let dst_end = if year >= 2007 {
-        first_sunday_on_or_after(year, 11, 1)?
-    } else {
-        last_sunday_on_or_before(year, 10, 31)?
-    };
-    if (dst_start..dst_end).contains(&pg_days) {
-        Some(-4 * 3600)
-    } else {
-        Some(-5 * 3600)
-    }
-}
-
-pub fn named_timezone_offset_seconds_for_date(name: &str, pg_days: i32) -> Option<i32> {
+pub fn parse_tz_name(name: &str) -> Option<Tz> {
     match name.trim().to_ascii_lowercase().as_str() {
-        "america/new_york" => new_york_offset_seconds(pg_days),
-        other => named_timezone_offset_seconds(other),
+        "msk" => Some(chrono_tz::Europe::Moscow),
+        _ => name.trim().parse::<Tz>().ok(),
     }
 }
 
-fn supported_dynamic_timezone_name(name: &str) -> bool {
-    matches!(
-        name.trim().to_ascii_lowercase().as_str(),
-        "america/new_york"
-    )
+fn naive_datetime_from_postgres_usecs(usecs: i64) -> Option<NaiveDateTime> {
+    let (days, time_usecs) = timestamp_parts_from_usecs(usecs);
+    let (year, month, day) = ymd_from_days(days);
+    let hour = (time_usecs / USECS_PER_HOUR) as u32;
+    let minute = ((time_usecs % USECS_PER_HOUR) / USECS_PER_MINUTE) as u32;
+    let second = ((time_usecs % USECS_PER_MINUTE) / USECS_PER_SEC) as u32;
+    let micros = (time_usecs % USECS_PER_SEC) as u32;
+    Some(NaiveDateTime::new(
+        NaiveDate::from_ymd_opt(year, month, day)?,
+        NaiveTime::from_hms_micro_opt(hour, minute, second, micros)?,
+    ))
+}
+
+pub fn named_timezone_offset_seconds_at_utc(name: &str, utc_usecs: i64) -> Option<i32> {
+    let tz = parse_tz_name(name)?;
+    let utc = naive_datetime_from_postgres_usecs(utc_usecs)?;
+    Some(tz.offset_from_utc_datetime(&utc).fix().local_minus_utc())
+}
+
+pub fn named_timezone_offset_seconds_for_local(name: &str, local_usecs: i64) -> Option<i32> {
+    let tz = parse_tz_name(name)?;
+    let local = naive_datetime_from_postgres_usecs(local_usecs)?;
+    match tz.offset_from_local_datetime(&local) {
+        chrono::LocalResult::Single(offset) => Some(offset.fix().local_minus_utc()),
+        chrono::LocalResult::Ambiguous(_, late) => Some(late.fix().local_minus_utc()),
+        chrono::LocalResult::None => {
+            Some(tz.offset_from_utc_datetime(&local).fix().local_minus_utc())
+        }
+    }
 }
 
 fn timezone_name_exists(name: &str) -> bool {
@@ -665,6 +660,9 @@ pub fn parse_timezone_spec(text: &str) -> Result<Option<TimeZoneSpec>, DateTimeP
     if let Some(offset) = named_timezone_offset_seconds(trimmed) {
         return Ok(Some(TimeZoneSpec::FixedOffset(offset)));
     }
+    if matches!(trimmed.to_ascii_lowercase().as_str(), "lmt" | "mmt" | "msk") {
+        return Ok(Some(TimeZoneSpec::Named(trimmed.to_string())));
+    }
     if let Some(sign_idx) = trimmed
         .char_indices()
         .skip(1)
@@ -685,7 +683,7 @@ pub fn parse_timezone_spec(text: &str) -> Result<Option<TimeZoneSpec>, DateTimeP
             return Ok(Some(TimeZoneSpec::FixedOffset(offset)));
         }
     }
-    if supported_dynamic_timezone_name(trimmed) || timezone_name_exists(trimmed) {
+    if parse_tz_name(trimmed).is_some() || timezone_name_exists(trimmed) {
         return Ok(Some(TimeZoneSpec::Named(normalize_timezone_name(trimmed))));
     }
     if is_timezone_name_candidate(trimmed) {
@@ -705,6 +703,11 @@ pub fn parse_offset_seconds(text: &str) -> Option<i32> {
 
 pub fn timezone_offset_seconds(config: &DateTimeConfig) -> i32 {
     parse_offset_seconds(current_timezone_name(config)).unwrap_or(0)
+}
+
+pub fn timezone_offset_seconds_at_utc(config: &DateTimeConfig, utc_usecs: i64) -> i32 {
+    named_timezone_offset_seconds_at_utc(current_timezone_name(config), utc_usecs)
+        .unwrap_or_else(|| timezone_offset_seconds(config))
 }
 
 pub fn parse_time_components(text: &str) -> Option<(u32, u32, u32, i64)> {
@@ -794,8 +797,10 @@ pub fn format_offset(offset_seconds: i32) -> String {
 }
 
 pub fn today_pg_days(config: &DateTimeConfig) -> i32 {
-    let now = current_postgres_timestamp_usecs();
-    let local = now + timezone_offset_seconds(config) as i64 * USECS_PER_SEC;
+    let now = config
+        .transaction_timestamp_usecs
+        .unwrap_or_else(current_postgres_timestamp_usecs);
+    let local = now + timezone_offset_seconds_at_utc(config, now) as i64 * USECS_PER_SEC;
     local.div_euclid(USECS_PER_DAY) as i32
 }
 

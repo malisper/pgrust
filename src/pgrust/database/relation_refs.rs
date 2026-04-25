@@ -784,7 +784,11 @@ fn collect_direct_relation_oids_from_sql_expr(
         | SqlExpr::JsonGet(left, right)
         | SqlExpr::JsonGetText(left, right)
         | SqlExpr::JsonPath(left, right)
-        | SqlExpr::JsonPathText(left, right) => {
+        | SqlExpr::JsonPathText(left, right)
+        | SqlExpr::AtTimeZone {
+            expr: left,
+            zone: right,
+        } => {
             collect_direct_relation_oids_from_sql_expr(left, catalog, visible_ctes, rels);
             collect_direct_relation_oids_from_sql_expr(right, catalog, visible_ctes, rels);
         }

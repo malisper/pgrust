@@ -3,6 +3,7 @@ use num_traits::ToPrimitive;
 use std::cmp::Ordering;
 
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
+use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
 use crate::backend::utils::trigger::format_trigger_definition;
 use crate::include::nodes::datetime::MAX_TIME_PRECISION;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
@@ -29,8 +30,8 @@ pub(crate) use super::expr_compile::{
 use super::expr_date::{
     eval_age_function, eval_date_bin_function, eval_date_part_function, eval_date_trunc_function,
     eval_extract_function, eval_isfinite_function, eval_make_date_function,
-    eval_make_time_function, eval_make_timestamp_function, eval_timezone_function,
-    eval_to_date_function,
+    eval_make_time_function, eval_make_timestamp_function, eval_make_timestamptz_function,
+    eval_timezone_function, eval_to_date_function,
 };
 use super::expr_datetime::{
     current_date_value, current_date_value_from_timestamp_with_config, current_time_value,
@@ -3894,6 +3895,11 @@ fn eval_plpgsql_builtin_function(
             _ => eval_length_function(&values),
         },
         BuiltinScalarFunction::ArrayUpper => eval_array_upper_function(&values),
+        BuiltinScalarFunction::PgSleep => eval_pg_sleep_function(&values),
+        BuiltinScalarFunction::Timezone => eval_timezone_function(
+            &values,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        ),
         BuiltinScalarFunction::CashLarger => match values.as_slice() {
             [Value::Money(left), Value::Money(right)] => {
                 Ok(Value::Money(money_larger(*left, *right)))
@@ -4302,6 +4308,98 @@ fn eval_plpgsql_builtin_function(
                 actual: format!("{func:?}"),
             }))
         }
+    }
+}
+
+fn eval_pg_sleep_function(values: &[Value]) -> Result<Value, ExecError> {
+    let seconds = match values {
+        [Value::Null] => return Ok(Value::Null),
+        [Value::Float64(value)] => *value,
+        [Value::Int32(value)] => *value as f64,
+        [Value::Int64(value)] => *value as f64,
+        [other] => {
+            return Err(ExecError::TypeMismatch {
+                op: "pg_sleep",
+                left: other.clone(),
+                right: Value::Null,
+            });
+        }
+        _ => {
+            return Err(ExecError::TypeMismatch {
+                op: "pg_sleep",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            });
+        }
+    };
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "non-negative finite sleep duration",
+            actual: seconds.to_string(),
+        }));
+    }
+    std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+    Ok(Value::Null)
+}
+
+fn eval_timezone_function(
+    values: &[Value],
+    config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+) -> Result<Value, ExecError> {
+    let (zone, value) = match values {
+        [value] => (
+            crate::backend::utils::time::datetime::current_timezone_name(config),
+            value,
+        ),
+        [zone, value] => {
+            if matches!(zone, Value::Null) {
+                return Ok(Value::Null);
+            }
+            let zone = zone.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "timezone",
+                left: zone.clone(),
+                right: value.clone(),
+            })?;
+            let zone = if zone == "__pgrust_local_timezone__" {
+                crate::backend::utils::time::datetime::current_timezone_name(config)
+            } else {
+                zone
+            };
+            (zone, value)
+        }
+        _ => {
+            return Err(ExecError::TypeMismatch {
+                op: "timezone",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            });
+        }
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match value {
+        Value::Timestamp(timestamp) => timestamp_at_time_zone(*timestamp, zone)
+            .map(Value::TimestampTz)
+            .map_err(|err| ExecError::InvalidStorageValue {
+                column: "timestamptz".into(),
+                details: super::expr_casts::datetime_parse_error_details(
+                    "timestamp with time zone",
+                    zone,
+                    err,
+                ),
+            }),
+        Value::TimestampTz(timestamptz) => timestamptz_at_time_zone(*timestamptz, zone)
+            .map(Value::Timestamp)
+            .map_err(|err| ExecError::InvalidStorageValue {
+                column: "timestamp".into(),
+                details: super::expr_casts::datetime_parse_error_details("timestamp", zone, err),
+            }),
+        other => Err(ExecError::TypeMismatch {
+            op: "timezone",
+            left: Value::Text(zone.into()),
+            right: other.clone(),
+        }),
     }
 }
 
@@ -5027,21 +5125,19 @@ fn eval_builtin_function(
         BuiltinScalarFunction::PgStatisticsObjIsVisible => {
             eval_pg_statistics_obj_is_visible(&values, ctx)
         }
-        BuiltinScalarFunction::Now
-        | BuiltinScalarFunction::TransactionTimestamp
-        | BuiltinScalarFunction::StatementTimestamp => {
-            Ok(current_timestamp_value_from_timestamp_with_config(
-                &ctx.datetime_config,
-                ctx.statement_timestamp_usecs,
-                None,
-                true,
-            ))
+        BuiltinScalarFunction::Now | BuiltinScalarFunction::TransactionTimestamp => Ok(
+            current_timestamp_value_with_config(&ctx.datetime_config, None, true),
+        ),
+        BuiltinScalarFunction::StatementTimestamp => {
+            let mut config = ctx.datetime_config.clone();
+            config.transaction_timestamp_usecs = config.statement_timestamp_usecs;
+            Ok(current_timestamp_value_with_config(&config, None, true))
         }
-        BuiltinScalarFunction::ClockTimestamp => Ok(current_timestamp_value_with_config(
-            &ctx.datetime_config,
-            None,
-            true,
-        )),
+        BuiltinScalarFunction::ClockTimestamp => {
+            let mut config = ctx.datetime_config.clone();
+            config.transaction_timestamp_usecs = None;
+            Ok(current_timestamp_value_with_config(&config, None, true))
+        }
         BuiltinScalarFunction::TimeOfDay => {
             let value = current_timestamp_value_with_config(&ctx.datetime_config, None, true);
             Ok(Value::Text(
@@ -5065,6 +5161,9 @@ fn eval_builtin_function(
         BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
         BuiltinScalarFunction::MakeTime => eval_make_time_function(&values),
         BuiltinScalarFunction::MakeTimestamp => eval_make_timestamp_function(&values),
+        BuiltinScalarFunction::MakeTimestampTz => {
+            eval_make_timestamptz_function(&values, &ctx.datetime_config)
+        }
         BuiltinScalarFunction::Age => eval_age_function(&values),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
         BuiltinScalarFunction::PgMyTempSchema => Ok(Value::Int64(i64::from(
@@ -5267,6 +5366,8 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ArrayDims => eval_array_dims_function(&values),
         BuiltinScalarFunction::ArrayLower => eval_array_lower_function(&values),
         BuiltinScalarFunction::ArrayUpper => eval_array_upper_function(&values),
+        BuiltinScalarFunction::PgSleep => eval_pg_sleep_function(&values),
+        BuiltinScalarFunction::Timezone => eval_timezone_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::ArrayFill => eval_array_fill_function(&values),
         BuiltinScalarFunction::StringToArray => eval_string_to_array_function(&values),
         BuiltinScalarFunction::ArrayToString => eval_array_to_string_function(&values),

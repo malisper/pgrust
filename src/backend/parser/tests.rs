@@ -6372,6 +6372,37 @@ fn analyze_timestamptz_typed_string_literal_keeps_timestamp_tz_type() {
 }
 
 #[test]
+fn parse_at_time_zone_expression() {
+    let stmt = parse_select("select timestamp '2001-02-16 20:38:40' at time zone 'America/Denver'")
+        .unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::AtTimeZone { expr, zone }
+            if matches!(expr.as_ref(), SqlExpr::Cast(_, ty) if *ty == SqlType::new(SqlTypeKind::Timestamp))
+                && matches!(zone.as_ref(), SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _)))
+    ));
+}
+
+#[test]
+fn analyze_at_time_zone_uses_timezone_function_types() {
+    let stmt =
+        parse_select("select timestamptz '2001-02-16 20:38:40+00' at time zone 'America/Denver'")
+            .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+
+    assert!(matches!(
+        &query.target_list[0].expr,
+        Expr::Func(func)
+            if func.implementation == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+                crate::include::nodes::primnodes::BuiltinScalarFunction::Timezone
+            )
+                && func.funcresulttype == Some(SqlType::new(SqlTypeKind::Timestamp))
+                && func.args.len() == 2
+    ));
+}
+
+#[test]
 fn analyze_interval_typed_string_literal_keeps_interval_type() {
     let stmt = parse_select("select interval '1 day'").unwrap();
     let (query, _) =

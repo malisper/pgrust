@@ -1034,6 +1034,70 @@ pub(super) fn bind_agg_output_expr_in_clause(
             )?;
             bind_explicit_collation(bound, inner_type, collation, catalog)
         }
+        SqlExpr::AtTimeZone { expr, zone } => {
+            let source_type = grouped_infer_sql_expr_type(
+                expr,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            );
+            let zone_type = grouped_infer_sql_expr_type(
+                zone,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            );
+            let source_is_timestamptz = matches!(source_type.kind, SqlTypeKind::TimestampTz)
+                || matches!(
+                    expr.as_ref(),
+                    SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+                );
+            let result_type = if source_is_timestamptz {
+                SqlType::new(SqlTypeKind::Timestamp)
+            } else {
+                SqlType::new(SqlTypeKind::TimestampTz)
+            };
+            let source_target = if source_is_timestamptz {
+                SqlType::new(SqlTypeKind::TimestampTz)
+            } else {
+                SqlType::new(SqlTypeKind::Timestamp)
+            };
+            let bound_expr = bind_agg_output_expr_in_clause(
+                expr,
+                clause.clone(),
+                group_by_exprs,
+                group_key_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )?;
+            let bound_zone = bind_agg_output_expr_in_clause(
+                zone,
+                clause,
+                group_by_exprs,
+                group_key_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )?;
+            Ok(Expr::builtin_func(
+                BuiltinScalarFunction::Timezone,
+                Some(result_type),
+                false,
+                vec![
+                    coerce_bound_expr(bound_zone, zone_type, SqlType::new(SqlTypeKind::Text)),
+                    coerce_bound_expr(bound_expr, source_type, source_target),
+                ],
+            ))
+        }
         SqlExpr::Xml(_) => Err(ParseError::FeatureNotSupported(
             "xml expressions in grouped aggregate output are not implemented".into(),
         )),

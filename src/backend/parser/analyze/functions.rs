@@ -1070,6 +1070,8 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::StatementTimestamp
             | BuiltinScalarFunction::ClockTimestamp
             | BuiltinScalarFunction::TimeOfDay => args.is_empty(),
+            BuiltinScalarFunction::PgSleep => args.len() == 1,
+            BuiltinScalarFunction::Timezone => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::CurrentDatabase
             | BuiltinScalarFunction::Version
             | BuiltinScalarFunction::PgBackendPid
@@ -1078,14 +1080,14 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgGetTriggerDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgTriggerDepth => args.is_empty(),
             BuiltinScalarFunction::PgPartitionRoot => args.len() == 1,
-            BuiltinScalarFunction::DatePart
-            | BuiltinScalarFunction::Extract
-            | BuiltinScalarFunction::DateTrunc => args.len() == 2,
+            BuiltinScalarFunction::DatePart | BuiltinScalarFunction::Extract => args.len() == 2,
+            BuiltinScalarFunction::DateTrunc => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::DateBin => args.len() == 3,
             BuiltinScalarFunction::TimeZone => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::IsFinite => args.len() == 1,
             BuiltinScalarFunction::MakeDate | BuiltinScalarFunction::MakeTime => args.len() == 3,
             BuiltinScalarFunction::MakeTimestamp => args.len() == 6,
+            BuiltinScalarFunction::MakeTimestampTz => matches!(args.len(), 6 | 7),
             BuiltinScalarFunction::Age => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
             BuiltinScalarFunction::PgMyTempSchema => args.is_empty(),
@@ -1966,6 +1968,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("clock_timestamp", BuiltinScalarFunction::ClockTimestamp),
         ("timeofday", BuiltinScalarFunction::TimeOfDay),
+        ("pg_sleep", BuiltinScalarFunction::PgSleep),
+        ("timezone", BuiltinScalarFunction::Timezone),
         ("date_part", BuiltinScalarFunction::DatePart),
         ("extract", BuiltinScalarFunction::Extract),
         ("date_trunc", BuiltinScalarFunction::DateTrunc),
@@ -1975,6 +1979,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("make_date", BuiltinScalarFunction::MakeDate),
         ("make_time", BuiltinScalarFunction::MakeTime),
         ("make_timestamp", BuiltinScalarFunction::MakeTimestamp),
+        ("make_timestamptz", BuiltinScalarFunction::MakeTimestampTz),
         ("age", BuiltinScalarFunction::Age),
         (
             "getdatabaseencoding",
@@ -2971,6 +2976,15 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             by_func.push((
                 BuiltinScalarFunction::TimeOfDay,
                 SqlType::new(SqlTypeKind::Text),
+            ));
+        }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::PgSleep)
+        {
+            by_func.push((
+                BuiltinScalarFunction::PgSleep,
+                SqlType::new(SqlTypeKind::Void),
             ));
         }
         if by_func

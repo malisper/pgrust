@@ -3407,6 +3407,10 @@ pub enum SqlExpr {
         expr: Box<SqlExpr>,
         collation: String,
     },
+    AtTimeZone {
+        expr: Box<SqlExpr>,
+        zone: Box<SqlExpr>,
+    },
     Eq(Box<SqlExpr>, Box<SqlExpr>),
     NotEq(Box<SqlExpr>, Box<SqlExpr>),
     Lt(Box<SqlExpr>, Box<SqlExpr>),

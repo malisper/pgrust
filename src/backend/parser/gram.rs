@@ -14558,20 +14558,20 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     Rule::at_time_zone_suffix => {
                         let zone = suffix
                             .into_inner()
-                            .find(|part| part.as_rule() == Rule::concat_expr)
+                            .find(|part| part.as_rule() == Rule::postfix_expr)
                             .map(build_expr)
-                            .transpose()?;
-                        expr = match zone {
-                            Some(zone) => simple_func_call(
-                                "timezone",
-                                vec![
-                                    SqlFunctionArg::positional(zone),
-                                    SqlFunctionArg::positional(expr),
-                                ],
-                            ),
-                            None => {
-                                simple_func_call("timezone", vec![SqlFunctionArg::positional(expr)])
-                            }
+                            .ok_or(ParseError::UnexpectedEof)??;
+                        expr = SqlExpr::AtTimeZone {
+                            expr: Box::new(expr),
+                            zone: Box::new(zone),
+                        };
+                    }
+                    Rule::at_local_suffix => {
+                        expr = SqlExpr::AtTimeZone {
+                            expr: Box::new(expr),
+                            zone: Box::new(SqlExpr::Const(Value::Text(
+                                "__pgrust_local_timezone__".into(),
+                            ))),
                         };
                     }
                     _ => {}
