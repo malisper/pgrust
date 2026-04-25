@@ -131,16 +131,16 @@ pub(super) fn bind_builtin_system_view(
             .into_iter()
             .map(|row| {
                 vec![
-                    Value::Int32(row.oid as i32),
+                    Value::Int64(i64::from(row.oid)),
                     Value::Text(row.typname.into()),
-                    Value::Int32(row.typnamespace as i32),
-                    Value::Int32(row.typowner as i32),
+                    Value::Int64(i64::from(row.typnamespace)),
+                    Value::Int64(i64::from(row.typowner)),
                     Value::Int16(row.typlen),
                     Value::InternalChar(row.typalign.as_char() as u8),
                     Value::InternalChar(row.typstorage.as_char() as u8),
-                    Value::Int32(row.typrelid as i32),
-                    Value::Int32(row.typelem as i32),
-                    Value::Int32(row.typarray as i32),
+                    Value::Int64(i64::from(row.typrelid)),
+                    Value::Int64(i64::from(row.typelem)),
+                    Value::Int64(i64::from(row.typarray)),
                 ]
             })
             .collect(),
