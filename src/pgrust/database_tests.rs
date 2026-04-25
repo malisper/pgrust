@@ -6627,7 +6627,7 @@ fn inherited_update_delete_follow_postgres_targeting_rules() {
 }
 
 #[test]
-fn inheritance_guardrails_still_reject_truncate_and_column_alter() {
+fn inheritance_guardrails_reject_truncate_but_allow_column_alter() {
     let dir = temp_dir("inheritance_guardrails");
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
@@ -6646,14 +6646,31 @@ fn inheritance_guardrails_still_reject_truncate_and_column_alter() {
             if message.contains("TRUNCATE on inherited parents")
     ));
 
-    let alter_err = session
+    session
+        .execute(&db, "insert into parent_guard values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into child_guard values (2)")
+        .unwrap();
+
+    session
         .execute(&db, "alter table parent_guard add column b int4")
-        .unwrap_err();
-    assert!(matches!(
-        alter_err,
-        ExecError::Parse(ParseError::FeatureNotSupported(message))
-            if message.contains("inheritance tree members")
-    ));
+        .unwrap();
+    session
+        .execute(&db, "alter table parent_guard rename column b to bb")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select a, bb from parent_guard order by a"),
+        vec![
+            vec![Value::Int32(1), Value::Null],
+            vec![Value::Int32(2), Value::Null],
+        ]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select a, bb from only child_guard order by a"),
+        vec![vec![Value::Int32(2), Value::Null]]
+    );
 }
 
 #[test]
