@@ -5,6 +5,7 @@ use crate::backend::executor::{
 use crate::backend::parser::ParseOptions;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::stack_depth::StackDepthGuard;
+use crate::pl::plpgsql::execute_do_with_gucs;
 
 impl Database {
     pub(crate) fn execute_truncate_table_in_transaction_with_search_path(
@@ -159,6 +160,23 @@ impl Database {
         configured_search_path: Option<&[String]>,
         datetime_config: &DateTimeConfig,
     ) -> Result<StatementResult, ExecError> {
+        self.execute_statement_with_search_path_datetime_config_and_gucs(
+            client_id,
+            stmt,
+            configured_search_path,
+            datetime_config,
+            &std::collections::HashMap::new(),
+        )
+    }
+
+    pub(crate) fn execute_statement_with_search_path_datetime_config_and_gucs(
+        &self,
+        client_id: ClientId,
+        stmt: Statement,
+        configured_search_path: Option<&[String]>,
+        datetime_config: &DateTimeConfig,
+        gucs: &std::collections::HashMap<String, String>,
+    ) -> Result<StatementResult, ExecError> {
         let statement_lock_scope_id = Some(self.allocate_statement_lock_scope_id());
         let stats_state = self.session_stats_state(client_id);
         stats_state.write().begin_top_level_xact();
@@ -170,6 +188,7 @@ impl Database {
             statement_lock_scope_id,
             configured_search_path,
             datetime_config,
+            gucs,
         );
         if let Some(scope_id) = statement_lock_scope_id {
             advisory_locks.unlock_all_statement(client_id, scope_id);
@@ -249,6 +268,7 @@ impl Database {
         statement_lock_scope_id: Option<u64>,
         configured_search_path: Option<&[String]>,
         datetime_config: &DateTimeConfig,
+        gucs: &std::collections::HashMap<String, String>,
     ) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::commands::tablecmds::execute_truncate_table;
@@ -256,7 +276,7 @@ impl Database {
         let session_replication_role = self.session_replication_role(client_id);
 
         match stmt {
-            Statement::Do(ref do_stmt) => execute_do(do_stmt),
+            Statement::Do(ref do_stmt) => execute_do_with_gucs(do_stmt, gucs),
             Statement::Checkpoint(_) => {
                 let auth = self.auth_state(client_id);
                 let auth_catalog = self.auth_catalog(client_id, None).map_err(|err| {
@@ -632,12 +652,14 @@ impl Database {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let bound = crate::backend::parser::plan_merge(merge_stmt, &catalog)?;
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
@@ -645,6 +667,7 @@ impl Database {
                     row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
+                    gucs: gucs.clone(),
                     interrupts: Arc::clone(&interrupts),
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
@@ -831,6 +854,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
@@ -838,6 +862,7 @@ impl Database {
                     row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
+                    gucs: gucs.clone(),
                     interrupts: Arc::clone(&interrupts),
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
@@ -930,7 +955,8 @@ impl Database {
                 let locked_rels = table_lock_relations(&lock_requests);
 
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let deferred_foreign_keys =
                     crate::backend::executor::DeferredForeignKeyTracker::default();
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
@@ -938,6 +964,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
@@ -945,6 +972,7 @@ impl Database {
                     row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
+                    gucs: gucs.clone(),
                     interrupts: Arc::clone(&interrupts),
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
@@ -1031,7 +1059,8 @@ impl Database {
                 let locked_rels = table_lock_relations(&lock_requests);
 
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let deferred_foreign_keys =
                     crate::backend::executor::DeferredForeignKeyTracker::default();
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
@@ -1039,6 +1068,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
@@ -1046,6 +1076,7 @@ impl Database {
                     row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
+                    gucs: gucs.clone(),
                     interrupts: Arc::clone(&interrupts),
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
@@ -1133,7 +1164,8 @@ impl Database {
                 let locked_rels = table_lock_relations(&lock_requests);
 
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let deferred_foreign_keys =
                     crate::backend::executor::DeferredForeignKeyTracker::default();
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
@@ -1141,6 +1173,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
@@ -1148,6 +1181,7 @@ impl Database {
                     row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
+                    gucs: gucs.clone(),
                     interrupts: Arc::clone(&interrupts),
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
@@ -1301,7 +1335,8 @@ impl Database {
                 ),
             Statement::DropTable(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let mut catalog_effects = Vec::new();
                 let mut temp_effects = Vec::new();
                 let result = self.execute_drop_table_stmt_in_transaction_with_search_path(
@@ -1320,7 +1355,8 @@ impl Database {
             }
             Statement::DropIndex(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let mut catalog_effects = Vec::new();
                 let result = self.execute_drop_index_stmt_in_transaction_with_search_path(
                     client_id,
@@ -1387,7 +1423,8 @@ impl Database {
             ),
             Statement::DropSequence(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let mut catalog_effects = Vec::new();
                 let mut temp_effects = Vec::new();
                 let mut sequence_effects = Vec::new();
@@ -1414,7 +1451,8 @@ impl Database {
             }
             Statement::DropView(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let mut catalog_effects = Vec::new();
                 let result = self.execute_drop_view_stmt_in_transaction_with_search_path(
                     client_id,
@@ -1443,7 +1481,8 @@ impl Database {
             ),
             Statement::DropSchema(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let mut catalog_effects = Vec::new();
                 let result = self.execute_drop_schema_stmt_in_transaction_with_search_path(
                     client_id,
@@ -1505,6 +1544,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
@@ -1512,6 +1552,7 @@ impl Database {
                     row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
+                    gucs: gucs.clone(),
                     interrupts: Arc::clone(&interrupts),
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
@@ -1648,6 +1689,7 @@ impl Database {
             pool: std::sync::Arc::clone(&self.pool),
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
+            lock_status_provider: Some(std::sync::Arc::new(self.clone())),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
@@ -1655,6 +1697,7 @@ impl Database {
             row_locks: std::sync::Arc::clone(&self.row_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: datetime_config.clone(),
+            gucs: std::collections::HashMap::new(),
             interrupts,
             stats: std::sync::Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),

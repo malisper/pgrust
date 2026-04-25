@@ -101,8 +101,8 @@ struct HashJoinClauses {
 #[derive(Debug, Clone)]
 struct MergeJoinClauses {
     merge_clauses: Vec<RestrictInfo>,
-    outer_sort_keys: Vec<Expr>,
-    inner_sort_keys: Vec<Expr>,
+    outer_merge_keys: Vec<Expr>,
+    inner_merge_keys: Vec<Expr>,
     join_clauses: Vec<RestrictInfo>,
 }
 

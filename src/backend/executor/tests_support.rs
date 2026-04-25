@@ -50,6 +50,7 @@ impl SeededSqlHarness {
                 pool,
                 txns: txns_arc,
                 txn_waiter: None,
+                lock_status_provider: None,
                 sequences: Some(Arc::new(
                     crate::pgrust::database::SequenceRuntime::new_ephemeral(),
                 )),
@@ -63,6 +64,7 @@ impl SeededSqlHarness {
                     crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(
                 ),
+                gucs: std::collections::HashMap::new(),
                 interrupts: Arc::new(
                     crate::backend::utils::misc::interrupts::InterruptState::new(),
                 ),

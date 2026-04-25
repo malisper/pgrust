@@ -34,6 +34,8 @@ impl Default for ParseOptions {
     }
 }
 
+const PARSER_STACK_DEPTH_FLOOR_KB: u32 = 8 * 1024;
+
 pub fn parse_statement(sql: &str) -> Result<Statement, ParseError> {
     parse_statement_with_options(sql, ParseOptions::default())
 }
@@ -1869,6 +1871,12 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "int2vector" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int2Vector))),
         "oidvector" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::OidVector))),
         "name" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Name))),
+        "refcursor" => {
+            return Ok(RawTypeName::Builtin(
+                SqlType::new(SqlTypeKind::Text)
+                    .with_identity(crate::include::catalog::REFCURSOR_TYPE_OID, 0),
+            ));
+        }
         "inet" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Inet))),
         "cidr" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Cidr))),
         "bpchar" | "pg_catalog.bpchar" => {
@@ -1914,6 +1922,11 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
+    // :HACK: The current pest AST builders can use more debug stack than
+    // PostgreSQL's default max_stack_depth while lowering ordinary statements.
+    // Keep executor/runtime checks tied to the GUC, but give parser-only work a
+    // floor until those recursive builders are flattened.
+    let max_stack_depth_kb = max_stack_depth_kb.max(PARSER_STACK_DEPTH_FLOOR_KB);
     std::thread::Builder::new()
         .name("pgrust-parser".into())
         .stack_size(32 * 1024 * 1024)
@@ -1928,6 +1941,7 @@ fn run_with_parser_stack<F, T>(max_stack_depth_kb: u32, f: F) -> T
 where
     F: FnOnce() -> T,
 {
+    let max_stack_depth_kb = max_stack_depth_kb.max(PARSER_STACK_DEPTH_FLOOR_KB);
     // Browser wasm cannot spawn threads without a different runtime model.
     // Run inline there and keep the larger parser stack workaround only on
     // native targets.
@@ -8574,6 +8588,9 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             let mut with_ordinality = false;
             for part in pair.into_inner() {
                 match part.as_rule() {
+                    Rule::qualified_srf_name if name.is_none() => {
+                        name = Some(build_qualified_srf_name(part)?);
+                    }
                     Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
                     Rule::function_arg_list => {
                         parsed_args = build_function_arg_list(part)?;
@@ -8601,6 +8618,18 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             actual: raw,
         }),
     }
+}
+
+fn build_qualified_srf_name(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    let parts = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier)
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(parts.join("."))
 }
 
 fn build_join_clause(
@@ -11073,6 +11102,9 @@ fn simple_func_call(name: impl Into<String>, args: Vec<SqlFunctionArg>) -> SqlEx
 }
 
 fn sql_type_output_name(ty: SqlType) -> &'static str {
+    if ty.type_oid == crate::include::catalog::REFCURSOR_TYPE_OID {
+        return "refcursor";
+    }
     match ty.kind {
         SqlTypeKind::AnyElement => "anyelement",
         SqlTypeKind::AnyRange => "anyrange",
@@ -12341,6 +12373,8 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 "oid" => SqlType::new(SqlTypeKind::Oid),
                 "name" => SqlType::new(SqlTypeKind::Name),
                 "text" => SqlType::new(SqlTypeKind::Text),
+                "refcursor" => SqlType::new(SqlTypeKind::Text)
+                    .with_identity(crate::include::catalog::REFCURSOR_TYPE_OID, 0),
                 "bool" | "boolean" => SqlType::new(SqlTypeKind::Bool),
                 "bytea" => SqlType::new(SqlTypeKind::Bytea),
                 "inet" => SqlType::new(SqlTypeKind::Inet),
@@ -12416,6 +12450,10 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
             }
         }
         Rule::kw_text => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+        Rule::kw_refcursor => RawTypeName::Builtin(
+            SqlType::new(SqlTypeKind::Text)
+                .with_identity(crate::include::catalog::REFCURSOR_TYPE_OID, 0),
+        ),
         Rule::kw_json => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Json)),
         Rule::kw_jsonb => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Jsonb)),
         Rule::kw_jsonpath => RawTypeName::Builtin(SqlType::new(SqlTypeKind::JsonPath)),

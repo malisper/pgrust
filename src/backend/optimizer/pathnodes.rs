@@ -373,9 +373,16 @@ impl Path {
             {
                 left.pathkeys()
             }
-            Self::MergeJoin { pathkeys, .. } => pathkeys.clone(),
+            Self::MergeJoin { left, kind, .. }
+                if matches!(
+                    kind,
+                    JoinType::Inner | JoinType::Left | JoinType::Semi | JoinType::Anti
+                ) =>
+            {
+                left.pathkeys()
+            }
             Self::HashJoin { .. } => Vec::new(),
-            Self::NestedLoopJoin { .. } => Vec::new(),
+            Self::NestedLoopJoin { .. } | Self::MergeJoin { .. } => Vec::new(),
         }
     }
 }

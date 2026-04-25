@@ -402,12 +402,21 @@ fn push_verbose_plan_details(
         Plan::HashJoin {
             left,
             right,
+            hash_clauses,
             join_qual,
             qual,
             ..
         } => {
             let left_names = verbose_plan_output_exprs(left, ctx, true);
             let right_names = verbose_plan_output_exprs(right, ctx, true);
+            if !hash_clauses.is_empty() {
+                let rendered = hash_clauses
+                    .iter()
+                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                lines.push(format!("{prefix}Hash Cond: {rendered}"));
+            }
             if !join_qual.is_empty() {
                 let rendered = join_qual
                     .iter()
@@ -664,6 +673,7 @@ fn render_verbose_set_returning_call(
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             vec![render_verbose_function_arg(relid, ctx)]
         }
+        SetReturningCall::PgLockStatus { .. } => Vec::new(),
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
@@ -946,12 +956,27 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
         }
         Plan::NestedLoopJoin {
             join_qual, qual, ..
+        } => {
+            for expr in join_qual {
+                collect_direct_expr_subplans(expr, &mut found);
+            }
+            for expr in qual {
+                collect_direct_expr_subplans(expr, &mut found);
+            }
         }
-        | Plan::HashJoin {
-            hash_clauses: join_qual,
+        Plan::HashJoin {
+            hash_clauses,
+            hash_keys,
+            join_qual,
             qual,
             ..
         } => {
+            for expr in hash_clauses {
+                collect_direct_expr_subplans(expr, &mut found);
+            }
+            for expr in hash_keys {
+                collect_direct_expr_subplans(expr, &mut found);
+            }
             for expr in join_qual {
                 collect_direct_expr_subplans(expr, &mut found);
             }
@@ -961,19 +986,25 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
         }
         Plan::MergeJoin {
             merge_clauses,
-            outer_sort_keys,
-            inner_sort_keys,
+            outer_merge_keys,
+            inner_merge_keys,
             join_qual,
             qual,
             ..
         } => {
-            for expr in merge_clauses
-                .iter()
-                .chain(outer_sort_keys.iter())
-                .chain(inner_sort_keys.iter())
-                .chain(join_qual.iter())
-                .chain(qual.iter())
-            {
+            for expr in merge_clauses {
+                collect_direct_expr_subplans(expr, &mut found);
+            }
+            for expr in outer_merge_keys {
+                collect_direct_expr_subplans(expr, &mut found);
+            }
+            for expr in inner_merge_keys {
+                collect_direct_expr_subplans(expr, &mut found);
+            }
+            for expr in join_qual {
+                collect_direct_expr_subplans(expr, &mut found);
+            }
+            for expr in qual {
                 collect_direct_expr_subplans(expr, &mut found);
             }
         }
@@ -1238,6 +1269,7 @@ fn collect_direct_set_returning_call_subplans<'a>(
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             collect_direct_expr_subplans(relid, out);
         }
+        SetReturningCall::PgLockStatus { .. } => {}
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }

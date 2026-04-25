@@ -14,6 +14,13 @@ pub struct VarDecl {
     pub type_name: String,
     pub ty: SqlType,
     pub default_expr: Option<String>,
+    pub strict: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorDecl {
+    pub name: String,
+    pub query: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +39,7 @@ pub enum AliasTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decl {
     Var(VarDecl),
+    Cursor(CursorDecl),
     Alias(AliasDecl),
 }
 
@@ -135,6 +143,21 @@ pub enum Stmt {
         sql_expr: String,
         into_targets: Vec<AssignTarget>,
         using_exprs: Vec<String>,
+    },
+    GetDiagnostics {
+        stacked: bool,
+        items: Vec<(AssignTarget, String)>,
+    },
+    OpenCursor {
+        name: String,
+        sql: Option<String>,
+    },
+    FetchCursor {
+        name: String,
+        targets: Vec<AssignTarget>,
+    },
+    CloseCursor {
+        name: String,
     },
     ExecSql {
         sql: String,

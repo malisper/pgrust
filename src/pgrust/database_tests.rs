@@ -184,6 +184,7 @@ fn analyze_executor_context(
         pool: Arc::clone(&db.pool),
         txns: db.txns.clone(),
         txn_waiter: Some(db.txn_waiter.clone()),
+        lock_status_provider: Some(Arc::new(db.clone())),
         sequences: Some(db.sequences.clone()),
         large_objects: Some(db.large_objects.clone()),
         async_notify_runtime: Some(db.async_notify_runtime.clone()),
@@ -191,6 +192,7 @@ fn analyze_executor_context(
         row_locks: Arc::clone(&db.row_locks),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        gucs: std::collections::HashMap::new(),
         interrupts: db.interrupt_state(client_id),
         stats: Arc::clone(&db.stats),
         session_stats: db.session_stats_state(client_id),
@@ -2672,6 +2674,67 @@ fn advisory_session_and_transaction_locks_cleanup_and_encode_keys() {
 }
 
 #[test]
+fn pg_locks_pg_lock_status_return_same_advisory_rows() {
+    let dir = temp_dir("pg_locks_pg_lock_status_advisory_rows");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "select pg_advisory_lock(4294967298), pg_advisory_lock_shared(7, 8)",
+        )
+        .unwrap();
+
+    let select_list = "classid, objid, objsubid, pid, mode, granted, fastpath, waitstart is null";
+    let order_by = "order by objsubid, classid, objid";
+    let from_view = session_query_rows(
+        &mut session,
+        &db,
+        &format!("select {select_list} from pg_locks where locktype = 'advisory' {order_by}"),
+    );
+    let from_catalog_view = session_query_rows(
+        &mut session,
+        &db,
+        &format!(
+            "select {select_list} from pg_catalog.pg_locks \
+             where locktype = 'advisory' {order_by}"
+        ),
+    );
+    let from_srf = session_query_rows(
+        &mut session,
+        &db,
+        &format!(
+            "select {select_list} from pg_catalog.pg_lock_status() \
+             where locktype = 'advisory' {order_by}"
+        ),
+    );
+
+    assert_eq!(from_view, from_catalog_view);
+    assert_eq!(from_view, from_srf);
+
+    session
+        .execute(&db, "select pg_advisory_unlock_all()")
+        .unwrap();
+}
+
+#[test]
+fn pg_locks_pg_lock_status_virtualxid_includes_current_backend() {
+    let dir = temp_dir("pg_locks_pg_lock_status_virtualxid");
+    let db = Database::open(&dir, 64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            7,
+            "select count(*) from pg_lock_status() \
+             where locktype = 'virtualxid' and pid = pg_backend_pid()"
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+}
+
+#[test]
 fn advisory_try_lock_shared_and_reentrant_counts_match_postgres() {
     let dir = temp_dir("advisory_try_lock_shared_reentrant");
     let db = Database::open(&dir, 64).unwrap();
@@ -3153,6 +3216,18 @@ fn pg_locks_shows_granted_and_waiting_relation_locks() {
         Value::Bool(false),
         Value::Bool(true),
     ]));
+    assert_eq!(
+        relation_rows,
+        query_rows(
+            &db,
+            3,
+            &format!(
+                "select pid, mode, granted, waitstart is not null \
+                 from pg_lock_status() where locktype = 'relation' and relation = {relation_oid} \
+                 order by pid, granted desc"
+            ),
+        )
+    );
 
     holder.execute(&db, "rollback").unwrap();
     match done_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap() {
@@ -3162,6 +3237,177 @@ fn pg_locks_shows_granted_and_waiting_relation_locks() {
         other => panic!("expected query result, got {other:?}"),
     }
     worker.join().unwrap();
+}
+
+#[test]
+fn pg_locks_reports_tuple_granted_and_waiting_rows() {
+    use std::sync::mpsc;
+
+    let dir = temp_dir("pg_locks_tuple_rows");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut holder = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    holder
+        .execute(
+            &db,
+            "create table tuple_lock_items (id int4 not null primary key)",
+        )
+        .unwrap();
+    holder
+        .execute(&db, "insert into tuple_lock_items values (1)")
+        .unwrap();
+    let relation_oid = relation_oid_for(&db, 1, "tuple_lock_items");
+
+    holder.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut holder,
+            &db,
+            "select id from tuple_lock_items where id = 1 for update"
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+
+    db.install_interrupt_state(2, waiter.interrupts());
+    let db2 = db.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        done_tx
+            .send(waiter.execute(
+                &db2,
+                "select id from tuple_lock_items where id = 1 for share",
+            ))
+            .unwrap();
+    });
+
+    let waiting_row = wait_for_pg_lock_row(&db, TEST_TIMEOUT, |row| {
+        matches!(row.first(), Some(Value::Text(locktype)) if locktype.as_str() == "tuple")
+            && row.get(2) == Some(&Value::Int64(relation_oid))
+            && row.get(11) == Some(&Value::Int32(2))
+            && row.get(13) == Some(&Value::Bool(false))
+    });
+    assert_eq!(waiting_row[12], Value::Text("RowShareLock".into()));
+    assert!(!matches!(waiting_row[15], Value::Null));
+
+    let tuple_rows = query_rows(
+        &db,
+        3,
+        &format!(
+            "select pid, mode, granted, waitstart is not null \
+             from pg_lock_status() where locktype = 'tuple' and relation = {relation_oid} \
+             order by pid, granted desc"
+        ),
+    );
+    assert!(tuple_rows.contains(&vec![
+        Value::Int32(1),
+        Value::Text("AccessExclusiveLock".into()),
+        Value::Bool(true),
+        Value::Bool(false),
+    ]));
+    assert!(tuple_rows.contains(&vec![
+        Value::Int32(2),
+        Value::Text("RowShareLock".into()),
+        Value::Bool(false),
+        Value::Bool(true),
+    ]));
+
+    holder.execute(&db, "rollback").unwrap();
+    match done_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+    worker.join().unwrap();
+    assert!(
+        query_rows(
+            &db,
+            3,
+            "select locktype from pg_lock_status() where locktype = 'tuple'"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn pg_locks_reports_transactionid_holders_waiters_and_cleanup() {
+    use std::sync::mpsc;
+
+    let dir = temp_dir("pg_locks_transactionid_rows");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut holder = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    holder
+        .execute(
+            &db,
+            "create table transaction_lock_items (id int4 not null primary key)",
+        )
+        .unwrap();
+    holder
+        .execute(&db, "insert into transaction_lock_items values (1)")
+        .unwrap();
+
+    holder.execute(&db, "begin").unwrap();
+    holder
+        .execute(&db, "update transaction_lock_items set id = 2 where id = 1")
+        .unwrap();
+
+    db.install_interrupt_state(2, waiter.interrupts());
+    let db2 = db.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        done_tx
+            .send(waiter.execute(
+                &db2,
+                "update transaction_lock_items set id = 3 where id = 1",
+            ))
+            .unwrap();
+    });
+
+    let waiting_row = wait_for_pg_lock_row(&db, TEST_TIMEOUT, |row| {
+        matches!(row.first(), Some(Value::Text(locktype)) if locktype.as_str() == "transactionid")
+            && row.get(11) == Some(&Value::Int32(2))
+            && row.get(13) == Some(&Value::Bool(false))
+    });
+    assert_eq!(waiting_row[12], Value::Text("ShareLock".into()));
+    assert!(!matches!(waiting_row[15], Value::Null));
+
+    let transaction_rows = query_rows(
+        &db,
+        3,
+        "select pid, mode, granted, waitstart is not null \
+         from pg_lock_status() where locktype = 'transactionid' order by pid, granted desc",
+    );
+    assert!(transaction_rows.contains(&vec![
+        Value::Int32(1),
+        Value::Text("ExclusiveLock".into()),
+        Value::Bool(true),
+        Value::Bool(false),
+    ]));
+    assert!(transaction_rows.contains(&vec![
+        Value::Int32(2),
+        Value::Text("ShareLock".into()),
+        Value::Bool(false),
+        Value::Bool(true),
+    ]));
+
+    holder.execute(&db, "rollback").unwrap();
+    match done_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap() {
+        StatementResult::AffectedRows(1) => {}
+        other => panic!("expected update result, got {other:?}"),
+    }
+    worker.join().unwrap();
+    assert!(
+        query_rows(
+            &db,
+            3,
+            "select locktype from pg_lock_status() where locktype = 'transactionid' \
+             and pid in (1, 2)"
+        )
+        .is_empty()
+    );
 }
 
 #[test]
@@ -13687,6 +13933,97 @@ fn explain_inner_join_can_reorder_commutative_inputs() {
 }
 
 #[test]
+fn explain_ordered_equijoin_can_choose_merge_join() {
+    std::thread::Builder::new()
+        .name("explain_ordered_equijoin_can_choose_merge_join".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let base = temp_dir("explain_ordered_equijoin_merge_join");
+            let db = Database::open(&base, 16).unwrap();
+            let mut session = Session::new(1);
+
+            session
+                .execute(&db, "set max_stack_depth = '32MB'")
+                .unwrap();
+            session
+                .execute(&db, "create table left_items (id int4 not null, note text)")
+                .unwrap();
+            session
+                .execute(
+                    &db,
+                    "create table right_items (id int4 not null, note text)",
+                )
+                .unwrap();
+
+            for id in 0..96 {
+                session
+                    .execute(
+                        &db,
+                        &format!("insert into left_items values ({id}, 'l{id}')"),
+                    )
+                    .unwrap();
+                session
+                    .execute(
+                        &db,
+                        &format!("insert into right_items values ({id}, 'r{id}')"),
+                    )
+                    .unwrap();
+            }
+
+            session.execute(&db, "analyze left_items").unwrap();
+            session.execute(&db, "analyze right_items").unwrap();
+
+            let lines = match session
+                .execute(
+                    &db,
+                    "explain select l.id, r.note from \
+                     (select id, note from left_items order by id) l \
+                     join (select id, note from right_items order by id) r \
+                       on l.id = r.id \
+                     order by l.id",
+                )
+                .unwrap()
+            {
+                StatementResult::Query { rows, .. } => rows
+                    .into_iter()
+                    .map(|row| match row.first() {
+                        Some(Value::Text(text)) => text.to_string(),
+                        other => panic!("expected explain text row, got {:?}", other),
+                    })
+                    .collect::<Vec<_>>(),
+                other => panic!("expected query result, got {:?}", other),
+            };
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.trim_start().starts_with("Merge Join  ")),
+                "expected ordered equijoin to choose merge join, got {lines:?}"
+            );
+
+            assert_eq!(
+                session_query_rows(
+                    &mut session,
+                    &db,
+                    "select l.id, r.note from \
+                     (select id, note from left_items order by id) l \
+                     join (select id, note from right_items order by id) r \
+                       on l.id = r.id \
+                     where l.id < 3 \
+                     order by l.id",
+                ),
+                vec![
+                    vec![Value::Int32(0), Value::Text("r0".into())],
+                    vec![Value::Int32(1), Value::Text("r1".into())],
+                    vec![Value::Int32(2), Value::Text("r2".into())],
+                ],
+            );
+        })
+        .expect("spawn merge join planner test")
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn explain_cte_self_join_pushes_single_rel_filter_below_join() {
     let base = temp_dir("explain_cte_self_join_filter_pushdown");
     let db = Database::open(&base, 16).unwrap();
@@ -18545,6 +18882,69 @@ fn stats_gucs_show_postgres_like_defaults_and_runtime_values() {
 }
 
 #[test]
+fn plpgsql_gucs_show_set_current_setting_and_drive_asserts() {
+    let base = temp_dir("plpgsql_gucs");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show plpgsql.check_asserts"),
+        vec![vec![Value::Text("on".into())]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show plpgsql.extra_warnings"),
+        vec![vec![Value::Text("none".into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select current_setting('plpgsql.variable_conflict')",
+        ),
+        vec![vec![Value::Text("error".into())]]
+    );
+
+    session
+        .execute(&db, "set plpgsql.check_asserts = off")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "set plpgsql.extra_warnings = 'shadowed_variables,too_many_rows'",
+        )
+        .unwrap();
+    session
+        .execute(&db, "set plpgsql.variable_conflict = use_column")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select current_setting('plpgsql.check_asserts'), current_setting('plpgsql.extra_warnings'), current_setting('plpgsql.variable_conflict')",
+        ),
+        vec![vec![
+            Value::Text("off".into()),
+            Value::Text("shadowed_variables,too_many_rows".into()),
+            Value::Text("use_column".into()),
+        ]]
+    );
+    assert_eq!(
+        session
+            .execute(&db, "do $$ begin assert false, 'disabled'; end $$")
+            .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+
+    match session.execute(&db, "set plpgsql.variable_conflict = bogus") {
+        Err(ExecError::Parse(ParseError::UnrecognizedParameter(value))) => {
+            assert_eq!(value, "bogus");
+        }
+        other => panic!("expected invalid plpgsql.variable_conflict error, got {other:?}"),
+    }
+}
+
+#[test]
 fn stats_snapshot_timestamp_requires_snapshot_mode_and_clear_snapshot_resets_it() {
     let base = temp_dir("stats_snapshot_timestamp");
     let db = Database::open(&base, 16).unwrap();
@@ -22874,6 +23274,34 @@ fn plpgsql_write_inside_autocommit_select_error_aborts_xid() {
 }
 
 #[test]
+fn plpgsql_insert_failure_inside_autocommit_select_has_xid_and_rolls_back() {
+    let base = temp_dir("plpgsql_insert_failure_xid");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table lazy_bad_insert_items (id int4 not null)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function lazy_bad_insert() returns int4 language plpgsql as $$ begin insert into lazy_bad_insert_items values (null); return 0; end $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select lazy_bad_insert()").unwrap_err();
+    let err = match err {
+        ExecError::WithContext { source, .. } => *source,
+        err => err,
+    };
+    assert!(matches!(
+        err,
+        ExecError::NotNullViolation { column, .. } if column == "id"
+    ));
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from lazy_bad_insert_items"),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
 fn plpgsql_write_inside_explicit_transaction_select_allocates_xid() {
     let base = temp_dir("plpgsql_write_inside_explicit_select_xid");
     let db = Database::open(&base, 64).unwrap();
@@ -24334,6 +24762,160 @@ fn create_function_row_returns_work_for_table_and_record() {
 }
 
 #[test]
+fn create_function_nonset_record_composite_and_multi_out_work() {
+    let dir = temp_dir("create_function_nonset_row_returns");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table one_widget (id int4, label text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function one_widget_row(n int4) returns one_widget language plpgsql as $$ begin return row(n, 'widget'); end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function one_record_row(n int4) returns record language plpgsql as $$ begin return row(n, 'record'); end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function one_out_row(n int4, out a int4, out b text) language plpgsql as $$ begin a := n; b := 'out'; return; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from one_widget_row(5)"),
+        vec![vec![Value::Int32(5), Value::Text("widget".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select * from one_record_row(6) as t(a int4, b text)"
+        ),
+        vec![vec![Value::Int32(6), Value::Text("record".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select * from one_out_row(7)"),
+        vec![vec![Value::Int32(7), Value::Text("out".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_refcursor_open_fetch_close_work() {
+    let dir = temp_dir("plpgsql_refcursor_open_fetch_close");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table pl_cursor_items (id int4)")
+        .unwrap();
+    db.execute(1, "insert into pl_cursor_items values (1), (2), (3)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function cursor_total() returns int4 language plpgsql as $$
+            declare
+                c cursor for select id from pl_cursor_items order by id;
+                v int4;
+                total int4 := 0;
+            begin
+                open c;
+                fetch c into v;
+                total := total + v;
+                fetch c into v;
+                total := total + v;
+                close c;
+                return total;
+            end
+        $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select cursor_total()"),
+        vec![vec![Value::Int32(3)]]
+    );
+}
+
+#[test]
+fn drop_function_ignores_argument_names_and_out_only_modes() {
+    let dir = temp_dir("drop_function_mode_signature");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function drop_mode_sig(in a int4, inout b int4, out c text) language plpgsql as $$ begin b := a + b; c := b::text; return; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "drop function drop_mode_sig(in a int4, inout b int4, out c text)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_proc where proname = 'drop_mode_sig'"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn plpgsql_savepoint_reports_unsupported_transaction_command() {
+    let dir = temp_dir("plpgsql_savepoint_unsupported");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function bad_savepoint() returns void language plpgsql as $$ begin savepoint s; end $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select bad_savepoint()").unwrap_err();
+    let err = match err {
+        ExecError::WithContext { source, context } => {
+            assert!(context.contains("PL/pgSQL function bad_savepoint"));
+            assert!(context.contains("at SQL statement"));
+            *source
+        }
+        other => panic!("expected PL/pgSQL context, got {other:?}"),
+    };
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            sqlstate: "0A000",
+            ..
+        } if message == "unsupported transaction command in PL/pgSQL"
+    ));
+}
+
+#[test]
+fn plpgsql_runtime_errors_include_statement_context() {
+    let dir = temp_dir("plpgsql_error_context");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function fail_context() returns int4 language plpgsql as $$ declare z int4 := 0; begin perform 1 / z; return 0; end $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select fail_context()").unwrap_err();
+    match err {
+        ExecError::WithContext { source, context } => {
+            assert!(context.contains("PL/pgSQL function fail_context"));
+            assert!(context.contains("at PERFORM"));
+            assert!(matches!(*source, ExecError::DivisionByZero(_)));
+        }
+        other => panic!("expected PL/pgSQL context, got {other:?}"),
+    }
+}
+
+#[test]
 fn create_function_named_composite_rows_expand_from_relation_rowtype() {
     let dir = temp_dir("create_function_named_composite");
     let db = Database::open(&dir, 64).unwrap();
@@ -25121,6 +25703,13 @@ fn plpgsql_query_for_loop_reports_row_shape_mismatch() {
     .unwrap();
 
     let err = db.execute(1, "select bad_query_loop_shape()").unwrap_err();
+    let err = match err {
+        ExecError::WithContext { source, context } => {
+            assert!(context.contains("PL/pgSQL function bad_query_loop_shape"));
+            *source
+        }
+        err => err,
+    };
     assert!(matches!(
         err,
         ExecError::DetailedError {
@@ -25146,6 +25735,13 @@ fn plpgsql_dynamic_execute_query_for_loop_rejects_null_query_string() {
     .unwrap();
 
     let err = db.execute(1, "select null_dynamic_loop()").unwrap_err();
+    let err = match err {
+        ExecError::WithContext { source, context } => {
+            assert!(context.contains("PL/pgSQL function null_dynamic_loop"));
+            *source
+        }
+        err => err,
+    };
     assert!(matches!(
         err,
         ExecError::DetailedError {

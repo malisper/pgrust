@@ -1,6 +1,7 @@
 use crate::backend::access::heap::heapam::VisibleHeapScan;
 use crate::backend::access::transam::xact::{Snapshot, TransactionManager};
 use crate::backend::executor::hashjoin::{HashJoinPhase, HashJoinTable};
+use crate::backend::executor::mergejoin::MergeJoinBufferedRow;
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::include::access::relscan::IndexScanDesc;
@@ -521,16 +522,18 @@ pub struct MergeJoinState {
     pub(crate) right: PlanState,
     pub(crate) kind: JoinType,
     pub(crate) merge_clauses: Vec<Expr>,
-    pub(crate) outer_sort_keys: Vec<Expr>,
-    pub(crate) inner_sort_keys: Vec<Expr>,
+    pub(crate) outer_merge_keys: Vec<Expr>,
+    pub(crate) inner_merge_keys: Vec<Expr>,
     pub(crate) join_qual: Vec<Expr>,
     pub(crate) qual: Vec<Expr>,
     pub(crate) combined_names: Vec<String>,
     pub(crate) output_names: Vec<String>,
     pub(crate) left_width: usize,
     pub(crate) right_width: usize,
-    pub(crate) rows: Option<Vec<MaterializedRow>>,
-    pub(crate) next_index: usize,
+    pub(crate) left_rows: Option<Vec<MergeJoinBufferedRow>>,
+    pub(crate) right_rows: Option<Vec<MergeJoinBufferedRow>>,
+    pub(crate) output_rows: Option<Vec<MaterializedRow>>,
+    pub(crate) next_output_index: usize,
     pub(crate) slot: TupleSlot,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,

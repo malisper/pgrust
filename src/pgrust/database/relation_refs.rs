@@ -242,6 +242,7 @@ fn collect_rels_from_set_returning_call(
         } => {
             collect_rels_from_expr(relid, rels);
         }
+        crate::include::nodes::primnodes::SetReturningCall::PgLockStatus { .. } => {}
         crate::include::nodes::primnodes::SetReturningCall::Unnest { args, .. }
         | crate::include::nodes::primnodes::SetReturningCall::JsonTableFunction { args, .. }
         | crate::include::nodes::primnodes::SetReturningCall::JsonRecordFunction { args, .. }
@@ -332,8 +333,8 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
             left,
             right,
             merge_clauses,
-            outer_sort_keys,
-            inner_sort_keys,
+            outer_merge_keys,
+            inner_merge_keys,
             join_qual,
             qual,
             ..
@@ -343,10 +344,10 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
             for expr in merge_clauses {
                 collect_rels_from_expr(expr, rels);
             }
-            for expr in outer_sort_keys {
+            for expr in outer_merge_keys {
                 collect_rels_from_expr(expr, rels);
             }
-            for expr in inner_sort_keys {
+            for expr in inner_merge_keys {
                 collect_rels_from_expr(expr, rels);
             }
             for expr in join_qual {
@@ -439,6 +440,7 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
             } => {
                 collect_rels_from_expr(relid, rels);
             }
+            crate::include::nodes::primnodes::SetReturningCall::PgLockStatus { .. } => {}
             crate::include::nodes::primnodes::SetReturningCall::Unnest { args, .. }
             | crate::include::nodes::primnodes::SetReturningCall::JsonTableFunction {
                 args, ..
@@ -509,6 +511,9 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                             } => {
                                 collect_rels_from_expr(relid, rels);
                             }
+                            crate::include::nodes::primnodes::SetReturningCall::PgLockStatus {
+                                ..
+                            } => {}
                             crate::include::nodes::primnodes::SetReturningCall::Unnest {
                                 args, ..
                             }

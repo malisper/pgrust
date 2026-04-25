@@ -135,6 +135,7 @@ fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
         }
         SetReturningCall::PartitionTree { relid, .. }
         | SetReturningCall::PartitionAncestors { relid, .. } => expr_uses_outer_columns(relid),
+        SetReturningCall::PgLockStatus { .. } => false,
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
@@ -219,8 +220,8 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
             left,
             right,
             merge_clauses,
-            outer_sort_keys,
-            inner_sort_keys,
+            outer_merge_keys,
+            inner_merge_keys,
             join_qual,
             qual,
             ..
@@ -228,8 +229,8 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
             plan_uses_outer_columns(left)
                 || plan_uses_outer_columns(right)
                 || merge_clauses.iter().any(expr_uses_outer_columns)
-                || outer_sort_keys.iter().any(expr_uses_outer_columns)
-                || inner_sort_keys.iter().any(expr_uses_outer_columns)
+                || outer_merge_keys.iter().any(expr_uses_outer_columns)
+                || inner_merge_keys.iter().any(expr_uses_outer_columns)
                 || join_qual.iter().any(expr_uses_outer_columns)
                 || qual.iter().any(expr_uses_outer_columns)
         }
@@ -676,14 +677,14 @@ pub fn executor_start(plan: Plan) -> PlanState {
             right,
             kind,
             merge_clauses,
-            outer_sort_keys,
-            inner_sort_keys,
+            outer_merge_keys,
+            inner_merge_keys,
             join_qual,
             qual,
         } => {
             assert!(
-                matches!(kind, crate::include::nodes::primnodes::JoinType::Inner),
-                "merge join currently supports inner joins",
+                !matches!(kind, crate::include::nodes::primnodes::JoinType::Cross),
+                "merge join does not support cross joins",
             );
             let left_width = left.column_names().len();
             let right_width = right.column_names().len();
@@ -692,23 +693,43 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 .into_iter()
                 .chain(right.column_names())
                 .collect();
-            let output_names = combined_names.clone();
+            let output_names = if matches!(
+                kind,
+                crate::include::nodes::primnodes::JoinType::Semi
+                    | crate::include::nodes::primnodes::JoinType::Anti
+            ) {
+                left.column_names()
+            } else {
+                combined_names.clone()
+            };
             Box::new(MergeJoinState {
                 left: executor_start(*left),
                 right: executor_start(*right),
                 kind,
                 merge_clauses,
-                outer_sort_keys,
-                inner_sort_keys,
+                outer_merge_keys,
+                inner_merge_keys,
                 join_qual,
                 qual,
                 combined_names,
                 output_names,
                 left_width,
                 right_width,
-                rows: None,
-                next_index: 0,
-                slot: TupleSlot::empty(left_width + right_width),
+                left_rows: None,
+                right_rows: None,
+                output_rows: None,
+                next_output_index: 0,
+                slot: TupleSlot::empty(
+                    if matches!(
+                        kind,
+                        crate::include::nodes::primnodes::JoinType::Semi
+                            | crate::include::nodes::primnodes::JoinType::Anti
+                    ) {
+                        left_width
+                    } else {
+                        left_width + right_width
+                    },
+                ),
                 current_bindings: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),

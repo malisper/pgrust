@@ -1718,6 +1718,17 @@ fn lower_set_returning_call(
             relid: lower_expr(ctx, relid, mode),
             output_columns,
         },
+        SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,
@@ -1888,6 +1899,17 @@ fn fix_set_returning_call_upper_exprs(
             func_variadic,
             relid: fix_upper_expr_for_input(root, relid, path, input_tlist),
             output_columns,
+        },
+        SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
         },
         SetReturningCall::Unnest {
             func_oid,
@@ -2502,6 +2524,7 @@ fn validate_set_returning_call(
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             validate_executable_expr(relid, plan_node, field);
         }
+        SetReturningCall::PgLockStatus { .. } => {}
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
@@ -2608,8 +2631,8 @@ fn validate_executable_plan(plan: &Plan) {
             left,
             right,
             merge_clauses,
-            outer_sort_keys,
-            inner_sort_keys,
+            outer_merge_keys,
+            inner_merge_keys,
             join_qual,
             qual,
             ..
@@ -2617,12 +2640,12 @@ fn validate_executable_plan(plan: &Plan) {
             merge_clauses
                 .iter()
                 .for_each(|expr| validate_executable_expr(expr, "MergeJoin", "merge_clauses"));
-            outer_sort_keys
+            outer_merge_keys
                 .iter()
-                .for_each(|expr| validate_executable_expr(expr, "MergeJoin", "outer_sort_keys"));
-            inner_sort_keys
+                .for_each(|expr| validate_executable_expr(expr, "MergeJoin", "outer_merge_keys"));
+            inner_merge_keys
                 .iter()
-                .for_each(|expr| validate_executable_expr(expr, "MergeJoin", "inner_sort_keys"));
+                .for_each(|expr| validate_executable_expr(expr, "MergeJoin", "inner_merge_keys"));
             join_qual
                 .iter()
                 .for_each(|expr| validate_executable_expr(expr, "MergeJoin", "join_qual"));
@@ -2887,6 +2910,7 @@ fn validate_planner_set_returning_call(
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             validate_planner_expr(relid, path_node, field);
         }
+        SetReturningCall::PgLockStatus { .. } => {}
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
@@ -2994,8 +3018,8 @@ fn validate_planner_path(path: &Path) {
             right,
             restrict_clauses,
             merge_clauses,
-            outer_sort_keys,
-            inner_sort_keys,
+            outer_merge_keys,
+            inner_merge_keys,
             ..
         } => {
             for restrict in restrict_clauses {
@@ -3004,11 +3028,11 @@ fn validate_planner_path(path: &Path) {
             for restrict in merge_clauses {
                 validate_planner_expr(&restrict.clause, "MergeJoin", "merge_clauses");
             }
-            for expr in outer_sort_keys {
-                validate_planner_expr(expr, "MergeJoin", "outer_sort_keys");
+            for expr in outer_merge_keys {
+                validate_planner_expr(expr, "MergeJoin", "outer_merge_keys");
             }
-            for expr in inner_sort_keys {
-                validate_planner_expr(expr, "MergeJoin", "inner_sort_keys");
+            for expr in inner_merge_keys {
+                validate_planner_expr(expr, "MergeJoin", "inner_merge_keys");
             }
             validate_planner_path(left);
             validate_planner_path(right);
@@ -3537,41 +3561,49 @@ fn set_merge_join_references(
     right: Box<Path>,
     kind: crate::include::nodes::primnodes::JoinType,
     merge_clauses: Vec<RestrictInfo>,
-    outer_sort_keys: Vec<Expr>,
-    inner_sort_keys: Vec<Expr>,
+    outer_merge_keys: Vec<Expr>,
+    inner_merge_keys: Vec<Expr>,
     restrict_clauses: Vec<RestrictInfo>,
 ) -> Plan {
     let left_tlist = build_path_tlist(ctx.root, &left);
     let right_tlist = build_path_tlist(ctx.root, &right);
     let merge_restrict_clauses = merge_clauses.clone();
 
-    let mut lowered_outer_sort_keys = Vec::with_capacity(outer_sort_keys.len());
-    for expr in outer_sort_keys {
-        let expr = fix_upper_expr_for_input(ctx.root, expr, &left, &left_tlist);
-        lowered_outer_sort_keys.push(lower_expr(
-            ctx,
-            expr,
-            LowerMode::Input {
-                path: Some(&left),
-                tlist: &left_tlist,
-            },
-        ));
-    }
-    let outer_sort_keys = lowered_outer_sort_keys;
+    let outer_merge_keys = outer_merge_keys
+        .into_iter()
+        .map(|expr| fix_upper_expr_for_input(ctx.root, expr, &left, &left_tlist))
+        .collect::<Vec<_>>();
+    let inner_merge_keys = inner_merge_keys
+        .into_iter()
+        .map(|expr| fix_upper_expr_for_input(ctx.root, expr, &right, &right_tlist))
+        .collect::<Vec<_>>();
 
-    let mut lowered_inner_sort_keys = Vec::with_capacity(inner_sort_keys.len());
-    for expr in inner_sort_keys {
-        let expr = fix_upper_expr_for_input(ctx.root, expr, &right, &right_tlist);
-        lowered_inner_sort_keys.push(lower_expr(
-            ctx,
-            expr,
-            LowerMode::Input {
-                path: Some(&right),
-                tlist: &right_tlist,
-            },
-        ));
-    }
-    let inner_sort_keys = lowered_inner_sort_keys;
+    let outer_merge_keys = outer_merge_keys
+        .into_iter()
+        .map(|expr| {
+            lower_expr(
+                ctx,
+                expr,
+                LowerMode::Input {
+                    path: Some(&left),
+                    tlist: &left_tlist,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let inner_merge_keys = inner_merge_keys
+        .into_iter()
+        .map(|expr| {
+            lower_expr(
+                ctx,
+                expr,
+                LowerMode::Input {
+                    path: Some(&right),
+                    tlist: &right_tlist,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
     let lowered_merge_clauses = merge_clauses
         .into_iter()
         .map(|restrict| {
@@ -3608,8 +3640,8 @@ fn set_merge_join_references(
         right: Box::new(right_plan),
         kind,
         merge_clauses: lowered_merge_clauses,
-        outer_sort_keys,
-        inner_sort_keys,
+        outer_merge_keys,
+        inner_merge_keys,
         join_qual,
         qual,
     }
@@ -4258,8 +4290,8 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             right,
             kind,
             merge_clauses,
-            outer_sort_keys,
-            inner_sort_keys,
+            outer_merge_keys,
+            inner_merge_keys,
             restrict_clauses,
             ..
         } => set_merge_join_references(
@@ -4269,8 +4301,8 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             right,
             kind,
             merge_clauses,
-            outer_sort_keys,
-            inner_sort_keys,
+            outer_merge_keys,
+            inner_merge_keys,
             restrict_clauses,
         ),
         Path::Projection {

@@ -316,6 +316,17 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             relid: simplify_expr(relid, None)?,
             output_columns,
         },
+        SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::TextSearchTableFunction {
             kind,
             args,

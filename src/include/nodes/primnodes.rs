@@ -814,6 +814,12 @@ pub enum SetReturningCall {
         relid: Expr,
         output_columns: Vec<QueryColumn>,
     },
+    PgLockStatus {
+        func_oid: u32,
+        func_variadic: bool,
+        output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
+    },
     TextSearchTableFunction {
         kind: TextSearchTableFunction,
         args: Vec<Expr>,
@@ -840,6 +846,7 @@ impl SetReturningCall {
             | SetReturningCall::StringTableFunction { output_columns, .. }
             | SetReturningCall::PartitionTree { output_columns, .. }
             | SetReturningCall::PartitionAncestors { output_columns, .. }
+            | SetReturningCall::PgLockStatus { output_columns, .. }
             | SetReturningCall::TextSearchTableFunction { output_columns, .. }
             | SetReturningCall::UserDefined { output_columns, .. } => output_columns,
         }
@@ -863,6 +870,9 @@ impl SetReturningCall {
                 with_ordinality, ..
             }
             | SetReturningCall::StringTableFunction {
+                with_ordinality, ..
+            }
+            | SetReturningCall::PgLockStatus {
                 with_ordinality, ..
             }
             | SetReturningCall::TextSearchTableFunction {
@@ -916,6 +926,17 @@ impl SetReturningCall {
                 func_variadic,
                 relid: map(relid),
                 output_columns,
+            },
+            SetReturningCall::PgLockStatus {
+                func_oid,
+                func_variadic,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::PgLockStatus {
+                func_oid,
+                func_variadic,
+                output_columns,
+                with_ordinality,
             },
             SetReturningCall::Unnest {
                 func_oid,
@@ -1818,6 +1839,7 @@ pub fn set_returning_call_exprs(call: &SetReturningCall) -> Vec<&Expr> {
         } => vec![start, stop, step],
         SetReturningCall::PartitionTree { relid, .. }
         | SetReturningCall::PartitionAncestors { relid, .. } => vec![relid],
+        SetReturningCall::PgLockStatus { .. } => Vec::new(),
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }

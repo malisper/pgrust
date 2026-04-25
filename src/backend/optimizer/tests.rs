@@ -295,6 +295,27 @@ fn cheapest_path_for_pathkeys_prefers_cheapest_matching_path() {
 }
 
 #[test]
+fn pathkeys_satisfy_equivalent_default_null_ordering() {
+    let actual = vec![pathkey(var(10, 1))];
+    let mut required = pathkey(var(10, 1));
+    required.nulls_first = Some(false);
+
+    assert!(bestpath::pathkeys_satisfy(&actual, &[required]));
+
+    let actual_desc = vec![PathKey {
+        descending: true,
+        ..pathkey(var(10, 1))
+    }];
+    let required_desc = PathKey {
+        descending: true,
+        nulls_first: Some(true),
+        ..pathkey(var(10, 1))
+    };
+
+    assert!(bestpath::pathkeys_satisfy(&actual_desc, &[required_desc]));
+}
+
+#[test]
 fn choose_final_path_falls_back_to_cheapest_total_without_match() {
     let mut rel = RelOptInfo::new(
         vec![1],
@@ -678,6 +699,9 @@ fn outer_join_paths_keep_logical_left_orientation() {
                     kind: JoinType::Right,
                     ..
                 } | Plan::HashJoin {
+                    kind: JoinType::Right,
+                    ..
+                } | Plan::MergeJoin {
                     kind: JoinType::Right,
                     ..
                 }
@@ -2076,8 +2100,8 @@ fn extract_merge_join_clauses_splits_residual_predicates() {
         clauses.merge_clauses,
         vec![restrict(eq(var(1, 1), var(2, 1)))]
     );
-    assert_eq!(clauses.outer_sort_keys, vec![var(1, 1)]);
-    assert_eq!(clauses.inner_sort_keys, vec![var(2, 1)]);
+    assert_eq!(clauses.outer_merge_keys, vec![var(1, 1)]);
+    assert_eq!(clauses.inner_merge_keys, vec![var(2, 1)]);
     assert_eq!(
         clauses.join_clauses,
         vec![restrict(gt(var(1, 2), var(2, 2)))]
@@ -2137,6 +2161,76 @@ fn build_join_paths_skips_hash_join_for_cross_and_non_equi_joins() {
         !non_equi_paths
             .iter()
             .any(|path| matches!(path, Path::MergeJoin { .. }))
+    );
+}
+
+#[test]
+fn merge_join_path_sorts_unordered_inputs() {
+    let paths = super::build_join_paths(
+        values_path(1, 1.0, 10.0),
+        values_path(2, 2.0, 20.0),
+        &[1],
+        &[2],
+        JoinType::Inner,
+        vec![restrict(eq(var(1, 1), var(2, 1)))],
+    );
+
+    let merge = paths
+        .iter()
+        .find_map(|path| match path {
+            Path::MergeJoin { left, right, .. }
+                if matches!(left.as_ref(), Path::OrderBy { .. })
+                    && matches!(right.as_ref(), Path::OrderBy { .. }) =>
+            {
+                Some(path)
+            }
+            _ => None,
+        })
+        .expect("merge join with sorted inputs");
+
+    match merge {
+        Path::MergeJoin {
+            left,
+            right,
+            outer_merge_keys,
+            inner_merge_keys,
+            ..
+        } => {
+            assert_eq!(outer_merge_keys, &vec![var(1, 1)]);
+            assert_eq!(inner_merge_keys, &vec![var(2, 1)]);
+            assert!(matches!(left.as_ref(), Path::OrderBy { .. }));
+            assert!(matches!(right.as_ref(), Path::OrderBy { .. }));
+        }
+        other => panic!("expected merge join, got {other:?}"),
+    }
+}
+
+#[test]
+fn swapped_merge_join_candidate_keeps_logical_pathtarget_order() {
+    let paths = super::build_join_paths(
+        values_path(1, 1.0, 10.0),
+        values_path(2, 2.0, 20.0),
+        &[1],
+        &[2],
+        JoinType::Inner,
+        vec![restrict(eq(var(1, 1), var(2, 1)))],
+    );
+
+    let swapped = paths
+        .into_iter()
+        .find(|path| match path {
+            Path::MergeJoin { left, .. } => left.output_vars().first() == Some(&var(2, 1)),
+            _ => false,
+        })
+        .expect("swapped merge join");
+
+    assert_eq!(
+        swapped.semantic_output_vars(),
+        vec![var(1, 1), var(1, 2), var(2, 1), var(2, 2)]
+    );
+    assert_eq!(
+        swapped.output_vars(),
+        vec![var(2, 1), var(2, 2), var(1, 1), var(1, 2)]
     );
 }
 
@@ -2220,7 +2314,7 @@ fn hash_join_path_lowers_to_hash_join_plan_with_hash_inner() {
 }
 
 #[test]
-fn merge_join_path_lowers_sort_keys_and_merge_clauses() {
+fn merge_join_path_lowers_to_merge_join_plan_with_executable_keys() {
     let left = values_path(1, 1.0, 10.0);
     let right = values_path(2, 2.0, 20.0);
     let plan = Path::MergeJoin {
@@ -2231,13 +2325,12 @@ fn merge_join_path_lowers_sort_keys_and_merge_clauses() {
         right: Box::new(right),
         kind: JoinType::Inner,
         merge_clauses: vec![restrict(eq(var(1, 1), var(2, 1)))],
-        outer_sort_keys: vec![var(1, 1)],
-        inner_sort_keys: vec![var(2, 1)],
+        outer_merge_keys: vec![var(1, 1)],
+        inner_merge_keys: vec![var(2, 1)],
         restrict_clauses: vec![
             restrict(eq(var(1, 1), var(2, 1))),
             restrict(gt(var(1, 2), var(2, 2))),
         ],
-        pathkeys: vec![pathkey(var(1, 1))],
     }
     .into_plan();
 
@@ -2245,17 +2338,17 @@ fn merge_join_path_lowers_sort_keys_and_merge_clauses() {
         Plan::MergeJoin {
             kind,
             merge_clauses,
-            outer_sort_keys,
-            inner_sort_keys,
+            outer_merge_keys,
+            inner_merge_keys,
             join_qual,
             qual,
             ..
         } => {
             assert_eq!(kind, JoinType::Inner);
-            assert_eq!(outer_sort_keys.len(), 1);
-            assert!(is_special_user_var(&outer_sort_keys[0], OUTER_VAR, 0));
-            assert_eq!(inner_sort_keys.len(), 1);
-            assert!(is_special_user_var(&inner_sort_keys[0], OUTER_VAR, 0));
+            assert_eq!(outer_merge_keys.len(), 1);
+            assert!(is_special_user_var(&outer_merge_keys[0], OUTER_VAR, 0));
+            assert_eq!(inner_merge_keys.len(), 1);
+            assert!(is_special_user_var(&inner_merge_keys[0], OUTER_VAR, 0));
             assert_eq!(merge_clauses.len(), 1);
             match &merge_clauses[0] {
                 Expr::Op(op) => {
@@ -2267,8 +2360,17 @@ fn merge_join_path_lowers_sort_keys_and_merge_clauses() {
                 other => panic!("expected merge clause op, got {other:?}"),
             }
             assert_eq!(join_qual.len(), 1);
+            match &join_qual[0] {
+                Expr::Op(op) => {
+                    assert_eq!(op.op, OpExprKind::Gt);
+                    assert_eq!(op.args.len(), 2);
+                    assert!(is_special_user_var(&op.args[0], OUTER_VAR, 1));
+                    assert!(is_special_user_var(&op.args[1], INNER_VAR, 1));
+                }
+                other => panic!("expected join qual op, got {other:?}"),
+            }
             assert!(qual.is_empty());
         }
-        other => panic!("expected merge join, got {:?}", other),
+        other => panic!("expected merge join plan, got {other:?}"),
     }
 }
