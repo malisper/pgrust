@@ -328,6 +328,20 @@ impl CompiledTupleDecoder {
                                     ]),
                                 ))
                             }
+                            ScalarType::Interval => {
+                                Value::Interval(crate::include::nodes::datum::IntervalValue {
+                                    time_micros: i64::from_le_bytes([
+                                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+                                        bytes[6], bytes[7],
+                                    ]),
+                                    days: i32::from_le_bytes([
+                                        bytes[8], bytes[9], bytes[10], bytes[11],
+                                    ]),
+                                    months: i32::from_le_bytes([
+                                        bytes[12], bytes[13], bytes[14], bytes[15],
+                                    ]),
+                                })
+                            }
                             ScalarType::BitString => {
                                 values.push(Value::Null);
                                 continue;

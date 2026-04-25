@@ -5425,8 +5425,16 @@ fn interval_array_literals_preserve_interval_array_values() {
         .unwrap(),
         vec![vec![Value::PgArray(
             ArrayValue::from_1d(vec![
-                Value::Text("@ 0 secs".into()),
-                Value::Text("@ 1 hour 42 mins 20 secs".into()),
+                Value::Interval(IntervalValue {
+                    time_micros: 0,
+                    days: 0,
+                    months: 0,
+                }),
+                Value::Interval(IntervalValue {
+                    time_micros: 6_140_000_000,
+                    days: 0,
+                    months: 0,
+                }),
             ])
             .with_element_type_oid(crate::include::catalog::INTERVAL_TYPE_OID),
         )]],
@@ -5446,7 +5454,11 @@ fn interval_text_cast_canonicalizes_interval_value() {
             "select '1 day'::interval",
         )
         .unwrap(),
-        vec![vec![Value::Text("@ 1 day".into())]],
+        vec![vec![Value::Interval(IntervalValue {
+            time_micros: 0,
+            days: 1,
+            months: 0,
+        })]],
     );
 }
 
@@ -5465,7 +5477,7 @@ fn interval_array_text_casts_render_postgres_interval_style() {
         .unwrap(),
         vec![vec![
             Value::Text("{\"@ 0\",\"@ 1 hour 42 mins 20 secs\"}".into()),
-            Value::Text("@ 0 secs".into()),
+            Value::Text("@ 0".into()),
         ]],
     );
 }
@@ -12976,6 +12988,280 @@ fn window_range_offset_frame_supports_numeric_order_keys() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                last_value(id) over (
+                    order by id
+                    range between 100 following and 100 following
+                )
+         from people
+         order by id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Null],
+                    vec![Value::Int32(3), Value::Null],
+                    vec![Value::Int32(4), Value::Null],
+                    vec![Value::Int32(8), Value::Null],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn window_range_offset_frame_casts_unknown_numeric_offsets() {
+    let base = temp_dir("window_range_offset_float_unknown");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    let float_catalog = range_catalog("floats", crate::backend::parser::SqlTypeKind::Float8);
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        xid,
+        "insert into floats (id, span) values
+            (1, '-infinity'),
+            (2, 0),
+            (3, 'infinity'),
+            (4, 'NaN')",
+        float_catalog.clone(),
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                first_value(id) over (
+                    order by span
+                    range between 'inf' preceding and 'inf' following
+                ),
+                last_value(id) over (
+                    order by span
+                    range between 'inf' preceding and 'inf' following
+                )
+         from floats
+         order by id",
+        float_catalog.clone(),
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int32(1), Value::Int32(3)],
+                    vec![Value::Int32(2), Value::Int32(1), Value::Int32(3)],
+                    vec![Value::Int32(3), Value::Int32(1), Value::Int32(3)],
+                    vec![Value::Int32(4), Value::Int32(4), Value::Int32(4)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select first_value(id) over (
+            order by span
+            range between 1.1 preceding and 'NaN' following
+         )
+         from floats",
+        float_catalog,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { ref message, .. }
+            if message == "invalid preceding or following size in window function"
+    ));
+
+    let base = temp_dir("window_range_offset_numeric_unknown");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    let numeric_catalog = range_catalog("nums", crate::backend::parser::SqlTypeKind::Numeric);
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        xid,
+        "insert into nums (id, span) values
+            (1, '-infinity'),
+            (2, 0),
+            (3, 'infinity'),
+            (4, 'NaN')",
+        numeric_catalog.clone(),
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                first_value(id) over (
+                    order by span
+                    range between 'inf' preceding and 'inf' following
+                ),
+                last_value(id) over (
+                    order by span
+                    range between 'inf' preceding and 'inf' following
+                )
+         from nums
+         order by id",
+        numeric_catalog,
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int32(1), Value::Int32(3)],
+                    vec![Value::Int32(2), Value::Int32(1), Value::Int32(3)],
+                    vec![Value::Int32(3), Value::Int32(1), Value::Int32(3)],
+                    vec![Value::Int32(4), Value::Int32(4), Value::Int32(4)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn window_range_offset_frame_supports_datetime_and_interval_order_keys() {
+    let base = temp_dir("window_range_offset_datetime_interval");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    let date_catalog = range_catalog("events", crate::backend::parser::SqlTypeKind::Date);
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        xid,
+        "insert into events (id, span) values
+            (1, '2020-01-01'),
+            (2, '2020-06-01'),
+            (3, '2021-01-01'),
+            (4, '2022-01-01')",
+        date_catalog.clone(),
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                first_value(id) over (
+                    order by span
+                    range between '1 year'::interval preceding and '1 year'::interval following
+                ),
+                last_value(id) over (
+                    order by span
+                    range between '1 year'::interval preceding and '1 year'::interval following
+                )
+         from events
+         order by id",
+        date_catalog,
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int32(1), Value::Int32(3)],
+                    vec![Value::Int32(2), Value::Int32(1), Value::Int32(3)],
+                    vec![Value::Int32(3), Value::Int32(1), Value::Int32(4)],
+                    vec![Value::Int32(4), Value::Int32(3), Value::Int32(4)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let base = temp_dir("window_range_offset_interval");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    let interval_catalog = range_catalog("spans", crate::backend::parser::SqlTypeKind::Interval);
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        xid,
+        "insert into spans (id, span) values
+            (1, '1 year'),
+            (2, '2 years'),
+            (3, '4 years'),
+            (4, '8 years')",
+        interval_catalog.clone(),
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                first_value(id) over (
+                    order by span
+                    range between '1 year'::interval preceding and '1 year'::interval following
+                ),
+                last_value(id) over (
+                    order by span
+                    range between '1 year'::interval preceding and '1 year'::interval following
+                )
+         from spans
+         order by id",
+        interval_catalog.clone(),
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int32(1), Value::Int32(2)],
+                    vec![Value::Int32(2), Value::Int32(1), Value::Int32(2)],
+                    vec![Value::Int32(3), Value::Int32(3), Value::Int32(3)],
+                    vec![Value::Int32(4), Value::Int32(4), Value::Int32(4)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select first_value(id) over (
+            order by span
+            range between '-1 year'::interval preceding and '1 year'::interval following
+         )
+         from spans",
+        interval_catalog,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { ref message, .. }
+            if message == "invalid preceding or following size in window function"
+    ));
 }
 
 #[test]

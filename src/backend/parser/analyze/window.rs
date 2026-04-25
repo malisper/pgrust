@@ -1,7 +1,8 @@
 use super::*;
 use crate::include::nodes::parsenodes::{RawWindowFrame, RawWindowFrameBound, WindowFrameMode};
 use crate::include::nodes::primnodes::{
-    WindowClause, WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind, WindowSpec,
+    WindowClause, WindowFrame, WindowFrameBound, WindowFrameOffset, WindowFuncExpr, WindowFuncKind,
+    WindowSpec, expr_sql_type_hint,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -369,6 +370,8 @@ pub(super) fn bind_window_spec(
 
 fn bind_window_frame_bound(
     raw_bound: &RawWindowFrameBound,
+    frame_mode: WindowFrameMode,
+    order_by: &[OrderByEntry],
     bind_expr: &mut impl FnMut(&SqlExpr) -> Result<Expr, ParseError>,
 ) -> Result<WindowFrameBound, ParseError> {
     Ok(match raw_bound {
@@ -379,15 +382,126 @@ fn bind_window_frame_bound(
             if expr_contains_window(expr) {
                 return Err(nested_window_error());
             }
-            WindowFrameBound::OffsetPreceding(with_windows_disallowed(|| bind_expr(expr))?)
+            let bound_expr = with_windows_disallowed(|| bind_expr(expr))?;
+            WindowFrameBound::OffsetPreceding(bind_window_frame_offset(
+                bound_expr, frame_mode, order_by,
+            )?)
         }
         RawWindowFrameBound::OffsetFollowing(expr) => {
             if expr_contains_window(expr) {
                 return Err(nested_window_error());
             }
-            WindowFrameBound::OffsetFollowing(with_windows_disallowed(|| bind_expr(expr))?)
+            let bound_expr = with_windows_disallowed(|| bind_expr(expr))?;
+            WindowFrameBound::OffsetFollowing(bind_window_frame_offset(
+                bound_expr, frame_mode, order_by,
+            )?)
         }
     })
+}
+
+fn bind_window_frame_offset(
+    expr: Expr,
+    frame_mode: WindowFrameMode,
+    order_by: &[OrderByEntry],
+) -> Result<WindowFrameOffset, ParseError> {
+    if frame_mode != WindowFrameMode::Range {
+        return Ok(WindowFrameOffset::rows_or_groups(expr));
+    }
+
+    let order_type = order_by
+        .first()
+        .and_then(|item| expr_sql_type_hint(&item.expr))
+        .unwrap_or(SqlType::new(SqlTypeKind::Text));
+    let offset_type = expr_sql_type_hint(&expr).unwrap_or(SqlType::new(SqlTypeKind::Text));
+    let target_type = range_offset_target_type(order_type, offset_type, &expr)?;
+    let expr = if offset_type == target_type {
+        expr
+    } else {
+        Expr::Cast(Box::new(expr), target_type)
+    };
+    Ok(WindowFrameOffset {
+        expr,
+        offset_type: target_type,
+        in_range_func: None,
+    })
+}
+
+fn range_offset_target_type(
+    order_type: SqlType,
+    offset_type: SqlType,
+    offset_expr: &Expr,
+) -> Result<SqlType, ParseError> {
+    let is_text_const = matches!(offset_expr, Expr::Const(Value::Text(_)));
+    let is_numeric_const = matches!(offset_expr, Expr::Const(Value::Numeric(_)));
+    let target = match order_type.kind {
+        SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 => {
+            if matches!(
+                offset_type.kind,
+                SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
+            ) || is_text_const
+            {
+                SqlType::new(SqlTypeKind::Int8)
+            } else {
+                return Err(range_offset_pair_error(order_type, offset_type));
+            }
+        }
+        SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
+            if matches!(
+                offset_type.kind,
+                SqlTypeKind::Int2
+                    | SqlTypeKind::Int4
+                    | SqlTypeKind::Int8
+                    | SqlTypeKind::Float4
+                    | SqlTypeKind::Float8
+            ) || is_text_const
+                || is_numeric_const
+            {
+                SqlType::new(SqlTypeKind::Float8)
+            } else {
+                return Err(range_offset_pair_error(order_type, offset_type));
+            }
+        }
+        SqlTypeKind::Numeric => {
+            if matches!(
+                offset_type.kind,
+                SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Numeric
+            ) || is_text_const
+            {
+                SqlType::new(SqlTypeKind::Numeric)
+            } else {
+                return Err(range_offset_pair_error(order_type, offset_type));
+            }
+        }
+        SqlTypeKind::Date
+        | SqlTypeKind::Time
+        | SqlTypeKind::TimeTz
+        | SqlTypeKind::Timestamp
+        | SqlTypeKind::TimestampTz
+        | SqlTypeKind::Interval => {
+            if offset_type.kind == SqlTypeKind::Interval
+                || matches!(offset_expr, Expr::Const(Value::Text(_)))
+            {
+                SqlType::new(SqlTypeKind::Interval)
+            } else {
+                return Err(range_offset_pair_error(order_type, offset_type));
+            }
+        }
+        _ => {
+            return Err(ParseError::WindowingError(format!(
+                "RANGE with offset PRECEDING/FOLLOWING is not supported for column type {}",
+                super::coerce::sql_type_name(order_type)
+            )));
+        }
+    };
+    Ok(target)
+}
+
+fn range_offset_pair_error(order_type: SqlType, offset_type: SqlType) -> ParseError {
+    ParseError::WindowingError(format!(
+        "RANGE with offset PRECEDING/FOLLOWING is not supported for column type {} and offset type {}",
+        super::coerce::sql_type_name(order_type),
+        super::coerce::sql_type_name(offset_type)
+    ))
 }
 
 fn bind_window_frame(
@@ -425,8 +539,18 @@ fn bind_window_frame(
 
     let frame = WindowFrame {
         mode: raw_frame.mode,
-        start_bound: bind_window_frame_bound(&raw_frame.start_bound, bind_expr)?,
-        end_bound: bind_window_frame_bound(&raw_frame.end_bound, bind_expr)?,
+        start_bound: bind_window_frame_bound(
+            &raw_frame.start_bound,
+            raw_frame.mode,
+            order_by,
+            bind_expr,
+        )?,
+        end_bound: bind_window_frame_bound(
+            &raw_frame.end_bound,
+            raw_frame.mode,
+            order_by,
+            bind_expr,
+        )?,
     };
     validate_window_frame(&frame)?;
     Ok(frame)

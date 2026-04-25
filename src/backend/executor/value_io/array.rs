@@ -1,5 +1,5 @@
 use super::*;
-use crate::backend::executor::expr_casts::canonicalize_interval_text;
+use crate::backend::executor::expr_casts::{parse_interval_text_value, render_interval_text};
 use crate::backend::storage::page::bufpage::max_align;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::AttributeAlign;
@@ -132,6 +132,13 @@ fn encode_array_element_payload(
         }
         Value::Timestamp(v) => Ok(v.0.to_le_bytes().to_vec()),
         Value::TimestampTz(v) => Ok(v.0.to_le_bytes().to_vec()),
+        Value::Interval(v) => {
+            let mut bytes = Vec::with_capacity(16);
+            bytes.extend_from_slice(&v.time_micros.to_le_bytes());
+            bytes.extend_from_slice(&v.days.to_le_bytes());
+            bytes.extend_from_slice(&v.months.to_le_bytes());
+            Ok(bytes)
+        }
         Value::Range(range) => crate::backend::executor::encode_range_bytes(&range),
         Value::Bit(v) => {
             let mut bytes = Vec::with_capacity(4 + v.bytes.len());
@@ -555,6 +562,7 @@ fn array_element_layout(
         | SqlTypeKind::Timestamp
         | SqlTypeKind::TimestampTz
         | SqlTypeKind::Float8 => (8, AttributeAlign::Double),
+        SqlTypeKind::Interval => (16, AttributeAlign::Double),
         SqlTypeKind::TimeTz => (12, AttributeAlign::Double),
         SqlTypeKind::Point => (16, AttributeAlign::Double),
         SqlTypeKind::Line | SqlTypeKind::Circle => (24, AttributeAlign::Double),
@@ -572,7 +580,6 @@ fn array_element_layout(
         | SqlTypeKind::Xml
         | SqlTypeKind::Text
         | SqlTypeKind::Tid
-        | SqlTypeKind::Interval
         | SqlTypeKind::Name
         | SqlTypeKind::PgNodeTree
         | SqlTypeKind::InternalChar
@@ -767,6 +774,7 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
         Value::TimeTz(_) => Some(SqlType::new(SqlTypeKind::TimeTz)),
         Value::Timestamp(_) => Some(SqlType::new(SqlTypeKind::Timestamp)),
         Value::TimestampTz(_) => Some(SqlType::new(SqlTypeKind::TimestampTz)),
+        Value::Interval(_) => Some(SqlType::new(SqlTypeKind::Interval)),
         Value::Bytea(_) => Some(SqlType::new(SqlTypeKind::Bytea)),
         Value::Inet(_) => Some(SqlType::new(SqlTypeKind::Inet)),
         Value::Cidr(_) => Some(SqlType::new(SqlTypeKind::Cidr)),
@@ -961,6 +969,21 @@ fn decode_array_element_value(
                 )),
             ))
         }
+        SqlTypeKind::Interval => {
+            if bytes.len() != 16 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: column.into(),
+                    details: "interval array element must be 16 bytes".into(),
+                });
+            }
+            Ok(Value::Interval(
+                crate::include::nodes::datum::IntervalValue {
+                    time_micros: i64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                    days: i32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+                    months: i32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+                },
+            ))
+        }
         SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
             let width = if matches!(element_type.kind, SqlTypeKind::Float4) {
                 4
@@ -1120,7 +1143,6 @@ fn decode_array_element_value(
         }
         SqlTypeKind::Text
         | SqlTypeKind::Tid
-        | SqlTypeKind::Interval
         | SqlTypeKind::Name
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
@@ -1215,12 +1237,26 @@ fn format_array_values_nested(
         *offset += 1;
         match item {
             Value::Null => out.push_str("NULL"),
+            Value::Text(text) if array.element_type_oid == Some(INTERVAL_TYPE_OID) => {
+                let rendered = parse_interval_text_value(text)
+                    .map(render_interval_text)
+                    .unwrap_or_else(|_| text.to_string());
+                push_array_text_element(&mut out, &rendered);
+            }
+            Value::TextRef(_, _) if array.element_type_oid == Some(INTERVAL_TYPE_OID) => {
+                let text = item.as_text().unwrap_or_default();
+                let rendered = parse_interval_text_value(text)
+                    .map(render_interval_text)
+                    .unwrap_or_else(|_| text.to_string());
+                push_array_text_element(&mut out, &rendered);
+            }
             Value::Int16(v) => out.push_str(&v.to_string()),
             Value::Int32(v) => out.push_str(&v.to_string()),
             Value::Int64(v) => out.push_str(&v.to_string()),
             Value::Money(v) => out.push_str(&crate::backend::executor::money_format_text(*v)),
             Value::Float64(v) => out.push_str(&v.to_string()),
             Value::Numeric(v) => out.push_str(&v.render()),
+            Value::Interval(v) => push_array_text_element(&mut out, &render_interval_text(*v)),
             Value::Date(_)
             | Value::Time(_)
             | Value::TimeTz(_)
@@ -1343,19 +1379,7 @@ fn format_array_values_nested(
                 push_array_text_element(&mut out, &rendered);
             }
             Value::Text(_) | Value::TextRef(_, _) => {
-                let rendered = if array.element_type_oid == Some(INTERVAL_TYPE_OID) {
-                    canonicalize_interval_text(item.as_text().unwrap())
-                        .map(|text| {
-                            if text == "@ 0 secs" {
-                                "@ 0".to_string()
-                            } else {
-                                text
-                            }
-                        })
-                        .unwrap_or_else(|_| item.as_text().unwrap().to_string())
-                } else {
-                    item.as_text().unwrap().to_string()
-                };
+                let rendered = item.as_text().unwrap().to_string();
                 push_array_text_element(&mut out, &rendered);
             }
             Value::InternalChar(byte) => {

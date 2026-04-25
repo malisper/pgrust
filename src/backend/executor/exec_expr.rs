@@ -2107,6 +2107,7 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
         | Value::Timestamp(_)
         | Value::TimestampTz(_) => 8,
         Value::TimeTz(_) => 12,
+        Value::Interval(_) => 16,
         Value::Bool(_) => 1,
         Value::Numeric(numeric) => numeric.render().len(),
         Value::Bit(bits) => bits.bytes.len(),
