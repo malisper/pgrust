@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
-use crate::backend::executor::{executor_start, render_explain_expr, set_returning_call_label};
+use crate::backend::executor::{
+    executor_start, render_explain_expr, render_index_order_by, set_returning_call_label,
+};
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::*;
@@ -354,7 +356,165 @@ fn push_nonverbose_plan_details(
             }
             true
         }
+        Plan::WindowAgg { input, clause, .. } => {
+            let rendered = render_window_clause_for_explain(input, clause, ctx);
+            lines.push(format!("{prefix}Window: w1 AS ({rendered})"));
+            true
+        }
         _ => false,
+    }
+}
+
+fn render_window_clause_for_explain(
+    input: &Plan,
+    clause: &WindowClause,
+    ctx: &VerboseExplainContext,
+) -> String {
+    let input_names = verbose_plan_output_exprs(input, ctx, true);
+    let mut parts = Vec::new();
+    if !clause.spec.partition_by.is_empty() {
+        parts.push(format!(
+            "PARTITION BY {}",
+            clause
+                .spec
+                .partition_by
+                .iter()
+                .map(|expr| render_verbose_expr(expr, &input_names, ctx))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !clause.spec.order_by.is_empty() {
+        parts.push(format!(
+            "ORDER BY {}",
+            render_window_order_by_for_explain(input, clause, ctx, &input_names)
+        ));
+    }
+    if let Some(frame) = render_window_frame_for_explain(clause, &input_names, ctx) {
+        parts.push(frame);
+    }
+    parts.join(" ")
+}
+
+fn render_window_order_by_for_explain(
+    input: &Plan,
+    clause: &WindowClause,
+    ctx: &VerboseExplainContext,
+    input_names: &[String],
+) -> String {
+    if let Some(order_by) = render_ordered_index_child_order_by(input) {
+        return order_by;
+    }
+    clause
+        .spec
+        .order_by
+        .iter()
+        .map(|item| render_verbose_expr(&item.expr, input_names, ctx))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_ordered_index_child_order_by(input: &Plan) -> Option<String> {
+    match input {
+        Plan::IndexOnlyScan {
+            order_by_keys,
+            desc,
+            index_meta,
+            ..
+        }
+        | Plan::IndexScan {
+            order_by_keys,
+            desc,
+            index_meta,
+            ..
+        } => render_index_order_by(order_by_keys, desc, index_meta)
+            .map(|detail| format!("({detail})")),
+        Plan::Projection { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::SubqueryScan { input, .. } => render_ordered_index_child_order_by(input),
+        _ => None,
+    }
+}
+
+fn render_window_frame_for_explain(
+    clause: &WindowClause,
+    column_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    use crate::include::nodes::parsenodes::WindowFrameMode;
+
+    let frame = &clause.spec.frame;
+    let mode = match frame.mode {
+        WindowFrameMode::Rows => "ROWS",
+        WindowFrameMode::Range => "RANGE",
+        WindowFrameMode::Groups => "GROUPS",
+    };
+    match (&frame.start_bound, &frame.end_bound) {
+        (WindowFrameBound::UnboundedPreceding, WindowFrameBound::CurrentRow) => (frame.mode
+            == WindowFrameMode::Rows
+            || (frame.mode == WindowFrameMode::Range
+                && !clause.spec.order_by.is_empty()
+                && window_clause_uses_prefix_frame(clause)))
+        .then(|| "ROWS UNBOUNDED PRECEDING".into()),
+        (start, WindowFrameBound::CurrentRow) => Some(format!(
+            "{mode} {} PRECEDING",
+            render_window_frame_start_bound(start, column_names, ctx)?
+        )),
+        (start, end) => Some(format!(
+            "{mode} BETWEEN {} AND {}",
+            render_window_frame_bound(start, column_names, ctx)?,
+            render_window_frame_bound(end, column_names, ctx)?
+        )),
+    }
+}
+
+fn window_clause_uses_prefix_frame(clause: &WindowClause) -> bool {
+    clause.functions.iter().any(|func| {
+        matches!(
+            func.kind,
+            WindowFuncKind::Builtin(
+                crate::include::nodes::primnodes::BuiltinWindowFunction::RowNumber
+                    | crate::include::nodes::primnodes::BuiltinWindowFunction::Rank
+                    | crate::include::nodes::primnodes::BuiltinWindowFunction::DenseRank
+                    | crate::include::nodes::primnodes::BuiltinWindowFunction::PercentRank
+                    | crate::include::nodes::primnodes::BuiltinWindowFunction::CumeDist
+            )
+        )
+    })
+}
+
+fn render_window_frame_start_bound(
+    bound: &WindowFrameBound,
+    column_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    match bound {
+        WindowFrameBound::UnboundedPreceding => Some("UNBOUNDED".into()),
+        WindowFrameBound::OffsetPreceding(offset) => {
+            Some(render_verbose_expr(&offset.expr, column_names, ctx))
+        }
+        _ => None,
+    }
+}
+
+fn render_window_frame_bound(
+    bound: &WindowFrameBound,
+    column_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    match bound {
+        WindowFrameBound::UnboundedPreceding => Some("UNBOUNDED PRECEDING".into()),
+        WindowFrameBound::OffsetPreceding(offset) => Some(format!(
+            "{} PRECEDING",
+            render_verbose_expr(&offset.expr, column_names, ctx)
+        )),
+        WindowFrameBound::CurrentRow => Some("CURRENT ROW".into()),
+        WindowFrameBound::OffsetFollowing(offset) => Some(format!(
+            "{} FOLLOWING",
+            render_verbose_expr(&offset.expr, column_names, ctx)
+        )),
+        WindowFrameBound::UnboundedFollowing => Some("UNBOUNDED FOLLOWING".into()),
     }
 }
 
