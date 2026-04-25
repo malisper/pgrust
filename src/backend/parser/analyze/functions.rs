@@ -861,6 +861,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::Encode
             | BuiltinScalarFunction::Decode
             | BuiltinScalarFunction::ToChar
+            | BuiltinScalarFunction::ToDate
             | BuiltinScalarFunction::ToNumber
             | BuiltinScalarFunction::PgInputIsValid
             | BuiltinScalarFunction::PgInputErrorMessage
@@ -1915,6 +1916,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("to_oct", BuiltinScalarFunction::ToOct),
         ("to_hex", BuiltinScalarFunction::ToHex),
         ("to_char", BuiltinScalarFunction::ToChar),
+        ("to_date", BuiltinScalarFunction::ToDate),
         ("to_number", BuiltinScalarFunction::ToNumber),
         ("abs", BuiltinScalarFunction::Abs),
         ("log", BuiltinScalarFunction::Log),
@@ -2478,6 +2480,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ToOct
             | BuiltinScalarFunction::ToHex
             | BuiltinScalarFunction::ToChar
+            | BuiltinScalarFunction::ToDate
             | BuiltinScalarFunction::ToNumber
             | BuiltinScalarFunction::RegexpMatch
             | BuiltinScalarFunction::RegexpReplace

@@ -278,6 +278,7 @@ pub(super) fn bind_grouped_quantified_array(
 pub(super) fn bind_grouped_func_call(
     name: &str,
     args: &[SqlFunctionArg],
+    func_variadic: bool,
     group_by_exprs: &[SqlExpr],
     group_key_exprs: &[Expr],
     input_scope: &BoundScope,
@@ -387,7 +388,7 @@ pub(super) fn bind_grouped_func_call(
                 )],
             ))
         }
-        _ => Ok(Expr::builtin_func(func, None, false, bound_args)),
+        _ => Ok(Expr::builtin_func(func, None, func_variadic, bound_args)),
     }
 }
 
