@@ -15,17 +15,17 @@ use crate::backend::commands::tablecmds::{execute_merge, execute_prepared_insert
 use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
-    DeferredForeignKeyTracker, ExecError, ExecutorContext, ExecutorTransactionState,
-    SessionReplicationRole, StatementResult, Value, cast_value, execute_planned_stmt,
+    DeferredForeignKeyTracker, ExecError, ExecutorContext, ExecutorTransactionState, Expr,
+    RelationDesc, SessionReplicationRole, StatementResult, Value, cast_value, execute_planned_stmt,
     execute_readonly_statement_with_config, parse_bytea_text,
 };
 use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::parser::{
     CatalogLookup, CopyFormat as ParserCopyFormat, CopyFromStatement,
-    CopyOptions as ParserCopyOptions, CopySource, CopyToDestination, CopyToSource,
-    CopyToStatement, DetachPartitionMode, ParseError, ParseOptions, PreparedInsert,
-    SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared, bind_update,
-    pg_plan_query_with_config, plan_merge,
+    CopyOptions as ParserCopyOptions, CopySource, CopyToDestination, CopyToSource, CopyToStatement,
+    DetachPartitionMode, ParseError, ParseOptions, PreparedInsert, SelectStatement, Statement,
+    bind_delete, bind_insert, bind_insert_prepared, bind_update, pg_plan_query_with_config,
+    plan_merge,
 };
 use crate::backend::rewrite::relation_has_row_security;
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
@@ -115,6 +115,7 @@ pub(crate) struct CopyOptions {
     pub quote: char,
     pub escape: char,
     pub null_marker: String,
+    pub default_marker: Option<String>,
     pub on_error_ignore: bool,
     pub freeze: bool,
     pub where_clause: Option<String>,
@@ -128,6 +129,7 @@ impl Default for CopyOptions {
             quote: '"',
             escape: '"',
             null_marker: "\\N".into(),
+            default_marker: None,
             on_error_ignore: false,
             freeze: false,
             where_clause: None,
@@ -172,8 +174,23 @@ pub(crate) enum CopyExecutionResult {
 
 struct CopyInsertOptions<'a> {
     null_marker: &'a str,
+    default_marker: Option<&'a str>,
     on_error: CopyOnError,
     where_filter: Option<CopyWhereFilter>,
+    progress: Option<CopyProgressOptions>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CopyProgressOptions {
+    source: CopyProgressSource,
+    bytes_processed: i64,
+    bytes_total: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyProgressSource {
+    File,
+    Pipe,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +226,70 @@ impl CopyWhereFilter {
             literal: self.literal.clone(),
         })
     }
+}
+
+fn bind_copy_column_defaults(
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<Expr>, ExecError> {
+    desc.columns
+        .iter()
+        .map(|column| {
+            if column.generated.is_some() {
+                return Ok(Expr::Const(Value::Null));
+            }
+            if let Some(sequence_oid) = column.default_sequence_oid {
+                let expr = Expr::builtin_func(
+                    crate::include::nodes::primnodes::BuiltinScalarFunction::NextVal,
+                    Some(crate::backend::parser::SqlType::new(
+                        crate::backend::parser::SqlTypeKind::Int8,
+                    )),
+                    false,
+                    vec![Expr::Const(Value::Int64(i64::from(sequence_oid)))],
+                );
+                return Ok(
+                    if column.sql_type.kind == crate::backend::parser::SqlTypeKind::Int8 {
+                        expr
+                    } else {
+                        Expr::Cast(Box::new(expr), column.sql_type)
+                    },
+                );
+            }
+            column
+                .default_expr
+                .as_deref()
+                .map(|sql| {
+                    let parsed = crate::backend::parser::parse_expr(sql)?;
+                    crate::backend::parser::bind_scalar_expr_in_scope(&parsed, &[], catalog)
+                        .map(|(expr, _)| expr)
+                })
+                .transpose()
+                .map(|expr| expr.or_else(|| column.missing_default_value.clone().map(Expr::Const)))
+                .map(|expr| expr.unwrap_or(Expr::Const(Value::Null)))
+                .map_err(ExecError::Parse)
+        })
+        .collect()
+}
+
+fn evaluate_copy_column_default(
+    desc: &RelationDesc,
+    column_defaults: &[Expr],
+    column_index: usize,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let mut slot = crate::include::nodes::execnodes::TupleSlot::virtual_row(vec![
+        Value::Null;
+        desc.columns.len()
+    ]);
+    let value = crate::backend::executor::exec_expr::eval_expr(
+        &column_defaults[column_index],
+        &mut slot,
+        ctx,
+    )?;
+    crate::backend::executor::value_io::coerce_assignment_value(
+        &value,
+        desc.columns[column_index].sql_type,
+    )
 }
 
 impl ResolvedCopyWhereFilter {
@@ -3203,6 +3284,21 @@ impl Session {
                     search_path.as_deref(),
                 )
             }
+            Statement::CreateForeignServer(ref create_stmt) => {
+                db.execute_create_foreign_server_stmt(client_id, create_stmt)
+            }
+            Statement::CreateForeignTable(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_create_foreign_table_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::AlterForeignDataWrapper(ref alter_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_alter_foreign_data_wrapper_stmt_with_search_path(
@@ -5044,11 +5140,38 @@ impl Session {
             Statement::TruncateTable(ref truncate_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relations = {
-                    truncate_stmt
-                        .table_names
-                        .iter()
-                        .filter_map(|name| catalog.lookup_any_relation(name))
-                        .collect::<Vec<_>>()
+                    let mut relations = Vec::new();
+                    for name in &truncate_stmt.table_names {
+                        let Some(relation) = catalog.lookup_any_relation(name) else {
+                            continue;
+                        };
+                        if !relations.iter().any(
+                            |existing: &crate::backend::parser::BoundRelation| {
+                                existing.relation_oid == relation.relation_oid
+                            },
+                        ) {
+                            relations.push(relation.clone());
+                        }
+                        if relation.relkind == 'p' {
+                            for oid in catalog.find_all_inheritors(relation.relation_oid) {
+                                if oid == relation.relation_oid {
+                                    continue;
+                                }
+                                let Some(child) = catalog.relation_by_oid(oid) else {
+                                    continue;
+                                };
+                                if relations.iter().any(
+                                    |existing: &crate::backend::parser::BoundRelation| {
+                                        existing.relation_oid == child.relation_oid
+                                    },
+                                ) {
+                                    continue;
+                                }
+                                relations.push(child);
+                            }
+                        }
+                    }
+                    relations
                 };
                 for relation in &relations {
                     reject_relation_with_referencing_foreign_keys(
@@ -5554,6 +5677,9 @@ impl Session {
                         sqlstate: "22023",
                     });
                 }
+                if let CopyEndpoint::File(path) = endpoint {
+                    self.ensure_copy_to_file_allowed(db, path)?;
+                }
                 let (columns, rows) = self.copy_query_rows(db, &copy.relation)?;
                 let data = render_copy_output(&columns, &rows, &copy.options);
                 if let CopyEndpoint::File(path) = endpoint {
@@ -5612,9 +5738,30 @@ impl Session {
                     sqlstate: "0A000",
                 });
             }
+            if entry.relkind == 'f' {
+                return Err(ExecError::DetailedError {
+                    message: "cannot perform COPY FREEZE on a foreign table".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                });
+            }
         }
-        let mut rows = parse_copy_input_rows(text, &copy.options)?;
-        self.apply_copy_header(db, name, columns.as_deref(), &copy.options, &mut rows)?;
+        let stop_on_copy_marker =
+            matches!(copy.direction, CopyDirection::From(CopyEndpoint::Stdin));
+        let mut rows = parse_copy_input_rows(text, &copy.options, Some(name), stop_on_copy_marker)?;
+        self.apply_copy_header(db, name, columns.as_deref(), &copy.options, &mut rows)
+            .map_err(|err| {
+                if matches!(copy.options.header, CopyHeader::Match)
+                    && let Some(context) = first_copy_row_context(text, name)
+                {
+                    return ExecError::WithContext {
+                        source: Box::new(err),
+                        context,
+                    };
+                }
+                err
+            })?;
         let where_filter = copy
             .options
             .where_clause
@@ -5624,6 +5771,20 @@ impl Session {
             CopyFormat::Text => COPY_TEXT_NULL_SENTINEL,
             CopyFormat::Csv => &copy.options.null_marker,
         };
+        let bytes_processed = text.len().min(i64::MAX as usize) as i64;
+        let progress = match &copy.direction {
+            CopyDirection::From(CopyEndpoint::File(_)) => Some(CopyProgressOptions {
+                source: CopyProgressSource::File,
+                bytes_processed,
+                bytes_total: bytes_processed,
+            }),
+            CopyDirection::From(CopyEndpoint::Stdin) => Some(CopyProgressOptions {
+                source: CopyProgressSource::Pipe,
+                bytes_processed,
+                bytes_total: 0,
+            }),
+            _ => None,
+        };
         self.copy_from_rows_into_internal_with_options(
             db,
             name,
@@ -5631,14 +5792,80 @@ impl Session {
             &rows,
             CopyInsertOptions {
                 null_marker: parsed_null_marker,
+                default_marker: copy.options.default_marker.as_deref(),
                 on_error: if copy.options.on_error_ignore {
                     CopyOnError::Ignore
                 } else {
                     CopyOnError::Stop
                 },
                 where_filter,
+                progress,
             },
         )
+    }
+
+    pub(crate) fn validate_copy_from_stdin_start(
+        &self,
+        db: &Database,
+        copy: &CopyCommand,
+    ) -> Result<(), ExecError> {
+        if !matches!(copy.direction, CopyDirection::From(CopyEndpoint::Stdin)) {
+            return Ok(());
+        }
+        let CopyRelation::Table { name, columns } = &copy.relation else {
+            return Ok(());
+        };
+        let catalog = self.catalog_lookup(db);
+        let desc = {
+            let entry = catalog
+                .lookup_any_relation(name)
+                .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(name.to_string())))?;
+            entry.desc.clone()
+        };
+        let target_indexes = if let Some(columns) = columns {
+            let mut indexes = Vec::with_capacity(columns.len());
+            for name in columns {
+                let Some(index) = desc
+                    .columns
+                    .iter()
+                    .position(|column| !column.dropped && column.name == *name)
+                else {
+                    return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
+                };
+                indexes.push(index);
+            }
+            indexes
+        } else {
+            desc.visible_column_indexes()
+        };
+        let validation_default_indexes = if copy.options.default_marker.is_some() {
+            desc.visible_column_indexes()
+        } else {
+            desc.visible_column_indexes()
+                .into_iter()
+                .filter(|column_index| !target_indexes.contains(column_index))
+                .collect::<Vec<_>>()
+        };
+        if validation_default_indexes.is_empty() {
+            return Ok(());
+        }
+
+        let column_defaults = bind_copy_column_defaults(&desc, &catalog)?;
+        let snapshot = db
+            .txns
+            .read()
+            .snapshot_for_command(INVALID_TRANSACTION_ID, 0)?;
+        let mut ctx = self.executor_context_for_catalog(db, snapshot, 0, &catalog, None, None);
+        for column_index in validation_default_indexes {
+            let column = &desc.columns[column_index];
+            if column.default_sequence_oid.is_some()
+                || column.default_expr.is_none() && column.missing_default_value.is_none()
+            {
+                continue;
+            }
+            let _ = evaluate_copy_column_default(&desc, &column_defaults, column_index, &mut ctx)?;
+        }
+        Ok(())
     }
 
     fn apply_copy_header(
@@ -5724,8 +5951,27 @@ impl Session {
         relation: &CopyRelation,
     ) -> Result<(Vec<crate::backend::executor::QueryColumn>, Vec<Vec<Value>>), ExecError> {
         let query = match relation {
-            CopyRelation::Query(query) => query.trim().to_string(),
+            CopyRelation::Query(query) => {
+                let trimmed = query.trim();
+                let stmt = self.parse_copy_query_statement(db, trimmed)?;
+                self.validate_copy_to_query(db, &stmt, trimmed)?;
+                trimmed.to_string()
+            }
             CopyRelation::Table { name, columns } => {
+                let catalog = self.catalog_lookup(db);
+                if let Some(entry) = catalog.lookup_any_relation(name)
+                    && entry.relkind == 'm'
+                    && !entry.relispopulated
+                {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "cannot copy from unpopulated materialized view \"{name}\""
+                        ),
+                        detail: None,
+                        hint: Some("Use the REFRESH MATERIALIZED VIEW command.".into()),
+                        sqlstate: "55000",
+                    });
+                }
                 let select_list = columns
                     .as_ref()
                     .map(|columns| columns.join(", "))
@@ -5739,6 +5985,26 @@ impl Session {
                 expected: "query result for COPY TO",
                 actual: format!("{other:?}"),
             })),
+        }
+    }
+
+    fn parse_copy_query_statement(&self, db: &Database, sql: &str) -> Result<Statement, ExecError> {
+        if self.standard_conforming_strings() {
+            db.plan_cache.get_statement_with_options(
+                sql,
+                ParseOptions {
+                    max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
+                    ..ParseOptions::default()
+                },
+            )
+        } else {
+            Ok(crate::backend::parser::parse_statement_with_options(
+                sql,
+                ParseOptions {
+                    standard_conforming_strings: false,
+                    max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
+                },
+            )?)
         }
     }
 
@@ -5757,8 +6023,10 @@ impl Session {
             rows,
             CopyInsertOptions {
                 null_marker,
+                default_marker: None,
                 on_error: CopyOnError::Stop,
                 where_filter: None,
+                progress: None,
             },
         )
     }
@@ -5860,7 +6128,45 @@ impl Session {
                         relation_foreign_key_lock_requests(rel, &relation_constraints);
                     self.lock_table_requests_if_needed(db, &lock_requests)?;
 
+                    let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+                    let interrupts = self.interrupts();
+                    let deferred_foreign_keys = self
+                        .active_txn
+                        .as_ref()
+                        .unwrap()
+                        .deferred_foreign_keys
+                        .clone();
+                    let mut ctx = self.executor_context_for_catalog(
+                        db,
+                        snapshot,
+                        cid,
+                        &catalog,
+                        Some(deferred_foreign_keys),
+                        None,
+                    );
+                    ctx.interrupts = interrupts;
+                    let column_defaults = bind_copy_column_defaults(&desc, &catalog)?;
+                    let omitted_default_indexes = desc
+                        .visible_column_indexes()
+                        .into_iter()
+                        .filter(|column_index| !target_indexes.contains(column_index))
+                        .collect::<Vec<_>>();
+                    let validation_default_indexes = if options.default_marker.is_some() {
+                        desc.visible_column_indexes()
+                    } else {
+                        omitted_default_indexes.clone()
+                    };
+                    for column_index in &validation_default_indexes {
+                        let _ = evaluate_copy_column_default(
+                            &desc,
+                            &column_defaults,
+                            *column_index,
+                            &mut ctx,
+                        )?;
+                    }
+
                     let mut skipped = 0usize;
+                    let mut excluded = 0usize;
                     let mut parsed_rows = Vec::with_capacity(rows.len());
                     for row in rows {
                         let parsed = (|| -> Result<Option<Vec<Value>>, ExecError> {
@@ -5874,11 +6180,26 @@ impl Session {
                             }
 
                             let mut values = vec![Value::Null; desc.columns.len()];
+                            for column_index in &omitted_default_indexes {
+                                values[*column_index] = evaluate_copy_column_default(
+                                    &desc,
+                                    &column_defaults,
+                                    *column_index,
+                                    &mut ctx,
+                                )?;
+                            }
                             for (raw, target_index) in
                                 row.iter().zip(target_indexes.iter().copied())
                             {
                                 let column = &desc.columns[target_index];
-                                let value = if raw == options.null_marker {
+                                let value = if options.default_marker == Some(raw.as_str()) {
+                                    evaluate_copy_column_default(
+                                        &desc,
+                                        &column_defaults,
+                                        target_index,
+                                        &mut ctx,
+                                    )?
+                                } else if raw == options.null_marker {
                                     Value::Null
                                 } else {
                                     match column.ty {
@@ -5986,7 +6307,7 @@ impl Session {
                         })();
                         match parsed {
                             Ok(Some(values)) => parsed_rows.push(values),
-                            Ok(None) => {}
+                            Ok(None) => excluded = excluded.saturating_add(1),
                             Err(_err) if matches!(options.on_error, CopyOnError::Ignore) => {
                                 skipped = skipped.saturating_add(1);
                             }
@@ -5999,24 +6320,26 @@ impl Session {
                         ));
                     }
 
-                    let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                    let interrupts = self.interrupts();
-                    let deferred_foreign_keys = self
-                        .active_txn
-                        .as_ref()
-                        .unwrap()
-                        .deferred_foreign_keys
-                        .clone();
-                    let mut ctx = self.executor_context_for_catalog(
-                        db,
-                        snapshot,
-                        cid,
-                        &catalog,
-                        Some(deferred_foreign_keys),
-                        None,
-                    );
-                    ctx.interrupts = interrupts;
+                    let _copy_progress = options.progress.map(|progress| {
+                        crate::backend::utils::cache::system_views::install_copy_progress(
+                            crate::backend::utils::cache::system_views::CopyProgressSnapshot {
+                                pid: self.client_id as i32,
+                                datid: db.database_oid,
+                                datname: db.current_database_name(),
+                                relid: relation_oid,
+                                command: "COPY FROM",
+                                copy_type: match progress.source {
+                                    CopyProgressSource::File => "FILE",
+                                    CopyProgressSource::Pipe => "PIPE",
+                                },
+                                bytes_processed: progress.bytes_processed,
+                                bytes_total: progress.bytes_total,
+                                tuples_processed: parsed_rows.len() as i64,
+                                tuples_excluded: excluded as i64,
+                                tuples_skipped: skipped as i64,
+                            },
+                        )
+                    });
                     let result = crate::backend::commands::tablecmds::execute_insert_values(
                         table_name,
                         relation_oid,
@@ -7047,6 +7370,18 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
             rest = after;
             continue;
         }
+        if lower.starts_with("default") && copy_keyword_boundary(rest, 7) {
+            let (value, after) =
+                parse_copy_string_token(rest[7..].trim_start()).ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "COPY default string",
+                        actual: rest.into(),
+                    })
+                })?;
+            options.default_marker = Some(value);
+            rest = after;
+            continue;
+        }
         if lower.starts_with("freeze") && copy_keyword_boundary(rest, 6) {
             options.freeze = true;
             rest = &rest[6..];
@@ -7088,6 +7423,7 @@ fn merge_copy_options(options: &mut CopyOptions, nested: CopyOptions) {
     if nested.null_marker != "\\N" {
         options.null_marker = nested.null_marker;
     }
+    options.default_marker = options.default_marker.take().or(nested.default_marker);
     options.on_error_ignore |= nested.on_error_ignore;
     options.freeze |= nested.freeze;
     options.where_clause = options.where_clause.take().or(nested.where_clause);
@@ -7106,29 +7442,47 @@ fn read_copy_text_file(file_path: &str) -> Result<String, ExecError> {
 pub(crate) fn parse_copy_input_rows(
     text: &str,
     options: &CopyOptions,
+    table_name: Option<&str>,
+    stop_on_copy_marker: bool,
 ) -> Result<Vec<Vec<String>>, ExecError> {
     match options.format {
-        CopyFormat::Text => parse_copy_text_rows(text, &options.null_marker),
-        CopyFormat::Csv => parse_copy_csv_rows(text, options.quote, options.escape),
+        CopyFormat::Text => {
+            parse_copy_text_rows(text, &options.null_marker, table_name, stop_on_copy_marker)
+        }
+        CopyFormat::Csv => {
+            parse_copy_csv_rows(text, options.quote, options.escape, stop_on_copy_marker)
+        }
     }
 }
 
-fn parse_copy_text_rows(text: &str, null_marker: &str) -> Result<Vec<Vec<String>>, ExecError> {
+fn parse_copy_text_rows(
+    text: &str,
+    null_marker: &str,
+    table_name: Option<&str>,
+    stop_on_copy_marker: bool,
+) -> Result<Vec<Vec<String>>, ExecError> {
     let mut rows = Vec::new();
     for (line_idx, line) in text.lines().enumerate() {
         let line = line.trim_end_matches('\r');
         if line.is_empty() {
             continue;
         }
-        if line == "\\." {
+        if stop_on_copy_marker && line == "\\." {
             break;
         }
-        if line.contains("\\.") {
-            return Err(ExecError::DetailedError {
+        if stop_on_copy_marker && line.contains("\\.") {
+            let err = ExecError::DetailedError {
                 message: "end-of-copy marker is not alone on its line".into(),
                 detail: None,
                 hint: None,
                 sqlstate: "22P04",
+            };
+            return Err(match table_name {
+                Some(name) => ExecError::WithContext {
+                    source: Box::new(err),
+                    context: format!("COPY {name}, line {}", line_idx + 1),
+                },
+                None => err,
             });
         }
         let row = line
@@ -7149,6 +7503,20 @@ fn parse_copy_text_rows(text: &str, null_marker: &str) -> Result<Vec<Vec<String>
     Ok(rows)
 }
 
+fn first_copy_row_context(text: &str, table_name: &str) -> Option<String> {
+    for (line_idx, line) in text.lines().enumerate() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        return Some(format!(
+            "COPY {table_name}, line {}: \"{line}\"",
+            line_idx + 1
+        ));
+    }
+    None
+}
+
 fn is_parsed_copy_null(field: &str, options: &CopyOptions) -> bool {
     match options.format {
         CopyFormat::Text => field == COPY_TEXT_NULL_SENTINEL,
@@ -7160,6 +7528,7 @@ fn parse_copy_csv_rows(
     text: &str,
     quote: char,
     escape: char,
+    stop_on_copy_marker: bool,
 ) -> Result<Vec<Vec<String>>, ExecError> {
     let mut rows = Vec::new();
     let mut row = Vec::new();
@@ -7219,10 +7588,10 @@ fn parse_copy_csv_rows(
         row.push(field);
         rows.push(row);
     }
-    Ok(rows
-        .into_iter()
-        .filter(|row| !(row.len() == 1 && row[0] == "\\."))
-        .collect())
+    if stop_on_copy_marker {
+        rows.retain(|row| !(row.len() == 1 && row[0] == "\\."));
+    }
+    Ok(rows)
 }
 
 pub(crate) fn render_copy_output(
@@ -7341,6 +7710,7 @@ fn copy_value_to_field(
         Value::Money(v) => crate::backend::executor::money_format_text(*v),
         Value::TsVector(v) => crate::backend::executor::render_tsvector_text(v),
         Value::TsQuery(v) => crate::backend::executor::render_tsquery_text(v),
+        Value::Uuid(v) => crate::backend::executor::value_io::render_uuid_text(v),
         Value::InternalChar(byte) => (*byte as char).to_string(),
         Value::Record(record) => {
             crate::backend::executor::value_io::format_record_text_with_options(

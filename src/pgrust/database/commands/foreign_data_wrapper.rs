@@ -4,7 +4,8 @@ use crate::backend::parser::{
     AlterForeignDataWrapperOwnerStatement, AlterForeignDataWrapperRenameStatement,
     AlterForeignDataWrapperStatement, AlterGenericOptionAction,
     CommentOnForeignDataWrapperStatement, CreateForeignDataWrapperStatement,
-    DropForeignDataWrapperStatement, ParseError,
+    CreateForeignServerStatement, CreateForeignTableStatement, DropForeignDataWrapperStatement,
+    ParseError,
 };
 use crate::include::catalog::{BOOL_TYPE_OID, FDW_HANDLER_TYPE_OID, PgForeignDataWrapperRow};
 use crate::pgrust::database::ddl::ensure_can_set_role;
@@ -183,6 +184,89 @@ fn validate_fdw_options(
 }
 
 impl Database {
+    pub(crate) fn execute_create_foreign_server_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &CreateForeignServerStatement,
+    ) -> Result<StatementResult, ExecError> {
+        let normalized =
+            normalize_foreign_data_wrapper_name(&stmt.fdw_name).map_err(ExecError::Parse)?;
+        if lookup_foreign_data_wrapper(self, client_id, None, &normalized)?.is_none() {
+            return Err(ExecError::DetailedError {
+                message: format!("foreign-data wrapper \"{}\" does not exist", stmt.fdw_name),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            });
+        }
+        let _server_name =
+            normalize_foreign_data_wrapper_name(&stmt.server_name).map_err(ExecError::Parse)?;
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_create_foreign_table_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &CreateForeignTableStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let create_stmt = &stmt.create_table;
+        let (table_name, namespace_oid, persistence) = self
+            .normalize_create_table_stmt_with_search_path(
+                client_id,
+                Some((xid, cid)),
+                create_stmt,
+                configured_search_path,
+            )?;
+        if persistence != TablePersistence::Permanent {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "permanent foreign table",
+                actual: "temporary table".into(),
+            }));
+        }
+        let _server_name =
+            normalize_foreign_data_wrapper_name(&stmt.server_name).map_err(ExecError::Parse)?;
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let lowered = lower_create_table_with_catalog(create_stmt, &catalog, persistence)?;
+        if create_stmt.if_not_exists
+            && catalog
+                .lookup_any_relation(&table_name)
+                .is_some_and(|relation| relation.namespace_oid == namespace_oid)
+        {
+            return Ok(StatementResult::AffectedRows(0));
+        }
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let (entry, effect) = self
+            .catalog
+            .write()
+            .create_relation_mvcc_with_relkind(
+                table_name,
+                lowered.relation_desc,
+                namespace_oid,
+                self.database_oid,
+                'p',
+                'f',
+                self.auth_state(client_id).current_user_oid(),
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
+        let _ = entry;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_create_foreign_data_wrapper_stmt_with_search_path(
         &self,
         client_id: ClientId,

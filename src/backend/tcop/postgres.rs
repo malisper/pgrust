@@ -4574,6 +4574,7 @@ fn handle_close(
 fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> io::Result<()> {
     for notice in notices {
         let (severity, sqlstate) = match notice.level {
+            RaiseLevel::Info => ("INFO", "00000"),
             RaiseLevel::Notice => ("NOTICE", "00000"),
             RaiseLevel::Warning => ("WARNING", "01000"),
             RaiseLevel::Exception => continue,
