@@ -3275,42 +3275,54 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 resolution_types[0] = common_type;
                 resolution_types[2] = common_type;
             }
-            if let Ok(resolved) =
-                resolve_function_call(catalog, name, &resolution_types, *func_variadic)
-            {
-                if resolved.window_impl.is_some() {
-                    return Err(window_function_requires_over_error(name));
-                }
-                if resolved.prokind != 'f' {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "supported scalar function",
-                        actual: name.clone(),
-                    });
-                }
-                if resolved.proretset {
-                    return bind_set_returning_expr_from_parts(
-                        name,
-                        args_list,
-                        *func_variadic,
-                        None,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    );
-                }
-                if let Some(func) = resolved.scalar_impl {
-                    let lowered_args = lower_named_scalar_function_args(func, args_list)?;
-                    return bind_scalar_function_call(
-                        func,
+            match resolve_function_call(catalog, name, &resolution_types, *func_variadic) {
+                Ok(resolved) => {
+                    if resolved.window_impl.is_some() {
+                        return Err(window_function_requires_over_error(name));
+                    }
+                    if resolved.prokind != 'f' {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "supported scalar function",
+                            actual: name.clone(),
+                        });
+                    }
+                    if resolved.proretset {
+                        return bind_set_returning_expr_from_parts(
+                            name,
+                            args_list,
+                            *func_variadic,
+                            None,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        );
+                    }
+                    if let Some(func) = resolved.scalar_impl {
+                        let lowered_args = lower_named_scalar_function_args(func, args_list)?;
+                        return bind_scalar_function_call(
+                            func,
+                            resolved.proc_oid,
+                            Some(resolved.result_type),
+                            resolved.func_variadic,
+                            resolved.nvargs,
+                            resolved.vatype_oid,
+                            &resolved.declared_arg_types,
+                            &lowered_args,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        );
+                    }
+                    return bind_user_defined_scalar_function_call(
                         resolved.proc_oid,
-                        Some(resolved.result_type),
-                        resolved.func_variadic,
-                        resolved.nvargs,
-                        resolved.vatype_oid,
+                        Some(resolved.proname.clone()),
+                        resolved.result_type,
                         &resolved.declared_arg_types,
-                        &lowered_args,
+                        args_list,
                         scope,
                         catalog,
                         outer_scopes,
@@ -3318,18 +3330,8 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                         ctes,
                     );
                 }
-                return bind_user_defined_scalar_function_call(
-                    resolved.proc_oid,
-                    Some(resolved.proname.clone()),
-                    resolved.result_type,
-                    &resolved.declared_arg_types,
-                    args_list,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
+                Err(err) if !catalog.proc_rows_by_name(name).is_empty() => return Err(err),
+                Err(_) => {}
             }
             if name.eq_ignore_ascii_case("xmlconcat") {
                 if args.args().iter().any(|arg| arg.name.is_some()) {

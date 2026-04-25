@@ -32,7 +32,7 @@ use crate::pgrust::database::{
     AsyncNotifyRuntime, ConversionEntry, Database, DatabaseCreateGrant, DatabaseError,
     DatabaseOpenOptions, DatabaseStatsStore, DomainEntry, EnumTypeEntry, LargeObjectRuntime,
     RangeTypeEntry, SequenceRuntime, SessionStatsState, StatisticsObjectEntry, TempBackendId,
-    TempNamespace,
+    TempNamespace, load_range_type_entries,
 };
 use crate::{BufferPool, ClientId};
 
@@ -118,10 +118,15 @@ pub(crate) struct OpenDatabaseState {
 }
 
 impl OpenDatabaseState {
-    fn new(base_dir: &Path, catalog: CatalogStore) -> Result<Self, DatabaseError> {
+    fn new(
+        base_dir: &Path,
+        database_oid: u32,
+        catalog: CatalogStore,
+    ) -> Result<Self, DatabaseError> {
         let sequences = Arc::new(
             SequenceRuntime::load(Some(base_dir), &catalog).map_err(DatabaseError::Catalog)?,
         );
+        let range_types = load_range_type_entries(base_dir, database_oid)?;
         Ok(Self {
             catalog: Arc::new(RwLock::new(catalog)),
             backend_cache_states: Arc::new(RwLock::new(HashMap::new())),
@@ -135,7 +140,7 @@ impl OpenDatabaseState {
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
             domains: Arc::new(RwLock::new(BTreeMap::new())),
             enum_types: Arc::new(RwLock::new(BTreeMap::new())),
-            range_types: Arc::new(RwLock::new(BTreeMap::new())),
+            range_types: Arc::new(RwLock::new(range_types)),
             conversions: Arc::new(RwLock::new(BTreeMap::new())),
             statistics_objects: Arc::new(RwLock::new(BTreeMap::new())),
             sequences,
@@ -253,7 +258,7 @@ impl Cluster {
             open_relfiles_for_store(&pool, &local_store)?;
             open_databases.insert(
                 row.oid,
-                Arc::new(OpenDatabaseState::new(&base_dir, local_store)?),
+                Arc::new(OpenDatabaseState::new(&base_dir, row.oid, local_store)?),
             );
         }
 
@@ -553,7 +558,7 @@ impl Cluster {
         let local_store = CatalogStore::load_database(&self.shared.base_dir, db_oid)?;
         open_relfiles_for_store(&self.shared.pool, &local_store)?;
         let state = Arc::new(
-            OpenDatabaseState::new(&self.shared.base_dir, local_store).map_err(|err| {
+            OpenDatabaseState::new(&self.shared.base_dir, db_oid, local_store).map_err(|err| {
                 ExecError::DetailedError {
                     message: format!("failed to open database state: {err:?}"),
                     detail: None,

@@ -731,6 +731,7 @@ pub struct CreateRangeTypeStatement {
     pub schema_name: Option<String>,
     pub type_name: String,
     pub subtype: RawTypeName,
+    pub subtype_opclass: Option<String>,
     pub subtype_diff: Option<String>,
     pub collation: Option<String>,
     pub multirange_type_name: Option<String>,
@@ -2656,6 +2657,7 @@ impl ColumnGeneratedKind {
 pub struct CreateDomainStatement {
     pub domain_name: String,
     pub ty: RawTypeName,
+    pub check: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2794,6 +2796,11 @@ pub enum TableConstraint {
         columns: Vec<String>,
         without_overlaps: Option<String>,
     },
+    Exclusion {
+        attributes: ConstraintAttributes,
+        access_method: String,
+        elements: Vec<ExclusionConstraintElement>,
+    },
     ForeignKey {
         attributes: ConstraintAttributes,
         columns: Vec<String>,
@@ -2806,6 +2813,12 @@ pub enum TableConstraint {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExclusionConstraintElement {
+    pub column: String,
+    pub operator: String,
+}
+
 impl TableConstraint {
     pub fn attributes(&self) -> &ConstraintAttributes {
         match self {
@@ -2813,6 +2826,7 @@ impl TableConstraint {
             | Self::Check { attributes, .. }
             | Self::PrimaryKey { attributes, .. }
             | Self::Unique { attributes, .. }
+            | Self::Exclusion { attributes, .. }
             | Self::ForeignKey { attributes, .. } => attributes,
         }
     }

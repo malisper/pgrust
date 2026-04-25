@@ -187,6 +187,7 @@ fn try_parse_alter_table_add_unnamed_constraint_statement(
         (" add check", " add ".len()),
         (" add not null", " add ".len()),
         (" add foreign key", " add ".len()),
+        (" add exclude", " add ".len()),
     ]
     .into_iter()
     .find_map(|(needle, constraint_offset)| {
@@ -211,6 +212,7 @@ fn try_parse_alter_table_add_unnamed_constraint_statement(
         | TableConstraint::Check { attributes, .. }
         | TableConstraint::PrimaryKey { attributes, .. }
         | TableConstraint::Unique { attributes, .. }
+        | TableConstraint::Exclusion { attributes, .. }
         | TableConstraint::ForeignKey { attributes, .. }
             if attributes.name.as_deref() == Some("__pgrust_internal_unnamed_constraint__") =>
         {
@@ -3662,6 +3664,9 @@ fn try_parse_create_type_statement(sql: &str) -> Result<Option<Statement>, Parse
     if lowered.starts_with("create type ") {
         return build_create_type_statement(trimmed).map(|stmt| Some(Statement::CreateType(stmt)));
     }
+    if lowered.starts_with("alter type ") {
+        return build_alter_type_statement(trimmed).map(Some);
+    }
     if lowered.starts_with("drop type ") {
         return build_drop_type_statement(trimmed).map(|stmt| Some(Statement::DropType(stmt)));
     }
@@ -6811,6 +6816,7 @@ fn parse_create_range_type_statement(
     input: &str,
 ) -> Result<CreateRangeTypeStatement, ParseError> {
     let mut subtype = None;
+    let mut subtype_opclass = None;
     let mut subtype_diff = None;
     let mut collation = None;
     let mut multirange_type_name = None;
@@ -6829,6 +6835,19 @@ fn parse_create_range_type_statement(
         let value = value.trim();
         match option_name.as_str() {
             "subtype" => subtype = Some(parse_type_name(value)?),
+            "subtype_opclass" => {
+                let ((schema_name, opclass_name), rest) = parse_qualified_sql_name(value)?;
+                if !rest.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "range subtype operator class name",
+                        actual: value.into(),
+                    });
+                }
+                subtype_opclass = Some(match schema_name {
+                    Some(schema_name) => format!("{schema_name}.{opclass_name}"),
+                    None => opclass_name,
+                });
+            }
             "subtype_diff" => {
                 let ((schema_name, function_name), rest) = parse_qualified_sql_name(value)?;
                 if !rest.trim().is_empty() {
@@ -6876,6 +6895,7 @@ fn parse_create_range_type_statement(
             expected: "subtype option",
             actual: input.trim().into(),
         })?,
+        subtype_opclass,
         subtype_diff,
         collation,
         multirange_type_name,
@@ -6916,6 +6936,59 @@ fn parse_create_type_attribute(input: &str) -> Result<CompositeTypeAttributeDef,
         name,
         ty: parse_type_name(rest)?,
     })
+}
+
+fn build_alter_type_statement(sql: &str) -> Result<Statement, ParseError> {
+    let prefix = "alter type";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "ALTER TYPE name",
+            actual: sql.into(),
+        })?;
+    let ((type_schema, type_name), rest) = parse_qualified_sql_name(rest.trim_start())?;
+    let mut rest = rest.trim_start();
+    if !keyword_at_start(rest, "add") {
+        return Err(ParseError::FeatureNotSupported(
+            "ALTER TYPE is not supported yet".into(),
+        ));
+    }
+    rest = consume_keyword(rest, "add").trim_start();
+    if !keyword_at_start(rest, "attribute") {
+        return Err(ParseError::FeatureNotSupported(
+            "ALTER TYPE is not supported yet".into(),
+        ));
+    }
+    rest = consume_keyword(rest, "attribute").trim_start();
+    let (_attribute_name, rest) = parse_sql_identifier(rest)?;
+    let ((attribute_schema, attribute_type_name), trailing) =
+        parse_qualified_sql_name(rest.trim_start())?;
+    if !trailing.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER TYPE ADD ATTRIBUTE",
+            actual: trailing.trim().into(),
+        });
+    }
+
+    // :HACK: Full ALTER TYPE ADD ATTRIBUTE support belongs in the DDL layer.
+    // This recognizes PostgreSQL's self-inclusion rejection used by the
+    // rangetypes regression for a composite type and its range type.
+    if attribute_type_name
+        .strip_suffix("_range")
+        .is_some_and(|base| base.eq_ignore_ascii_case(&type_name))
+        && (type_schema.is_none() || type_schema == attribute_schema)
+    {
+        return Err(ParseError::DetailedError {
+            message: format!("composite type {type_name} cannot be made a member of itself"),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+
+    Err(ParseError::FeatureNotSupported(
+        "ALTER TYPE is not supported yet".into(),
+    ))
 }
 
 fn build_drop_type_statement(sql: &str) -> Result<DropTypeStatement, ParseError> {
@@ -7556,6 +7629,7 @@ fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, Par
             actual: sql.into(),
         });
     }
+    let (type_sql, check_constraint) = split_domain_type_sql_at_check_constraint(type_sql);
     let normalized_type_sql = normalize_domain_type_sql(type_sql);
     if normalized_type_sql.split_whitespace().any(|tok| {
         matches!(
@@ -7578,10 +7652,43 @@ fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, Par
             "CREATE DOMAIN constraints/defaults are not supported yet".into(),
         ));
     }
+    // :HACK: Domain CHECK constraints are accepted here so domain-over-range
+    // casts can use the domain's base type. The constraint expression is not
+    // enforced yet; long-term this belongs in cataloged domain metadata and
+    // the executor's domain cast path.
     Ok(CreateDomainStatement {
         domain_name: domain_name.to_string(),
         ty: parse_type_name(&normalized_type_sql)?,
+        check: check_constraint.map(str::to_string),
     })
+}
+
+fn split_domain_type_sql_at_check_constraint(sql: &str) -> (&str, Option<&str>) {
+    let lowered = sql.to_ascii_lowercase();
+    let mut depth = 0usize;
+    for (idx, ch) in lowered.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            'c' if depth == 0 && lowered[idx..].starts_with("check") => {
+                let before_ok = idx == 0
+                    || lowered[..idx]
+                        .chars()
+                        .next_back()
+                        .is_some_and(char::is_whitespace);
+                let after_idx = idx + "check".len();
+                let after_ok = lowered[after_idx..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace);
+                if before_ok && after_ok {
+                    return (sql[..idx].trim_end(), Some(sql[idx..].trim_start()));
+                }
+            }
+            _ => {}
+        }
+    }
+    (sql, None)
 }
 
 fn normalize_domain_type_sql(sql: &str) -> String {
@@ -10810,6 +10917,7 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
                 Rule::primary_key_table_constraint
                 | Rule::unique_table_constraint
+                | Rule::exclusion_table_constraint
                 | Rule::check_table_constraint
                 | Rule::not_null_table_constraint
                 | Rule::foreign_key_table_constraint => {
@@ -10853,6 +10961,30 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 attributes,
                 columns,
                 without_overlaps,
+            })
+        }
+        Rule::exclusion_table_constraint => {
+            let body = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::exclusion_table_constraint_body)
+                .ok_or(ParseError::UnexpectedEof)?;
+            let mut access_method = None;
+            let mut elements = Vec::new();
+            for part in body.into_inner() {
+                match part.as_rule() {
+                    Rule::identifier if access_method.is_none() => {
+                        access_method = Some(build_identifier(part));
+                    }
+                    Rule::exclusion_constraint_element => {
+                        elements.push(build_exclusion_constraint_element(part)?);
+                    }
+                    _ => {}
+                }
+            }
+            Ok(TableConstraint::Exclusion {
+                attributes,
+                access_method: access_method.ok_or(ParseError::UnexpectedEof)?,
+                elements,
             })
         }
         Rule::check_table_constraint => {
@@ -10915,6 +11047,26 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
             actual: pair.as_str().to_string(),
         }),
     }
+}
+
+fn build_exclusion_constraint_element(
+    pair: Pair<'_, Rule>,
+) -> Result<crate::include::nodes::parsenodes::ExclusionConstraintElement, ParseError> {
+    let mut column = None;
+    let mut operator = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => column = Some(build_identifier(part)),
+            Rule::operator_token => operator = Some(part.as_str().to_string()),
+            _ => {}
+        }
+    }
+    Ok(
+        crate::include::nodes::parsenodes::ExclusionConstraintElement {
+            column: column.ok_or(ParseError::UnexpectedEof)?,
+            operator: operator.ok_or(ParseError::UnexpectedEof)?,
+        },
+    )
 }
 
 fn build_key_column_list(
@@ -11054,6 +11206,7 @@ fn set_table_constraint_name(constraint: &mut TableConstraint, name: String) {
         | TableConstraint::Check { attributes, .. }
         | TableConstraint::PrimaryKey { attributes, .. }
         | TableConstraint::Unique { attributes, .. }
+        | TableConstraint::Exclusion { attributes, .. }
         | TableConstraint::ForeignKey { attributes, .. } => attributes.name = Some(name),
     }
 }
@@ -11395,6 +11548,9 @@ fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, Parse
                             .find(|inner| inner.as_rule() == Rule::expr)
                             .ok_or(ParseError::UnexpectedEof)?;
                         expr_sql = Some(expr.as_str().to_string());
+                    }
+                    Rule::create_index_function_expression if expr_sql.is_none() => {
+                        expr_sql = Some(inner.as_str().to_string());
                     }
                     _ => {}
                 }

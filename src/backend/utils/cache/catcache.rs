@@ -689,6 +689,14 @@ impl CatCache {
         self.types_by_oid.get(&oid)
     }
 
+    pub fn extend_type_rows(&mut self, rows: impl IntoIterator<Item = PgTypeRow>) {
+        for row in rows {
+            self.types_by_name
+                .insert(row.typname.to_ascii_lowercase(), row.clone());
+            self.types_by_oid.insert(row.oid, row);
+        }
+    }
+
     pub fn namespace_rows(&self) -> Vec<PgNamespaceRow> {
         self.namespaces_by_oid.values().cloned().collect()
     }

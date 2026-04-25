@@ -7,8 +7,8 @@ use crate::backend::parser::{
     ForeignKeyConstraintAction,
 };
 use crate::include::catalog::{
-    CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
-    CONSTRAINT_UNIQUE, PG_CATALOG_NAMESPACE_OID, PgConstraintRow,
+    CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
+    CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, PG_CATALOG_NAMESPACE_OID, PgConstraintRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::TupleSlot;
@@ -1074,7 +1074,7 @@ impl Database {
                     catalog.materialize_visible_catalog(),
                     &index_columns,
                     None,
-                    true,
+                    !action.exclusion,
                     action.primary,
                     action.nulls_not_distinct,
                     xid,
@@ -1111,7 +1111,9 @@ impl Database {
                         relation.relation_oid,
                         index_entry.relation_oid,
                         constraint_name,
-                        if action.primary {
+                        if action.exclusion {
+                            CONSTRAINT_EXCLUSION
+                        } else if action.primary {
                             CONSTRAINT_PRIMARY
                         } else {
                             CONSTRAINT_UNIQUE

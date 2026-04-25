@@ -11,6 +11,7 @@ use crate::include::catalog::{
 use crate::include::nodes::parsenodes::{
     DropAggregateStatement, DropFunctionStatement, DropIndexStatement, DropSchemaStatement,
 };
+use crate::pgrust::database::save_range_type_entries;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone)]
@@ -810,21 +811,62 @@ impl Database {
 
     pub(crate) fn execute_drop_domain_stmt_with_search_path(
         &self,
-        _client_id: ClientId,
+        client_id: ClientId,
         drop_stmt: &DropDomainStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
         let (normalized, _, _) =
             self.normalize_domain_name_for_create(&drop_stmt.domain_name, configured_search_path)?;
         let mut domains = self.domains.write();
-        if domains.remove(&normalized).is_none() {
+        let Some(domain) = domains.get(&normalized).cloned() else {
             if drop_stmt.if_exists {
                 return Ok(StatementResult::AffectedRows(0));
             }
             return Err(ExecError::Parse(ParseError::UnsupportedType(
                 drop_stmt.domain_name.clone(),
             )));
+        };
+
+        let dependent_ranges = self
+            .range_types
+            .read()
+            .iter()
+            .filter(|(_, entry)| {
+                entry.subtype_dependency_oid == Some(domain.oid)
+                    || entry.subtype.type_oid == domain.oid
+            })
+            .map(|(key, entry)| (key.clone(), entry.name.clone()))
+            .collect::<Vec<_>>();
+        if !dependent_ranges.is_empty() && !drop_stmt.cascade {
+            let dependent_name = &dependent_ranges[0].1;
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot drop type {} because other objects depend on it",
+                    domain.name
+                ),
+                detail: Some(format!(
+                    "type {dependent_name} depends on type {}",
+                    domain.name
+                )),
+                hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+                sqlstate: "2BP01",
+            });
         }
+
+        if !dependent_ranges.is_empty() {
+            let mut range_types = self.range_types.write();
+            for (key, name) in &dependent_ranges {
+                if range_types.remove(key).is_some() {
+                    push_notice(format!("drop cascades to type {name}"));
+                }
+            }
+            save_range_type_entries(&self.cluster.base_dir, self.database_oid, &range_types)?;
+        }
+
+        domains.remove(&normalized);
+        drop(domains);
+        self.refresh_catalog_store_dynamic_type_rows(client_id, configured_search_path);
+        self.invalidate_backend_cache_state(client_id);
         self.plan_cache.invalidate_all();
         Ok(StatementResult::AffectedRows(0))
     }
@@ -840,6 +882,7 @@ impl Database {
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
+        self.refresh_catalog_store_dynamic_type_rows(client_id, configured_search_path);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let catcache = self
             .backend_catcache(client_id, Some((xid, cid)))

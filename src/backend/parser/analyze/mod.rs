@@ -777,6 +777,10 @@ pub trait CatalogLookup {
             .find(|row| row.typname.eq_ignore_ascii_case(normalized))
     }
 
+    fn domain_check_by_type_oid(&self, _oid: u32) -> Option<String> {
+        None
+    }
+
     fn range_rows(&self) -> Vec<PgRangeRow> {
         builtin_range_rows()
     }

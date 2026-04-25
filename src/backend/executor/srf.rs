@@ -1,8 +1,10 @@
 use super::exec_expr::eval_string_to_table_rows;
 use super::expr_json::{eval_json_record_set_returning_function, eval_json_table_function};
 use super::pg_regex::{eval_regexp_matches_rows, eval_regexp_split_to_table_rows};
+use super::sqlfunc::execute_user_defined_sql_set_returning_function;
 use super::{ExecError, ExecutorContext, Expr, SetReturningCall, TupleSlot, Value, eval_expr};
 use crate::backend::commands::partition::{partition_ancestor_oids, partition_tree_entries};
+use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::SqlTypeKind;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::utils::time::datetime::{
@@ -76,9 +78,7 @@ pub(crate) fn eval_set_returning_call(
             args,
             output_columns,
             ..
-        } => {
-            execute_user_defined_set_returning_function(*proc_oid, args, output_columns, slot, ctx)
-        }
+        } => eval_user_defined_set_returning_function(*proc_oid, args, output_columns, slot, ctx),
     }?;
     if call.with_ordinality() {
         for (index, row) in rows.iter_mut().enumerate() {
@@ -87,6 +87,44 @@ pub(crate) fn eval_set_returning_call(
         }
     }
     Ok(rows)
+}
+
+fn eval_user_defined_set_returning_function(
+    proc_oid: u32,
+    args: &[Expr],
+    output_columns: &[crate::include::nodes::primnodes::QueryColumn],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let catalog = ctx
+        .catalog
+        .as_ref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "user-defined functions require executor catalog context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })?;
+    let row = catalog
+        .proc_row_by_oid(proc_oid)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("unknown function oid {proc_oid}"),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
+        })?;
+    match row.prolang {
+        crate::include::catalog::PG_LANGUAGE_SQL_OID => {
+            execute_user_defined_sql_set_returning_function(
+                &row,
+                args,
+                output_columns.len(),
+                slot,
+                ctx,
+            )
+        }
+        _ => execute_user_defined_set_returning_function(proc_oid, args, output_columns, slot, ctx),
+    }
 }
 
 pub(crate) fn eval_project_set_returning_call(

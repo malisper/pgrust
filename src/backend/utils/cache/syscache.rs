@@ -389,6 +389,47 @@ fn bootstrap_sys_cache_tuple(cache_id: SysCacheId, keys: &[Value]) -> Option<Sys
         .map(SysCacheTuple::Type)
 }
 
+fn extra_type_sys_cache_tuples(
+    type_rows: &[PgTypeRow],
+    cache_id: SysCacheId,
+    keys: &[Value],
+) -> Vec<SysCacheTuple> {
+    match (cache_id, keys) {
+        (SysCacheId::TypeOid, [key]) => {
+            let oid = match key {
+                Value::Int32(value) => u32::try_from(*value).ok(),
+                Value::Int64(value) => u32::try_from(*value).ok(),
+                _ => None,
+            };
+            oid.into_iter()
+                .flat_map(|oid| type_rows.iter().filter(move |row| row.oid == oid).cloned())
+                .map(SysCacheTuple::Type)
+                .collect()
+        }
+        (SysCacheId::TypeNameNsp, [Value::Text(name), namespace_key]) => {
+            let namespace_oid = match namespace_key {
+                Value::Int32(value) => u32::try_from(*value).ok(),
+                Value::Int64(value) => u32::try_from(*value).ok(),
+                _ => None,
+            };
+            namespace_oid
+                .into_iter()
+                .flat_map(|namespace_oid| {
+                    type_rows
+                        .iter()
+                        .filter(move |row| {
+                            row.typnamespace == namespace_oid
+                                && row.typname.eq_ignore_ascii_case(name.as_str())
+                        })
+                        .cloned()
+                })
+                .map(SysCacheTuple::Type)
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn sys_cache_tuple_from_values(
     cache_id: SysCacheId,
     values: Vec<Value>,
@@ -700,6 +741,11 @@ impl CatalogStore {
 
         if let Some(tuple) = bootstrap_sys_cache_tuple(cache_id, &keys) {
             return Ok(vec![tuple]);
+        }
+
+        let extra_tuples = extra_type_sys_cache_tuples(self.extra_type_rows(), cache_id, &keys);
+        if !extra_tuples.is_empty() {
+            return Ok(extra_tuples);
         }
 
         let snapshot = ctx
@@ -1500,7 +1546,7 @@ pub fn backend_catcache(
 
     let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
         .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
-    let cache = {
+    let mut cache = {
         let txns = db.txns.read();
         let shared = db
             .shared_catalog
@@ -1512,6 +1558,10 @@ pub fn backend_catcache(
             .catcache_with_snapshot(&db.pool, &txns, &snapshot, client_id)?;
         merge_catcaches(shared, local)
     };
+    let search_path = db.effective_search_path(client_id, None);
+    cache.extend_type_rows(db.domain_type_rows_for_search_path(&search_path));
+    cache.extend_type_rows(db.enum_type_rows_for_search_path(&search_path));
+    cache.extend_type_rows(db.range_type_rows_for_search_path(&search_path));
 
     let mut states = db.backend_cache_states.write();
     let state = states.entry(client_id).or_default();

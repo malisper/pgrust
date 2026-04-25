@@ -84,6 +84,55 @@ fn catalog_type_oid(
         })
 }
 
+fn catalog_entry_from_bound_relation(
+    relation: &crate::backend::parser::BoundRelation,
+) -> crate::backend::catalog::catalog::CatalogEntry {
+    crate::backend::catalog::catalog::CatalogEntry {
+        rel: relation.rel,
+        relation_oid: relation.relation_oid,
+        namespace_oid: relation.namespace_oid,
+        owner_oid: relation.owner_oid,
+        relacl: None,
+        row_type_oid: 0,
+        array_type_oid: 0,
+        reltoastrelid: relation.toast.map(|toast| toast.relation_oid).unwrap_or(0),
+        relpersistence: relation.relpersistence,
+        relkind: relation.relkind,
+        am_oid: 0,
+        relhassubclass: false,
+        relhastriggers: false,
+        relispartition: relation.relispartition,
+        relispopulated: relation.relispopulated,
+        relpartbound: relation.relpartbound.clone(),
+        relrowsecurity: false,
+        relforcerowsecurity: false,
+        relpages: 0,
+        reltuples: -1.0,
+        relallvisible: 0,
+        relallfrozen: 0,
+        relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
+        desc: relation.desc.clone(),
+        partitioned_table: relation.partitioned_table.clone(),
+        index_meta: None,
+    }
+}
+
+fn expression_index_default_name(expr_sql: &str) -> String {
+    let trimmed = expr_sql.trim();
+    let Some(open_paren) = trimmed.find('(') else {
+        return "expr".into();
+    };
+    let name = trimmed[..open_paren].trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch == '_' || ch == '.' || ch.is_ascii_alphanumeric())
+    {
+        return "expr".into();
+    }
+    name.rsplit('.').next().unwrap_or(name).to_ascii_lowercase()
+}
+
 impl Database {
     pub(super) fn relcache_index_meta_from_catalog(
         &self,
@@ -331,10 +380,10 @@ impl Database {
         let column_part = columns
             .iter()
             .map(|column| {
-                if column.expr_sql.is_some() {
-                    "expr"
+                if let Some(expr_sql) = column.expr_sql.as_deref() {
+                    expression_index_default_name(expr_sql)
                 } else {
-                    column.name.as_str()
+                    column.name.clone()
                 }
             })
             .collect::<Vec<_>>()
@@ -405,8 +454,16 @@ impl Database {
                     })?
                     .sql_type
             };
-            let type_oid = range_type_ref_for_sql_type(sql_type)
-                .map(|range_type| range_type.type_oid())
+            let type_oid = ((sql_type.is_range() || sql_type.is_multirange())
+                && sql_type.type_oid != 0)
+                .then_some(sql_type.type_oid)
+                .or_else(|| {
+                    range_type_ref_for_sql_type(sql_type).map(|range_type| range_type.type_oid())
+                })
+                .or_else(|| {
+                    multirange_type_ref_for_sql_type(sql_type)
+                        .map(|multirange_type| multirange_type.type_oid())
+                })
                 .or_else(|| {
                     type_rows
                         .iter()
@@ -678,10 +735,11 @@ impl Database {
             indnullsnotdistinct: nulls_not_distinct,
             ..build_options.clone()
         };
+        let table_entry = catalog_entry_from_bound_relation(relation);
         let (index_entry, effect) = catalog_guard
-            .create_index_for_relation_mvcc_with_options(
+            .create_index_for_catalog_entry_mvcc_with_options(
                 index_name.to_string(),
-                relation.relation_oid,
+                &table_entry,
                 unique,
                 primary,
                 columns,
@@ -1265,16 +1323,6 @@ impl Database {
                 message: format!(
                     "access method \"{access_method_name}\" does not support multicolumn indexes"
                 ),
-                detail: None,
-                hint: None,
-                sqlstate: "0A000",
-            });
-        }
-        if access_method_oid == SPGIST_AM_OID
-            && index_columns.iter().any(|column| column.expr_sql.is_some())
-        {
-            return Err(ExecError::DetailedError {
-                message: "access method \"spgist\" does not support expression indexes".into(),
                 detail: None,
                 hint: None,
                 sqlstate: "0A000",

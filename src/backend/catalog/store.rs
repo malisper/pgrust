@@ -10,6 +10,7 @@ use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::lmgr::TransactionWaiter;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::misc::interrupts::{InterruptState, check_for_interrupts};
+use crate::include::catalog::PgTypeRow;
 use crate::include::catalog::{BootstrapCatalogKind, CatalogScope};
 
 // Mirror PostgreSQL's catalog split: durable control/storage lives in `storage`,
@@ -45,6 +46,7 @@ pub struct CatalogStore {
     oid_control_path: Option<PathBuf>,
     catalog: Catalog,
     control: CatalogControl,
+    extra_type_rows: Vec<PgTypeRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

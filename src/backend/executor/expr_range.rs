@@ -2,11 +2,14 @@ use std::cmp::Ordering;
 
 use super::ExecError;
 use super::expr_casts::cast_value;
-use super::expr_datetime::render_datetime_value_text;
+use super::expr_datetime::render_datetime_value_text_with_config;
 use super::expr_multirange::eval_multirange_function;
 use super::expr_ops::compare_order_values;
 use super::node_types::{BuiltinScalarFunction, RangeBound, RangeTypeRef, RangeValue, Value};
+use super::value_io::{format_array_text, format_array_value_text, format_record_text};
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::time::datetime::days_from_ymd;
 use crate::include::catalog::{
     DATE_TYPE_OID, DATERANGE_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID,
     INT8RANGE_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, RangeCanonicalization,
@@ -117,13 +120,24 @@ pub(crate) fn parse_range_text(text: &str, ty: SqlType) -> Result<Value, ExecErr
 }
 
 pub fn render_range_text(value: &Value) -> Option<String> {
+    render_range_text_with_config(value, &DateTimeConfig::default())
+}
+
+pub fn render_range_text_with_config(value: &Value, config: &DateTimeConfig) -> Option<String> {
     let Value::Range(range) = value else {
         return None;
     };
-    Some(render_range_value(range))
+    Some(render_range_value_with_config(range, config))
 }
 
 pub(crate) fn render_range_value(range: &RangeValue) -> String {
+    render_range_value_with_config(range, &DateTimeConfig::default())
+}
+
+pub(crate) fn render_range_value_with_config(
+    range: &RangeValue,
+    config: &DateTimeConfig,
+) -> String {
     if range.empty {
         return "empty".to_string();
     }
@@ -136,11 +150,11 @@ pub(crate) fn render_range_value(range: &RangeValue) -> String {
         },
     );
     if let Some(lower) = &range.lower {
-        out.push_str(&render_bound_text(lower.value.as_ref()));
+        out.push_str(&render_bound_text_with_config(lower.value.as_ref(), config));
     }
     out.push(',');
     if let Some(upper) = &range.upper {
-        out.push_str(&render_bound_text(upper.value.as_ref()));
+        out.push_str(&render_bound_text_with_config(upper.value.as_ref(), config));
     }
     out.push(
         if range.upper.as_ref().is_some_and(|bound| bound.inclusive) {
@@ -514,12 +528,14 @@ pub(crate) fn normalize_range(
     if matches!(range_type.canonicalization, RangeCanonicalization::Discrete) {
         if let Some(bound) = &mut lower
             && !bound.inclusive
+            && !is_discrete_infinity_bound(range_type, bound.value.as_ref())
         {
             *bound.value = successor_value(range_type, bound.value.as_ref())?;
             bound.inclusive = true;
         }
         if let Some(bound) = &mut upper
             && bound.inclusive
+            && !is_discrete_infinity_bound(range_type, bound.value.as_ref())
         {
             *bound.value = successor_value(range_type, bound.value.as_ref())?;
             bound.inclusive = false;
@@ -820,7 +836,7 @@ fn cmp_upper_to_lower(upper: Option<&RangeBound>, lower: Option<&RangeBound>) ->
     }
 }
 
-fn bounds_adjacent(upper: Option<&RangeBound>, lower: Option<&RangeBound>) -> bool {
+pub(crate) fn bounds_adjacent(upper: Option<&RangeBound>, lower: Option<&RangeBound>) -> bool {
     match (upper, lower) {
         (Some(upper), Some(lower))
             if compare_scalar_values(upper.value.as_ref(), lower.value.as_ref())
@@ -907,21 +923,44 @@ fn successor_value(range_type: RangeTypeRef, value: &Value) -> Result<Value, Exe
         (SqlTypeKind::Int4, Value::Int32(v)) => v
             .checked_add(1)
             .map(Value::Int32)
-            .ok_or_else(range_bound_overflow),
+            .ok_or_else(|| range_successor_out_of_range("integer out of range", "22003")),
         (SqlTypeKind::Int8, Value::Int64(v)) => v
             .checked_add(1)
             .map(Value::Int64)
-            .ok_or_else(range_bound_overflow),
+            .ok_or_else(|| range_successor_out_of_range("bigint out of range", "22003")),
         (SqlTypeKind::Date, Value::Date(v)) => {
             v.0.checked_add(1)
+                .filter(|days| {
+                    *days <= days_from_ymd(5_874_897, 12, 31).expect("supported date upper bound")
+                })
                 .map(|days| Value::Date(DateADT(days)))
-                .ok_or_else(range_bound_overflow)
+                .ok_or_else(date_out_of_range)
         }
         _ => Err(ExecError::TypeMismatch {
             op: "range canonicalization",
             left: value.clone(),
             right: Value::Null,
         }),
+    }
+}
+
+fn is_discrete_infinity_bound(range_type: RangeTypeRef, value: &Value) -> bool {
+    matches!(
+        (range_type.subtype.kind, value),
+        (SqlTypeKind::Date, Value::Date(date)) if !date.is_finite()
+    )
+}
+
+fn date_out_of_range() -> ExecError {
+    range_successor_out_of_range("date out of range", "22008")
+}
+
+fn range_successor_out_of_range(message: &'static str, sqlstate: &'static str) -> ExecError {
+    ExecError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate,
     }
 }
 
@@ -967,7 +1006,7 @@ fn encode_bound_value(range_type: RangeTypeRef, value: &Value) -> Result<Vec<u8>
         },
         value,
     )?;
-    Ok(render_bound_text(value).into_bytes())
+    Ok(render_bound_storage_text(value).into_bytes())
 }
 
 fn decode_bound_value(range_type: RangeTypeRef, bytes: &[u8]) -> Result<Value, ExecError> {
@@ -983,20 +1022,11 @@ fn parse_range_bound_text(text: &str, subtype: SqlType) -> Result<Value, ExecErr
 }
 
 fn render_bound_text(value: &Value) -> String {
-    let raw = match value {
-        Value::Int16(v) => v.to_string(),
-        Value::Int32(v) => v.to_string(),
-        Value::Int64(v) => v.to_string(),
-        Value::Money(v) => v.to_string(),
-        Value::Float64(v) => v.to_string(),
-        Value::Numeric(v) => v.render(),
-        Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => {
-            render_datetime_value_text(value).unwrap_or_default()
-        }
-        Value::Bool(v) => v.to_string(),
-        Value::Bit(bits) => bits.render(),
-        other => other.as_text().unwrap_or_default().to_string(),
-    };
+    render_bound_text_with_config(value, &DateTimeConfig::default())
+}
+
+fn render_bound_text_with_config(value: &Value, config: &DateTimeConfig) -> String {
+    let raw = render_bound_storage_text_with_config(value, config);
     if needs_range_quotes(&raw) {
         let mut escaped = String::with_capacity(raw.len());
         for ch in raw.chars() {
@@ -1008,6 +1038,30 @@ fn render_bound_text(value: &Value) -> String {
         format!("\"{escaped}\"")
     } else {
         raw
+    }
+}
+
+fn render_bound_storage_text(value: &Value) -> String {
+    render_bound_storage_text_with_config(value, &DateTimeConfig::default())
+}
+
+fn render_bound_storage_text_with_config(value: &Value, config: &DateTimeConfig) -> String {
+    match value {
+        Value::Int16(v) => v.to_string(),
+        Value::Int32(v) => v.to_string(),
+        Value::Int64(v) => v.to_string(),
+        Value::Money(v) => v.to_string(),
+        Value::Float64(v) => v.to_string(),
+        Value::Numeric(v) => v.render(),
+        Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => {
+            render_datetime_value_text_with_config(value, config).unwrap_or_default()
+        }
+        Value::Bool(v) => v.to_string(),
+        Value::Bit(bits) => bits.render(),
+        Value::Array(values) => format_array_text(values),
+        Value::PgArray(array) => format_array_value_text(array),
+        Value::Record(record) => format_record_text(record),
+        other => other.as_text().unwrap_or_default().to_string(),
     }
 }
 
@@ -1126,18 +1180,10 @@ fn range_bounds_error(_range_type: RangeTypeRef) -> ExecError {
     }
 }
 
-fn range_bound_overflow() -> ExecError {
-    ExecError::DetailedError {
-        message: "range bound value out of range".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "22003",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat};
     use crate::include::nodes::datum::NumericValue;
 
     fn test_range_type(sql_type: SqlType) -> RangeTypeRef {
@@ -1205,6 +1251,36 @@ mod tests {
         assert_eq!(
             render_range_text(&value).unwrap(),
             "[\"2000-01-01 00:00:00\",\"2000-01-02 00:00:00\")"
+        );
+    }
+
+    #[test]
+    fn render_range_text_respects_datetime_config() {
+        let config = DateTimeConfig {
+            date_style_format: DateStyleFormat::Postgres,
+            date_order: DateOrder::Mdy,
+            time_zone: "-08".into(),
+            ..DateTimeConfig::default()
+        };
+
+        let date_range = parse_range_text(
+            "[2000-01-10,2000-01-20)",
+            SqlType::new(SqlTypeKind::DateRange),
+        )
+        .unwrap();
+        assert_eq!(
+            render_range_text_with_config(&date_range, &config).unwrap(),
+            "[01-10-2000,01-20-2000)"
+        );
+
+        let tstz_range = parse_range_text(
+            "[2010-01-01 01:00:00 -05, 2010-01-01 02:00:00 -08)",
+            SqlType::new(SqlTypeKind::TimestampTzRange),
+        )
+        .unwrap();
+        assert_eq!(
+            render_range_text_with_config(&tstz_range, &config).unwrap(),
+            "[\"Thu Dec 31 22:00:00 2009 -08\",\"Fri Jan 01 02:00:00 2010 -08\")"
         );
     }
 

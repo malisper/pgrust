@@ -7,7 +7,8 @@ use crate::backend::parser::{
     pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
 };
 use crate::include::catalog::{
-    ANYOID, BOOTSTRAP_SUPERUSER_OID, BYTEA_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
+    BOOTSTRAP_SUPERUSER_OID, BYTEA_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
     PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PgAggregateRow,
     PgProcRow, RECORD_TYPE_OID,
 };
@@ -67,6 +68,59 @@ fn existing_view_prefix_matches(
                 old_column.name.eq_ignore_ascii_case(&new_column.name)
                     && old_column.sql_type == new_column.sql_type
             })
+}
+
+fn validate_polymorphic_range_return_type(
+    prorettype: u32,
+    callable_arg_oids: &[u32],
+) -> Result<(), ExecError> {
+    let (type_name, other_name, required_inputs) = match prorettype {
+        ANYRANGEOID => ("anyrange", "anymultirange", [ANYRANGEOID, ANYMULTIRANGEOID]),
+        ANYMULTIRANGEOID => ("anymultirange", "anyrange", [ANYMULTIRANGEOID, ANYRANGEOID]),
+        ANYCOMPATIBLERANGEOID => (
+            "anycompatiblerange",
+            "anycompatiblemultirange",
+            [ANYCOMPATIBLERANGEOID, ANYCOMPATIBLEMULTIRANGEOID],
+        ),
+        ANYCOMPATIBLEMULTIRANGEOID => (
+            "anycompatiblemultirange",
+            "anycompatiblerange",
+            [ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID],
+        ),
+        _ => return Ok(()),
+    };
+    if callable_arg_oids
+        .iter()
+        .any(|oid| required_inputs.contains(oid))
+    {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: "cannot determine result data type".into(),
+        detail: Some(format!(
+            "A result of type {type_name} requires at least one input of type {type_name} or {other_name}."
+        )),
+        hint: None,
+        sqlstate: "42P13",
+    })
+}
+
+fn validate_polymorphic_range_output_types(
+    prorettype: u32,
+    proallargtypes: Option<&Vec<u32>>,
+    proargmodes: Option<&Vec<u8>>,
+    callable_arg_oids: &[u32],
+) -> Result<(), ExecError> {
+    validate_polymorphic_range_return_type(prorettype, callable_arg_oids)?;
+    let (Some(all_argtypes), Some(argmodes)) = (proallargtypes, proargmodes) else {
+        return Ok(());
+    };
+    for (type_oid, mode) in all_argtypes.iter().zip(argmodes.iter()) {
+        if matches!(*mode, b'o' | b'b' | b't') {
+            validate_polymorphic_range_return_type(*type_oid, callable_arg_oids)?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn normalize_create_proc_name_for_search_path(
@@ -374,7 +428,7 @@ impl Database {
                     catalog.materialize_visible_catalog(),
                     &index_columns,
                     None,
-                    true,
+                    !action.exclusion,
                     action.primary,
                     action.nulls_not_distinct,
                     xid,
@@ -427,7 +481,9 @@ impl Database {
                         relation.relation_oid,
                         index_entry.relation_oid,
                         constraint_name,
-                        if action.primary {
+                        if action.exclusion {
+                            crate::include::catalog::CONSTRAINT_EXCLUSION
+                        } else if action.primary {
                             crate::include::catalog::CONSTRAINT_PRIMARY
                         } else {
                             crate::include::catalog::CONSTRAINT_UNIQUE
@@ -953,17 +1009,16 @@ impl Database {
                 create_stmt.domain_name.clone(),
             )));
         }
-        let oid = {
-            let catalog = self.catalog.write();
-            let snapshot = catalog.catalog_snapshot().map_err(map_catalog_error)?;
-            let next_catalog_oid = snapshot.next_oid();
-            domains
-                .values()
-                .map(|domain| domain.oid.saturating_add(1))
-                .max()
-                .unwrap_or(next_catalog_oid)
-                .max(next_catalog_oid)
-        };
+        let dynamic_floor = domains
+            .values()
+            .map(|domain| domain.oid.saturating_add(1))
+            .max()
+            .unwrap_or(crate::backend::catalog::store::DEFAULT_FIRST_USER_OID);
+        let oid = self
+            .catalog
+            .write()
+            .allocate_oid_block(1, dynamic_floor)
+            .map_err(map_catalog_error)?;
         domains.insert(
             normalized,
             DomainEntry {
@@ -971,9 +1026,13 @@ impl Database {
                 name: object_name,
                 namespace_oid,
                 sql_type,
+                check: create_stmt.check.clone(),
                 comment: None,
             },
         );
+        drop(domains);
+        self.refresh_catalog_store_dynamic_type_rows(client_id, configured_search_path);
+        self.invalidate_backend_cache_state(client_id);
         self.plan_cache.invalidate_all();
         Ok(StatementResult::AffectedRows(0))
     }
@@ -1200,6 +1259,13 @@ impl Database {
                 }
             }
         }
+
+        validate_polymorphic_range_output_types(
+            prorettype,
+            proallargtypes.as_ref(),
+            proargmodes.as_ref(),
+            &callable_arg_oids,
+        )?;
 
         let proargtypes = callable_arg_oids
             .iter()

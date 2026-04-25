@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 
 use crate::backend::executor::{
     executor_start, render_explain_expr, render_index_order_by,
-    render_index_scan_condition_with_key_names, set_returning_call_label,
+    render_index_scan_condition_with_key_names, render_verbose_range_support_expr,
+    set_returning_call_label,
 };
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
@@ -305,6 +306,18 @@ fn push_nonverbose_plan_details(
 ) -> bool {
     let prefix = explain_detail_prefix(indent);
     match plan {
+        Plan::OrderBy { input, items, .. } => {
+            let input_names = verbose_plan_output_exprs(input, ctx, true);
+            let sort_key = items
+                .iter()
+                .map(|item| render_verbose_expr(&item.expr, &input_names, ctx))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !sort_key.is_empty() {
+                lines.push(format!("{prefix}Sort Key: {sort_key}"));
+            }
+            true
+        }
         Plan::NestedLoopJoin {
             left,
             right,
@@ -567,6 +580,9 @@ fn explain_detail_prefix(indent: usize) -> String {
 
 fn verbose_plan_label(plan: &Plan) -> Option<String> {
     match plan {
+        Plan::Projection { input, .. } if matches!(input.as_ref(), Plan::Result { .. }) => {
+            Some("Result".into())
+        }
         Plan::Aggregate { strategy, .. } => match strategy {
             AggregateStrategy::Plain => Some("Aggregate".into()),
             AggregateStrategy::Sorted => Some("GroupAggregate".into()),
@@ -1624,6 +1640,9 @@ fn render_verbose_expr(
     column_names: &[String],
     ctx: &VerboseExplainContext,
 ) -> String {
+    if let Some(rendered) = render_verbose_range_support_expr(expr, column_names) {
+        return rendered;
+    }
     match expr {
         Expr::Var(var) => {
             render_var_name(var.varattno, column_names).unwrap_or_else(|| format!("{expr:?}"))

@@ -23,13 +23,14 @@ use crate::include::catalog::{
     synthetic_range_proc_rows_by_name,
 };
 use crate::pgrust::database::DatabaseStatsStore;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone)]
 pub struct VisibleCatalog {
     relcache: RelCache,
     catcache: Option<CatCache>,
     search_path: Vec<String>,
+    domain_checks: BTreeMap<u32, String>,
 }
 
 impl VisibleCatalog {
@@ -46,7 +47,13 @@ impl VisibleCatalog {
             relcache,
             catcache,
             search_path,
+            domain_checks: BTreeMap::new(),
         }
+    }
+
+    pub fn with_domain_checks(mut self, domain_checks: BTreeMap<u32, String>) -> Self {
+        self.domain_checks = domain_checks;
+        self
     }
 
     pub fn relcache(&self) -> &RelCache {
@@ -477,6 +484,10 @@ impl CatalogLookup for VisibleCatalog {
             }
         }
         rows
+    }
+
+    fn domain_check_by_type_oid(&self, oid: u32) -> Option<String> {
+        self.domain_checks.get(&oid).cloned()
     }
 
     fn range_rows(&self) -> Vec<PgRangeRow> {

@@ -17,6 +17,7 @@ pub struct IndexBackedConstraintAction {
     pub constraint_name: Option<String>,
     pub columns: Vec<String>,
     pub primary: bool,
+    pub exclusion: bool,
     pub nulls_not_distinct: bool,
     pub without_overlaps: Option<String>,
     pub deferrable: bool,
@@ -162,6 +163,7 @@ struct PendingIndexConstraint {
     generated_base: String,
     columns: Vec<String>,
     primary: bool,
+    exclusion: bool,
     nulls_not_distinct: bool,
     without_overlaps: Option<String>,
     deferrable: bool,
@@ -291,6 +293,7 @@ pub fn normalize_create_table_constraints(
                         generated_base: format!("{}_pkey", stmt.table_name),
                         columns: vec![column.name.clone()],
                         primary: true,
+                        exclusion: false,
                         nulls_not_distinct: false,
                         without_overlaps: None,
                         deferrable,
@@ -305,6 +308,7 @@ pub fn normalize_create_table_constraints(
                         generated_base: format!("{}_{}_key", stmt.table_name, column.name),
                         columns: vec![column.name.clone()],
                         primary: false,
+                        exclusion: false,
                         nulls_not_distinct: attributes.nulls_not_distinct,
                         without_overlaps: None,
                         deferrable,
@@ -400,6 +404,7 @@ pub fn normalize_create_table_constraints(
                     generated_base: format!("{}_pkey", stmt.table_name),
                     columns: resolved,
                     primary: true,
+                    exclusion: false,
                     nulls_not_distinct: false,
                     without_overlaps: without_overlaps.clone(),
                     deferrable,
@@ -431,8 +436,43 @@ pub fn normalize_create_table_constraints(
                     generated_base: format!("{}_{}_key", stmt.table_name, resolved.join("_")),
                     columns: resolved,
                     primary: false,
+                    exclusion: false,
                     nulls_not_distinct: attributes.nulls_not_distinct,
                     without_overlaps: without_overlaps.clone(),
+                    deferrable,
+                    initially_deferred,
+                });
+            }
+            TableConstraint::Exclusion {
+                attributes,
+                access_method,
+                elements,
+            } => {
+                let (deferrable, initially_deferred) =
+                    validate_key_attributes(attributes, "EXCLUDE")?;
+                let (exclusion_columns, period_column) =
+                    normalize_exclusion_constraint(access_method, elements)?;
+                let resolved = resolve_index_constraint_columns(
+                    &exclusion_columns,
+                    Some(period_column.as_str()),
+                    &columns,
+                    &column_lookup,
+                )?;
+                validate_without_overlaps_column(
+                    &resolved,
+                    Some(period_column.as_str()),
+                    &columns,
+                    &column_lookup,
+                    catalog,
+                )?;
+                index_constraints.push(PendingIndexConstraint {
+                    explicit_name: attributes.name.clone(),
+                    generated_base: format!("{}_{}_excl", stmt.table_name, resolved.join("_")),
+                    columns: resolved,
+                    primary: false,
+                    exclusion: true,
+                    nulls_not_distinct: false,
+                    without_overlaps: Some(period_column),
                     deferrable,
                     initially_deferred,
                 });
@@ -565,6 +605,7 @@ pub fn normalize_create_table_constraints(
             })),
             columns: constraint.columns,
             primary: constraint.primary,
+            exclusion: constraint.exclusion,
             nulls_not_distinct: constraint.nulls_not_distinct,
             without_overlaps: constraint.without_overlaps,
             deferrable: constraint.deferrable,
@@ -711,6 +752,7 @@ pub fn bind_relation_constraints(
             }
             crate::include::catalog::CONSTRAINT_PRIMARY
             | crate::include::catalog::CONSTRAINT_UNIQUE
+            | crate::include::catalog::CONSTRAINT_EXCLUSION
                 if row.conperiod =>
             {
                 temporal.push(bind_temporal_constraint(row, desc)?);
@@ -910,6 +952,7 @@ pub fn normalize_alter_table_add_constraint(
                     constraint_name: Some(constraint_name),
                     columns: resolved,
                     primary: true,
+                    exclusion: false,
                     nulls_not_distinct: false,
                     without_overlaps: without_overlaps.clone(),
                     deferrable,
@@ -945,8 +988,47 @@ pub fn normalize_alter_table_add_constraint(
                     constraint_name: Some(constraint_name),
                     columns: resolved,
                     primary: false,
+                    exclusion: false,
                     nulls_not_distinct: attributes.nulls_not_distinct,
                     without_overlaps: without_overlaps.clone(),
+                    deferrable,
+                    initially_deferred,
+                },
+            ))
+        }
+        TableConstraint::Exclusion {
+            attributes,
+            access_method,
+            elements,
+        } => {
+            let (deferrable, initially_deferred) = validate_key_attributes(attributes, "EXCLUDE")?;
+            let (exclusion_columns, period_column) =
+                normalize_exclusion_constraint(access_method, elements)?;
+            let resolved = resolve_relation_index_constraint_columns(
+                &exclusion_columns,
+                Some(period_column.as_str()),
+                desc,
+                &column_lookup,
+            )?;
+            validate_without_overlaps_relation_column(
+                &resolved,
+                Some(period_column.as_str()),
+                desc,
+                &column_lookup,
+            )?;
+            let constraint_name = assign_constraint_name(
+                attributes.name.clone(),
+                format!("{table_name}_{}_excl", resolved.join("_")),
+                &mut used_names,
+            )?;
+            Ok(NormalizedAlterTableConstraint::IndexBacked(
+                IndexBackedConstraintAction {
+                    constraint_name: Some(constraint_name),
+                    columns: resolved,
+                    primary: false,
+                    exclusion: true,
+                    nulls_not_distinct: false,
+                    without_overlaps: Some(period_column),
                     deferrable,
                     initially_deferred,
                 },
@@ -1860,6 +1942,52 @@ fn validate_without_overlaps_column(
         });
     }
     Ok(())
+}
+
+fn normalize_exclusion_constraint(
+    access_method: &str,
+    elements: &[crate::include::nodes::parsenodes::ExclusionConstraintElement],
+) -> Result<(Vec<String>, String), ParseError> {
+    if !access_method.eq_ignore_ascii_case("gist") {
+        return Err(ParseError::FeatureNotSupportedMessage(
+            "only GiST exclusion constraints are supported".into(),
+        ));
+    }
+    let mut period_column = None;
+    let mut columns = Vec::with_capacity(elements.len());
+    for element in elements {
+        match element.operator.as_str() {
+            "=" => {}
+            "&&" => {
+                if period_column.replace(element.column.clone()).is_some() {
+                    return Err(ParseError::FeatureNotSupportedMessage(
+                        "exclusion constraints support one overlapping range column".into(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(ParseError::FeatureNotSupportedMessage(format!(
+                    "exclusion operator {} is not supported",
+                    element.operator
+                )));
+            }
+        }
+        columns.push(element.column.clone());
+    }
+    let period_column = period_column.ok_or_else(|| {
+        ParseError::FeatureNotSupportedMessage(
+            "exclusion constraints require one overlapping range column".into(),
+        )
+    })?;
+    if !columns
+        .last()
+        .is_some_and(|column| column.eq_ignore_ascii_case(&period_column))
+    {
+        return Err(ParseError::FeatureNotSupportedMessage(
+            "overlapping exclusion column must be last".into(),
+        ));
+    }
+    Ok((columns, period_column))
 }
 
 fn validate_without_overlaps_relation_column(

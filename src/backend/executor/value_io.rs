@@ -12,9 +12,11 @@ use super::expr_geometry::{
     decode_path_bytes, decode_polygon_bytes, encode_path_bytes, encode_polygon_bytes,
     render_geometry_text,
 };
-use super::expr_multirange::render_multirange;
+use super::expr_multirange::{render_multirange, render_multirange_text_with_config};
 use super::expr_network::{encode_network_bytes, parse_cidr_bytes, parse_inet_bytes};
-use super::expr_range::{decode_range_bytes, encode_range_bytes, render_range_text};
+use super::expr_range::{
+    decode_range_bytes, encode_range_bytes, render_range_text, render_range_text_with_config,
+};
 use super::node_types::*;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
@@ -125,7 +127,12 @@ pub(crate) fn format_record_text_with_options(
             Value::Array(values) => {
                 format_array_text_with_config(values, &float_format.datetime_config)
             }
-            Value::Range(_) => render_range_text(value).unwrap_or_default(),
+            Value::Range(_) => render_range_text_with_config(value, &float_format.datetime_config)
+                .unwrap_or_default(),
+            Value::Multirange(_) => {
+                render_multirange_text_with_config(value, &float_format.datetime_config)
+                    .unwrap_or_default()
+            }
             Value::InternalChar(byte) => render_internal_char_text(*byte),
             Value::Jsonb(bytes) => render_jsonb_bytes(bytes).unwrap_or_default(),
             other => {
@@ -224,7 +231,22 @@ pub(crate) fn format_exclusion_key_detail(
     proposed: &[Value],
     existing: &[Value],
 ) -> String {
-    format_exclusion_key_detail_with_existing_label(columns, proposed, existing, true)
+    format_exclusion_key_detail_with_config(columns, proposed, existing, &DateTimeConfig::default())
+}
+
+pub(crate) fn format_exclusion_key_detail_with_config(
+    columns: &[ColumnDesc],
+    proposed: &[Value],
+    existing: &[Value],
+    datetime_config: &DateTimeConfig,
+) -> String {
+    format_exclusion_key_detail_with_existing_label(
+        columns,
+        proposed,
+        existing,
+        true,
+        datetime_config,
+    )
 }
 
 pub(crate) fn format_exclusion_create_key_detail(
@@ -232,7 +254,27 @@ pub(crate) fn format_exclusion_create_key_detail(
     proposed: &[Value],
     existing: &[Value],
 ) -> String {
-    format_exclusion_key_detail_with_existing_label(columns, proposed, existing, false)
+    format_exclusion_create_key_detail_with_config(
+        columns,
+        proposed,
+        existing,
+        &DateTimeConfig::default(),
+    )
+}
+
+pub(crate) fn format_exclusion_create_key_detail_with_config(
+    columns: &[ColumnDesc],
+    proposed: &[Value],
+    existing: &[Value],
+    datetime_config: &DateTimeConfig,
+) -> String {
+    format_exclusion_key_detail_with_existing_label(
+        columns,
+        proposed,
+        existing,
+        false,
+        datetime_config,
+    )
 }
 
 fn format_exclusion_key_detail_with_existing_label(
@@ -240,8 +282,8 @@ fn format_exclusion_key_detail_with_existing_label(
     proposed: &[Value],
     existing: &[Value],
     existing_label: bool,
+    datetime_config: &DateTimeConfig,
 ) -> String {
-    let datetime_config = DateTimeConfig::default();
     let names = columns
         .iter()
         .map(|column| column.name.as_str())
@@ -250,13 +292,13 @@ fn format_exclusion_key_detail_with_existing_label(
     let proposed = proposed
         .iter()
         .take(columns.len())
-        .map(|value| format_failing_row_value(value, &datetime_config))
+        .map(|value| format_failing_row_value(value, datetime_config))
         .collect::<Vec<_>>()
         .join(", ");
     let existing = existing
         .iter()
         .take(columns.len())
-        .map(|value| format_failing_row_value(value, &datetime_config))
+        .map(|value| format_failing_row_value(value, datetime_config))
         .collect::<Vec<_>>()
         .join(", ");
     if existing_label {
@@ -301,9 +343,11 @@ fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> 
         | Value::TimestampTz(_) => {
             render_datetime_value_text_with_config(value, datetime_config).unwrap_or_default()
         }
-        Value::Range(_) => render_range_text(value).unwrap_or_default(),
+        Value::Range(_) => {
+            render_range_text_with_config(value, datetime_config).unwrap_or_default()
+        }
         Value::Multirange(_) => {
-            crate::backend::executor::render_multirange_text(value).unwrap_or_default()
+            render_multirange_text_with_config(value, datetime_config).unwrap_or_default()
         }
         Value::Bit(bits) => render_bit_text(bits),
         Value::Jsonb(bytes) => render_jsonb_bytes(bytes).unwrap_or_default(),

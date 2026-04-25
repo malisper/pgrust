@@ -303,6 +303,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if let Some(position) = find_detailed_operator_position(sql, message) {
                 return Some(position);
             }
+            if message == "range lower bound must be less than or equal to range upper bound" {
+                return find_range_literal_position(sql);
+            }
+            if let Some(position) = find_missing_function_position(sql, message) {
+                return Some(position);
+            }
             if let Some(value) = extract_quoted_error_value(message) {
                 value
             } else {
@@ -391,6 +397,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             {
                 return Some(position);
             }
+            if message == "range lower bound must be less than or equal to range upper bound" {
+                return find_range_literal_position(sql);
+            }
+            if let Some(position) = find_missing_function_position(sql, message) {
+                return Some(position);
+            }
             if let Some(value) = extract_quoted_error_value(message) {
                 value
             } else {
@@ -459,6 +471,67 @@ fn find_function_argument_position(sql: &str, func: &str) -> Option<usize> {
         }
         return Some(idx + 1);
     }
+}
+
+fn find_range_literal_position(sql: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] != b'\'' {
+            idx += 1;
+            continue;
+        }
+        let literal_start = idx;
+        idx += 1;
+        while idx < bytes.len() {
+            if bytes[idx] == b'\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    idx += 2;
+                    continue;
+                }
+                break;
+            }
+            idx += 1;
+        }
+        if idx >= bytes.len() {
+            break;
+        }
+        let mut after = idx + 1;
+        while bytes
+            .get(after)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            after += 1;
+        }
+        if bytes.get(after..after + 2) == Some(b"::") {
+            let type_start = after + 2;
+            let type_end = bytes[type_start..]
+                .iter()
+                .position(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+                .map(|offset| type_start + offset)
+                .unwrap_or(bytes.len());
+            if sql[type_start..type_end]
+                .to_ascii_lowercase()
+                .contains("range")
+            {
+                return Some(literal_start + 1);
+            }
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn find_missing_function_position(sql: &str, message: &str) -> Option<usize> {
+    if !sql.trim_start().to_ascii_lowercase().starts_with("select ") {
+        return None;
+    }
+    let rest = message.strip_prefix("function ")?;
+    let name = rest.split_once('(')?.0;
+    if name.is_empty() {
+        return None;
+    }
+    find_case_insensitive_token_position(sql, name)
 }
 
 fn publication_where_error_position(
@@ -8064,6 +8137,64 @@ mod tests {
         };
 
         assert_eq!(exec_error_position(sql, &err), Some(8));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_range_literal_quote_for_bound_order_errors() {
+        let sql = "select '[z,a]'::textrange;";
+        let err = ExecError::DetailedError {
+            message: "range lower bound must be less than or equal to range upper bound".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22000",
+        };
+
+        assert_eq!(exec_error_position(sql, &err), Some(8));
+    }
+
+    #[test]
+    fn exec_error_position_omits_range_constructor_bound_order_errors() {
+        let sql = "select textrange1('a','Z') @> 'b'::text;";
+        let err = ExecError::DetailedError {
+            message: "range lower bound must be less than or equal to range upper bound".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22000",
+        };
+
+        assert_eq!(exec_error_position(sql, &err), None);
+    }
+
+    #[test]
+    fn exec_error_position_points_at_missing_function_name() {
+        let sql = "select anyarray_anyrange_func(ARRAY[1,2], numrange(10,20));";
+        let err = ExecError::DetailedError {
+            message: "function anyarray_anyrange_func(integer[], numrange) does not exist".into(),
+            detail: None,
+            hint: Some(
+                "No function matches the given name and argument types. You might need to add explicit type casts."
+                    .into(),
+            ),
+            sqlstate: "42883",
+        };
+
+        assert_eq!(exec_error_position(sql, &err), Some(8));
+    }
+
+    #[test]
+    fn exec_error_position_omits_create_type_missing_subtype_diff_function() {
+        let sql = "create type bogus_float8range as range (subtype=float8, subtype_diff=float4mi);";
+        let err = ExecError::DetailedError {
+            message: "function float4mi(double precision, double precision) does not exist".into(),
+            detail: None,
+            hint: Some(
+                "No function matches the given name and argument types. You might need to add explicit type casts."
+                    .into(),
+            ),
+            sqlstate: "42883",
+        };
+
+        assert_eq!(exec_error_position(sql, &err), None);
     }
 
     #[test]

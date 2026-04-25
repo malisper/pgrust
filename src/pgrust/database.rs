@@ -1,6 +1,7 @@
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -259,6 +260,7 @@ pub(crate) struct DomainEntry {
     pub name: String,
     pub namespace_oid: u32,
     pub sql_type: SqlType,
+    pub check: Option<String>,
     pub comment: Option<String>,
 }
 
@@ -272,7 +274,7 @@ pub(crate) struct EnumTypeEntry {
     pub comment: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RangeTypeEntry {
     pub oid: u32,
     pub array_oid: u32,
@@ -282,9 +284,130 @@ pub(crate) struct RangeTypeEntry {
     pub multirange_name: String,
     pub namespace_oid: u32,
     pub subtype: SqlType,
+    #[serde(default)]
+    pub subtype_dependency_oid: Option<u32>,
+    // :HACK: Stored for catalog compatibility; range comparison still uses the subtype's
+    // default ordering until opclass-specific range support is wired through execution.
+    pub subtype_opclass: Option<String>,
     pub subtype_diff: Option<String>,
     pub collation: Option<String>,
     pub comment: Option<String>,
+}
+
+pub(crate) fn load_range_type_entries(
+    base_dir: &Path,
+    database_oid: u32,
+) -> Result<BTreeMap<String, RangeTypeEntry>, DatabaseError> {
+    let path = range_types_file_path(base_dir, database_oid);
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| DatabaseError::Catalog(CatalogError::Io(err.to_string())))?;
+    serde_json::from_str(&text).map_err(|_| {
+        DatabaseError::Catalog(CatalogError::Corrupt("invalid range type metadata file"))
+    })
+}
+
+pub(crate) fn save_range_type_entries(
+    base_dir: &Path,
+    database_oid: u32,
+    range_types: &BTreeMap<String, RangeTypeEntry>,
+) -> Result<(), ExecError> {
+    let path = range_types_file_path(base_dir, database_oid);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(range_type_metadata_io_error)?;
+    }
+    let text = serde_json::to_string_pretty(range_types).map_err(|err| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "range type metadata serialization",
+            actual: err.to_string(),
+        })
+    })?;
+    std::fs::write(path, text).map_err(range_type_metadata_io_error)
+}
+
+pub(crate) fn range_type_rows_for_entry(entry: &RangeTypeEntry) -> [PgTypeRow; 4] {
+    let discrete = matches!(
+        entry.subtype.kind,
+        SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Date
+    );
+    let base_sql_type = SqlType::range(entry.oid, entry.subtype.type_oid)
+        .with_identity(entry.oid, entry.subtype.typrelid)
+        .with_range_metadata(entry.subtype.type_oid, entry.multirange_oid, discrete);
+    let multirange_sql_type = SqlType::multirange(entry.multirange_oid, entry.oid)
+        .with_identity(entry.multirange_oid, entry.subtype.typrelid)
+        .with_range_metadata(entry.subtype.type_oid, entry.multirange_oid, discrete)
+        .with_multirange_range_oid(entry.oid);
+
+    [
+        PgTypeRow {
+            oid: entry.oid,
+            typname: entry.name.clone(),
+            typnamespace: entry.namespace_oid,
+            typowner: BOOTSTRAP_SUPERUSER_OID,
+            typlen: -1,
+            typalign: AttributeAlign::Int,
+            typstorage: AttributeStorage::Extended,
+            typrelid: 0,
+            typelem: 0,
+            typarray: entry.array_oid,
+            sql_type: base_sql_type,
+        },
+        PgTypeRow {
+            oid: entry.array_oid,
+            typname: format!("_{}", entry.name),
+            typnamespace: entry.namespace_oid,
+            typowner: BOOTSTRAP_SUPERUSER_OID,
+            typlen: -1,
+            typalign: AttributeAlign::Int,
+            typstorage: AttributeStorage::Extended,
+            typrelid: 0,
+            typelem: entry.oid,
+            typarray: 0,
+            sql_type: SqlType::array_of(base_sql_type),
+        },
+        PgTypeRow {
+            oid: entry.multirange_oid,
+            typname: entry.multirange_name.clone(),
+            typnamespace: entry.namespace_oid,
+            typowner: BOOTSTRAP_SUPERUSER_OID,
+            typlen: -1,
+            typalign: AttributeAlign::Int,
+            typstorage: AttributeStorage::Extended,
+            typrelid: 0,
+            typelem: 0,
+            typarray: entry.multirange_array_oid,
+            sql_type: multirange_sql_type,
+        },
+        PgTypeRow {
+            oid: entry.multirange_array_oid,
+            typname: format!("_{}", entry.multirange_name),
+            typnamespace: entry.namespace_oid,
+            typowner: BOOTSTRAP_SUPERUSER_OID,
+            typlen: -1,
+            typalign: AttributeAlign::Int,
+            typstorage: AttributeStorage::Extended,
+            typrelid: 0,
+            typelem: entry.multirange_oid,
+            typarray: 0,
+            sql_type: SqlType::array_of(multirange_sql_type),
+        },
+    ]
+}
+
+fn range_types_file_path(base_dir: &Path, database_oid: u32) -> PathBuf {
+    base_dir
+        .join("base")
+        .join(database_oid.to_string())
+        .join("pg_pgrust_range_types.json")
+}
+
+fn range_type_metadata_io_error(error: std::io::Error) -> ExecError {
+    ExecError::Parse(ParseError::UnexpectedToken {
+        expected: "range type metadata persistence",
+        actual: error.to_string(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -641,7 +764,7 @@ impl Database {
                 typrelid: 0,
                 typelem: 0,
                 typarray: 0,
-                sql_type: domain.sql_type,
+                sql_type: domain.sql_type.with_identity(domain.oid, 0),
             })
             .collect::<Vec<_>>();
         rows.sort_by_key(|row| {
@@ -714,71 +837,7 @@ impl Database {
         let range_types = self.range_types.read();
         let mut rows = range_types
             .values()
-            .flat_map(|entry| {
-                let discrete = matches!(
-                    entry.subtype.kind,
-                    SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Date
-                );
-                let base_sql_type = SqlType::range(entry.oid, entry.subtype.type_oid)
-                    .with_range_metadata(entry.subtype.type_oid, entry.multirange_oid, discrete);
-                let multirange_sql_type = SqlType::multirange(entry.multirange_oid, entry.oid)
-                    .with_range_metadata(entry.subtype.type_oid, entry.multirange_oid, discrete)
-                    .with_multirange_range_oid(entry.oid);
-                [
-                    PgTypeRow {
-                        oid: entry.oid,
-                        typname: entry.name.clone(),
-                        typnamespace: entry.namespace_oid,
-                        typowner: BOOTSTRAP_SUPERUSER_OID,
-                        typlen: -1,
-                        typalign: AttributeAlign::Int,
-                        typstorage: AttributeStorage::Extended,
-                        typrelid: 0,
-                        typelem: 0,
-                        typarray: entry.array_oid,
-                        sql_type: base_sql_type,
-                    },
-                    PgTypeRow {
-                        oid: entry.array_oid,
-                        typname: format!("_{}", entry.name),
-                        typnamespace: entry.namespace_oid,
-                        typowner: BOOTSTRAP_SUPERUSER_OID,
-                        typlen: -1,
-                        typalign: AttributeAlign::Int,
-                        typstorage: AttributeStorage::Extended,
-                        typrelid: 0,
-                        typelem: entry.oid,
-                        typarray: 0,
-                        sql_type: SqlType::array_of(base_sql_type),
-                    },
-                    PgTypeRow {
-                        oid: entry.multirange_oid,
-                        typname: entry.multirange_name.clone(),
-                        typnamespace: entry.namespace_oid,
-                        typowner: BOOTSTRAP_SUPERUSER_OID,
-                        typlen: -1,
-                        typalign: AttributeAlign::Int,
-                        typstorage: AttributeStorage::Extended,
-                        typrelid: 0,
-                        typelem: 0,
-                        typarray: entry.multirange_array_oid,
-                        sql_type: multirange_sql_type,
-                    },
-                    PgTypeRow {
-                        oid: entry.multirange_array_oid,
-                        typname: format!("_{}", entry.multirange_name),
-                        typnamespace: entry.namespace_oid,
-                        typowner: BOOTSTRAP_SUPERUSER_OID,
-                        typlen: -1,
-                        typalign: AttributeAlign::Int,
-                        typstorage: AttributeStorage::Extended,
-                        typrelid: 0,
-                        typelem: entry.multirange_oid,
-                        typarray: 0,
-                        sql_type: SqlType::array_of(multirange_sql_type),
-                    },
-                ]
-            })
+            .flat_map(range_type_rows_for_entry)
             .collect::<Vec<_>>();
         rows.sort_by_key(|row| {
             let schema_rank = search_path
@@ -791,6 +850,26 @@ impl Database {
             (schema_rank, row.typname.clone())
         });
         rows
+    }
+
+    pub(crate) fn dynamic_type_rows_for_search_path(
+        &self,
+        search_path: &[String],
+    ) -> Vec<PgTypeRow> {
+        let mut rows = self.domain_type_rows_for_search_path(search_path);
+        rows.extend(self.enum_type_rows_for_search_path(search_path));
+        rows.extend(self.range_type_rows_for_search_path(search_path));
+        rows
+    }
+
+    pub(crate) fn refresh_catalog_store_dynamic_type_rows(
+        &self,
+        client_id: ClientId,
+        configured_search_path: Option<&[String]>,
+    ) {
+        let search_path = self.effective_search_path(client_id, configured_search_path);
+        let rows = self.dynamic_type_rows_for_search_path(&search_path);
+        self.catalog.write().set_extra_type_rows(rows);
     }
 
     pub(crate) fn range_rows(&self) -> Vec<PgRangeRow> {

@@ -768,6 +768,7 @@ impl Database {
                     constraint_name: Some(index_name.to_string()),
                     columns: key_columns,
                     primary: false,
+                    exclusion: false,
                     nulls_not_distinct,
                     without_overlaps: None,
                     deferrable: false,

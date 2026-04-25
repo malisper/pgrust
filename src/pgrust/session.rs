@@ -5240,7 +5240,10 @@ impl Session {
         } else if name == "session_replication_role" {
             db.install_session_replication_role(self.client_id, self.session_replication_role());
             db.plan_cache.invalidate_all();
-        } else if name == "enable_partitionwise_join" {
+        } else if matches!(
+            name.as_str(),
+            "enable_partitionwise_join" | "enable_seqscan"
+        ) {
             db.plan_cache.invalidate_all();
         }
         Ok(StatementResult::AffectedRows(0))
@@ -5289,7 +5292,10 @@ impl Session {
                     self.session_replication_role(),
                 );
                 db.plan_cache.invalidate_all();
-            } else if normalized == "enable_partitionwise_join" {
+            } else if matches!(
+                normalized.as_str(),
+                "enable_partitionwise_join" | "enable_seqscan"
+            ) {
                 db.plan_cache.invalidate_all();
             }
         } else {
@@ -6997,8 +7003,8 @@ fn parse_statement_timeout(value: &str) -> Result<Option<Duration>, ExecError> {
 
 fn parse_bool_guc(value: &str) -> Option<bool> {
     match normalize_guc_name(value).as_str() {
-        "on" | "true" | "yes" | "1" => Some(true),
-        "off" | "false" | "no" | "0" => Some(false),
+        "on" | "true" | "yes" | "1" | "t" => Some(true),
+        "off" | "false" | "no" | "0" | "f" => Some(false),
         _ => None,
     }
 }
@@ -8002,7 +8008,7 @@ fn unquote_identifier(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Session, parse_default_toast_compression_guc_value, parse_max_stack_depth,
+        Session, parse_bool_guc, parse_default_toast_compression_guc_value, parse_max_stack_depth,
         parse_startup_options, parse_statement_timeout, validate_max_stack_depth,
     };
     use crate::backend::executor::ExecError;
@@ -8115,6 +8121,17 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_bool_guc_accepts_postgres_boolean_aliases() {
+        for value in ["on", "true", "yes", "1", "t"] {
+            assert_eq!(parse_bool_guc(value), Some(true));
+        }
+        for value in ["off", "false", "no", "0", "f"] {
+            assert_eq!(parse_bool_guc(value), Some(false));
+        }
+        assert_eq!(parse_bool_guc("maybe"), None);
     }
 
     #[test]

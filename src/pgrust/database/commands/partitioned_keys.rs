@@ -756,6 +756,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
                     constraint_name: desired_constraint_name.map(str::to_string),
                     columns: spec.columns.clone(),
                     primary: spec.primary,
+                    exclusion: false,
                     nulls_not_distinct: spec.nulls_not_distinct,
                     without_overlaps: spec.without_overlaps.clone(),
                     deferrable: spec.deferrable,

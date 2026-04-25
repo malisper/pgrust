@@ -211,7 +211,7 @@ fn gist_builtin_strategy(proc_oid: u32, argument: &Value) -> Option<u16> {
         BuiltinScalarFunction::RangeStrictRight => 5,
         BuiltinScalarFunction::RangeAdjacent => 6,
         BuiltinScalarFunction::RangeContains => {
-            if matches!(argument, Value::Range(_)) {
+            if matches!(argument, Value::Range(_) | Value::Multirange(_)) {
                 7
             } else {
                 16
