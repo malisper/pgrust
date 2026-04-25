@@ -904,11 +904,7 @@ fn apply_implicit_sign(spec: &FormatSpec, rendered: &mut [String], negative: boo
     if spec.fill_mode && !negative {
         return;
     }
-    let Some(anchor_idx) = find_number_anchor(spec, rendered).or_else(|| {
-        rendered
-            .iter()
-            .position(|cell| !cell.is_empty() && cell != " ")
-    }) else {
+    let Some(anchor_idx) = find_number_anchor(spec, rendered) else {
         return;
     };
     let sign = if negative { "-" } else { " " };
@@ -1678,6 +1674,10 @@ mod tests {
         assert_eq!(
             to_char_numeric(&NumericValue::from("100"), "f\\\\\"oo999").unwrap(),
             "f\\\"oo 100"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("100"), "f\"ool\\\"999").unwrap(),
+            "fool\"999"
         );
         assert_eq!(
             to_char_numeric(
