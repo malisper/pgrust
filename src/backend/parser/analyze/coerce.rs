@@ -557,6 +557,11 @@ pub(super) fn resolve_common_scalar_type(left: SqlType, right: SqlType) -> Optio
         }
         return Some(SqlType::new(SqlTypeKind::VarBit));
     }
+    if matches!(left.kind, SqlTypeKind::Inet | SqlTypeKind::Cidr)
+        && matches!(right.kind, SqlTypeKind::Inet | SqlTypeKind::Cidr)
+    {
+        return Some(SqlType::new(SqlTypeKind::Inet));
+    }
     if is_numeric_family(left) && is_numeric_family(right) {
         return resolve_numeric_binary_type("+", left, right).ok();
     }

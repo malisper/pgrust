@@ -504,6 +504,11 @@ impl Session {
                 .get("enable_partitionwise_join")
                 .map(|value| parse_bool_guc(value).unwrap_or(false))
                 .unwrap_or(false),
+            enable_seqscan: self
+                .gucs
+                .get("enable_seqscan")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
         }
     }
 
@@ -5097,7 +5102,7 @@ impl Session {
                     .write()
                     .set_track_functions(track_functions);
             }
-            "row_security" | "enable_partitionwise_join" => {
+            "row_security" | "enable_partitionwise_join" | "enable_seqscan" => {
                 parse_bool_guc(value).ok_or_else(|| {
                     ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
                 })?;

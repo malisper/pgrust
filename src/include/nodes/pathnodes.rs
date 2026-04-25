@@ -27,9 +27,19 @@ pub struct AppendRelInfo {
     pub translated_vars: Vec<Expr>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlannerConfig {
     pub enable_partitionwise_join: bool,
+    pub enable_seqscan: bool,
+}
+
+impl Default for PlannerConfig {
+    fn default() -> Self {
+        Self {
+            enable_partitionwise_join: false,
+            enable_seqscan: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

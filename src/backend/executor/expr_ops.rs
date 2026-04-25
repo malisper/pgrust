@@ -16,6 +16,7 @@ use super::expr_money::{
     money_add, money_cash_div, money_cmp, money_div_float, money_div_int, money_mul_float,
     money_mul_int, money_sub,
 };
+use super::expr_network::{network_add, network_bitwise_binary, network_bitwise_not, network_sub};
 use super::node_types::*;
 use super::{compare_multirange_values, expr_range::compare_range_values};
 use crate::backend::executor::jsonb::{
@@ -103,7 +104,9 @@ pub(crate) fn compare_order_values(
         (Value::Bit(a), Value::Bit(b)) => Ok(compare_bit_strings(a, b)),
         (Value::Bytea(a), Value::Bytea(b)) => Ok(a.cmp(b)),
         (Value::Uuid(a), Value::Uuid(b)) => Ok(a.cmp(b)),
-        (Value::Inet(a), Value::Inet(b)) => {
+        (Value::Inet(a), Value::Inet(b))
+        | (Value::Inet(a), Value::Cidr(b))
+        | (Value::Cidr(a), Value::Inet(b)) => {
             Ok(crate::backend::executor::compare_network_values(a, b))
         }
         (Value::Cidr(a), Value::Cidr(b)) => {
@@ -205,8 +208,10 @@ pub(crate) fn compare_values(
         (Value::Interval(l), Value::Interval(r)) => Ok(Value::Bool(l == r)),
         (Value::Bytea(l), Value::Bytea(r)) => Ok(Value::Bool(l == r)),
         (Value::Uuid(l), Value::Uuid(r)) => Ok(Value::Bool(l == r)),
-        (Value::Inet(l), Value::Inet(r)) => Ok(Value::Bool(l == r)),
-        (Value::Cidr(l), Value::Cidr(r)) => Ok(Value::Bool(l == r)),
+        (Value::Inet(l), Value::Inet(r))
+        | (Value::Inet(l), Value::Cidr(r))
+        | (Value::Cidr(l), Value::Inet(r))
+        | (Value::Cidr(l), Value::Cidr(r)) => Ok(Value::Bool(l == r)),
         (Value::Bit(l), Value::Bit(r)) => Ok(Value::Bool(l == r)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(*l, *r))),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
@@ -372,6 +377,11 @@ pub(crate) fn add_values(left: Value, right: Value) -> Result<Value, ExecError> 
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
+    if matches!(left, Value::Inet(_) | Value::Cidr(_))
+        || matches!(right, Value::Inet(_) | Value::Cidr(_))
+    {
+        return network_add(left, right);
+    }
     match (&left, &right) {
         (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(checked_add_i16(*l, *r)?)),
         (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32(checked_add_i32(*l as i32, *r)?)),
@@ -404,6 +414,11 @@ pub(crate) fn add_values(left: Value, right: Value) -> Result<Value, ExecError> 
 pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
+    }
+    if matches!(left, Value::Inet(_) | Value::Cidr(_))
+        || matches!(right, Value::Inet(_) | Value::Cidr(_))
+    {
+        return network_sub(left, right);
     }
     match (&left, &right) {
         (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(checked_sub_i16(*l, *r)?)),
@@ -583,6 +598,11 @@ pub(crate) fn shift_right_values(left: Value, right: Value) -> Result<Value, Exe
 }
 
 pub(crate) fn bitwise_and_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Inet(_) | Value::Cidr(_))
+        || matches!(right, Value::Inet(_) | Value::Cidr(_))
+    {
+        return network_bitwise_binary("&", left, right);
+    }
     match (left, right) {
         (Value::Bit(l), Value::Bit(r)) => Ok(Value::Bit(bitwise_binary_bits("&", &l, &r)?)),
         (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l & r)),
@@ -597,6 +617,11 @@ pub(crate) fn bitwise_and_values(left: Value, right: Value) -> Result<Value, Exe
 }
 
 pub(crate) fn bitwise_or_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Inet(_) | Value::Cidr(_))
+        || matches!(right, Value::Inet(_) | Value::Cidr(_))
+    {
+        return network_bitwise_binary("|", left, right);
+    }
     match (left, right) {
         (Value::Bit(l), Value::Bit(r)) => Ok(Value::Bit(bitwise_binary_bits("|", &l, &r)?)),
         (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l | r)),
@@ -625,6 +650,9 @@ pub(crate) fn bitwise_xor_values(left: Value, right: Value) -> Result<Value, Exe
 }
 
 pub(crate) fn bitwise_not_value(value: Value) -> Result<Value, ExecError> {
+    if matches!(value, Value::Inet(_) | Value::Cidr(_)) {
+        return network_bitwise_not(value);
+    }
     match value {
         Value::Bit(bits) => Ok(Value::Bit(bitwise_not_bits(&bits))),
         Value::Int16(v) => Ok(Value::Int16(!v)),
@@ -872,7 +900,10 @@ pub(crate) fn order_values(
         }
         (Value::Bytea(l), Value::Bytea(r)) => Ok(Value::Bool(compare_ord(l, r, op))),
         (Value::Uuid(l), Value::Uuid(r)) => Ok(Value::Bool(compare_ord(l, r, op))),
-        (Value::Inet(l), Value::Inet(r)) | (Value::Cidr(l), Value::Cidr(r)) => {
+        (Value::Inet(l), Value::Inet(r))
+        | (Value::Inet(l), Value::Cidr(r))
+        | (Value::Cidr(l), Value::Inet(r))
+        | (Value::Cidr(l), Value::Cidr(r)) => {
             let ordering = crate::backend::executor::compare_network_values(l, r);
             Ok(Value::Bool(match op {
                 "<" => ordering == Ordering::Less,
