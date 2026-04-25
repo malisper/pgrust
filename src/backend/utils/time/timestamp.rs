@@ -4,7 +4,7 @@ use crate::backend::utils::time::datetime::{
     DateTimeKeyword, DateTimeParseError, TimeZoneSpec, current_postgres_timestamp_usecs,
     current_timezone_name, day_of_week_from_julian_day, days_from_ymd, expand_two_digit_year,
     format_date_ymd, format_offset, format_time_usecs, is_bc_token, is_weekday_token,
-    julian_day_from_postgres_date, month_number, named_timezone_offset_seconds,
+    julian_day_from_postgres_date, month_number, named_timezone_offset_seconds_for_date,
     parse_date_token_with_config, parse_keyword, parse_time_components, parse_timezone_spec,
     split_time_and_offset, time_usecs_from_hms, timestamp_parts_from_usecs,
     timezone_offset_seconds, today_pg_days, ymd_from_days,
@@ -371,13 +371,15 @@ fn extract_timestamp_parts(
 
 fn timezone_spec_offset(
     spec: Option<TimeZoneSpec>,
+    pg_days: i32,
     config: &DateTimeConfig,
 ) -> Result<i32, DateTimeParseError> {
     match spec {
         Some(TimeZoneSpec::FixedOffset(offset)) => Ok(offset),
-        Some(TimeZoneSpec::Named(name)) => named_timezone_offset_seconds(&name).ok_or(
-            DateTimeParseError::UnknownTimeZone(name.to_ascii_lowercase()),
-        ),
+        Some(TimeZoneSpec::Named(name)) => named_timezone_offset_seconds_for_date(&name, pg_days)
+            .ok_or(DateTimeParseError::UnknownTimeZone(
+                name.to_ascii_lowercase(),
+            )),
         None => Ok(timezone_offset_seconds(config)),
     }
 }
@@ -445,7 +447,7 @@ pub fn parse_timestamptz_text(
     }
 
     let (days, time_usecs, zone) = extract_timestamp_parts(trimmed, config)?;
-    let offset_seconds = timezone_spec_offset(zone, config)?;
+    let offset_seconds = timezone_spec_offset(zone, days, config)?;
     Ok(TimestampTzADT(
         days as i64 * USECS_PER_DAY + time_usecs - offset_seconds as i64 * USECS_PER_SEC,
     ))
@@ -580,6 +582,27 @@ mod tests {
             parse_timestamp_text("19970710 173201 America/Does_not_exist", &config),
             Err(DateTimeParseError::UnknownTimeZone(
                 "america/does_not_exist".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn parses_timestamptz_with_date_dependent_named_timezone() {
+        let config = DateTimeConfig::default();
+        let march_days = days_from_ymd(2003, 3, 7).unwrap();
+        let july_days = days_from_ymd(2003, 7, 7).unwrap();
+        let time_usecs =
+            15 * 60 * 60 * USECS_PER_SEC + 36 * 60 * USECS_PER_SEC + 39 * USECS_PER_SEC;
+        assert_eq!(
+            parse_timestamptz_text("2003-03-07 15:36:39 America/New_York", &config),
+            Ok(TimestampTzADT(
+                i64::from(march_days) * USECS_PER_DAY + time_usecs + 5 * 60 * 60 * USECS_PER_SEC
+            ))
+        );
+        assert_eq!(
+            parse_timestamptz_text("2003-07-07 15:36:39 America/New_York", &config),
+            Ok(TimestampTzADT(
+                i64::from(july_days) * USECS_PER_DAY + time_usecs + 4 * 60 * 60 * USECS_PER_SEC
             ))
         );
     }

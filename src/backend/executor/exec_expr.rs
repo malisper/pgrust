@@ -26,7 +26,7 @@ pub(crate) use super::expr_compile::{
 };
 use super::expr_date::{
     eval_date_part_function, eval_date_trunc_function, eval_isfinite_function,
-    eval_make_date_function, eval_to_date_function,
+    eval_make_date_function, eval_timezone_function, eval_to_date_function,
 };
 use super::expr_datetime::{
     current_date_value, current_date_value_with_config, current_time_value,
@@ -1145,6 +1145,15 @@ fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value
             return auth_role_name(ctx, role_oid);
         }
         return Ok(Value::Text("none".into()));
+    }
+    if name == "timezone" {
+        return Ok(Value::Text(ctx.datetime_config.time_zone.clone().into()));
+    }
+    if name == "datestyle" {
+        return Ok(Value::Text(
+            crate::backend::utils::misc::guc_datetime::format_datestyle(&ctx.datetime_config)
+                .into(),
+        ));
     }
 
     if let Some(value) = ctx
@@ -4720,6 +4729,7 @@ fn eval_builtin_function(
         }
         BuiltinScalarFunction::DatePart => eval_date_part_function(&values),
         BuiltinScalarFunction::DateTrunc => eval_date_trunc_function(&values, &ctx.datetime_config),
+        BuiltinScalarFunction::TimeZone => eval_timezone_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::IsFinite => eval_isfinite_function(&values),
         BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),

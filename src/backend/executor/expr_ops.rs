@@ -23,6 +23,7 @@ use crate::backend::executor::jsonb::{
 };
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
+use crate::include::nodes::datetime::{TimeTzADT, USECS_PER_SEC};
 use crate::pgrust::compact_string::CompactString;
 
 pub(crate) fn compare_order_by_keys(
@@ -93,10 +94,7 @@ pub(crate) fn compare_order_values(
         (Value::Float64(a), Value::Int64(b)) => Ok(pg_float_cmp(*a, *b as f64)),
         (Value::Date(a), Value::Date(b)) => Ok(a.cmp(b)),
         (Value::Time(a), Value::Time(b)) => Ok(a.cmp(b)),
-        (Value::TimeTz(a), Value::TimeTz(b)) => Ok(a
-            .time
-            .cmp(&b.time)
-            .then_with(|| a.offset_seconds.cmp(&b.offset_seconds))),
+        (Value::TimeTz(a), Value::TimeTz(b)) => Ok(timetz_order_key(*a).cmp(&timetz_order_key(*b))),
         (Value::Timestamp(a), Value::Timestamp(b)) => Ok(a.cmp(b)),
         (Value::TimestampTz(a), Value::TimestampTz(b)) => Ok(a.cmp(b)),
         (Value::Interval(a), Value::Interval(b)) => Ok(a.cmp_key().cmp(&b.cmp_key())),
@@ -814,8 +812,8 @@ pub(crate) fn order_values(
         (Value::Date(l), Value::Date(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Time(l), Value::Time(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::TimeTz(l), Value::TimeTz(r)) => Ok(Value::Bool(compare_ord(
-            (l.time, l.offset_seconds),
-            (r.time, r.offset_seconds),
+            timetz_order_key(*l),
+            timetz_order_key(*r),
             op,
         ))),
         (Value::Timestamp(l), Value::Timestamp(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
@@ -966,6 +964,10 @@ fn compare_ord<T: Ord>(left: T, right: T, op: &'static str) -> bool {
         ">=" => left >= right,
         _ => unreachable!(),
     }
+}
+
+fn timetz_order_key(value: TimeTzADT) -> i64 {
+    value.time.0 - i64::from(value.offset_seconds) * USECS_PER_SEC
 }
 
 fn compare_record_values(

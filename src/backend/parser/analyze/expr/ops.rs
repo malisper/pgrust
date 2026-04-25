@@ -113,6 +113,18 @@ pub(super) fn bind_arithmetic_expr(
     }
     if !left_type.is_array
         && !right_type.is_array
+        && op == "+"
+        && matches!(left_type.kind, SqlTypeKind::TimeTz)
+        && matches!(right_type.kind, SqlTypeKind::TimeTz)
+    {
+        return Err(ParseError::UndefinedOperator {
+            op,
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        });
+    }
+    if !left_type.is_array
+        && !right_type.is_array
         && (matches!(left_type.kind, SqlTypeKind::Money)
             || matches!(right_type.kind, SqlTypeKind::Money))
     {
