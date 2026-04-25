@@ -10505,31 +10505,14 @@ limit 1"#,
     assert!(build_plan(&stmt, &catalog()).is_ok());
 }
 
-#[test]
-fn recursive_cte_allows_lisp_expr_frame_branches() {
-    let stmt = parse_select(
+fn assert_lisp_expr_frame_branch_plan(frame: &str, case_arms: &str) {
+    let sql = format!(
         r#"with recursive frames as (
-  select '{"type":"expr","env":{"x":9},"expr":1}'::jsonb as frame
-  union all
-  select '{"type":"expr","env":{"x":9},"expr":"x"}'::jsonb
-  union all
-  select '{"type":"expr","env":{},"expr":["if",true,1,0]}'::jsonb
-  union all
-  select '{"type":"expr","env":{},"expr":["lambda",["x"],["+", "x", 1]]}'::jsonb
-  union all
-  select '{"type":"expr","env":{},"expr":["call",1,2]}'::jsonb
+  select '{frame}'::jsonb as frame
 )
 select
   case
-    when jsonb_typeof(expr) = 'number'
-    then jsonb_build_object('result', expr)
-    when jsonb_typeof(expr) = 'string'
-    then jsonb_build_object('result', env -> expr_string)
-    when op_string = 'if'
-    then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_if', 'expr', expr, 'env', env)))
-    when op_string = 'lambda'
-    then jsonb_build_object('result', jsonb_build_object('args', arg1, 'body', arg2, 'env', env))
-    else jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_args', 'left', expr, 'done', '[]'::jsonb, 'env', env)))
+{case_arms}
   end
 from (
   select
@@ -10540,35 +10523,75 @@ from (
     frame -> 'expr' -> 2 as arg2,
     frame -> 'env' as env
   from frames
-) sub"#,
-    )
-    .unwrap();
+) sub"#
+    );
+    let stmt = parse_select(&sql).unwrap();
     assert!(build_plan(&stmt, &catalog()).is_ok());
 }
 
 #[test]
-fn recursive_cte_allows_lisp_eval_args_frame_branches() {
-    let stmt = parse_select(
+fn recursive_cte_allows_lisp_expr_number_branch() {
+    assert_lisp_expr_frame_branch_plan(
+        r#"{"type":"expr","env":{"x":9},"expr":1}"#,
+        r#"    when jsonb_typeof(expr) = 'number'
+    then jsonb_build_object('result', expr)
+    else jsonb_build_object('result', null)
+"#,
+    );
+}
+
+#[test]
+fn recursive_cte_allows_lisp_expr_string_lookup_branch() {
+    assert_lisp_expr_frame_branch_plan(
+        r#"{"type":"expr","env":{"x":9},"expr":"x"}"#,
+        r#"    when jsonb_typeof(expr) = 'string'
+    then jsonb_build_object('result', env -> expr_string)
+    else jsonb_build_object('result', null)
+"#,
+    );
+}
+
+#[test]
+fn recursive_cte_allows_lisp_expr_if_branch() {
+    assert_lisp_expr_frame_branch_plan(
+        r#"{"type":"expr","env":{},"expr":["if",true,1,0]}"#,
+        r#"    when op_string = 'if'
+    then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_if', 'expr', expr, 'env', env)))
+    else jsonb_build_object('result', null)
+"#,
+    );
+}
+
+#[test]
+fn recursive_cte_allows_lisp_expr_lambda_branch() {
+    assert_lisp_expr_frame_branch_plan(
+        r#"{"type":"expr","env":{},"expr":["lambda",["x"],["+", "x", 1]]}"#,
+        r#"    when op_string = 'lambda'
+    then jsonb_build_object('result', jsonb_build_object('args', arg1, 'body', arg2, 'env', env))
+    else jsonb_build_object('result', null)
+"#,
+    );
+}
+
+#[test]
+fn recursive_cte_allows_lisp_expr_eval_args_fallback_branch() {
+    assert_lisp_expr_frame_branch_plan(
+        r#"{"type":"expr","env":{},"expr":["call",1,2]}"#,
+        r#"    when op_string = '__never__'
+    then jsonb_build_object('result', null)
+    else jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_args', 'left', expr, 'done', '[]'::jsonb, 'env', env)))
+"#,
+    );
+}
+
+fn assert_lisp_eval_args_frame_branch_plan(frame: &str, result: &str, case_arms: &str) {
+    let sql = format!(
         r#"with recursive frames as (
-  select '{"type":"eval_args","left":[],"done":[1,2],"env":{}}'::jsonb as frame, null::jsonb as result
-  union all
-  select '{"type":"eval_args","left":[1,2],"done":[],"env":{}}'::jsonb, null::jsonb
-  union all
-  select '{"type":"eval_args","left":[2],"done":[1],"env":{}}'::jsonb, '9'::jsonb
+  select '{frame}'::jsonb as frame, {result}::jsonb as result
 )
 select
   case
-    when result is null and jsonb_array_length(args_left) = 0
-    then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_call', 'expr', args_done, 'env', env)))
-    when result is null
-    then jsonb_build_object(
-      'stack',
-      jsonb_build_array(
-        jsonb_build_object('type', 'expr', 'expr', args_left -> 0, 'env', env),
-        jsonb_build_object('type', 'eval_args', 'left', args_left - 0, 'done', args_done, 'env', env)
-      )
-    )
-    else jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_args', 'left', args_left, 'done', args_done || jsonb_build_array(result), 'env', env)))
+{case_arms}
   end
 from (
   select
@@ -10577,10 +10600,52 @@ from (
     frame -> 'env' as env,
     result
   from frames
-) sub"#,
-    )
-    .unwrap();
+) sub"#
+    );
+    let stmt = parse_select(&sql).unwrap();
     assert!(build_plan(&stmt, &catalog()).is_ok());
+}
+
+#[test]
+fn recursive_cte_allows_lisp_eval_args_empty_left_branch() {
+    assert_lisp_eval_args_frame_branch_plan(
+        r#"{"type":"eval_args","left":[],"done":[1,2],"env":{}}"#,
+        "null",
+        r#"    when result is null and jsonb_array_length(args_left) = 0
+    then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_call', 'expr', args_done, 'env', env)))
+    else jsonb_build_object('result', null)
+"#,
+    );
+}
+
+#[test]
+fn recursive_cte_allows_lisp_eval_args_schedule_next_arg_branch() {
+    assert_lisp_eval_args_frame_branch_plan(
+        r#"{"type":"eval_args","left":[1,2],"done":[],"env":{}}"#,
+        "null",
+        r#"    when result is null
+    then jsonb_build_object(
+      'stack',
+      jsonb_build_array(
+        jsonb_build_object('type', 'expr', 'expr', args_left -> 0, 'env', env),
+        jsonb_build_object('type', 'eval_args', 'left', args_left - 0, 'done', args_done, 'env', env)
+      )
+    )
+    else jsonb_build_object('result', null)
+"#,
+    );
+}
+
+#[test]
+fn recursive_cte_allows_lisp_eval_args_append_result_branch() {
+    assert_lisp_eval_args_frame_branch_plan(
+        r#"{"type":"eval_args","left":[2],"done":[1],"env":{}}"#,
+        "'9'",
+        r#"    when result is null
+    then jsonb_build_object('result', null)
+    else jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_args', 'left', args_left, 'done', args_done || jsonb_build_array(result), 'env', env)))
+"#,
+    );
 }
 
 fn assert_lisp_eval_call_branch_plan(frames: &str, case_arms: &str) {
