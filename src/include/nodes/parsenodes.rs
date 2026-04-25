@@ -3426,6 +3426,8 @@ pub enum SqlExpr {
         field: String,
     },
     CurrentDate,
+    CurrentCatalog,
+    CurrentSchema,
     CurrentUser,
     SessionUser,
     CurrentRole,

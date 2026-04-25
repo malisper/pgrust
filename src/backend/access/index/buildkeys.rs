@@ -117,6 +117,8 @@ impl IndexBuildKeyProjector {
                 row_locks: std::sync::Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
                 checkpoint_stats: CheckpointStatsSnapshot::default(),
                 datetime_config: expr_ctx.datetime_config.clone(),
+                statement_timestamp_usecs:
+                    crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
                 gucs: std::collections::HashMap::new(),
                 interrupts: ctx.interrupts.clone(),
                 stats: expr_ctx.stats.clone(),

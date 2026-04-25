@@ -639,6 +639,8 @@ pub(crate) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .collect(),
         },
         expr @ (Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole
@@ -983,6 +985,8 @@ pub(crate) fn rewrite_local_vars_for_output_exprs(
                 .collect(),
         },
         expr @ (Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole

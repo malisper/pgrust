@@ -2730,6 +2730,8 @@ impl<'a> RecursiveReferenceChecker<'a> {
             | SqlExpr::NumericLiteral(_)
             | SqlExpr::Random
             | SqlExpr::CurrentDate
+            | SqlExpr::CurrentCatalog
+            | SqlExpr::CurrentSchema
             | SqlExpr::CurrentUser
             | SqlExpr::SessionUser
             | SqlExpr::CurrentRole
@@ -3020,6 +3022,8 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
         | SqlExpr::NumericLiteral(_)
         | SqlExpr::Random
         | SqlExpr::CurrentDate
+        | SqlExpr::CurrentCatalog
+        | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
         | SqlExpr::CurrentRole
