@@ -344,6 +344,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
                     .generated
                     .map(|kind| kind.catalog_char())
                     .unwrap_or('\0'),
+                attcollation: column.collation_oid,
                 sql_type: column.sql_type,
             }
         }));

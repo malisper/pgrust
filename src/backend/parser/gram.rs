@@ -580,13 +580,82 @@ fn parse_partition_spec_clause(
         if trimmed.is_empty() {
             return Err(ParseError::UnexpectedEof.into());
         }
-        let (column, remainder) = parse_unqualified_identifier(trimmed, "partition column")?;
-        if !remainder.trim().is_empty() {
-            return Err(PartitionStatementParseError::Unsupported);
-        }
-        keys.push(RawPartitionKey::Column(column));
+        keys.push(parse_partition_key_item(trimmed)?);
     }
     Ok((RawPartitionSpec { strategy, keys }, rest))
+}
+
+fn parse_partition_key_item(item: &str) -> Result<RawPartitionKey, PartitionStatementParseError> {
+    if let Ok(expr) = parse_partition_key_expr(item) {
+        return Ok(RawPartitionKey {
+            expr,
+            expr_sql: item.to_string(),
+            opclass: None,
+        });
+    }
+
+    let Some(split) = find_top_level_trailing_identifier_start(item) else {
+        return Err(PartitionStatementParseError::Parse(
+            ParseError::UnexpectedToken {
+                expected: "partition key expression",
+                actual: item.to_string(),
+            },
+        ));
+    };
+    let expr_sql = item[..split].trim();
+    let opclass_sql = item[split..].trim();
+    if expr_sql.is_empty() || opclass_sql.is_empty() {
+        return Err(ParseError::UnexpectedEof.into());
+    }
+    let (parts, remainder) = parse_qualified_identifier_parts(opclass_sql)?;
+    if !remainder.trim().is_empty() {
+        return Err(PartitionStatementParseError::Unsupported);
+    }
+    Ok(RawPartitionKey {
+        expr: parse_partition_key_expr(expr_sql)?,
+        expr_sql: expr_sql.to_string(),
+        opclass: Some(parts.join(".")),
+    })
+}
+
+fn parse_partition_key_expr(sql: &str) -> Result<SqlExpr, ParseError> {
+    parse_expr(&format!("({sql})"))
+}
+
+fn find_top_level_trailing_identifier_start(input: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut last_ws = None;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = parse_delimited_token_end(bytes, i, b'\'');
+                continue;
+            }
+            b'"' => {
+                i = parse_delimited_token_end(bytes, i, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            byte if byte.is_ascii_whitespace() && depth == 0 => last_ws = Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    last_ws.map(|index| {
+        input[index..]
+            .find(|ch: char| !ch.is_ascii_whitespace())
+            .map(|offset| index + offset)
+            .unwrap_or(input.len())
+    })
 }
 
 fn parse_partition_bound_clause(
@@ -11313,6 +11382,7 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
         inner.next().ok_or(ParseError::UnexpectedEof)?,
     ))?;
     let mut default_expr = None;
+    let mut collation = None;
     let mut generated = None;
     let mut identity = None;
     let storage = None;
@@ -11326,6 +11396,13 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
             continue;
         };
         match flag.as_rule() {
+            Rule::column_collation => {
+                collation = Some(build_collation_name(
+                    flag.into_inner()
+                        .find(|part| part.as_rule() == Rule::collation_name)
+                        .ok_or(ParseError::UnexpectedEof)?,
+                )?);
+            }
             Rule::column_default => {
                 default_expr = flag
                     .into_inner()
@@ -11380,6 +11457,7 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
     Ok(ColumnDef {
         name,
         ty,
+        collation,
         default_expr,
         generated,
         identity,

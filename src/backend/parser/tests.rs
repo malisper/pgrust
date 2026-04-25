@@ -2425,6 +2425,7 @@ fn parse_alter_table_add_column_statement() {
             column: ColumnDef {
                 name: "note".into(),
                 ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
+                collation: None,
                 default_expr: Some("'hello'".into()),
                 generated: None,
                 identity: None,
@@ -8228,13 +8229,89 @@ fn parse_create_table_partition_by_range() {
                 Some(RawPartitionSpec {
                     strategy: PartitionStrategy::Range,
                     keys: vec![
-                        RawPartitionKey::Column("a".into()),
-                        RawPartitionKey::Column("b".into()),
+                        RawPartitionKey {
+                            expr: SqlExpr::Column("a".into()),
+                            expr_sql: "a".into(),
+                            opclass: None,
+                        },
+                        RawPartitionKey {
+                            expr: SqlExpr::Column("b".into()),
+                            expr_sql: "b".into(),
+                            opclass: None,
+                        },
                     ],
                 })
             );
             assert_eq!(ct.partition_of, None);
             assert_eq!(ct.partition_bound, None);
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_table_column_collation() {
+    match parse_statement("create table coll_pruning (a text collate \"C\")").unwrap() {
+        Statement::CreateTable(ct) => {
+            let column = ct.columns().next().expect("column");
+            assert_eq!(column.name, "a");
+            assert_eq!(column.collation.as_deref(), Some("C"));
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_partition_keys_with_opclasses_and_expressions() {
+    match parse_statement(
+        "create table hp (a int4, b text) partition by hash (a part_test_int4_ops, b part_test_text_ops)",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            let spec = ct.partition_spec.expect("partition spec");
+            assert_eq!(spec.strategy, PartitionStrategy::Hash);
+            assert_eq!(spec.keys[0].expr, SqlExpr::Column("a".into()));
+            assert_eq!(spec.keys[0].opclass.as_deref(), Some("part_test_int4_ops"));
+            assert_eq!(spec.keys[1].expr, SqlExpr::Column("b".into()));
+            assert_eq!(spec.keys[1].opclass.as_deref(), Some("part_test_text_ops"));
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+
+    match parse_statement("create table rlp3 (b varchar, a int) partition by list (b varchar_ops)")
+        .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            let spec = ct.partition_spec.expect("partition spec");
+            assert_eq!(spec.keys[0].expr, SqlExpr::Column("b".into()));
+            assert_eq!(spec.keys[0].opclass.as_deref(), Some("varchar_ops"));
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+
+    match parse_statement(
+        "create table mc3p (a int, b int, c int) partition by range (a, abs(b), c)",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            let spec = ct.partition_spec.expect("partition spec");
+            assert_eq!(spec.keys[1].expr_sql, "abs(b)");
+            assert!(matches!(spec.keys[1].expr, SqlExpr::FuncCall { .. }));
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+
+    match parse_statement(
+        "create table cp (a text) partition by range (substr(a, 1) collate \"POSIX\", substr(a, 1) collate \"C\")",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            let spec = ct.partition_spec.expect("partition spec");
+            assert!(matches!(spec.keys[0].expr, SqlExpr::Collate { .. }));
+            assert!(matches!(spec.keys[1].expr, SqlExpr::Collate { .. }));
         }
         other => panic!("expected CreateTable, got {:?}", other),
     }
@@ -8264,7 +8341,11 @@ fn parse_create_table_partition_of_with_subpartition_spec() {
                 ct.partition_spec,
                 Some(RawPartitionSpec {
                     strategy: PartitionStrategy::List,
-                    keys: vec![RawPartitionKey::Column("b".into())],
+                    keys: vec![RawPartitionKey {
+                        expr: SqlExpr::Column("b".into()),
+                        expr_sql: "b".into(),
+                        opclass: None,
+                    }],
                 })
             );
         }
@@ -8382,7 +8463,11 @@ fn parse_create_table_partition_by_hash() {
                 ct.partition_spec,
                 Some(RawPartitionSpec {
                     strategy: PartitionStrategy::Hash,
-                    keys: vec![RawPartitionKey::Column("a".into())],
+                    keys: vec![RawPartitionKey {
+                        expr: SqlExpr::Column("a".into()),
+                        expr_sql: "a".into(),
+                        opclass: None,
+                    }],
                 })
             );
         }

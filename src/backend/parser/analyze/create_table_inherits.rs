@@ -293,6 +293,7 @@ fn merge_inherited_columns(
             let inherited = crate::backend::parser::ColumnDef {
                 name: column.name.clone(),
                 ty: RawTypeName::Builtin(column.sql_type),
+                collation: None,
                 default_expr: if generated.is_some() {
                     None
                 } else {
