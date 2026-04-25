@@ -408,6 +408,13 @@ impl Database {
             let type_oid = range_type_ref_for_sql_type(sql_type)
                 .map(|range_type| range_type.type_oid())
                 .or_else(|| {
+                    (matches!(
+                        sql_type.element_type().kind,
+                        crate::backend::parser::SqlTypeKind::Enum
+                    ) && sql_type.element_type().type_oid != 0)
+                        .then_some(sql_type.element_type().type_oid)
+                })
+                .or_else(|| {
                     type_rows
                         .iter()
                         .find(|row| row.sql_type == sql_type)
@@ -457,6 +464,33 @@ impl Database {
                     access_method.oid,
                     type_oid,
                 )
+                .or_else(|| {
+                    matches!(
+                        sql_type.element_type().kind,
+                        crate::backend::parser::SqlTypeKind::Enum
+                    )
+                    .then(|| {
+                        let fallback_oid = match access_method.oid {
+                            crate::include::catalog::BTREE_AM_OID => {
+                                crate::include::catalog::OID_BTREE_OPCLASS_OID
+                            }
+                            crate::include::catalog::HASH_AM_OID => {
+                                crate::include::catalog::OID_HASH_OPCLASS_OID
+                            }
+                            _ => 0,
+                        };
+                        opclass_rows
+                            .iter()
+                            .find(|row| {
+                                (row.opcmethod == access_method.oid
+                                    && row.opcdefault
+                                    && row.opcintype == crate::include::catalog::ANYENUMOID)
+                                    || row.oid == fallback_oid
+                            })
+                            .cloned()
+                    })
+                    .flatten()
+                })
             }
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::MissingDefaultOpclass {

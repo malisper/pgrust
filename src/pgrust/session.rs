@@ -9,14 +9,15 @@ use std::time::Duration;
 
 use crate::backend::access::transam::xact::{CommandId, INVALID_TRANSACTION_ID, TransactionId};
 use crate::backend::catalog::store::CatalogMutationEffect;
-use crate::backend::commands::copyfrom::parse_text_array_literal;
+use crate::backend::commands::copyfrom::parse_text_array_literal_with_catalog;
 use crate::backend::commands::copyto::{CopyToSink, IoCopyToSink, write_copy_to};
 use crate::backend::commands::tablecmds::{execute_merge, execute_prepared_insert_row};
 use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
     DeferredForeignKeyTracker, ExecError, ExecutorContext, ExecutorTransactionState,
-    SessionReplicationRole, StatementResult, Value, cast_value, execute_planned_stmt,
+    SessionReplicationRole, StatementResult, Value, cast_value,
+    cast_value_with_source_type_catalog_and_config, execute_planned_stmt,
     execute_readonly_statement_with_config, parse_bytea_text,
 };
 use crate::backend::libpq::pqformat::FloatFormatOptions;
@@ -5476,13 +5477,31 @@ impl Session {
                                 | ScalarType::Circle
                                 | ScalarType::TsVector
                                 | ScalarType::TsQuery => {
-                                    cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                                    cast_value_with_source_type_catalog_and_config(
+                                        Value::Text(raw.clone().into()),
+                                        None,
+                                        column.sql_type,
+                                        Some(&catalog),
+                                        &self.datetime_config,
+                                    )?
                                 }
                                 ScalarType::BitString => {
-                                    cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                                    cast_value_with_source_type_catalog_and_config(
+                                        Value::Text(raw.clone().into()),
+                                        None,
+                                        column.sql_type,
+                                        Some(&catalog),
+                                        &self.datetime_config,
+                                    )?
                                 }
                                 ScalarType::Inet | ScalarType::Cidr => {
-                                    cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                                    cast_value_with_source_type_catalog_and_config(
+                                        Value::Text(raw.clone().into()),
+                                        None,
+                                        column.sql_type,
+                                        Some(&catalog),
+                                        &self.datetime_config,
+                                    )?
                                 }
                                 ScalarType::Float32 | ScalarType::Float64 => raw
                                     .parse::<f64>()
@@ -5508,7 +5527,13 @@ impl Session {
                                         .into(),
                                 ),
                                 ScalarType::Xml => {
-                                    cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                                    cast_value_with_source_type_catalog_and_config(
+                                        Value::Text(raw.clone().into()),
+                                        None,
+                                        column.sql_type,
+                                        Some(&catalog),
+                                        &self.datetime_config,
+                                    )?
                                 }
                                 ScalarType::Bytea => Value::Bytea(parse_bytea_text(raw)?),
                                 ScalarType::Uuid => {
@@ -5524,7 +5549,11 @@ impl Session {
                                 }
                                 ScalarType::Bool => Value::Bool(parse_pg_bool_text(raw)?),
                                 ScalarType::Array(_) => {
-                                    parse_text_array_literal(raw, column.sql_type.element_type())?
+                                    parse_text_array_literal_with_catalog(
+                                        raw,
+                                        column.sql_type.element_type(),
+                                        Some(&catalog),
+                                    )?
                                 }
                             }
                                 };

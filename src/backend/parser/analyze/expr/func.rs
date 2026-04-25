@@ -425,6 +425,32 @@ pub(super) fn bind_scalar_function_call(
     let build_func = |funcvariadic: bool, args: Vec<Expr>| {
         Expr::resolved_builtin_func(func, func_oid, result_type, funcvariadic, args)
     };
+    if matches!(
+        func,
+        BuiltinScalarFunction::EnumFirst
+            | BuiltinScalarFunction::EnumLast
+            | BuiltinScalarFunction::EnumRange
+    ) {
+        let enum_type = result_type
+            .map(|ty| if ty.is_array { ty.element_type() } else { ty })
+            .filter(|ty| matches!(ty.kind, SqlTypeKind::Enum) && ty.type_oid != 0)
+            .or_else(|| {
+                arg_types
+                    .iter()
+                    .copied()
+                    .find(|ty| matches!(ty.kind, SqlTypeKind::Enum) && ty.type_oid != 0)
+            })
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "concrete enum argument",
+                actual: format!("{func:?}({} args)", args.len()),
+            })?;
+        let coerced = bound_args
+            .iter()
+            .zip(arg_types.iter().copied())
+            .map(|(arg, actual_type)| coerce_bound_expr(arg.clone(), actual_type, enum_type))
+            .collect();
+        return Ok(build_func(func_variadic, coerced));
+    }
     match func {
         BuiltinScalarFunction::Random | BuiltinScalarFunction::RandomNormal => {
             if bound_args.is_empty() {

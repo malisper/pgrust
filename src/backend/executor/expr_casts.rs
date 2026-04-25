@@ -927,6 +927,15 @@ pub(crate) fn parse_text_array_literal_with_op(
     parse_text_array_literal_with_options(raw, element_type, op, true)
 }
 
+pub(crate) fn parse_text_array_literal_with_catalog_and_op(
+    raw: &str,
+    element_type: SqlType,
+    op: &'static str,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    parse_text_array_literal_with_options_and_catalog(raw, element_type, op, true, catalog)
+}
+
 pub(crate) fn parse_text_array_literal_with_options(
     raw: &str,
     element_type: SqlType,

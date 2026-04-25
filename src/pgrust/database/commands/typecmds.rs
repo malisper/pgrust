@@ -8,6 +8,7 @@ use crate::backend::parser::{
     CreateRangeTypeStatement, CreateTypeStatement, DropTypeStatement, ParseError,
     resolve_raw_type_name,
 };
+use crate::backend::utils::misc::notices::push_notice;
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, is_system_column_name, map_catalog_error, reject_type_with_dependents,
 };
@@ -567,13 +568,14 @@ impl Database {
             .ok_or_else(|| type_does_not_exist_error(&stmt.type_name))?;
         if entry.labels.iter().any(|label| label.label == stmt.label) {
             if stmt.if_not_exists {
+                push_notice(format!(
+                    "enum label \"{}\" already exists, skipping",
+                    stmt.label
+                ));
                 return Ok(StatementResult::AffectedRows(0));
             }
             return Err(ExecError::DetailedError {
-                message: format!(
-                    "enum label \"{}\" already exists for enum {}",
-                    stmt.label, entry.name
-                ),
+                message: format!("enum label \"{}\" already exists", stmt.label),
                 detail: None,
                 hint: None,
                 sqlstate: "42710",
@@ -656,27 +658,24 @@ impl Database {
             .values_mut()
             .find(|entry| entry.oid == type_oid)
             .ok_or_else(|| type_does_not_exist_error(&stmt.type_name))?;
+        let label_index = entry
+            .labels
+            .iter()
+            .position(|label| label.label == stmt.old_label)
+            .ok_or_else(|| enum_neighbor_missing_error(&entry.name, &stmt.old_label))?;
         if entry
             .labels
             .iter()
             .any(|label| label.label == stmt.new_label)
         {
             return Err(ExecError::DetailedError {
-                message: format!(
-                    "enum label \"{}\" already exists for enum {}",
-                    stmt.new_label, entry.name
-                ),
+                message: format!("enum label \"{}\" already exists", stmt.new_label),
                 detail: None,
                 hint: None,
                 sqlstate: "42710",
             });
         }
-        let label = entry
-            .labels
-            .iter_mut()
-            .find(|label| label.label == stmt.old_label)
-            .ok_or_else(|| enum_neighbor_missing_error(&entry.name, &stmt.old_label))?;
-        label.label = stmt.new_label.clone();
+        entry.labels[label_index].label = stmt.new_label.clone();
         self.plan_cache.invalidate_all();
         Ok(StatementResult::AffectedRows(0))
     }
@@ -856,11 +855,7 @@ impl Database {
         existing_enum_types: Option<&std::collections::BTreeMap<String, EnumTypeEntry>>,
         existing_range_types: Option<&std::collections::BTreeMap<String, RangeTypeEntry>>,
     ) -> Result<u32, ExecError> {
-        let next_catalog_oid = {
-            let catalog = self.catalog.read();
-            let snapshot = catalog.catalog_snapshot().map_err(map_catalog_error)?;
-            snapshot.next_oid()
-        };
+        let next_catalog_oid = self.catalog.read().next_oid();
         let next_dynamic_oid = self
             .domains
             .read()
@@ -870,7 +865,16 @@ impl Database {
                 existing_enum_types
                     .into_iter()
                     .flat_map(|enum_types| enum_types.values())
-                    .map(|entry| entry.array_oid.saturating_add(1)),
+                    .map(|entry| {
+                        entry
+                            .labels
+                            .iter()
+                            .map(|label| label.oid)
+                            .max()
+                            .unwrap_or(entry.array_oid)
+                            .max(entry.array_oid)
+                            .saturating_add(1)
+                    }),
             )
             .chain(
                 existing_enum_types
@@ -880,7 +884,16 @@ impl Database {
                     .flat_map(|enum_types| {
                         enum_types
                             .values()
-                            .map(|entry| entry.array_oid.saturating_add(1))
+                            .map(|entry| {
+                                entry
+                                    .labels
+                                    .iter()
+                                    .map(|label| label.oid)
+                                    .max()
+                                    .unwrap_or(entry.array_oid)
+                                    .max(entry.array_oid)
+                                    .saturating_add(1)
+                            })
                             .collect::<Vec<_>>()
                     }),
             )
@@ -926,8 +939,8 @@ fn enum_type_display_name(stmt: &CreateEnumTypeStatement) -> String {
 fn validate_enum_label_len(label: &str) -> Result<(), ExecError> {
     if label.len() > 63 {
         return Err(ExecError::DetailedError {
-            message: "invalid enum label".into(),
-            detail: Some("Labels must be 63 bytes or shorter.".into()),
+            message: format!("invalid enum label \"{label}\""),
+            detail: Some("Labels must be 63 bytes or less.".into()),
             hint: None,
             sqlstate: "42622",
         });
@@ -936,8 +949,9 @@ fn validate_enum_label_len(label: &str) -> Result<(), ExecError> {
 }
 
 fn enum_neighbor_missing_error(type_name: &str, label: &str) -> ExecError {
+    let _ = type_name;
     ExecError::DetailedError {
-        message: format!("enum label \"{label}\" does not exist for enum {type_name}"),
+        message: format!("\"{label}\" is not an existing enum label"),
         detail: None,
         hint: None,
         sqlstate: "42704",

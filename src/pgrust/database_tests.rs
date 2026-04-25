@@ -27714,6 +27714,41 @@ fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
             vec![Value::Text("happy".into())],
         ]
     );
+
+    clear_backend_notices();
+    db.execute(1, "alter type mood add value if not exists 'sad'")
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(r#"enum label "sad" already exists, skipping"#)]
+    );
+
+    db.execute(1, "create type insenum as enum ('L1', 'L2')")
+        .unwrap();
+    for index in 1..=30 {
+        db.execute(
+            1,
+            &format!("alter type insenum add value 'i{index}' before 'L2'"),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select enumlabel, case when enumsortorder > 20 then null else enumsortorder end \
+             from pg_enum where enumtypid = 'insenum'::regtype order by enumsortorder",
+        )
+        .into_iter()
+        .take(4)
+        .collect::<Vec<_>>(),
+        vec![
+            vec![Value::Text("L1".into()), Value::Float64(1.0)],
+            vec![Value::Text("i1".into()), Value::Float64(2.0)],
+            vec![Value::Text("i2".into()), Value::Float64(3.0)],
+            vec![Value::Text("i3".into()), Value::Float64(4.0)],
+        ]
+    );
 }
 
 #[test]
