@@ -2679,13 +2679,7 @@ fn execute_insert_rows_with_routing(
     let mut routed = BTreeMap::<u32, PartitionResultRelInfo>::new();
     let mut proute = exec_setup_partition_tuple_routing(catalog, &target_relation)?;
     for row in rows {
-        let leaf = exec_find_partition(
-            catalog,
-            &mut proute,
-            &target_relation,
-            row,
-            &ctx.datetime_config,
-        )?;
+        let leaf = exec_find_partition(catalog, &mut proute, &target_relation, row, ctx)?;
         match routed.entry(leaf.relation_oid) {
             Entry::Occupied(mut entry) => entry.get_mut().rows.push(row.clone()),
             Entry::Vacant(entry) => {

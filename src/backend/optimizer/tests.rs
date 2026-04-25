@@ -656,6 +656,9 @@ fn create_partitioned_table(catalog: &mut Catalog, name: &str) -> u32 {
     let spec = LoweredPartitionSpec {
         strategy: PartitionStrategy::Range,
         key_columns: vec!["k".into()],
+        key_exprs: vec![var(1, 1)],
+        key_types: vec![int4()],
+        key_sqls: vec!["k".into()],
         partattrs: vec![1],
         partclass: vec![0],
         partcollation: vec![0],

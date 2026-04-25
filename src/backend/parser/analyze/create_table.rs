@@ -15,7 +15,7 @@ use super::{
     CatalogLookup, CheckConstraintAction, CreateTableStatement, ForeignKeyConstraintAction,
     IndexBackedConstraintAction, LoweredPartitionSpec, NotNullConstraintAction, ParseError,
     PartitionBoundSpec, normalize_create_table_constraints, raw_type_name_hint,
-    resolve_raw_type_name, validate_generated_columns,
+    resolve_collation_oid, resolve_raw_type_name, validate_generated_columns,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +150,20 @@ pub fn lower_create_table(
                 }
                 let nullable = not_null.is_none() && serial_kind.is_none() && column.identity.is_none();
                 let mut desc = column_desc(column.name.clone(), sql_type, nullable);
+                if let Some(collation) = column.collation.as_deref() {
+                    if !super::is_collatable_type(sql_type) {
+                        return Err(ParseError::DetailedError {
+                            message: format!(
+                                "collations are not supported by type {}",
+                                super::sql_type_name(sql_type)
+                            ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42804",
+                        });
+                    }
+                    desc.collation_oid = resolve_collation_oid(collation, catalog)?;
+                }
                 if let Some(not_null) = not_null {
                     desc.not_null_constraint_name = Some(not_null.constraint_name.clone());
                     desc.not_null_constraint_validated = !not_null.not_valid;
@@ -372,6 +386,7 @@ fn expand_like_clause(
             CreateTableElement::Column(crate::backend::parser::ColumnDef {
                 name: column.name.clone(),
                 ty: RawTypeName::Builtin(column.sql_type),
+                collation: None,
                 default_expr: if generated.is_some() {
                     None
                 } else if options.defaults && column.generated.is_none() {
@@ -549,6 +564,7 @@ mod tests {
             elements: vec![CreateTableElement::Column(ColumnDef {
                 name: "a".into(),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::AnyArray)),
+                collation: None,
                 default_expr: None,
                 generated: None,
                 identity: None,
@@ -583,6 +599,7 @@ mod tests {
                 CreateTableElement::Column(ColumnDef {
                     name: "id".into(),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                    collation: None,
                     default_expr: None,
                     generated: None,
                     identity: None,
@@ -595,6 +612,7 @@ mod tests {
                 CreateTableElement::Column(ColumnDef {
                     name: "note".into(),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                    collation: None,
                     default_expr: None,
                     generated: None,
                     identity: None,
@@ -844,6 +862,7 @@ mod tests {
                 CreateTableElement::Column(ColumnDef {
                     name: "id".into(),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                    collation: None,
                     default_expr: None,
                     generated: None,
                     identity: None,
@@ -890,6 +909,7 @@ mod tests {
             elements: vec![CreateTableElement::Column(ColumnDef {
                 name: "id".into(),
                 ty: RawTypeName::Serial(SerialKind::Regular),
+                collation: None,
                 default_expr: None,
                 generated: None,
                 identity: None,
@@ -930,6 +950,7 @@ mod tests {
             elements: vec![CreateTableElement::Column(ColumnDef {
                 name: "id".into(),
                 ty: RawTypeName::Serial(SerialKind::Regular),
+                collation: None,
                 default_expr: Some("7".into()),
                 generated: None,
                 identity: None,
@@ -966,6 +987,7 @@ mod tests {
             elements: vec![CreateTableElement::Column(ColumnDef {
                 name: "f1".into(),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                collation: None,
                 default_expr: None,
                 generated: None,
                 identity: None,
@@ -1001,6 +1023,7 @@ mod tests {
             elements: vec![CreateTableElement::Column(ColumnDef {
                 name: "f1".into(),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                collation: None,
                 default_expr: None,
                 generated: None,
                 identity: None,

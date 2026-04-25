@@ -171,7 +171,7 @@ pub(super) fn resolve_generate_series_common_type(
     Ok(common)
 }
 
-pub(super) fn sql_type_name(ty: SqlType) -> String {
+pub(crate) fn sql_type_name(ty: SqlType) -> String {
     let base = if ty.is_range() {
         builtin_range_name_for_sql_type(ty).unwrap_or("range")
     } else if ty.is_multirange() {
