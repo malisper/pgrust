@@ -678,6 +678,24 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     SqlType::new(SqlTypeKind::TimestampTz)
                 }
                 Some(BuiltinScalarFunction::TimeOfDay) => SqlType::new(SqlTypeKind::Text),
+                Some(BuiltinScalarFunction::ToRegProc) => SqlType::new(SqlTypeKind::RegProc),
+                Some(BuiltinScalarFunction::ToRegProcedure) => {
+                    SqlType::new(SqlTypeKind::RegProcedure)
+                }
+                Some(BuiltinScalarFunction::ToRegOper) => SqlType::new(SqlTypeKind::RegOper),
+                Some(BuiltinScalarFunction::ToRegOperator) => {
+                    SqlType::new(SqlTypeKind::RegOperator)
+                }
+                Some(BuiltinScalarFunction::ToRegClass) => SqlType::new(SqlTypeKind::RegClass),
+                Some(BuiltinScalarFunction::ToRegType) => SqlType::new(SqlTypeKind::RegType),
+                Some(BuiltinScalarFunction::ToRegTypeMod) => SqlType::new(SqlTypeKind::Int4),
+                Some(BuiltinScalarFunction::ToRegRole) => SqlType::new(SqlTypeKind::RegRole),
+                Some(BuiltinScalarFunction::ToRegNamespace) => {
+                    SqlType::new(SqlTypeKind::RegNamespace)
+                }
+                Some(BuiltinScalarFunction::ToRegCollation) => {
+                    SqlType::new(SqlTypeKind::RegCollation)
+                }
                 Some(BuiltinScalarFunction::DatePart) => SqlType::new(SqlTypeKind::Float8),
                 Some(BuiltinScalarFunction::DateTrunc) => match args.args().get(1).map(|arg| {
                     infer_sql_expr_type_with_ctes(
@@ -750,6 +768,15 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::Md5)
                 | Some(BuiltinScalarFunction::Chr)
                 | Some(BuiltinScalarFunction::QuoteLiteral)
+                | Some(BuiltinScalarFunction::FormatType)
+                | Some(BuiltinScalarFunction::RegProcToText)
+                | Some(BuiltinScalarFunction::RegOperToText)
+                | Some(BuiltinScalarFunction::RegOperatorToText)
+                | Some(BuiltinScalarFunction::RegProcedureToText)
+                | Some(BuiltinScalarFunction::RegCollationToText)
+                | Some(BuiltinScalarFunction::RegClassToText)
+                | Some(BuiltinScalarFunction::RegTypeToText)
+                | Some(BuiltinScalarFunction::RegRoleToText)
                 | Some(BuiltinScalarFunction::Replace)
                 | Some(BuiltinScalarFunction::SplitPart)
                 | Some(BuiltinScalarFunction::Translate)

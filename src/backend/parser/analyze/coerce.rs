@@ -63,6 +63,18 @@ fn lower_special_cast(expr: &Expr, from: SqlType, to: SqlType) -> Option<Expr> {
             vec![expr.clone()],
         ));
     }
+    if matches!(from.element_type().kind, SqlTypeKind::RegProc)
+        && matches!(to.element_type().kind, SqlTypeKind::Text)
+        && !from.is_array
+        && !to.is_array
+    {
+        return Some(Expr::builtin_func(
+            BuiltinScalarFunction::RegProcToText,
+            Some(SqlType::new(SqlTypeKind::Text)),
+            false,
+            vec![expr.clone()],
+        ));
+    }
     if matches!(from.element_type().kind, SqlTypeKind::RegClass)
         && matches!(to.element_type().kind, SqlTypeKind::Text)
         && !from.is_array
@@ -99,6 +111,30 @@ fn lower_special_cast(expr: &Expr, from: SqlType, to: SqlType) -> Option<Expr> {
             vec![expr.clone()],
         ));
     }
+    if matches!(from.element_type().kind, SqlTypeKind::RegOper)
+        && matches!(to.element_type().kind, SqlTypeKind::Text)
+        && !from.is_array
+        && !to.is_array
+    {
+        return Some(Expr::builtin_func(
+            BuiltinScalarFunction::RegOperToText,
+            Some(SqlType::new(SqlTypeKind::Text)),
+            false,
+            vec![expr.clone()],
+        ));
+    }
+    if matches!(from.element_type().kind, SqlTypeKind::RegOperator)
+        && matches!(to.element_type().kind, SqlTypeKind::Text)
+        && !from.is_array
+        && !to.is_array
+    {
+        return Some(Expr::builtin_func(
+            BuiltinScalarFunction::RegOperatorToText,
+            Some(SqlType::new(SqlTypeKind::Text)),
+            false,
+            vec![expr.clone()],
+        ));
+    }
     if matches!(from.element_type().kind, SqlTypeKind::RegProcedure)
         && matches!(to.element_type().kind, SqlTypeKind::Text)
         && !from.is_array
@@ -106,6 +142,18 @@ fn lower_special_cast(expr: &Expr, from: SqlType, to: SqlType) -> Option<Expr> {
     {
         return Some(Expr::builtin_func(
             BuiltinScalarFunction::RegProcedureToText,
+            Some(SqlType::new(SqlTypeKind::Text)),
+            false,
+            vec![expr.clone()],
+        ));
+    }
+    if matches!(from.element_type().kind, SqlTypeKind::RegCollation)
+        && matches!(to.element_type().kind, SqlTypeKind::Text)
+        && !from.is_array
+        && !to.is_array
+    {
+        return Some(Expr::builtin_func(
+            BuiltinScalarFunction::RegCollationToText,
             Some(SqlType::new(SqlTypeKind::Text)),
             false,
             vec![expr.clone()],
@@ -142,9 +190,13 @@ pub(super) fn resolve_numeric_binary_type(
     if matches!(left.kind, Int8) || matches!(right.kind, Int8) {
         return Ok(SqlType::new(Int8));
     }
-    if matches!(left.kind, Int4 | Oid | RegType | RegRole | RegNamespace)
-        || matches!(right.kind, Int4 | Oid | RegType | RegRole | RegNamespace)
-    {
+    if matches!(
+        left.kind,
+        Int4 | Oid | RegProc | RegType | RegRole | RegNamespace | RegOper | RegCollation
+    ) || matches!(
+        right.kind,
+        Int4 | Oid | RegProc | RegType | RegRole | RegNamespace | RegOper | RegCollation
+    ) {
         return Ok(SqlType::new(Int4));
     }
     Ok(SqlType::new(Int2))
@@ -200,12 +252,15 @@ pub(crate) fn sql_type_name(ty: SqlType) -> String {
             SqlTypeKind::Int8 => "bigint",
             SqlTypeKind::Name => "name",
             SqlTypeKind::Oid => "oid",
+            SqlTypeKind::RegProc => "regproc",
             SqlTypeKind::RegClass => "regclass",
             SqlTypeKind::RegType => "regtype",
             SqlTypeKind::RegRole => "regrole",
             SqlTypeKind::RegNamespace => "regnamespace",
+            SqlTypeKind::RegOper => "regoper",
             SqlTypeKind::RegOperator => "regoperator",
             SqlTypeKind::RegProcedure => "regprocedure",
+            SqlTypeKind::RegCollation => "regcollation",
             SqlTypeKind::Tid => "tid",
             SqlTypeKind::Xid => "xid",
             SqlTypeKind::OidVector => "oidvector",

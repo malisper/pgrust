@@ -25421,8 +25421,8 @@ fn regproc_cast_aliases_resolve_in_queries() {
             "select 6403::regproc::text, 6403::pg_catalog.regproc::text"
         ),
         vec![vec![
-            Value::Text("pg_rust_test_fdw_handler()".into()),
-            Value::Text("pg_rust_test_fdw_handler()".into()),
+            Value::Text("pg_rust_test_fdw_handler".into()),
+            Value::Text("pg_rust_test_fdw_handler".into()),
         ]]
     );
 }

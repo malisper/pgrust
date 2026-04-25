@@ -3559,7 +3559,7 @@ fn parse_set_session_authorization_statement() {
 fn parse_regproc_type_name() {
     assert_eq!(
         parse_type_name("regproc").unwrap(),
-        RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegProcedure))
+        RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegProc))
     );
 }
 

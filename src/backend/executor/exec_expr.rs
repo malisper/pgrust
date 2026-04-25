@@ -18,7 +18,7 @@ use super::expr_bit::{
 use super::expr_bool::{eval_booland_statefunc, eval_booleq, eval_boolne, eval_boolor_statefunc};
 use super::expr_casts::{
     cast_value, cast_value_with_config, cast_value_with_source_type_and_config,
-    cast_value_with_source_type_catalog_and_config, soft_input_error_info_with_config,
+    cast_value_with_source_type_catalog_and_config, soft_input_error_info_with_catalog_and_config,
 };
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
@@ -62,6 +62,7 @@ use super::expr_ops::{
 };
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
 use super::expr_range::eval_range_function;
+use super::expr_reg;
 use super::expr_string::{
     eval_ascii_function, eval_bit_count_bytes, eval_bpchar_to_text_function, eval_bytea_overlay,
     eval_bytea_position_function, eval_bytea_substring, eval_chr_function, eval_concat_function,
@@ -707,15 +708,48 @@ fn regproc_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::Internal => "internal",
         SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::RegProc => "regproc",
         SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::RegRole => "regrole",
         SqlTypeKind::RegNamespace => "regnamespace",
+        SqlTypeKind::RegOper => "regoper",
         SqlTypeKind::RegOperator => "regoperator",
+        SqlTypeKind::RegCollation => "regcollation",
         SqlTypeKind::Text => "text",
         SqlTypeKind::FdwHandler => "fdw_handler",
         _ => "text",
     }
+}
+
+fn catalog_lookup(ctx: Option<&ExecutorContext>) -> Option<&dyn CatalogLookup> {
+    ctx.and_then(|ctx| {
+        ctx.catalog
+            .as_ref()
+            .map(|catalog| catalog as &dyn CatalogLookup)
+    })
+}
+
+fn eval_reg_object_to_text(
+    value: &Value,
+    kind: SqlTypeKind,
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let oid = oid_arg_to_u32(value, "::text")?;
+    let catalog = catalog_lookup(ctx);
+    let text = match kind {
+        SqlTypeKind::RegProc => expr_reg::format_regproc_oid_optional(oid, catalog),
+        SqlTypeKind::RegProcedure => expr_reg::format_regprocedure_oid_optional(oid, catalog),
+        SqlTypeKind::RegOper => expr_reg::format_regoper_oid_optional(oid, catalog),
+        SqlTypeKind::RegOperator => expr_reg::format_regoperator_oid_optional(oid, catalog),
+        SqlTypeKind::RegCollation => expr_reg::format_regcollation_oid_optional(oid, catalog),
+        _ => None,
+    }
+    .unwrap_or_else(|| oid.to_string());
+    Ok(Value::Text(text.into()))
 }
 
 fn eval_regprocedure_to_text(value: &Value, ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -1282,15 +1316,11 @@ fn eval_regtype_to_text_function(
     if oid == 0 {
         return Ok(Value::Text("-".into()));
     }
-    if let Some(type_name) = ctx
-        .and_then(|ctx| ctx.catalog.as_ref())
-        .and_then(|catalog| catalog.type_by_oid(oid))
-        .map(|row| row.typname)
-        .or_else(|| builtin_type_name_for_oid(oid))
-    {
-        return Ok(Value::Text(quote_identifier_if_needed(&type_name).into()));
+    let text = expr_reg::format_type_optional(Some(oid), None, catalog_lookup(ctx));
+    match text {
+        Value::Text(text) if text.as_str() != "???" => Ok(Value::Text(text)),
+        _ => Ok(Value::Text(oid.to_string().into())),
     }
-    Ok(Value::Text(oid.to_string().into()))
 }
 
 fn eval_text_to_regclass_function(
@@ -1344,6 +1374,52 @@ fn eval_text_to_regclass_function(
         .lookup_any_relation(text)
         .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(text.to_string())))?;
     Ok(Value::Int64(i64::from(relation.relation_oid)))
+}
+
+fn eval_to_reg_object_function(
+    values: &[Value],
+    kind: SqlTypeKind,
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    expr_reg::to_reg_object(value, kind, catalog_lookup(ctx))
+}
+
+fn eval_to_regtypemod_function(
+    values: &[Value],
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    Ok(expr_reg::to_regtypemod(value, catalog_lookup(ctx)))
+}
+
+fn eval_format_type_function(
+    values: &[Value],
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    let Some(oid_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(oid_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let oid = oid_arg_to_u32(oid_value, "format_type")?;
+    let typmod = values.get(1).and_then(|value| {
+        if matches!(value, Value::Null) {
+            None
+        } else {
+            int32_arg(value, "format_type").ok()
+        }
+    });
+    Ok(expr_reg::format_type_optional(
+        Some(oid),
+        typmod,
+        catalog_lookup(ctx),
+    ))
 }
 
 fn ensure_builtin_side_effects_allowed(
@@ -3622,9 +3698,53 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Chr => eval_chr_function(&values),
         BuiltinScalarFunction::ParseIdent => eval_parse_ident_function(&values),
         BuiltinScalarFunction::TextToRegClass => eval_text_to_regclass_function(&values, None),
+        BuiltinScalarFunction::ToRegProc => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegProc, None)
+        }
+        BuiltinScalarFunction::ToRegProcedure => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegProcedure, None)
+        }
+        BuiltinScalarFunction::ToRegOper => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegOper, None)
+        }
+        BuiltinScalarFunction::ToRegOperator => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegOperator, None)
+        }
+        BuiltinScalarFunction::ToRegClass => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegClass, None)
+        }
+        BuiltinScalarFunction::ToRegType => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegType, None)
+        }
+        BuiltinScalarFunction::ToRegTypeMod => eval_to_regtypemod_function(&values, None),
+        BuiltinScalarFunction::ToRegRole => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegRole, None)
+        }
+        BuiltinScalarFunction::ToRegNamespace => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegNamespace, None)
+        }
+        BuiltinScalarFunction::ToRegCollation => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegCollation, None)
+        }
+        BuiltinScalarFunction::FormatType => eval_format_type_function(&values, None),
+        BuiltinScalarFunction::RegProcToText => {
+            eval_reg_object_to_text(&values[0], SqlTypeKind::RegProc, None)
+        }
         BuiltinScalarFunction::RegClassToText => eval_regclass_to_text_function(&values, None),
         BuiltinScalarFunction::RegTypeToText => eval_regtype_to_text_function(&values, None),
         BuiltinScalarFunction::RegRoleToText => eval_regrole_to_text_function(&values, None),
+        BuiltinScalarFunction::RegOperToText => {
+            eval_reg_object_to_text(&values[0], SqlTypeKind::RegOper, None)
+        }
+        BuiltinScalarFunction::RegOperatorToText => {
+            eval_reg_object_to_text(&values[0], SqlTypeKind::RegOperator, None)
+        }
+        BuiltinScalarFunction::RegProcedureToText => {
+            eval_reg_object_to_text(&values[0], SqlTypeKind::RegProcedure, None)
+        }
+        BuiltinScalarFunction::RegCollationToText => {
+            eval_reg_object_to_text(&values[0], SqlTypeKind::RegCollation, None)
+        }
         BuiltinScalarFunction::QuoteLiteral => eval_quote_literal_function(&values),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
         BuiltinScalarFunction::Strpos => eval_strpos_function(&values),
@@ -4527,10 +4647,21 @@ fn eval_builtin_function(
         | BuiltinScalarFunction::Int8Avg => {
             execute_builtin_scalar_function_value_call(func, &values)
         }
-        BuiltinScalarFunction::RegProcedureToText => match values.as_slice() {
-            [value] => eval_regprocedure_to_text(value, ctx),
-            _ => Err(malformed_expr_error("regprocedure_to_text")),
-        },
+        BuiltinScalarFunction::RegProcToText => {
+            eval_reg_object_to_text(&values[0], SqlTypeKind::RegProc, Some(ctx))
+        }
+        BuiltinScalarFunction::RegOperToText => {
+            eval_reg_object_to_text(&values[0], SqlTypeKind::RegOper, Some(ctx))
+        }
+        BuiltinScalarFunction::RegOperatorToText => {
+            eval_reg_object_to_text(&values[0], SqlTypeKind::RegOperator, Some(ctx))
+        }
+        BuiltinScalarFunction::RegProcedureToText => {
+            eval_reg_object_to_text(&values[0], SqlTypeKind::RegProcedure, Some(ctx))
+        }
+        BuiltinScalarFunction::RegCollationToText => {
+            eval_reg_object_to_text(&values[0], SqlTypeKind::RegCollation, Some(ctx))
+        }
         BuiltinScalarFunction::PgGetUserById => eval_pg_get_userbyid(&values, ctx),
         BuiltinScalarFunction::PgGetAcl => eval_pg_get_acl(&values, ctx),
         BuiltinScalarFunction::PgGetStatisticsObjDef => eval_pg_get_statisticsobjdef(&values, ctx),
@@ -4703,7 +4834,13 @@ fn eval_builtin_function(
                 right: Value::Text("".into()),
             })?;
             Ok(Value::Bool(
-                soft_input_error_info_with_config(input, ty, &ctx.datetime_config)?.is_none(),
+                soft_input_error_info_with_catalog_and_config(
+                    input,
+                    ty,
+                    catalog_lookup(Some(ctx)),
+                    &ctx.datetime_config,
+                )?
+                .is_none(),
             ))
         }
         BuiltinScalarFunction::PgInputErrorMessage
@@ -4720,7 +4857,12 @@ fn eval_builtin_function(
                 left: values[1].clone(),
                 right: Value::Text("".into()),
             })?;
-            let info = soft_input_error_info_with_config(input, ty, &ctx.datetime_config)?;
+            let info = soft_input_error_info_with_catalog_and_config(
+                input,
+                ty,
+                catalog_lookup(Some(ctx)),
+                &ctx.datetime_config,
+            )?;
             Ok(match (func, info) {
                 (_, None) => Value::Null,
                 (BuiltinScalarFunction::PgInputErrorMessage, Some(info)) => {
@@ -4945,6 +5087,35 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Md5 => eval_md5_function(&values),
         BuiltinScalarFunction::Reverse => eval_reverse_function(&values),
         BuiltinScalarFunction::TextToRegClass => eval_text_to_regclass_function(&values, Some(ctx)),
+        BuiltinScalarFunction::ToRegProc => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegProc, Some(ctx))
+        }
+        BuiltinScalarFunction::ToRegProcedure => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegProcedure, Some(ctx))
+        }
+        BuiltinScalarFunction::ToRegOper => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegOper, Some(ctx))
+        }
+        BuiltinScalarFunction::ToRegOperator => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegOperator, Some(ctx))
+        }
+        BuiltinScalarFunction::ToRegClass => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegClass, Some(ctx))
+        }
+        BuiltinScalarFunction::ToRegType => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegType, Some(ctx))
+        }
+        BuiltinScalarFunction::ToRegTypeMod => eval_to_regtypemod_function(&values, Some(ctx)),
+        BuiltinScalarFunction::ToRegRole => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegRole, Some(ctx))
+        }
+        BuiltinScalarFunction::ToRegNamespace => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegNamespace, Some(ctx))
+        }
+        BuiltinScalarFunction::ToRegCollation => {
+            eval_to_reg_object_function(&values, SqlTypeKind::RegCollation, Some(ctx))
+        }
+        BuiltinScalarFunction::FormatType => eval_format_type_function(&values, Some(ctx)),
         BuiltinScalarFunction::RegClassToText => eval_regclass_to_text_function(&values, Some(ctx)),
         BuiltinScalarFunction::RegTypeToText => eval_regtype_to_text_function(&values, Some(ctx)),
         BuiltinScalarFunction::RegRoleToText => eval_regrole_to_text_function(&values, Some(ctx)),

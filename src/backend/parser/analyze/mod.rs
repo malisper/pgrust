@@ -38,10 +38,11 @@ use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
     PgCollationRow, PgConstraintRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
     PgOperatorRow, PgPartitionedTableRow, PgProcRow, PgRangeRow, PgRewriteRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID,
-    bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
-    bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
-    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTsConfigRow, PgTsDictRow,
+    PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows,
+    bootstrap_pg_collation_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
+    bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, builtin_range_rows, builtin_type_rows,
     is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
     proc_oid_for_builtin_aggregate_function, proc_oid_for_builtin_hypothetical_aggregate_function,
     range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_proc_row_by_oid,
@@ -738,6 +739,18 @@ pub trait CatalogLookup {
             .find(|row| row.oid == oid)
     }
 
+    fn operator_rows(&self) -> Vec<PgOperatorRow> {
+        bootstrap_pg_operator_rows()
+    }
+
+    fn ts_config_rows(&self) -> Vec<PgTsConfigRow> {
+        bootstrap_pg_ts_config_rows().to_vec()
+    }
+
+    fn ts_dict_rows(&self) -> Vec<PgTsDictRow> {
+        bootstrap_pg_ts_dict_rows().to_vec()
+    }
+
     fn cast_by_source_target(
         &self,
         source_type_oid: u32,
@@ -1327,6 +1340,18 @@ impl CatalogLookup for Catalog {
             .find(|row| row.oid == oid)
     }
 
+    fn operator_rows(&self) -> Vec<PgOperatorRow> {
+        CatCache::from_catalog(self).operator_rows()
+    }
+
+    fn ts_config_rows(&self) -> Vec<PgTsConfigRow> {
+        CatCache::from_catalog(self).ts_config_rows()
+    }
+
+    fn ts_dict_rows(&self) -> Vec<PgTsDictRow> {
+        CatCache::from_catalog(self).ts_dict_rows()
+    }
+
     fn aggregate_by_fnoid(&self, aggfnoid: u32) -> Option<PgAggregateRow> {
         CatCache::from_catalog(self)
             .aggregate_by_fnoid(aggfnoid)
@@ -1805,11 +1830,15 @@ fn builtin_named_type_alias(name: &str) -> Option<SqlType> {
     } else if name.eq_ignore_ascii_case("regtype") {
         Some(SqlType::new(SqlTypeKind::RegType))
     } else if name.eq_ignore_ascii_case("regproc") {
-        Some(SqlType::new(SqlTypeKind::RegProcedure))
+        Some(SqlType::new(SqlTypeKind::RegProc))
+    } else if name.eq_ignore_ascii_case("regoper") {
+        Some(SqlType::new(SqlTypeKind::RegOper))
     } else if name.eq_ignore_ascii_case("regoperator") {
         Some(SqlType::new(SqlTypeKind::RegOperator))
     } else if name.eq_ignore_ascii_case("regnamespace") {
         Some(SqlType::new(SqlTypeKind::RegNamespace))
+    } else if name.eq_ignore_ascii_case("regcollation") {
+        Some(SqlType::new(SqlTypeKind::RegCollation))
     } else {
         None
     }
