@@ -270,6 +270,61 @@ impl Database {
         }
     }
 
+    pub(crate) fn execute_grant_object_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &GrantObjectStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        match stmt.privilege {
+            GrantObjectPrivilege::CreateOnDatabase => {
+                self.execute_grant_database_create_stmt(client_id, stmt)
+            }
+            GrantObjectPrivilege::AllPrivilegesOnTable | GrantObjectPrivilege::SelectOnTable => {
+                self.execute_grant_table_acl_stmt_in_transaction_with_search_path(
+                    client_id,
+                    stmt,
+                    xid,
+                    cid,
+                    configured_search_path,
+                    catalog_effects,
+                )
+            }
+            GrantObjectPrivilege::AllPrivilegesOnSchema => {
+                let catcache = self
+                    .backend_catcache(client_id, Some((xid, cid)))
+                    .map_err(map_catalog_error)?;
+                for object_name in &stmt.object_names {
+                    catcache.namespace_by_name(object_name).ok_or_else(|| {
+                        ExecError::DetailedError {
+                            message: format!("schema \"{}\" does not exist", object_name),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "3F000",
+                        }
+                    })?;
+                }
+                Ok(StatementResult::AffectedRows(0))
+            }
+            GrantObjectPrivilege::ExecuteOnFunction => {
+                let object_name =
+                    single_object_name(&stmt.object_names, "single function signature")?;
+                ensure_function_signature_exists(
+                    self,
+                    client_id,
+                    Some((xid, cid)),
+                    configured_search_path,
+                    object_name,
+                )?;
+                Ok(StatementResult::AffectedRows(0))
+            }
+            GrantObjectPrivilege::UsageOnType => Ok(StatementResult::AffectedRows(0)),
+        }
+    }
+
     pub(crate) fn execute_revoke_object_stmt_with_search_path(
         &self,
         client_id: ClientId,

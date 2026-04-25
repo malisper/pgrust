@@ -8,16 +8,17 @@ use crate::include::catalog::{
     FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INET_TYPE_OID, INT2_TYPE_OID, INT4_ARRAY_TYPE_OID,
     INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID,
     INTERNAL_CHAR_TYPE_OID, INTERVAL_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, JSONPATH_TYPE_OID,
-    LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID,
-    NUMRANGE_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_LANGUAGE_INTERNAL_OID, PG_NODE_TREE_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID,
-    RECORD_TYPE_OID, REGCLASS_TYPE_OID, REGCOLLATION_TYPE_OID, REGCONFIG_TYPE_OID,
-    REGNAMESPACE_TYPE_OID, REGOPER_TYPE_OID, REGOPERATOR_TYPE_OID, REGPROC_TYPE_OID,
-    REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID, REGTYPE_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
-    TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TRIGGER_TYPE_OID,
-    TSQUERY_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, TSVECTOR_TYPE_OID,
-    TXID_SNAPSHOT_TYPE_OID, UUID_TYPE_OID, VARBIT_TYPE_OID, VARBITRANGE_TYPE_OID, VARCHAR_TYPE_OID,
-    XID_TYPE_OID, XML_TYPE_OID, aggregate_func_for_dynamic_range_proc_oid,
+    LINE_TYPE_OID, LSEG_TYPE_OID, MACADDR_TYPE_OID, MACADDR8_TYPE_OID, MONEY_TYPE_OID,
+    NAME_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, PG_NODE_TREE_TYPE_OID, POINT_TYPE_OID,
+    POLYGON_TYPE_OID, RECORD_TYPE_OID, REGCLASS_TYPE_OID, REGCOLLATION_TYPE_OID,
+    REGCONFIG_TYPE_OID, REGNAMESPACE_TYPE_OID, REGOPER_TYPE_OID, REGOPERATOR_TYPE_OID,
+    REGPROC_TYPE_OID, REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID, REGTYPE_TYPE_OID,
+    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
+    TIMETZ_TYPE_OID, TRIGGER_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
+    TSVECTOR_TYPE_OID, TXID_SNAPSHOT_TYPE_OID, UUID_TYPE_OID, VARBIT_TYPE_OID,
+    VARBITRANGE_TYPE_OID, VARCHAR_TYPE_OID, XID_TYPE_OID, XML_TYPE_OID,
+    aggregate_func_for_dynamic_range_proc_oid,
 };
 use crate::include::nodes::primnodes::{
     AggFunc, BuiltinScalarFunction, BuiltinWindowFunction, HypotheticalAggFunc,
@@ -149,6 +150,35 @@ pub const HASH_TIMETZ_PROC_OID: u32 = 76517;
 pub const HASH_BYTEA_PROC_OID: u32 = 76518;
 pub const HASH_MULTIRANGE_PROC_OID: u32 = 76519;
 pub const HASH_UUID_PROC_OID: u32 = 2963;
+pub const MACADDR_EQ_PROC_OID: u32 = 830;
+pub const MACADDR_LT_PROC_OID: u32 = 831;
+pub const MACADDR_LE_PROC_OID: u32 = 832;
+pub const MACADDR_GT_PROC_OID: u32 = 833;
+pub const MACADDR_GE_PROC_OID: u32 = 834;
+pub const MACADDR_NE_PROC_OID: u32 = 835;
+pub const MACADDR_CMP_PROC_OID: u32 = 836;
+pub const MACADDR_TRUNC_PROC_OID: u32 = 753;
+pub const HASH_MACADDR_PROC_OID: u32 = 399;
+pub const HASH_MACADDR_EXTENDED_PROC_OID: u32 = 778;
+pub const MACADDR_NOT_PROC_OID: u32 = 3144;
+pub const MACADDR_AND_PROC_OID: u32 = 3145;
+pub const MACADDR_OR_PROC_OID: u32 = 3146;
+pub const HASH_MACADDR8_PROC_OID: u32 = 328;
+pub const HASH_MACADDR8_EXTENDED_PROC_OID: u32 = 781;
+pub const MACADDR8_EQ_PROC_OID: u32 = 4113;
+pub const MACADDR8_LT_PROC_OID: u32 = 4114;
+pub const MACADDR8_LE_PROC_OID: u32 = 4115;
+pub const MACADDR8_GT_PROC_OID: u32 = 4116;
+pub const MACADDR8_GE_PROC_OID: u32 = 4117;
+pub const MACADDR8_NE_PROC_OID: u32 = 4118;
+pub const MACADDR8_CMP_PROC_OID: u32 = 4119;
+pub const MACADDR8_TRUNC_PROC_OID: u32 = 4112;
+pub const MACADDR8_NOT_PROC_OID: u32 = 4120;
+pub const MACADDR8_AND_PROC_OID: u32 = 4121;
+pub const MACADDR8_OR_PROC_OID: u32 = 4122;
+pub const MACADDR_TO_MACADDR8_PROC_OID: u32 = 4123;
+pub const MACADDR8_TO_MACADDR_PROC_OID: u32 = 4124;
+pub const MACADDR8_SET7BIT_PROC_OID: u32 = 4125;
 pub const NAME_CMP_EQ_PROC_OID: u32 = 76550;
 pub const VARCHAR_CMP_EQ_PROC_OID: u32 = 76551;
 pub const NUMERIC_CMP_EQ_PROC_OID: u32 = 76552;
@@ -4300,6 +4330,7 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
         ),
     ];
     rows.extend(geometry_proc_rows());
+    rows.extend(macaddr_proc_rows());
     rows.extend(range_proc_rows());
     rows.extend(gist_support_proc_rows());
     rows.extend(spgist_support_proc_rows());
@@ -5106,6 +5137,47 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("gcd", BuiltinScalarFunction::Gcd),
         ("lcm", BuiltinScalarFunction::Lcm),
         ("trunc", BuiltinScalarFunction::Trunc),
+        ("macaddr_eq", BuiltinScalarFunction::MacAddrEq),
+        ("macaddr_ne", BuiltinScalarFunction::MacAddrNe),
+        ("macaddr_lt", BuiltinScalarFunction::MacAddrLt),
+        ("macaddr_le", BuiltinScalarFunction::MacAddrLe),
+        ("macaddr_gt", BuiltinScalarFunction::MacAddrGt),
+        ("macaddr_ge", BuiltinScalarFunction::MacAddrGe),
+        ("macaddr_cmp", BuiltinScalarFunction::MacAddrCmp),
+        ("macaddr_not", BuiltinScalarFunction::MacAddrNot),
+        ("macaddr_and", BuiltinScalarFunction::MacAddrAnd),
+        ("macaddr_or", BuiltinScalarFunction::MacAddrOr),
+        ("macaddr_trunc", BuiltinScalarFunction::MacAddrTrunc),
+        (
+            "macaddrtomacaddr8",
+            BuiltinScalarFunction::MacAddrToMacAddr8,
+        ),
+        ("macaddr8_eq", BuiltinScalarFunction::MacAddr8Eq),
+        ("macaddr8_ne", BuiltinScalarFunction::MacAddr8Ne),
+        ("macaddr8_lt", BuiltinScalarFunction::MacAddr8Lt),
+        ("macaddr8_le", BuiltinScalarFunction::MacAddr8Le),
+        ("macaddr8_gt", BuiltinScalarFunction::MacAddr8Gt),
+        ("macaddr8_ge", BuiltinScalarFunction::MacAddr8Ge),
+        ("macaddr8_cmp", BuiltinScalarFunction::MacAddr8Cmp),
+        ("macaddr8_not", BuiltinScalarFunction::MacAddr8Not),
+        ("macaddr8_and", BuiltinScalarFunction::MacAddr8And),
+        ("macaddr8_or", BuiltinScalarFunction::MacAddr8Or),
+        ("macaddr8_trunc", BuiltinScalarFunction::MacAddr8Trunc),
+        (
+            "macaddr8tomacaddr",
+            BuiltinScalarFunction::MacAddr8ToMacAddr,
+        ),
+        ("macaddr8_set7bit", BuiltinScalarFunction::MacAddr8Set7Bit),
+        ("hashmacaddr", BuiltinScalarFunction::HashMacAddr),
+        (
+            "hashmacaddrextended",
+            BuiltinScalarFunction::HashMacAddrExtended,
+        ),
+        ("hashmacaddr8", BuiltinScalarFunction::HashMacAddr8),
+        (
+            "hashmacaddr8extended",
+            BuiltinScalarFunction::HashMacAddr8Extended,
+        ),
         ("round", BuiltinScalarFunction::Round),
         ("ceil", BuiltinScalarFunction::Ceil),
         ("ceiling", BuiltinScalarFunction::Ceiling),
@@ -6691,6 +6763,283 @@ fn hash_support_proc_rows() -> Vec<PgProcRow> {
         )
     })
     .collect()
+}
+
+fn macaddr_proc_rows() -> Vec<PgProcRow> {
+    let mut rows = vec![
+        comparison_proc_row(
+            MACADDR_EQ_PROC_OID,
+            "macaddr_eq",
+            &[MACADDR_TYPE_OID, MACADDR_TYPE_OID],
+        ),
+        comparison_proc_row(
+            MACADDR_NE_PROC_OID,
+            "macaddr_ne",
+            &[MACADDR_TYPE_OID, MACADDR_TYPE_OID],
+        ),
+        comparison_proc_row(
+            MACADDR_LT_PROC_OID,
+            "macaddr_lt",
+            &[MACADDR_TYPE_OID, MACADDR_TYPE_OID],
+        ),
+        comparison_proc_row(
+            MACADDR_LE_PROC_OID,
+            "macaddr_le",
+            &[MACADDR_TYPE_OID, MACADDR_TYPE_OID],
+        ),
+        comparison_proc_row(
+            MACADDR_GT_PROC_OID,
+            "macaddr_gt",
+            &[MACADDR_TYPE_OID, MACADDR_TYPE_OID],
+        ),
+        comparison_proc_row(
+            MACADDR_GE_PROC_OID,
+            "macaddr_ge",
+            &[MACADDR_TYPE_OID, MACADDR_TYPE_OID],
+        ),
+        proc_row(
+            MACADDR_CMP_PROC_OID,
+            "macaddr_cmp",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[MACADDR_TYPE_OID, MACADDR_TYPE_OID]),
+            "macaddr_cmp",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            MACADDR_TRUNC_PROC_OID,
+            "trunc",
+            MACADDR_TYPE_OID,
+            &oid_argtypes(&[MACADDR_TYPE_OID]),
+            "macaddr_trunc",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            MACADDR_NOT_PROC_OID,
+            "macaddr_not",
+            MACADDR_TYPE_OID,
+            &oid_argtypes(&[MACADDR_TYPE_OID]),
+            "macaddr_not",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            MACADDR_AND_PROC_OID,
+            "macaddr_and",
+            MACADDR_TYPE_OID,
+            &oid_argtypes(&[MACADDR_TYPE_OID, MACADDR_TYPE_OID]),
+            "macaddr_and",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            MACADDR_OR_PROC_OID,
+            "macaddr_or",
+            MACADDR_TYPE_OID,
+            &oid_argtypes(&[MACADDR_TYPE_OID, MACADDR_TYPE_OID]),
+            "macaddr_or",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            HASH_MACADDR_PROC_OID,
+            "hashmacaddr",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[MACADDR_TYPE_OID]),
+            "hashmacaddr",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            HASH_MACADDR_EXTENDED_PROC_OID,
+            "hashmacaddrextended",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[MACADDR_TYPE_OID, INT8_TYPE_OID]),
+            "hashmacaddrextended",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            MACADDR_TO_MACADDR8_PROC_OID,
+            "macaddr8",
+            MACADDR8_TYPE_OID,
+            &oid_argtypes(&[MACADDR_TYPE_OID]),
+            "macaddrtomacaddr8",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        comparison_proc_row(
+            MACADDR8_EQ_PROC_OID,
+            "macaddr8_eq",
+            &[MACADDR8_TYPE_OID, MACADDR8_TYPE_OID],
+        ),
+        comparison_proc_row(
+            MACADDR8_NE_PROC_OID,
+            "macaddr8_ne",
+            &[MACADDR8_TYPE_OID, MACADDR8_TYPE_OID],
+        ),
+        comparison_proc_row(
+            MACADDR8_LT_PROC_OID,
+            "macaddr8_lt",
+            &[MACADDR8_TYPE_OID, MACADDR8_TYPE_OID],
+        ),
+        comparison_proc_row(
+            MACADDR8_LE_PROC_OID,
+            "macaddr8_le",
+            &[MACADDR8_TYPE_OID, MACADDR8_TYPE_OID],
+        ),
+        comparison_proc_row(
+            MACADDR8_GT_PROC_OID,
+            "macaddr8_gt",
+            &[MACADDR8_TYPE_OID, MACADDR8_TYPE_OID],
+        ),
+        comparison_proc_row(
+            MACADDR8_GE_PROC_OID,
+            "macaddr8_ge",
+            &[MACADDR8_TYPE_OID, MACADDR8_TYPE_OID],
+        ),
+        proc_row(
+            MACADDR8_CMP_PROC_OID,
+            "macaddr8_cmp",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[MACADDR8_TYPE_OID, MACADDR8_TYPE_OID]),
+            "macaddr8_cmp",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            MACADDR8_TRUNC_PROC_OID,
+            "trunc",
+            MACADDR8_TYPE_OID,
+            &oid_argtypes(&[MACADDR8_TYPE_OID]),
+            "macaddr8_trunc",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            MACADDR8_NOT_PROC_OID,
+            "macaddr8_not",
+            MACADDR8_TYPE_OID,
+            &oid_argtypes(&[MACADDR8_TYPE_OID]),
+            "macaddr8_not",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            MACADDR8_AND_PROC_OID,
+            "macaddr8_and",
+            MACADDR8_TYPE_OID,
+            &oid_argtypes(&[MACADDR8_TYPE_OID, MACADDR8_TYPE_OID]),
+            "macaddr8_and",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            MACADDR8_OR_PROC_OID,
+            "macaddr8_or",
+            MACADDR8_TYPE_OID,
+            &oid_argtypes(&[MACADDR8_TYPE_OID, MACADDR8_TYPE_OID]),
+            "macaddr8_or",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            MACADDR8_TO_MACADDR_PROC_OID,
+            "macaddr",
+            MACADDR_TYPE_OID,
+            &oid_argtypes(&[MACADDR8_TYPE_OID]),
+            "macaddr8tomacaddr",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            MACADDR8_SET7BIT_PROC_OID,
+            "macaddr8_set7bit",
+            MACADDR8_TYPE_OID,
+            &oid_argtypes(&[MACADDR8_TYPE_OID]),
+            "macaddr8_set7bit",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            HASH_MACADDR8_PROC_OID,
+            "hashmacaddr8",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[MACADDR8_TYPE_OID]),
+            "hashmacaddr8",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            HASH_MACADDR8_EXTENDED_PROC_OID,
+            "hashmacaddr8extended",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[MACADDR8_TYPE_OID, INT8_TYPE_OID]),
+            "hashmacaddr8extended",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+    ];
+
+    for row in &mut rows {
+        if row.proname.starts_with("macaddr") || row.proname.starts_with("hashmacaddr") {
+            row.proleakproof = true;
+        }
+    }
+
+    rows
 }
 
 fn brin_scalar_comparison_proc_rows() -> Vec<PgProcRow> {
@@ -8998,6 +9347,42 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_rows_include_macaddr_builtin_procs() {
+        let rows = bootstrap_pg_proc_rows();
+        let macaddr_cmp = rows
+            .iter()
+            .find(|row| row.oid == MACADDR_CMP_PROC_OID)
+            .expect("macaddr_cmp row");
+        assert_eq!(macaddr_cmp.proname, "macaddr_cmp");
+        assert_eq!(
+            macaddr_cmp.proargtypes,
+            oid_argtypes(&[MACADDR_TYPE_OID, MACADDR_TYPE_OID])
+        );
+        assert_eq!(macaddr_cmp.prorettype, INT4_TYPE_OID);
+
+        let macaddr8_cast = rows
+            .iter()
+            .find(|row| row.oid == MACADDR_TO_MACADDR8_PROC_OID)
+            .expect("macaddr to macaddr8 cast row");
+        assert_eq!(macaddr8_cast.prorettype, MACADDR8_TYPE_OID);
+        assert_eq!(
+            builtin_scalar_function_for_proc_oid(macaddr8_cast.oid),
+            Some(BuiltinScalarFunction::MacAddrToMacAddr8)
+        );
+
+        let hash_extended = rows
+            .iter()
+            .find(|row| row.oid == HASH_MACADDR8_EXTENDED_PROC_OID)
+            .expect("hashmacaddr8extended row");
+        assert_eq!(hash_extended.proname, "hashmacaddr8extended");
+        assert_eq!(
+            hash_extended.proargtypes,
+            oid_argtypes(&[MACADDR8_TYPE_OID, INT8_TYPE_OID])
+        );
+        assert_eq!(hash_extended.prorettype, INT8_TYPE_OID);
+    }
+
+    #[test]
     fn bootstrap_rows_include_pg_rust_test_fdw_handler() {
         let row = bootstrap_pg_proc_rows()
             .into_iter()
@@ -9046,6 +9431,18 @@ mod tests {
             BuiltinScalarFunction::Float8Combine,
             BuiltinScalarFunction::Float8RegrAccum,
             BuiltinScalarFunction::Float8RegrCombine,
+            BuiltinScalarFunction::MacAddrEq,
+            BuiltinScalarFunction::MacAddrCmp,
+            BuiltinScalarFunction::MacAddrTrunc,
+            BuiltinScalarFunction::MacAddrToMacAddr8,
+            BuiltinScalarFunction::MacAddr8Eq,
+            BuiltinScalarFunction::MacAddr8Cmp,
+            BuiltinScalarFunction::MacAddr8ToMacAddr,
+            BuiltinScalarFunction::MacAddr8Set7Bit,
+            BuiltinScalarFunction::HashMacAddr,
+            BuiltinScalarFunction::HashMacAddrExtended,
+            BuiltinScalarFunction::HashMacAddr8,
+            BuiltinScalarFunction::HashMacAddr8Extended,
             BuiltinScalarFunction::XmlComment,
             BuiltinScalarFunction::XmlIsWellFormed,
             BuiltinScalarFunction::XmlIsWellFormedDocument,

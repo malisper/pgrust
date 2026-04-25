@@ -15,22 +15,23 @@ use crate::include::catalog::{
     INT8MULTIRANGE_TYPE_OID, INT8RANGE_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID,
     INTERNAL_CHAR_TYPE_OID, INTERVAL_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
     JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID,
-    LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_ARRAY_TYPE_OID, MONEY_TYPE_OID, NAME_ARRAY_TYPE_OID,
-    NAME_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, NUMMULTIRANGE_TYPE_OID,
-    NUMRANGE_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, PG_LSN_TYPE_OID,
-    POINT_TYPE_OID, POLYGON_TYPE_OID, REGCLASS_TYPE_OID, REGCOLLATION_ARRAY_TYPE_OID,
-    REGCOLLATION_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
-    REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, REGNAMESPACE_TYPE_OID,
-    REGOPER_ARRAY_TYPE_OID, REGOPER_TYPE_OID, REGOPERATOR_ARRAY_TYPE_OID, REGOPERATOR_TYPE_OID,
-    REGPROC_ARRAY_TYPE_OID, REGPROC_TYPE_OID, REGPROCEDURE_ARRAY_TYPE_OID, REGPROCEDURE_TYPE_OID,
-    REGROLE_TYPE_OID, REGTYPE_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TID_ARRAY_TYPE_OID,
-    TID_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
-    TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TSMULTIRANGE_TYPE_OID, TSQUERY_ARRAY_TYPE_OID,
-    TSQUERY_TYPE_OID, TSRANGE_TYPE_OID, TSTZMULTIRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
-    TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, TXID_SNAPSHOT_ARRAY_TYPE_OID,
-    TXID_SNAPSHOT_TYPE_OID, UUID_ARRAY_TYPE_OID, UUID_TYPE_OID, VARBIT_ARRAY_TYPE_OID,
-    VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID,
-    XML_ARRAY_TYPE_OID, XML_TYPE_OID,
+    LINE_TYPE_OID, LSEG_TYPE_OID, MACADDR_ARRAY_TYPE_OID, MACADDR_TO_MACADDR8_PROC_OID,
+    MACADDR_TYPE_OID, MACADDR8_ARRAY_TYPE_OID, MACADDR8_TO_MACADDR_PROC_OID, MACADDR8_TYPE_OID,
+    MONEY_ARRAY_TYPE_OID, MONEY_TYPE_OID, NAME_ARRAY_TYPE_OID, NAME_TYPE_OID,
+    NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, NUMMULTIRANGE_TYPE_OID, NUMRANGE_TYPE_OID,
+    OID_ARRAY_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, PG_LSN_TYPE_OID, POINT_TYPE_OID,
+    POLYGON_TYPE_OID, REGCLASS_TYPE_OID, REGCOLLATION_ARRAY_TYPE_OID, REGCOLLATION_TYPE_OID,
+    REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
+    REGDICTIONARY_TYPE_OID, REGNAMESPACE_TYPE_OID, REGOPER_ARRAY_TYPE_OID, REGOPER_TYPE_OID,
+    REGOPERATOR_ARRAY_TYPE_OID, REGOPERATOR_TYPE_OID, REGPROC_ARRAY_TYPE_OID, REGPROC_TYPE_OID,
+    REGPROCEDURE_ARRAY_TYPE_OID, REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID, REGTYPE_TYPE_OID,
+    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIME_TYPE_OID,
+    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID,
+    TSMULTIRANGE_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID,
+    TSTZMULTIRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID,
+    TXID_SNAPSHOT_ARRAY_TYPE_OID, TXID_SNAPSHOT_TYPE_OID, UUID_ARRAY_TYPE_OID, UUID_TYPE_OID,
+    VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
+    XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID, XML_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +172,22 @@ pub fn bootstrap_pg_cast_rows() -> Vec<PgCastRow> {
             'e',
             'i',
         ),
+        cast_row(
+            4800,
+            MACADDR_TYPE_OID,
+            MACADDR8_TYPE_OID,
+            MACADDR_TO_MACADDR8_PROC_OID,
+            'i',
+            'f',
+        ),
+        cast_row(
+            4801,
+            MACADDR8_TYPE_OID,
+            MACADDR_TYPE_OID,
+            MACADDR8_TO_MACADDR_PROC_OID,
+            'a',
+            'f',
+        ),
     ];
     let text_input_rows = text_input_cast_rows(4113);
     let geometry_rows = geometry_cast_rows(4113 + text_input_rows.len() as u32);
@@ -216,6 +233,8 @@ fn text_input_cast_rows(first_oid: u32) -> Vec<PgCastRow> {
         UUID_TYPE_OID,
         INET_TYPE_OID,
         CIDR_TYPE_OID,
+        MACADDR_TYPE_OID,
+        MACADDR8_TYPE_OID,
         JSON_TYPE_OID,
         JSONB_TYPE_OID,
         JSONPATH_TYPE_OID,
@@ -314,6 +333,8 @@ fn text_input_array_cast_rows(first_oid: u32) -> Vec<PgCastRow> {
         UUID_ARRAY_TYPE_OID,
         INET_ARRAY_TYPE_OID,
         CIDR_ARRAY_TYPE_OID,
+        MACADDR_ARRAY_TYPE_OID,
+        MACADDR8_ARRAY_TYPE_OID,
         JSON_ARRAY_TYPE_OID,
         JSONB_ARRAY_TYPE_OID,
         JSONPATH_ARRAY_TYPE_OID,
@@ -434,6 +455,18 @@ mod tests {
                 && row.castcontext == 'e'
                 && row.castmethod == 'i'
         }));
+        assert!(rows.iter().any(|row| {
+            row.castsource == TEXT_TYPE_OID
+                && row.casttarget == MACADDR_TYPE_OID
+                && row.castcontext == 'e'
+                && row.castmethod == 'i'
+        }));
+        assert!(rows.iter().any(|row| {
+            row.castsource == TEXT_TYPE_OID
+                && row.casttarget == MACADDR8_ARRAY_TYPE_OID
+                && row.castcontext == 'e'
+                && row.castmethod == 'i'
+        }));
     }
 
     #[test]
@@ -466,6 +499,25 @@ mod tests {
                 && row.castfunc == 0
                 && row.castcontext == 'i'
                 && row.castmethod == 'b'
+        }));
+    }
+
+    #[test]
+    fn bootstrap_pg_cast_rows_include_macaddr_conversions() {
+        let rows = bootstrap_pg_cast_rows();
+        assert!(rows.iter().any(|row| {
+            row.castsource == MACADDR_TYPE_OID
+                && row.casttarget == MACADDR8_TYPE_OID
+                && row.castfunc == MACADDR_TO_MACADDR8_PROC_OID
+                && row.castcontext == 'i'
+                && row.castmethod == 'f'
+        }));
+        assert!(rows.iter().any(|row| {
+            row.castsource == MACADDR8_TYPE_OID
+                && row.casttarget == MACADDR_TYPE_OID
+                && row.castfunc == MACADDR8_TO_MACADDR_PROC_OID
+                && row.castcontext == 'a'
+                && row.castmethod == 'f'
         }));
     }
 }

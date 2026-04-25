@@ -2126,6 +2126,8 @@ fn render_dynamic_query_param_base_sql(
         Value::Bytea(bytes) => quote_sql_string(&format_bytea_text(bytes, ByteaOutputFormat::Hex)),
         Value::Inet(v) => quote_sql_string(&v.render_inet()),
         Value::Cidr(v) => quote_sql_string(&v.render_cidr()),
+        Value::MacAddr(v) => quote_sql_string(&crate::backend::executor::render_macaddr_text(v)),
+        Value::MacAddr8(v) => quote_sql_string(&crate::backend::executor::render_macaddr8_text(v)),
         Value::InternalChar(byte) => {
             quote_sql_string(&crate::backend::executor::render_internal_char_text(*byte))
         }
@@ -2655,6 +2657,8 @@ fn render_raise_value(value: &Value) -> String {
         }
         Value::Inet(v) => v.render_inet(),
         Value::Cidr(v) => v.render_cidr(),
+        Value::MacAddr(v) => crate::backend::executor::render_macaddr_text(v),
+        Value::MacAddr8(v) => crate::backend::executor::render_macaddr8_text(v),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)

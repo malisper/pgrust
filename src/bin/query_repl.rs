@@ -179,6 +179,8 @@ fn render_value(value: &Value) -> String {
         ),
         Value::Inet(v) => v.render_inet(),
         Value::Cidr(v) => v.render_cidr(),
+        Value::MacAddr(v) => pgrust::backend::executor::render_macaddr_text(v),
+        Value::MacAddr8(v) => pgrust::backend::executor::render_macaddr8_text(v),
         Value::Text(v) => v.to_string(),
         Value::TextRef(_, _) => value.as_text().unwrap().to_string(),
         Value::InternalChar(v) => pgrust::backend::executor::render_internal_char_text(*v),

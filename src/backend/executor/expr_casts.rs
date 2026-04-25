@@ -8,6 +8,10 @@ use super::expr_geometry::{
     cast_geometry_value, geometry_input_error_message, parse_geometry_text,
 };
 use super::expr_json::{canonicalize_jsonpath_text, validate_json_text};
+use super::expr_mac::{
+    macaddr_to_macaddr8, macaddr8_to_macaddr, parse_macaddr_text, parse_macaddr8_text,
+    render_macaddr_text, render_macaddr8_text,
+};
 use super::expr_money::{
     money_format_text, money_from_float, money_numeric_text, money_parse_text,
 };
@@ -2017,7 +2021,9 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::Inet
                     | SqlTypeKind::Cidr
                     | SqlTypeKind::Uuid
-                    | SqlTypeKind::PgLsn,
+                    | SqlTypeKind::PgLsn
+                    | SqlTypeKind::MacAddr
+                    | SqlTypeKind::MacAddr8,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -2157,7 +2163,9 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::Inet
                     | SqlTypeKind::Cidr
                     | SqlTypeKind::Uuid
-                    | SqlTypeKind::PgLsn,
+                    | SqlTypeKind::PgLsn
+                    | SqlTypeKind::MacAddr
+                    | SqlTypeKind::MacAddr8,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -2253,7 +2261,9 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::RegDictionary
                     | SqlTypeKind::Inet
                     | SqlTypeKind::Cidr
-                    | SqlTypeKind::PgLsn,
+                    | SqlTypeKind::PgLsn
+                    | SqlTypeKind::MacAddr
+                    | SqlTypeKind::MacAddr8,
                 ..
             } => cast_text_value(if v { "true" } else { "false" }, ty, true),
             SqlType {
@@ -2735,6 +2745,30 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 right: Value::Null,
             }),
         },
+        Value::MacAddr(value) => match ty.kind {
+            SqlTypeKind::MacAddr => Ok(Value::MacAddr(value)),
+            SqlTypeKind::MacAddr8 => Ok(Value::MacAddr8(macaddr_to_macaddr8(value))),
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(
+                Value::Text(CompactString::from_owned(render_macaddr_text(&value))),
+            ),
+            _ => Err(ExecError::TypeMismatch {
+                op: "::macaddr",
+                left: Value::MacAddr(value),
+                right: Value::Null,
+            }),
+        },
+        Value::MacAddr8(value) => match ty.kind {
+            SqlTypeKind::MacAddr8 => Ok(Value::MacAddr8(value)),
+            SqlTypeKind::MacAddr => macaddr8_to_macaddr(value).map(Value::MacAddr),
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(
+                Value::Text(CompactString::from_owned(render_macaddr8_text(&value))),
+            ),
+            _ => Err(ExecError::TypeMismatch {
+                op: "::macaddr8",
+                left: Value::MacAddr8(value),
+                right: Value::Null,
+            }),
+        },
         Value::Jsonb(bytes) => match ty.kind {
             SqlTypeKind::Jsonb => Ok(Value::Jsonb(bytes)),
             SqlTypeKind::Json => Ok(Value::Json(CompactString::from_owned(render_jsonb_bytes(
@@ -2856,7 +2890,9 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::Inet
                     | SqlTypeKind::Cidr
                     | SqlTypeKind::Uuid
-                    | SqlTypeKind::PgLsn,
+                    | SqlTypeKind::PgLsn
+                    | SqlTypeKind::MacAddr
+                    | SqlTypeKind::MacAddr8,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -2969,7 +3005,9 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::Inet
                     | SqlTypeKind::Cidr
                     | SqlTypeKind::Uuid
-                    | SqlTypeKind::PgLsn,
+                    | SqlTypeKind::PgLsn
+                    | SqlTypeKind::MacAddr
+                    | SqlTypeKind::MacAddr8,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -3285,6 +3323,8 @@ pub(crate) fn cast_text_value_with_config(
         SqlTypeKind::Uuid => Ok(Value::Uuid(parse_uuid_text(text)?)),
         SqlTypeKind::Inet => parse_inet_text(text).map(Value::Inet),
         SqlTypeKind::Cidr => parse_cidr_text(text).map(Value::Cidr),
+        SqlTypeKind::MacAddr => parse_macaddr_text(text).map(Value::MacAddr),
+        SqlTypeKind::MacAddr8 => parse_macaddr8_text(text).map(Value::MacAddr8),
         SqlTypeKind::Json => {
             validate_json_text(text)?;
             Ok(Value::Json(CompactString::new(text)))
@@ -3516,7 +3556,9 @@ pub(super) fn cast_numeric_value(
             left: Value::Numeric(value),
             right: Value::Uuid([0; 16]),
         }),
-        SqlTypeKind::Inet | SqlTypeKind::Cidr => cast_text_value(&value.render(), ty, explicit),
+        SqlTypeKind::Inet | SqlTypeKind::Cidr | SqlTypeKind::MacAddr | SqlTypeKind::MacAddr8 => {
+            cast_text_value(&value.render(), ty, explicit)
+        }
         SqlTypeKind::Range
         | SqlTypeKind::Int4Range
         | SqlTypeKind::Int8Range
@@ -4002,6 +4044,18 @@ mod tests {
                 SqlTypeKind::Varchar,
                 4
             )))
+        );
+        assert_eq!(
+            parse_input_type_name("macaddr").unwrap(),
+            Some(SqlType::new(SqlTypeKind::MacAddr))
+        );
+        assert_eq!(
+            parse_input_type_name("macaddr8[]").unwrap(),
+            Some(SqlType::array_of(SqlType::new(SqlTypeKind::MacAddr8)))
+        );
+        assert_eq!(
+            parse_input_type_name("_macaddr").unwrap(),
+            Some(SqlType::array_of(SqlType::new(SqlTypeKind::MacAddr)))
         );
         assert_eq!(
             parse_input_type_name("int4[][]").unwrap(),
