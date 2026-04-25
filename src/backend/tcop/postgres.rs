@@ -989,6 +989,7 @@ struct CopyInState {
     columns: Option<Vec<String>>,
     null_marker: String,
     pending: Vec<u8>,
+    continuation: Vec<String>,
 }
 
 struct ConnectionCleanupGuard<'a> {
@@ -1314,37 +1315,65 @@ fn handle_query(
         send_ready_with_pending_messages(stream, db, &state.session)?;
         return Ok(());
     }
-    let mut executed_any = false;
-    let mut copy_in_started = false;
-    for raw_stmt in split_simple_query_statements(sql) {
-        if sql_is_effectively_empty_after_comments(raw_stmt) {
-            continue;
-        }
-        executed_any = true;
-        match execute_query_statement(stream, db, state, raw_stmt)? {
-            QueryStatementFlow::Continue => {}
-            QueryStatementFlow::Stop => break,
-            QueryStatementFlow::CopyInStarted => {
-                copy_in_started = true;
-                break;
-            }
-        }
-    }
+    let statements = split_simple_query_statements(sql)
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let result = execute_simple_query_statements(stream, db, state, statements)?;
 
-    if !executed_any {
+    if !result.executed_any {
         send_empty_query(stream)?;
     }
-    if copy_in_started {
+    if result.copy_in_started {
         return Ok(());
     }
     send_ready_with_pending_messages(stream, db, &state.session)?;
     Ok(())
 }
 
+struct SimpleQueryExecutionResult {
+    executed_any: bool,
+    copy_in_started: bool,
+}
+
 enum QueryStatementFlow {
     Continue,
     Stop,
     CopyInStarted,
+}
+
+fn execute_simple_query_statements(
+    stream: &mut impl Write,
+    db: &Database,
+    state: &mut ConnectionState,
+    statements: Vec<String>,
+) -> io::Result<SimpleQueryExecutionResult> {
+    let mut executed_any = false;
+    let mut statements = statements.into_iter();
+    while let Some(raw_stmt) = statements.next() {
+        if sql_is_effectively_empty_after_comments(&raw_stmt) {
+            continue;
+        }
+        executed_any = true;
+        match execute_query_statement(stream, db, state, &raw_stmt)? {
+            QueryStatementFlow::Continue => {}
+            QueryStatementFlow::Stop => break,
+            QueryStatementFlow::CopyInStarted => {
+                if let Some(copy) = state.copy_in.as_mut() {
+                    copy.continuation = statements.collect();
+                }
+                return Ok(SimpleQueryExecutionResult {
+                    executed_any,
+                    copy_in_started: true,
+                });
+            }
+        }
+    }
+
+    Ok(SimpleQueryExecutionResult {
+        executed_any,
+        copy_in_started: false,
+    })
 }
 
 fn handle_portal_statement(
@@ -1571,6 +1600,7 @@ fn execute_query_statement(
             columns,
             null_marker,
             pending: Vec::new(),
+            continuation: Vec::new(),
         });
         send_copy_in_response(stream)?;
         return Ok(QueryStatementFlow::CopyInStarted);
@@ -3729,6 +3759,10 @@ fn handle_copy_done(
 
     flush_pending_backend_messages(stream, db, &state.session)?;
     send_command_complete(stream, "COPY")?;
+    let result = execute_simple_query_statements(stream, db, state, copy.continuation)?;
+    if result.copy_in_started {
+        return Ok(());
+    }
     send_ready_with_pending_messages(stream, db, &state.session)?;
     Ok(())
 }
@@ -5767,6 +5801,62 @@ mod tests {
         output
             .windows(message.len() + 1)
             .any(|window| window == format!("{message}\0").as_bytes())
+    }
+
+    fn backend_message_count(output: &[u8], tag: u8) -> usize {
+        backend_messages(output)
+            .into_iter()
+            .filter(|(message_tag, _)| *message_tag == tag)
+            .count()
+    }
+
+    #[test]
+    fn simple_query_resumes_after_copy_from_stdin_continuation() {
+        let db = Database::open(temp_dir("copy_from_stdin_continuation"), 16).unwrap();
+        db.execute(1, "create table test3 (c int)").unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "select 0; copy test3 from stdin; copy test3 from stdin; select 1;",
+        )
+        .unwrap();
+        assert!(state.copy_in.is_some());
+        assert_eq!(backend_message_count(&output, b'G'), 1);
+        assert_eq!(backend_message_count(&output, b'Z'), 0);
+
+        output.clear();
+        handle_copy_data(&mut state, b"1\n").unwrap();
+        handle_copy_done(&mut output, &db, &mut state).unwrap();
+        assert!(state.copy_in.is_some());
+        assert_eq!(backend_message_count(&output, b'G'), 1);
+        assert_eq!(backend_message_count(&output, b'Z'), 0);
+
+        output.clear();
+        handle_copy_data(&mut state, b"2\n").unwrap();
+        handle_copy_done(&mut output, &db, &mut state).unwrap();
+        assert!(state.copy_in.is_none());
+        assert_eq!(backend_message_count(&output, b'G'), 0);
+        assert_eq!(backend_message_count(&output, b'Z'), 1);
+
+        match state
+            .session
+            .execute(&db, "select c from test3 order by c")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
     }
 
     #[test]
