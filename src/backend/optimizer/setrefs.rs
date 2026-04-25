@@ -2443,7 +2443,12 @@ fn index_scan_can_use_index_only(
     let Some(root) = ctx.root else {
         return false;
     };
-    if am_oid != crate::include::catalog::BTREE_AM_OID {
+    if !matches!(
+        am_oid,
+        crate::include::catalog::BTREE_AM_OID
+            | crate::include::catalog::GIST_AM_OID
+            | crate::include::catalog::SPGIST_AM_OID
+    ) {
         return false;
     }
     let query_relids = root.all_query_relids();

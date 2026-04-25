@@ -4,18 +4,19 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     ANYARRAYOID, ANYOID, BIT_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID,
     BPCHAR_TYPE_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATE_TYPE_OID, DATERANGE_TYPE_OID,
-    FDW_HANDLER_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID,
-    INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID,
-    INTERNAL_CHAR_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID,
-    LSEG_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID,
-    OID_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID,
-    PG_NODE_TREE_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_TYPE_OID, REGCLASS_TYPE_OID,
-    REGCOLLATION_TYPE_OID, REGCONFIG_TYPE_OID, REGNAMESPACE_TYPE_OID, REGOPER_TYPE_OID,
-    REGOPERATOR_TYPE_OID, REGPROC_TYPE_OID, REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID,
-    REGTYPE_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID,
-    TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TRIGGER_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID,
-    TSTZRANGE_TYPE_OID, TSVECTOR_TYPE_OID, TXID_SNAPSHOT_TYPE_OID, UUID_TYPE_OID, VARBIT_TYPE_OID,
-    VARCHAR_TYPE_OID, XID_TYPE_OID, XML_TYPE_OID, aggregate_func_for_dynamic_range_proc_oid,
+    FDW_HANDLER_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID,
+    INET_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_ARRAY_TYPE_OID,
+    INT8_TYPE_OID, INT8RANGE_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID,
+    JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID,
+    NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_LANGUAGE_INTERNAL_OID, PG_NODE_TREE_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID,
+    RECORD_TYPE_OID, REGCLASS_TYPE_OID, REGCOLLATION_TYPE_OID, REGCONFIG_TYPE_OID,
+    REGNAMESPACE_TYPE_OID, REGOPER_TYPE_OID, REGOPERATOR_TYPE_OID, REGPROC_TYPE_OID,
+    REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID, REGTYPE_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
+    TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TRIGGER_TYPE_OID,
+    TSQUERY_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, TSVECTOR_TYPE_OID,
+    TXID_SNAPSHOT_TYPE_OID, UUID_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID, XID_TYPE_OID,
+    XML_TYPE_OID, aggregate_func_for_dynamic_range_proc_oid,
 };
 use crate::include::nodes::primnodes::{
     AggFunc, BuiltinScalarFunction, BuiltinWindowFunction, HypotheticalAggFunc,
@@ -104,11 +105,21 @@ pub const RANGE_GIST_PENALTY_PROC_OID: u32 = 3879;
 pub const RANGE_GIST_PICKSPLIT_PROC_OID: u32 = 3880;
 pub const RANGE_GIST_SAME_PROC_OID: u32 = 3881;
 pub const GIST_BOX_DISTANCE_PROC_OID: u32 = 3998;
+pub const GIST_NETWORK_CONSISTENT_PROC_OID: u32 = 76600;
+pub const GIST_NETWORK_UNION_PROC_OID: u32 = 76601;
+pub const GIST_NETWORK_PENALTY_PROC_OID: u32 = 76602;
+pub const GIST_NETWORK_PICKSPLIT_PROC_OID: u32 = 76603;
+pub const GIST_NETWORK_SAME_PROC_OID: u32 = 76604;
 pub const SPG_BOX_QUAD_CONFIG_PROC_OID: u32 = 5012;
 pub const SPG_BOX_QUAD_CHOOSE_PROC_OID: u32 = 5013;
 pub const SPG_BOX_QUAD_PICKSPLIT_PROC_OID: u32 = 5014;
 pub const SPG_BOX_QUAD_INNER_CONSISTENT_PROC_OID: u32 = 5015;
 pub const SPG_BOX_QUAD_LEAF_CONSISTENT_PROC_OID: u32 = 5016;
+pub const SPG_NETWORK_CONFIG_PROC_OID: u32 = 76605;
+pub const SPG_NETWORK_CHOOSE_PROC_OID: u32 = 76606;
+pub const SPG_NETWORK_PICKSPLIT_PROC_OID: u32 = 76607;
+pub const SPG_NETWORK_INNER_CONSISTENT_PROC_OID: u32 = 76608;
+pub const SPG_NETWORK_LEAF_CONSISTENT_PROC_OID: u32 = 76609;
 pub const GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID: u32 = 6347;
 pub const RANGE_SORTSUPPORT_PROC_OID: u32 = 6391;
 pub const BRIN_MINMAX_OPCINFO_PROC_OID: u32 = 3383;
@@ -6086,6 +6097,72 @@ fn gist_support_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            GIST_NETWORK_CONSISTENT_PROC_OID,
+            "inet_gist_consistent",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[
+                INTERNAL_TYPE_OID,
+                INET_TYPE_OID,
+                INT2_TYPE_OID,
+                OID_TYPE_OID,
+                INTERNAL_TYPE_OID,
+            ]),
+            "inet_gist_consistent",
+            5,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            GIST_NETWORK_UNION_PROC_OID,
+            "inet_gist_union",
+            INET_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "inet_gist_union",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            GIST_NETWORK_PENALTY_PROC_OID,
+            "inet_gist_penalty",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "inet_gist_penalty",
+            3,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            GIST_NETWORK_PICKSPLIT_PROC_OID,
+            "inet_gist_picksplit",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "inet_gist_picksplit",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            GIST_NETWORK_SAME_PROC_OID,
+            "inet_gist_same",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[INET_TYPE_OID, INET_TYPE_OID, INTERNAL_TYPE_OID]),
+            "inet_gist_same",
+            3,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
             RANGE_SORTSUPPORT_PROC_OID,
             "range_sortsupport",
             VOID_TYPE_OID,
@@ -6168,6 +6245,66 @@ fn spgist_support_proc_rows() -> Vec<PgProcRow> {
             BOOL_TYPE_OID,
             &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
             "spg_box_quad_leaf_consistent",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_NETWORK_CONFIG_PROC_OID,
+            "inet_spg_config",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "inet_spg_config",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_NETWORK_CHOOSE_PROC_OID,
+            "inet_spg_choose",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "inet_spg_choose",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_NETWORK_PICKSPLIT_PROC_OID,
+            "inet_spg_picksplit",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "inet_spg_picksplit",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_NETWORK_INNER_CONSISTENT_PROC_OID,
+            "inet_spg_inner_consistent",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "inet_spg_inner_consistent",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_NETWORK_LEAF_CONSISTENT_PROC_OID,
+            "inet_spg_leaf_consistent",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "inet_spg_leaf_consistent",
             2,
             false,
             false,

@@ -227,9 +227,11 @@ fn parse_network_text(text: &str, cidr: bool) -> Result<InetValue, ExecError> {
     };
     let value = InetValue { addr, bits };
     if cidr && !host_bits_are_zero(&value) {
-        return Err(ExecError::InvalidStorageValue {
-            column: "cidr".into(),
-            details: format!("invalid cidr value: \"{text}\" has bits set to right of mask"),
+        return Err(ExecError::DetailedError {
+            message: format!("invalid cidr value: \"{text}\""),
+            detail: Some("Value has bits set to right of mask.".into()),
+            hint: None,
+            sqlstate: "22P02",
         });
     }
     Ok(value)
@@ -551,7 +553,7 @@ fn network_hostmask(value: &InetValue) -> InetValue {
     }
 }
 
-fn network_merge(left: &InetValue, right: &InetValue) -> InetValue {
+pub(crate) fn network_merge(left: &InetValue, right: &InetValue) -> InetValue {
     let max = left.max_bits();
     let common = common_prefix_bits(left.addr, right.addr, max);
     let bits = left.bits.min(right.bits).min(common);
@@ -583,7 +585,7 @@ fn common_prefix_bits(left: IpAddr, right: IpAddr, max: u8) -> u8 {
     }
 }
 
-fn network_contains(container: &InetValue, value: &InetValue, strict: bool) -> bool {
+pub(crate) fn network_contains(container: &InetValue, value: &InetValue, strict: bool) -> bool {
     if max_bits(container.addr) != max_bits(value.addr) {
         return false;
     }
@@ -688,8 +690,14 @@ mod tests {
         let err = parse_cidr_text("192.168.1.10/24").unwrap_err();
 
         match err {
-            crate::backend::executor::ExecError::InvalidStorageValue { details, .. } => {
-                assert!(details.contains("bits set to right of mask"));
+            crate::backend::executor::ExecError::DetailedError {
+                message, detail, ..
+            } => {
+                assert_eq!(message, "invalid cidr value: \"192.168.1.10/24\"");
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("Value has bits set to right of mask.")
+                );
             }
             other => panic!("unexpected error: {other:?}"),
         }
