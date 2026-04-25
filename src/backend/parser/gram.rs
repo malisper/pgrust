@@ -12369,7 +12369,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Cidr => "cidr",
         SqlTypeKind::Date => "date",
         SqlTypeKind::DateRange => "daterange",
-        SqlTypeKind::Time => "time without time zone",
+        SqlTypeKind::Time => "time",
         SqlTypeKind::TimeTz => "timetz",
         SqlTypeKind::Interval => "interval",
         SqlTypeKind::TsVector => "tsvector",
@@ -12390,9 +12390,9 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Polygon => "polygon",
         SqlTypeKind::Line => "line",
         SqlTypeKind::Circle => "circle",
-        SqlTypeKind::Timestamp => "timestamp without time zone",
+        SqlTypeKind::Timestamp => "timestamp",
         SqlTypeKind::TimestampRange => "tsrange",
-        SqlTypeKind::TimestampTz => "timestamp with time zone",
+        SqlTypeKind::TimestampTz => "timestamptz",
         SqlTypeKind::TimestampTzRange => "tstzrange",
         SqlTypeKind::PgNodeTree => "pg_node_tree",
         SqlTypeKind::Internal => "internal",
@@ -14531,7 +14531,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 }
             }
             Ok(simple_func_call(
-                "date_part",
+                "extract",
                 vec![
                     SqlFunctionArg::positional(field.ok_or(ParseError::UnexpectedEof)?),
                     SqlFunctionArg::positional(value.ok_or(ParseError::UnexpectedEof)?),
