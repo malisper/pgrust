@@ -2843,6 +2843,56 @@ fn current_temp_namespace_name(ctx: &ExecutorContext) -> Option<CompactString> {
         })
 }
 
+fn configured_current_schema_search_path(ctx: &ExecutorContext) -> Vec<String> {
+    ctx.gucs
+        .get("search_path")
+        .filter(|value| !value.trim().eq_ignore_ascii_case("default"))
+        .map(|value| {
+            value
+                .split(',')
+                .map(|schema| {
+                    schema
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .to_ascii_lowercase()
+                })
+                .filter(|schema| !schema.is_empty())
+                .collect()
+        })
+        .unwrap_or_else(|| vec!["public".into()])
+}
+
+fn current_schema_value(ctx: &ExecutorContext) -> Value {
+    let Some(catalog) = ctx.catalog.as_ref() else {
+        return Value::Text("public".into());
+    };
+    let namespaces = catalog.namespace_rows();
+    let catalog_search_path = catalog.search_path();
+    let mut search_path = if catalog_search_path.is_empty() {
+        configured_current_schema_search_path(ctx)
+    } else {
+        catalog_search_path
+    };
+    if search_path.len() > 1
+        && search_path
+            .first()
+            .is_some_and(|schema| schema == "pg_catalog")
+    {
+        search_path.remove(0);
+    }
+    search_path
+        .into_iter()
+        .filter(|schema| schema != "$user" && schema != "pg_temp")
+        .find(|schema| {
+            namespaces
+                .iter()
+                .any(|namespace| namespace.nspname.eq_ignore_ascii_case(schema))
+        })
+        .map(|schema| Value::Text(schema.into()))
+        .unwrap_or(Value::Null)
+}
+
 fn current_temp_namespace_oid(ctx: &ExecutorContext) -> Option<u32> {
     let name = current_temp_namespace_name(ctx)?;
     ctx.catalog
@@ -2916,6 +2966,8 @@ fn expr_requires_stack_check(expr: &Expr) -> bool {
             | Expr::CaseTest(_)
             | Expr::Random
             | Expr::CurrentDate
+            | Expr::CurrentCatalog
+            | Expr::CurrentSchema
             | Expr::CurrentUser
             | Expr::SessionUser
             | Expr::CurrentRole
@@ -3203,6 +3255,8 @@ pub fn eval_expr(
         }
         Expr::Random => Ok(Value::Float64(rand::random::<f64>())),
         Expr::CurrentDate => Ok(current_date_value_with_config(&ctx.datetime_config)),
+        Expr::CurrentCatalog => Ok(Value::Text(ctx.current_database_name.clone().into())),
+        Expr::CurrentSchema => Ok(current_schema_value(ctx)),
         Expr::CurrentUser | Expr::CurrentRole => auth_role_name(ctx, ctx.current_user_oid),
         Expr::SessionUser => auth_role_name(ctx, ctx.session_user_oid),
         Expr::CurrentTime { precision } => Ok(current_time_value_with_config(
@@ -3534,16 +3588,17 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             let value = eval_plpgsql_expr(array, slot)?;
             eval_array_subscript_plpgsql(value, subscripts, slot)
         }
-        Expr::CurrentUser | Expr::CurrentRole | Expr::SessionUser => {
-            Err(ExecError::DetailedError {
-                message:
-                    "role identity expressions are not supported in PL/pgSQL expression evaluation"
-                        .into(),
-                detail: None,
-                hint: None,
-                sqlstate: "0A000",
-            })
-        }
+        Expr::CurrentUser
+        | Expr::CurrentRole
+        | Expr::SessionUser
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema => Err(ExecError::DetailedError {
+            message: "SQL value functions are not supported in PL/pgSQL expression evaluation"
+                .into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        }),
         Expr::CurrentDate => Ok(current_date_value()),
         Expr::CurrentTime { precision } => Ok(current_time_value(*precision, true)),
         Expr::CurrentTimestamp { precision } => Ok(current_timestamp_value(*precision, true)),

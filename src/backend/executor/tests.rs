@@ -1384,6 +1384,64 @@ fn expr_eval_obeys_null_semantics() {
 }
 
 #[test]
+fn eval_current_catalog_and_schema() {
+    let base = temp_dir("eval_current_catalog_and_schema");
+    let mut ctx = empty_executor_context(&base);
+    ctx.catalog = Some(
+        crate::backend::utils::cache::visible_catalog::VisibleCatalog::new(
+            crate::backend::utils::cache::relcache::RelCache::default(),
+            None,
+        ),
+    );
+    let mut slot = TupleSlot::virtual_row(Vec::new());
+
+    assert_eq!(
+        eval_expr(&Expr::CurrentCatalog, &mut slot, &mut ctx).unwrap(),
+        Value::Text("postgres".into())
+    );
+    assert_eq!(
+        eval_expr(&Expr::CurrentSchema, &mut slot, &mut ctx).unwrap(),
+        Value::Text("public".into())
+    );
+
+    ctx.gucs.insert("search_path".into(), "notme".into());
+    assert_eq!(
+        eval_expr(&Expr::CurrentSchema, &mut slot, &mut ctx).unwrap(),
+        Value::Null
+    );
+
+    ctx.gucs.insert("search_path".into(), "pg_catalog".into());
+    assert_eq!(
+        eval_expr(&Expr::CurrentSchema, &mut slot, &mut ctx).unwrap(),
+        Value::Text("pg_catalog".into())
+    );
+
+    ctx.catalog = Some(
+        crate::backend::utils::cache::visible_catalog::VisibleCatalog::with_search_path(
+            crate::backend::utils::cache::relcache::RelCache::default(),
+            None,
+            vec!["pg_catalog".into(), "notme".into()],
+        ),
+    );
+    assert_eq!(
+        eval_expr(&Expr::CurrentSchema, &mut slot, &mut ctx).unwrap(),
+        Value::Null
+    );
+
+    ctx.catalog = Some(
+        crate::backend::utils::cache::visible_catalog::VisibleCatalog::with_search_path(
+            crate::backend::utils::cache::relcache::RelCache::default(),
+            None,
+            vec!["pg_catalog".into()],
+        ),
+    );
+    assert_eq!(
+        eval_expr(&Expr::CurrentSchema, &mut slot, &mut ctx).unwrap(),
+        Value::Text("pg_catalog".into())
+    );
+}
+
+#[test]
 fn pg_column_compression_reports_compressed_heap_values() {
     let base = temp_dir("pg_column_compression_reports_compressed_heap_values");
     let mut ctx = empty_executor_context(&base);

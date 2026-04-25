@@ -676,6 +676,8 @@ fn expr_srf_depth(expr: &Expr) -> usize {
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentDate
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -816,6 +818,8 @@ fn collect_srfs_at_depth(expr: &Expr, depth: usize, out: &mut Vec<Expr>) {
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentDate
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }

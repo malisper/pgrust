@@ -131,6 +131,8 @@ fn expr_references_local_cte(expr: &Expr, local_ctes: &HashMap<usize, String>) -
         | Expr::CaseTest(_)
         | Expr::Random
         | Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole
@@ -3115,6 +3117,8 @@ pub(super) fn bind_agg_output_expr_in_clause(
             })
         }
         SqlExpr::CurrentDate => Ok(Expr::CurrentDate),
+        SqlExpr::CurrentCatalog => Ok(Expr::CurrentCatalog),
+        SqlExpr::CurrentSchema => Ok(Expr::CurrentSchema),
         SqlExpr::CurrentUser => Ok(Expr::CurrentUser),
         SqlExpr::SessionUser => Ok(Expr::SessionUser),
         SqlExpr::CurrentRole => Ok(Expr::CurrentRole),
