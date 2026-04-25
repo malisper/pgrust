@@ -1019,7 +1019,7 @@ fn standard_planner_with_param_base(
     config: PlannerConfig,
 ) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
     let mut glob = PlannerGlobal::new();
-    let query = root::prepare_query_for_planning(root::prepare_query_for_locking(query)?);
+    let query = root::prepare_query_for_planning(root::prepare_query_for_locking(query)?, catalog);
     let query = pull_up_sublinks(query);
     let mut root = PlannerInfo::new_with_config(query, config);
     let command_type = root.parse.command_type;
