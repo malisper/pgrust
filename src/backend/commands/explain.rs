@@ -108,7 +108,9 @@ fn format_explain_plan_with_subplans_inner(
         return;
     }
 
-    if !verbose && let Some(child) = explain_passthrough_plan_child(plan) {
+    if let Some(child) = explain_passthrough_plan_child(plan)
+        && (!verbose || explain_passthrough_applies_in_verbose(plan))
+    {
         format_explain_plan_with_subplans_inner(
             child, subplans, indent, show_costs, verbose, ctx, lines,
         );
@@ -154,6 +156,19 @@ fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
             projection_targets_are_explain_passthrough(input, targets).then_some(input.as_ref())
         }
         _ => None,
+    }
+}
+
+fn explain_passthrough_applies_in_verbose(plan: &Plan) -> bool {
+    match plan {
+        Plan::Projection { input, targets, .. } => {
+            matches!(input.as_ref(), Plan::Aggregate { .. })
+                && targets.len() == input.column_names().len()
+                && targets
+                    .iter()
+                    .all(|target| !target.resjunk && matches!(target.expr, Expr::Var(_)))
+        }
+        _ => false,
     }
 }
 
