@@ -540,12 +540,12 @@ pub fn executor_start(plan: Plan) -> PlanState {
         } => {
             let right_plan = *right;
             let right_uses_outer = !nest_params.is_empty();
-            let cross_right_outer = matches!(
-                kind,
-                crate::include::nodes::primnodes::JoinType::Cross
-                    | crate::include::nodes::primnodes::JoinType::Inner
-            ) && !right_uses_outer
-                && !plan_is_join_relation(&left);
+            let cross_right_outer =
+                (matches!(kind, crate::include::nodes::primnodes::JoinType::Cross)
+                    || (matches!(kind, crate::include::nodes::primnodes::JoinType::Inner)
+                        && !join_qual.is_empty()))
+                    && !right_uses_outer
+                    && !plan_is_join_relation(&left);
             let left_width = left.column_names().len();
             let right_width = right_plan.column_names().len();
             let combined_names: Vec<String> = left
