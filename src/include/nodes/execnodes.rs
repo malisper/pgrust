@@ -302,6 +302,30 @@ pub struct AppendState {
     pub(crate) stats: NodeExecStats,
 }
 
+#[derive(Debug)]
+pub struct MergeAppendState {
+    pub(crate) source_id: usize,
+    pub(crate) children: Vec<PlanState>,
+    pub(crate) items: Vec<OrderByEntry>,
+    pub(crate) column_names: Vec<String>,
+    pub(crate) rows: Option<Vec<MaterializedRow>>,
+    pub(crate) next_index: usize,
+    pub(crate) slot: TupleSlot,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct UniqueState {
+    pub(crate) input: PlanState,
+    pub(crate) previous_values: Option<Vec<Value>>,
+    pub(crate) slot: TupleSlot,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
 pub struct SeqScanState {
     pub(crate) rel: RelFileLocator,
     pub(crate) relation_name: String,
@@ -359,6 +383,8 @@ pub struct IndexScanState {
     pub(crate) scan: Option<IndexScanDesc>,
     pub(crate) scan_exhausted: bool,
     pub(crate) slot: TupleSlot,
+    pub(crate) qual: Option<crate::backend::executor::expr::CompiledPredicate>,
+    pub(crate) qual_expr: Option<Expr>,
     pub(crate) source_id: usize,
     pub(crate) relation_oid: u32,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
@@ -374,6 +400,48 @@ impl std::fmt::Debug for IndexScanState {
             .field("index_rel", &self.index_rel)
             .field("index_name", &self.index_name)
             .field("am_oid", &self.am_oid)
+            .field("has_qual", &self.qual.is_some())
+            .finish()
+    }
+}
+
+pub struct IndexOnlyScanState {
+    pub(crate) rel: RelFileLocator,
+    pub(crate) relation_name: String,
+    pub(crate) toast_relation: Option<ToastRelationRef>,
+    pub(crate) index_rel: RelFileLocator,
+    pub(crate) index_name: String,
+    pub(crate) am_oid: u32,
+    pub(crate) column_names: Vec<String>,
+    pub(crate) desc: Rc<RelationDesc>,
+    pub(crate) index_desc: Rc<RelationDesc>,
+    pub(crate) attr_descs: Rc<[AttributeDesc]>,
+    pub(crate) index_meta: IndexRelCacheEntry,
+    pub(crate) keys: Vec<IndexScanKey>,
+    pub(crate) order_by_keys: Vec<IndexScanKey>,
+    pub(crate) direction: ScanDirection,
+    pub(crate) scan: Option<IndexScanDesc>,
+    pub(crate) scan_exhausted: bool,
+    pub(crate) vm_buf: Option<crate::include::access::visibilitymap::VisibilityMapBuffer>,
+    pub(crate) slot: TupleSlot,
+    pub(crate) qual: Option<crate::backend::executor::expr::CompiledPredicate>,
+    pub(crate) qual_expr: Option<Expr>,
+    pub(crate) source_id: usize,
+    pub(crate) relation_oid: u32,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+impl std::fmt::Debug for IndexOnlyScanState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndexOnlyScanState")
+            .field("rel", &self.rel)
+            .field("relation_name", &self.relation_name)
+            .field("index_rel", &self.index_rel)
+            .field("index_name", &self.index_name)
+            .field("am_oid", &self.am_oid)
+            .field("has_qual", &self.qual.is_some())
             .finish()
     }
 }

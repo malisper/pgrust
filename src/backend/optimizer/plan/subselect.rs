@@ -1035,7 +1035,36 @@ fn rebase_window_frame_bound_subplan_ids(
 
 fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
     match plan {
-        Plan::Result { .. } | Plan::SeqScan { .. } | Plan::IndexScan { .. } => plan,
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. } => plan,
+        Plan::MergeAppend {
+            plan_info,
+            source_id,
+            desc,
+            items,
+            children,
+        } => Plan::MergeAppend {
+            plan_info,
+            source_id,
+            desc,
+            items: items
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                    expr: rebase_expr_subplan_ids(item.expr, base),
+                    ..item
+                })
+                .collect(),
+            children: children
+                .into_iter()
+                .map(|child| rebase_plan_subplan_ids(child, base))
+                .collect(),
+        },
+        Plan::Unique { plan_info, input } => Plan::Unique {
+            plan_info,
+            input: Box::new(rebase_plan_subplan_ids(*input, base)),
+        },
         Plan::BitmapIndexScan {
             plan_info,
             source_id,
@@ -1429,9 +1458,36 @@ pub(super) fn finalize_plan_subqueries(
     match plan {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::WorkTableScan { .. } => plan,
+        Plan::MergeAppend {
+            plan_info,
+            source_id,
+            desc,
+            items,
+            children,
+        } => Plan::MergeAppend {
+            plan_info,
+            source_id,
+            desc,
+            items: items
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                    expr: finalize_expr_subqueries(item.expr, catalog, subplans),
+                    ..item
+                })
+                .collect(),
+            children: children
+                .into_iter()
+                .map(|child| finalize_plan_subqueries(child, catalog, subplans))
+                .collect(),
+        },
+        Plan::Unique { plan_info, input } => Plan::Unique {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
+        },
         Plan::BitmapHeapScan {
             plan_info,
             source_id,

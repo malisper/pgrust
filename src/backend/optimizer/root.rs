@@ -115,6 +115,12 @@ fn validate_select_locking(query: &Query, strength: SelectLockingClause) -> Resu
             strength.sql()
         )));
     }
+    if query.distinct {
+        return Err(ParseError::FeatureNotSupportedMessage(format!(
+            "{} is not allowed with DISTINCT clause",
+            strength.sql()
+        )));
+    }
     if !query.group_by.is_empty() {
         return Err(ParseError::FeatureNotSupportedMessage(format!(
             "{} is not allowed with GROUP BY clause",
@@ -899,6 +905,7 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
         rtable: Vec::new(),
         jointree: None,
         target_list,
+        distinct: query.distinct,
         where_qual: None,
         group_by: Vec::new(),
         accumulators: Vec::new(),
@@ -1258,6 +1265,7 @@ fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
         rtable: query.rtable.clone(),
         jointree: query.jointree.clone(),
         target_list: vec![target],
+        distinct: false,
         where_qual,
         group_by: Vec::new(),
         accumulators: Vec::new(),

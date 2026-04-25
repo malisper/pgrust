@@ -1179,12 +1179,7 @@ impl Database {
             }));
         }
         ensure_relation_owner(self, client_id, &entry, &create_stmt.table_name)?;
-        if !create_stmt.include_columns.is_empty()
-            || create_stmt
-                .columns
-                .iter()
-                .any(|column| column.descending || column.nulls_first.is_some())
-        {
+        if !create_stmt.include_columns.is_empty() {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "simple index definition",
                 actual: "unsupported CREATE INDEX feature".into(),

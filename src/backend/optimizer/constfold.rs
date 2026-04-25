@@ -41,6 +41,7 @@ fn simplify_query(query: Query) -> Result<Query, ParseError> {
             .into_iter()
             .map(simplify_target_entry)
             .collect::<Result<Vec<_>, _>>()?,
+        distinct: query.distinct,
         where_qual: query
             .where_qual
             .map(|expr| simplify_expr(expr, None))

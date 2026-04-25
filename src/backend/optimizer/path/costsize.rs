@@ -51,6 +51,23 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 plan_info: PlanEstimate::new(0.0, 0.0, 1.0, 0),
                 pathtarget,
             },
+            Path::Unique {
+                pathtarget, input, ..
+            } => {
+                let input = optimize_path(*input, catalog);
+                let input_info = input.plan_info();
+                let rows = clamp_rows(input_info.plan_rows.as_f64());
+                Path::Unique {
+                    plan_info: PlanEstimate::new(
+                        input_info.startup_cost.as_f64(),
+                        input_info.total_cost.as_f64() + rows * CPU_OPERATOR_COST,
+                        rows,
+                        input_info.plan_width,
+                    ),
+                    pathtarget,
+                    input: Box::new(input),
+                }
+            }
             Path::Append {
                 pathtarget,
                 source_id,
@@ -86,6 +103,46 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     pathtarget,
                     source_id,
                     desc,
+                    children,
+                }
+            }
+            Path::MergeAppend {
+                pathtarget,
+                source_id,
+                desc,
+                items,
+                children,
+                ..
+            } => {
+                let children = children
+                    .into_iter()
+                    .map(|child| optimize_path(child, catalog))
+                    .collect::<Vec<_>>();
+                let startup_cost = children
+                    .iter()
+                    .map(|child| child.plan_info().startup_cost.as_f64())
+                    .fold(0.0, f64::max);
+                let total_cost = children
+                    .iter()
+                    .map(|child| child.plan_info().total_cost.as_f64())
+                    .sum::<f64>();
+                let rows = clamp_rows(
+                    children
+                        .iter()
+                        .map(|child| child.plan_info().plan_rows.as_f64())
+                        .sum::<f64>(),
+                );
+                let width = desc
+                    .columns
+                    .iter()
+                    .map(|column| estimate_sql_type_width(column.sql_type))
+                    .sum();
+                Path::MergeAppend {
+                    plan_info: PlanEstimate::new(startup_cost, total_cost, rows, width),
+                    pathtarget,
+                    source_id,
+                    desc,
+                    items,
                     children,
                 }
             }
@@ -155,6 +212,57 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     relispopulated,
                     toast,
                     desc,
+                }
+            }
+            Path::IndexOnlyScan {
+                pathtarget,
+                source_id,
+                rel,
+                relation_name,
+                relation_oid,
+                index_rel,
+                index_name,
+                am_oid,
+                toast,
+                desc,
+                index_desc,
+                index_meta,
+                keys,
+                order_by_keys,
+                direction,
+                pathkeys,
+                ..
+            } => {
+                let stats = relation_stats(catalog, index_meta.indrelid, &desc);
+                let rows = clamp_rows(stats.reltuples * DEFAULT_EQ_SEL);
+                let pages = catalog
+                    .class_row_by_oid(index_meta.indrelid)
+                    .map(|row| row.relpages.max(1) as f64)
+                    .unwrap_or(DEFAULT_NUM_PAGES);
+                let plan_info = PlanEstimate::new(
+                    CPU_OPERATOR_COST,
+                    RANDOM_PAGE_COST + pages.min(rows.max(1.0)) + rows * CPU_INDEX_TUPLE_COST,
+                    rows,
+                    stats.width,
+                );
+                Path::IndexOnlyScan {
+                    plan_info,
+                    pathtarget,
+                    source_id,
+                    rel,
+                    relation_name,
+                    relation_oid,
+                    index_rel,
+                    index_name,
+                    am_oid,
+                    toast,
+                    desc,
+                    index_desc,
+                    index_meta,
+                    keys,
+                    order_by_keys,
+                    direction,
+                    pathkeys,
                 }
             }
             Path::IndexScan {
@@ -1472,24 +1580,48 @@ pub(super) fn estimate_index_candidate(
     } else {
         Vec::new()
     };
-    let mut plan = Path::IndexScan {
-        plan_info: scan_info,
-        pathtarget: slot_output_target(source_id, &desc.columns, |column| column.sql_type),
-        source_id,
-        rel,
-        relation_name,
-        relation_oid,
-        index_rel: spec.index.rel,
-        index_name: spec.index.name.clone(),
-        am_oid: spec.index.index_meta.am_oid,
-        toast,
-        desc,
-        index_desc: spec.index.desc,
-        index_meta: spec.index.index_meta,
-        keys: spec.keys,
-        order_by_keys: spec.order_by_keys,
-        direction: spec.direction,
-        pathkeys: native_pathkeys,
+    let index_only =
+        spec.index.index_meta.am_oid == BTREE_AM_OID && index_covers_relation(&desc, &spec.index);
+    let mut plan = if index_only {
+        Path::IndexOnlyScan {
+            plan_info: scan_info,
+            pathtarget: slot_output_target(source_id, &desc.columns, |column| column.sql_type),
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            index_rel: spec.index.rel,
+            index_name: spec.index.name.clone(),
+            am_oid: spec.index.index_meta.am_oid,
+            toast,
+            desc,
+            index_desc: spec.index.desc,
+            index_meta: spec.index.index_meta,
+            keys: spec.keys,
+            order_by_keys: spec.order_by_keys,
+            direction: spec.direction,
+            pathkeys: native_pathkeys,
+        }
+    } else {
+        Path::IndexScan {
+            plan_info: scan_info,
+            pathtarget: slot_output_target(source_id, &desc.columns, |column| column.sql_type),
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            index_rel: spec.index.rel,
+            index_name: spec.index.name.clone(),
+            am_oid: spec.index.index_meta.am_oid,
+            toast,
+            desc,
+            index_desc: spec.index.desc,
+            index_meta: spec.index.index_meta,
+            keys: spec.keys,
+            order_by_keys: spec.order_by_keys,
+            direction: spec.direction,
+            pathkeys: native_pathkeys,
+        }
     };
 
     if let Some(predicate) = spec.residual {
@@ -2026,6 +2158,7 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
     match path {
         Path::Result { .. }
         | Path::SeqScan { .. }
+        | Path::IndexOnlyScan { .. }
         | Path::IndexScan { .. }
         | Path::BitmapIndexScan { .. }
         | Path::WorkTableScan { .. } => false,
@@ -2040,6 +2173,15 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
         Path::Append { children, .. } | Path::SetOp { children, .. } => {
             children.iter().any(path_uses_immediate_outer_columns)
         }
+        Path::MergeAppend {
+            children, items, ..
+        } => {
+            children.iter().any(path_uses_immediate_outer_columns)
+                || items
+                    .iter()
+                    .any(|item| expr_uses_immediate_outer_columns(&item.expr))
+        }
+        Path::Unique { input, .. } => path_uses_immediate_outer_columns(input),
         Path::Filter {
             input, predicate, ..
         } => {
@@ -2554,6 +2696,9 @@ pub(super) fn build_index_path_spec(
         conjuncts
             .iter()
             .filter(|expr| !used_exprs.iter().any(|used_expr| *used_expr == *expr))
+            .filter(|expr| {
+                !predicate_implies_index_predicate(index.index_predicate.as_ref(), Some(expr))
+            })
             .cloned()
             .collect(),
     );
@@ -2994,6 +3139,17 @@ fn const_argument(expr: &Expr) -> Option<Value> {
 fn simple_index_column(index: &BoundIndexRelation, index_pos: usize) -> Option<usize> {
     let attnum = *index.index_meta.indkey.get(index_pos)?;
     (attnum > 0).then_some((attnum - 1) as usize)
+}
+
+fn index_covers_relation(desc: &RelationDesc, index: &BoundIndexRelation) -> bool {
+    desc.columns.iter().enumerate().all(|(column_index, _)| {
+        index
+            .index_meta
+            .indkey
+            .iter()
+            .enumerate()
+            .any(|(index_pos, _)| simple_index_column(index, index_pos) == Some(column_index))
+    })
 }
 
 fn index_expression_position(index: &BoundIndexRelation, index_pos: usize) -> Option<usize> {
@@ -3440,6 +3596,8 @@ fn index_order_match(
     index: &BoundIndexRelation,
     equality_prefix: usize,
 ) -> Option<(usize, crate::include::access::relscan::ScanDirection)> {
+    const BT_DESC_FLAG: i16 = 0x0001;
+
     if index.index_meta.am_oid != BTREE_AM_OID || items.is_empty() {
         return None;
     }
@@ -3455,10 +3613,15 @@ fn index_order_match(
         if index_column != column {
             break;
         }
-        let item_direction = if item.descending {
-            crate::include::access::relscan::ScanDirection::Backward
-        } else {
+        let index_desc = index
+            .index_meta
+            .indoption
+            .get(equality_prefix + idx)
+            .is_some_and(|option| option & BT_DESC_FLAG != 0);
+        let item_direction = if item.descending == index_desc {
             crate::include::access::relscan::ScanDirection::Forward
+        } else {
+            crate::include::access::relscan::ScanDirection::Backward
         };
         if let Some(existing) = direction {
             if existing != item_direction {

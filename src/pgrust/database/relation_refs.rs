@@ -265,12 +265,16 @@ fn collect_rels_from_set_returning_call(
 pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLocator>) {
     match plan {
         Plan::Result { .. } | Plan::WorkTableScan { .. } => {}
-        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => {
             for child in children {
                 collect_rels_from_plan(child, rels);
             }
         }
+        Plan::Unique { input, .. } => collect_rels_from_plan(input, rels),
         Plan::SeqScan { rel, .. }
+        | Plan::IndexOnlyScan { rel, .. }
         | Plan::IndexScan { rel, .. }
         | Plan::BitmapIndexScan { rel, .. } => {
             rels.insert(*rel);
