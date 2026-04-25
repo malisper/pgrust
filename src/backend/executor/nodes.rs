@@ -270,7 +270,7 @@ fn render_index_scan_condition(
 ) -> Option<String> {
     let mut rendered = keys
         .iter()
-        .filter_map(|key| render_index_scan_key(key, desc, index_meta))
+        .filter_map(|key| render_index_scan_key(key, desc, index_meta, 's'))
         .collect::<Vec<_>>();
     if let Some(qual_expr) = qual_expr {
         rendered.push(render_explain_expr_inner(qual_expr, column_names));
@@ -279,6 +279,22 @@ fn render_index_scan_condition(
         0 => None,
         1 => rendered.into_iter().next(),
         _ => Some(rendered.join(" AND ")),
+    }
+}
+
+pub(crate) fn render_index_order_by(
+    keys: &[IndexScanKey],
+    desc: &RelationDesc,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+) -> Option<String> {
+    let rendered = keys
+        .iter()
+        .filter_map(|key| render_index_scan_key(key, desc, index_meta, 'o'))
+        .collect::<Vec<_>>();
+    match rendered.len() {
+        0 => None,
+        1 => rendered.into_iter().next(),
+        _ => Some(rendered.join(", ")),
     }
 }
 
@@ -1375,6 +1391,11 @@ impl PlanNode for IndexOnlyScanState {
         ) {
             lines.push(format!("{prefix}Index Cond: ({detail})"));
         }
+        if let Some(detail) =
+            render_index_order_by(&self.order_by_keys, &self.desc, &self.index_meta)
+        {
+            lines.push(format!("{prefix}Order By: ({detail})"));
+        }
         if analyze && self.stats.rows_removed_by_filter > 0 {
             lines.push(format!(
                 "{prefix}Rows Removed by Filter: {}",
@@ -1641,6 +1662,11 @@ impl PlanNode for IndexScanState {
         ) {
             lines.push(format!("{prefix}Index Cond: ({detail})"));
         }
+        if let Some(detail) =
+            render_index_order_by(&self.order_by_keys, &self.desc, &self.index_meta)
+        {
+            lines.push(format!("{prefix}Order By: ({detail})"));
+        }
         if analyze && self.stats.rows_removed_by_filter > 0 {
             lines.push(format!(
                 "{prefix}Rows Removed by Filter: {}",
@@ -1662,13 +1688,17 @@ fn render_index_scan_key(
     key: &IndexScanKey,
     desc: &RelationDesc,
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    purpose: char,
 ) -> Option<String> {
     let index_attno = usize::try_from(key.attribute_number.checked_sub(1)?).ok()?;
     let heap_attno = usize::try_from(*index_meta.indkey.get(index_attno)?)
         .ok()?
         .checked_sub(1)?;
     let column_name = desc.columns.get(heap_attno)?.name.clone();
-    if key.strategy == 1 && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Null)) {
+    if purpose == 's'
+        && key.strategy == 1
+        && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Null))
+    {
         return Some(format!("{column_name} IS NOT NULL"));
     }
     let right_type_oid = match &key.argument {
@@ -1685,7 +1715,7 @@ fn render_index_scan_key(
         .get(index_attno)?
         .iter()
         .filter(|entry| {
-            entry.purpose == 's' && u16::try_from(entry.strategy).ok() == Some(key.strategy)
+            entry.purpose == purpose && u16::try_from(entry.strategy).ok() == Some(key.strategy)
         })
         .filter(|entry| {
             right_type_oid.is_none()

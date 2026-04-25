@@ -102,6 +102,7 @@ pub(crate) use expr_txid::{
 pub(crate) use expr_xml::validate_xml_input;
 pub(crate) use nodes::{
     render_explain_expr, render_explain_join_expr, render_explain_projection_expr_with_qualifier,
+    render_index_order_by,
 };
 pub(crate) use srf::set_returning_call_label;
 pub use startup::executor_start;
