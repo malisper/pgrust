@@ -189,6 +189,50 @@ pub(super) fn bind_arithmetic_expr(
     }
     if !left_type.is_array
         && !right_type.is_array
+        && op == "*"
+        && (matches!(left_type.kind, SqlTypeKind::Interval)
+            || matches!(right_type.kind, SqlTypeKind::Interval))
+        && matches!(
+            if matches!(left_type.kind, SqlTypeKind::Interval) {
+                right_type.kind
+            } else {
+                left_type.kind
+            },
+            SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
+        )
+    {
+        let interval = SqlType::new(SqlTypeKind::Interval);
+        return Ok(Expr::binary_op(
+            make,
+            interval,
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_left_type,
+                left_type,
+            ),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_right_type,
+                right_type,
+            ),
+        ));
+    }
+    if !left_type.is_array
+        && !right_type.is_array
         && op == "-"
         && matches!(left_type.kind, SqlTypeKind::Date)
         && matches!(right_type.kind, SqlTypeKind::Date)

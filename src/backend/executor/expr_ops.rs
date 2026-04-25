@@ -473,6 +473,34 @@ fn timestamp_difference_interval(left: i64, right: i64) -> Result<Value, ExecErr
     }
 }
 
+fn multiply_interval_by_i64(value: IntervalValue, factor: i64) -> Result<Value, ExecError> {
+    if !value.is_finite() {
+        return Ok(Value::Interval(if factor < 0 {
+            value.negate()
+        } else {
+            value
+        }));
+    }
+    Ok(Value::Interval(IntervalValue {
+        time_micros: value
+            .time_micros
+            .checked_mul(factor)
+            .ok_or_else(interval_out_of_range)?,
+        days: i32::try_from(
+            i64::from(value.days)
+                .checked_mul(factor)
+                .ok_or_else(interval_out_of_range)?,
+        )
+        .map_err(|_| interval_out_of_range())?,
+        months: i32::try_from(
+            i64::from(value.months)
+                .checked_mul(factor)
+                .ok_or_else(interval_out_of_range)?,
+        )
+        .map_err(|_| interval_out_of_range())?,
+    }))
+}
+
 pub(crate) fn mul_values(left: Value, right: Value) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
@@ -487,6 +515,12 @@ pub(crate) fn mul_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_mul_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_mul_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_mul_i64(*l, *r)?)),
+        (Value::Interval(l), Value::Int16(r)) => multiply_interval_by_i64(*l, i64::from(*r)),
+        (Value::Interval(l), Value::Int32(r)) => multiply_interval_by_i64(*l, i64::from(*r)),
+        (Value::Interval(l), Value::Int64(r)) => multiply_interval_by_i64(*l, *r),
+        (Value::Int16(l), Value::Interval(r)) => multiply_interval_by_i64(*r, i64::from(*l)),
+        (Value::Int32(l), Value::Interval(r)) => multiply_interval_by_i64(*r, i64::from(*l)),
+        (Value::Int64(l), Value::Interval(r)) => multiply_interval_by_i64(*r, *l),
         (Value::Money(l), Value::Int16(r)) => Ok(Value::Money(money_mul_int(*l, i64::from(*r))?)),
         (Value::Money(l), Value::Int32(r)) => Ok(Value::Money(money_mul_int(*l, i64::from(*r))?)),
         (Value::Money(l), Value::Int64(r)) => Ok(Value::Money(money_mul_int(*l, *r)?)),
