@@ -1,3 +1,4 @@
+use crate::backend::executor::expr_numeric::eval_power_function;
 use crate::backend::executor::expr_ops::{
     add_values, bitwise_and_values, bitwise_not_value, bitwise_or_values, bitwise_xor_values,
     concat_values, div_values, mod_values, mul_values, negate_value, not_equal_values,
@@ -11,10 +12,10 @@ use crate::include::nodes::parsenodes::{
     SqlType, SqlTypeKind,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, AggFunc, Aggref, BoolExpr, BoolExprType, CaseExpr, CaseWhen, Expr,
-    ExprArraySubscript, OpExpr, OpExprKind, OrderByEntry, SetReturningCall, SortGroupClause,
-    TargetEntry, WindowClause, WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind,
-    XmlExpr,
+    AggAccum, AggFunc, Aggref, BoolExpr, BoolExprType, BuiltinScalarFunction, CaseExpr, CaseWhen,
+    Expr, ExprArraySubscript, FuncExpr, OpExpr, OpExprKind, OrderByEntry, ScalarFunctionImpl,
+    SetReturningCall, SortGroupClause, TargetEntry, WindowClause, WindowFrame, WindowFrameBound,
+    WindowFuncExpr, WindowFuncKind, XmlExpr,
 };
 
 pub(crate) fn fold_query_constants(query: Query) -> Result<Query, ParseError> {
@@ -494,6 +495,21 @@ fn simplify_exprs(exprs: Vec<Expr>) -> Result<Vec<Expr>, ParseError> {
         .collect::<Result<Vec<_>, _>>()
 }
 
+fn simplify_func_expr(func: FuncExpr, case_test_value: Option<&Value>) -> Result<Expr, ParseError> {
+    let args = func
+        .args
+        .into_iter()
+        .map(|expr| simplify_expr(expr, case_test_value))
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(values) = const_expr_values(&args)
+        && let Some(expr) =
+            try_fold_optional_eval(evaluate_const_func(func.implementation, &values))?
+    {
+        return Ok(expr);
+    }
+    Ok(Expr::Func(Box::new(FuncExpr { args, ..func })))
+}
+
 fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, ParseError> {
     match expr {
         other @ (Expr::Var(_)
@@ -519,16 +535,7 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
         Expr::Op(op) => simplify_op_expr(*op, case_test_value),
         Expr::Bool(bool_expr) => simplify_bool_expr(*bool_expr, case_test_value),
         Expr::Case(case_expr) => simplify_case_expr(*case_expr, case_test_value),
-        Expr::Func(func) => Ok(Expr::Func(Box::new(
-            crate::include::nodes::primnodes::FuncExpr {
-                args: func
-                    .args
-                    .into_iter()
-                    .map(|expr| simplify_expr(expr, case_test_value))
-                    .collect::<Result<Vec<_>, _>>()?,
-                ..*func
-            },
-        ))),
+        Expr::Func(func) => simplify_func_expr(*func, case_test_value),
         Expr::SetReturning(srf) => Ok(Expr::SetReturning(Box::new(
             crate::include::nodes::primnodes::SetReturningExpr {
                 call: simplify_set_returning_call(srf.call)?,
@@ -697,6 +704,18 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
                 .map(|subscript| simplify_array_subscript(subscript, case_test_value))
                 .collect::<Result<Vec<_>, _>>()?,
         }),
+    }
+}
+
+fn evaluate_const_func(
+    implementation: ScalarFunctionImpl,
+    args: &[Value],
+) -> Result<Option<Value>, ExecError> {
+    match implementation {
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Power) => {
+            eval_power_function(args).map(Some)
+        }
+        _ => Ok(None),
     }
 }
 

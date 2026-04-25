@@ -1168,6 +1168,11 @@ impl NumericValue {
                     ..
                 },
             ) => {
+                if lscale == rscale {
+                    return Self::finite(lcoeff + rcoeff, *lscale)
+                        .with_dscale(*lscale)
+                        .normalize();
+                }
                 let scale = (*lscale).max(*rscale);
                 let left = align_coeff(lcoeff.clone(), *lscale, scale);
                 let right = align_coeff(rcoeff.clone(), *rscale, scale);
@@ -1284,6 +1289,19 @@ impl NumericValue {
                 },
             ) => {
                 let exp = (out_scale as i64) + (*rscale as i64) - (*lscale as i64);
+                if let Some(divisor_exp) = power_of_ten_exponent(rcoeff) {
+                    let divisor_sign = rcoeff.signum();
+                    let rounded = rounded_divide_coeff_by_power_of_ten(
+                        lcoeff,
+                        divisor_exp as i64 - exp,
+                        divisor_sign,
+                    );
+                    return Some(
+                        Self::finite(rounded, out_scale)
+                            .with_dscale(out_scale)
+                            .normalize(),
+                    );
+                }
                 let num = if exp >= 0 {
                     lcoeff * pow10_bigint(exp as u32)
                 } else {
@@ -1327,6 +1345,9 @@ impl NumericValue {
                     ..
                 },
             ) => {
+                if lscale == rscale {
+                    return lcoeff.cmp(rcoeff);
+                }
                 let scale = (*lscale).max(*rscale);
                 let left = align_coeff(lcoeff.clone(), *lscale, scale);
                 let right = align_coeff(rcoeff.clone(), *rscale, scale);
@@ -1350,9 +1371,14 @@ fn numeric_pg_weight_and_first_digit(value: &NumericValue) -> Option<(i32, i32)>
     let first_group_exp = weight * 4;
     let shift = *scale as i32 + first_group_exp;
     let first_digit = if shift >= 0 {
-        (coeff.abs() / pow10_bigint(shift as u32)).to_i32()?
+        let end = digits.len().checked_sub(shift as usize)?;
+        digits[..end].parse::<i32>().ok()?
     } else {
-        (coeff.abs() * pow10_bigint((-shift) as u32)).to_i32()?
+        let zeros = (-shift) as usize;
+        let mut first = String::with_capacity(digits.len() + zeros);
+        first.push_str(&digits);
+        first.extend(std::iter::repeat_n('0', zeros));
+        first.parse::<i32>().ok()?
     };
     Some((weight, first_digit))
 }
@@ -1461,11 +1487,60 @@ fn align_coeff(coeff: BigInt, from_scale: u32, to_scale: u32) -> BigInt {
 }
 
 fn pow10_bigint(exp: u32) -> BigInt {
-    let mut value = BigInt::from(1u8);
-    for _ in 0..exp {
-        value *= 10u8;
+    let mut digits = String::with_capacity(exp as usize + 1);
+    digits.push('1');
+    digits.extend(std::iter::repeat_n('0', exp as usize));
+    BigInt::parse_bytes(digits.as_bytes(), 10).expect("power of ten digits are decimal")
+}
+
+fn power_of_ten_exponent(value: &BigInt) -> Option<u32> {
+    let digits = value.abs().to_str_radix(10);
+    if !digits.starts_with('1') || !digits.as_bytes()[1..].iter().all(|digit| *digit == b'0') {
+        return None;
     }
-    value
+    Some((digits.len() - 1) as u32)
+}
+
+fn rounded_divide_coeff_by_power_of_ten(
+    coeff: &BigInt,
+    shift: i64,
+    divisor_sign: BigInt,
+) -> BigInt {
+    if coeff.is_zero() {
+        return BigInt::zero();
+    }
+
+    let negative = coeff.signum() != divisor_sign;
+    let digits = coeff.abs().to_str_radix(10);
+    let mut rounded = if shift <= 0 {
+        let zeros = (-shift) as usize;
+        let mut shifted = String::with_capacity(digits.len() + zeros);
+        shifted.push_str(&digits);
+        shifted.extend(std::iter::repeat_n('0', zeros));
+        BigInt::parse_bytes(shifted.as_bytes(), 10).expect("shifted coefficient digits are decimal")
+    } else {
+        let drop = shift as usize;
+        if drop > digits.len() {
+            BigInt::zero()
+        } else {
+            let keep_len = digits.len() - drop;
+            let mut quotient = if keep_len == 0 {
+                BigInt::zero()
+            } else {
+                BigInt::parse_bytes(digits[..keep_len].as_bytes(), 10)
+                    .expect("coefficient digits are decimal")
+            };
+            if drop > 0 && digits.as_bytes()[keep_len] >= b'5' {
+                quotient += 1u8;
+            }
+            quotient
+        }
+    };
+
+    if negative {
+        rounded = -rounded;
+    }
+    rounded
 }
 
 pub(crate) fn parse_numeric_text(text: &str) -> Option<NumericValue> {
@@ -1671,7 +1746,7 @@ mod tests {
     use std::cmp::Ordering;
 
     use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
-    use crate::include::nodes::datum::Value;
+    use crate::include::nodes::datum::{NumericValue, Value};
 
     #[test]
     fn compare_order_values_orders_int64_values_directly() {
@@ -1717,5 +1792,16 @@ mod tests {
             Err(crate::backend::executor::ExecError::DetailedError { sqlstate, .. })
                 if sqlstate == "0A000"
         ));
+    }
+
+    #[test]
+    fn numeric_divides_by_large_power_of_ten_without_full_bigint_division() {
+        let numerator = super::parse_numeric_text("6e131071").unwrap();
+        let denominator = super::parse_numeric_text("1e131071").unwrap();
+
+        assert_eq!(
+            numerator.div(&denominator, 0),
+            Some(NumericValue::from_i64(6))
+        );
     }
 }
