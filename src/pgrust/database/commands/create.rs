@@ -420,12 +420,13 @@ impl Database {
                 } else {
                     None
                 };
+                let table_entry = super::index::catalog_entry_from_bound_relation(relation);
                 let constraint_effect = self
                     .catalog
                     .write()
-                    .create_index_backed_constraint_mvcc_with_period(
-                        relation.relation_oid,
-                        index_entry.relation_oid,
+                    .create_index_backed_constraint_for_entries_mvcc_with_period(
+                        &table_entry,
+                        &index_entry,
                         constraint_name,
                         if action.primary {
                             crate::include::catalog::CONSTRAINT_PRIMARY
@@ -493,20 +494,19 @@ impl Database {
                 Some((xid, constraint_cid)),
                 configured_search_path,
             );
-            let (referenced_relation, referenced_index_oid) = if action.self_referential {
+            let (referenced_relation, referenced_index) = if action.self_referential {
                 let referenced_relation = catalog
                     .lookup_relation_by_oid(relation.relation_oid)
                     .unwrap_or_else(|| relation.clone());
                 let referenced_attnums =
                     column_attnums_for_names(&referenced_relation.desc, &action.referenced_columns);
-                let referenced_index_oid = catalog
+                let referenced_index = catalog
                     .index_relations_for_heap(referenced_relation.relation_oid)
                     .into_iter()
                     .find(|index| {
                         index.index_meta.indisunique
                             && index.index_meta.indkey == referenced_attnums
                     })
-                    .map(|index| index.relation_oid)
                     .ok_or_else(|| {
                         ExecError::Parse(ParseError::UnexpectedToken {
                             expected: "referenced UNIQUE or PRIMARY KEY index",
@@ -515,14 +515,24 @@ impl Database {
                             ),
                         })
                     })?;
-                (referenced_relation, referenced_index_oid)
+                (referenced_relation, referenced_index)
             } else {
                 let referenced_relation = catalog
                     .lookup_relation_by_oid(action.referenced_relation_oid)
                     .ok_or_else(|| {
                         ExecError::Parse(ParseError::UnknownTable(action.referenced_table.clone()))
                     })?;
-                (referenced_relation, action.referenced_index_oid)
+                let referenced_index = catalog
+                    .index_relations_for_heap(referenced_relation.relation_oid)
+                    .into_iter()
+                    .find(|index| index.relation_oid == action.referenced_index_oid)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "referenced UNIQUE or PRIMARY KEY index",
+                            actual: action.referenced_index_oid.to_string(),
+                        })
+                    })?;
+                (referenced_relation, referenced_index)
             };
             let local_attnums = column_attnums_for_names(&relation.desc, &action.columns);
             let referenced_attnums =
@@ -540,19 +550,28 @@ impl Database {
                 waiter: None,
                 interrupts: Arc::clone(&interrupts),
             };
+            let table_entry = super::index::catalog_entry_from_bound_relation(relation);
+            let referenced_table_entry =
+                super::index::catalog_entry_from_bound_relation(&referenced_relation);
+            let referenced_index_entry = super::index::catalog_entry_from_bound_index_relation(
+                &referenced_index,
+                referenced_relation.namespace_oid,
+                referenced_relation.owner_oid,
+                referenced_relation.relpersistence,
+            );
             let constraint_effect = self
                 .catalog
                 .write()
-                .create_foreign_key_constraint_mvcc(
-                    relation.relation_oid,
+                .create_foreign_key_constraint_for_entries_mvcc(
+                    &table_entry,
                     action.constraint_name.clone(),
                     action.deferrable,
                     action.initially_deferred,
                     action.enforced,
                     action.enforced && !action.not_valid,
                     &local_attnums,
-                    referenced_relation.relation_oid,
-                    referenced_index_oid,
+                    &referenced_table_entry,
+                    &referenced_index_entry,
                     &referenced_attnums,
                     foreign_key_action_code(action.on_update),
                     foreign_key_action_code(action.on_delete),
