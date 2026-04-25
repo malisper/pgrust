@@ -310,33 +310,6 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
     }
 }
 
-fn plan_is_join_relation(plan: &Plan) -> bool {
-    match plan {
-        Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. } | Plan::MergeJoin { .. } => true,
-        Plan::BitmapHeapScan { bitmapqual, .. }
-        | Plan::Hash {
-            input: bitmapqual, ..
-        } => plan_is_join_relation(bitmapqual),
-        Plan::Filter { input, .. }
-        | Plan::OrderBy { input, .. }
-        | Plan::Limit { input, .. }
-        | Plan::LockRows { input, .. }
-        | Plan::Projection { input, .. }
-        | Plan::Aggregate { input, .. }
-        | Plan::WindowAgg { input, .. }
-        | Plan::SubqueryScan { input, .. }
-        | Plan::ProjectSet { input, .. } => plan_is_join_relation(input),
-        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
-            children.iter().any(plan_is_join_relation)
-        }
-        Plan::CteScan { cte_plan, .. } => plan_is_join_relation(cte_plan),
-        Plan::RecursiveUnion {
-            anchor, recursive, ..
-        } => plan_is_join_relation(anchor) || plan_is_join_relation(recursive),
-        _ => false,
-    }
-}
-
 pub fn executor_start(plan: Plan) -> PlanState {
     match plan {
         Plan::Result { plan_info } => Box::new(ResultState {
@@ -637,12 +610,6 @@ pub fn executor_start(plan: Plan) -> PlanState {
         } => {
             let right_plan = *right;
             let right_uses_outer = !nest_params.is_empty();
-            let cross_right_outer =
-                (matches!(kind, crate::include::nodes::primnodes::JoinType::Cross)
-                    || (matches!(kind, crate::include::nodes::primnodes::JoinType::Inner)
-                        && !join_qual.is_empty()))
-                    && !right_uses_outer
-                    && !plan_is_join_relation(&left);
             let left_width = left.column_names().len();
             let right_width = right_plan.column_names().len();
             let combined_names: Vec<String> = left
@@ -665,20 +632,16 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 right: executor_start(right_plan.clone()),
                 right_plan: right_uses_outer.then_some(right_plan),
                 kind,
-                cross_right_outer,
                 nest_params,
                 join_qual,
                 qual,
                 combined_names,
                 output_names,
-                left_rows: None,
                 right_rows: None,
                 right_matched: None,
                 current_left: None,
-                current_right: None,
                 current_nest_param_saves: None,
                 current_left_matched: false,
-                left_index: 0,
                 right_index: 0,
                 left_width,
                 right_width,
