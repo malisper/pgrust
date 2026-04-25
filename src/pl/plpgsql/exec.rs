@@ -4,10 +4,11 @@ use std::sync::Arc;
 use crate::backend::commands::tablecmds::{execute_delete, execute_insert, execute_update};
 use crate::backend::executor::{
     ArrayDimension, ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult,
-    TupleSlot, Value, cast_value, compare_order_values, eval_expr, eval_plpgsql_expr,
-    execute_planned_stmt, execute_readonly_statement, render_interval_text,
+    TupleSlot, Value, cast_value, cast_value_with_config, compare_order_values, eval_expr,
+    eval_plpgsql_expr, execute_planned_stmt, execute_readonly_statement, render_interval_text,
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
+use crate::backend::libpq::pqformat::format_exec_error;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, TriggerLevel, TriggerTiming, parse_statement,
     pg_plan_query_with_outer_scopes_and_ctes, pg_plan_values_query_with_outer_scopes_and_ctes,
@@ -854,6 +855,7 @@ fn exec_function_exception_handlers(
     else {
         return Ok(None);
     };
+    state.values[compiled.sqlerrm_slot] = Value::Text(format_exec_error(err).into());
     exec_function_stmt_list(
         &handler.statements,
         compiled,
@@ -1046,7 +1048,7 @@ fn exec_function_stmt(
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::FetchCursor { slot, targets } => {
-            exec_function_fetch_cursor(*slot, targets, compiled, state)?;
+            exec_function_fetch_cursor(*slot, targets, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::CloseCursor { slot } => {
@@ -1264,6 +1266,7 @@ fn exec_function_select_into(
         strict,
         compiled,
         state,
+        ctx,
     )
 }
 
@@ -1274,6 +1277,7 @@ fn assign_query_rows_into_targets(
     strict: bool,
     compiled: &CompiledFunction,
     state: &mut FunctionState,
+    ctx: &ExecutorContext,
 ) -> Result<(), ExecError> {
     let Some(row) = rows.first() else {
         if strict {
@@ -1308,7 +1312,7 @@ fn assign_query_rows_into_targets(
         }
         [CompiledSelectIntoTarget { slot, ty }] => {
             let value = row.first().cloned().unwrap_or(Value::Null);
-            state.values[*slot] = cast_value(value, *ty)?;
+            state.values[*slot] = cast_value_with_config(value, *ty, &ctx.datetime_config)?;
         }
         _ => {
             if row.len() != targets.len() {
@@ -1323,7 +1327,8 @@ fn assign_query_rows_into_targets(
                 ));
             }
             for (target, value) in targets.iter().zip(row.iter()) {
-                state.values[target.slot] = cast_value(value.clone(), target.ty)?;
+                state.values[target.slot] =
+                    cast_value_with_config(value.clone(), target.ty, &ctx.datetime_config)?;
             }
         }
     }
@@ -1422,7 +1427,7 @@ fn exec_function_insert_into(
         ));
     };
     advance_plpgsql_command_id(ctx);
-    assign_query_rows_into_targets(&rows, &columns, targets, false, compiled, state)
+    assign_query_rows_into_targets(&rows, &columns, targets, false, compiled, state, ctx)
 }
 
 fn exec_function_update(
@@ -1476,7 +1481,7 @@ fn exec_function_update_into(
         ));
     };
     advance_plpgsql_command_id(ctx);
-    assign_query_rows_into_targets(&rows, &columns, targets, false, compiled, state)
+    assign_query_rows_into_targets(&rows, &columns, targets, false, compiled, state, ctx)
 }
 
 fn exec_function_delete(
@@ -1528,7 +1533,7 @@ fn exec_function_delete_into(
         ));
     };
     advance_plpgsql_command_id(ctx);
-    assign_query_rows_into_targets(&rows, &columns, targets, false, compiled, state)
+    assign_query_rows_into_targets(&rows, &columns, targets, false, compiled, state, ctx)
 }
 
 fn advance_plpgsql_command_id(ctx: &mut ExecutorContext) {
@@ -1585,6 +1590,7 @@ fn exec_function_dynamic_execute(
             false,
             compiled,
             state,
+            ctx,
         );
     }
     Ok(())
@@ -1760,6 +1766,7 @@ fn exec_function_fetch_cursor(
     targets: &[CompiledSelectIntoTarget],
     compiled: &CompiledFunction,
     state: &mut FunctionState,
+    ctx: &ExecutorContext,
 ) -> Result<(), ExecError> {
     let portal_name = cursor_name_for_slot(slot, "", state);
     let (rows, columns) = {
@@ -1776,7 +1783,7 @@ fn exec_function_fetch_cursor(
         }
         (row.into_iter().collect::<Vec<_>>(), cursor.columns.clone())
     };
-    assign_query_rows_into_targets(&rows, &columns, targets, false, compiled, state)
+    assign_query_rows_into_targets(&rows, &columns, targets, false, compiled, state, ctx)
 }
 
 fn exec_function_close_cursor(slot: usize, state: &mut FunctionState) -> Result<(), ExecError> {

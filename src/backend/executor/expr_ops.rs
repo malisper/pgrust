@@ -26,9 +26,13 @@ use crate::backend::executor::jsonb::{
 };
 use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::time::datetime::{
+    days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
+};
 use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
 use crate::include::nodes::datetime::{
-    TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeTzADT, USECS_PER_DAY, USECS_PER_SEC,
+    DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT,
+    TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
 };
 use crate::include::nodes::datum::IntervalValue;
 use crate::pgrust::compact_string::CompactString;
@@ -414,6 +418,16 @@ pub(crate) fn add_values(left: Value, right: Value) -> Result<Value, ExecError> 
             .checked_add(*r)
             .map(Value::Interval)
             .ok_or_else(interval_out_of_range),
+        (Value::Date(l), Value::Interval(r)) => date_interval_op(*l, *r, false),
+        (Value::Interval(l), Value::Date(r)) => date_interval_op(*r, *l, false),
+        (Value::Timestamp(l), Value::Interval(r)) => timestamp_interval_op(*l, *r, false),
+        (Value::Interval(l), Value::Timestamp(r)) => timestamp_interval_op(*r, *l, false),
+        (Value::TimestampTz(l), Value::Interval(r)) => timestamptz_interval_op(*l, *r, false),
+        (Value::Interval(l), Value::TimestampTz(r)) => timestamptz_interval_op(*r, *l, false),
+        (Value::Time(l), Value::Interval(r)) => time_interval_op(*l, *r, false, true),
+        (Value::Interval(l), Value::Time(r)) => time_interval_op(*r, *l, false, true),
+        (Value::TimeTz(l), Value::Interval(r)) => timetz_interval_op(*l, *r, false, true),
+        (Value::Interval(l), Value::TimeTz(r)) => timetz_interval_op(*r, *l, false, true),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l + r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| Some(lv.add(rv)), "+")
@@ -514,6 +528,11 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
             .checked_sub(*r)
             .map(Value::Interval)
             .ok_or_else(interval_out_of_range),
+        (Value::Date(l), Value::Interval(r)) => date_interval_op(*l, *r, true),
+        (Value::Timestamp(l), Value::Interval(r)) => timestamp_interval_op(*l, *r, true),
+        (Value::TimestampTz(l), Value::Interval(r)) => timestamptz_interval_op(*l, *r, true),
+        (Value::Time(l), Value::Interval(r)) => time_interval_op(*l, *r, true, false),
+        (Value::TimeTz(l), Value::Interval(r)) => timetz_interval_op(*l, *r, true, false),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l - r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| Some(lv.sub(rv)), "-")
@@ -526,66 +545,160 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
     }
 }
 
-fn interval_out_of_range() -> ExecError {
+fn timestamp_out_of_range() -> ExecError {
     ExecError::DetailedError {
-        message: "interval out of range".into(),
+        message: "timestamp out of range".into(),
         detail: None,
         hint: None,
         sqlstate: "22008",
     }
 }
 
-fn timestamp_difference_interval(left: i64, right: i64) -> Result<Value, ExecError> {
-    match (left, right) {
-        (TIMESTAMP_NOEND, TIMESTAMP_NOEND) | (TIMESTAMP_NOBEGIN, TIMESTAMP_NOBEGIN) => {
-            Err(interval_out_of_range())
+fn add_months_to_days(days: i32, months: i32) -> Option<i32> {
+    let (year, month, day) = ymd_from_days(days);
+    let month_index = i64::from(year) * 12 + i64::from(month) - 1 + i64::from(months);
+    let new_year = i32::try_from(month_index.div_euclid(12)).ok()?;
+    let new_month = (month_index.rem_euclid(12) + 1) as u32;
+    let new_day = day.min(days_in_month(new_year, new_month));
+    days_from_ymd(new_year, new_month, new_day)
+}
+
+fn finite_timestamp_interval(timestamp: i64, interval: IntervalValue) -> Result<i64, ExecError> {
+    let (mut days, time_usecs) = timestamp_parts_from_usecs(timestamp);
+    if interval.months != 0 {
+        days = add_months_to_days(days, interval.months).ok_or_else(timestamp_out_of_range)?;
+    }
+    days = days
+        .checked_add(interval.days)
+        .ok_or_else(timestamp_out_of_range)?;
+    let total = i128::from(days) * i128::from(USECS_PER_DAY)
+        + i128::from(time_usecs)
+        + i128::from(interval.time_micros);
+    if total <= i128::from(TIMESTAMP_NOBEGIN) || total >= i128::from(TIMESTAMP_NOEND) {
+        return Err(timestamp_out_of_range());
+    }
+    Ok(total as i64)
+}
+
+fn timestamp_interval_value(
+    timestamp: i64,
+    interval: IntervalValue,
+    subtract: bool,
+) -> Result<i64, ExecError> {
+    let interval = if subtract {
+        interval
+            .checked_negate()
+            .ok_or_else(interval_out_of_range)?
+    } else {
+        interval
+    };
+    if interval.is_neg_infinity() {
+        if timestamp == TIMESTAMP_NOEND {
+            return Err(timestamp_out_of_range());
         }
-        (TIMESTAMP_NOEND, TIMESTAMP_NOBEGIN) => Ok(Value::Interval(IntervalValue::infinity())),
-        (TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND) => Ok(Value::Interval(IntervalValue::neg_infinity())),
-        (TIMESTAMP_NOEND, _) | (_, TIMESTAMP_NOBEGIN) => {
-            Ok(Value::Interval(IntervalValue::infinity()))
+        return Ok(TIMESTAMP_NOBEGIN);
+    }
+    if interval.is_infinity() {
+        if timestamp == TIMESTAMP_NOBEGIN {
+            return Err(timestamp_out_of_range());
         }
-        (TIMESTAMP_NOBEGIN, _) | (_, TIMESTAMP_NOEND) => {
-            Ok(Value::Interval(IntervalValue::neg_infinity()))
-        }
-        _ => {
-            let diff = left.checked_sub(right).ok_or_else(interval_out_of_range)?;
-            let days = diff / crate::include::nodes::datetime::USECS_PER_DAY;
-            let time_micros = diff % crate::include::nodes::datetime::USECS_PER_DAY;
-            Ok(Value::Interval(IntervalValue {
-                time_micros,
-                days: i32::try_from(days).map_err(|_| interval_out_of_range())?,
-                months: 0,
-            }))
-        }
+        return Ok(TIMESTAMP_NOEND);
+    }
+    if timestamp == TIMESTAMP_NOBEGIN || timestamp == TIMESTAMP_NOEND {
+        return Ok(timestamp);
+    }
+    finite_timestamp_interval(timestamp, interval)
+}
+
+fn date_timestamp_value(date: DateADT) -> i64 {
+    match date.0 {
+        DATEVAL_NOBEGIN => TIMESTAMP_NOBEGIN,
+        DATEVAL_NOEND => TIMESTAMP_NOEND,
+        days => i64::from(days) * USECS_PER_DAY,
     }
 }
 
-fn multiply_interval_by_i64(value: IntervalValue, factor: i64) -> Result<Value, ExecError> {
-    if !value.is_finite() {
-        return Ok(Value::Interval(if factor < 0 {
-            value.negate()
+fn date_interval_op(
+    date: DateADT,
+    interval: IntervalValue,
+    subtract: bool,
+) -> Result<Value, ExecError> {
+    timestamp_interval_value(date_timestamp_value(date), interval, subtract)
+        .map(|value| Value::Timestamp(TimestampADT(value)))
+}
+
+fn timestamp_interval_op(
+    timestamp: TimestampADT,
+    interval: IntervalValue,
+    subtract: bool,
+) -> Result<Value, ExecError> {
+    timestamp_interval_value(timestamp.0, interval, subtract)
+        .map(|value| Value::Timestamp(TimestampADT(value)))
+}
+
+fn timestamptz_interval_op(
+    timestamp: TimestampTzADT,
+    interval: IntervalValue,
+    subtract: bool,
+) -> Result<Value, ExecError> {
+    timestamp_interval_value(timestamp.0, interval, subtract)
+        .map(|value| Value::TimestampTz(TimestampTzADT(value)))
+}
+
+fn time_interval_error(add: bool) -> ExecError {
+    ExecError::DetailedError {
+        message: if add {
+            "cannot add infinite interval to time".into()
         } else {
-            value
-        }));
+            "cannot subtract infinite interval from time".into()
+        },
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
     }
-    Ok(Value::Interval(IntervalValue {
-        time_micros: value
-            .time_micros
-            .checked_mul(factor)
-            .ok_or_else(interval_out_of_range)?,
-        days: i32::try_from(
-            i64::from(value.days)
-                .checked_mul(factor)
-                .ok_or_else(interval_out_of_range)?,
-        )
-        .map_err(|_| interval_out_of_range())?,
-        months: i32::try_from(
-            i64::from(value.months)
-                .checked_mul(factor)
-                .ok_or_else(interval_out_of_range)?,
-        )
-        .map_err(|_| interval_out_of_range())?,
+}
+
+fn apply_interval_time_component(
+    time: TimeADT,
+    interval: IntervalValue,
+    subtract: bool,
+) -> TimeADT {
+    let delta = if subtract {
+        -i128::from(interval.time_micros)
+    } else {
+        i128::from(interval.time_micros)
+    };
+    let day = i128::from(USECS_PER_DAY);
+    let wrapped = (i128::from(time.0) + delta).rem_euclid(day);
+    TimeADT(wrapped as i64)
+}
+
+fn time_interval_op(
+    time: TimeADT,
+    interval: IntervalValue,
+    subtract: bool,
+    add_message: bool,
+) -> Result<Value, ExecError> {
+    if !interval.is_finite() {
+        return Err(time_interval_error(add_message));
+    }
+    Ok(Value::Time(apply_interval_time_component(
+        time, interval, subtract,
+    )))
+}
+
+fn timetz_interval_op(
+    timetz: TimeTzADT,
+    interval: IntervalValue,
+    subtract: bool,
+    add_message: bool,
+) -> Result<Value, ExecError> {
+    if !interval.is_finite() {
+        return Err(time_interval_error(add_message));
+    }
+    Ok(Value::TimeTz(TimeTzADT {
+        time: apply_interval_time_component(timetz.time, interval, subtract),
+        offset_seconds: timetz.offset_seconds,
     }))
 }
 

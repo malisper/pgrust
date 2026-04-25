@@ -1,3 +1,4 @@
+use super::expr_casts::render_interval_text;
 use super::{ExecError, Value};
 use crate::backend::executor::expr_datetime::current_date_value_with_config;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
@@ -992,6 +993,187 @@ fn truncate_interval(field: &str, interval: IntervalValue) -> Result<IntervalVal
         _ => return Err(unrecognized_interval_part(field)),
     }
     interval_from_parts(parts)
+}
+
+fn datetime_value_out_of_range(message: impl Into<String>) -> ExecError {
+    ExecError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    }
+}
+
+fn invalid_parameter_value(message: impl Into<String>) -> ExecError {
+    ExecError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
+fn date_bin_stride_micros(stride: IntervalValue) -> Result<i64, ExecError> {
+    if !stride.is_finite() {
+        return Err(datetime_value_out_of_range(
+            "timestamps cannot be binned into infinite intervals",
+        ));
+    }
+    if stride.months != 0 {
+        return Err(ExecError::DetailedError {
+            message: "timestamps cannot be binned into intervals containing months or years".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    let micros = i64::from(stride.days)
+        .checked_mul(USECS_PER_DAY)
+        .and_then(|value| value.checked_add(stride.time_micros))
+        .ok_or_else(|| datetime_value_out_of_range("interval out of range"))?;
+    if micros <= 0 {
+        return Err(datetime_value_out_of_range(
+            "stride must be greater than zero",
+        ));
+    }
+    Ok(micros)
+}
+
+fn bin_timestamp_value(timestamp: i64, origin: i64, stride: i64) -> Result<i64, ExecError> {
+    let diff = timestamp
+        .checked_sub(origin)
+        .ok_or_else(|| datetime_value_out_of_range("interval out of range"))?;
+    let mut result = origin
+        .checked_add(diff - diff % stride)
+        .ok_or_else(|| datetime_value_out_of_range("timestamp out of range"))?;
+    if diff % stride < 0 {
+        result = result
+            .checked_sub(stride)
+            .ok_or_else(|| datetime_value_out_of_range("timestamp out of range"))?;
+    }
+    Ok(result)
+}
+
+pub(crate) fn eval_date_bin_function(values: &[Value]) -> Result<Value, ExecError> {
+    let [Value::Interval(stride), source, origin] = values else {
+        return Err(ExecError::DetailedError {
+            message: "malformed date_bin call".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    let stride = date_bin_stride_micros(*stride)?;
+    match (source, origin) {
+        (Value::Timestamp(source), _) if !source.is_finite() => Ok(Value::Timestamp(*source)),
+        (Value::TimestampTz(source), _) if !source.is_finite() => Ok(Value::TimestampTz(*source)),
+        (_, Value::Timestamp(origin)) if !origin.is_finite() => {
+            Err(datetime_value_out_of_range("origin out of range"))
+        }
+        (_, Value::TimestampTz(origin)) if !origin.is_finite() => {
+            Err(datetime_value_out_of_range("origin out of range"))
+        }
+        (Value::Timestamp(source), Value::Timestamp(origin)) => Ok(Value::Timestamp(TimestampADT(
+            bin_timestamp_value(source.0, origin.0, stride)?,
+        ))),
+        (Value::TimestampTz(source), Value::TimestampTz(origin)) => Ok(Value::TimestampTz(
+            TimestampTzADT(bin_timestamp_value(source.0, origin.0, stride)?),
+        )),
+        _ => Err(ExecError::TypeMismatch {
+            op: "date_bin",
+            left: source.clone(),
+            right: origin.clone(),
+        }),
+    }
+}
+
+fn timezone_interval_seconds(zone: IntervalValue) -> Result<i64, ExecError> {
+    let rendered = render_interval_text(zone);
+    if !zone.is_finite() {
+        return Err(invalid_parameter_value(format!(
+            "interval time zone \"{rendered}\" must be finite"
+        )));
+    }
+    if zone.months != 0 || zone.days != 0 {
+        return Err(invalid_parameter_value(format!(
+            "interval time zone \"{rendered}\" must not include months or days"
+        )));
+    }
+    Ok(zone.time_micros / USECS_PER_SEC)
+}
+
+fn timezone_text_seconds(zone: &str) -> Result<i64, ExecError> {
+    match zone.trim().to_ascii_uppercase().as_str() {
+        "GMT" | "UTC" | "UT" | "Z" => Ok(0),
+        _ => Err(invalid_parameter_value(format!(
+            "time zone \"{zone}\" not recognized"
+        ))),
+    }
+}
+
+pub(crate) fn eval_timezone_function(values: &[Value]) -> Result<Value, ExecError> {
+    let [zone, value] = values else {
+        return Err(ExecError::DetailedError {
+            message: "malformed timezone call".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    let seconds = match zone {
+        Value::Interval(zone) => timezone_interval_seconds(*zone)?,
+        Value::Text(zone) => timezone_text_seconds(zone.as_str())?,
+        _ => {
+            return Err(ExecError::DetailedError {
+                message: "malformed timezone call".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            });
+        }
+    };
+    let seconds_i32 = i32::try_from(seconds)
+        .map_err(|_| datetime_value_out_of_range("timestamp out of range"))?;
+    let micros = seconds
+        .checked_mul(USECS_PER_SEC)
+        .ok_or_else(|| datetime_value_out_of_range("timestamp out of range"))?;
+    match value {
+        Value::Timestamp(timestamp) if !timestamp.is_finite() => {
+            Ok(Value::TimestampTz(TimestampTzADT(timestamp.0)))
+        }
+        Value::TimestampTz(timestamp) if !timestamp.is_finite() => {
+            Ok(Value::Timestamp(TimestampADT(timestamp.0)))
+        }
+        Value::Timestamp(timestamp) => Ok(Value::TimestampTz(TimestampTzADT(
+            timestamp
+                .0
+                .checked_sub(micros)
+                .ok_or_else(|| datetime_value_out_of_range("timestamp out of range"))?,
+        ))),
+        Value::TimestampTz(timestamp) => Ok(Value::Timestamp(TimestampADT(
+            timestamp
+                .0
+                .checked_add(micros)
+                .ok_or_else(|| datetime_value_out_of_range("timestamp out of range"))?,
+        ))),
+        Value::Time(time) => Ok(Value::TimeTz(TimeTzADT {
+            time: *time,
+            offset_seconds: -seconds_i32,
+        })),
+        Value::TimeTz(timetz) => Ok(Value::TimeTz(TimeTzADT {
+            time: TimeADT(
+                (i128::from(timetz.time.0)
+                    + i128::from(timetz.offset_seconds + seconds_i32) * i128::from(USECS_PER_SEC))
+                .rem_euclid(i128::from(USECS_PER_DAY)) as i64,
+            ),
+            offset_seconds: -seconds_i32,
+        })),
+        _ => Err(ExecError::TypeMismatch {
+            op: "timezone",
+            left: zone.clone(),
+            right: value.clone(),
+        }),
+    }
 }
 
 fn checked_justify_result(value: IntervalValue) -> Result<IntervalValue, ExecError> {

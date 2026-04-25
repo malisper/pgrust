@@ -412,10 +412,8 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if let Some(target) = extract_subscripted_assignment_target(message) {
                 return find_subscripted_assignment_position(sql, target);
             }
-            if is_reg_object_direct_input_error(message)
-                && let Some(position) = find_reg_object_literal_position(sql)
-            {
-                return Some(position);
+            if message == "interval out of range" {
+                return find_interval_input_position(sql);
             }
             if let Some(value) = extract_quoted_error_value(message) {
                 value
@@ -436,15 +434,25 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     find_error_value_position(sql, value)
 }
 
-fn is_reg_object_direct_input_error(message: &str) -> bool {
-    message == "invalid name syntax"
-        || message.starts_with("operator does not exist: ")
-        || message.starts_with("function \"")
-        || message.starts_with("relation \"")
-        || message.starts_with("type \"")
-        || message.starts_with("role \"")
-        || message.starts_with("schema \"")
-        || message.starts_with("collation \"")
+fn find_interval_input_position(sql: &str) -> Option<usize> {
+    let trimmed = sql.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("insert ") {
+        return sql.find('\'').map(|index| index + 1);
+    }
+    if !lower.starts_with("select interval ") {
+        return None;
+    }
+    let interval_position = find_case_insensitive_token_position(sql, "interval")?;
+    let quote_offset = sql[interval_position - 1..].find('\'')?;
+    let quote_position = interval_position + quote_offset;
+    let quote_index = quote_position - 1;
+    let closing_quote = find_closing_sql_quote(sql, quote_index + 1)?;
+    let after_literal = &sql[closing_quote + 1..];
+    if has_unquoted_arithmetic_operator(after_literal) {
+        return None;
+    }
+    Some(quote_position)
 }
 
 fn extract_unrecognized_time_zone(message: &str) -> Option<&str> {
@@ -491,6 +499,40 @@ fn find_function_argument_position(sql: &str, func: &str) -> Option<usize> {
         }
         return Some(idx + 1);
     }
+}
+
+fn has_unquoted_arithmetic_operator(sql: &str) -> bool {
+    let mut in_quote = false;
+    let mut chars = sql.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' {
+            if in_quote && chars.peek() == Some(&'\'') {
+                chars.next();
+            } else {
+                in_quote = !in_quote;
+            }
+            continue;
+        }
+        if !in_quote && matches!(ch, '+' | '-' | '*' | '/') {
+            return true;
+        }
+    }
+    false
+}
+
+fn find_closing_sql_quote(sql: &str, mut index: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            if bytes.get(index + 1) == Some(&b'\'') {
+                index += 2;
+                continue;
+            }
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
 }
 
 fn publication_where_error_position(

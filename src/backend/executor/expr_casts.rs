@@ -43,7 +43,7 @@ use crate::include::catalog::{
     INT2_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows,
     multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
-use crate::include::nodes::datetime::{USECS_PER_HOUR, USECS_PER_MINUTE};
+use crate::include::nodes::datetime::{TimeADT, USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE};
 use crate::include::nodes::datum::ArrayDimension;
 use crate::pgrust::compact_string::CompactString;
 use num_bigint::BigInt;
@@ -659,6 +659,15 @@ fn interval_out_of_range_error() -> ExecError {
     }
 }
 
+fn cannot_convert_infinite_interval_to_time_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "cannot convert infinite interval to time".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    }
+}
+
 fn apply_interval_precision(
     value: IntervalValue,
     precision: Option<i32>,
@@ -1078,6 +1087,13 @@ enum DecimalIntervalError {
 }
 
 pub(crate) fn parse_interval_text_value(text: &str) -> Result<IntervalValue, ExecError> {
+    parse_interval_text_value_with_style(text, IntervalStyle::Postgres)
+}
+
+pub(crate) fn parse_interval_text_value_with_style(
+    text: &str,
+    style: IntervalStyle,
+) -> Result<IntervalValue, ExecError> {
     fn invalid(text: &str) -> ExecError {
         invalid_interval_text_error(text)
     }
@@ -1160,8 +1176,9 @@ pub(crate) fn parse_interval_text_value(text: &str) -> Result<IntervalValue, Exe
     }
 
     let tokens = expand_interval_tokens(rest);
+    let force_negative = interval_sql_standard_force_negative(&tokens, style);
     if let Some(value) = parse_year_month_interval(&tokens) {
-        return apply_trailing_ago(value, negative, text);
+        return apply_trailing_ago(value.map_err(|err| parse_error(err, text))?, negative, text);
     }
     if tokens.len() == 1 && !tokens[0].contains(':') {
         let value = IntervalValue {
@@ -1172,9 +1189,7 @@ pub(crate) fn parse_interval_text_value(text: &str) -> Result<IntervalValue, Exe
         };
         return apply_trailing_ago(value, negative, text);
     }
-    let mut months = 0i32;
-    let mut days = 0i32;
-    let mut micros = 0i64;
+    let mut accum = IntervalAccum::default();
     let mut seen_units: BTreeSet<&'static str> = BTreeSet::new();
     let mut saw_time_token = false;
     let mut saw_second_fraction = false;
@@ -1192,15 +1207,18 @@ pub(crate) fn parse_interval_text_value(text: &str) -> Result<IntervalValue, Exe
                 return Err(invalid(text));
             }
             saw_time_token = true;
-            micros = micros
-                .checked_add(
-                    parse_interval_time_token(token).map_err(|err| parse_error(err, text))?,
+            let time_token = interval_forced_negative_token(token, force_negative);
+            accum
+                .add_micros(
+                    parse_interval_time_token(&time_token).map_err(|err| parse_error(err, text))?,
                 )
-                .ok_or_else(|| interval_out_of_range(text))?;
+                .map_err(|err| parse_error(err, text))?;
             idx += 1;
             continue;
         }
 
+        let value_token = interval_forced_negative_token(token, force_negative);
+        let token = value_token.as_str();
         let value = token.parse::<f64>().map_err(|_| invalid(text))?;
         if !value.is_finite() {
             return Err(invalid(text));
@@ -1214,14 +1232,19 @@ pub(crate) fn parse_interval_text_value(text: &str) -> Result<IntervalValue, Exe
                 return Err(invalid(text));
             }
             saw_time_token = true;
-            days = add_i32_checked(
-                days,
-                decimal_trunc_to_i64(token).map_err(|err| decimal_error(err, text, true))?,
-            )
-            .ok_or_else(|| field_out_of_range(text))?;
-            micros = micros
-                .checked_add(parse_interval_time_token(unit).map_err(|err| parse_error(err, text))?)
-                .ok_or_else(|| interval_out_of_range(text))?;
+            accum
+                .add_days(
+                    decimal_trunc_to_i64(token).map_err(|err| decimal_error(err, text, true))?,
+                )
+                .map_err(|err| parse_error(err, text))?;
+            add_interval_fractional_microseconds(value.fract(), USECS_PER_DAY, &mut accum)
+                .map_err(|err| parse_error(err, text))?;
+            let time_token = interval_forced_negative_token(unit, force_negative);
+            accum
+                .add_micros(
+                    parse_interval_time_token(&time_token).map_err(|err| parse_error(err, text))?,
+                )
+                .map_err(|err| parse_error(err, text))?;
             idx += 2;
             continue;
         }
@@ -1255,126 +1278,103 @@ pub(crate) fn parse_interval_text_value(text: &str) -> Result<IntervalValue, Exe
 
         match normalized_unit.as_str() {
             "millennium" => {
-                add_interval_year_unit(token, value, 1000, &mut months, &mut days)
-                    .map_err(|err| decimal_error(err, text, true))?;
+                add_interval_year_unit(token, value, 1000, &mut accum)
+                    .map_err(|err| parse_error(err, text))?;
             }
             "century" => {
-                add_interval_year_unit(token, value, 100, &mut months, &mut days)
-                    .map_err(|err| decimal_error(err, text, true))?;
+                add_interval_year_unit(token, value, 100, &mut accum)
+                    .map_err(|err| parse_error(err, text))?;
             }
             "decade" => {
-                add_interval_year_unit(token, value, 10, &mut months, &mut days)
-                    .map_err(|err| decimal_error(err, text, true))?;
+                add_interval_year_unit(token, value, 10, &mut accum)
+                    .map_err(|err| parse_error(err, text))?;
             }
             "year" => {
                 let years =
                     decimal_trunc_to_i64(token).map_err(|err| decimal_error(err, text, true))?;
-                i32::try_from(years).map_err(|_| field_out_of_range(text))?;
-                let total_months = years
-                    .checked_mul(12)
-                    .ok_or_else(|| interval_out_of_range(text))?;
-                months = add_i32_checked(months, total_months)
-                    .ok_or_else(|| interval_out_of_range(text))?;
-                let total_months = value * 12.0;
-                let rem = total_months.fract();
-                if rem != 0.0 {
-                    days = add_i32_checked(days, (rem * 30.0).trunc() as i64)
-                        .ok_or_else(|| field_out_of_range(text))?;
-                }
+                accum
+                    .add_years(years)
+                    .map_err(|err| parse_error(err, text))?;
+                add_interval_fractional_years(value, 1, &mut accum)
+                    .map_err(|err| parse_error(err, text))?;
             }
             "month" => {
-                months = add_i32_checked(
-                    months,
-                    decimal_trunc_to_i64(token).map_err(|err| decimal_error(err, text, true))?,
-                )
-                .ok_or_else(|| field_out_of_range(text))?;
-                let rem = value.fract();
-                if rem != 0.0 {
-                    days = add_i32_checked(days, (rem * 30.0).trunc() as i64)
-                        .ok_or_else(|| field_out_of_range(text))?;
-                }
+                accum
+                    .add_months(
+                        decimal_trunc_to_i64(token)
+                            .map_err(|err| decimal_error(err, text, true))?,
+                    )
+                    .map_err(|err| parse_error(err, text))?;
+                add_interval_fractional_days(value.fract(), 30, &mut accum)
+                    .map_err(|err| parse_error(err, text))?;
             }
             "week" => {
-                let total_days = decimal_mul_trunc_to_i64(token, 7)
-                    .map_err(|err| decimal_error(err, text, true))?;
-                days = add_i32_checked(days, total_days).ok_or_else(|| field_out_of_range(text))?;
-                let total_days = value * 7.0;
-                let rem = total_days.fract();
-                if rem != 0.0 {
-                    micros = micros
-                        .checked_add(
-                            checked_round_f64_to_i64(rem * 86_400_000_000.0)
-                                .ok_or_else(|| interval_out_of_range(text))?,
-                        )
-                        .ok_or_else(|| field_out_of_range(text))?;
-                }
+                let total_days = decimal_trunc_to_i64(token)
+                    .map_err(|err| decimal_error(err, text, true))?
+                    .checked_mul(7)
+                    .ok_or_else(|| field_out_of_range(text))?;
+                accum
+                    .add_days(total_days)
+                    .map_err(|err| parse_error(err, text))?;
+                add_interval_fractional_days(value.fract(), 7, &mut accum)
+                    .map_err(|err| parse_error(err, text))?;
             }
             "day" => {
-                days = add_i32_checked(
-                    days,
-                    decimal_trunc_to_i64(token).map_err(|err| decimal_error(err, text, true))?,
-                )
-                .ok_or_else(|| field_out_of_range(text))?;
-                let rem = value.fract();
-                if rem != 0.0 {
-                    micros = micros
-                        .checked_add(
-                            checked_round_f64_to_i64(rem * 86_400_000_000.0)
-                                .ok_or_else(|| interval_out_of_range(text))?,
-                        )
-                        .ok_or_else(|| field_out_of_range(text))?;
-                }
+                accum
+                    .add_days(
+                        decimal_trunc_to_i64(token)
+                            .map_err(|err| decimal_error(err, text, true))?,
+                    )
+                    .map_err(|err| parse_error(err, text))?;
+                add_interval_fractional_microseconds(value.fract(), USECS_PER_DAY, &mut accum)
+                    .map_err(|err| parse_error(err, text))?;
             }
             "hour" => {
-                micros = micros
-                    .checked_add(
+                accum
+                    .add_micros(
                         decimal_mul_round_to_i64(token, 3_600_000_000)
                             .map_err(|err| decimal_error(err, text, true))?,
                     )
-                    .ok_or_else(|| field_out_of_range(text))?;
+                    .map_err(|err| parse_error(err, text))?;
             }
             "minute" => {
-                micros = micros
-                    .checked_add(
+                accum
+                    .add_micros(
                         decimal_mul_round_to_i64(token, 60_000_000)
                             .map_err(|err| decimal_error(err, text, true))?,
                     )
-                    .ok_or_else(|| field_out_of_range(text))?;
+                    .map_err(|err| parse_error(err, text))?;
             }
             "second" => {
-                micros = micros
-                    .checked_add(
+                accum
+                    .add_micros(
                         decimal_mul_round_to_i64(token, 1_000_000)
                             .map_err(|err| decimal_error(err, text, true))?,
                     )
-                    .ok_or_else(|| field_out_of_range(text))?;
+                    .map_err(|err| parse_error(err, text))?;
             }
             "millisecond" => {
-                micros = micros
-                    .checked_add(
+                accum
+                    .add_micros(
                         decimal_mul_round_to_i64(token, 1_000)
                             .map_err(|err| decimal_error(err, text, true))?,
                     )
-                    .ok_or_else(|| field_out_of_range(text))?;
+                    .map_err(|err| parse_error(err, text))?;
             }
             "microsecond" => {
-                micros = micros
-                    .checked_add(
+                accum
+                    .add_micros(
                         decimal_mul_round_to_i64(token, 1)
                             .map_err(|err| decimal_error(err, text, true))?,
                     )
-                    .ok_or_else(|| field_out_of_range(text))?;
+                    .map_err(|err| parse_error(err, text))?;
             }
             _ => return Err(invalid(text)),
         }
         idx += 2;
     }
 
-    let value = IntervalValue {
-        time_micros: micros,
-        days,
-        months,
-    };
+    let value = accum.finish().map_err(|err| parse_error(err, text))?;
     apply_trailing_ago(value, negative, text)
 }
 
@@ -1391,6 +1391,147 @@ fn expand_interval_tokens(text: &str) -> Vec<String> {
         .collect()
 }
 
+fn interval_sql_standard_force_negative(tokens: &[String], style: IntervalStyle) -> bool {
+    matches!(style, IntervalStyle::SqlStandard)
+        && tokens.first().is_some_and(|token| token.starts_with('-'))
+        && !tokens
+            .iter()
+            .skip(1)
+            .any(|token| interval_token_has_explicit_sign(token))
+}
+
+fn interval_token_has_explicit_sign(token: &str) -> bool {
+    token.starts_with(['+', '-'])
+        || token
+            .split(':')
+            .skip(1)
+            .any(|part| part.starts_with(['+', '-']))
+}
+
+fn interval_forced_negative_token(token: &str, force_negative: bool) -> String {
+    if force_negative && !interval_token_has_explicit_sign(token) {
+        format!("-{token}")
+    } else {
+        token.to_string()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct IntervalAccum {
+    years: i32,
+    months: i32,
+    days: i32,
+    micros: i64,
+}
+
+impl IntervalAccum {
+    fn add_years(&mut self, delta: i64) -> Result<(), IntervalParseErrorKind> {
+        self.years =
+            add_i32_checked(self.years, delta).ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
+        Ok(())
+    }
+
+    fn add_months(&mut self, delta: i64) -> Result<(), IntervalParseErrorKind> {
+        self.months =
+            add_i32_checked(self.months, delta).ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
+        Ok(())
+    }
+
+    fn add_days(&mut self, delta: i64) -> Result<(), IntervalParseErrorKind> {
+        self.days =
+            add_i32_checked(self.days, delta).ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
+        Ok(())
+    }
+
+    fn add_micros(&mut self, delta: i64) -> Result<(), IntervalParseErrorKind> {
+        self.micros = self
+            .micros
+            .checked_add(delta)
+            .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
+        Ok(())
+    }
+
+    fn finish(self) -> Result<IntervalValue, IntervalParseErrorKind> {
+        let months = i64::from(self.years)
+            .checked_mul(12)
+            .and_then(|months| months.checked_add(i64::from(self.months)))
+            .and_then(|months| i32::try_from(months).ok())
+            .ok_or(IntervalParseErrorKind::IntervalOutOfRange)?;
+        Ok(IntervalValue {
+            time_micros: self.micros,
+            days: self.days,
+            months,
+        })
+    }
+}
+
+fn add_interval_fractional_years(
+    value: f64,
+    multiplier: i32,
+    accum: &mut IntervalAccum,
+) -> Result<(), IntervalParseErrorKind> {
+    let rem = value.fract();
+    if rem == 0.0 {
+        return Ok(());
+    }
+    let months = (rem * f64::from(multiplier) * 12.0).round_ties_even();
+    if !months.is_finite() || months < i64::MIN as f64 || months > i64::MAX as f64 {
+        return Err(IntervalParseErrorKind::FieldOutOfRange);
+    }
+    accum.add_months(months as i64)
+}
+
+fn add_interval_fractional_days(
+    fraction: f64,
+    scale: i32,
+    accum: &mut IntervalAccum,
+) -> Result<(), IntervalParseErrorKind> {
+    if fraction == 0.0 {
+        return Ok(());
+    }
+    let total = fraction * f64::from(scale);
+    if !total.is_finite() || total < i32::MIN as f64 || total > i32::MAX as f64 {
+        return Err(IntervalParseErrorKind::FieldOutOfRange);
+    }
+    let extra_days = total.trunc() as i64;
+    accum.add_days(extra_days)?;
+    add_interval_fractional_microseconds(total - extra_days as f64, USECS_PER_DAY, accum)
+}
+
+fn add_interval_fractional_microseconds(
+    fraction: f64,
+    scale: i64,
+    accum: &mut IntervalAccum,
+) -> Result<(), IntervalParseErrorKind> {
+    if fraction == 0.0 {
+        return Ok(());
+    }
+    let usecs = pg_round_fractional_microseconds(fraction, scale)?;
+    accum.add_micros(usecs)
+}
+
+fn pg_round_fractional_microseconds(
+    fraction: f64,
+    scale: i64,
+) -> Result<i64, IntervalParseErrorKind> {
+    let scaled = fraction * scale as f64;
+    if !scaled.is_finite() || scaled < i64::MIN as f64 || scaled > i64::MAX as f64 {
+        return Err(IntervalParseErrorKind::FieldOutOfRange);
+    }
+    let mut usecs = scaled.trunc() as i64;
+    let rem = scaled - usecs as f64;
+    if rem > 0.5 {
+        usecs = usecs
+            .checked_add(1)
+            .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
+    } else if rem < -0.5 {
+        usecs = usecs
+            .checked_sub(1)
+            .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
+    }
+    Ok(usecs)
+}
+
 fn parse_iso8601_interval(text: &str) -> Result<IntervalValue, IntervalParseErrorKind> {
     let body = text
         .strip_prefix(['P', 'p'])
@@ -1402,22 +1543,12 @@ fn parse_iso8601_interval(text: &str) -> Result<IntervalValue, IntervalParseErro
         return Ok(value);
     }
 
-    let mut months = 0i32;
-    let mut days = 0i32;
-    let mut micros = 0i64;
-    let saw = parse_iso8601_designators(body, false, &mut months, &mut days, &mut micros)?;
+    let mut accum = IntervalAccum::default();
+    let saw = parse_iso8601_designators(body, false, &mut accum)?;
     if !saw {
         return Err(IntervalParseErrorKind::Invalid);
     }
-    let result = IntervalValue {
-        time_micros: micros,
-        days,
-        months,
-    };
-    result
-        .is_finite()
-        .then_some(result)
-        .ok_or(IntervalParseErrorKind::IntervalOutOfRange)
+    accum.finish()
 }
 
 fn parse_iso8601_alternative(body: &str) -> Result<Option<IntervalValue>, IntervalParseErrorKind> {
@@ -1432,106 +1563,79 @@ fn parse_iso8601_alternative(body: &str) -> Result<Option<IntervalValue>, Interv
         return Ok(None);
     }
 
-    let mut months = 0i32;
-    let mut days = 0i32;
-    let mut micros = 0i64;
+    let mut accum = IntervalAccum::default();
     if !date_part.is_empty() {
-        parse_iso8601_alternative_date(date_part, &mut months, &mut days)?;
+        parse_iso8601_alternative_date(date_part, &mut accum)?;
     }
     if !time_part.is_empty() {
-        parse_iso8601_alternative_time(time_part, &mut months, &mut days, &mut micros)?;
+        parse_iso8601_alternative_time(time_part, &mut accum)?;
     }
-    let result = IntervalValue {
-        time_micros: micros,
-        days,
-        months,
-    };
-    result
-        .is_finite()
-        .then_some(Some(result))
-        .ok_or(IntervalParseErrorKind::IntervalOutOfRange)
+    accum.finish().map(Some)
 }
 
 fn parse_iso8601_alternative_date(
     text: &str,
-    months: &mut i32,
-    days: &mut i32,
+    accum: &mut IntervalAccum,
 ) -> Result<(), IntervalParseErrorKind> {
-    if text.contains('-') {
-        let parts = text.split('-').collect::<Vec<_>>();
+    if iso8601_alternative_date_has_separators(text) {
+        let parts = split_iso8601_alternative_date(text)?;
         if parts.is_empty() || parts.len() > 3 || parts.iter().any(|part| part.is_empty()) {
             return Err(IntervalParseErrorKind::Invalid);
         }
-        let mut unused_micros = 0i64;
-        add_iso8601_unit(parts[0], 'Y', false, months, days, &mut unused_micros)?;
+        add_iso8601_unit(parts[0], 'Y', false, accum)?;
         if let Some(month) = parts.get(1) {
-            add_iso8601_unit(month, 'M', false, months, days, &mut unused_micros)?;
+            add_iso8601_unit(month, 'M', false, accum)?;
         }
         if let Some(day) = parts.get(2) {
-            add_iso8601_unit(day, 'D', false, months, days, &mut unused_micros)?;
+            add_iso8601_unit(day, 'D', false, accum)?;
         }
         return Ok(());
     }
-    if !text.chars().all(|ch| ch.is_ascii_digit()) {
+    let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+    if !unsigned.chars().all(|ch| ch.is_ascii_digit() || ch == '.') {
         return Err(IntervalParseErrorKind::Invalid);
     }
-    if !matches!(text.len(), 4 | 6 | 8) {
-        let mut unused_micros = 0i64;
-        add_iso8601_unit(text, 'Y', false, months, days, &mut unused_micros)?;
+    if text.starts_with(['+', '-']) || !matches!(text.len(), 4 | 6 | 8) {
+        add_iso8601_unit(text, 'Y', false, accum)?;
         return Ok(());
     }
-    let mut unused_micros = 0i64;
-    add_iso8601_unit(&text[0..4], 'Y', false, months, days, &mut unused_micros)?;
+    add_iso8601_unit(&text[0..4], 'Y', false, accum)?;
     if text.len() >= 6 {
-        add_iso8601_unit(&text[4..6], 'M', false, months, days, &mut unused_micros)?;
+        add_iso8601_unit(&text[4..6], 'M', false, accum)?;
     }
     if text.len() == 8 {
-        add_iso8601_unit(&text[6..8], 'D', false, months, days, &mut unused_micros)?;
+        add_iso8601_unit(&text[6..8], 'D', false, accum)?;
     }
     Ok(())
 }
 
 fn parse_iso8601_alternative_time(
     text: &str,
-    months: &mut i32,
-    days: &mut i32,
-    micros: &mut i64,
+    accum: &mut IntervalAccum,
 ) -> Result<(), IntervalParseErrorKind> {
     if text.chars().any(|ch| ch.is_ascii_alphabetic()) {
-        parse_iso8601_designators(text, true, months, days, micros)?;
+        parse_iso8601_designators(text, true, accum)?;
         return Ok(());
     }
     if text.contains(':') {
-        *micros = micros
-            .checked_add(parse_interval_time_token(text)?)
-            .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
+        parse_iso8601_alternative_colon_time(text, accum)?;
         return Ok(());
     }
     if text.chars().all(|ch| ch.is_ascii_digit()) && matches!(text.len(), 4 | 6) {
-        let time = if text.len() == 4 {
-            format!("{}:{}", &text[0..2], &text[2..4])
-        } else {
-            format!("{}:{}:{}", &text[0..2], &text[2..4], &text[4..6])
-        };
-        *micros = micros
-            .checked_add(parse_interval_time_token(&time)?)
-            .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
+        add_iso8601_unit(&text[0..2], 'H', true, accum)?;
+        add_iso8601_unit(&text[2..4], 'M', true, accum)?;
+        if text.len() == 6 {
+            add_iso8601_unit(&text[4..6], 'S', true, accum)?;
+        }
         return Ok(());
     }
-    *micros = micros
-        .checked_add(
-            decimal_mul_round_to_i64(text, 3_600_000_000).map_err(decimal_interval_parse_error)?,
-        )
-        .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
-    Ok(())
+    add_iso8601_unit(text, 'H', true, accum)
 }
 
 fn parse_iso8601_designators(
     text: &str,
     mut in_time: bool,
-    months: &mut i32,
-    days: &mut i32,
-    micros: &mut i64,
+    accum: &mut IntervalAccum,
 ) -> Result<bool, IntervalParseErrorKind> {
     let mut pos = 0usize;
     let mut saw = false;
@@ -1561,14 +1665,7 @@ fn parse_iso8601_designators(
             return Err(IntervalParseErrorKind::Invalid);
         }
         pos += unit.len_utf8();
-        add_iso8601_unit(
-            &text[start..pos - unit.len_utf8()],
-            unit,
-            in_time,
-            months,
-            days,
-            micros,
-        )?;
+        add_iso8601_unit(&text[start..pos - unit.len_utf8()], unit, in_time, accum)?;
         saw = true;
     }
     Ok(saw)
@@ -1628,103 +1725,104 @@ fn consume_iso8601_number(text: &str, mut pos: usize) -> Result<usize, IntervalP
     Ok(pos)
 }
 
+fn iso8601_alternative_date_has_separators(text: &str) -> bool {
+    text.char_indices().any(|(idx, ch)| ch == '-' && idx != 0)
+}
+
+fn split_iso8601_alternative_date(text: &str) -> Result<Vec<&str>, IntervalParseErrorKind> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if ch == '-' && idx != 0 {
+            parts.push(&text[start..idx]);
+            start = idx + ch.len_utf8();
+        }
+    }
+    parts.push(&text[start..]);
+    Ok(parts)
+}
+
+fn parse_iso8601_number_parts(token: &str) -> Result<(i64, f64), IntervalParseErrorKind> {
+    let first = token
+        .chars()
+        .next()
+        .ok_or(IntervalParseErrorKind::Invalid)?;
+    if !(first.is_ascii_digit() || matches!(first, '-' | '+' | '.')) {
+        return Err(IntervalParseErrorKind::Invalid);
+    }
+    let value = token
+        .parse::<f64>()
+        .map_err(|_| IntervalParseErrorKind::Invalid)?;
+    if value.is_nan() || !(-1.0e15..=1.0e15).contains(&value) {
+        return Err(IntervalParseErrorKind::FieldOutOfRange);
+    }
+    let ipart = if value >= 0.0 {
+        value.floor()
+    } else {
+        -(-value).floor()
+    };
+    Ok((ipart as i64, value - ipart))
+}
+
+fn add_iso8601_microseconds(
+    token: &str,
+    scale: i64,
+    accum: &mut IntervalAccum,
+) -> Result<(), IntervalParseErrorKind> {
+    let (value, fraction) = parse_iso8601_number_parts(token)?;
+    let whole = value
+        .checked_mul(scale)
+        .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
+    accum.add_micros(whole)?;
+    add_interval_fractional_microseconds(fraction, scale, accum)
+}
+
+fn parse_iso8601_alternative_colon_time(
+    text: &str,
+    accum: &mut IntervalAccum,
+) -> Result<(), IntervalParseErrorKind> {
+    let parts = text.split(':').collect::<Vec<_>>();
+    if !(2..=3).contains(&parts.len()) || parts.iter().any(|part| part.is_empty()) {
+        return Err(IntervalParseErrorKind::Invalid);
+    }
+    add_iso8601_unit(parts[0], 'H', true, accum)?;
+    add_iso8601_unit(parts[1], 'M', true, accum)?;
+    if let Some(seconds) = parts.get(2) {
+        add_iso8601_unit(seconds, 'S', true, accum)?;
+    }
+    Ok(())
+}
+
 fn add_iso8601_unit(
     token: &str,
     unit: char,
     in_time: bool,
-    months: &mut i32,
-    days: &mut i32,
-    micros: &mut i64,
+    accum: &mut IntervalAccum,
 ) -> Result<(), IntervalParseErrorKind> {
-    let value = token
-        .parse::<f64>()
-        .map_err(|_| IntervalParseErrorKind::Invalid)?;
-    if !value.is_finite() {
-        return Err(IntervalParseErrorKind::Invalid);
-    }
+    let (value, fraction) = parse_iso8601_number_parts(token)?;
     match unit.to_ascii_uppercase() {
         'Y' if !in_time => {
-            *months = add_i32_checked(
-                *months,
-                decimal_mul_trunc_to_i64(token, 12).map_err(decimal_interval_parse_error)?,
-            )
-            .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
-            Ok(())
+            accum.add_years(value)?;
+            add_interval_fractional_years(fraction, 1, accum)
         }
         'M' if !in_time => {
-            *months = add_i32_checked(
-                *months,
-                decimal_trunc_to_i64(token).map_err(decimal_interval_parse_error)?,
-            )
-            .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
-            let rem = value.fract();
-            if rem != 0.0 {
-                *days = add_i32_checked(*days, (rem * 30.0).trunc() as i64)
-                    .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
-            }
-            Ok(())
+            accum.add_months(value)?;
+            add_interval_fractional_days(fraction, 30, accum)
         }
         'W' if !in_time => {
-            *days = add_i32_checked(
-                *days,
-                decimal_mul_trunc_to_i64(token, 7).map_err(decimal_interval_parse_error)?,
-            )
-            .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
-            let rem = (value * 7.0).fract();
-            if rem != 0.0 {
-                *micros = micros
-                    .checked_add(
-                        checked_round_f64_to_i64(rem * 86_400_000_000.0)
-                            .ok_or(IntervalParseErrorKind::FieldOutOfRange)?,
-                    )
-                    .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
-            }
-            Ok(())
+            let days = value
+                .checked_mul(7)
+                .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
+            accum.add_days(days)?;
+            add_interval_fractional_days(fraction, 7, accum)
         }
         'D' if !in_time => {
-            *days = add_i32_checked(
-                *days,
-                decimal_trunc_to_i64(token).map_err(decimal_interval_parse_error)?,
-            )
-            .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
-            let rem = value.fract();
-            if rem != 0.0 {
-                *micros = micros
-                    .checked_add(
-                        checked_round_f64_to_i64(rem * 86_400_000_000.0)
-                            .ok_or(IntervalParseErrorKind::FieldOutOfRange)?,
-                    )
-                    .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
-            }
-            Ok(())
+            accum.add_days(value)?;
+            add_interval_fractional_microseconds(fraction, USECS_PER_DAY, accum)
         }
-        'H' if in_time => {
-            *micros = micros
-                .checked_add(
-                    decimal_mul_round_to_i64(token, 3_600_000_000)
-                        .map_err(decimal_interval_parse_error)?,
-                )
-                .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
-            Ok(())
-        }
-        'M' if in_time => {
-            *micros = micros
-                .checked_add(
-                    decimal_mul_round_to_i64(token, 60_000_000)
-                        .map_err(decimal_interval_parse_error)?,
-                )
-                .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
-            Ok(())
-        }
-        'S' if in_time => {
-            *micros = micros
-                .checked_add(
-                    decimal_mul_round_to_i64(token, 1_000_000)
-                        .map_err(decimal_interval_parse_error)?,
-                )
-                .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
-            Ok(())
-        }
+        'H' if in_time => add_iso8601_microseconds(token, 3_600_000_000, accum),
+        'M' if in_time => add_iso8601_microseconds(token, 60_000_000, accum),
+        'S' if in_time => add_iso8601_microseconds(token, 1_000_000, accum),
         _ => Err(IntervalParseErrorKind::Invalid),
     }
 }
@@ -1736,31 +1834,59 @@ fn decimal_interval_parse_error(err: DecimalIntervalError) -> IntervalParseError
     }
 }
 
-fn parse_year_month_interval(tokens: &[String]) -> Option<IntervalValue> {
-    if !(tokens.len() == 1
+fn parse_year_month_interval(
+    tokens: &[String],
+) -> Option<Result<IntervalValue, IntervalParseErrorKind>> {
+    let (years, months) = parse_year_month_token(tokens.first()?.as_str())?;
+    let mut accum = IntervalAccum::default();
+    if tokens.len() == 1
         || (tokens.len() == 4
             && tokens[1].eq_ignore_ascii_case("year")
             && tokens[2].eq_ignore_ascii_case("to")
-            && tokens[3].eq_ignore_ascii_case("month")))
+            && tokens[3].eq_ignore_ascii_case("month"))
     {
-        return None;
+        return Some(
+            accum
+                .add_years(years)
+                .and_then(|()| accum.add_months(months))
+                .and_then(|()| accum.finish()),
+        );
     }
-    let value = tokens[0].as_str();
-    let split = value.strip_prefix('-').unwrap_or(value).find('-')?;
-    let split = if value.starts_with('-') {
-        split + 1
-    } else {
-        split
-    };
+    if tokens.len() == 3 && tokens[2].contains(':') {
+        return Some(
+            accum
+                .add_years(years)
+                .and_then(|()| accum.add_months(months))
+                .and_then(|()| {
+                    let days =
+                        decimal_trunc_to_i64(&tokens[1]).map_err(decimal_interval_parse_error)?;
+                    accum.add_days(days)
+                })
+                .and_then(|()| {
+                    let micros = parse_interval_time_token(&tokens[2])?;
+                    accum.add_micros(micros)
+                })
+                .and_then(|()| accum.finish()),
+        );
+    }
+    None
+}
+
+fn parse_year_month_token(value: &str) -> Option<(i64, i64)> {
+    let unsigned = value.strip_prefix(['+', '-']).unwrap_or(value);
+    let split = unsigned.find('-')?;
+    let split = value.len() - unsigned.len() + split;
     let years = value[..split].parse::<i64>().ok()?;
     let month_text = &value[split + 1..];
-    let month_sign = if years < 0 { -1 } else { 1 };
-    let months = month_text.parse::<i64>().ok()? * month_sign;
-    Some(IntervalValue {
-        time_micros: 0,
-        days: 0,
-        months: i32::try_from(years.checked_mul(12)?.checked_add(months)?).ok()?,
-    })
+    if month_text.starts_with(['+', '-']) {
+        return None;
+    }
+    let months = month_text.parse::<i64>().ok()?;
+    if !(0..12).contains(&months) {
+        return None;
+    }
+    let month_sign = if value.starts_with('-') { -1 } else { 1 };
+    Some((years, months * month_sign))
 }
 
 fn split_compact_interval_token(token: &str) -> Option<(String, String)> {
@@ -1844,71 +1970,97 @@ fn add_interval_year_unit(
     token: &str,
     value: f64,
     multiplier: i64,
-    months: &mut i32,
-    days: &mut i32,
-) -> Result<(), DecimalIntervalError> {
-    let years = decimal_trunc_to_i64(token)?
+    accum: &mut IntervalAccum,
+) -> Result<(), IntervalParseErrorKind> {
+    let years = decimal_trunc_to_i64(token)
+        .map_err(decimal_interval_parse_error)?
         .checked_mul(multiplier)
-        .ok_or(DecimalIntervalError::OutOfRange)?;
-    i32::try_from(years).map_err(|_| DecimalIntervalError::OutOfRange)?;
-    let total_months = years
-        .checked_mul(12)
-        .ok_or(DecimalIntervalError::OutOfRange)?;
-    *months = add_i32_checked(*months, total_months).ok_or(DecimalIntervalError::OutOfRange)?;
-    let total_months = value * multiplier as f64 * 12.0;
-    let rem = total_months.fract();
-    if rem != 0.0 {
-        *days = add_i32_checked(*days, (rem * 30.0).trunc() as i64)
-            .ok_or(DecimalIntervalError::OutOfRange)?;
-    }
+        .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
+    let multiplier = i32::try_from(multiplier).map_err(|_| IntervalParseErrorKind::Invalid)?;
+    accum.add_years(years)?;
+    add_interval_fractional_years(value, multiplier, accum)?;
     Ok(())
 }
 
 fn parse_interval_time_token(token: &str) -> Result<i64, IntervalParseErrorKind> {
-    let (sign, rest) = if let Some(rest) = token.strip_prefix('-') {
-        (-1i64, rest)
-    } else if let Some(rest) = token.strip_prefix('+') {
-        (1i64, rest)
-    } else {
-        (1i64, token)
-    };
-    let mut parts = rest.split(':');
-    let hours = parts
-        .next()
-        .ok_or(IntervalParseErrorKind::Invalid)?
-        .parse::<i64>()
-        .map_err(|_| IntervalParseErrorKind::Invalid)?;
-    let minutes = parts
-        .next()
-        .ok_or(IntervalParseErrorKind::Invalid)?
-        .parse::<i64>()
-        .map_err(|_| IntervalParseErrorKind::Invalid)?;
-    let second_token = parts.next().unwrap_or("0");
-    let seconds = second_token
-        .parse::<f64>()
-        .map_err(|_| IntervalParseErrorKind::Invalid)?;
-    if parts.next().is_some()
-        || minutes.abs() >= 60
-        || !seconds.is_finite()
-        || seconds.abs() >= 60.0
-    {
+    let parts = token.split(':').collect::<Vec<_>>();
+    if !(2..=3).contains(&parts.len()) {
         return Err(IntervalParseErrorKind::Invalid);
     }
-    let seconds_micros = decimal_mul_round_to_i64(second_token, 1_000_000).map_err(|err| {
+    let mut inherited_sign = 1i64;
+    let (hours, _, sign) = parse_time_micros_part(parts[0], inherited_sign, USECS_PER_HOUR, true)?;
+    inherited_sign = sign;
+    let (minutes, minute_value, sign) =
+        parse_time_micros_part(parts[1], inherited_sign, USECS_PER_MINUTE, false)?;
+    inherited_sign = sign;
+    let (seconds_micros, second_value, _) = parse_time_micros_part(
+        parts.get(2).copied().unwrap_or("0"),
+        inherited_sign,
+        1_000_000,
+        true,
+    )?;
+    if minute_value >= 60.0 || second_value >= 60.0 {
+        return Err(IntervalParseErrorKind::Invalid);
+    }
+    let micros = hours
+        .checked_add(minutes)
+        .and_then(|value| value.checked_add(seconds_micros))
+        .ok_or(IntervalParseErrorKind::FieldOutOfRange)?;
+    Ok(micros)
+}
+
+fn parse_time_micros_part(
+    token: &str,
+    inherited_sign: i64,
+    scale: i64,
+    allow_fraction: bool,
+) -> Result<(i64, f64, i64), IntervalParseErrorKind> {
+    let (sign, magnitude) = signed_time_part(token, inherited_sign)?;
+    if !allow_fraction && magnitude.contains('.') {
+        return Err(IntervalParseErrorKind::Invalid);
+    }
+    let abs_value = magnitude
+        .parse::<f64>()
+        .map_err(|_| IntervalParseErrorKind::Invalid)?
+        .abs();
+    if !abs_value.is_finite() {
+        return Err(IntervalParseErrorKind::Invalid);
+    }
+    let signed = if sign < 0 {
+        format!("-{magnitude}")
+    } else {
+        magnitude.to_string()
+    };
+    let micros = decimal_mul_round_to_i64(&signed, scale).map_err(|err| {
         if matches!(err, DecimalIntervalError::Invalid) {
             IntervalParseErrorKind::Invalid
         } else {
-            IntervalParseErrorKind::IntervalOutOfRange
+            IntervalParseErrorKind::FieldOutOfRange
         }
     })?;
-    let micros = hours
-        .checked_mul(3_600_000_000)
-        .and_then(|value| value.checked_add(minutes.checked_mul(60_000_000)?))
-        .and_then(|value| value.checked_add(seconds_micros))
-        .ok_or(IntervalParseErrorKind::IntervalOutOfRange)?;
-    micros
-        .checked_mul(sign)
-        .ok_or(IntervalParseErrorKind::IntervalOutOfRange)
+    Ok((micros, abs_value, sign))
+}
+
+fn signed_time_part(
+    token: &str,
+    inherited_sign: i64,
+) -> Result<(i64, &str), IntervalParseErrorKind> {
+    if token.is_empty() {
+        return Err(IntervalParseErrorKind::Invalid);
+    }
+    if let Some(rest) = token.strip_prefix('-') {
+        if rest.is_empty() {
+            return Err(IntervalParseErrorKind::Invalid);
+        }
+        Ok((-1, rest))
+    } else if let Some(rest) = token.strip_prefix('+') {
+        if rest.is_empty() {
+            return Err(IntervalParseErrorKind::Invalid);
+        }
+        Ok((1, rest))
+    } else {
+        Ok((inherited_sign, token))
+    }
 }
 
 fn add_i32_checked(value: i32, delta: i64) -> Option<i32> {
@@ -3796,6 +3948,14 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         },
         Value::Interval(v) => match ty.kind {
             SqlTypeKind::Interval => Ok(Value::Interval(apply_interval_typmod(v, ty)?)),
+            SqlTypeKind::Time => {
+                if !v.is_finite() {
+                    return Err(cannot_convert_infinite_interval_to_time_error());
+                }
+                Ok(Value::Time(TimeADT(
+                    i128::from(v.time_micros).rem_euclid(i128::from(USECS_PER_DAY)) as i64,
+                )))
+            }
             SqlTypeKind::Text
             | SqlTypeKind::Name
             | SqlTypeKind::Char
@@ -4731,7 +4891,7 @@ pub(crate) fn cast_text_value_with_config(
                 details: datetime_parse_error_details("time with time zone", text, err),
             }),
         SqlTypeKind::Interval => Ok(Value::Interval(apply_interval_typmod(
-            parse_interval_text_value(text)?,
+            parse_interval_text_value_with_style(text, config.interval_style)?,
             ty,
         )?)),
         SqlTypeKind::Timestamp => parse_timestamp_text(text, config)
@@ -5119,10 +5279,19 @@ fn pad_char_string(text: &str, max_chars: usize) -> String {
 
 fn cast_float_to_int(value: f64, ty: SqlType) -> Result<Value, ExecError> {
     if !value.is_finite() {
-        return Err(ExecError::InvalidFloatInput {
-            ty: "double precision",
-            value: value.to_string(),
-        });
+        return match ty.kind {
+            SqlTypeKind::Int2 => Err(ExecError::Int2OutOfRange),
+            SqlTypeKind::Int4 => Err(ExecError::Int4OutOfRange),
+            SqlTypeKind::Int8 => Err(ExecError::Int8OutOfRange),
+            SqlTypeKind::Oid
+            | SqlTypeKind::RegClass
+            | SqlTypeKind::RegType
+            | SqlTypeKind::RegRole
+            | SqlTypeKind::RegNamespace
+            | SqlTypeKind::RegOperator
+            | SqlTypeKind::RegProcedure => Err(ExecError::OidOutOfRange),
+            _ => unreachable!(),
+        };
     }
     let rounded = value.round_ties_even();
     match ty.kind {

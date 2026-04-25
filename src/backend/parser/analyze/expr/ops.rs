@@ -19,6 +19,14 @@ pub(super) fn bind_arithmetic_expr(
         infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
     let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
     let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    let right_is_string_literal = matches!(
+        right,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    );
+    let left_is_string_literal = matches!(
+        left,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    );
     if !left_type.is_array
         && !right_type.is_array
         && matches!(left_type.kind, SqlTypeKind::PgLsn)
@@ -342,6 +350,90 @@ pub(super) fn bind_arithmetic_expr(
     }
     if !left_type.is_array
         && !right_type.is_array
+        && matches!(op, "+" | "-")
+        && matches!(
+            left_type.kind,
+            SqlTypeKind::Date | SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+        )
+        && matches!(right_type.kind, SqlTypeKind::Interval)
+    {
+        let result_type = match left_type.kind {
+            SqlTypeKind::Date => SqlType::new(SqlTypeKind::Timestamp),
+            _ => left_type,
+        };
+        return Ok(Expr::binary_op(
+            make,
+            result_type,
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_left_type,
+                left_type,
+            ),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_right_type,
+                SqlType::new(SqlTypeKind::Interval),
+            ),
+        ));
+    }
+    if !left_type.is_array
+        && !right_type.is_array
+        && op == "+"
+        && matches!(left_type.kind, SqlTypeKind::Interval)
+        && matches!(
+            right_type.kind,
+            SqlTypeKind::Date | SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+        )
+    {
+        let result_type = match right_type.kind {
+            SqlTypeKind::Date => SqlType::new(SqlTypeKind::Timestamp),
+            _ => right_type,
+        };
+        return Ok(Expr::binary_op(
+            make,
+            result_type,
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_left_type,
+                SqlType::new(SqlTypeKind::Interval),
+            ),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_right_type,
+                right_type,
+            ),
+        ));
+    }
+    if !left_type.is_array
+        && !right_type.is_array
         && matches!(op, "*" | "/")
         && (matches!(left_type.kind, SqlTypeKind::Interval)
             || matches!(right_type.kind, SqlTypeKind::Interval))
@@ -350,7 +442,7 @@ pub(super) fn bind_arithmetic_expr(
         let float8 = SqlType::new(SqlTypeKind::Float8);
         if op == "*"
             && matches!(left_type.kind, SqlTypeKind::Interval)
-            && is_numeric_family(right_type)
+            && (is_numeric_family(right_type) || right_is_string_literal)
         {
             return Ok(Expr::binary_op(
                 make,
@@ -382,7 +474,7 @@ pub(super) fn bind_arithmetic_expr(
             ));
         }
         if op == "*"
-            && is_numeric_family(left_type)
+            && (is_numeric_family(left_type) || left_is_string_literal)
             && matches!(right_type.kind, SqlTypeKind::Interval)
         {
             return Ok(Expr::binary_op(
@@ -416,7 +508,7 @@ pub(super) fn bind_arithmetic_expr(
         }
         if op == "/"
             && matches!(left_type.kind, SqlTypeKind::Interval)
-            && is_numeric_family(right_type)
+            && (is_numeric_family(right_type) || right_is_string_literal)
         {
             return Ok(Expr::binary_op(
                 make,
@@ -447,6 +539,76 @@ pub(super) fn bind_arithmetic_expr(
                 ),
             ));
         }
+    }
+    if !left_type.is_array
+        && !right_type.is_array
+        && matches!(op, "+" | "-")
+        && matches!(left_type.kind, SqlTypeKind::Time | SqlTypeKind::TimeTz)
+        && matches!(right_type.kind, SqlTypeKind::Interval)
+    {
+        return Ok(Expr::binary_op(
+            make,
+            left_type,
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_left_type,
+                left_type,
+            ),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_right_type,
+                SqlType::new(SqlTypeKind::Interval),
+            ),
+        ));
+    }
+    if !left_type.is_array
+        && !right_type.is_array
+        && op == "+"
+        && matches!(left_type.kind, SqlTypeKind::Interval)
+        && matches!(right_type.kind, SqlTypeKind::Time | SqlTypeKind::TimeTz)
+    {
+        return Ok(Expr::binary_op(
+            make,
+            right_type,
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_left_type,
+                SqlType::new(SqlTypeKind::Interval),
+            ),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_right_type,
+                right_type,
+            ),
+        ));
     }
     let common = resolve_numeric_binary_type(op, left_type, right_type)?;
     let left = coerce_bound_expr(

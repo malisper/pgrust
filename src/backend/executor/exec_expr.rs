@@ -4190,6 +4190,11 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::BoolAndStateFunc => eval_booland_statefunc(&values),
         BuiltinScalarFunction::BoolOrStateFunc => eval_boolor_statefunc(&values),
         BuiltinScalarFunction::Extract => eval_extract_function(&values),
+        BuiltinScalarFunction::DateBin => eval_date_bin_function(&values),
+        BuiltinScalarFunction::Timezone => eval_timezone_function(
+            &values,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        ),
         BuiltinScalarFunction::JustifyDays => eval_justify_days_function(&values),
         BuiltinScalarFunction::JustifyHours => eval_justify_hours_function(&values),
         BuiltinScalarFunction::JustifyInterval => eval_justify_interval_function(&values),
@@ -5215,9 +5220,7 @@ fn eval_builtin_function(
         }
         BuiltinScalarFunction::DateTrunc => eval_date_trunc_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::DateBin => eval_date_bin_function(&values),
-        BuiltinScalarFunction::TimeZone => {
-            eval_timetz_timezone_function(&values, &ctx.datetime_config)
-        }
+        BuiltinScalarFunction::Timezone => eval_timezone_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::DateAdd => eval_datetime_add_function(&values, false),
         BuiltinScalarFunction::DateSubtract => eval_datetime_add_function(&values, true),
         BuiltinScalarFunction::Age => eval_age_function(&values, &ctx.datetime_config),

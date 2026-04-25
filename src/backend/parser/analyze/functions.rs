@@ -1084,7 +1084,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::DatePart | BuiltinScalarFunction::Extract => args.len() == 2,
             BuiltinScalarFunction::DateTrunc => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::DateBin => args.len() == 3,
-            BuiltinScalarFunction::TimeZone => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::Timezone => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::DateAdd | BuiltinScalarFunction::DateSubtract => {
                 matches!(args.len(), 2 | 3)
             }

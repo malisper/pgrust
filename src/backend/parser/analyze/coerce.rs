@@ -643,6 +643,37 @@ pub(super) fn infer_arithmetic_sql_type(expr: &SqlExpr, left: SqlType, right: Sq
     let left = left.element_type();
     let right = right.element_type();
 
+    let has_interval = matches!(left.kind, Interval) || matches!(right.kind, Interval);
+    if has_interval {
+        return match expr {
+            SqlExpr::Add(_, _) if matches!(left.kind, Date) || matches!(right.kind, Date) => {
+                SqlType::new(Timestamp)
+            }
+            SqlExpr::Add(_, _)
+                if matches!(left.kind, Timestamp | TimestampTz)
+                    || matches!(right.kind, Timestamp | TimestampTz) =>
+            {
+                if matches!(left.kind, TimestampTz) || matches!(right.kind, TimestampTz) {
+                    SqlType::new(TimestampTz)
+                } else {
+                    SqlType::new(Timestamp)
+                }
+            }
+            SqlExpr::Sub(_, _) if matches!(left.kind, Date) && matches!(right.kind, Interval) => {
+                SqlType::new(Timestamp)
+            }
+            SqlExpr::Sub(_, _)
+                if matches!(left.kind, Timestamp | TimestampTz)
+                    && matches!(right.kind, Interval) =>
+            {
+                SqlType::new(left.kind)
+            }
+            SqlExpr::Add(_, _) | SqlExpr::Sub(_, _) => SqlType::new(Interval),
+            SqlExpr::Mul(_, _) | SqlExpr::Div(_, _) => SqlType::new(Interval),
+            _ => SqlType::new(Interval),
+        };
+    }
+
     let has_float8 = matches!(left.kind, Float8) || matches!(right.kind, Float8);
     let has_float4 = matches!(left.kind, Float4) || matches!(right.kind, Float4);
     if has_float8 {

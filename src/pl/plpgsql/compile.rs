@@ -42,6 +42,7 @@ pub struct CompiledFunction {
     pub(crate) body: CompiledBlock,
     pub(crate) return_contract: FunctionReturnContract,
     pub(crate) found_slot: usize,
+    pub(crate) sqlerrm_slot: usize,
     pub(crate) local_ctes: Vec<BoundCte>,
 }
 
@@ -653,6 +654,7 @@ pub(crate) fn compile_function_from_proc(
     }
 
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
+    let sqlerrm_slot = env.define_var("sqlerrm", SqlType::new(SqlTypeKind::Text));
 
     let return_contract = function_return_contract(row, catalog, &output_slots)?;
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
@@ -663,6 +665,7 @@ pub(crate) fn compile_function_from_proc(
         body,
         return_contract,
         found_slot,
+        sqlerrm_slot,
         local_ctes: Vec::new(),
     })
 }
@@ -687,6 +690,7 @@ pub(crate) fn compile_trigger_function_from_proc(
         .collect();
     let bindings = seed_trigger_env(&mut env, relation_desc);
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
+    let sqlerrm_slot = env.define_var("sqlerrm", SqlType::new(SqlTypeKind::Text));
     let return_contract = FunctionReturnContract::Trigger { bindings };
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
     Ok(CompiledFunction {
@@ -696,6 +700,7 @@ pub(crate) fn compile_trigger_function_from_proc(
         body,
         return_contract,
         found_slot,
+        sqlerrm_slot,
         local_ctes: env.local_ctes.clone(),
     })
 }

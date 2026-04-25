@@ -1790,7 +1790,9 @@ fn build_join_paths_internal(
     let allow_base_cross_swap = matches!(kind, JoinType::Cross)
         && !lateral_orientation_locked
         && path_relids(&left).len() == 1
-        && path_relids(&right).len() == 1;
+        && path_relids(&right).len() == 1
+        && !path_is_values_relation(&left)
+        && !path_is_values_relation(&right);
     let allow_swapped_orientation = matches!(kind, JoinType::Inner)
         && (!right_uses_immediate_outer || !lateral_orientation_locked)
         || allow_base_cross_swap;
@@ -1961,6 +1963,20 @@ fn cross_join_left_relid_count(path: &Path) -> Option<usize> {
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => cross_join_left_relid_count(input),
         _ => None,
+    }
+}
+
+fn path_is_values_relation(path: &Path) -> bool {
+    match path {
+        Path::Values { .. } => true,
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. } => path_is_values_relation(input),
+        _ => false,
     }
 }
 

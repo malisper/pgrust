@@ -653,14 +653,18 @@ pub(super) fn bind_scalar_function_call(
         BuiltinScalarFunction::Timezone => {
             let source_index = if arg_types.len() == 1 { 0 } else { 1 };
             let source_type = arg_types[source_index];
+            let source_is_time = matches!(source_type.kind, SqlTypeKind::Time);
             let source_is_timetz = matches!(source_type.kind, SqlTypeKind::TimeTz);
             let source_is_timestamptz = !source_is_timetz
+                && !source_is_time
                 && (matches!(source_type.kind, SqlTypeKind::TimestampTz)
                     || matches!(
                         &args[source_index],
                         SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
                     ));
             let result_type = if source_is_timetz {
+                SqlType::new(SqlTypeKind::TimeTz)
+            } else if source_is_time {
                 SqlType::new(SqlTypeKind::TimeTz)
             } else if source_is_timestamptz {
                 SqlType::new(SqlTypeKind::Timestamp)
@@ -669,6 +673,8 @@ pub(super) fn bind_scalar_function_call(
             };
             let source_target = if source_is_timetz {
                 SqlType::new(SqlTypeKind::TimeTz)
+            } else if source_is_time {
+                SqlType::new(SqlTypeKind::Time)
             } else if source_is_timestamptz {
                 SqlType::new(SqlTypeKind::TimestampTz)
             } else {
@@ -676,10 +682,21 @@ pub(super) fn bind_scalar_function_call(
             };
             let mut rewritten_args = Vec::new();
             if bound_args.len() == 2 {
+                let zone_target = if matches!(
+                    arg_types[0].kind,
+                    SqlTypeKind::Text
+                        | SqlTypeKind::Name
+                        | SqlTypeKind::Char
+                        | SqlTypeKind::Varchar
+                ) {
+                    SqlType::new(SqlTypeKind::Text)
+                } else {
+                    SqlType::new(SqlTypeKind::Interval)
+                };
                 rewritten_args.push(coerce_bound_expr(
                     bound_args[0].clone(),
                     arg_types[0],
-                    SqlType::new(SqlTypeKind::Text),
+                    zone_target,
                 ));
             }
             rewritten_args.push(coerce_bound_expr(
@@ -2094,15 +2111,7 @@ pub(super) fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            if !is_numeric_family(value_type)
-                && !matches!(
-                    value_type.kind,
-                    SqlTypeKind::Date
-                        | SqlTypeKind::Timestamp
-                        | SqlTypeKind::TimestampTz
-                        | SqlTypeKind::Interval
-                )
-            {
+            if !is_numeric_family(value_type) && !matches!(value_type.kind, SqlTypeKind::Interval) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "numeric or datetime argument",
                     actual: format!("{func:?}({})", sql_type_name(value_type)),

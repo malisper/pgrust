@@ -12,9 +12,7 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
 use crate::include::catalog::{CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};
-use crate::include::nodes::datetime::{
-    DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT,
-};
+use crate::include::nodes::datetime::{DateADT, TimeADT, TimestampADT};
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::{OrderByEntry, Var, user_attrno};
 use crate::pgrust::database::{Database, Session};
@@ -7157,6 +7155,119 @@ fn interval_multiply_and_divide_bind_to_float8_scaling() {
                 months: 0,
             }),
         ]],
+    );
+
+    assert!(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select interval 'infinity' * 'nan'",
+        )
+        .is_err()
+    );
+    assert!(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select interval 'infinity' / 'infinity'",
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn time_interval_arithmetic_rejects_infinite_intervals() {
+    let base = temp_dir("time_interval_infinite");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select time '23:30' + interval '2 hours'",
+        )
+        .unwrap(),
+        vec![vec![Value::Time(TimeADT(5_400_000_000))]],
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select time '11:27:42' + interval 'infinity'",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "cannot add infinite interval to time"
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select timetz '11:27:42' - interval '-infinity'",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "cannot subtract infinite interval from time"
+    );
+}
+
+#[test]
+fn interval_infinite_function_edges_match_postgres_errors() {
+    let base = temp_dir("interval_infinite_function_edges");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select date_bin('infinity', timestamp '2001-02-16 20:38:40', timestamp '2001-02-16 20:05:00')",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "timestamps cannot be binned into infinite intervals"
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select timezone('infinity'::interval, '1995-08-06 12:12:12'::timestamp)",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "interval time zone \"infinity\" must be finite"
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select to_char('infinity'::interval, 'YYYY')",
+        )
+        .unwrap(),
+        vec![vec![Value::Text("".into())]],
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select 'infinity'::interval::time",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "cannot convert infinite interval to time"
     );
 }
 
