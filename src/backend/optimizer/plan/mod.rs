@@ -5,7 +5,7 @@ mod subselect;
 
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::parsenodes::Query;
-use crate::include::nodes::pathnodes::{PathTarget, PlannerInfo, RelOptInfo};
+use crate::include::nodes::pathnodes::{PathTarget, PlannerConfig, PlannerInfo, RelOptInfo};
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::Expr;
 
@@ -16,12 +16,29 @@ pub(crate) fn planner(
     planner::planner(query, catalog)
 }
 
+pub(crate) fn planner_with_config(
+    query: Query,
+    catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
+) -> Result<PlannedStmt, crate::backend::parser::ParseError> {
+    planner::planner_with_config(query, catalog, config)
+}
+
 pub(crate) fn planner_with_param_base(
     query: Query,
     catalog: &dyn CatalogLookup,
     next_param_id: usize,
 ) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
     planner::planner_with_param_base(query, catalog, next_param_id)
+}
+
+pub(crate) fn planner_with_param_base_and_config(
+    query: Query,
+    catalog: &dyn CatalogLookup,
+    next_param_id: usize,
+    config: PlannerConfig,
+) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
+    planner::planner_with_param_base_and_config(query, catalog, next_param_id, config)
 }
 
 pub(super) fn finalize_expr_subqueries(

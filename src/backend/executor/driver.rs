@@ -6,7 +6,11 @@ use super::{
     execute_truncate_table, execute_update, execute_vacuum, executor_start, parse_statement,
     pg_plan_query, pg_plan_values_query,
 };
-use crate::backend::parser::{CatalogLookup, UnsupportedStatement, plan_merge};
+use crate::backend::parser::{
+    CatalogLookup, UnsupportedStatement, pg_plan_query_with_config,
+    pg_plan_values_query_with_config, plan_merge,
+};
+use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::pgrust::database::queue_pending_notification;
 use crate::pl::plpgsql::execute_do;
 
@@ -126,7 +130,7 @@ fn execute_statement_with_source(
     ctx.snapshot = ctx.txns.read().snapshot_for_command(xid, cid)?;
     let result = match stmt {
         Statement::Do(stmt) => execute_do(&stmt),
-        Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx),
+        Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx, PlannerConfig::default()),
         Statement::Select(stmt) => execute_query_desc(
             create_query_desc(pg_plan_query(&stmt, catalog)?, source_text.map(str::to_string)),
             ctx,
@@ -488,9 +492,18 @@ pub fn execute_readonly_statement(
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
+    execute_readonly_statement_with_config(stmt, catalog, ctx, PlannerConfig::default())
+}
+
+pub fn execute_readonly_statement_with_config(
+    stmt: Statement,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    planner_config: PlannerConfig,
+) -> Result<StatementResult, ExecError> {
     match stmt {
         Statement::Do(stmt) => execute_do(&stmt),
-        Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx),
+        Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx, planner_config),
         Statement::Select(stmt) => {
             if let Some(locking_clause) = stmt.locking_clause {
                 return Err(ExecError::DetailedError {
@@ -503,9 +516,15 @@ pub fn execute_readonly_statement(
                     sqlstate: "25006",
                 });
             }
-            execute_planned_stmt(pg_plan_query(&stmt, catalog)?, ctx)
+            execute_planned_stmt(
+                pg_plan_query_with_config(&stmt, catalog, planner_config)?,
+                ctx,
+            )
         }
-        Statement::Values(stmt) => execute_planned_stmt(pg_plan_values_query(&stmt, catalog)?, ctx),
+        Statement::Values(stmt) => execute_planned_stmt(
+            pg_plan_values_query_with_config(&stmt, catalog, planner_config)?,
+            ctx,
+        ),
         Statement::Analyze(stmt) => execute_analyze(stmt, catalog),
         Statement::Show(_)
         | Statement::Set(_)

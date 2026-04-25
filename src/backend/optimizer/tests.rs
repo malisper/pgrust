@@ -4,11 +4,18 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::optimizer::pathnodes::rte_slot_id;
 use crate::backend::optimizer::util;
 use crate::backend::parser::analyze::LiteralDefaultCatalog;
-use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::backend::parser::{
+    LoweredPartitionSpec, ParseOptions, PartitionBoundSpec, PartitionRangeDatumValue,
+    PartitionStrategy, SerializedPartitionValue, SqlType, SqlTypeKind, Statement,
+    parse_statement_with_options, pg_partitioned_table_row, serialize_partition_bound,
+};
 use crate::backend::parser::{analyze_select_query_with_outer, parse_select};
+use crate::include::catalog::{
+    BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_OID, PUBLIC_NAMESPACE_OID, PgInheritsRow,
+};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{
-    Path, PathKey, PathTarget, PlannerInfo, RelOptInfo, RelOptKind,
+    Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, RelOptInfo, RelOptKind,
 };
 use crate::include::nodes::plannodes::{IndexScanKeyArgument, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
@@ -522,10 +529,38 @@ fn planned_stmt_for_sql_with_catalog(
     sql: &str,
     catalog: &dyn crate::backend::parser::CatalogLookup,
 ) -> crate::include::nodes::plannodes::PlannedStmt {
-    let stmt = parse_select(sql).expect("parse");
+    planned_stmt_for_sql_with_catalog_and_config(sql, catalog, PlannerConfig::default())
+}
+
+fn planned_stmt_for_sql_with_catalog_and_config(
+    sql: &str,
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    config: PlannerConfig,
+) -> crate::include::nodes::plannodes::PlannedStmt {
+    let stmt = parse_select_for_optimizer_test(sql).expect("parse");
     let (query, _) = analyze_select_query_with_outer(&stmt, catalog, &[], None, None, &[], &[])
         .expect("analyze");
-    super::planner(query, catalog).expect("plan")
+    super::planner_with_config(query, catalog, config).expect("plan")
+}
+
+fn parse_select_for_optimizer_test(
+    sql: &str,
+) -> Result<crate::backend::parser::SelectStatement, crate::backend::parser::ParseError> {
+    stacker::grow(32 * 1024 * 1024, || {
+        match parse_statement_with_options(
+            sql,
+            ParseOptions {
+                max_stack_depth_kb: 32768,
+                ..ParseOptions::default()
+            },
+        )? {
+            Statement::Select(stmt) => Ok(stmt),
+            other => Err(crate::backend::parser::ParseError::UnexpectedToken {
+                expected: "SELECT",
+                actual: format!("{other:?}"),
+            }),
+        }
+    })
 }
 
 fn planned_stmt_for_values_sql(sql: &str) -> crate::include::nodes::plannodes::PlannedStmt {
@@ -580,6 +615,270 @@ fn catalog_with_people_and_pets() -> Catalog {
         )
         .expect("create pets table");
     catalog
+}
+
+fn catalog_with_matching_range_partitions() -> Catalog {
+    let mut catalog = Catalog::default();
+    create_partitioned_table_pair(&mut catalog, "lp", "rp");
+    catalog
+}
+
+fn create_partitioned_table_pair(catalog: &mut Catalog, left: &str, right: &str) {
+    let left_oid = create_partitioned_table(catalog, left);
+    let right_oid = create_partitioned_table(catalog, right);
+
+    create_range_partition(catalog, left_oid, &format!("{left}_p1"), 0, 10, 1);
+    create_range_partition(catalog, left_oid, &format!("{left}_p3"), 20, 30, 2);
+    create_range_partition(catalog, left_oid, &format!("{left}_p2"), 10, 20, 3);
+    create_range_partition(catalog, right_oid, &format!("{right}_p1"), 0, 10, 1);
+    create_range_partition(catalog, right_oid, &format!("{right}_p3"), 20, 30, 2);
+    create_range_partition(catalog, right_oid, &format!("{right}_p2"), 10, 20, 3);
+}
+
+fn create_partitioned_table(catalog: &mut Catalog, name: &str) -> u32 {
+    let desc = RelationDesc {
+        columns: vec![
+            column_desc("k", int4(), false),
+            column_desc("v", int4(), true),
+        ],
+    };
+    let entry = catalog
+        .create_table_with_relkind(
+            name,
+            desc,
+            PUBLIC_NAMESPACE_OID,
+            CURRENT_DATABASE_OID,
+            'p',
+            'p',
+            BOOTSTRAP_SUPERUSER_OID,
+        )
+        .expect("create partitioned table");
+    let spec = LoweredPartitionSpec {
+        strategy: PartitionStrategy::Range,
+        key_columns: vec!["k".into()],
+        partattrs: vec![1],
+        partclass: vec![0],
+        partcollation: vec![0],
+    };
+    let relation_oid = entry.relation_oid;
+    let table = catalog.tables.get_mut(&name.to_ascii_lowercase()).unwrap();
+    table.relhassubclass = true;
+    table.partitioned_table = Some(pg_partitioned_table_row(relation_oid, &spec, 0));
+    relation_oid
+}
+
+fn create_range_partition(
+    catalog: &mut Catalog,
+    parent_oid: u32,
+    name: &str,
+    from: i32,
+    to: i32,
+    inhseqno: i32,
+) -> u32 {
+    let desc = RelationDesc {
+        columns: vec![
+            column_desc("k", int4(), false),
+            column_desc("v", int4(), true),
+        ],
+    };
+    let entry = catalog
+        .create_table(name, desc)
+        .expect("create partition child");
+    let bound = PartitionBoundSpec::Range {
+        from: vec![PartitionRangeDatumValue::Value(
+            SerializedPartitionValue::Int32(from),
+        )],
+        to: vec![PartitionRangeDatumValue::Value(
+            SerializedPartitionValue::Int32(to),
+        )],
+        is_default: false,
+    };
+    let relation_oid = entry.relation_oid;
+    let table = catalog.tables.get_mut(&name.to_ascii_lowercase()).unwrap();
+    table.relispartition = true;
+    table.relpartbound = Some(serialize_partition_bound(&bound).expect("serialize bound"));
+    catalog.inherits.push(PgInheritsRow {
+        inhrelid: relation_oid,
+        inhparent: parent_oid,
+        inhseqno,
+        inhdetachpending: false,
+    });
+    relation_oid
+}
+
+fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
+    match plan {
+        Plan::Append { children, .. }
+            if children.iter().all(|child| {
+                matches!(child, Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. })
+            }) =>
+        {
+            Some(children)
+        }
+        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
+            children.iter().find_map(append_with_join_children)
+        }
+        Plan::Hash { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::BitmapHeapScan {
+            bitmapqual: input, ..
+        }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => append_with_join_children(input),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => append_with_join_children(left).or_else(|| append_with_join_children(right)),
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::Values { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. } => None,
+    }
+}
+
+fn child_relation_names(plan: &Plan) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_relation_names(plan, &mut names);
+    names
+}
+
+fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
+    match plan {
+        Plan::SeqScan { relation_name, .. } => names.push(relation_name.clone()),
+        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
+            for child in children {
+                collect_relation_names(child, names);
+            }
+        }
+        Plan::Hash { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::BitmapHeapScan {
+            bitmapqual: input, ..
+        }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => collect_relation_names(input, names),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => {
+            collect_relation_names(left, names);
+            collect_relation_names(right, names);
+        }
+        Plan::Result { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::Values { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. } => {}
+    }
+}
+
+#[test]
+fn partitionwise_join_guc_off_keeps_join_over_appends() {
+    let catalog = catalog_with_matching_range_partitions();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select lp.k, rp.v from lp join rp on lp.k = rp.k",
+        &catalog,
+    );
+
+    assert!(
+        append_with_join_children(&planned.plan_tree).is_none(),
+        "partitionwise append should not be selected while the GUC is off: {:?}",
+        planned.plan_tree
+    );
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| {
+            matches!(
+                plan,
+                Plan::NestedLoopJoin { left, right, .. }
+                    if matches!(left.as_ref(), Plan::Append { .. })
+                        || matches!(right.as_ref(), Plan::Append { .. })
+            ) || matches!(
+                plan,
+                Plan::HashJoin { left, right, .. }
+                    if matches!(left.as_ref(), Plan::Append { .. })
+                        || matches!(right.as_ref(), Plan::Hash { input, .. } if matches!(input.as_ref(), Plan::Append { .. }))
+            )
+        }),
+        "expected the current unified-append join shape, got {:?}",
+        planned.plan_tree
+    );
+}
+
+#[test]
+fn partitionwise_join_guc_on_builds_append_of_child_joins_in_bound_order() {
+    let catalog = catalog_with_matching_range_partitions();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select lp.k, rp.v from lp join rp on lp.k = rp.k",
+        &catalog,
+        PlannerConfig {
+            enable_partitionwise_join: true,
+        },
+    );
+    let children = append_with_join_children(&planned.plan_tree).unwrap_or_else(|| {
+        panic!(
+            "expected append of child joins, got {:?}",
+            planned.plan_tree
+        )
+    });
+    let child_names = children
+        .iter()
+        .map(child_relation_names)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        child_names,
+        vec![
+            vec!["lp_p1".to_string(), "rp_p1".to_string()],
+            vec!["lp_p2".to_string(), "rp_p2".to_string()],
+            vec!["lp_p3".to_string(), "rp_p3".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn partitionwise_join_requires_complete_key_equality() {
+    let catalog = catalog_with_matching_range_partitions();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select lp.k, rp.v from lp join rp on lp.v = rp.v",
+        &catalog,
+        PlannerConfig {
+            enable_partitionwise_join: true,
+        },
+    );
+
+    assert!(
+        append_with_join_children(&planned.plan_tree).is_none(),
+        "non-key equality should not use partitionwise join: {:?}",
+        planned.plan_tree
+    );
 }
 
 fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool {

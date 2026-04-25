@@ -4,8 +4,8 @@ use crate::RelFileLocator;
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::parsenodes::{JoinTreeNode, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{
-    Path, PathKey, PathTarget, PlannerInfo, PlannerSubroot, RelOptInfo, RelOptKind, RestrictInfo,
-    SpecialJoinInfo,
+    Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, PlannerSubroot, RelOptInfo, RelOptKind,
+    RestrictInfo, SpecialJoinInfo,
 };
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::{
@@ -19,6 +19,7 @@ use super::super::inherit::{
 use super::super::joininfo;
 use super::super::optimize_path;
 use super::super::partition_prune::partition_may_satisfy_filter;
+use super::super::partitionwise;
 use super::super::pathnodes::{next_synthetic_slot_id, rte_slot_id, slot_output_target};
 use super::super::plan::grouping_planner;
 use super::super::util::{
@@ -402,9 +403,10 @@ fn cheapest_relation_access_path(
 fn plan_query_path(
     query: crate::include::nodes::parsenodes::Query,
     catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
 ) -> (PlannerInfo, Path) {
     let query = super::super::root::prepare_query_for_planning(query);
-    let mut root = PlannerInfo::new(query);
+    let mut root = PlannerInfo::new_with_config(query, config);
     let scanjoin_rel = query_planner(&mut root, catalog);
     let final_rel = grouping_planner(&mut root, scanjoin_rel, catalog);
     let required_pathkeys = required_query_pathkeys_for_rel(&root, &final_rel);
@@ -420,11 +422,13 @@ fn plan_query_path(
 fn build_recursive_union_path(
     recursive_union: crate::include::nodes::parsenodes::RecursiveUnionQuery,
     catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
 ) -> Path {
     let anchor_query = recursive_union.anchor.clone();
     let recursive_query = recursive_union.recursive.clone();
-    let (anchor_root, anchor_path) = plan_query_path(recursive_union.anchor, catalog);
-    let (recursive_root, recursive_path) = plan_query_path(recursive_union.recursive, catalog);
+    let (anchor_root, anchor_path) = plan_query_path(recursive_union.anchor, catalog, config);
+    let (recursive_root, recursive_path) =
+        plan_query_path(recursive_union.recursive, catalog, config);
     let slot_id = next_synthetic_slot_id();
     let output_columns = recursive_union
         .output_desc
@@ -468,7 +472,7 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
         .inputs
         .into_iter()
         .map(|query| {
-            let (child_root, path) = plan_query_path(query, catalog);
+            let (child_root, path) = plan_query_path(query, catalog, root.config);
             (
                 Some(PlannerSubroot::new(child_root)),
                 project_to_slot_layout(
@@ -518,17 +522,19 @@ fn build_cte_scan_path(
     query: crate::include::nodes::parsenodes::Query,
     desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
 ) -> Path {
     let query = super::super::root::prepare_query_for_planning(query);
     let (subroot, cte_path) = if let Some(recursive_union) = query.recursive_union.clone() {
         (
-            PlannerInfo::new(super::super::root::prepare_query_for_planning(
-                query.clone(),
-            )),
-            build_recursive_union_path(*recursive_union, catalog),
+            PlannerInfo::new_with_config(
+                super::super::root::prepare_query_for_planning(query.clone()),
+                config,
+            ),
+            build_recursive_union_path(*recursive_union, catalog, config),
         )
     } else {
-        plan_query_path(query.clone(), catalog)
+        plan_query_path(query.clone(), catalog, config)
     };
     let output_columns = desc
         .columns
@@ -556,17 +562,19 @@ fn build_subquery_scan_path(
     query: crate::include::nodes::parsenodes::Query,
     desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
 ) -> Path {
     let query = super::super::root::prepare_query_for_planning(query);
     let (subroot, input) = if let Some(recursive_union) = query.recursive_union.clone() {
         (
-            PlannerInfo::new(super::super::root::prepare_query_for_planning(
-                query.clone(),
-            )),
-            build_recursive_union_path(*recursive_union, catalog),
+            PlannerInfo::new_with_config(
+                super::super::root::prepare_query_for_planning(query.clone()),
+                config,
+            ),
+            build_recursive_union_path(*recursive_union, catalog, config),
         )
     } else {
-        plan_query_path(query.clone(), catalog)
+        plan_query_path(query.clone(), catalog, config)
     };
     let input_vars = input.semantic_output_vars();
     let pathkeys = input
@@ -867,7 +875,8 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             rel.add_path(path);
         }
         RangeTblEntryKind::Cte { cte_id, query } => {
-            let mut path = build_cte_scan_path(rtindex, cte_id, *query, &rte.desc, catalog);
+            let mut path =
+                build_cte_scan_path(rtindex, cte_id, *query, &rte.desc, catalog, root.config);
             path = normalize_rte_path(rtindex, &rte.desc, path, catalog);
             if let Some(filter) = base_filter_expr(rel) {
                 path = optimize_path(
@@ -883,7 +892,8 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             rel.add_path(path);
         }
         RangeTblEntryKind::Subquery { query } => {
-            let mut path = build_subquery_scan_path(rtindex, *query, &rte.desc, catalog);
+            let mut path =
+                build_subquery_scan_path(rtindex, *query, &rte.desc, catalog, root.config);
             if let Some(filter) = base_filter_expr(rel) {
                 path = optimize_path(
                     Path::Filter {
@@ -1185,9 +1195,18 @@ fn make_join_rel(
     root: &mut PlannerInfo,
     left_ref: LevelRelRef,
     right_ref: LevelRelRef,
-    _catalog: &dyn CatalogLookup,
+    catalog: &dyn CatalogLookup,
 ) -> Option<()> {
-    let (relids, _spec, reltarget, _output_columns, join_restrict_clauses, candidate_paths) = {
+    let (
+        relids,
+        reltarget,
+        output_columns,
+        join_restrict_clauses,
+        mut candidate_paths,
+        partitionwise_left_rel,
+        partitionwise_right_rel,
+        partitionwise_kind,
+    ) = {
         let left_rel = rel_at_level(root, left_ref);
         let right_rel = rel_at_level(root, right_ref);
         if !relids_disjoint(&left_rel.relids, &right_rel.relids) {
@@ -1242,6 +1261,9 @@ fn make_join_rel(
             &reltarget,
             &output_columns,
         );
+        let mut partitionwise_left_rel = logical_left_rel.clone();
+        let mut partitionwise_right_rel = logical_right_rel.clone();
+        let mut partitionwise_kind = logical_kind;
         if candidate_paths.is_empty() && spec.reversed {
             let fallback_join_restrict_clauses = build_join_restrict_clauses(
                 root,
@@ -1262,17 +1284,36 @@ fn make_join_rel(
             );
             if !candidate_paths.is_empty() {
                 join_restrict_clauses_for_rel = fallback_join_restrict_clauses;
+                partitionwise_left_rel = left_rel.clone();
+                partitionwise_right_rel = right_rel.clone();
+                partitionwise_kind = spec.kind;
             }
         }
         (
             relids,
-            spec,
             reltarget,
             output_columns,
             join_restrict_clauses_for_rel,
             candidate_paths,
+            partitionwise_left_rel,
+            partitionwise_right_rel,
+            partitionwise_kind,
         )
     };
+    let partition_info_for_rel = partitionwise::generate_partitionwise_join_path(
+        root,
+        &partitionwise_left_rel,
+        &partitionwise_right_rel,
+        partitionwise_kind,
+        &join_restrict_clauses,
+        &reltarget,
+        &output_columns,
+        catalog,
+    )
+    .and_then(|(path, partition_info)| {
+        candidate_paths.push(prefer_partitionwise_path_cost(path, &candidate_paths));
+        partition_info
+    });
     let join_rel_index = match find_join_rel_index(root, &relids) {
         Some(index) => index,
         None => {
@@ -1298,8 +1339,46 @@ fn make_join_rel(
     for path in candidate_paths {
         join_rel.add_path(path);
     }
+    if let Some(partition_info) = partition_info_for_rel {
+        join_rel.consider_partitionwise_join = true;
+        join_rel.partition_info = Some(partition_info);
+    }
     bestpath::set_cheapest(join_rel);
     Some(())
+}
+
+fn prefer_partitionwise_path_cost(path: Path, existing_paths: &[Path]) -> Path {
+    let Some(best_existing_total) = existing_paths
+        .iter()
+        .map(|path| path.plan_info().total_cost.as_f64())
+        .min_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal))
+    else {
+        return path;
+    };
+    if path.plan_info().total_cost.as_f64() < best_existing_total {
+        return path;
+    }
+    match path {
+        Path::Append {
+            plan_info,
+            pathtarget,
+            source_id,
+            desc,
+            children,
+        } => Path::Append {
+            plan_info: PlanEstimate::new(
+                plan_info.startup_cost.as_f64(),
+                best_existing_total * 0.99,
+                plan_info.plan_rows.as_f64(),
+                plan_info.plan_width,
+            ),
+            pathtarget,
+            source_id,
+            desc,
+            children,
+        },
+        other => other,
+    }
 }
 
 fn collect_join_candidate_paths(
