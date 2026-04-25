@@ -5267,7 +5267,7 @@ fn build_relation_entry(
         0
     };
     let mut next_oid = array_type_oid.saturating_add(1);
-    if relkind == 'r' {
+    if matches!(relkind, 'r' | 'p') {
         allocate_relation_object_oids(&mut desc, &mut next_oid);
     }
     let rel_number = if relkind_has_storage(relkind) {

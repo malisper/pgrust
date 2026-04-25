@@ -3075,6 +3075,14 @@ fn try_parse_conversion_statement(sql: &str) -> Result<Option<Statement>, ParseE
 fn try_parse_foreign_data_wrapper_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create server ") {
+        return build_create_foreign_server_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateForeignServer(stmt)));
+    }
+    if lowered.starts_with("create foreign table ") {
+        return build_create_foreign_table_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateForeignTable(stmt)));
+    }
     if lowered.starts_with("create foreign data wrapper ") {
         return build_create_foreign_data_wrapper_statement(trimmed)
             .map(|stmt| Some(Statement::CreateForeignDataWrapper(stmt)));
@@ -3091,6 +3099,123 @@ fn try_parse_foreign_data_wrapper_statement(sql: &str) -> Result<Option<Statemen
             .map(|stmt| Some(Statement::CommentOnForeignDataWrapper(stmt)));
     }
     Ok(None)
+}
+
+fn build_create_foreign_server_statement(
+    sql: &str,
+) -> Result<CreateForeignServerStatement, ParseError> {
+    let mut rest = sql["create server ".len()..].trim_start();
+    let (server_name, next) = parse_sql_identifier(rest)?;
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "foreign data wrapper") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "FOREIGN DATA WRAPPER",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "foreign data wrapper").trim_start();
+    let (fdw_name, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CreateForeignServerStatement {
+        server_name,
+        fdw_name,
+    })
+}
+
+fn find_matching_create_foreign_table_columns_end(input: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    if bytes.first().copied()? != b'(' {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = parse_delimited_token_end(bytes, i, b'\'');
+                continue;
+            }
+            b'"' => {
+                i = parse_delimited_token_end(bytes, i, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b'(' => depth = depth.saturating_add(1),
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn build_create_foreign_table_statement(
+    sql: &str,
+) -> Result<CreateForeignTableStatement, ParseError> {
+    let mut rest = sql["create foreign table ".len()..].trim_start();
+    let if_not_exists = if keyword_at_start(rest, "if not exists") {
+        rest = consume_keyword(rest, "if not exists").trim_start();
+        true
+    } else {
+        false
+    };
+    let ((schema_name, table_name), next) = parse_qualified_sql_name(rest)?;
+    rest = next.trim_start();
+    let columns_end = find_matching_create_foreign_table_columns_end(rest).ok_or(
+        ParseError::UnexpectedToken {
+            expected: "foreign table column definitions",
+            actual: rest.into(),
+        },
+    )?;
+    let columns_sql = &rest[..=columns_end];
+    rest = rest[columns_end + 1..].trim_start();
+    if !keyword_at_start(rest, "server") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "SERVER",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "server").trim_start();
+    let (server_name, tail) = parse_sql_identifier(rest)?;
+    if !tail.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: tail.trim().into(),
+        });
+    }
+
+    let qualified_name = schema_name
+        .as_ref()
+        .map(|schema| format!("{schema}.{table_name}"))
+        .unwrap_or_else(|| table_name.clone());
+    let create_table_sql = if if_not_exists {
+        format!("create table if not exists {qualified_name} {columns_sql}")
+    } else {
+        format!("create table {qualified_name} {columns_sql}")
+    };
+    let create_table = match parse_statement(&create_table_sql)? {
+        Statement::CreateTable(stmt) => stmt,
+        _ => unreachable!("CREATE TABLE parser must produce CreateTable"),
+    };
+    Ok(CreateForeignTableStatement {
+        create_table,
+        server_name,
+    })
 }
 
 fn build_create_foreign_data_wrapper_statement(
@@ -12258,7 +12383,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::MacAddr8 => "macaddr8",
         SqlTypeKind::Date => "date",
         SqlTypeKind::DateRange => "daterange",
-        SqlTypeKind::Time => "time without time zone",
+        SqlTypeKind::Time => "time",
         SqlTypeKind::TimeTz => "timetz",
         SqlTypeKind::Interval => "interval",
         SqlTypeKind::TsVector => "tsvector",
@@ -12279,9 +12404,9 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Polygon => "polygon",
         SqlTypeKind::Line => "line",
         SqlTypeKind::Circle => "circle",
-        SqlTypeKind::Timestamp => "timestamp without time zone",
+        SqlTypeKind::Timestamp => "timestamp",
         SqlTypeKind::TimestampRange => "tsrange",
-        SqlTypeKind::TimestampTz => "timestamp with time zone",
+        SqlTypeKind::TimestampTz => "timestamptz",
         SqlTypeKind::TimestampTzRange => "tstzrange",
         SqlTypeKind::PgNodeTree => "pg_node_tree",
         SqlTypeKind::Internal => "internal",
@@ -14424,7 +14549,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 }
             }
             Ok(simple_func_call(
-                "date_part",
+                "extract",
                 vec![
                     SqlFunctionArg::positional(field.ok_or(ParseError::UnexpectedEof)?),
                     SqlFunctionArg::positional(value.ok_or(ParseError::UnexpectedEof)?),

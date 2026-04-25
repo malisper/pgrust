@@ -22,6 +22,8 @@ pub enum DateTimeKeyword {
 pub enum DateTimeParseError {
     Invalid,
     FieldOutOfRange,
+    TimestampOutOfRange,
+    TimeZoneDisplacementOutOfRange,
     UnknownTimeZone(String),
 }
 
@@ -520,6 +522,9 @@ pub fn parse_fraction_to_usecs(text: &str) -> Option<i64> {
     let mut micros = trimmed.parse::<i64>().ok()?;
     for _ in 0..(6usize.saturating_sub(trimmed.len())) {
         micros *= 10;
+    }
+    if text.len() > 6 && text.as_bytes().get(6).is_some_and(|digit| *digit >= b'5') {
+        micros += 1;
     }
     Some(micros)
 }

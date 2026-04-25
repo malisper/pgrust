@@ -310,6 +310,8 @@ fn execute_statement_with_source(
         })),
         Statement::CommentOnForeignDataWrapper(_)
         | Statement::CreateForeignDataWrapper(_)
+        | Statement::CreateForeignServer(_)
+        | Statement::CreateForeignTable(_)
         | Statement::AlterForeignDataWrapper(_)
         | Statement::AlterForeignDataWrapperOwner(_)
         | Statement::AlterForeignDataWrapperRename(_)

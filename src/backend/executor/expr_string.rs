@@ -6,7 +6,8 @@ use super::expr_casts::{
 };
 use super::expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 use super::expr_format::{
-    to_char_float, to_char_float4, to_char_int, to_char_numeric, to_number_numeric,
+    format_roman, ordinal_suffix, to_char_float, to_char_float4, to_char_int, to_char_numeric,
+    to_number_numeric,
 };
 use super::expr_ops::ensure_builtin_collation_supported;
 use super::expr_range::render_range_text;
@@ -19,7 +20,16 @@ use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
-use crate::include::nodes::datum::NumericValue;
+use crate::backend::utils::time::datetime::{
+    day_of_week_from_julian_day, day_of_year, days_from_ymd, iso_day_of_week_from_julian_day,
+    iso_week_and_year, julian_day_from_postgres_date, timestamp_parts_from_usecs,
+    timezone_offset_seconds, ymd_from_days,
+};
+use crate::include::nodes::datetime::{
+    DATEVAL_NOBEGIN, DATEVAL_NOEND, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, USECS_PER_DAY,
+    USECS_PER_HOUR, USECS_PER_MINUTE, USECS_PER_SEC,
+};
+use crate::include::nodes::datum::{IntervalValue, NumericValue};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
 use base64::Engine as _;
@@ -75,6 +85,472 @@ const SIZE_PRETTY_UNITS: [SizePrettyUnit; 6] = [
     },
 ];
 
+const WEEKDAY_NAMES: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+const MONTH_NAMES: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+const DATETIME_TO_CHAR_PATTERNS: &[&str] = &[
+    "A.D.", "a.d.", "B.C.", "b.c.", "P.M.", "p.m.", "A.M.", "a.m.", "Y,YYY", "HH24", "HH12",
+    "IYYY", "IDDD", "YYYY", "MONTH", "Month", "month", "DAY", "Day", "day", "SSSS", "FF1", "FF2",
+    "FF3", "FF4", "FF5", "FF6", "ff1", "ff2", "ff3", "ff4", "ff5", "ff6", "IYY", "YYY", "MON",
+    "Mon", "mon", "DY", "Dy", "dy", "HH", "MI", "SS", "MS", "US", "DDD", "YY", "CC", "MM", "WW",
+    "DD", "IW", "IY", "ID", "RM", "rm", "AD", "ad", "BC", "bc", "PM", "pm", "AM", "am", "Y", "I",
+    "Q", "J", "D",
+];
+
+struct TimestampFormatParts {
+    year: i32,
+    display_year: i32,
+    bc: bool,
+    month: u32,
+    day: u32,
+    day_of_year: u32,
+    julian_day: i32,
+    dow: u32,
+    isodow: u32,
+    iso_display_year: i32,
+    iso_week: u32,
+    iso_day_of_year: i32,
+    hour: i64,
+    minute: i64,
+    second: i64,
+    seconds_since_midnight: i64,
+    micros: i64,
+}
+
+fn titlecase_ascii(text: &str) -> String {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    out.push(first.to_ascii_uppercase());
+    out.push_str(&chars.as_str().to_ascii_lowercase());
+    out
+}
+
+fn pad_right_unless_fill(text: String, width: usize, fill_mode: bool) -> String {
+    if fill_mode {
+        text
+    } else {
+        format!("{text:<width$}")
+    }
+}
+
+fn format_signed_width(value: i32, width: usize, fill_mode: bool) -> String {
+    if fill_mode {
+        return value.to_string();
+    }
+    if value < 0 {
+        format!("-{:0width$}", value.abs(), width = width)
+    } else {
+        format!("{value:0width$}")
+    }
+}
+
+fn format_last_digits(value: i32, modulo: i32, width: usize, fill_mode: bool) -> String {
+    let value = value.rem_euclid(modulo);
+    if fill_mode {
+        value.to_string()
+    } else {
+        format!("{value:0width$}")
+    }
+}
+
+fn format_grouped_year(display_year: i32) -> String {
+    let negative = display_year < 0;
+    let digits = format!("{:04}", display_year.abs());
+    let split = digits.len().saturating_sub(3);
+    let mut out = format!("{},{}", &digits[..split], &digits[split..]);
+    if negative {
+        out.insert(0, '-');
+    }
+    out
+}
+
+fn timestamp_century(year: i32) -> i32 {
+    if year > 0 {
+        (year + 99) / 100
+    } else {
+        -((-year + 99) / 100)
+    }
+}
+
+fn timestamp_to_char_parts(timestamp_usecs: i64) -> Option<TimestampFormatParts> {
+    if timestamp_usecs == TIMESTAMP_NOBEGIN || timestamp_usecs == TIMESTAMP_NOEND {
+        return None;
+    }
+    let (pg_days, time_usecs) = timestamp_parts_from_usecs(timestamp_usecs);
+    let (year, month, day) = ymd_from_days(pg_days);
+    let display_year = if year <= 0 { 1 - year } else { year };
+    let julian_day = julian_day_from_postgres_date(pg_days);
+    let dow = day_of_week_from_julian_day(julian_day);
+    let isodow = iso_day_of_week_from_julian_day(julian_day);
+    let (iso_year, iso_week) = iso_week_and_year(year, month, day);
+    let iso_display_year = if iso_year <= 0 {
+        1 - iso_year
+    } else {
+        iso_year
+    };
+    let jan4 = days_from_ymd(iso_year, 1, 4)?;
+    let jan4_isodow = iso_day_of_week_from_julian_day(julian_day_from_postgres_date(jan4)) as i32;
+    let iso_year_start = jan4 - (jan4_isodow - 1);
+    let hour = time_usecs / USECS_PER_HOUR;
+    let minute = (time_usecs % USECS_PER_HOUR) / USECS_PER_MINUTE;
+    let second = (time_usecs % USECS_PER_MINUTE) / USECS_PER_SEC;
+    Some(TimestampFormatParts {
+        year,
+        display_year,
+        bc: year <= 0,
+        month,
+        day,
+        day_of_year: day_of_year(year, month, day),
+        julian_day,
+        dow,
+        isodow,
+        iso_display_year,
+        iso_week,
+        iso_day_of_year: pg_days - iso_year_start + 1,
+        hour,
+        minute,
+        second,
+        seconds_since_midnight: time_usecs / USECS_PER_SEC,
+        micros: time_usecs % USECS_PER_SEC,
+    })
+}
+
+fn match_datetime_to_char_pattern(format: &str, idx: usize) -> Option<&'static str> {
+    DATETIME_TO_CHAR_PATTERNS
+        .iter()
+        .copied()
+        .find(|pattern| format[idx..].starts_with(pattern))
+}
+
+fn datetime_ordinal_suffix(value: i128, lower: bool) -> String {
+    let suffix = ordinal_suffix(value);
+    if lower {
+        suffix.to_ascii_lowercase()
+    } else {
+        suffix.to_string()
+    }
+}
+
+fn render_ad_bc(parts: &TimestampFormatParts, pattern: &str) -> String {
+    let dotted = pattern.contains('.');
+    let lower = pattern.chars().all(|ch| !ch.is_ascii_uppercase());
+    let text = if parts.bc {
+        if dotted { "B.C." } else { "BC" }
+    } else if dotted {
+        "A.D."
+    } else {
+        "AD"
+    };
+    if lower {
+        text.to_ascii_lowercase()
+    } else {
+        text.to_string()
+    }
+}
+
+fn render_am_pm(parts: &TimestampFormatParts, pattern: &str) -> String {
+    let dotted = pattern.contains('.');
+    let lower = pattern.chars().all(|ch| !ch.is_ascii_uppercase());
+    let text = if parts.hour < 12 {
+        if dotted { "A.M." } else { "AM" }
+    } else if dotted {
+        "P.M."
+    } else {
+        "PM"
+    };
+    if lower {
+        text.to_ascii_lowercase()
+    } else {
+        text.to_string()
+    }
+}
+
+fn render_datetime_to_char_pattern(
+    parts: &TimestampFormatParts,
+    pattern: &str,
+    fill_mode: bool,
+) -> (String, Option<i128>) {
+    let month_idx = parts.month.saturating_sub(1) as usize;
+    let weekday = WEEKDAY_NAMES[parts.dow as usize];
+    let month = MONTH_NAMES[month_idx];
+    match pattern {
+        "DAY" => (
+            pad_right_unless_fill(weekday.to_ascii_uppercase(), 9, fill_mode),
+            None,
+        ),
+        "Day" => (
+            pad_right_unless_fill(titlecase_ascii(weekday), 9, fill_mode),
+            None,
+        ),
+        "day" => (
+            pad_right_unless_fill(weekday.to_ascii_lowercase(), 9, fill_mode),
+            None,
+        ),
+        "DY" => (weekday[..3].to_ascii_uppercase(), None),
+        "Dy" => (titlecase_ascii(&weekday[..3]), None),
+        "dy" => (weekday[..3].to_ascii_lowercase(), None),
+        "MONTH" => (
+            pad_right_unless_fill(month.to_ascii_uppercase(), 9, fill_mode),
+            None,
+        ),
+        "Month" => (
+            pad_right_unless_fill(titlecase_ascii(month), 9, fill_mode),
+            None,
+        ),
+        "month" => (
+            pad_right_unless_fill(month.to_ascii_lowercase(), 9, fill_mode),
+            None,
+        ),
+        "MON" => (month[..3].to_ascii_uppercase(), None),
+        "Mon" => (titlecase_ascii(&month[..3]), None),
+        "mon" => (month[..3].to_ascii_lowercase(), None),
+        "RM" | "rm" => {
+            let lower = pattern == "rm";
+            let roman = format_roman(i128::from(parts.month), true, lower);
+            (pad_right_unless_fill(roman, 4, fill_mode), None)
+        }
+        "Y,YYY" => (format_grouped_year(parts.display_year), None),
+        "YYYY" => {
+            let rendered = format_signed_width(parts.display_year, 4, fill_mode);
+            (rendered, Some(i128::from(parts.display_year)))
+        }
+        "YYY" => (
+            format_last_digits(parts.display_year, 1000, 3, fill_mode),
+            Some(i128::from(parts.display_year.rem_euclid(1000))),
+        ),
+        "YY" => (
+            format_last_digits(parts.display_year, 100, 2, fill_mode),
+            Some(i128::from(parts.display_year.rem_euclid(100))),
+        ),
+        "Y" => (
+            format_last_digits(parts.display_year, 10, 1, fill_mode),
+            Some(i128::from(parts.display_year.rem_euclid(10))),
+        ),
+        "CC" => {
+            let century = timestamp_century(parts.year);
+            (
+                format_signed_width(century, 2, fill_mode),
+                Some(century.into()),
+            )
+        }
+        "Q" => {
+            let quarter = ((parts.month - 1) / 3) + 1;
+            (quarter.to_string(), Some(quarter.into()))
+        }
+        "MM" => (
+            format_signed_width(parts.month as i32, 2, fill_mode),
+            Some(parts.month.into()),
+        ),
+        "WW" => {
+            let week = ((parts.day_of_year - 1) / 7) + 1;
+            (
+                format_signed_width(week as i32, 2, fill_mode),
+                Some(week.into()),
+            )
+        }
+        "DDD" => (
+            format_signed_width(parts.day_of_year as i32, 3, fill_mode),
+            Some(parts.day_of_year.into()),
+        ),
+        "DD" => (
+            format_signed_width(parts.day as i32, 2, fill_mode),
+            Some(parts.day.into()),
+        ),
+        "D" => {
+            let day = parts.dow + 1;
+            (day.to_string(), Some(day.into()))
+        }
+        "J" => (
+            parts.julian_day.to_string(),
+            Some(i128::from(parts.julian_day)),
+        ),
+        "HH" | "HH12" => {
+            let mut hour = parts.hour % 12;
+            if hour == 0 {
+                hour = 12;
+            }
+            (format!("{hour:02}"), Some(hour.into()))
+        }
+        "HH24" => (format!("{:02}", parts.hour), Some(parts.hour.into())),
+        "MI" => (format!("{:02}", parts.minute), Some(parts.minute.into())),
+        "SS" => (format!("{:02}", parts.second), Some(parts.second.into())),
+        "SSSS" => (
+            parts.seconds_since_midnight.to_string(),
+            Some(parts.seconds_since_midnight.into()),
+        ),
+        "MS" => (format!("{:03}", parts.micros / 1_000), None),
+        "US" => (format!("{:06}", parts.micros), None),
+        "FF1" | "FF2" | "FF3" | "FF4" | "FF5" | "FF6" | "ff1" | "ff2" | "ff3" | "ff4" | "ff5"
+        | "ff6" => {
+            let digits = format!("{:06}", parts.micros);
+            let width = pattern[2..3].parse::<usize>().unwrap_or(6);
+            (digits[..width].to_string(), None)
+        }
+        "A.D." | "a.d." | "B.C." | "b.c." | "AD" | "ad" | "BC" | "bc" => {
+            (render_ad_bc(parts, pattern), None)
+        }
+        "P.M." | "p.m." | "A.M." | "a.m." | "PM" | "pm" | "AM" | "am" => {
+            (render_am_pm(parts, pattern), None)
+        }
+        "IYYY" => {
+            let rendered = format_signed_width(parts.iso_display_year, 4, fill_mode);
+            (rendered, Some(i128::from(parts.iso_display_year)))
+        }
+        "IYY" => (
+            format_last_digits(parts.iso_display_year, 1000, 3, fill_mode),
+            Some(i128::from(parts.iso_display_year.rem_euclid(1000))),
+        ),
+        "IY" => (
+            format_last_digits(parts.iso_display_year, 100, 2, fill_mode),
+            Some(i128::from(parts.iso_display_year.rem_euclid(100))),
+        ),
+        "I" => (
+            format_last_digits(parts.iso_display_year, 10, 1, fill_mode),
+            Some(i128::from(parts.iso_display_year.rem_euclid(10))),
+        ),
+        "IW" => (
+            format_signed_width(parts.iso_week as i32, 2, fill_mode),
+            Some(parts.iso_week.into()),
+        ),
+        "IDDD" => (
+            format_signed_width(parts.iso_day_of_year, 3, fill_mode),
+            Some(parts.iso_day_of_year.into()),
+        ),
+        "ID" => (parts.isodow.to_string(), Some(parts.isodow.into())),
+        _ => (pattern.to_string(), None),
+    }
+}
+
+fn to_char_timestamp_usecs(timestamp_usecs: i64, format: &str) -> String {
+    let Some(parts) = timestamp_to_char_parts(timestamp_usecs) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    let mut idx = 0usize;
+    while idx < format.len() {
+        let mut fill_mode = false;
+        if format[idx..].starts_with("FM") {
+            fill_mode = true;
+            idx += 2;
+            if idx >= format.len() {
+                break;
+            }
+        }
+        if format[idx..].starts_with('"') {
+            idx += 1;
+            while idx < format.len() {
+                let ch = format[idx..]
+                    .chars()
+                    .next()
+                    .expect("format index points at a char");
+                idx += ch.len_utf8();
+                if ch == '"' {
+                    break;
+                }
+                if ch == '\\' && idx < format.len() {
+                    let escaped = format[idx..]
+                        .chars()
+                        .next()
+                        .expect("format index points at a char");
+                    out.push(escaped);
+                    idx += escaped.len_utf8();
+                } else {
+                    out.push(ch);
+                }
+            }
+            continue;
+        }
+        if format[idx..].starts_with("\\\"") {
+            out.push('"');
+            idx += 2;
+            continue;
+        }
+        if let Some(pattern) = match_datetime_to_char_pattern(format, idx) {
+            let (mut rendered, ordinal_value) =
+                render_datetime_to_char_pattern(&parts, pattern, fill_mode);
+            idx += pattern.len();
+            if let Some(value) = ordinal_value {
+                if format[idx..].starts_with("TH") || format[idx..].starts_with("th") {
+                    rendered.push_str(&datetime_ordinal_suffix(
+                        value,
+                        &format[idx..idx + 2] == "th",
+                    ));
+                    idx += 2;
+                }
+            }
+            out.push_str(&rendered);
+            continue;
+        }
+        let ch = format[idx..]
+            .chars()
+            .next()
+            .expect("format index points at a char");
+        out.push(ch);
+        idx += ch.len_utf8();
+    }
+    out
+}
+
+fn to_char_interval_value(value: IntervalValue, format: &str) -> Option<String> {
+    let mut idx = 0usize;
+    let mut out = String::new();
+    while idx < format.len() {
+        let mut fill_mode = false;
+        if format[idx..].starts_with("FM") {
+            fill_mode = true;
+            idx += 2;
+            if idx >= format.len() {
+                break;
+            }
+        }
+        if format[idx..].starts_with("RM") || format[idx..].starts_with("rm") {
+            let lower = format[idx..].starts_with("rm");
+            idx += 2;
+            if value.months == 0 {
+                continue;
+            }
+            let month = if value.months > 0 {
+                (value.months - 1).rem_euclid(12) + 1
+            } else {
+                (value.months + 12).rem_euclid(12) + 1
+            };
+            let roman = format_roman(i128::from(month), true, lower);
+            out.push_str(&pad_right_unless_fill(roman, 4, fill_mode));
+            continue;
+        }
+        let ch = format[idx..]
+            .chars()
+            .next()
+            .expect("format index points at a char");
+        out.push(ch);
+        idx += ch.len_utf8();
+    }
+    Some(out)
+}
+
 pub(super) fn eval_to_char_function(values: &[Value]) -> Result<Value, ExecError> {
     eval_to_char_function_with_float4(values, false)
 }
@@ -102,6 +578,23 @@ fn eval_to_char_function_with_float4(values: &[Value], float4: bool) -> Result<V
         Value::Numeric(v) => to_char_numeric(v, fmt)?,
         Value::Float64(v) if float4 => to_char_float4(*v, fmt)?,
         Value::Float64(v) => to_char_float(*v, fmt)?,
+        Value::Date(v) if matches!(v.0, DATEVAL_NOBEGIN | DATEVAL_NOEND) => String::new(),
+        Value::Date(v) => to_char_timestamp_usecs(i64::from(v.0) * USECS_PER_DAY, fmt),
+        Value::Timestamp(v) => to_char_timestamp_usecs(v.0, fmt),
+        Value::TimestampTz(v) if matches!(v.0, TIMESTAMP_NOBEGIN | TIMESTAMP_NOEND) => {
+            String::new()
+        }
+        Value::TimestampTz(v) => {
+            let offset = i64::from(timezone_offset_seconds(&DateTimeConfig::default()));
+            to_char_timestamp_usecs(v.0 + offset * USECS_PER_SEC, fmt)
+        }
+        Value::Interval(v) => {
+            to_char_interval_value(*v, fmt).ok_or_else(|| ExecError::TypeMismatch {
+                op: "to_char",
+                left: value.clone(),
+                right: Value::Text("".into()),
+            })?
+        }
         _ => {
             return Err(ExecError::TypeMismatch {
                 op: "to_char",
