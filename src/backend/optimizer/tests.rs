@@ -30,6 +30,10 @@ fn int4() -> SqlType {
     SqlType::new(SqlTypeKind::Int4)
 }
 
+fn box_ty() -> SqlType {
+    SqlType::new(SqlTypeKind::Box)
+}
+
 fn oid() -> SqlType {
     SqlType::new(SqlTypeKind::Oid)
 }
@@ -627,6 +631,21 @@ fn int4_btree_options(num_keys: usize, indnullsnotdistinct: bool) -> CatalogInde
     }
 }
 
+fn box_spgist_options(num_keys: usize) -> CatalogIndexBuildOptions {
+    CatalogIndexBuildOptions {
+        am_oid: crate::include::catalog::SPGIST_AM_OID,
+        indclass: vec![crate::include::catalog::BOX_SPGIST_OPCLASS_OID; num_keys],
+        indcollation: vec![0; num_keys],
+        indoption: vec![0; num_keys],
+        indnullsnotdistinct: false,
+        indisexclusion: false,
+        indimmediate: true,
+        brin_options: None,
+        gin_options: None,
+        hash_options: None,
+    }
+}
+
 fn add_ready_index(
     catalog: &mut Catalog,
     table_name: &str,
@@ -728,6 +747,39 @@ fn catalog_with_noncovering_indexed_items() -> Catalog {
         .expect("mark test catalog index usable");
     catalog
         .set_relation_stats(table.relation_oid, 128, 10_000.0)
+        .expect("seed test catalog table stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 32, 10_000.0)
+        .expect("seed test catalog index stats");
+    catalog
+}
+
+fn catalog_with_spgist_box_temp() -> Catalog {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "box_temp",
+            RelationDesc {
+                columns: vec![column_desc("f1", box_ty(), true)],
+            },
+        )
+        .expect("create test catalog relation");
+    let index = catalog
+        .create_index_for_relation_with_options_and_flags(
+            "box_spgist",
+            table.relation_oid,
+            false,
+            false,
+            &[IndexColumnDef::from("f1")],
+            &box_spgist_options(1),
+            None,
+        )
+        .expect("create test catalog index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark test catalog index usable");
+    catalog
+        .set_relation_stats(table.relation_oid, 512, 10_000.0)
         .expect("seed test catalog table stats");
     catalog
         .set_relation_stats(index.relation_oid, 32, 10_000.0)
@@ -2740,6 +2792,27 @@ fn planner_keeps_index_scan_when_index_is_not_covering() {
         plan,
         Plan::IndexOnlyScan { .. }
     )));
+}
+
+#[test]
+fn planner_uses_spgist_box_index_only_when_opclass_can_return_data() {
+    let catalog = catalog_with_spgist_box_temp();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select * from box_temp where f1 << '(10,20),(30,40)'::box",
+        &catalog,
+    );
+
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::IndexOnlyScan { index_name, .. } if index_name == "box_spgist"
+    )));
+    let lines = explain_lines_for_planned_stmt(&planned);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Index Only Scan using box_spgist on box_temp")),
+        "expected SP-GiST box covering query to use index-only scan, got {lines:?}"
+    );
 }
 
 #[test]

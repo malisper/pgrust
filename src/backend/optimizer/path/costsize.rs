@@ -11,10 +11,12 @@ use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::access::brin::BRIN_DEFAULT_PAGES_PER_RANGE;
 use crate::include::access::brin_page::REVMAP_PAGE_MAXITEMS;
 use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
+use crate::include::access::spgist::SPGIST_CONFIG_PROC;
 use crate::include::catalog::{
-    BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, PgStatisticRow, SPGIST_AM_OID,
-    bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
-    proc_oid_for_builtin_scalar_function, relkind_has_storage,
+    BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, PgStatisticRow,
+    SPG_BOX_QUAD_CONFIG_PROC_OID, SPGIST_AM_OID, bootstrap_pg_operator_rows,
+    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
+    relkind_has_storage,
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo, RestrictInfo};
@@ -1610,8 +1612,7 @@ pub(super) fn estimate_index_candidate(
     } else {
         Vec::new()
     };
-    let index_only =
-        spec.index.index_meta.am_oid == BTREE_AM_OID && index_covers_relation(&desc, &spec.index);
+    let index_only = index_supports_index_only_scan(&desc, &spec.index);
     let mut plan = if index_only {
         Path::IndexOnlyScan {
             plan_info: scan_info,
@@ -3267,6 +3268,47 @@ fn index_covers_relation(desc: &RelationDesc, index: &BoundIndexRelation) -> boo
             .enumerate()
             .any(|(index_pos, _)| simple_index_column(index, index_pos) == Some(column_index))
     })
+}
+
+fn index_supports_index_only_scan(desc: &RelationDesc, index: &BoundIndexRelation) -> bool {
+    if !index_covers_relation(desc, index) {
+        return false;
+    }
+
+    desc.columns.iter().enumerate().all(|(column_index, _)| {
+        index
+            .index_meta
+            .indkey
+            .iter()
+            .enumerate()
+            .any(|(index_pos, _)| {
+                simple_index_column(index, index_pos) == Some(column_index)
+                    && index_column_can_return(index, index_pos)
+            })
+    })
+}
+
+fn index_column_can_return(index: &BoundIndexRelation, index_pos: usize) -> bool {
+    match index.index_meta.am_oid {
+        BTREE_AM_OID => true,
+        SPGIST_AM_OID => spgist_index_column_can_return(index, index_pos),
+        _ => false,
+    }
+}
+
+fn spgist_index_column_can_return(index: &BoundIndexRelation, index_pos: usize) -> bool {
+    if index_pos >= usize::try_from(index.index_meta.indnkeyatts).unwrap_or(usize::MAX) {
+        return true;
+    }
+
+    index
+        .index_meta
+        .amproc_oid(&index.desc, index_pos, SPGIST_CONFIG_PROC)
+        .is_some_and(spgist_config_proc_can_return_data)
+}
+
+fn spgist_config_proc_can_return_data(proc_oid: u32) -> bool {
+    matches!(proc_oid, SPG_BOX_QUAD_CONFIG_PROC_OID)
 }
 
 fn index_expression_position(index: &BoundIndexRelation, index_pos: usize) -> Option<usize> {
