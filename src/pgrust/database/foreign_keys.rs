@@ -222,6 +222,8 @@ fn build_constraint_validation_context(
         row_locks: Arc::clone(&db.row_locks),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: datetime_config.clone(),
+        statement_timestamp_usecs:
+            crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
         gucs: std::collections::HashMap::new(),
         interrupts,
         stats: Arc::clone(&db.stats),

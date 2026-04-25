@@ -152,6 +152,8 @@ fn expr_references_group_output(expr: &Expr, target: &Expr) -> bool {
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentDate
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }

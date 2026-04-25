@@ -1273,6 +1273,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         | SqlExpr::GeometryUnaryOp { .. }
         | SqlExpr::GeometryBinaryOp { .. } => unreachable!("handled before match"),
         SqlExpr::CurrentDate => SqlType::new(SqlTypeKind::Date),
+        SqlExpr::CurrentCatalog => SqlType::new(SqlTypeKind::Text),
+        SqlExpr::CurrentSchema => SqlType::new(SqlTypeKind::Text),
         SqlExpr::CurrentUser => SqlType::new(SqlTypeKind::Name),
         SqlExpr::SessionUser => SqlType::new(SqlTypeKind::Name),
         SqlExpr::CurrentRole => SqlType::new(SqlTypeKind::Name),
