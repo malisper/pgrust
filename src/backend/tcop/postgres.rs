@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 
 use crate::backend::access::heap::heapam::HeapError;
+use crate::backend::commands::copyto::CopyToSink;
 use crate::backend::executor::{ExecError, QueryColumn, StatementResult};
 use crate::backend::libpq::pqcomm::{
     cstr_from_bytes, read_byte, read_cstr, read_i16_bytes, read_i32, read_i32_bytes,
@@ -13,12 +14,13 @@ use crate::backend::libpq::pqcomm::{
 use crate::backend::libpq::pqformat::{
     FloatFormatOptions, format_bytea_text, format_exec_error, format_exec_error_hint,
     infer_command_tag, send_auth_ok, send_backend_key_data, send_bind_complete,
-    send_close_complete, send_command_complete, send_copy_in_response, send_empty_query,
-    send_error, send_error_with_fields, send_error_with_hint, send_no_data, send_notice,
-    send_notice_with_hint, send_notice_with_severity, send_notification_response,
-    send_parameter_description, send_parameter_status, send_parse_complete, send_portal_suspended,
-    send_query_result, send_ready_for_query, send_row_description,
-    send_row_description_with_formats, send_typed_data_row, validate_binary_result_formats,
+    send_close_complete, send_command_complete, send_copy_data, send_copy_done,
+    send_copy_in_response, send_copy_out_response, send_empty_query, send_error,
+    send_error_with_fields, send_error_with_hint, send_no_data, send_notice, send_notice_with_hint,
+    send_notice_with_severity, send_notification_response, send_parameter_description,
+    send_parameter_status, send_parse_complete, send_portal_suspended, send_query_result,
+    send_ready_for_query, send_row_description, send_row_description_with_formats,
+    send_typed_data_row, validate_binary_result_formats,
 };
 use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
@@ -37,6 +39,7 @@ use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT,
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value,
 };
+use crate::include::nodes::parsenodes::{CopyFormat, CopyToStatement};
 use crate::include::nodes::primnodes::RelationDesc;
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::database::ddl::format_sql_type_name;
@@ -126,6 +129,33 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::Heap(HeapError::DeadlockDetected) => "40P01",
         ExecError::Parse(_) => "42601",
         _ => "XX000",
+    }
+}
+
+struct ProtocolCopyToSink<'a, W: Write> {
+    stream: &'a mut W,
+}
+
+impl<W: Write> CopyToSink for ProtocolCopyToSink<'_, W> {
+    fn begin(&mut self, format: CopyFormat, column_count: usize) -> Result<(), ExecError> {
+        send_copy_out_response(self.stream, format, column_count).map_err(protocol_copy_io_error)
+    }
+
+    fn write_all(&mut self, data: &[u8]) -> Result<(), ExecError> {
+        send_copy_data(self.stream, data).map_err(protocol_copy_io_error)
+    }
+
+    fn finish(&mut self) -> Result<(), ExecError> {
+        send_copy_done(self.stream).map_err(protocol_copy_io_error)
+    }
+}
+
+fn protocol_copy_io_error(err: io::Error) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("could not send COPY data: {err}"),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
     }
 }
 
@@ -1660,6 +1690,9 @@ fn execute_query_statement(
     if try_handle_pg_cursors_query(stream, state, sql.as_ref())? {
         return Ok(QueryStatementFlow::Continue);
     }
+    if let Ok(Statement::CopyTo(copy_stmt)) = parsed.as_ref() {
+        return execute_copy_to_statement(stream, db, state, &sql, copy_stmt);
+    }
     if let Ok(Statement::Select(ref select_stmt)) = parsed
         && !raw_select_contains_pg_notify(select_stmt)
     {
@@ -1866,6 +1899,41 @@ fn normalize_nonstandard_string_literals(sql: &str) -> String {
     }
 
     out
+}
+
+fn execute_copy_to_statement(
+    stream: &mut impl Write,
+    db: &Database,
+    state: &mut ConnectionState,
+    sql: &str,
+    copy_stmt: &CopyToStatement,
+) -> io::Result<QueryStatementFlow> {
+    clear_backend_notices();
+    clear_notices();
+    match execute_copy_to_payload(stream, db, state, copy_stmt) {
+        Ok(row_count) => {
+            flush_pending_backend_messages(stream, db, &state.session)?;
+            send_command_complete(stream, &format!("COPY {row_count}"))?;
+            Ok(QueryStatementFlow::Continue)
+        }
+        Err(e) => {
+            send_queued_notices(stream)?;
+            send_exec_error(stream, sql, &e)?;
+            Ok(QueryStatementFlow::Stop)
+        }
+    }
+}
+
+fn execute_copy_to_payload(
+    stream: &mut impl Write,
+    db: &Database,
+    state: &mut ConnectionState,
+    copy_stmt: &CopyToStatement,
+) -> Result<usize, ExecError> {
+    let mut sink = ProtocolCopyToSink { stream };
+    state
+        .session
+        .execute_copy_to(db, copy_stmt, Some(&mut sink))
 }
 
 fn execute_streaming_select_statement(
@@ -3907,7 +3975,6 @@ fn handle_copy_done(
             "received CopyDone outside copy-in mode",
         ));
     };
-
     let text = String::from_utf8_lossy(&copy.pending);
     let rows = text
         .lines()
@@ -4300,6 +4367,62 @@ fn handle_execute(
     } else {
         PortalFetchLimit::Count(max_rows as usize)
     };
+    if let Some(source_text) = state.session.portal_source_text(&portal_name) {
+        match parse_portal_copy_to_statement(db, state, &source_text) {
+            Ok(Some(copy_stmt)) => {
+                clear_backend_notices();
+                clear_notices();
+                match execute_copy_to_payload(stream, db, state, &copy_stmt) {
+                    Ok(row_count) => {
+                        let tag = format!("COPY {row_count}");
+                        if let Err(e) = state
+                            .session
+                            .mark_portal_command_done(&portal_name, tag.clone())
+                        {
+                            let message = format_exec_error(&e);
+                            let hint = format_exec_error_hint(&e);
+                            send_error_with_hint(
+                                stream,
+                                exec_error_sqlstate(&e),
+                                &message,
+                                hint.as_deref(),
+                                None,
+                            )?;
+                            return Ok(());
+                        }
+                        flush_pending_backend_messages(stream, db, &state.session)?;
+                        send_command_complete(stream, &tag)?;
+                    }
+                    Err(e) => {
+                        let message = format_exec_error(&e);
+                        let hint = format_exec_error_hint(&e);
+                        state.session.mark_transaction_failed();
+                        send_error_with_hint(
+                            stream,
+                            exec_error_sqlstate(&e),
+                            &message,
+                            hint.as_deref(),
+                            None,
+                        )?;
+                    }
+                }
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let message = format_exec_error(&e);
+                let hint = format_exec_error_hint(&e);
+                send_error_with_hint(
+                    stream,
+                    exec_error_sqlstate(&e),
+                    &message,
+                    hint.as_deref(),
+                    None,
+                )?;
+                return Ok(());
+            }
+        }
+    }
     match state
         .session
         .execute_portal_forward(db, &portal_name, limit)
@@ -4374,6 +4497,34 @@ fn handle_execute(
             )
         }
     }
+}
+
+fn parse_portal_copy_to_statement(
+    db: &Database,
+    state: &ConnectionState,
+    sql: &str,
+) -> Result<Option<CopyToStatement>, ExecError> {
+    let stmt = if state.session.standard_conforming_strings() {
+        db.plan_cache.get_statement_with_options(
+            sql,
+            crate::backend::parser::ParseOptions {
+                max_stack_depth_kb: state.session.datetime_config().max_stack_depth_kb,
+                ..crate::backend::parser::ParseOptions::default()
+            },
+        )?
+    } else {
+        crate::backend::parser::parse_statement_with_options(
+            sql,
+            crate::backend::parser::ParseOptions {
+                standard_conforming_strings: false,
+                max_stack_depth_kb: state.session.datetime_config().max_stack_depth_kb,
+            },
+        )?
+    };
+    Ok(match stmt {
+        Statement::CopyTo(copy_stmt) => Some(copy_stmt),
+        _ => None,
+    })
 }
 
 fn handle_close(

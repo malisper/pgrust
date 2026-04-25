@@ -280,7 +280,7 @@ rule_action_list = { "(" ~ rule_action_list_chunk* ~ ")" }
 rule_action_list_chunk = { rule_action_list_group | !")" ~ ANY }
 rule_action_list_group = { "(" ~ rule_action_list_chunk* ~ ")" }
 rule_action_stmt = { insert_stmt | update_stmt | delete_stmt | rule_unsupported_action_stmt }
-rule_unsupported_action_stmt = { cte_clause? ~ (select_stmt | values_stmt) }
+rule_unsupported_action_stmt = { cte_clause? ~ (select_stmt | values_stmt) | notify_stmt }
 commit_stmt = { ((kw_commit | kw_end) ~ kw_transaction?) }
 rollback_stmt = { kw_rollback }
 
