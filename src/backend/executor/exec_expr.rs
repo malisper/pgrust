@@ -5139,12 +5139,20 @@ fn eval_builtin_function(
         BuiltinScalarFunction::PgStatisticsObjIsVisible => {
             eval_pg_statistics_obj_is_visible(&values, ctx)
         }
-        BuiltinScalarFunction::Now | BuiltinScalarFunction::TransactionTimestamp => Ok(
-            current_timestamp_value_with_config(&ctx.datetime_config, None, true),
-        ),
+        BuiltinScalarFunction::Now | BuiltinScalarFunction::TransactionTimestamp => {
+            let mut config = ctx.datetime_config.clone();
+            config
+                .transaction_timestamp_usecs
+                .get_or_insert(ctx.statement_timestamp_usecs);
+            Ok(current_timestamp_value_with_config(&config, None, true))
+        }
         BuiltinScalarFunction::StatementTimestamp => {
             let mut config = ctx.datetime_config.clone();
-            config.transaction_timestamp_usecs = config.statement_timestamp_usecs;
+            config.transaction_timestamp_usecs = Some(
+                config
+                    .statement_timestamp_usecs
+                    .unwrap_or(ctx.statement_timestamp_usecs),
+            );
             Ok(current_timestamp_value_with_config(&config, None, true))
         }
         BuiltinScalarFunction::ClockTimestamp => {
