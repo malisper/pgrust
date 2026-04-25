@@ -1149,6 +1149,8 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::FdwHandler, true) => unreachable!("fdw_handler arrays are unsupported"),
         (SqlTypeKind::Int8, false) => INT8_TYPE_OID,
         (SqlTypeKind::Int8, true) => INT8_ARRAY_TYPE_OID,
+        (SqlTypeKind::PgLsn, false) => crate::include::catalog::PG_LSN_TYPE_OID,
+        (SqlTypeKind::PgLsn, true) => crate::include::catalog::PG_LSN_ARRAY_TYPE_OID,
         (SqlTypeKind::Name, false) => crate::include::catalog::NAME_TYPE_OID,
         (SqlTypeKind::Name, true) => crate::include::catalog::NAME_ARRAY_TYPE_OID,
         (SqlTypeKind::Int2, false) => INT2_TYPE_OID,

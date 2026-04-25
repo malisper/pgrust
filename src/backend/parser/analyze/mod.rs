@@ -3503,14 +3503,6 @@ fn bind_select_query_with_outer(
             );
         }
 
-        if stmt.distinct
-            && (!stmt.order_by.is_empty() || stmt.limit.is_some() || stmt.offset.is_some())
-        {
-            return Err(ParseError::FeatureNotSupported(
-                "SELECT DISTINCT with ORDER BY/LIMIT/OFFSET".into(),
-            ));
-        }
-
         if stmt.targets.is_empty() && stmt.from.is_none() {
             return Err(ParseError::EmptySelectList);
         }
@@ -3555,7 +3547,21 @@ fn bind_select_query_with_outer(
             )?;
             reject_window_clause(predicate, "WHERE")?;
         }
-        for group_expr in &stmt.group_by {
+        let lower_distinct_to_grouping = stmt.distinct
+            && stmt.group_by.is_empty()
+            && target_aggs.is_empty()
+            && stmt.having.is_none()
+            && (!stmt.order_by.is_empty() || stmt.limit.is_some() || stmt.offset.is_some());
+        let effective_group_by = if lower_distinct_to_grouping {
+            stmt.targets
+                .iter()
+                .map(|target| target.expr.clone())
+                .collect::<Vec<_>>()
+        } else {
+            stmt.group_by.clone()
+        };
+
+        for group_expr in &effective_group_by {
             analyze_expr_aggregates_in_clause(
                 group_expr,
                 AggregateClauseKind::GroupBy,
@@ -3608,10 +3614,10 @@ fn bind_select_query_with_outer(
         }
 
         let needs_agg =
-            !stmt.group_by.is_empty() || !target_aggs.is_empty() || stmt.having.is_some();
+            !effective_group_by.is_empty() || !target_aggs.is_empty() || stmt.having.is_some();
 
         let can_skip_scan_for_degenerate_having = needs_agg
-            && stmt.group_by.is_empty()
+            && effective_group_by.is_empty()
             && target_aggs.is_empty()
             && stmt.having.as_ref().is_some_and(|having| {
                 !having_agg_summary
@@ -3650,8 +3656,7 @@ fn bind_select_query_with_outer(
 
         with_local_aggregate_scope(local_agg_scope, || {
             if needs_agg {
-                let group_keys: Vec<Expr> = stmt
-                    .group_by
+                let group_keys: Vec<Expr> = effective_group_by
                     .iter()
                     .map(|e| {
                         bind_expr_with_outer_and_ctes(
@@ -3909,7 +3914,7 @@ fn bind_select_query_with_outer(
 
                     let n_keys = group_keys.len();
                     let mut output_columns: Vec<QueryColumn> = Vec::new();
-                    for gk in &stmt.group_by {
+                    for gk in &effective_group_by {
                         output_columns.push(QueryColumn {
                             name: sql_expr_name(gk),
                             sql_type: infer_sql_expr_type_with_ctes(
@@ -3982,7 +3987,7 @@ fn bind_select_query_with_outer(
                             bind_agg_output_expr_in_clause(
                                 e,
                                 UngroupedColumnClause::Having,
-                                &stmt.group_by,
+                                &effective_group_by,
                                 &group_keys,
                                 &scope,
                                 catalog,
@@ -4056,7 +4061,7 @@ fn bind_select_query_with_outer(
                                             bind_agg_output_expr_in_clause(
                                                 &item.expr,
                                                 UngroupedColumnClause::SelectTarget,
-                                                &stmt.group_by,
+                                                &effective_group_by,
                                                 &group_keys,
                                                 &scope,
                                                 catalog,
@@ -4089,7 +4094,7 @@ fn bind_select_query_with_outer(
                                 bind_agg_output_expr_in_clause(
                                     expr,
                                     UngroupedColumnClause::SelectTarget,
-                                    &stmt.group_by,
+                                    &effective_group_by,
                                     &group_keys,
                                     &scope,
                                     catalog,
@@ -4131,7 +4136,8 @@ fn bind_select_query_with_outer(
                         recursive_union: None,
                         set_operation: None,
                     };
-                    let query = apply_select_distinct(query, stmt.distinct);
+                    let query =
+                        apply_select_distinct(query, stmt.distinct && !lower_distinct_to_grouping);
                     Ok((query, scope))
                 });
             } else {

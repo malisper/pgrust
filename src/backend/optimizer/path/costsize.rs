@@ -3133,6 +3133,7 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::Date
         | SqlTypeKind::Float4 => 4,
         SqlTypeKind::Int8
+        | SqlTypeKind::PgLsn
         | SqlTypeKind::Money
         | SqlTypeKind::Timestamp
         | SqlTypeKind::TimestampTz

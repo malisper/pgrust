@@ -158,6 +158,7 @@ fn encode_array_element_payload(
         Value::TextRef(_, _) => Ok(coerced.as_text().unwrap().as_bytes().to_vec()),
         Value::TsVector(vector) => Ok(crate::backend::executor::encode_tsvector_bytes(&vector)),
         Value::TsQuery(query) => Ok(crate::backend::executor::encode_tsquery_bytes(&query)),
+        Value::PgLsn(value) => Ok(value.to_le_bytes().to_vec()),
         Value::InternalChar(v) => Ok(vec![v]),
         Value::Float64(v) => {
             if matches!(element_type.kind, SqlTypeKind::Float4) {
@@ -562,6 +563,7 @@ fn array_element_layout(
         | SqlTypeKind::Time
         | SqlTypeKind::Timestamp
         | SqlTypeKind::TimestampTz
+        | SqlTypeKind::PgLsn
         | SqlTypeKind::Float8 => (8, AttributeAlign::Double),
         SqlTypeKind::Interval => (16, AttributeAlign::Double),
         SqlTypeKind::Uuid => (16, AttributeAlign::Char),
@@ -785,6 +787,7 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
         Value::Array(_) => Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
         Value::TsVector(_) => Some(SqlType::new(SqlTypeKind::TsVector)),
         Value::TsQuery(_) => Some(SqlType::new(SqlTypeKind::TsQuery)),
+        Value::PgLsn(_) => Some(SqlType::new(SqlTypeKind::PgLsn)),
         Value::InternalChar(_) => Some(SqlType::new(SqlTypeKind::InternalChar)),
         Value::Json(_) => Some(SqlType::new(SqlTypeKind::Json)),
         Value::Jsonb(_) => Some(SqlType::new(SqlTypeKind::Jsonb)),
@@ -900,6 +903,15 @@ fn decode_array_element_value(
                 });
             }
             Ok(Value::Int64(i64::from_le_bytes(bytes.try_into().unwrap())))
+        }
+        SqlTypeKind::PgLsn => {
+            if bytes.len() != 8 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: column.into(),
+                    details: "pg_lsn array element must be 8 bytes".into(),
+                });
+            }
+            Ok(Value::PgLsn(u64::from_le_bytes(bytes.try_into().unwrap())))
         }
         SqlTypeKind::Money => {
             if bytes.len() != 8 {
@@ -1346,6 +1358,7 @@ fn format_array_values_nested(
                 }
                 out.push('"');
             }
+            Value::PgLsn(v) => out.push_str(&crate::backend::executor::render_pg_lsn_text(*v)),
             Value::Jsonb(v) => {
                 let rendered = render_jsonb_bytes(v).unwrap_or_else(|_| "null".into());
                 out.push('"');
