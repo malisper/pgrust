@@ -97,6 +97,44 @@ fn infer_quantified_array_literal_type(
     Ok(SqlType::array_of(common.unwrap_or(left_element_type)))
 }
 
+fn bind_array_literal_elements_as_type(
+    elements: &[SqlExpr],
+    target_array_type: SqlType,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let target_element_type = target_array_type.element_type();
+    let elements = elements
+        .iter()
+        .map(|element| {
+            let raw_type = infer_sql_expr_type_with_ctes(
+                element,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let bound = bind_expr_with_outer_and_ctes(
+                element,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            Ok(coerce_bound_expr(bound, raw_type, target_element_type))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Expr::ArrayLiteral {
+        elements,
+        array_type: target_array_type,
+    })
+}
+
 fn bind_single_column_sublink(
     select: &SelectStatement,
     sublink_type: SubLinkType,
@@ -302,38 +340,26 @@ pub(super) fn bind_quantified_array_expr(
     } else {
         SqlType::array_of(left_type.element_type())
     };
-    let (bound_array, raw_array_type) = if let SqlExpr::ArrayLiteral(elements) = array {
-        (
-            Expr::ArrayLiteral {
-                elements: elements
-                    .iter()
-                    .map(|element| {
-                        bind_expr_with_outer_and_ctes(
-                            element,
-                            scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        )
-                    })
-                    .collect::<Result<_, _>>()?,
-                array_type: target_array_type,
-            },
+    let bound_array = if let SqlExpr::ArrayLiteral(elements) = array {
+        bind_array_literal_elements_as_type(
+            elements,
             target_array_type,
-        )
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?
     } else {
-        (
-            bind_expr_with_outer_and_ctes(
-                array,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?,
-            raw_array_type,
-        )
+        let bound_array = bind_expr_with_outer_and_ctes(
+            array,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?;
+        coerce_bound_expr(bound_array, raw_array_type, target_array_type)
     };
     let bound_left =
         bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
@@ -344,7 +370,6 @@ pub(super) fn bind_quantified_array_expr(
         left_type
     };
     let left = coerce_bound_expr(bound_left, raw_left_type, comparison_left_type);
-    let right = coerce_bound_expr(bound_array, raw_array_type, target_array_type);
     let collation_oid = consumer_for_subquery_comparison_op(op)
         .map(|consumer| {
             derive_consumer_collation(
@@ -362,7 +387,7 @@ pub(super) fn bind_quantified_array_expr(
         op,
         !is_all,
         left,
-        right,
+        bound_array,
         collation_oid,
     ))
 }

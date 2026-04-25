@@ -21,6 +21,40 @@ fn push_relation_missing_notice(name: &str) {
     push_notice(format!(r#"relation "{name}" does not exist, skipping"#));
 }
 
+fn collect_rename_column_targets(
+    catalog: &dyn CatalogLookup,
+    relation: &BoundRelation,
+    column_name: &str,
+    new_column_name: &str,
+    only: bool,
+) -> Result<Vec<BoundRelation>, ExecError> {
+    let relation_oids = if only {
+        vec![relation.relation_oid]
+    } else {
+        catalog.find_all_inheritors(relation.relation_oid)
+    };
+    let relation_oids = relation_oids
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut targets = Vec::with_capacity(relation_oids.len());
+
+    for relation_oid in relation_oids {
+        let target = if relation_oid == relation.relation_oid {
+            relation.clone()
+        } else {
+            catalog
+                .lookup_relation_by_oid(relation_oid)
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnknownTable(relation_oid.to_string()))
+                })?
+        };
+        validate_alter_table_rename_column(&target.desc, column_name, new_column_name)?;
+        targets.push(target);
+    }
+
+    Ok(targets)
+}
+
 fn lookup_relation_for_rename(
     catalog: &dyn CatalogLookup,
     relation_name: &str,
@@ -384,23 +418,27 @@ impl Database {
             }));
         }
         ensure_relation_owner(self, client_id, &relation, &rename_stmt.table_name)?;
-        reject_inheritance_tree_ddl(
-            &catalog,
-            relation.relation_oid,
-            "ALTER TABLE RENAME COLUMN on inheritance tree members is not supported yet",
-        )?;
         let new_column_name = validate_alter_table_rename_column(
             &relation.desc,
             &rename_stmt.column_name,
             &rename_stmt.new_column_name,
         )?;
-        reject_relation_with_dependent_views(
-            self,
-            client_id,
-            Some((xid, cid)),
-            relation.relation_oid,
-            "ALTER TABLE RENAME COLUMN on relation without dependent views",
+        let targets = collect_rename_column_targets(
+            &catalog,
+            &relation,
+            &rename_stmt.column_name,
+            &new_column_name,
+            rename_stmt.only,
         )?;
+        for target in &targets {
+            reject_relation_with_dependent_views(
+                self,
+                client_id,
+                Some((xid, cid)),
+                target.relation_oid,
+                "ALTER TABLE RENAME COLUMN on relation without dependent views",
+            )?;
+        }
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -410,17 +448,19 @@ impl Database {
             waiter: None,
             interrupts,
         };
-        let effect = self
-            .catalog
-            .write()
-            .alter_table_rename_column_mvcc(
-                relation.relation_oid,
-                &rename_stmt.column_name,
-                &new_column_name,
-                &ctx,
-            )
-            .map_err(map_catalog_error)?;
-        catalog_effects.push(effect);
+        for target in targets {
+            let effect = self
+                .catalog
+                .write()
+                .alter_table_rename_column_mvcc(
+                    target.relation_oid,
+                    &rename_stmt.column_name,
+                    &new_column_name,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 }
