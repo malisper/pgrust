@@ -1925,12 +1925,14 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
     match value {
         Value::Null => Ok(Value::Null),
         Value::EnumOid(v) => match ty.kind {
-            SqlTypeKind::Enum => Ok(Value::EnumOid(v)),
+            SqlTypeKind::Enum | SqlTypeKind::AnyEnum => Ok(Value::EnumOid(v)),
             SqlTypeKind::Text => {
-                if let Some(source) = source_type
-                    && matches!(source.kind, SqlTypeKind::Enum)
-                    && let Some(label) =
+                if let Some(label) = source_type
+                    .filter(|source| matches!(source.kind, SqlTypeKind::Enum))
+                    .and_then(|source| {
                         catalog.and_then(|catalog| catalog.enum_label(source.type_oid, v))
+                    })
+                    .or_else(|| catalog.and_then(|catalog| catalog.enum_label_by_oid(v)))
                 {
                     Ok(Value::Text(CompactString::from_owned(label)))
                 } else {

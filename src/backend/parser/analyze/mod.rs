@@ -794,6 +794,13 @@ pub trait CatalogLookup {
         None
     }
 
+    fn enum_label_by_oid(&self, label_oid: u32) -> Option<String> {
+        self.enum_rows()
+            .into_iter()
+            .find(|row| row.oid == label_oid)
+            .map(|row| row.enumlabel)
+    }
+
     fn enum_rows(&self) -> Vec<PgEnumRow> {
         bootstrap_pg_enum_rows().to_vec()
     }
@@ -1189,6 +1196,14 @@ impl CatalogLookup for IndexExpressionCatalogLookup<'_> {
 
     fn enum_label(&self, type_oid: u32, label_oid: u32) -> Option<String> {
         self.inner.enum_label(type_oid, label_oid)
+    }
+
+    fn enum_label_by_oid(&self, label_oid: u32) -> Option<String> {
+        self.inner.enum_label_by_oid(label_oid)
+    }
+
+    fn enum_rows(&self) -> Vec<PgEnumRow> {
+        self.inner.enum_rows()
     }
 
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {

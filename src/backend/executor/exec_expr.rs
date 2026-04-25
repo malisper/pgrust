@@ -59,9 +59,10 @@ use super::expr_numeric::{
 use super::expr_ops::compare_order_values;
 use super::expr_ops::{
     add_values, bitwise_and_values, bitwise_not_value, bitwise_or_values, bitwise_xor_values,
-    compare_values, compare_values_with_type, concat_values, div_values, eval_and, eval_or,
-    mod_values, mul_values, negate_value, not_equal_values, not_equal_values_with_type,
-    order_values, shift_left_values, shift_right_values, sub_values, values_are_distinct,
+    compare_values, compare_values_with_type, concat_values, concat_values_with_cast_context,
+    div_values, eval_and, eval_or, mod_values, mul_values, negate_value, not_equal_values,
+    not_equal_values_with_type, order_values, shift_left_values, shift_right_values, sub_values,
+    values_are_distinct,
 };
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
 use super::expr_range::eval_range_function;
@@ -2637,9 +2638,16 @@ fn eval_op_expr(
         (OpExprKind::Mod, [left, right]) => {
             mod_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
         }
-        (OpExprKind::Concat, [left, right]) => {
-            concat_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
+        (OpExprKind::Concat, [left, right]) => concat_values_with_cast_context(
+            eval_expr(left, slot, ctx)?,
+            expr_sql_type_hint(left),
+            eval_expr(right, slot, ctx)?,
+            expr_sql_type_hint(right),
+            ctx.catalog
+                .as_ref()
+                .map(|catalog| catalog as &dyn crate::backend::parser::CatalogLookup),
+            &ctx.datetime_config,
+        ),
         (OpExprKind::Eq, [left, right]) => compare_values_with_type(
             "=",
             eval_expr(left, slot, ctx)?,

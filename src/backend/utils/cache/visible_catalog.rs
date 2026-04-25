@@ -516,6 +516,13 @@ impl CatalogLookup for VisibleCatalog {
             .map(|row| row.enumlabel.clone())
     }
 
+    fn enum_label_by_oid(&self, label_oid: u32) -> Option<String> {
+        self.enum_rows
+            .iter()
+            .find(|row| row.oid == label_oid)
+            .map(|row| row.enumlabel.clone())
+    }
+
     fn enum_rows(&self) -> Vec<PgEnumRow> {
         if self.enum_rows.is_empty() {
             return bootstrap_pg_enum_rows().to_vec();

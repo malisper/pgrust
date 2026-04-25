@@ -27663,6 +27663,30 @@ fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
     )
     .unwrap();
     db.execute(1, "drop index feelings_mood_hash_idx").unwrap();
+    db.execute(1, "create table enum_parents (id mood primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table enum_children (parent mood references enum_parents)",
+    )
+    .unwrap();
+    db.execute(1, "insert into enum_parents values ('happy')")
+        .unwrap();
+    db.execute(1, "insert into enum_children values ('happy')")
+        .unwrap();
+    assert!(
+        db.execute(1, "insert into enum_children values ('sad')")
+            .is_err()
+    );
+    db.execute(
+        1,
+        "create function echo_enum(anyenum) returns text as $$ begin return $1::text || 'omg'; end $$ language plpgsql",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select echo_enum('happy'::mood)"),
+        vec![vec![Value::Text("happyomg".into())]]
+    );
     assert_eq!(
         query_rows(
             &db,
