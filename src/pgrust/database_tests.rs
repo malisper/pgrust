@@ -7030,9 +7030,15 @@ fn assert_explain_uses_index(db: &Database, client_id: u32, sql: &str, index_nam
     assert!(
         lines.iter().any(|line| {
             line.contains(&format!("Index Scan using rel {relfilenode} "))
+                || line.contains(&format!("Index Scan Backward using rel {relfilenode} "))
                 || line.contains(&format!("Index Scan using {index_name} "))
+                || line.contains(&format!("Index Scan Backward using {index_name} "))
                 || line.contains(&format!("Index Only Scan using rel {relfilenode} "))
+                || line.contains(&format!(
+                    "Index Only Scan Backward using rel {relfilenode} "
+                ))
                 || line.contains(&format!("Index Only Scan using {index_name} "))
+                || line.contains(&format!("Index Only Scan Backward using {index_name} "))
         }),
         "expected EXPLAIN to use index {index_name} (relfilenode {relfilenode}), got {lines:?}"
     );
