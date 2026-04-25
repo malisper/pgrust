@@ -989,6 +989,68 @@ fn make_ordered_rel(
     rel
 }
 
+fn distinct_pathkeys(targets: &[TargetEntry]) -> Vec<PathKey> {
+    targets
+        .iter()
+        .map(|target| PathKey {
+            expr: target.expr.clone(),
+            ressortgroupref: target.ressortgroupref,
+            descending: false,
+            nulls_first: None,
+            collation_oid: None,
+        })
+        .collect()
+}
+
+fn make_distinct_rel(
+    root: &mut PlannerInfo,
+    input_rel: RelOptInfo,
+    targets: &[TargetEntry],
+    catalog: &dyn CatalogLookup,
+) -> RelOptInfo {
+    let reltarget = PathTarget::from_target_list(targets);
+    let upper_rel_index = upperrels::ensure_upper_rel_index(
+        root,
+        UpperRelKind::Distinct,
+        &input_rel.relids,
+        reltarget.clone(),
+    );
+    if !root.upper_rels[upper_rel_index].rel.pathlist.is_empty() {
+        return root.upper_rels[upper_rel_index].rel.clone();
+    }
+
+    let required_pathkeys = distinct_pathkeys(targets);
+    let mut rel = RelOptInfo::new(input_rel.relids.clone(), RelOptKind::UpperRel, reltarget);
+    for path in input_rel.pathlist {
+        let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
+            let display_items = sort_key_display_items(root, &required_pathkeys);
+            optimize_path(
+                Path::OrderBy {
+                    plan_info: PlanEstimate::default(),
+                    pathtarget: path.semantic_output_target(),
+                    items: pathkeys_to_order_items(&required_pathkeys),
+                    display_items,
+                    input: Box::new(path),
+                },
+                catalog,
+            )
+        } else {
+            path
+        };
+        rel.add_path(optimize_path(
+            Path::Unique {
+                plan_info: PlanEstimate::default(),
+                pathtarget: path.semantic_output_target(),
+                input: Box::new(path),
+            },
+            catalog,
+        ));
+    }
+    bestpath::set_cheapest(&mut rel);
+    root.upper_rels[upper_rel_index].rel = rel.clone();
+    rel
+}
+
 fn make_limit_rel(
     _root: &PlannerInfo,
     input_rel: RelOptInfo,
@@ -1283,6 +1345,14 @@ pub(super) fn grouping_planner(
             processed_tlist.as_slice()
         };
         current_rel = adjust_paths_for_srfs(root, current_rel, project_set_tlist, catalog);
+        projection_done = current_rel.reltarget == root.final_target;
+    }
+
+    if root.parse.distinct {
+        if current_rel.reltarget != root.final_target {
+            current_rel = make_projection_rel(root, current_rel, &final_targets, catalog, false);
+        }
+        current_rel = make_distinct_rel(root, current_rel, &final_targets, catalog);
         projection_done = current_rel.reltarget == root.final_target;
     }
 

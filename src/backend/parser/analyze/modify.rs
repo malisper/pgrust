@@ -686,6 +686,7 @@ fn query_from_projection_with_qual(input: AnalyzedFrom, where_qual: Option<Expr>
         rtable,
         jointree,
         target_list: normalize_target_list(identity_target_list(&output_columns, &output_exprs)),
+        distinct: false,
         where_qual,
         group_by: Vec::new(),
         accumulators: Vec::new(),

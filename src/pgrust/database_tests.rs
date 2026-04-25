@@ -7077,7 +7077,10 @@ fn assert_explain_uses_index(db: &Database, client_id: u32, sql: &str, index_nam
     let lines = explain_lines(db, client_id, sql);
     assert!(
         lines.iter().any(|line| {
-            (line.contains("Index Scan") || line.contains("Index Only Scan"))
+            (line.contains("Index Scan using ")
+                || line.contains("Index Scan Backward using ")
+                || line.contains("Index Only Scan using ")
+                || line.contains("Index Only Scan Backward using "))
                 && (line.contains(&format!("using rel {relfilenode} "))
                     || line.contains(&format!("using {index_name} ")))
         }),
@@ -20312,6 +20315,55 @@ fn index_matrix_order_only_uses_backward_index_scan() {
             vec![Value::Int32(1)],
             vec![Value::Int32(1)],
         ]
+    );
+}
+
+#[test]
+fn inherited_minmax_explain_uses_desc_and_partial_child_indexes() {
+    let base = temp_dir("inherited_minmax_desc_partial_indexes");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    db.execute(1, "create table items1 () inherits (items)")
+        .unwrap();
+    db.execute(1, "create table items2 () inherits (items)")
+        .unwrap();
+    db.execute(1, "create table items3 () inherits (items)")
+        .unwrap();
+    db.execute(1, "create index items_id_idx on items (id)")
+        .unwrap();
+    db.execute(1, "create index items1_id_idx on items1 (id)")
+        .unwrap();
+    db.execute(1, "create index items2_id_desc_idx on items2 (id desc)")
+        .unwrap();
+    db.execute(
+        1,
+        "create index items3_id_partial_idx on items3 (id) where id is not null",
+    )
+    .unwrap();
+    db.execute(1, "insert into items values (11), (12)")
+        .unwrap();
+    db.execute(1, "insert into items1 values (13), (14)")
+        .unwrap();
+    db.execute(1, "insert into items2 values (15), (16)")
+        .unwrap();
+    db.execute(1, "insert into items3 values (17), (18)")
+        .unwrap();
+
+    let sql = "select min(id), max(id) from items";
+    assert_explain_uses_index(&db, 1, sql, "items_id_idx");
+    assert_explain_uses_index(&db, 1, sql, "items1_id_idx");
+    assert_explain_uses_index(&db, 1, sql, "items2_id_desc_idx");
+    assert_explain_uses_index(&db, 1, sql, "items3_id_partial_idx");
+    let lines = explain_lines(&db, 1, sql);
+    assert!(
+        lines.iter().any(|line| line.contains("Merge Append")),
+        "expected inherited min/max rewrite to use Merge Append, got {lines:?}"
+    );
+
+    assert_eq!(
+        query_rows(&db, 1, sql),
+        vec![vec![Value::Int32(11), Value::Int32(18)]]
     );
 }
 

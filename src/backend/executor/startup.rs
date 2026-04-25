@@ -3,10 +3,11 @@ use crate::backend::executor::hashjoin::HashJoinPhase;
 use crate::backend::parser::SqlType;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, CteScanState,
-    FilterState, FunctionScanState, HashJoinState, HashState, IndexScanState, LimitState,
-    LockRowsState, MergeJoinState, NestedLoopJoinState, NodeExecStats, OrderByState,
-    ProjectSetState, ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState,
-    SeqScanState, SetOpState, SubqueryScanState, ValuesState, WindowAggState, WorkTableScanState,
+    FilterState, FunctionScanState, HashJoinState, HashState, IndexOnlyScanState, IndexScanState,
+    LimitState, LockRowsState, MergeAppendState, MergeJoinState, NestedLoopJoinState,
+    NodeExecStats, OrderByState, ProjectSetState, ProjectionState, RecursiveUnionState,
+    RecursiveWorkTable, ResultState, SeqScanState, SetOpState, SubqueryScanState, UniqueState,
+    ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{Expr, SetReturningCall, set_returning_call_exprs};
@@ -172,6 +173,7 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
     match plan {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::WorkTableScan { .. } => false,
@@ -185,6 +187,13 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
             children.iter().any(plan_uses_outer_columns)
         }
+        Plan::MergeAppend {
+            children, items, ..
+        } => {
+            children.iter().any(plan_uses_outer_columns)
+                || items.iter().any(|item| expr_uses_outer_columns(&item.expr))
+        }
+        Plan::Unique { input, .. } => plan_uses_outer_columns(input),
         Plan::Hash {
             input, hash_keys, ..
         } => plan_uses_outer_columns(input) || hash_keys.iter().any(expr_uses_outer_columns),
@@ -351,6 +360,32 @@ pub fn executor_start(plan: Plan) -> PlanState {
             plan_info,
             stats: NodeExecStats::default(),
         }),
+        Plan::MergeAppend {
+            plan_info,
+            source_id,
+            desc,
+            items,
+            children,
+        } => Box::new(MergeAppendState {
+            source_id,
+            children: children.into_iter().map(executor_start).collect(),
+            items,
+            column_names: desc.columns.iter().map(|c| c.name.clone()).collect(),
+            rows: None,
+            next_index: 0,
+            slot: TupleSlot::empty(desc.columns.len()),
+            current_bindings: Vec::new(),
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
+        Plan::Unique { plan_info, input } => Box::new(UniqueState {
+            input: executor_start(*input),
+            previous_values: None,
+            slot: TupleSlot::empty(0),
+            current_bindings: Vec::new(),
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
         Plan::SeqScan {
             plan_info,
             source_id,
@@ -385,6 +420,62 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 scan_rows: Vec::new(),
                 scan_index: 0,
                 sequence_emitted: false,
+                slot,
+                qual: None,
+                qual_expr: None,
+                source_id,
+                relation_oid,
+                current_bindings: Vec::new(),
+                plan_info,
+                stats: NodeExecStats::default(),
+            })
+        }
+        Plan::IndexOnlyScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            index_rel,
+            index_name,
+            am_oid,
+            toast,
+            desc,
+            index_desc,
+            index_meta,
+            keys,
+            order_by_keys,
+            direction,
+        } => {
+            let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
+            let desc = Rc::new(desc);
+            let index_desc = Rc::new(index_desc);
+            let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+            let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(
+                &desc,
+                &attr_descs,
+            ));
+            let ncols = desc.columns.len();
+            let mut slot = TupleSlot::empty(ncols);
+            slot.decoder = Some(decoder);
+            Box::new(IndexOnlyScanState {
+                rel,
+                relation_name,
+                toast_relation: toast,
+                index_rel,
+                index_name,
+                am_oid,
+                column_names,
+                desc,
+                index_desc,
+                attr_descs,
+                index_meta,
+                keys,
+                order_by_keys,
+                direction,
+                scan: None,
+                scan_exhausted: false,
+                vm_buf: None,
                 slot,
                 qual: None,
                 qual_expr: None,
@@ -443,6 +534,8 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 scan: None,
                 scan_exhausted: false,
                 slot,
+                qual: None,
+                qual_expr: None,
                 source_id,
                 relation_oid,
                 current_bindings: Vec::new(),
@@ -782,6 +875,137 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 scan_rows: Vec::new(),
                 scan_index: 0,
                 sequence_emitted: false,
+                slot,
+                qual: Some(qual),
+                qual_expr: Some(predicate),
+                source_id,
+                relation_oid,
+                current_bindings: Vec::new(),
+                plan_info,
+                stats: NodeExecStats::default(),
+            })
+        }
+        Plan::Filter {
+            plan_info,
+            input,
+            predicate,
+        } if matches!(&*input, Plan::IndexOnlyScan { .. }) => {
+            let Plan::IndexOnlyScan {
+                plan_info: _,
+                source_id,
+                rel,
+                relation_name,
+                relation_oid,
+                index_rel,
+                index_name,
+                am_oid,
+                toast,
+                desc,
+                index_desc,
+                index_meta,
+                keys,
+                order_by_keys,
+                direction,
+            } = *input
+            else {
+                unreachable!()
+            };
+            let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
+            let desc = Rc::new(desc);
+            let index_desc = Rc::new(index_desc);
+            let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+            let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(
+                &desc,
+                &attr_descs,
+            ));
+            let qual = expr::compile_predicate_with_decoder(&predicate, &decoder);
+            let ncols = desc.columns.len();
+            let mut slot = TupleSlot::empty(ncols);
+            slot.decoder = Some(decoder);
+            Box::new(IndexOnlyScanState {
+                rel,
+                relation_name,
+                toast_relation: toast,
+                index_rel,
+                index_name,
+                am_oid,
+                column_names,
+                desc,
+                index_desc,
+                attr_descs,
+                index_meta,
+                keys,
+                order_by_keys,
+                direction,
+                scan: None,
+                scan_exhausted: false,
+                vm_buf: None,
+                slot,
+                qual: Some(qual),
+                qual_expr: Some(predicate),
+                source_id,
+                relation_oid,
+                current_bindings: Vec::new(),
+                plan_info,
+                stats: NodeExecStats::default(),
+            })
+        }
+        Plan::Filter {
+            plan_info,
+            input,
+            predicate,
+        } if matches!(&*input, Plan::IndexScan { .. }) => {
+            let Plan::IndexScan {
+                plan_info: _,
+                source_id,
+                rel,
+                relation_name,
+                relation_oid,
+                index_rel,
+                index_name,
+                am_oid,
+                toast,
+                desc,
+                index_desc,
+                index_meta,
+                keys,
+                order_by_keys,
+                direction,
+                index_only,
+            } = *input
+            else {
+                unreachable!()
+            };
+            let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
+            let desc = Rc::new(desc);
+            let index_desc = Rc::new(index_desc);
+            let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+            let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(
+                &desc,
+                &attr_descs,
+            ));
+            let qual = expr::compile_predicate_with_decoder(&predicate, &decoder);
+            let ncols = desc.columns.len();
+            let mut slot = TupleSlot::empty(ncols);
+            slot.decoder = Some(decoder);
+            Box::new(IndexScanState {
+                rel,
+                relation_name,
+                toast_relation: toast,
+                index_rel,
+                index_name,
+                am_oid,
+                column_names,
+                desc,
+                index_desc,
+                attr_descs,
+                index_meta,
+                keys,
+                order_by_keys,
+                direction,
+                index_only,
+                scan: None,
+                scan_exhausted: false,
                 slot,
                 qual: Some(qual),
                 qual_expr: Some(predicate),

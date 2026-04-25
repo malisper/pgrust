@@ -707,6 +707,33 @@ fn catalog_with_indexed_items() -> Catalog {
         .expect("seed test catalog index stats");
     catalog
 }
+fn catalog_with_noncovering_indexed_items() -> Catalog {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "items",
+            RelationDesc {
+                columns: vec![
+                    column_desc("id", int4(), false),
+                    column_desc("payload", int4(), true),
+                ],
+            },
+        )
+        .expect("create test catalog relation");
+    let index = catalog
+        .create_index("items_id_idx", "items", false, &["id".into()])
+        .expect("create test catalog index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark test catalog index usable");
+    catalog
+        .set_relation_stats(table.relation_oid, 128, 10_000.0)
+        .expect("seed test catalog table stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 32, 10_000.0)
+        .expect("seed test catalog index stats");
+    catalog
+}
 
 fn catalog_with_unique_indexed_items() -> Catalog {
     let mut catalog = Catalog::default();
@@ -734,6 +761,195 @@ fn catalog_with_unique_indexed_items() -> Catalog {
         .set_relation_stats(index.relation_oid, 32, 10_000.0)
         .expect("seed test catalog index stats");
     catalog
+}
+
+fn catalog_with_inherited_indexed_items()
+-> crate::backend::utils::cache::visible_catalog::VisibleCatalog {
+    fn btree_options(
+        catalog: &Catalog,
+        relation_oid: u32,
+        columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
+    ) -> crate::backend::catalog::CatalogIndexBuildOptions {
+        let table = catalog
+            .get_by_oid(relation_oid)
+            .expect("relation for inherited test index");
+        let mut indclass = Vec::with_capacity(columns.len());
+        let mut indcollation = Vec::with_capacity(columns.len());
+        let mut indoption = Vec::with_capacity(columns.len());
+        for column in columns {
+            let table_column = table
+                .desc
+                .columns
+                .iter()
+                .find(|candidate| candidate.name.eq_ignore_ascii_case(&column.name))
+                .expect("indexed column present");
+            indclass.push(
+                crate::include::catalog::default_btree_opclass_oid(
+                    crate::backend::utils::cache::catcache::sql_type_oid(table_column.sql_type),
+                )
+                .expect("default btree opclass"),
+            );
+            indcollation.push(0);
+            let mut option = 0i16;
+            if column.descending {
+                option |= 0x0001;
+            }
+            if column.nulls_first.unwrap_or(false) {
+                option |= 0x0002;
+            }
+            indoption.push(option);
+        }
+        crate::backend::catalog::CatalogIndexBuildOptions {
+            am_oid: crate::include::catalog::BTREE_AM_OID,
+            indclass,
+            indcollation,
+            indoption,
+            indnullsnotdistinct: false,
+            indisexclusion: false,
+            indimmediate: true,
+            brin_options: None,
+            gin_options: None,
+            hash_options: None,
+        }
+    }
+
+    let mut catalog = Catalog::default();
+
+    let parent = catalog
+        .create_table(
+            "items",
+            RelationDesc {
+                columns: vec![column_desc("id", int4(), false)],
+            },
+        )
+        .expect("create parent table");
+    let parent_index = catalog
+        .create_index("items_id_idx", "items", false, &["id".into()])
+        .expect("create parent index");
+
+    let child1 = catalog
+        .create_table(
+            "items1",
+            RelationDesc {
+                columns: vec![column_desc("id", int4(), false)],
+            },
+        )
+        .expect("create first child table");
+    let child1_index = catalog
+        .create_index("items1_id_idx", "items1", false, &["id".into()])
+        .expect("create first child index");
+
+    let child2 = catalog
+        .create_table(
+            "items2",
+            RelationDesc {
+                columns: vec![column_desc("id", int4(), false)],
+            },
+        )
+        .expect("create second child table");
+    let child3 = catalog
+        .create_table(
+            "items3",
+            RelationDesc {
+                columns: vec![column_desc("id", int4(), false)],
+            },
+        )
+        .expect("create third child table");
+    let child2_index = catalog
+        .create_index_for_relation_with_options_and_flags(
+            "items2_id_idx",
+            child2.relation_oid,
+            false,
+            false,
+            &[crate::include::nodes::parsenodes::IndexColumnDef {
+                name: "id".into(),
+                expr_sql: None,
+                expr_type: None,
+                collation: None,
+                opclass: None,
+                descending: true,
+                nulls_first: None,
+            }],
+            &btree_options(
+                &catalog,
+                child2.relation_oid,
+                &[crate::include::nodes::parsenodes::IndexColumnDef {
+                    name: "id".into(),
+                    expr_sql: None,
+                    expr_type: None,
+                    collation: None,
+                    opclass: None,
+                    descending: true,
+                    nulls_first: None,
+                }],
+            ),
+            None,
+        )
+        .expect("create second child index");
+    let child3_index = catalog
+        .create_index_for_relation_with_options_and_flags(
+            "items3_id_idx",
+            child3.relation_oid,
+            false,
+            false,
+            &[crate::include::nodes::parsenodes::IndexColumnDef::from(
+                "id",
+            )],
+            &btree_options(
+                &catalog,
+                child3.relation_oid,
+                &[crate::include::nodes::parsenodes::IndexColumnDef::from(
+                    "id",
+                )],
+            ),
+            Some("id is not null"),
+        )
+        .expect("create third child index");
+
+    catalog
+        .attach_inheritance(child1.relation_oid, &[parent.relation_oid])
+        .expect("attach first child inheritance");
+    catalog
+        .attach_inheritance(child2.relation_oid, &[parent.relation_oid])
+        .expect("attach second child inheritance");
+    catalog
+        .attach_inheritance(child3.relation_oid, &[parent.relation_oid])
+        .expect("attach third child inheritance");
+
+    for index_oid in [
+        parent_index.relation_oid,
+        child1_index.relation_oid,
+        child2_index.relation_oid,
+        child3_index.relation_oid,
+    ] {
+        catalog
+            .set_index_ready_valid(index_oid, true, true)
+            .expect("mark inherited index usable");
+    }
+
+    for relation_oid in [
+        parent.relation_oid,
+        child1.relation_oid,
+        child2.relation_oid,
+        child3.relation_oid,
+    ] {
+        catalog
+            .set_relation_stats(relation_oid, 128, 10_000.0)
+            .expect("seed inherited table stats");
+    }
+    for relation_oid in [
+        parent_index.relation_oid,
+        child1_index.relation_oid,
+        child2_index.relation_oid,
+        child3_index.relation_oid,
+    ] {
+        catalog
+            .set_relation_stats(relation_oid, 32, 10_000.0)
+            .expect("seed inherited index stats");
+    }
+
+    crate::backend::parser::CatalogLookup::materialize_visible_catalog(&catalog)
+        .expect("materialize inherited optimizer test catalog")
 }
 
 fn catalog_with_people_and_pets() -> Catalog {
@@ -861,10 +1077,11 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
         {
             Some(children)
         }
-        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
-            children.iter().find_map(append_with_join_children)
-        }
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().find_map(append_with_join_children),
         Plan::Hash { input, .. }
+        | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -890,6 +1107,7 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
         } => append_with_join_children(left).or_else(|| append_with_join_children(right)),
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::Values { .. }
@@ -906,19 +1124,24 @@ fn child_relation_names(plan: &Plan) -> Vec<String> {
 
 fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
     match plan {
-        Plan::SeqScan { relation_name, .. } => names.push(
+        Plan::SeqScan { relation_name, .. }
+        | Plan::IndexOnlyScan { relation_name, .. }
+        | Plan::IndexScan { relation_name, .. } => names.push(
             relation_name
                 .split_once(' ')
                 .map(|(name, _)| name)
                 .unwrap_or(relation_name)
                 .to_string(),
         ),
-        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => {
             for child in children {
                 collect_relation_names(child, names);
             }
         }
         Plan::Hash { input, .. }
+        | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -946,7 +1169,6 @@ fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
             collect_relation_names(right, names);
         }
         Plan::Result { .. }
-        | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::Values { .. }
         | Plan::FunctionScan { .. }
@@ -1179,12 +1401,15 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
     match plan {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::Values { .. }
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. } => false,
-        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => {
             children.iter().any(|child| plan_contains(child, predicate))
         }
         Plan::Hash { input, .. }
@@ -1193,6 +1418,7 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
         | Plan::OrderBy { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
+        | Plan::Unique { input, .. }
         | Plan::Aggregate { input, .. }
         | Plan::WindowAgg { input, .. }
         | Plan::ProjectSet { input, .. }
@@ -1217,10 +1443,11 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
 fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
     match plan {
         Plan::Aggregate { .. } => Some(plan),
-        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
-            children.iter().find_map(find_aggregate_plan)
-        }
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().find_map(find_aggregate_plan),
         Plan::Hash { input, .. }
+        | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -1245,6 +1472,7 @@ fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
         } => find_aggregate_plan(left).or_else(|| find_aggregate_plan(right)),
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::Values { .. }
@@ -1509,6 +1737,7 @@ fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
         | Plan::OrderBy { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
+        | Plan::Unique { input, .. }
         | Plan::Aggregate { input, .. }
         | Plan::WindowAgg { input, .. }
         | Plan::ProjectSet { input, .. }
@@ -1516,15 +1745,16 @@ fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
         | Plan::BitmapHeapScan {
             bitmapqual: input, ..
         } => find_seq_scan(input),
-        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
-            children.iter().find_map(find_seq_scan)
-        }
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().find_map(find_seq_scan),
         Plan::NestedLoopJoin { left, right, .. }
         | Plan::HashJoin { left, right, .. }
         | Plan::MergeJoin { left, right, .. } => {
             find_seq_scan(left).or_else(|| find_seq_scan(right))
         }
         Plan::Result { .. }
+        | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::Values { .. }
@@ -1540,12 +1770,15 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
     here + match plan {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::Values { .. }
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. } => 0,
-        Plan::Append { children, .. } | Plan::SetOp { children, .. } => children
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => children
             .iter()
             .map(|child| count_plan_nodes(child, predicate))
             .sum(),
@@ -1555,6 +1788,7 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
         | Plan::OrderBy { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
+        | Plan::Unique { input, .. }
         | Plan::Aggregate { input, .. }
         | Plan::WindowAgg { input, .. }
         | Plan::ProjectSet { input, .. }
@@ -2310,14 +2544,11 @@ fn planner_rewrites_simple_min_aggregate_into_forward_index_only_subplan() {
     )));
     assert!(plan_contains(subplan, |plan| matches!(
         plan,
-        Plan::IndexScan {
-            direction,
-            index_only,
-            ..
-        } if *direction == crate::include::access::relscan::ScanDirection::Forward && *index_only
+        Plan::IndexOnlyScan { direction, .. }
+            if *direction == crate::include::access::relscan::ScanDirection::Forward
     )));
     assert!(plan_contains(subplan, |plan| match plan {
-        Plan::IndexScan { keys, .. } => {
+        Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => {
             keys.len() == 1
                 && keys.iter().any(|key| {
                     key.strategy == 1
@@ -2353,25 +2584,28 @@ fn planner_rewrites_simple_max_aggregate_into_limit_index_subplan() {
     )));
     assert!(plan_contains(subplan, |plan| matches!(
         plan,
-        Plan::IndexScan { .. }
+        Plan::IndexOnlyScan { .. }
     )));
     assert!(!plan_contains(subplan, |plan| matches!(
         plan,
         Plan::Aggregate { .. }
     )));
 
-    assert!(plan_contains(subplan, |plan| matches!(
-        plan,
+    assert!(plan_contains(subplan, |plan| match plan {
+        Plan::IndexOnlyScan { direction, .. } => {
+            *direction == crate::include::access::relscan::ScanDirection::Backward
+        }
         Plan::IndexScan {
             direction,
             index_only,
             ..
+        } => {
+            *direction == crate::include::access::relscan::ScanDirection::Backward && *index_only
         }
-            if *direction == crate::include::access::relscan::ScanDirection::Backward
-                && *index_only
-    )));
+        _ => false,
+    }));
     assert!(plan_contains(subplan, |plan| match plan {
-        Plan::IndexScan { keys, .. } => {
+        Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => {
             keys.iter().any(|key| {
                 key.strategy == 1
                     && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Null))
@@ -2399,14 +2633,14 @@ fn planner_rewrites_multiple_minmax_aggregates_into_multiple_subplans() {
     assert_eq!(planned.subplans.len(), 2);
     assert!(planned.subplans.iter().all(|subplan| {
         plan_contains(subplan, |plan| matches!(plan, Plan::Limit { .. }))
-            && plan_contains(subplan, |plan| matches!(plan, Plan::IndexScan { .. }))
+            && plan_contains(subplan, |plan| matches!(plan, Plan::IndexOnlyScan { .. }))
             && !plan_contains(subplan, |plan| matches!(plan, Plan::Aggregate { .. }))
     }));
     assert!(planned.subplans.iter().any(|subplan| {
         plan_contains(subplan, |plan| {
             matches!(
                 plan,
-                Plan::IndexScan { direction, .. }
+                Plan::IndexOnlyScan { direction, .. }
                     if *direction == crate::include::access::relscan::ScanDirection::Forward
             )
         })
@@ -2415,11 +2649,97 @@ fn planner_rewrites_multiple_minmax_aggregates_into_multiple_subplans() {
         plan_contains(subplan, |plan| {
             matches!(
                 plan,
-                Plan::IndexScan { direction, .. }
+                Plan::IndexOnlyScan { direction, .. }
                     if *direction == crate::include::access::relscan::ScanDirection::Backward
             )
         })
     }));
+}
+
+#[test]
+fn planner_uses_unique_for_simple_select_distinct() {
+    let catalog = catalog_with_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog("select distinct id from items", &catalog);
+
+    assert!(matches!(planned.plan_tree, Plan::Unique { .. }));
+    assert_eq!(
+        count_plan_nodes(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Unique { .. }
+        )),
+        1
+    );
+    assert!(!plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::SetOp { .. }
+    )));
+}
+
+#[test]
+fn planner_rewrites_distinct_minmax_with_unique_index_only_subplans() {
+    let catalog = catalog_with_indexed_items();
+    let planned =
+        planned_stmt_for_sql_with_catalog("select distinct min(id), max(id) from items", &catalog);
+
+    assert_eq!(planned.subplans.len(), 2);
+    assert!(matches!(planned.plan_tree, Plan::Unique { .. }));
+    assert!(!plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::Aggregate { .. } | Plan::SetOp { .. }
+    )));
+    assert!(planned.subplans.iter().all(|subplan| {
+        plan_contains(subplan, |plan| matches!(plan, Plan::Limit { .. }))
+            && plan_contains(subplan, |plan| matches!(plan, Plan::IndexOnlyScan { .. }))
+            && !plan_contains(subplan, |plan| matches!(plan, Plan::Aggregate { .. }))
+    }));
+}
+
+#[test]
+fn planner_rewrites_inherited_minmax_with_directional_index_only_subplans() {
+    let catalog = catalog_with_inherited_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog("select min(id), max(id) from items", &catalog);
+
+    assert_eq!(planned.subplans.len(), 2);
+    assert!(planned.subplans.iter().all(|subplan| {
+        plan_contains(subplan, |plan| matches!(plan, Plan::Limit { .. }))
+            && plan_contains(subplan, |plan| matches!(plan, Plan::IndexOnlyScan { .. }))
+    }));
+    assert!(planned.subplans.iter().any(|subplan| {
+        plan_contains(subplan, |plan| {
+            matches!(
+                plan,
+                Plan::IndexOnlyScan { direction, .. }
+                    if *direction == crate::include::access::relscan::ScanDirection::Forward
+            )
+        })
+    }));
+    assert!(planned.subplans.iter().any(|subplan| {
+        plan_contains(subplan, |plan| {
+            matches!(
+                plan,
+                Plan::IndexOnlyScan { direction, .. }
+                    if *direction == crate::include::access::relscan::ScanDirection::Backward
+            )
+        })
+    }));
+}
+
+#[test]
+fn planner_keeps_index_scan_when_index_is_not_covering() {
+    let catalog = catalog_with_noncovering_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select id, payload from items where id < 42 order by id limit 1",
+        &catalog,
+    );
+
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::IndexScan { .. }
+    )));
+    assert!(!plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::IndexOnlyScan { .. }
+    )));
 }
 
 #[test]
@@ -2441,12 +2761,33 @@ fn explain_shows_initplan_for_rewritten_minmax_aggregate() {
 
     assert!(lines.iter().any(|line| line == "  InitPlan 1"));
     assert!(lines.iter().any(|line| line.trim() == "Limit"));
+    assert!(lines.iter().any(|line| line.trim() == "Result"));
     assert!(
         lines
             .iter()
             .any(|line| line.contains("Index Scan") || line.contains("Index Only Scan"))
     );
     assert!(!lines.iter().any(|line| line.contains("Aggregate")));
+}
+
+#[test]
+fn explain_formats_distinct_minmax_with_unique_and_index_only_scan() {
+    let catalog = catalog_with_inherited_indexed_items();
+    let planned =
+        planned_stmt_for_sql_with_catalog("select distinct min(id), max(id) from items", &catalog);
+
+    let mut lines = Vec::new();
+    crate::backend::commands::explain::format_explain_plan_with_subplans(
+        &planned.plan_tree,
+        &planned.subplans,
+        0,
+        false,
+        &mut lines,
+    );
+
+    assert!(lines.iter().any(|line| line.trim() == "Unique"));
+    assert!(lines.iter().any(|line| line.trim() == "Result"));
+    assert!(lines.iter().any(|line| line.contains("Index Only Scan")));
 }
 
 #[test]
@@ -2458,11 +2799,8 @@ fn planner_preserves_ordered_index_path_under_limit() {
     assert!(matches!(planned.plan_tree, Plan::Limit { .. }));
     assert!(plan_contains(&planned.plan_tree, |plan| matches!(
         plan,
-        Plan::IndexScan {
-            direction,
-            index_only,
-            ..
-        } if *direction == crate::include::access::relscan::ScanDirection::Forward && *index_only
+        Plan::IndexOnlyScan { direction, .. }
+            if *direction == crate::include::access::relscan::ScanDirection::Forward
     )));
     assert!(!plan_contains(&planned.plan_tree, |plan| matches!(
         plan,
@@ -2499,7 +2837,7 @@ fn planner_rewrites_correlated_min_with_index_subplan() {
 
     assert!(planned.subplans.iter().any(|subplan| {
         plan_contains(subplan, |plan| matches!(plan, Plan::Limit { .. }))
-            && plan_contains(subplan, |plan| matches!(plan, Plan::IndexScan { .. }))
+            && plan_contains(subplan, |plan| matches!(plan, Plan::IndexOnlyScan { .. }))
     }));
 }
 
@@ -2526,12 +2864,14 @@ fn planner_uses_runtime_index_key_for_correlated_limit_subplan() {
     assert!(planned.subplans.iter().any(|subplan| {
         plan_contains(subplan, |plan| matches!(plan, Plan::Limit { .. }))
             && plan_contains(subplan, |plan| match plan {
-                Plan::IndexScan { keys, .. } => keys.iter().any(|key| {
-                    matches!(
-                        &key.argument,
-                        IndexScanKeyArgument::Runtime(expr) if contains_exec_param(expr)
-                    )
-                }),
+                Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => {
+                    keys.iter().any(|key| {
+                        matches!(
+                            &key.argument,
+                            IndexScanKeyArgument::Runtime(expr) if contains_exec_param(expr)
+                        )
+                    })
+                }
                 _ => false,
             })
     }));
@@ -2618,14 +2958,15 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
             | Plan::OrderBy { input, .. }
             | Plan::Limit { input, .. }
             | Plan::LockRows { input, .. }
+            | Plan::Unique { input, .. }
             | Plan::Aggregate { input, .. }
             | Plan::WindowAgg { input, .. }
             | Plan::BitmapHeapScan {
                 bitmapqual: input, ..
             } => find_project_set(input),
-            Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
-                children.iter().find_map(find_project_set)
-            }
+            Plan::Append { children, .. }
+            | Plan::MergeAppend { children, .. }
+            | Plan::SetOp { children, .. } => children.iter().find_map(find_project_set),
             Plan::NestedLoopJoin { left, right, .. }
             | Plan::HashJoin { left, right, .. }
             | Plan::MergeJoin { left, right, .. } => {
@@ -2633,6 +2974,7 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
             }
             Plan::Result { .. }
             | Plan::SeqScan { .. }
+            | Plan::IndexOnlyScan { .. }
             | Plan::IndexScan { .. }
             | Plan::BitmapIndexScan { .. }
             | Plan::Values { .. }

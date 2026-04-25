@@ -52,7 +52,10 @@ impl Path {
         match self {
             Self::Result { plan_info, .. }
             | Self::Append { plan_info, .. }
+            | Self::MergeAppend { plan_info, .. }
+            | Self::Unique { plan_info, .. }
             | Self::SeqScan { plan_info, .. }
+            | Self::IndexOnlyScan { plan_info, .. }
             | Self::IndexScan { plan_info, .. }
             | Self::BitmapIndexScan { plan_info, .. }
             | Self::BitmapHeapScan { plan_info, .. }
@@ -80,7 +83,7 @@ impl Path {
     pub fn columns(&self) -> Vec<QueryColumn> {
         match self {
             Self::Result { .. } => Vec::new(),
-            Self::Append { desc, .. } => desc
+            Self::Append { desc, .. } | Self::MergeAppend { desc, .. } => desc
                 .columns
                 .iter()
                 .map(|c| QueryColumn {
@@ -89,7 +92,10 @@ impl Path {
                     wire_type_oid: None,
                 })
                 .collect(),
-            Self::SeqScan { desc, .. } | Self::IndexScan { desc, .. } => desc
+            Self::Unique { input, .. } => input.columns(),
+            Self::SeqScan { desc, .. }
+            | Self::IndexOnlyScan { desc, .. }
+            | Self::IndexScan { desc, .. } => desc
                 .columns
                 .iter()
                 .map(|c| QueryColumn {
@@ -155,8 +161,15 @@ impl Path {
             Self::Result { .. } => Vec::new(),
             Self::Append {
                 source_id, desc, ..
+            }
+            | Self::MergeAppend {
+                source_id, desc, ..
             } => slot_output_vars(*source_id, &desc.columns, |column| column.sql_type),
+            Self::Unique { input, .. } => input.output_vars(),
             Self::SeqScan {
+                source_id, desc, ..
+            }
+            | Self::IndexOnlyScan {
                 source_id, desc, ..
             }
             | Self::IndexScan {
@@ -262,7 +275,8 @@ impl Path {
 
     pub fn output_target(&self) -> PathTarget {
         match self {
-            Self::Filter { input, .. }
+            Self::Unique { input, .. }
+            | Self::Filter { input, .. }
             | Self::OrderBy { input, .. }
             | Self::Limit { input, .. }
             | Self::LockRows { input, .. } => input.output_target(),
@@ -300,7 +314,10 @@ impl Path {
         match self {
             Self::Result { pathtarget, .. }
             | Self::Append { pathtarget, .. }
+            | Self::MergeAppend { pathtarget, .. }
+            | Self::Unique { pathtarget, .. }
             | Self::SeqScan { pathtarget, .. }
+            | Self::IndexOnlyScan { pathtarget, .. }
             | Self::IndexScan { pathtarget, .. }
             | Self::BitmapIndexScan { pathtarget, .. }
             | Self::BitmapHeapScan { pathtarget, .. }
@@ -343,9 +360,22 @@ impl Path {
                 strategy, pathkeys, ..
             } if *strategy == AggregateStrategy::Sorted => pathkeys.clone(),
             Self::Aggregate { .. } => Vec::new(),
-            Self::IndexScan { pathkeys, .. } => pathkeys.clone(),
+            Self::IndexOnlyScan { pathkeys, .. } | Self::IndexScan { pathkeys, .. } => {
+                pathkeys.clone()
+            }
             Self::SubqueryScan { pathkeys, .. } => pathkeys.clone(),
-            Self::Filter { input, .. }
+            Self::MergeAppend { items, .. } => items
+                .iter()
+                .map(|item| PathKey {
+                    expr: item.expr.clone(),
+                    ressortgroupref: item.ressortgroupref,
+                    descending: item.descending,
+                    nulls_first: item.nulls_first,
+                    collation_oid: item.collation_oid,
+                })
+                .collect(),
+            Self::Unique { input, .. }
+            | Self::Filter { input, .. }
             | Self::Limit { input, .. }
             | Self::LockRows { input, .. } => input.pathkeys(),
             Self::Projection {

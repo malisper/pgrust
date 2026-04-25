@@ -315,6 +315,35 @@ fn query_order_items_for_base_rel(root: &PlannerInfo, rtindex: usize) -> Option<
     order_items_for_base_rel_pathkeys(root, rtindex, &root.query_pathkeys)
 }
 
+fn cheapest_path_by_total(mut paths: Vec<Path>) -> Option<Path> {
+    let (index, _) = paths.iter().enumerate().min_by(|(_, left), (_, right)| {
+        left.plan_info()
+            .total_cost
+            .as_f64()
+            .partial_cmp(&right.plan_info().total_cost.as_f64())
+            .unwrap_or(Ordering::Equal)
+    })?;
+    Some(paths.swap_remove(index))
+}
+
+fn translate_append_pathkeys_for_child(
+    root: &PlannerInfo,
+    child_rtindex: usize,
+    pathkeys: &[PathKey],
+) -> Vec<PathKey> {
+    let Some(info) = append_translation(root, child_rtindex) else {
+        return pathkeys.to_vec();
+    };
+    pathkeys
+        .iter()
+        .cloned()
+        .map(|mut key| {
+            key.expr = translate_append_rel_expr(key.expr, info);
+            key
+        })
+        .collect()
+}
+
 fn relation_display_name(
     catalog: &dyn CatalogLookup,
     rte: &crate::include::nodes::parsenodes::RangeTblEntry,
@@ -807,12 +836,16 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
     } = rte.kind.clone()
         && (relkind == 'p' || !child_rtindexes.is_empty())
     {
+        let query_order_items = query_order_items_for_base_rel(root, rtindex);
+        let query_pathkeys = root.query_pathkeys.clone();
         let filter = root
             .simple_rel_array
             .get(rtindex)
             .and_then(Option::as_ref)
             .and_then(base_filter_expr);
         let mut children = Vec::new();
+        let mut ordered_children = Vec::new();
+        let mut ordered_ok = query_order_items.is_some();
         if relkind != 'p' {
             children.push(normalize_rte_path(
                 rtindex,
@@ -831,6 +864,27 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 ),
                 catalog,
             ));
+            if let Some(order_items) = query_order_items.as_ref() {
+                let ordered_parent = cheapest_path_by_total(collect_relation_ordered_index_paths(
+                    rtindex,
+                    heap_rel,
+                    rte.alias
+                        .clone()
+                        .unwrap_or_else(|| format!("rel {}", heap_rel.rel_number)),
+                    relation_oid,
+                    toast,
+                    rte.desc.clone(),
+                    filter.clone(),
+                    order_items,
+                    catalog,
+                ))
+                .map(|path| normalize_rte_path(rtindex, &rte.desc, path, catalog));
+                if let Some(path) = ordered_parent {
+                    ordered_children.push(path);
+                } else {
+                    ordered_ok = false;
+                }
+            }
         }
         for child_rtindex in child_rtindexes {
             let child_relation_oid = root
@@ -869,6 +923,43 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 PathTarget::new(translated_vars),
                 catalog,
             ));
+            if ordered_ok {
+                let translated_pathkeys =
+                    translate_append_pathkeys_for_child(root, child_rtindex, &query_pathkeys);
+                let ordered_child_path = cheapest_path_by_total(relation_ordered_index_paths(
+                    root,
+                    child_rtindex,
+                    &translated_pathkeys,
+                    catalog,
+                ))
+                .or_else(|| {
+                    root.simple_rel_array
+                        .get(child_rtindex)
+                        .and_then(Option::as_ref)
+                        .and_then(|rel| {
+                            bestpath::get_cheapest_path_for_pathkeys(
+                                rel,
+                                &translated_pathkeys,
+                                bestpath::CostSelector::Total,
+                            )
+                        })
+                        .cloned()
+                });
+                if let Some(path) = ordered_child_path {
+                    let translated_vars = append_translation(root, child_rtindex)
+                        .map(|info| info.translated_vars.clone())
+                        .unwrap_or_default();
+                    ordered_children.push(project_to_slot_layout(
+                        rtindex,
+                        &rte.desc,
+                        path,
+                        PathTarget::new(translated_vars),
+                        catalog,
+                    ));
+                } else {
+                    ordered_ok = false;
+                }
+            }
         }
         let append = optimize_path(
             Path::Append {
@@ -891,6 +982,21 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             return;
         };
         rel.add_path(append);
+        if ordered_ok && let Some(items) = query_order_items {
+            rel.add_path(optimize_path(
+                Path::MergeAppend {
+                    plan_info: PlanEstimate::default(),
+                    pathtarget: slot_output_target(rtindex, &rte.desc.columns, |column| {
+                        column.sql_type
+                    }),
+                    source_id: rtindex,
+                    desc: rte.desc.clone(),
+                    items,
+                    children: ordered_children,
+                },
+                catalog,
+            ));
+        }
         bestpath::set_cheapest(rel);
         return;
     }

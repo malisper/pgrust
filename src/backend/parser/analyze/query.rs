@@ -353,6 +353,7 @@ pub(super) fn query_from_from_projection(input: AnalyzedFrom, targets: Vec<Targe
         rtable,
         jointree,
         target_list,
+        distinct: false,
         where_qual: None,
         group_by: Vec::new(),
         accumulators: Vec::new(),

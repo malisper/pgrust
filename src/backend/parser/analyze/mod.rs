@@ -2326,6 +2326,7 @@ fn bind_ctes(
                             &output_columns,
                             &worktable_plan.output_exprs,
                         ),
+                        distinct: false,
                         where_qual: None,
                         group_by: Vec::new(),
                         accumulators: Vec::new(),
@@ -2395,6 +2396,7 @@ fn bind_ctes(
                         rtable: recursive_plan.rtable,
                         jointree: recursive_plan.jointree,
                         target_list,
+                        distinct: false,
                         where_qual: None,
                         group_by: Vec::new(),
                         accumulators: Vec::new(),
@@ -3333,6 +3335,7 @@ pub(crate) fn bound_cte_from_materialized_rows(
             rtable: plan.rtable,
             jointree: plan.jointree,
             target_list: identity_target_list(&output_columns, &plan.output_exprs),
+            distinct: false,
             where_qual: None,
             group_by: Vec::new(),
             accumulators: Vec::new(),
@@ -3424,6 +3427,7 @@ fn bind_values_query_with_outer(
             rtable,
             jointree,
             target_list,
+            distinct: false,
             where_qual: None,
             group_by: Vec::new(),
             accumulators: Vec::new(),
@@ -4112,6 +4116,7 @@ fn bind_select_query_with_outer(
                         rtable: base.rtable,
                         jointree: base.jointree,
                         target_list,
+                        distinct: false,
                         where_qual,
                         group_by: rewritten_group_keys,
                         accumulators,
@@ -4183,6 +4188,7 @@ fn bind_select_query_with_outer(
                     rtable: base.rtable,
                     jointree: base.jointree,
                     target_list,
+                    distinct: false,
                     where_qual,
                     group_by: Vec::new(),
                     accumulators: Vec::new(),
@@ -4205,55 +4211,7 @@ fn bind_select_query_with_outer(
 }
 
 fn apply_select_distinct(query: Query, distinct: bool) -> Query {
-    if !distinct {
-        return query;
-    }
-
-    let output_columns = query.columns();
-    let output_desc = RelationDesc {
-        columns: output_columns
-            .iter()
-            .map(|column| column_desc(column.name.clone(), column.sql_type, true))
-            .collect(),
-    };
-    let output_exprs = output_columns
-        .iter()
-        .enumerate()
-        .map(|(index, column)| {
-            Expr::Var(Var {
-                varno: 1,
-                varattno: user_attrno(index),
-                varlevelsup: 0,
-                vartype: column.sql_type,
-            })
-        })
-        .collect::<Vec<_>>();
-    let target_list = normalize_target_list(identity_target_list(&output_columns, &output_exprs));
-
-    Query {
-        command_type: crate::include::executor::execdesc::CommandType::Select,
-        depends_on_row_security: false,
-        rtable: Vec::new(),
-        jointree: None,
-        target_list,
-        where_qual: None,
-        group_by: Vec::new(),
-        accumulators: Vec::new(),
-        window_clauses: Vec::new(),
-        having_qual: None,
-        sort_clause: Vec::new(),
-        limit_count: None,
-        limit_offset: 0,
-        locking_clause: None,
-        row_marks: Vec::new(),
-        has_target_srfs: false,
-        recursive_union: None,
-        set_operation: Some(Box::new(SetOperationQuery {
-            output_desc,
-            op: SetOperator::Union { all: false },
-            inputs: vec![query],
-        })),
-    }
+    Query { distinct, ..query }
 }
 
 fn bind_set_operation_query_with_outer(
@@ -4392,6 +4350,7 @@ fn bind_set_operation_query_with_outer(
             rtable: Vec::new(),
             jointree: None,
             target_list,
+            distinct: false,
             where_qual: None,
             group_by: Vec::new(),
             accumulators: Vec::new(),
