@@ -382,6 +382,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             keys,
             order_by_keys,
             direction,
+            index_only,
         } => {
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
             let desc = Rc::new(desc);
@@ -409,6 +410,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 keys,
                 order_by_keys,
                 direction,
+                index_only,
                 scan: None,
                 scan_exhausted: false,
                 slot,
