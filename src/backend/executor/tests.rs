@@ -2106,7 +2106,7 @@ fn manual_merge_join_emits_duplicate_groups_in_merge_order() {
 }
 
 #[test]
-fn cross_join_without_order_by_uses_postgres_physical_order() {
+fn cross_join_without_order_by_preserves_from_list_order() {
     let mut harness = seed_people_and_pets("cross_join_without_order_by");
 
     assert_query_rows(
@@ -2118,11 +2118,11 @@ fn cross_join_without_order_by_uses_postgres_physical_order() {
             .unwrap(),
         vec![
             vec![Value::Int32(1), Value::Int32(10)],
-            vec![Value::Int32(2), Value::Int32(10)],
-            vec![Value::Int32(3), Value::Int32(10)],
             vec![Value::Int32(1), Value::Int32(11)],
+            vec![Value::Int32(1), Value::Int32(12)],
+            vec![Value::Int32(1), Value::Int32(13)],
+            vec![Value::Int32(2), Value::Int32(10)],
             vec![Value::Int32(2), Value::Int32(11)],
-            vec![Value::Int32(3), Value::Int32(11)],
         ],
     );
 }
@@ -2151,26 +2151,26 @@ fn three_way_cross_join_keeps_left_join_rel_outer() {
         vec![
             vec![Value::Int32(1), Value::Int32(10), Value::Int32(100)],
             vec![Value::Int32(1), Value::Int32(10), Value::Int32(200)],
-            vec![Value::Int32(2), Value::Int32(10), Value::Int32(100)],
-            vec![Value::Int32(2), Value::Int32(10), Value::Int32(200)],
-            vec![Value::Int32(3), Value::Int32(10), Value::Int32(100)],
-            vec![Value::Int32(3), Value::Int32(10), Value::Int32(200)],
             vec![Value::Int32(1), Value::Int32(11), Value::Int32(100)],
             vec![Value::Int32(1), Value::Int32(11), Value::Int32(200)],
-            vec![Value::Int32(2), Value::Int32(11), Value::Int32(100)],
-            vec![Value::Int32(2), Value::Int32(11), Value::Int32(200)],
-            vec![Value::Int32(3), Value::Int32(11), Value::Int32(100)],
-            vec![Value::Int32(3), Value::Int32(11), Value::Int32(200)],
             vec![Value::Int32(1), Value::Int32(12), Value::Int32(100)],
             vec![Value::Int32(1), Value::Int32(12), Value::Int32(200)],
-            vec![Value::Int32(2), Value::Int32(12), Value::Int32(100)],
-            vec![Value::Int32(2), Value::Int32(12), Value::Int32(200)],
-            vec![Value::Int32(3), Value::Int32(12), Value::Int32(100)],
-            vec![Value::Int32(3), Value::Int32(12), Value::Int32(200)],
             vec![Value::Int32(1), Value::Int32(13), Value::Int32(100)],
             vec![Value::Int32(1), Value::Int32(13), Value::Int32(200)],
+            vec![Value::Int32(2), Value::Int32(10), Value::Int32(100)],
+            vec![Value::Int32(2), Value::Int32(10), Value::Int32(200)],
+            vec![Value::Int32(2), Value::Int32(11), Value::Int32(100)],
+            vec![Value::Int32(2), Value::Int32(11), Value::Int32(200)],
+            vec![Value::Int32(2), Value::Int32(12), Value::Int32(100)],
+            vec![Value::Int32(2), Value::Int32(12), Value::Int32(200)],
             vec![Value::Int32(2), Value::Int32(13), Value::Int32(100)],
             vec![Value::Int32(2), Value::Int32(13), Value::Int32(200)],
+            vec![Value::Int32(3), Value::Int32(10), Value::Int32(100)],
+            vec![Value::Int32(3), Value::Int32(10), Value::Int32(200)],
+            vec![Value::Int32(3), Value::Int32(11), Value::Int32(100)],
+            vec![Value::Int32(3), Value::Int32(11), Value::Int32(200)],
+            vec![Value::Int32(3), Value::Int32(12), Value::Int32(100)],
+            vec![Value::Int32(3), Value::Int32(12), Value::Int32(200)],
             vec![Value::Int32(3), Value::Int32(13), Value::Int32(100)],
             vec![Value::Int32(3), Value::Int32(13), Value::Int32(200)],
         ],

@@ -11407,7 +11407,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Date => "date",
         SqlTypeKind::DateRange => "daterange",
         SqlTypeKind::Time => "time without time zone",
-        SqlTypeKind::TimeTz => "time with time zone",
+        SqlTypeKind::TimeTz => "timetz",
         SqlTypeKind::Interval => "interval",
         SqlTypeKind::TsVector => "tsvector",
         SqlTypeKind::TsQuery => "tsquery",
@@ -13009,6 +13009,25 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         expr = SqlExpr::Collate {
                             expr: Box::new(expr),
                             collation,
+                        };
+                    }
+                    Rule::at_time_zone_suffix => {
+                        let zone = suffix
+                            .into_inner()
+                            .find(|part| part.as_rule() == Rule::concat_expr)
+                            .map(build_expr)
+                            .transpose()?;
+                        expr = match zone {
+                            Some(zone) => simple_func_call(
+                                "timezone",
+                                vec![
+                                    SqlFunctionArg::positional(zone),
+                                    SqlFunctionArg::positional(expr),
+                                ],
+                            ),
+                            None => {
+                                simple_func_call("timezone", vec![SqlFunctionArg::positional(expr)])
+                            }
                         };
                     }
                     _ => {}
