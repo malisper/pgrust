@@ -107,6 +107,10 @@ pub(super) fn infer_sql_expr_type_with_ctes(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> SqlType {
+    if matches_grouped_outer_expr(expr, grouped_outer) {
+        return infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, None, ctes);
+    }
+
     if let Some(sql_type) = infer_geometry_special_expr_type_with_ctes(
         expr,
         scope,

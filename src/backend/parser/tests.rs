@@ -10306,6 +10306,52 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
 }
 
 #[test]
+fn analyze_array_subquery_can_order_by_aggregate_alias() {
+    let stmt = parse_select(
+        "select array(
+            select sum(x + y) s
+            from generate_series(1, 3) y
+            group by y
+            order by s
+        )
+        from generate_series(1, 3) x",
+    )
+    .unwrap();
+
+    match &stmt.targets[0].expr {
+        SqlExpr::ArraySubquery(subquery) => {
+            assert_eq!(subquery.targets.len(), 1);
+            assert_eq!(subquery.targets[0].output_name, "s");
+            assert_eq!(subquery.order_by.len(), 1);
+            assert!(matches!(
+                &subquery.order_by[0].expr,
+                SqlExpr::Column(name) if name == "s"
+            ));
+        }
+        other => panic!("expected array subquery target, got {other:?}"),
+    }
+
+    analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+}
+
+#[test]
+fn analyze_grouped_outer_expression_inside_sublink() {
+    let stmt = parse_select(
+        "select id + 1 as g,
+                exists(
+                    select 1
+                    from generate_series(1, 3) as y(val)
+                    where val = (id + 1)
+                )
+         from people
+         group by id + 1",
+    )
+    .unwrap();
+
+    analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+}
+
+#[test]
 fn build_plan_with_window_function_uses_windowagg() {
     let stmt = parse_select("select row_number() over (order by id) from people").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
