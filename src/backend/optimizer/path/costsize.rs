@@ -1637,11 +1637,16 @@ fn build_join_paths_internal(
     }
 
     if allow_swapped_orientation {
+        let swapped_kind = if allow_base_cross_swap {
+            JoinType::Inner
+        } else {
+            kind
+        };
         paths.push(estimate_nested_loop_join_internal(
             root,
             right.clone(),
             left.clone(),
-            kind,
+            swapped_kind,
             restrict_clauses.clone(),
             pathtarget.clone(),
             output_columns.clone(),
