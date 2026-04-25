@@ -192,6 +192,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::Multirange(multirange)) => multirange.multirange_type.sql_type,
         SqlExpr::Const(Value::Bit(v)) => SqlType::with_bit_len(SqlTypeKind::VarBit, v.bit_len),
         SqlExpr::Const(Value::Bytea(_)) => SqlType::new(SqlTypeKind::Bytea),
+        SqlExpr::Const(Value::Uuid(_)) => SqlType::new(SqlTypeKind::Uuid),
         SqlExpr::Const(Value::Inet(_)) => SqlType::new(SqlTypeKind::Inet),
         SqlExpr::Const(Value::Cidr(_)) => SqlType::new(SqlTypeKind::Cidr),
         SqlExpr::Const(Value::Bool(_)) => SqlType::new(SqlTypeKind::Bool),

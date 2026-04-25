@@ -55,6 +55,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         | ExecError::ArrayInput { .. }
         | ExecError::InvalidNumericInput(_)
         | ExecError::InvalidByteaInput { .. }
+        | ExecError::InvalidUuidInput { .. }
         | ExecError::InvalidGeometryInput { .. }
         | ExecError::InvalidBitInput { .. }
         | ExecError::InvalidBooleanInput { .. }
@@ -300,6 +301,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::IntegerOutOfRange { value, .. } => value.as_str(),
         ExecError::InvalidNumericInput(value) => value.as_str(),
         ExecError::InvalidByteaInput { value } => value.as_str(),
+        ExecError::InvalidUuidInput { value } => value.as_str(),
         ExecError::InvalidByteaHexDigit { value, .. } => value.as_str(),
         ExecError::InvalidByteaHexOddDigits { value } => value.as_str(),
         ExecError::InvalidGeometryInput { value, .. } => value.as_str(),

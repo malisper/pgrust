@@ -2,8 +2,8 @@ use super::{ExecError, Value};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::datetime::{
     day_of_week_from_julian_day, day_of_year, days_from_ymd, iso_day_of_week_from_julian_day,
-    iso_week_and_year, julian_day_from_postgres_date, timezone_offset_seconds,
-    unix_days_from_postgres_date, ymd_from_days,
+    iso_week_and_year, julian_day_from_postgres_date, timestamp_parts_from_usecs,
+    timezone_offset_seconds, unix_days_from_postgres_date, ymd_from_days,
 };
 use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT,
@@ -71,6 +71,24 @@ fn unrecognized_time_part(field: &str, with_timezone: bool) -> ExecError {
             "unit \"{field}\" not recognized for type time {} time zone",
             if with_timezone { "with" } else { "without" }
         ),
+        detail: None,
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
+fn unsupported_timestamp_part(field: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("unit \"{field}\" not supported for type timestamp"),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn unrecognized_timestamp_part(field: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("unit \"{field}\" not recognized for type timestamp"),
         detail: None,
         hint: None,
         sqlstate: "22023",
@@ -153,6 +171,8 @@ pub(crate) fn eval_date_part_function(values: &[Value]) -> Result<Value, ExecErr
     match date_value {
         Value::Time(time) => return eval_time_part(&field, *time, false),
         Value::TimeTz(timetz) => return eval_timetz_part(&field, *timetz),
+        Value::Timestamp(timestamp) => return eval_timestamp_part(&field, timestamp.0),
+        Value::TimestampTz(timestamp) => return eval_timestamp_part(&field, timestamp.0),
         Value::Date(_) => {}
         other => {
             return Err(ExecError::TypeMismatch {
@@ -237,6 +257,51 @@ pub(crate) fn eval_date_part_function(values: &[Value]) -> Result<Value, ExecErr
         "julian" => julian_day as f64,
         "epoch" => unix_days_from_postgres_date(date.0) as f64 * 86_400.0,
         _ => return Err(unrecognized_date_part(&field)),
+    };
+    Ok(Value::Float64(result))
+}
+
+fn eval_timestamp_part(field: &str, timestamp_usecs: i64) -> Result<Value, ExecError> {
+    let (days, time_usecs) = timestamp_parts_from_usecs(timestamp_usecs);
+    let time_result = match field {
+        "microsecond" | "microseconds" => Some(time_usecs.rem_euclid(USECS_PER_MINUTE) as f64),
+        "millisecond" | "milliseconds" => {
+            Some(time_usecs.rem_euclid(USECS_PER_MINUTE) as f64 / 1_000.0)
+        }
+        "second" => Some(time_usecs.rem_euclid(USECS_PER_MINUTE) as f64 / USECS_PER_SEC as f64),
+        "minute" => Some(time_usecs.div_euclid(USECS_PER_MINUTE).rem_euclid(60) as f64),
+        "hour" => Some(time_usecs.div_euclid(USECS_PER_HOUR) as f64),
+        _ => None,
+    };
+    if let Some(result) = time_result {
+        return Ok(Value::Float64(result));
+    }
+
+    let (astronomical_year, month, day) = ymd_from_days(days);
+    let year = extract_year_number(astronomical_year);
+    let julian_day = julian_day_from_postgres_date(days);
+    let (iso_year_astronomical, iso_week) = iso_week_and_year(astronomical_year, month, day);
+    let iso_year = extract_year_number(iso_year_astronomical);
+
+    let result = match field {
+        "day" => day as f64,
+        "month" => month as f64,
+        "year" => year as f64,
+        "quarter" => ((month - 1) / 3 + 1) as f64,
+        "decade" => astronomical_year.div_euclid(10) as f64,
+        "century" => extract_century(year) as f64,
+        "millennium" => extract_millennium(year) as f64,
+        "isoyear" => iso_year as f64,
+        "week" => iso_week as f64,
+        "dow" => day_of_week_from_julian_day(julian_day) as f64,
+        "isodow" => iso_day_of_week_from_julian_day(julian_day) as f64,
+        "doy" => day_of_year(astronomical_year, month, day) as f64,
+        "julian" => julian_day as f64 + time_usecs as f64 / USECS_PER_DAY as f64,
+        "epoch" => timestamp_usecs as f64 / USECS_PER_SEC as f64 + 946_684_800.0,
+        "timezone" | "timezone_h" | "timezone_m" => {
+            return Err(unsupported_timestamp_part(field));
+        }
+        _ => return Err(unrecognized_timestamp_part(field)),
     };
     Ok(Value::Float64(result))
 }

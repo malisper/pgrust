@@ -1296,6 +1296,7 @@ fn json_object_agg_key(key: &Value) -> String {
         Value::Jsonb(v) => render_jsonb_bytes(v).unwrap_or_else(|_| "null".into()),
         Value::Numeric(v) => v.render(),
         Value::Interval(v) => render_interval_text(*v),
+        Value::Uuid(v) => crate::backend::executor::value_io::render_uuid_text(v),
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
@@ -1349,6 +1350,9 @@ fn value_to_json_text(value: &Value) -> String {
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
         Value::Interval(v) => serde_json::to_string(&render_interval_text(*v)).unwrap(),
+        Value::Uuid(v) => {
+            serde_json::to_string(&crate::backend::executor::value_io::render_uuid_text(v)).unwrap()
+        }
         Value::Bool(v) => {
             if *v {
                 "true".into()

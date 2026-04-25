@@ -114,7 +114,7 @@ pub(crate) use tsearch::{
     parse_tsvector_text, render_tsquery_text, render_tsvector_text, tsquery_and,
     tsquery_input_error, tsquery_not, tsquery_or, tsvector_input_error,
 };
-pub use value_io::format_array_value_text;
+pub use value_io::{format_array_value_text, render_uuid_text};
 
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::access::transam::xact::{
@@ -592,6 +592,9 @@ pub enum ExecError {
     },
     InvalidNumericInput(String),
     InvalidByteaInput {
+        value: String,
+    },
+    InvalidUuidInput {
         value: String,
     },
     InvalidByteaHexDigit {

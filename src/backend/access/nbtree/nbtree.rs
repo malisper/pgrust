@@ -132,6 +132,7 @@ fn encode_index_value(
         Value::Xml(v) => Ok(v.as_bytes().to_vec()),
         Value::Numeric(v) => Ok(v.render().into_bytes()),
         Value::Bytea(v) => Ok(v.clone()),
+        Value::Uuid(v) => Ok(v.to_vec()),
         Value::Inet(v) => Ok(v.render_inet().into_bytes()),
         Value::Cidr(v) => Ok(v.render_cidr().into_bytes()),
         Value::Bit(v) => {

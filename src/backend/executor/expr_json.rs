@@ -1802,6 +1802,7 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
         Value::Float64(v) => Ok(v.to_string()),
         Value::Numeric(v) => Ok(v.render()),
         Value::Interval(v) => Ok(render_interval_text(*v)),
+        Value::Uuid(v) => Ok(crate::backend::executor::value_io::render_uuid_text(v)),
         Value::Bool(v) => Ok(if *v { "true".into() } else { "false".into() }),
         Value::JsonPath(v) => Ok(v.to_string()),
         Value::Xml(v) => Ok(v.to_string()),
@@ -3046,6 +3047,9 @@ fn value_to_json_serde_with_config(
             .unwrap_or(SerdeJsonValue::Null),
         Value::Numeric(v) => parse_json_text(&v.render()).unwrap_or(SerdeJsonValue::Null),
         Value::Interval(v) => SerdeJsonValue::String(render_interval_text(*v)),
+        Value::Uuid(v) => {
+            SerdeJsonValue::String(crate::backend::executor::value_io::render_uuid_text(v))
+        }
         Value::Bool(v) => SerdeJsonValue::Bool(*v),
         Value::Bit(v) => SerdeJsonValue::String(render_bit_text(v)),
         Value::JsonPath(text) => SerdeJsonValue::String(text.to_string()),
@@ -3157,6 +3161,9 @@ fn render_json_value_text_with_config(
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
         Value::Interval(v) => serde_json::to_string(&render_interval_text(*v)).unwrap(),
+        Value::Uuid(v) => {
+            serde_json::to_string(&crate::backend::executor::value_io::render_uuid_text(v)).unwrap()
+        }
         Value::Bool(v) => {
             if *v {
                 "true".into()

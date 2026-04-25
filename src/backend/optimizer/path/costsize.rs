@@ -3149,6 +3149,7 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         SqlTypeKind::Bit
         | SqlTypeKind::VarBit
         | SqlTypeKind::Bytea
+        | SqlTypeKind::Uuid
         | SqlTypeKind::Inet
         | SqlTypeKind::Cidr => 16,
         SqlTypeKind::Text

@@ -346,6 +346,7 @@ impl CompiledTupleDecoder {
                                     ]),
                                 })
                             }
+                            ScalarType::Uuid => Value::Uuid(bytes.try_into().unwrap()),
                             ScalarType::BitString => {
                                 values.push(Value::Null);
                                 continue;

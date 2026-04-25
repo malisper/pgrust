@@ -288,6 +288,10 @@ fn value_checksum(value: &Value) -> i64 {
         Value::Float64(v) => *v as i64,
         Value::Numeric(v) => v.render().bytes().map(i64::from).sum(),
         Value::Interval(v) => format!("{v:?}").bytes().map(i64::from).sum(),
+        Value::Uuid(v) => pgrust::backend::executor::render_uuid_text(v)
+            .bytes()
+            .map(i64::from)
+            .sum(),
         Value::Json(v) => v.bytes().map(i64::from).sum(),
         Value::Jsonb(v) => v.iter().copied().map(i64::from).sum(),
         Value::JsonPath(v) => v.bytes().map(i64::from).sum(),
