@@ -10,7 +10,7 @@ use super::comments::{
 use super::parsenodes::*;
 use crate::backend::executor::Value;
 use crate::backend::utils::misc::stack_depth::{
-    DEFAULT_MAX_STACK_DEPTH_KB, StackDepthGuard, check_parse_stack_depth,
+    StackDepthGuard, check_parse_stack_depth, effective_default_max_stack_depth_kb,
 };
 use crate::include::catalog::PolicyCommand;
 use crate::include::nodes::datum::BitString;
@@ -29,12 +29,16 @@ impl Default for ParseOptions {
     fn default() -> Self {
         Self {
             standard_conforming_strings: true,
-            max_stack_depth_kb: DEFAULT_MAX_STACK_DEPTH_KB,
+            max_stack_depth_kb: effective_default_max_stack_depth_kb(),
         }
     }
 }
 
 const PARSER_STACK_DEPTH_FLOOR_KB: u32 = 8 * 1024;
+#[cfg(debug_assertions)]
+const PARSER_THREAD_STACK_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(not(debug_assertions))]
+const PARSER_THREAD_STACK_BYTES: usize = 32 * 1024 * 1024;
 
 pub fn parse_statement(sql: &str) -> Result<Statement, ParseError> {
     parse_statement_with_options(sql, ParseOptions::default())
@@ -1913,7 +1917,7 @@ fn build_create_tablespace_statement(sql: &str) -> Result<CreateTablespaceStatem
 }
 
 pub fn parse_expr(sql: &str) -> Result<SqlExpr, ParseError> {
-    run_with_parser_stack(DEFAULT_MAX_STACK_DEPTH_KB, {
+    run_with_parser_stack(effective_default_max_stack_depth_kb(), {
         let sql = sql.to_string();
         move || {
             let sql = strip_sql_comments_preserving_layout(&sql);
@@ -1998,7 +2002,7 @@ where
     let max_stack_depth_kb = max_stack_depth_kb.max(PARSER_STACK_DEPTH_FLOOR_KB);
     std::thread::Builder::new()
         .name("pgrust-parser".into())
-        .stack_size(32 * 1024 * 1024)
+        .stack_size(PARSER_THREAD_STACK_BYTES)
         .spawn(move || StackDepthGuard::enter(max_stack_depth_kb).run(f))
         .expect("spawn parser thread")
         .join()
