@@ -4171,6 +4171,80 @@ fn covariance_single_row_pg_edge_cases_match() {
 }
 
 #[test]
+fn regression_aggregate_constant_and_tiny_variance_edges_match_pg() {
+    let base = temp_dir("regr_agg_edge_cases");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select corr(0.09, g), regr_r2(0.09, g) from generate_series(1, 30) g",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Null, Value::Float64(1.0)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select corr(g, 0.09), regr_r2(g, 0.09), regr_slope(g, 0.09), \
+         regr_intercept(g, 0.09) from generate_series(1, 30) g",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Null, Value::Null, Value::Null, Value::Null]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    for query in [
+        "select corr(1e-100 + g * 1e-105, 1e-100 + g * 1e-105) from generate_series(1, 3) g",
+        "select corr(1e-100 + g * 1e-105, 1e-100 + g * 1e-105) from generate_series(1, 30) g",
+    ] {
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, query).unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Float64(1.0)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+}
+
+#[test]
+fn regression_aggregate_unknown_nan_literals_match_pg() {
+    let base = temp_dir("regr_agg_unknown_nan");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select corr(g, 'NaN'), corr(0.1, 'NaN'), corr('NaN', 'NaN') \
+         from generate_series(1, 30) g",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            assert!(matches!(rows[0][0], Value::Float64(v) if v.is_nan()));
+            assert_eq!(rows[0][1], Value::Null);
+            assert!(matches!(rows[0][2], Value::Float64(v) if v.is_nan()));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn string_agg_skips_null_values() {
     let base = temp_dir("string_agg_text");
     let mut txns = TransactionManager::new_durable(&base).unwrap();

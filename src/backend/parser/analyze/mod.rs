@@ -318,18 +318,6 @@ fn resolve_builtin_aggregate_call(
             | AggFunc::VarSamp
             | AggFunc::StddevPop
             | AggFunc::StddevSamp
-            | AggFunc::RegrCount
-            | AggFunc::RegrSxx
-            | AggFunc::RegrSyy
-            | AggFunc::RegrSxy
-            | AggFunc::RegrAvgX
-            | AggFunc::RegrAvgY
-            | AggFunc::RegrR2
-            | AggFunc::RegrSlope
-            | AggFunc::RegrIntercept
-            | AggFunc::CovarPop
-            | AggFunc::CovarSamp
-            | AggFunc::Corr
             | AggFunc::BoolAnd
             | AggFunc::BoolOr
     ) {
@@ -373,7 +361,7 @@ fn resolve_aggregate_call(
             declared_arg_types: resolved
                 .as_ref()
                 .map(|call| call.declared_arg_types.clone())
-                .unwrap_or_else(|| arg_types.to_vec()),
+                .unwrap_or_else(|| fallback_builtin_aggregate_declared_arg_types(func, arg_types)),
             func_variadic: resolved
                 .as_ref()
                 .map(|call| call.func_variadic)
@@ -390,6 +378,30 @@ fn resolve_aggregate_call(
         func_variadic: resolved.func_variadic,
         builtin_impl: resolved.agg_impl,
     })
+}
+
+fn fallback_builtin_aggregate_declared_arg_types(
+    func: AggFunc,
+    arg_types: &[SqlType],
+) -> Vec<SqlType> {
+    match func {
+        AggFunc::RegrCount
+        | AggFunc::RegrSxx
+        | AggFunc::RegrSyy
+        | AggFunc::RegrSxy
+        | AggFunc::RegrAvgX
+        | AggFunc::RegrAvgY
+        | AggFunc::RegrR2
+        | AggFunc::RegrSlope
+        | AggFunc::RegrIntercept
+        | AggFunc::CovarPop
+        | AggFunc::CovarSamp
+        | AggFunc::Corr => vec![SqlType::new(SqlTypeKind::Float8); arg_types.len()],
+        AggFunc::BoolAnd | AggFunc::BoolOr => {
+            vec![SqlType::new(SqlTypeKind::Bool); arg_types.len()]
+        }
+        _ => arg_types.to_vec(),
+    }
 }
 
 fn validate_distinct_aggregate_order_by(
