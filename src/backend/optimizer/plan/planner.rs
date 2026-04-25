@@ -1030,7 +1030,7 @@ fn standard_planner_with_param_base(
     config: PlannerConfig,
 ) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
     let mut glob = PlannerGlobal::new();
-    let query = root::prepare_query_for_planning(root::prepare_query_for_locking(query)?);
+    let query = root::prepare_query_for_planning(root::prepare_query_for_locking(query)?, catalog);
     let query = pull_up_sublinks(query);
     let aggregate_layout = groupby_rewrite::build_aggregate_layout(&query, catalog);
     let mut root = PlannerInfo::new_with_config(query, aggregate_layout, config);

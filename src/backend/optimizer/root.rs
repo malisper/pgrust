@@ -1,4 +1,4 @@
-use crate::backend::parser::ParseError;
+use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::parsenodes::{
@@ -12,10 +12,17 @@ use crate::include::nodes::primnodes::{
     TargetEntry, Var, expr_contains_set_returning, is_system_attr, set_returning_call_exprs,
 };
 
+use super::path::flatten_and_conjuncts;
+
 use super::joininfo::build_special_join_info;
 use super::pathnodes::expr_sql_type;
 
-pub(super) fn prepare_query_for_planning(query: Query) -> Query {
+pub(super) fn prepare_query_for_planning(query: Query, catalog: &dyn CatalogLookup) -> Query {
+    prepare_query_tree_for_planning(query, catalog)
+}
+
+fn prepare_query_tree_for_planning(query: Query, catalog: &dyn CatalogLookup) -> Query {
+    let query = rewrite_target_outer_aggregate_sublinks(query, catalog);
     super::constfold::fold_query_constants_best_effort(rewrite_minmax_aggregate_query(query))
 }
 
@@ -922,6 +929,299 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
         has_target_srfs: false,
         recursive_union: None,
         set_operation: None,
+    }
+}
+
+fn rewrite_target_outer_aggregate_sublinks(mut query: Query, catalog: &dyn CatalogLookup) -> Query {
+    for target_idx in 0..query.target_list.len() {
+        let expr = query.target_list[target_idx].expr.clone();
+        if let Some(rewritten) = rewrite_target_outer_aggregate_sublink_expr(expr, catalog) {
+            query.target_list[target_idx].expr = rewritten;
+        }
+    }
+    query
+}
+
+fn rewrite_target_outer_aggregate_sublink_expr(
+    expr: Expr,
+    catalog: &dyn CatalogLookup,
+) -> Option<Expr> {
+    let Expr::SubLink(outer_sublink) = expr else {
+        return None;
+    };
+    if !matches!(outer_sublink.sublink_type, SubLinkType::ExprSubLink)
+        || outer_sublink.testexpr.is_some()
+    {
+        return None;
+    }
+    let aggregate_query = &outer_sublink.subselect;
+    if !aggregate_query.rtable.is_empty()
+        || aggregate_query.jointree.is_some()
+        || aggregate_query.target_list.len() != 1
+        || aggregate_query.where_qual.is_some()
+        || !aggregate_query.group_by.is_empty()
+        || !aggregate_query.window_clauses.is_empty()
+        || aggregate_query.having_qual.is_some()
+        || !aggregate_query.sort_clause.is_empty()
+        || aggregate_query.limit_count.is_some()
+        || aggregate_query.limit_offset != 0
+        || aggregate_query.locking_clause.is_some()
+        || !aggregate_query.row_marks.is_empty()
+        || aggregate_query.has_target_srfs
+        || aggregate_query.recursive_union.is_some()
+        || aggregate_query.set_operation.is_some()
+    {
+        return None;
+    }
+    let Expr::Aggref(aggref) = aggregate_query.target_list[0].expr.clone() else {
+        return None;
+    };
+    if builtin_aggregate_function_for_proc_oid(aggref.aggfnoid)
+        .is_none_or(|func| !matches!(func, AggFunc::Min | AggFunc::Max))
+        || aggref.aggvariadic
+        || aggref.aggdistinct
+        || !aggref.aggorder.is_empty()
+        || aggref.aggfilter.is_some()
+    {
+        return None;
+    }
+    if aggref.args.len() != 1 {
+        return None;
+    }
+    let Expr::SubLink(inner_sublink) = aggref.args[0].clone() else {
+        return None;
+    };
+    if !scalar_sublink_has_unique_lookup(&inner_sublink, catalog) {
+        return None;
+    }
+    Some(Expr::SubLink(inner_sublink))
+}
+
+fn scalar_sublink_has_unique_lookup(
+    sublink: &crate::include::nodes::primnodes::SubLink,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    if !matches!(sublink.sublink_type, SubLinkType::ExprSubLink) || sublink.testexpr.is_some() {
+        return false;
+    }
+    let subquery = &sublink.subselect;
+    if !matches!(subquery.command_type, CommandType::Select)
+        || !subquery.group_by.is_empty()
+        || !subquery.accumulators.is_empty()
+        || !subquery.window_clauses.is_empty()
+        || subquery.having_qual.is_some()
+        || !subquery.sort_clause.is_empty()
+        || subquery.limit_count.is_some()
+        || subquery.limit_offset != 0
+        || subquery.locking_clause.is_some()
+        || !subquery.row_marks.is_empty()
+        || subquery.has_target_srfs
+        || subquery.recursive_union.is_some()
+        || subquery.set_operation.is_some()
+        || subquery.target_list.len() != 1
+        || subquery.target_list[0].resjunk
+    {
+        return false;
+    }
+
+    let Some(JoinTreeNode::RangeTblRef(1)) = &subquery.jointree else {
+        return false;
+    };
+    if subquery.rtable.len() != 1 {
+        return false;
+    }
+    let Some(where_qual) = &subquery.where_qual else {
+        return false;
+    };
+    if expr_contains_sublink_for_minmax_rewrite(where_qual) {
+        return false;
+    }
+    if !matches!(
+        subquery.target_list[0].expr,
+        Expr::Var(Var {
+            varno: 1,
+            varlevelsup: 0,
+            ..
+        })
+    ) {
+        return false;
+    }
+
+    let RangeTblEntryKind::Relation { relation_oid, .. } = subquery.rtable[0].kind else {
+        return false;
+    };
+    let equality_columns = flatten_and_conjuncts(where_qual)
+        .into_iter()
+        .filter_map(unique_lookup_equality_column)
+        .collect::<Vec<_>>();
+    if equality_columns.is_empty() {
+        return false;
+    }
+
+    catalog
+        .index_relations_for_heap(relation_oid)
+        .into_iter()
+        .any(|index| {
+            index.index_meta.indisunique
+                && index.index_meta.indisvalid
+                && index.index_meta.indisready
+                && index.index_meta.indpred.is_none()
+                && index.index_exprs.is_empty()
+                && index
+                    .index_meta
+                    .indkey
+                    .iter()
+                    .take(index.index_meta.indnkeyatts.max(0) as usize)
+                    .all(|attno| {
+                        *attno > 0 && equality_columns.iter().any(|column| column == attno)
+                    })
+        })
+}
+
+fn unique_lookup_equality_column(expr: Expr) -> Option<i16> {
+    let Expr::Op(op) = strip_unique_lookup_casts(expr) else {
+        return None;
+    };
+    if op.op != crate::include::nodes::primnodes::OpExprKind::Eq || op.args.len() != 2 {
+        return None;
+    }
+    let left = strip_unique_lookup_casts(op.args[0].clone());
+    let right = strip_unique_lookup_casts(op.args[1].clone());
+    unique_lookup_column_match(&left, &right).or_else(|| unique_lookup_column_match(&right, &left))
+}
+
+fn unique_lookup_column_match(local: &Expr, other: &Expr) -> Option<i16> {
+    let Expr::Var(var) = local else {
+        return None;
+    };
+    if var.varno != 1 || var.varlevelsup != 0 || is_system_attr(var.varattno) {
+        return None;
+    }
+    let Ok(attno) = i16::try_from(var.varattno) else {
+        return None;
+    };
+    (!expr_contains_local_var_for_unique_lookup(other)).then_some(attno)
+}
+
+fn expr_contains_local_var_for_unique_lookup(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup == 0,
+        Expr::Aggref(aggref) => {
+            aggref
+                .args
+                .iter()
+                .any(expr_contains_local_var_for_unique_lookup)
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(expr_contains_local_var_for_unique_lookup)
+        }
+        Expr::WindowFunc(window_func) => window_func
+            .args
+            .iter()
+            .any(expr_contains_local_var_for_unique_lookup),
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(expr_contains_local_var_for_unique_lookup),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(expr_contains_local_var_for_unique_lookup),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(expr_contains_local_var_for_unique_lookup)
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_local_var_for_unique_lookup(&arm.expr)
+                        || expr_contains_local_var_for_unique_lookup(&arm.result)
+                })
+                || expr_contains_local_var_for_unique_lookup(&case_expr.defresult)
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(expr_contains_local_var_for_unique_lookup),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(expr_contains_local_var_for_unique_lookup),
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_local_var_for_unique_lookup(&saop.left)
+                || expr_contains_local_var_for_unique_lookup(&saop.right)
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => expr_contains_local_var_for_unique_lookup(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_local_var_for_unique_lookup(expr)
+                || expr_contains_local_var_for_unique_lookup(pattern)
+                || escape
+                    .as_deref()
+                    .is_some_and(expr_contains_local_var_for_unique_lookup)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_local_var_for_unique_lookup(left)
+                || expr_contains_local_var_for_unique_lookup(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(expr_contains_local_var_for_unique_lookup),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_local_var_for_unique_lookup(expr)),
+        Expr::FieldSelect { expr, .. } => expr_contains_local_var_for_unique_lookup(expr),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_local_var_for_unique_lookup(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_local_var_for_unique_lookup)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_local_var_for_unique_lookup)
+                })
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(expr_contains_local_var_for_unique_lookup),
+        Expr::SubLink(_) | Expr::SubPlan(_) => true,
+        Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+fn strip_unique_lookup_casts(expr: Expr) -> Expr {
+    match expr {
+        Expr::Cast(inner, _) => strip_unique_lookup_casts(*inner),
+        Expr::Collate { expr, .. } => strip_unique_lookup_casts(*expr),
+        other => other,
     }
 }
 

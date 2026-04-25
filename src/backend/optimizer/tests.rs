@@ -518,7 +518,7 @@ fn planner_info_for_sql(sql: &str) -> PlannerInfo {
     let stmt = parse_select(sql).expect("parse");
     let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
         .expect("analyze");
-    let query = super::root::prepare_query_for_planning(query);
+    let query = super::root::prepare_query_for_planning(query, &catalog);
     let query = super::pull_up_sublinks(query);
     let aggregate_layout = super::groupby_rewrite::build_aggregate_layout(&query, &catalog);
     PlannerInfo::new(query, aggregate_layout)
@@ -567,6 +567,16 @@ fn parse_select_for_optimizer_test(
     })
 }
 
+fn planned_stmt_for_sql_with_catalog_and_larger_parse_stack(
+    sql: &str,
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+) -> crate::include::nodes::plannodes::PlannedStmt {
+    let stmt = parse_select_for_optimizer_test(sql).expect("parse");
+    let (query, _) = analyze_select_query_with_outer(&stmt, catalog, &[], None, None, &[], &[])
+        .expect("analyze");
+    super::planner(query, catalog).expect("plan")
+}
+
 fn planned_stmt_for_values_sql(sql: &str) -> crate::include::nodes::plannodes::PlannedStmt {
     let catalog = LiteralDefaultCatalog;
     let stmt = parse_select(sql).expect("parse");
@@ -582,7 +592,7 @@ fn aggregate_layout_for_sql_with_catalog(
     let stmt = parse_select(sql).expect("parse");
     let (query, _) = analyze_select_query_with_outer(&stmt, catalog, &[], None, None, &[], &[])
         .expect("analyze");
-    let query = super::root::prepare_query_for_planning(query);
+    let query = super::root::prepare_query_for_planning(query, catalog);
     let query = super::pull_up_sublinks(query);
     super::groupby_rewrite::build_aggregate_layout(&query, catalog)
 }
@@ -681,6 +691,34 @@ fn catalog_with_indexed_items() -> Catalog {
         .expect("create test catalog relation");
     let index = catalog
         .create_index("items_id_idx", "items", false, &["id".into()])
+        .expect("create test catalog index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark test catalog index usable");
+    catalog
+        .set_relation_stats(table.relation_oid, 128, 10_000.0)
+        .expect("seed test catalog table stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 32, 10_000.0)
+        .expect("seed test catalog index stats");
+    catalog
+}
+
+fn catalog_with_unique_indexed_items() -> Catalog {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "items",
+            RelationDesc {
+                columns: vec![
+                    column_desc("id", int4(), false),
+                    column_desc("payload", int4(), true),
+                ],
+            },
+        )
+        .expect("create test catalog relation");
+    let index = catalog
+        .create_index("items_id_idx", "items", true, &["id".into()])
         .expect("create test catalog index");
     catalog
         .set_index_ready_valid(index.relation_oid, true, true)
@@ -2187,25 +2225,6 @@ fn explain_shows_initplan_for_rewritten_minmax_aggregate() {
 }
 
 #[test]
-fn planner_keeps_nested_sublink_max_as_aggregate() {
-    let catalog = catalog_with_indexed_items();
-    let stmt = parse_select(
-        "select (select max((select i.id from items i where i.id = o.id))) from items o",
-    )
-    .expect("parse");
-    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
-        .expect("analyze");
-    let planned = super::planner(query, &catalog).expect("plan");
-
-    assert!(
-        planned
-            .subplans
-            .iter()
-            .any(|subplan| plan_contains(subplan, |plan| matches!(plan, Plan::Aggregate { .. })))
-    );
-}
-
-#[test]
 fn planner_rewrites_correlated_min_with_index_subplan() {
     let catalog = catalog_with_indexed_items();
     let stmt =
@@ -2253,6 +2272,42 @@ fn planner_uses_runtime_index_key_for_correlated_limit_subplan() {
                 _ => false,
             })
     }));
+    for subplan in &planned.subplans {
+        super::setrefs::validate_executable_plan_for_tests(subplan);
+    }
+}
+
+#[test]
+fn planner_simplifies_outer_max_of_unique_scalar_sublink() {
+    let catalog = catalog_with_unique_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog_and_larger_parse_stack(
+        "select (select max((select i.payload from items i where i.id = o.id))) from items o",
+        &catalog,
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::SeqScan { .. }
+        )),
+        "expected the outer query to keep scanning one output row per outer tuple: {planned:#?}"
+    );
+    assert!(
+        planned
+            .subplans
+            .iter()
+            .all(|subplan| !plan_contains(subplan, |plan| matches!(plan, Plan::Aggregate { .. }))),
+        "outer max should not remain as a per-row aggregate subplan: {planned:#?}"
+    );
+    assert!(
+        planned
+            .subplans
+            .iter()
+            .any(|subplan| plan_contains(subplan, |plan| matches!(plan, Plan::IndexScan { .. }))),
+        "expected the remaining scalar lookup subplan to use the unique index: {planned:#?}"
+    );
+
+    super::setrefs::validate_executable_plan_for_tests(&planned.plan_tree);
     for subplan in &planned.subplans {
         super::setrefs::validate_executable_plan_for_tests(subplan);
     }
