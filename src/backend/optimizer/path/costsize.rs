@@ -14,7 +14,8 @@ use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
 use crate::include::access::spgist::SPGIST_CONFIG_PROC;
 use crate::include::catalog::{
     BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, PgStatisticRow,
-    SPG_BOX_QUAD_CONFIG_PROC_OID, SPGIST_AM_OID, bootstrap_pg_operator_rows,
+    SPG_BOX_QUAD_CONFIG_PROC_OID, SPG_NETWORK_CONFIG_PROC_OID, SPGIST_AM_OID,
+    bootstrap_pg_operator_rows,
     builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
     relkind_has_storage,
 };
@@ -3292,6 +3293,7 @@ fn index_supports_index_only_scan(desc: &RelationDesc, index: &BoundIndexRelatio
 fn index_column_can_return(index: &BoundIndexRelation, index_pos: usize) -> bool {
     match index.index_meta.am_oid {
         BTREE_AM_OID => true,
+        GIST_AM_OID => true,
         SPGIST_AM_OID => spgist_index_column_can_return(index, index_pos),
         _ => false,
     }
@@ -3309,7 +3311,10 @@ fn spgist_index_column_can_return(index: &BoundIndexRelation, index_pos: usize) 
 }
 
 fn spgist_config_proc_can_return_data(proc_oid: u32) -> bool {
-    matches!(proc_oid, SPG_BOX_QUAD_CONFIG_PROC_OID)
+    matches!(
+        proc_oid,
+        SPG_BOX_QUAD_CONFIG_PROC_OID | SPG_NETWORK_CONFIG_PROC_OID
+    )
 }
 
 fn index_expression_position(index: &BoundIndexRelation, index_pos: usize) -> Option<usize> {
@@ -3497,6 +3502,11 @@ fn gist_builtin_strategy(proc_oid: u32, argument: &Value) -> Option<u16> {
             }
         }
         BuiltinScalarFunction::RangeContainedBy => 8,
+        BuiltinScalarFunction::NetworkSubnet => 1,
+        BuiltinScalarFunction::NetworkSubnetEq => 2,
+        BuiltinScalarFunction::NetworkSupernet => 3,
+        BuiltinScalarFunction::NetworkSupernetEq => 4,
+        BuiltinScalarFunction::NetworkOverlap => 5,
         _ => return None,
     })
 }
@@ -3530,7 +3540,7 @@ fn qual_strategy(
             .amop_strategy_for_proc(&index.desc, index_pos, proc_oid, argument_type_oid)
             .or_else(|| {
                 let argument = qual.argument.as_const()?;
-                (index.index_meta.am_oid == GIST_AM_OID)
+                is_gist_like_am(index.index_meta.am_oid)
                     .then(|| gist_builtin_strategy(proc_oid, argument))
                     .flatten()
             }),

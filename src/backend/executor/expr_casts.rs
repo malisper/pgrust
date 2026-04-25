@@ -1440,6 +1440,11 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
         {
             details.clone()
         }
+        ExecError::InvalidStorageValue { column, details }
+            if matches!(column.as_str(), "inet" | "cidr") =>
+        {
+            details.clone()
+        }
         other => format!("{other:?}"),
     }
 }
@@ -1477,6 +1482,11 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
             } else {
                 "22007"
             }
+        }
+        ExecError::InvalidStorageValue { column, .. }
+            if matches!(column.as_str(), "inet" | "cidr") =>
+        {
+            "22P02"
         }
         ExecError::BitStringLengthMismatch { .. } => "22026",
         ExecError::BitStringTooLong { .. } => "22001",

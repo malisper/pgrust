@@ -203,6 +203,11 @@ fn gist_builtin_strategy(proc_oid: u32, argument: &Value) -> Option<u16> {
             }
         }
         BuiltinScalarFunction::RangeContainedBy => 8,
+        BuiltinScalarFunction::NetworkSubnet => 1,
+        BuiltinScalarFunction::NetworkSubnetEq => 2,
+        BuiltinScalarFunction::NetworkSupernet => 3,
+        BuiltinScalarFunction::NetworkSupernetEq => 4,
+        BuiltinScalarFunction::NetworkOverlap => 5,
         _ => return None,
     })
 }
@@ -234,7 +239,7 @@ fn qual_strategy(
                 value_type_oid(&qual.argument),
             )
             .or_else(|| {
-                (index.index_meta.am_oid == GIST_AM_OID)
+                (index.index_meta.am_oid == GIST_AM_OID || index.index_meta.am_oid == SPGIST_AM_OID)
                     .then(|| gist_builtin_strategy(proc_oid, &qual.argument))
                     .flatten()
             }),

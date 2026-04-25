@@ -21,14 +21,17 @@ pub const BTREE_DATETIME_FAMILY_OID: u32 = 434;
 pub const BTREE_FLOAT_FAMILY_OID: u32 = 1970;
 pub const BTREE_VARBIT_FAMILY_OID: u32 = 2002;
 pub const BTREE_MULTIRANGE_FAMILY_OID: u32 = 4199;
+pub const BTREE_NETWORK_FAMILY_OID: u32 = 1974;
 pub const GIST_POINT_FAMILY_OID: u32 = 1029;
 pub const GIST_BOX_FAMILY_OID: u32 = 2593;
 pub const GIST_POLY_FAMILY_OID: u32 = 2594;
 pub const GIST_CIRCLE_FAMILY_OID: u32 = 2595;
 pub const GIST_RANGE_FAMILY_OID: u32 = 3919;
+pub const GIST_NETWORK_FAMILY_OID: u32 = 76112;
 pub const GIN_JSONB_FAMILY_OID: u32 = 4036;
 pub const SPGIST_BOX_FAMILY_OID: u32 = 4001;
 pub const SPGIST_POLY_FAMILY_OID: u32 = 4002;
+pub const SPGIST_NETWORK_FAMILY_OID: u32 = 76113;
 pub const BRIN_BYTEA_MINMAX_FAMILY_OID: u32 = 76100;
 pub const BRIN_CHAR_MINMAX_FAMILY_OID: u32 = 76101;
 pub const BRIN_INTEGER_MINMAX_FAMILY_OID: u32 = 76102;
@@ -186,6 +189,13 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },
         PgOpfamilyRow {
+            oid: BTREE_NETWORK_FAMILY_OID,
+            opfmethod: BTREE_AM_OID,
+            opfname: "network_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
             oid: GIST_POINT_FAMILY_OID,
             opfmethod: GIST_AM_OID,
             opfname: "point_ops".into(),
@@ -221,6 +231,13 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },
         PgOpfamilyRow {
+            oid: GIST_NETWORK_FAMILY_OID,
+            opfmethod: GIST_AM_OID,
+            opfname: "network_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
             oid: SPGIST_BOX_FAMILY_OID,
             opfmethod: SPGIST_AM_OID,
             opfname: "box_ops".into(),
@@ -231,6 +248,13 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             oid: SPGIST_POLY_FAMILY_OID,
             opfmethod: SPGIST_AM_OID,
             opfname: "poly_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: SPGIST_NETWORK_FAMILY_OID,
+            opfmethod: SPGIST_AM_OID,
+            opfname: "network_ops".into(),
             opfnamespace: PG_CATALOG_NAMESPACE_OID,
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },
