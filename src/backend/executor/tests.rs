@@ -10,7 +10,7 @@ use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
 use crate::include::catalog::{CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};
 use crate::include::nodes::datetime::{DateADT, TimestampADT};
-use crate::include::nodes::primnodes::{Var, user_attrno};
+use crate::include::nodes::primnodes::{OrderByEntry, Var, user_attrno};
 use crate::pgrust::database::{Database, Session};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -392,6 +392,121 @@ fn people_pets_hash_join_plan(kind: JoinType, join_qual: Vec<Expr>, qual: Vec<Ex
             vec![local_var(0), local_var(5)],
         )],
         hash_keys: vec![local_var(0)],
+        join_qual,
+        qual,
+    }
+}
+
+fn sort_plan(input: Plan, expr: Expr) -> Plan {
+    Plan::OrderBy {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(input),
+        items: vec![OrderByEntry {
+            expr,
+            ressortgroupref: 0,
+            descending: false,
+            nulls_first: Some(false),
+            collation_oid: None,
+        }],
+    }
+}
+
+fn people_pets_merge_join_plan(kind: JoinType, join_qual: Vec<Expr>, qual: Vec<Expr>) -> Plan {
+    Plan::MergeJoin {
+        plan_info: PlanEstimate::default(),
+        left: Box::new(sort_plan(people_scan_plan(), local_var(0))),
+        right: Box::new(sort_plan(pets_scan_plan(), local_var(2))),
+        kind,
+        merge_clauses: vec![Expr::op_auto(
+            crate::include::nodes::primnodes::OpExprKind::Eq,
+            vec![local_var(0), local_var(5)],
+        )],
+        outer_merge_keys: vec![local_var(0)],
+        inner_merge_keys: vec![local_var(2)],
+        join_qual,
+        qual,
+    }
+}
+
+fn values_people_pets_merge_join_plan(
+    kind: JoinType,
+    join_qual: Vec<Expr>,
+    qual: Vec<Expr>,
+) -> Plan {
+    let int4 = crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4);
+    let text = crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Text);
+    let left_columns = vec![
+        QueryColumn {
+            name: "person_id".into(),
+            sql_type: int4,
+            wire_type_oid: None,
+        },
+        QueryColumn {
+            name: "person_name".into(),
+            sql_type: text,
+            wire_type_oid: None,
+        },
+    ];
+    let right_columns = vec![
+        QueryColumn {
+            name: "pet_id".into(),
+            sql_type: int4,
+            wire_type_oid: None,
+        },
+        QueryColumn {
+            name: "owner_id".into(),
+            sql_type: int4,
+            wire_type_oid: None,
+        },
+    ];
+
+    Plan::MergeJoin {
+        plan_info: PlanEstimate::default(),
+        left: Box::new(sort_plan(
+            Plan::Values {
+                plan_info: PlanEstimate::default(),
+                rows: vec![
+                    vec![
+                        Expr::Const(Value::Int32(1)),
+                        Expr::Const(Value::Text("alice".into())),
+                    ],
+                    vec![
+                        Expr::Const(Value::Int32(1)),
+                        Expr::Const(Value::Text("ally".into())),
+                    ],
+                    vec![
+                        Expr::Const(Value::Int32(2)),
+                        Expr::Const(Value::Text("bob".into())),
+                    ],
+                    vec![
+                        Expr::Const(Value::Int32(3)),
+                        Expr::Const(Value::Text("carol".into())),
+                    ],
+                ],
+                output_columns: left_columns,
+            },
+            local_var(0),
+        )),
+        right: Box::new(sort_plan(
+            Plan::Values {
+                plan_info: PlanEstimate::default(),
+                rows: vec![
+                    vec![Expr::Const(Value::Int32(10)), Expr::Const(Value::Int32(1))],
+                    vec![Expr::Const(Value::Int32(11)), Expr::Const(Value::Int32(1))],
+                    vec![Expr::Const(Value::Int32(12)), Expr::Const(Value::Int32(2))],
+                    vec![Expr::Const(Value::Int32(13)), Expr::Const(Value::Null)],
+                ],
+                output_columns: right_columns,
+            },
+            local_var(1),
+        )),
+        kind,
+        merge_clauses: vec![Expr::op_auto(
+            crate::include::nodes::primnodes::OpExprKind::Eq,
+            vec![local_var(0), local_var(3)],
+        )],
+        outer_merge_keys: vec![local_var(0)],
+        inner_merge_keys: vec![local_var(1)],
         join_qual,
         qual,
     }
@@ -1719,6 +1834,372 @@ fn manual_hash_join_explain_formats_hash_child() {
     let lines = explain_lines(people_pets_hash_join_plan(JoinType::Inner, vec![], vec![]));
     assert!(lines.first().is_some_and(|line| line.contains("Hash Join")));
     assert!(lines.iter().any(|line| line.contains("Hash  (cost=")));
+}
+
+#[test]
+fn manual_merge_join_inner_returns_duplicate_key_matches() {
+    let base = temp_dir("manual_merge_join_inner");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let plan = Plan::Projection {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(values_people_pets_merge_join_plan(
+            JoinType::Inner,
+            vec![],
+            vec![],
+        )),
+        targets: vec![
+            TargetEntry::new(
+                "person_name",
+                local_var(1),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Text),
+                1,
+            ),
+            TargetEntry::new(
+                "pet_id",
+                local_var(2),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                2,
+            ),
+        ],
+    };
+
+    let rows = run_plan(&base, &txns, plan).unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                vec!["person_name".into(), "pet_id".into()],
+                vec![Value::Text("alice".into()), Value::Int32(10)],
+            ),
+            (
+                vec!["person_name".into(), "pet_id".into()],
+                vec![Value::Text("alice".into()), Value::Int32(11)],
+            ),
+            (
+                vec!["person_name".into(), "pet_id".into()],
+                vec![Value::Text("ally".into()), Value::Int32(10)],
+            ),
+            (
+                vec!["person_name".into(), "pet_id".into()],
+                vec![Value::Text("ally".into()), Value::Int32(11)],
+            ),
+            (
+                vec!["person_name".into(), "pet_id".into()],
+                vec![Value::Text("bob".into()), Value::Int32(12)],
+            ),
+        ]
+    );
+}
+
+#[test]
+fn manual_merge_join_outer_join_variants_emit_unmatched_rows() {
+    let base = temp_dir("manual_merge_join_outer_variants");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let project = |input| Plan::Projection {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(input),
+        targets: vec![
+            TargetEntry::new(
+                "person_id",
+                local_var(0),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                1,
+            ),
+            TargetEntry::new(
+                "pet_id",
+                local_var(2),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                2,
+            ),
+        ],
+    };
+
+    assert_eq!(
+        run_plan(
+            &base,
+            &txns,
+            project(values_people_pets_merge_join_plan(
+                JoinType::Left,
+                vec![],
+                vec![]
+            ))
+        )
+        .unwrap(),
+        vec![
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(10)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(11)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(10)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(11)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(2), Value::Int32(12)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(3), Value::Null],
+            ),
+        ]
+    );
+    assert_eq!(
+        run_plan(
+            &base,
+            &txns,
+            project(values_people_pets_merge_join_plan(
+                JoinType::Right,
+                vec![],
+                vec![]
+            ))
+        )
+        .unwrap(),
+        vec![
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(10)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(11)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(10)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(11)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(2), Value::Int32(12)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Null, Value::Int32(13)],
+            ),
+        ]
+    );
+    assert_eq!(
+        run_plan(
+            &base,
+            &txns,
+            project(values_people_pets_merge_join_plan(
+                JoinType::Full,
+                vec![],
+                vec![]
+            ))
+        )
+        .unwrap(),
+        vec![
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(10)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(11)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(10)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(11)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(2), Value::Int32(12)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(3), Value::Null],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Null, Value::Int32(13)],
+            ),
+        ]
+    );
+}
+
+#[test]
+fn manual_merge_join_semi_and_anti_match_hash_join_semantics() {
+    let base = temp_dir("manual_merge_join_semi_anti");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let semi = Plan::Projection {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(values_people_pets_merge_join_plan(
+            JoinType::Semi,
+            vec![],
+            vec![],
+        )),
+        targets: vec![TargetEntry::new(
+            "person_id",
+            local_var(0),
+            crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+            1,
+        )],
+    };
+    let anti = Plan::Projection {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(values_people_pets_merge_join_plan(
+            JoinType::Anti,
+            vec![],
+            vec![],
+        )),
+        targets: vec![TargetEntry::new(
+            "person_id",
+            local_var(0),
+            crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+            1,
+        )],
+    };
+
+    assert_eq!(
+        run_plan(&base, &txns, semi).unwrap(),
+        vec![
+            (vec!["person_id".into()], vec![Value::Int32(1)]),
+            (vec!["person_id".into()], vec![Value::Int32(1)]),
+            (vec!["person_id".into()], vec![Value::Int32(2)]),
+        ]
+    );
+    assert_eq!(
+        run_plan(&base, &txns, anti).unwrap(),
+        vec![(vec!["person_id".into()], vec![Value::Int32(3)])]
+    );
+}
+
+#[test]
+fn manual_merge_join_null_keys_do_not_match_each_other() {
+    let base = temp_dir("manual_merge_join_null_keys");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let int4 = crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4);
+    let output_columns = vec![QueryColumn {
+        name: "id".into(),
+        sql_type: int4,
+        wire_type_oid: None,
+    }];
+
+    let plan = Plan::MergeJoin {
+        plan_info: PlanEstimate::default(),
+        left: Box::new(sort_plan(
+            Plan::Values {
+                plan_info: PlanEstimate::default(),
+                rows: vec![
+                    vec![Expr::Const(Value::Int32(1))],
+                    vec![Expr::Const(Value::Null)],
+                ],
+                output_columns: output_columns.clone(),
+            },
+            local_var(0),
+        )),
+        right: Box::new(sort_plan(
+            Plan::Values {
+                plan_info: PlanEstimate::default(),
+                rows: vec![
+                    vec![Expr::Const(Value::Int32(1))],
+                    vec![Expr::Const(Value::Null)],
+                ],
+                output_columns,
+            },
+            local_var(0),
+        )),
+        kind: JoinType::Inner,
+        merge_clauses: vec![Expr::op_auto(
+            crate::include::nodes::primnodes::OpExprKind::Eq,
+            vec![local_var(0), local_var(1)],
+        )],
+        outer_merge_keys: vec![local_var(0)],
+        inner_merge_keys: vec![local_var(0)],
+        join_qual: vec![],
+        qual: vec![],
+    };
+
+    let rows = run_plan(&base, &txns, plan).unwrap();
+    assert_eq!(
+        rows,
+        vec![(
+            vec!["id".into(), "id".into()],
+            vec![Value::Int32(1), Value::Int32(1)],
+        )]
+    );
+}
+
+#[test]
+fn manual_merge_join_join_qual_and_qual_preserve_outer_join_rules() {
+    let base = temp_dir("manual_merge_join_join_qual");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let plan = Plan::Projection {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(values_people_pets_merge_join_plan(
+            JoinType::Left,
+            vec![Expr::op_auto(
+                crate::include::nodes::primnodes::OpExprKind::Eq,
+                vec![local_var(2), Expr::Const(Value::Int32(11))],
+            )],
+            vec![Expr::Const(Value::Bool(false))],
+        )),
+        targets: vec![
+            TargetEntry::new(
+                "person_id",
+                local_var(0),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                1,
+            ),
+            TargetEntry::new(
+                "pet_id",
+                local_var(2),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                2,
+            ),
+        ],
+    };
+
+    let rows = run_plan(&base, &txns, plan).unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(2), Value::Null],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(3), Value::Null],
+            ),
+        ]
+    );
+}
+
+#[test]
+fn manual_merge_join_explain_formats_merge_condition_and_sort_children() {
+    let lines = explain_lines(people_pets_merge_join_plan(JoinType::Inner, vec![], vec![]));
+    assert!(
+        lines
+            .first()
+            .is_some_and(|line| line.contains("Merge Join"))
+    );
+    assert!(lines.iter().any(|line| line.contains("Merge Cond:")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim_start().starts_with("Sort"))
+    );
 }
 
 #[test]
