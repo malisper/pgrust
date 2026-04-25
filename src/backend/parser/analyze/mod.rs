@@ -40,13 +40,13 @@ use crate::include::catalog::{
     PgOpclassRow, PgOperatorRow, PgPartitionedTableRow, PgProcRow, PgRangeRow, PgRewriteRow,
     PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTsConfigRow, PgTsDictRow,
     PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_enum_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
-    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
-    bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, builtin_range_rows, builtin_type_rows,
-    is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
-    proc_oid_for_builtin_aggregate_function, proc_oid_for_builtin_hypothetical_aggregate_function,
-    range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_proc_row_by_oid,
-    synthetic_range_proc_rows_by_name,
+    bootstrap_pg_collation_rows, bootstrap_pg_enum_rows, bootstrap_pg_language_rows,
+    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_proc_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
+    builtin_range_rows, builtin_type_rows, is_synthetic_range_proc_name,
+    multirange_type_ref_for_sql_type, proc_oid_for_builtin_aggregate_function,
+    proc_oid_for_builtin_hypothetical_aggregate_function, range_type_ref_for_sql_type,
+    relkind_is_analyzable, synthetic_range_proc_row_by_oid, synthetic_range_proc_rows_by_name,
 };
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};

@@ -1286,6 +1286,7 @@ pub(crate) fn format_text_data_value(
         relation_names,
         proc_names,
         namespace_names,
+        None,
     )
     .map_err(|err| ExecError::DetailedError {
         message: format!("could not format COPY data: {err}"),
