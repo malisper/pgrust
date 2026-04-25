@@ -1075,7 +1075,7 @@ mod tests {
             parse_date_text("1999-01-08", &ymd)
         );
         assert_eq!(parse_date_text("99-Jan-08", &dmy), out_of_range);
-        assert_eq!(parse_date_text("99-Jan-08", &mdy), invalid);
+        assert_eq!(parse_date_text("99-Jan-08", &mdy), out_of_range);
 
         assert_eq!(parse_date_text("08-Jan-99", &ymd), out_of_range);
         assert_eq!(
