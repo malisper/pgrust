@@ -974,10 +974,11 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
         {
             Some(children)
         }
-        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
-            children.iter().find_map(append_with_join_children)
-        }
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().find_map(append_with_join_children),
         Plan::Hash { input, .. }
+        | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -1003,6 +1004,7 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
         } => append_with_join_children(left).or_else(|| append_with_join_children(right)),
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::Values { .. }
@@ -1019,13 +1021,18 @@ fn child_relation_names(plan: &Plan) -> Vec<String> {
 
 fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
     match plan {
-        Plan::SeqScan { relation_name, .. } => names.push(relation_name.clone()),
-        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
+        Plan::SeqScan { relation_name, .. } | Plan::IndexOnlyScan { relation_name, .. } => {
+            names.push(relation_name.clone())
+        }
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => {
             for child in children {
                 collect_relation_names(child, names);
             }
         }
         Plan::Hash { input, .. }
+        | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -1191,10 +1198,11 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
 fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
     match plan {
         Plan::Aggregate { .. } => Some(plan),
-        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
-            children.iter().find_map(find_aggregate_plan)
-        }
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().find_map(find_aggregate_plan),
         Plan::Hash { input, .. }
+        | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -1219,6 +1227,7 @@ fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
         } => find_aggregate_plan(left).or_else(|| find_aggregate_plan(right)),
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::Values { .. }
