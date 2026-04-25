@@ -1,3 +1,4 @@
+use crate::backend::executor::expr_geometry::eval_geometry_function;
 use crate::backend::executor::expr_numeric::eval_power_function;
 use crate::backend::executor::expr_ops::{
     add_values, bitwise_and_values, bitwise_not_value, bitwise_or_values, bitwise_xor_values,
@@ -717,6 +718,11 @@ fn evaluate_const_func(
     implementation: ScalarFunctionImpl,
     args: &[Value],
 ) -> Result<Option<Value>, ExecError> {
+    if let ScalarFunctionImpl::Builtin(builtin) = implementation
+        && let Some(result) = eval_geometry_function(builtin, args)
+    {
+        return result.map(Some);
+    }
     match implementation {
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Power) => {
             eval_power_function(args).map(Some)

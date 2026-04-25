@@ -3,8 +3,8 @@ use crate::backend::commands::tablecmds::collect_matching_rows_heap;
 use crate::backend::executor::value_io::format_failing_row_detail;
 use crate::backend::executor::{ExecutorContext, eval_expr};
 use crate::backend::parser::{
-    BoundCheckConstraint, BoundForeignKeyConstraint, BoundTemporalConstraint,
-    ForeignKeyConstraintAction,
+    BoundCheckConstraint, BoundExclusionConstraint, BoundForeignKeyConstraint,
+    BoundTemporalConstraint, ForeignKeyConstraintAction,
 };
 use crate::include::catalog::{
     CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
@@ -220,6 +220,65 @@ fn bound_temporal_constraint_from_action(
     })
 }
 
+fn bound_exclusion_constraint_from_action(
+    relation: &crate::backend::parser::BoundRelation,
+    action: &crate::backend::parser::IndexBackedConstraintAction,
+    operator_oids: Vec<u32>,
+    catalog: &dyn CatalogLookup,
+) -> Result<BoundExclusionConstraint, ExecError> {
+    let mut column_names = Vec::with_capacity(action.columns.len());
+    let mut column_indexes = Vec::with_capacity(action.columns.len());
+    for column_name in &action.columns {
+        let index = relation
+            .desc
+            .columns
+            .iter()
+            .enumerate()
+            .find_map(|(index, column)| {
+                (!column.dropped && column.name.eq_ignore_ascii_case(column_name)).then_some(index)
+            })
+            .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.clone())))?;
+        column_names.push(relation.desc.columns[index].name.clone());
+        column_indexes.push(index);
+    }
+    if column_indexes.len() != operator_oids.len() {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "one exclusion operator per key column",
+            actual: format!(
+                "{} columns and {} operators",
+                column_indexes.len(),
+                operator_oids.len()
+            ),
+        }));
+    }
+    let operator_proc_oids = operator_oids
+        .iter()
+        .map(|operator_oid| {
+            catalog
+                .operator_by_oid(*operator_oid)
+                .map(|operator| operator.oprcode)
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "exclusion constraint operator",
+                        actual: format!("unknown operator oid {operator_oid}"),
+                    })
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(BoundExclusionConstraint {
+        constraint_oid: 0,
+        constraint_name: action
+            .constraint_name
+            .clone()
+            .expect("normalized exclusion constraint name"),
+        column_names,
+        column_indexes,
+        operator_oids,
+        operator_proc_oids,
+        enforced: true,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_temporal_constraint_rows(
     db: &Database,
@@ -236,6 +295,30 @@ fn validate_temporal_constraint_rows(
     let rows =
         collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
     crate::backend::commands::tablecmds::validate_temporal_constraint_existing_rows(
+        relation_name,
+        &relation.desc,
+        constraint,
+        &rows,
+        &mut ctx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_exclusion_constraint_rows(
+    db: &Database,
+    relation: &crate::backend::parser::BoundRelation,
+    relation_name: &str,
+    constraint: &BoundExclusionConstraint,
+    catalog: &dyn CatalogLookup,
+    client_id: ClientId,
+    xid: TransactionId,
+    cid: CommandId,
+    interrupts: std::sync::Arc<crate::backend::utils::misc::interrupts::InterruptState>,
+) -> Result<(), ExecError> {
+    let mut ctx = ddl_executor_context(db, catalog, client_id, xid, cid, interrupts)?;
+    let rows =
+        collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
+    crate::backend::commands::tablecmds::validate_exclusion_constraint_existing_rows(
         relation_name,
         &relation.desc,
         constraint,
@@ -1031,6 +1114,24 @@ impl Database {
                     .cloned()
                     .map(crate::backend::parser::IndexColumnDef::from)
                     .collect::<Vec<_>>();
+                let mut storage_columns = index_columns.clone();
+                storage_columns.extend(
+                    action
+                        .include_columns
+                        .iter()
+                        .cloned()
+                        .map(crate::backend::parser::IndexColumnDef::from),
+                );
+                let exclusion_operator_oids = if action.exclusion {
+                    Some(self.exclusion_constraint_operator_oids_for_desc(
+                        &relation.desc,
+                        &action.columns,
+                        &action.exclusion_operators,
+                        &catalog,
+                    )?)
+                } else {
+                    None
+                };
                 if action.without_overlaps.is_some() {
                     let temporal = bound_temporal_constraint_from_action(&relation, &action)?;
                     validate_temporal_constraint_rows(
@@ -1045,26 +1146,55 @@ impl Database {
                         std::sync::Arc::clone(&interrupts),
                     )?;
                 }
-                let (access_method_oid, access_method_handler, build_options) =
-                    if action.without_overlaps.is_some() {
-                        self.resolve_temporal_index_build_options(
-                            client_id,
-                            Some((xid, index_cid)),
-                            &relation,
-                            &index_columns,
-                        )?
-                    } else {
-                        self.resolve_simple_index_build_options(
-                            client_id,
-                            Some((xid, index_cid)),
-                            "btree",
-                            &relation,
-                            &index_columns,
-                            &[],
-                        )?
-                    };
+                if let Some(operator_oids) = exclusion_operator_oids.clone() {
+                    let exclusion = bound_exclusion_constraint_from_action(
+                        &relation,
+                        &action,
+                        operator_oids,
+                        &catalog,
+                    )?;
+                    validate_exclusion_constraint_rows(
+                        self,
+                        &relation,
+                        &table_name,
+                        &exclusion,
+                        &catalog,
+                        client_id,
+                        xid,
+                        index_cid,
+                        std::sync::Arc::clone(&interrupts),
+                    )?;
+                }
+                let (access_method_oid, access_method_handler, build_options) = if action.exclusion
+                {
+                    self.resolve_simple_index_build_options(
+                        client_id,
+                        Some((xid, index_cid)),
+                        action.access_method.as_deref().unwrap_or("gist"),
+                        &relation,
+                        &index_columns,
+                        &[],
+                    )?
+                } else if action.without_overlaps.is_some() {
+                    self.resolve_temporal_index_build_options(
+                        client_id,
+                        Some((xid, index_cid)),
+                        &relation,
+                        &index_columns,
+                    )?
+                } else {
+                    self.resolve_simple_index_build_options(
+                        client_id,
+                        Some((xid, index_cid)),
+                        "btree",
+                        &relation,
+                        &index_columns,
+                        &[],
+                    )?
+                };
                 let build_options = crate::backend::catalog::CatalogIndexBuildOptions {
                     indimmediate: !action.deferrable,
+                    indisexclusion: action.exclusion || build_options.indisexclusion,
                     ..build_options
                 };
                 let index_entry = self.build_simple_index_in_transaction(
@@ -1072,9 +1202,9 @@ impl Database {
                     &relation,
                     &index_name,
                     catalog.materialize_visible_catalog(),
-                    &index_columns,
+                    &storage_columns,
                     None,
-                    true,
+                    !action.exclusion,
                     action.primary,
                     action.nulls_not_distinct,
                     xid,
@@ -1094,7 +1224,9 @@ impl Database {
                     waiter: None,
                     interrupts,
                 };
-                let conexclop = if action.without_overlaps.is_some() {
+                let conexclop = if let Some(operator_oids) = exclusion_operator_oids {
+                    Some(operator_oids)
+                } else if action.without_overlaps.is_some() {
                     Some(self.temporal_constraint_operator_oids_for_desc(
                         &relation.desc,
                         &action.columns,
@@ -1114,6 +1246,8 @@ impl Database {
                         constraint_name,
                         if action.primary {
                             CONSTRAINT_PRIMARY
+                        } else if action.exclusion {
+                            crate::include::catalog::CONSTRAINT_EXCLUSION
                         } else {
                             CONSTRAINT_UNIQUE
                         },

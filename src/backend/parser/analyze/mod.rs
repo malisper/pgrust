@@ -37,10 +37,9 @@ use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
     PgCollationRow, PgConstraintRow, PgEnumRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
-    PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgPartitionedTableRow, PgProcRow, PgRangeRow, PgRewriteRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTsConfigRow, PgTsDictRow,
-    PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows,
+    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgPartitionedTableRow, PgProcRow, PgRangeRow,
+    PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTsConfigRow,
+    PgTsDictRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows,
     bootstrap_pg_collation_rows, bootstrap_pg_enum_rows, bootstrap_pg_language_rows,
     bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
     bootstrap_pg_proc_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
@@ -82,7 +81,8 @@ pub(crate) use collation::{
 };
 pub(crate) use constraints::*;
 pub(crate) use constraints::{
-    BoundReferencedByForeignKey, BoundRelationConstraints, BoundTemporalConstraint,
+    BoundExclusionConstraint, BoundReferencedByForeignKey, BoundRelationConstraints,
+    BoundTemporalConstraint,
 };
 pub use create_table::*;
 pub use create_table_inherits::*;

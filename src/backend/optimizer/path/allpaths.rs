@@ -429,7 +429,6 @@ fn collect_relation_access_paths(
         .filter(|index| {
             index.index_meta.indisvalid
                 && index.index_meta.indisready
-                && !index.index_meta.indisexclusion
                 && !index.index_meta.indkey.is_empty()
         })
     {
@@ -495,7 +494,6 @@ fn collect_relation_ordered_index_paths(
         .filter(|index| {
             index.index_meta.indisvalid
                 && index.index_meta.indisready
-                && !index.index_meta.indisexclusion
                 && !index.index_meta.indkey.is_empty()
         })
     {

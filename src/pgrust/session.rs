@@ -1676,6 +1676,24 @@ impl Session {
                     self.maintenance_work_mem_kb()?,
                 )
             }
+            Statement::ReindexIndex(ref reindex_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_reindex_index_stmt_with_search_path(
+                        self.client_id,
+                        reindex_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::AlterTableOwner(ref alter_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -3485,6 +3503,22 @@ impl Session {
                     search_path.as_deref(),
                     maintenance_work_mem_kb,
                     catalog_effects,
+                )
+            }
+            Statement::ReindexIndex(ref reindex_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                if let Some(index) = catalog.lookup_any_relation(&reindex_stmt.index_name) {
+                    self.lock_table_if_needed(db, index.rel, TableLockMode::AccessExclusive)?;
+                }
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_reindex_index_stmt_in_transaction_with_search_path(
+                    client_id,
+                    reindex_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
                 )
             }
             Statement::CreateStatistics(ref create_stmt) => {

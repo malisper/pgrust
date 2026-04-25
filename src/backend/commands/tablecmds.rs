@@ -18,14 +18,14 @@ use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::optimizer::{finalize_expr_subqueries, planner};
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
-    BoundDeleteStatement, BoundDeleteTarget, BoundForeignKeyConstraint, BoundIndexRelation,
-    BoundInsertSource, BoundInsertStatement, BoundMergeAction, BoundMergeStatement,
-    BoundMergeWhenClause, BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey,
-    BoundRelation, BoundRelationConstraints, BoundTemporalConstraint, BoundUpdateStatement,
-    BoundUpdateTarget, Catalog, CatalogLookup, DropTableStatement, ExplainStatement,
-    ForeignKeyAction, MaintenanceTarget, MergeStatement, ParseError, SelectStatement, SqlType,
-    SqlTypeKind, Statement, TruncateTableStatement, UpdateStatement, VacuumStatement,
-    bind_create_table, bind_generated_expr, bind_referenced_by_foreign_keys,
+    BoundDeleteStatement, BoundDeleteTarget, BoundExclusionConstraint, BoundForeignKeyConstraint,
+    BoundIndexRelation, BoundInsertSource, BoundInsertStatement, BoundMergeAction,
+    BoundMergeStatement, BoundMergeWhenClause, BoundModifyRowSource, BoundOnConflictAction,
+    BoundReferencedByForeignKey, BoundRelation, BoundRelationConstraints, BoundTemporalConstraint,
+    BoundUpdateStatement, BoundUpdateTarget, Catalog, CatalogLookup, DropTableStatement,
+    ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement, ParseError,
+    SelectStatement, SqlType, SqlTypeKind, Statement, TruncateTableStatement, UpdateStatement,
+    VacuumStatement, bind_create_table, bind_generated_expr, bind_referenced_by_foreign_keys,
     bind_relation_constraints, bind_scalar_expr_in_scope, bind_update,
 };
 use crate::backend::rewrite::RlsWriteCheck;
@@ -1070,6 +1070,16 @@ pub(crate) fn write_insert_heap_row(
         None,
         ctx,
     )?;
+    enforce_exclusion_constraints_for_write(
+        relation_name,
+        rel,
+        toast,
+        desc,
+        relation_constraints,
+        values,
+        None,
+        ctx,
+    )?;
     crate::backend::executor::enforce_outbound_foreign_keys(
         relation_name,
         &relation_constraints.foreign_keys,
@@ -1159,6 +1169,16 @@ pub(crate) fn write_updated_row(
         ctx,
     )?;
     enforce_temporal_constraints_for_write(
+        relation_name,
+        rel,
+        toast,
+        desc,
+        relation_constraints,
+        &current_values,
+        Some(current_tid),
+        ctx,
+    )?;
+    enforce_exclusion_constraints_for_write(
         relation_name,
         rel,
         toast,
@@ -1381,6 +1401,211 @@ pub(crate) fn enforce_temporal_constraints_for_write(
         }
     }
     Ok(())
+}
+
+pub(crate) fn enforce_exclusion_constraints_for_write(
+    relation_name: &str,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    desc: &RelationDesc,
+    constraints: &BoundRelationConstraints,
+    values: &[Value],
+    excluded_tid: Option<ItemPointerData>,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for constraint in &constraints.exclusions {
+        if !constraint.enforced || exclusion_constraint_skips_conflict_check(constraint, values) {
+            continue;
+        }
+        let rows = collect_matching_rows_heap(rel, desc, toast, None, ctx)?;
+        for (tid, existing) in rows {
+            if excluded_tid.is_some_and(|excluded| excluded == tid) {
+                continue;
+            }
+            if exclusion_rows_conflict(constraint, values, &existing)? {
+                return Err(exclusion_violation(
+                    desc,
+                    relation_name,
+                    constraint,
+                    values,
+                    &existing,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn enforce_exclusion_constraints_against_values(
+    relation_name: &str,
+    desc: &RelationDesc,
+    constraints: &BoundRelationConstraints,
+    values: &[Value],
+    existing_rows: &[Vec<Value>],
+) -> Result<(), ExecError> {
+    for constraint in &constraints.exclusions {
+        if !constraint.enforced || exclusion_constraint_skips_conflict_check(constraint, values) {
+            continue;
+        }
+        for existing in existing_rows {
+            if exclusion_constraint_skips_conflict_check(constraint, existing) {
+                continue;
+            }
+            if exclusion_rows_conflict(constraint, values, existing)? {
+                return Err(exclusion_violation(
+                    desc,
+                    relation_name,
+                    constraint,
+                    values,
+                    existing,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_exclusion_constraint_existing_rows(
+    relation_name: &str,
+    desc: &RelationDesc,
+    constraint: &BoundExclusionConstraint,
+    rows: &[(ItemPointerData, Vec<Value>)],
+    _ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for (left_pos, (_, left_values)) in rows.iter().enumerate() {
+        if exclusion_constraint_skips_conflict_check(constraint, left_values) {
+            continue;
+        }
+        for (_, right_values) in rows.iter().skip(left_pos + 1) {
+            if exclusion_constraint_skips_conflict_check(constraint, right_values) {
+                continue;
+            }
+            if exclusion_rows_conflict(constraint, left_values, right_values)? {
+                let left_key = exclusion_constraint_key_values(constraint, left_values);
+                let right_key = exclusion_constraint_key_values(constraint, right_values);
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "could not create exclusion constraint \"{}\"",
+                        constraint.constraint_name
+                    ),
+                    detail: Some(
+                        crate::backend::executor::value_io::format_exclusion_create_key_detail(
+                            &exclusion_constraint_columns(desc, constraint),
+                            &left_key,
+                            &right_key,
+                        ),
+                    ),
+                    hint: None,
+                    sqlstate: "23P01",
+                });
+            }
+        }
+    }
+    let _ = relation_name;
+    Ok(())
+}
+
+fn exclusion_constraint_skips_conflict_check(
+    constraint: &BoundExclusionConstraint,
+    values: &[Value],
+) -> bool {
+    constraint
+        .column_indexes
+        .iter()
+        .any(|index| matches!(values.get(*index), Some(Value::Null) | None))
+}
+
+fn exclusion_rows_conflict(
+    constraint: &BoundExclusionConstraint,
+    proposed: &[Value],
+    existing: &[Value],
+) -> Result<bool, ExecError> {
+    for (column_index, proc_oid) in constraint
+        .column_indexes
+        .iter()
+        .zip(constraint.operator_proc_oids.iter())
+    {
+        let left = proposed.get(*column_index).unwrap_or(&Value::Null);
+        let right = existing.get(*column_index).unwrap_or(&Value::Null);
+        if matches!(left, Value::Null) || matches!(right, Value::Null) {
+            return Ok(false);
+        }
+        match eval_exclusion_operator(*proc_oid, left, right)? {
+            Value::Bool(true) => {}
+            Value::Bool(false) | Value::Null => return Ok(false),
+            other => {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "boolean exclusion operator result",
+                    actual: format!("{other:?}"),
+                }));
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn eval_exclusion_operator(proc_oid: u32, left: &Value, right: &Value) -> Result<Value, ExecError> {
+    if let Some(func) = crate::include::catalog::builtin_scalar_function_for_proc_oid(proc_oid)
+        && let Some(result) = crate::backend::executor::expr_geometry::eval_geometry_function(
+            func,
+            &[left.clone(), right.clone()],
+        )
+    {
+        return result;
+    }
+    Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+        "exclusion operator function oid {proc_oid}"
+    ))))
+}
+
+fn exclusion_violation(
+    desc: &RelationDesc,
+    _relation_name: &str,
+    constraint: &BoundExclusionConstraint,
+    proposed: &[Value],
+    existing: &[Value],
+) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "conflicting key value violates exclusion constraint \"{}\"",
+            constraint.constraint_name
+        ),
+        detail: {
+            let proposed_key = exclusion_constraint_key_values(constraint, proposed);
+            let existing_key = exclusion_constraint_key_values(constraint, existing);
+            Some(
+                crate::backend::executor::value_io::format_exclusion_key_detail(
+                    &exclusion_constraint_columns(desc, constraint),
+                    &proposed_key,
+                    &existing_key,
+                ),
+            )
+        },
+        hint: None,
+        sqlstate: "23P01",
+    }
+}
+
+fn exclusion_constraint_key_values(
+    constraint: &BoundExclusionConstraint,
+    values: &[Value],
+) -> Vec<Value> {
+    constraint
+        .column_indexes
+        .iter()
+        .map(|index| values.get(*index).cloned().unwrap_or(Value::Null))
+        .collect()
+}
+
+fn exclusion_constraint_columns(
+    desc: &RelationDesc,
+    constraint: &BoundExclusionConstraint,
+) -> Vec<crate::backend::executor::ColumnDesc> {
+    constraint
+        .column_indexes
+        .iter()
+        .filter_map(|index| desc.columns.get(*index).cloned())
+        .collect()
 }
 
 pub(crate) fn validate_temporal_constraint_existing_rows(
@@ -1732,6 +1957,7 @@ fn relation_write_state_for_foreign_key(
         checks: Vec::new(),
         foreign_keys: Vec::new(),
         temporal: Vec::new(),
+        exclusions: Vec::new(),
     };
     let referenced_by = bind_referenced_by_foreign_keys(
         constraint.child_relation_oid,
@@ -3031,6 +3257,16 @@ fn execute_merge_update_row(
         ctx,
     )?;
     enforce_temporal_constraints_for_write(
+        &stmt.relation_name,
+        stmt.rel,
+        stmt.toast,
+        &stmt.desc,
+        &stmt.relation_constraints,
+        &updated_values,
+        Some(target_tid),
+        ctx,
+    )?;
+    enforce_exclusion_constraints_for_write(
         &stmt.relation_name,
         stmt.rel,
         stmt.toast,
@@ -4523,6 +4759,13 @@ pub(crate) fn execute_insert_rows(
             continue;
         };
         materialize_generated_columns(desc, &mut values, ctx)?;
+        enforce_exclusion_constraints_against_values(
+            relation_name,
+            desc,
+            relation_constraints,
+            &values,
+            &inserted_rows,
+        )?;
         let heap_tid = write_insert_heap_row(
             relation_name,
             rel,
@@ -5670,6 +5913,16 @@ pub(crate) fn apply_base_update_row(
             ctx,
         )?;
         enforce_temporal_constraints_for_write(
+            &target.relation_name,
+            target.rel,
+            target.toast,
+            &target.desc,
+            &target.relation_constraints,
+            &current_values,
+            Some(current_tid),
+            ctx,
+        )?;
+        enforce_exclusion_constraints_for_write(
             &target.relation_name,
             target.rel,
             target.toast,
