@@ -93,6 +93,11 @@ pub const GIST_BOX_PENALTY_PROC_OID: u32 = 2581;
 pub const GIST_BOX_PICKSPLIT_PROC_OID: u32 = 2582;
 pub const GIST_BOX_UNION_PROC_OID: u32 = 2583;
 pub const GIST_BOX_SAME_PROC_OID: u32 = 2584;
+pub const GIST_POINT_CONSISTENT_PROC_OID: u32 = 76030;
+pub const GIST_POINT_UNION_PROC_OID: u32 = 76031;
+pub const GIST_POINT_PENALTY_PROC_OID: u32 = 76032;
+pub const GIST_POINT_PICKSPLIT_PROC_OID: u32 = 76033;
+pub const GIST_POINT_SAME_PROC_OID: u32 = 76034;
 pub const RANGE_GIST_CONSISTENT_PROC_OID: u32 = 3875;
 pub const RANGE_GIST_UNION_PROC_OID: u32 = 3876;
 pub const RANGE_GIST_PENALTY_PROC_OID: u32 = 3879;
@@ -5925,6 +5930,72 @@ fn gist_support_proc_rows() -> Vec<PgProcRow> {
             ]),
             "gist_box_distance",
             5,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            GIST_POINT_CONSISTENT_PROC_OID,
+            "gist_point_consistent",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[
+                INTERNAL_TYPE_OID,
+                POINT_TYPE_OID,
+                INT2_TYPE_OID,
+                OID_TYPE_OID,
+                INTERNAL_TYPE_OID,
+            ]),
+            "gist_point_consistent",
+            5,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            GIST_POINT_UNION_PROC_OID,
+            "gist_point_union",
+            POINT_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "gist_point_union",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            GIST_POINT_PENALTY_PROC_OID,
+            "gist_point_penalty",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "gist_point_penalty",
+            3,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            GIST_POINT_PICKSPLIT_PROC_OID,
+            "gist_point_picksplit",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "gist_point_picksplit",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            GIST_POINT_SAME_PROC_OID,
+            "gist_point_same",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[POINT_TYPE_OID, POINT_TYPE_OID, INTERNAL_TYPE_OID]),
+            "gist_point_same",
+            3,
             false,
             false,
             'f',
