@@ -33,6 +33,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
   REGRESS_RESULTS_DIR: ${{ github.workspace }}/regress-results
+  REGRESS_ARTIFACT_DIR: ${{ github.workspace }}/regress-artifact
   REGRESS_COMMAND_TIMEOUT: ${{ inputs.command_timeout || '210m' }}
   REGRESS_JOBS: ${{ inputs.jobs || '4' }}
   # Pin to the PG18 SHA the project currently develops against. Bump when the
@@ -141,12 +142,46 @@ jobs:
           finalize_regression_step "$status"
           exit 0
 
+      - name: Prepare compact regression artifacts
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -rf "$REGRESS_ARTIFACT_DIR"
+          mkdir -p "$REGRESS_ARTIFACT_DIR"
+
+          for file in summary.json summary.md exit_code.txt; do
+            if [[ -f "$REGRESS_RESULTS_DIR/$file" ]]; then
+              cp "$REGRESS_RESULTS_DIR/$file" "$REGRESS_ARTIFACT_DIR/$file"
+            fi
+          done
+
+          for dir in output diff status fixtures; do
+            if [[ -d "$REGRESS_RESULTS_DIR/$dir" ]]; then
+              mkdir -p "$REGRESS_ARTIFACT_DIR/$dir"
+              cp -R "$REGRESS_RESULTS_DIR/$dir/." "$REGRESS_ARTIFACT_DIR/$dir/"
+            fi
+          done
+
+          {
+            echo "Compact regression artifact bundle."
+            echo "Source results dir: $REGRESS_RESULTS_DIR"
+            echo "Included: summary.json, summary.md, exit_code.txt, output/, diff/, status/, fixtures/"
+            echo "Excluded: workers/ and tablespaces/ database state"
+            echo
+            if [[ -d "$REGRESS_RESULTS_DIR" ]]; then
+              du -sh "$REGRESS_RESULTS_DIR" || true
+            else
+              echo "Source results dir was missing."
+            fi
+            du -sh "$REGRESS_ARTIFACT_DIR" || true
+          } > "$REGRESS_ARTIFACT_DIR/artifact_manifest.txt"
+
       - name: Upload regression artifacts (workflow run)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: regression-results
-          path: ${{ env.REGRESS_RESULTS_DIR }}
+          path: ${{ env.REGRESS_ARTIFACT_DIR }}
           if-no-files-found: warn
           retention-days: 90
 
