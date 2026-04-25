@@ -13,12 +13,12 @@ use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
     DeferredForeignKeyTracker, ExecError, ExecutorContext, ExecutorTransactionState,
     SessionReplicationRole, StatementResult, Value, cast_value, execute_planned_stmt,
-    execute_readonly_statement, parse_bytea_text,
+    execute_readonly_statement_with_config, parse_bytea_text,
 };
 use crate::backend::parser::{
     CatalogLookup, CopyFromStatement, CopySource, DetachPartitionMode, ParseError, ParseOptions,
     PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared,
-    bind_update, pg_plan_query, plan_merge,
+    bind_update, pg_plan_query_with_config, plan_merge,
 };
 use crate::backend::rewrite::relation_has_row_security;
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
@@ -39,6 +39,7 @@ use crate::backend::utils::misc::interrupts::{InterruptState, StatementInterrupt
 use crate::backend::utils::misc::stack_depth::StackDepthGuard;
 use crate::include::catalog::PG_CHECKPOINT_OID;
 use crate::include::nodes::execnodes::ScalarType;
+use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::autovacuum::is_autovacuum_guc;
 use crate::pgrust::database::{
@@ -487,6 +488,16 @@ impl Session {
             .get("row_security")
             .map(|value| parse_bool_guc(value).unwrap_or(true))
             .unwrap_or(true)
+    }
+
+    pub(crate) fn planner_config(&self) -> PlannerConfig {
+        PlannerConfig {
+            enable_partitionwise_join: self
+                .gucs
+                .get("enable_partitionwise_join")
+                .map(|value| parse_bool_guc(value).unwrap_or(false))
+                .unwrap_or(false),
+        }
     }
 
     pub(crate) fn session_replication_role(&self) -> SessionReplicationRole {
@@ -2357,12 +2368,13 @@ impl Session {
                     result
                 } else {
                     let search_path = self.configured_search_path();
-                    db.execute_statement_with_search_path_datetime_config_and_gucs(
+                    db.execute_statement_with_search_path_datetime_config_gucs_and_planner_config(
                         self.client_id,
                         stmt,
                         search_path.as_deref(),
                         &self.datetime_config,
                         &self.gucs,
+                        self.planner_config(),
                     )
                 }
             }
@@ -2512,7 +2524,7 @@ impl Session {
             .is_none()
             .then(|| db.allocate_statement_lock_scope_id());
         let search_path = self.configured_search_path();
-        let mut guard = db.execute_streaming_with_search_path_and_datetime_config(
+        let mut guard = db.execute_streaming_with_config(
             self.client_id,
             select_stmt,
             txn_ctx,
@@ -2520,6 +2532,7 @@ impl Session {
             transaction_lock_scope_id,
             search_path.as_deref(),
             &self.datetime_config,
+            self.planner_config(),
         )?;
         guard.interrupt_guard = Some(self.statement_interrupt_guard()?);
         Ok(guard)
@@ -4196,9 +4209,17 @@ impl Session {
                 );
                 let result = match stmt {
                     Statement::Select(select) if select.locking_clause.is_some() => {
-                        execute_planned_stmt(pg_plan_query(&select, &catalog)?, &mut ctx)
+                        execute_planned_stmt(
+                            pg_plan_query_with_config(&select, &catalog, self.planner_config())?,
+                            &mut ctx,
+                        )
                     }
-                    other => execute_readonly_statement(other, &catalog, &mut ctx),
+                    other => execute_readonly_statement_with_config(
+                        other,
+                        &catalog,
+                        &mut ctx,
+                        self.planner_config(),
+                    ),
                 };
                 if let Some(xid) = ctx.transaction_xid()
                     && let Some(txn) = self.active_txn.as_mut()
@@ -4765,6 +4786,8 @@ impl Session {
         } else if name == "session_replication_role" {
             db.install_session_replication_role(self.client_id, self.session_replication_role());
             db.plan_cache.invalidate_all();
+        } else if name == "enable_partitionwise_join" {
+            db.plan_cache.invalidate_all();
         }
         Ok(StatementResult::AffectedRows(0))
     }
@@ -4811,6 +4834,8 @@ impl Session {
                     self.session_replication_role(),
                 );
                 db.plan_cache.invalidate_all();
+            } else if normalized == "enable_partitionwise_join" {
+                db.plan_cache.invalidate_all();
             }
         } else {
             self.gucs.clear();
@@ -4851,6 +4876,7 @@ impl Session {
                 "timezone" => default_timezone().to_string(),
                 "xmlbinary" => format_xmlbinary(self.datetime_config.xml.binary).to_string(),
                 "xmloption" => format_xmloption(self.datetime_config.xml.option).to_string(),
+                "enable_partitionwise_join" => "off".to_string(),
                 _ => default_runtime_guc_value(&name)
                     .map(str::to_string)
                     .unwrap_or_else(|| "default".to_string()),
@@ -5014,7 +5040,7 @@ impl Session {
                     .write()
                     .set_track_functions(track_functions);
             }
-            "row_security" => {
+            "row_security" | "enable_partitionwise_join" => {
                 parse_bool_guc(value).ok_or_else(|| {
                     ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
                 })?;

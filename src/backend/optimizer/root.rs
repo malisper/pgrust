@@ -4,7 +4,7 @@ use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, QueryRowMark, RangeTblEntry, RangeTblEntryKind, SelectLockingClause,
 };
-use crate::include::nodes::pathnodes::{PathTarget, PlannerInfo, RelOptInfo};
+use crate::include::nodes::pathnodes::{PathTarget, PlannerConfig, PlannerInfo, RelOptInfo};
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, Aggref, Expr, SetReturningCall, SortGroupClause, SubLink, SubLinkType,
     TargetEntry, Var, expr_contains_set_returning, is_system_attr, set_returning_call_exprs,
@@ -794,6 +794,10 @@ fn prepare_expr_for_locking(expr: Expr) -> Result<Expr, ParseError> {
 
 impl PlannerInfo {
     pub fn new(parse: Query) -> Self {
+        Self::new_with_config(parse, PlannerConfig::default())
+    }
+
+    pub fn new_with_config(parse: Query, config: PlannerConfig) -> Self {
         let processed_tlist = make_processed_tlist(&parse);
         let final_target = PathTarget::from_target_list(&parse.target_list);
         let query_pathkeys = PathTarget::from_sort_clause(&parse.sort_clause, &processed_tlist);
@@ -823,6 +827,7 @@ impl PlannerInfo {
         let simple_rel_array = build_simple_rel_array(&parse.rtable);
         let join_info_list = build_special_join_info(&parse);
         Self {
+            config,
             processed_tlist,
             scanjoin_target,
             group_input_target,

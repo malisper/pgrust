@@ -1,10 +1,12 @@
 use super::super::*;
 use crate::backend::executor::{
     ExecutorTransactionState, SharedExecutorTransactionState, execute_planned_stmt,
+    execute_readonly_statement_with_config,
 };
 use crate::backend::parser::ParseOptions;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::stack_depth::StackDepthGuard;
+use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::pl::plpgsql::execute_do_with_gucs;
 
 impl Database {
@@ -177,6 +179,43 @@ impl Database {
         datetime_config: &DateTimeConfig,
         gucs: &std::collections::HashMap<String, String>,
     ) -> Result<StatementResult, ExecError> {
+        self.execute_statement_with_search_path_datetime_config_gucs_and_planner_config(
+            client_id,
+            stmt,
+            configured_search_path,
+            datetime_config,
+            gucs,
+            PlannerConfig::default(),
+        )
+    }
+
+    pub(crate) fn execute_statement_with_config(
+        &self,
+        client_id: ClientId,
+        stmt: Statement,
+        configured_search_path: Option<&[String]>,
+        datetime_config: &DateTimeConfig,
+        planner_config: PlannerConfig,
+    ) -> Result<StatementResult, ExecError> {
+        self.execute_statement_with_search_path_datetime_config_gucs_and_planner_config(
+            client_id,
+            stmt,
+            configured_search_path,
+            datetime_config,
+            &std::collections::HashMap::new(),
+            planner_config,
+        )
+    }
+
+    pub(crate) fn execute_statement_with_search_path_datetime_config_gucs_and_planner_config(
+        &self,
+        client_id: ClientId,
+        stmt: Statement,
+        configured_search_path: Option<&[String]>,
+        datetime_config: &DateTimeConfig,
+        gucs: &std::collections::HashMap<String, String>,
+        planner_config: PlannerConfig,
+    ) -> Result<StatementResult, ExecError> {
         let statement_lock_scope_id = Some(self.allocate_statement_lock_scope_id());
         let stats_state = self.session_stats_state(client_id);
         stats_state.write().begin_top_level_xact();
@@ -189,6 +228,7 @@ impl Database {
             configured_search_path,
             datetime_config,
             gucs,
+            planner_config,
         );
         if let Some(scope_id) = statement_lock_scope_id {
             advisory_locks.unlock_all_statement(client_id, scope_id);
@@ -269,6 +309,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
         datetime_config: &DateTimeConfig,
         gucs: &std::collections::HashMap<String, String>,
+        planner_config: PlannerConfig,
     ) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::commands::tablecmds::execute_truncate_table;
@@ -815,18 +856,23 @@ impl Database {
                     let mut planned_select = None;
                     match &stmt {
                         Statement::Select(select) => {
-                            let planned_stmt =
-                                crate::backend::parser::pg_plan_query(select, &visible_catalog)?;
+                            let planned_stmt = crate::backend::parser::pg_plan_query_with_config(
+                                select,
+                                &visible_catalog,
+                                planner_config,
+                            )?;
                             collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
                             planned_select = Some(planned_stmt);
                         }
                         Statement::Values(_) => {}
                         Statement::Explain(explain) => {
                             if let Statement::Select(select) = explain.statement.as_ref() {
-                                let planned_stmt = crate::backend::parser::pg_plan_query(
-                                    select,
-                                    &visible_catalog,
-                                )?;
+                                let planned_stmt =
+                                    crate::backend::parser::pg_plan_query_with_config(
+                                        select,
+                                        &visible_catalog,
+                                        planner_config,
+                                    )?;
                                 collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
                             }
                         }
@@ -896,7 +942,12 @@ impl Database {
                 };
                 let result = match planned_select {
                     Some(planned_stmt) => execute_planned_stmt(planned_stmt, &mut ctx),
-                    None => execute_readonly_statement(stmt, &visible_catalog, &mut ctx),
+                    None => execute_readonly_statement_with_config(
+                        stmt,
+                        &visible_catalog,
+                        &mut ctx,
+                        planner_config,
+                    ),
                 };
                 let pending_async_notifications =
                     std::mem::take(&mut ctx.pending_async_notifications);
@@ -1659,6 +1710,29 @@ impl Database {
         configured_search_path: Option<&[String]>,
         datetime_config: &DateTimeConfig,
     ) -> Result<SelectGuard, ExecError> {
+        self.execute_streaming_with_config(
+            client_id,
+            select_stmt,
+            txn_ctx,
+            statement_lock_scope_id,
+            transaction_lock_scope_id,
+            configured_search_path,
+            datetime_config,
+            PlannerConfig::default(),
+        )
+    }
+
+    pub(crate) fn execute_streaming_with_config(
+        &self,
+        client_id: ClientId,
+        select_stmt: &crate::backend::parser::SelectStatement,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+        statement_lock_scope_id: Option<u64>,
+        transaction_lock_scope_id: Option<u64>,
+        configured_search_path: Option<&[String]>,
+        datetime_config: &DateTimeConfig,
+        planner_config: PlannerConfig,
+    ) -> Result<SelectGuard, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::executor::executor_start;
 
@@ -1666,7 +1740,11 @@ impl Database {
         let visible_catalog_snapshot = visible_catalog.materialize_visible_catalog();
         let (query_desc, rels) = {
             let query_desc = crate::backend::executor::create_query_desc(
-                crate::backend::parser::pg_plan_query(select_stmt, &visible_catalog)?,
+                crate::backend::parser::pg_plan_query_with_config(
+                    select_stmt,
+                    &visible_catalog,
+                    planner_config,
+                )?,
                 None,
             );
             let mut rels = std::collections::BTreeSet::new();
