@@ -949,6 +949,8 @@ fn finalize_regr_stats(
     sum_sq_y: f64,
     sum_xy: f64,
 ) -> Value {
+    let sum_sq_x = stable_regr_semidefinite_sum(sum_sq_x, sum_x, count);
+    let sum_sq_y = stable_regr_semidefinite_sum(sum_sq_y, sum_y, count);
     match func {
         AggFunc::RegrCount => Value::Int64(count as i64),
         AggFunc::RegrSxx => regr_value_or_null(count, sum_sq_x),
@@ -968,7 +970,7 @@ fn finalize_regr_stats(
             if count < 1.0 || sum_sq_x == 0.0 || sum_sq_y == 0.0 {
                 Value::Null
             } else {
-                Value::Float64(sum_xy / (sum_sq_x * sum_sq_y).sqrt())
+                Value::Float64(clamp_corr(sum_xy / (sum_sq_x.sqrt() * sum_sq_y.sqrt())))
             }
         }
         AggFunc::RegrR2 => {
@@ -977,7 +979,8 @@ fn finalize_regr_stats(
             } else if sum_sq_y == 0.0 {
                 Value::Float64(1.0)
             } else {
-                Value::Float64((sum_xy * sum_xy) / (sum_sq_x * sum_sq_y))
+                let denom = sum_sq_x.sqrt() * sum_sq_y.sqrt();
+                Value::Float64(clamp_regr_r2((sum_xy / denom).powi(2)))
             }
         }
         AggFunc::RegrSlope => {
@@ -1018,6 +1021,52 @@ fn finalize_regr_stats(
         | AggFunc::RangeAgg
         | AggFunc::XmlAgg
         | AggFunc::RangeIntersectAgg => unreachable!("non-regression aggregate"),
+    }
+}
+
+fn stable_regr_semidefinite_sum(sum_sq: f64, sum: f64, count: f64) -> f64 {
+    if !sum_sq.is_finite() || !sum.is_finite() || count < 1.0 {
+        return sum_sq;
+    }
+
+    let mean = sum / count;
+    let tolerance = 8.0 * f64::EPSILON * count * mean * mean;
+    if sum_sq.abs() <= tolerance {
+        0.0
+    } else {
+        sum_sq
+    }
+}
+
+fn clamp_corr(value: f64) -> f64 {
+    if !value.is_finite() {
+        value
+    } else {
+        let tolerance = 8.0 * f64::EPSILON;
+        if (value - 1.0).abs() <= tolerance {
+            1.0
+        } else if (value + 1.0).abs() <= tolerance {
+            -1.0
+        } else if value.abs() <= tolerance {
+            0.0
+        } else {
+            value.clamp(-1.0, 1.0)
+        }
+    }
+}
+
+fn clamp_regr_r2(value: f64) -> f64 {
+    if !value.is_finite() {
+        value
+    } else {
+        let tolerance = 8.0 * f64::EPSILON;
+        if value.abs() <= tolerance {
+            0.0
+        } else if (value - 1.0).abs() <= tolerance {
+            1.0
+        } else {
+            value.clamp(0.0, 1.0)
+        }
     }
 }
 
