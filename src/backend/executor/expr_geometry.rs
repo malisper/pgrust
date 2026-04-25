@@ -397,7 +397,7 @@ fn parse_path_like(text: &str, ty: &'static str) -> Result<(bool, Vec<GeoPoint>)
     if parser.consume('[') {
         wrapped = true;
         closed = false;
-    } else if parser.consume('(') {
+    } else if parser.leading_paren_is_path_wrapper() {
         wrapped = true;
         closed = true;
     }
@@ -410,6 +410,9 @@ fn parse_path_like(text: &str, ty: &'static str) -> Result<(bool, Vec<GeoPoint>)
         loop {
             points.push(parser.parse_point_pair()?);
             parser.skip_ws();
+            if !wrapped && parser.peek().is_none() {
+                break;
+            }
             if wrapped {
                 let end = if closed { ')' } else { ']' };
                 if parser.consume(end) {
@@ -418,9 +421,6 @@ fn parse_path_like(text: &str, ty: &'static str) -> Result<(bool, Vec<GeoPoint>)
             }
             parser.expect(',')?;
             parser.skip_ws();
-            if !wrapped && parser.peek().is_none() {
-                break;
-            }
         }
     } else {
         let mut numbers = Vec::new();
@@ -2953,6 +2953,22 @@ impl<'a> GeometryParser<'a> {
         }
     }
 
+    fn leading_paren_is_path_wrapper(&mut self) -> bool {
+        self.skip_ws();
+        if self.peek() != Some('(') {
+            return false;
+        }
+
+        let rest = &self.text[self.idx + '('.len_utf8()..];
+        let trimmed_rest = rest.trim_start_matches(|ch: char| ch.is_ascii_whitespace());
+        if trimmed_rest.starts_with('(') || !rest.contains('(') {
+            self.idx += '('.len_utf8();
+            return true;
+        }
+
+        false
+    }
+
     fn expect(&mut self, ch: char) -> Result<(), ExecError> {
         if self.consume(ch) {
             Ok(())
@@ -3004,5 +3020,14 @@ mod tests {
         assert_eq!(lseg.p[0].y, 4.1);
         assert_eq!(lseg.p[1].x, 3.1);
         assert_eq!(lseg.p[1].y, 3.1);
+    }
+
+    #[test]
+    fn parse_lseg_accepts_unwrapped_point_pairs() {
+        let lseg = parse_lseg_text("(0,0),(6,6)").unwrap();
+        assert_eq!(lseg.p[0].x, 0.0);
+        assert_eq!(lseg.p[0].y, 0.0);
+        assert_eq!(lseg.p[1].x, 6.0);
+        assert_eq!(lseg.p[1].y, 6.0);
     }
 }
