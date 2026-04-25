@@ -4703,7 +4703,7 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
                 "expected deduplicated sort key alias, got {rendered:?}"
             );
             assert!(
-                rendered.iter().any(|line| line.trim() == "Append"),
+                rendered.iter().any(|line| line.trim() == "->  Append"),
                 "expected partitionwise append plan, got {rendered:?}"
             );
             assert!(

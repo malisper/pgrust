@@ -2786,7 +2786,7 @@ fn explain_formats_distinct_minmax_with_unique_and_index_only_scan() {
     );
 
     assert!(lines.iter().any(|line| line.trim() == "Unique"));
-    assert!(lines.iter().any(|line| line.trim() == "Result"));
+    assert!(lines.iter().any(|line| line.trim() == "->  Result"));
     assert!(lines.iter().any(|line| line.contains("Index Only Scan")));
 }
 
