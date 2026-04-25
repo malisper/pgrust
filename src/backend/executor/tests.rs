@@ -10781,7 +10781,7 @@ fn numeric_math_misc_helpers_cover_log_factorial_and_pg_lsn() {
                         Value::Numeric("1.0000000000000000".into()),
                         Value::Numeric("2.0703893278913979".into()),
                         Value::Numeric("24".into()),
-                        Value::Text("0/16AE7F8".into()),
+                        Value::PgLsn(23783416),
                         Value::Numeric("-7".into()),
                         Value::Numeric("-8".into()),
                         Value::Numeric("-1".into()),

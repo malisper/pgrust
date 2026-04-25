@@ -11,7 +11,7 @@ use super::expr_bit::{
     concat_bit_strings, shift_left as shift_left_bits, shift_right as shift_right_bits,
 };
 use super::expr_bool::order_bool_values;
-use super::expr_casts::cast_value;
+use super::expr_casts::{cast_value, pg_lsn_out_of_range};
 use super::expr_money::{
     money_add, money_cash_div, money_cmp, money_div_float, money_div_int, money_mul_float,
     money_mul_int, money_sub,
@@ -84,6 +84,7 @@ pub(crate) fn compare_order_values(
         }
         (Value::Int32(a), Value::Int32(b)) => Ok(a.cmp(b)),
         (Value::Int64(a), Value::Int64(b)) => Ok(a.cmp(b)),
+        (Value::PgLsn(a), Value::PgLsn(b)) => Ok(a.cmp(b)),
         (Value::Int16(a), Value::Float64(b)) => Ok(pg_float_cmp(f64::from(*a), *b)),
         (Value::Int32(a), Value::Float64(b)) => Ok(pg_float_cmp(f64::from(*a), *b)),
         (Value::Int64(a), Value::Float64(b)) => Ok(pg_float_cmp(*a as f64, *b)),
@@ -193,6 +194,7 @@ pub(crate) fn compare_values(
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i64))),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(*l == (*r as i64))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(l == r)),
+        (Value::PgLsn(l), Value::PgLsn(r)) => Ok(Value::Bool(l == r)),
         (Value::Money(l), Value::Money(r)) => Ok(Value::Bool(l == r)),
         (Value::Date(l), Value::Date(r)) => Ok(Value::Bool(l == r)),
         (Value::Time(l), Value::Time(r)) => Ok(Value::Bool(l == r)),
@@ -322,6 +324,7 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (Value::Int64(l), Value::Int16(r)) => *l != (*r as i64),
         (Value::Int64(l), Value::Int32(r)) => *l != (*r as i64),
         (Value::Int64(l), Value::Int64(r)) => l != r,
+        (Value::PgLsn(l), Value::PgLsn(r)) => l != r,
         (Value::Money(l), Value::Money(r)) => l != r,
         (Value::Date(l), Value::Date(r)) => l != r,
         (Value::Time(l), Value::Time(r)) => l != r,
@@ -376,6 +379,12 @@ pub(crate) fn add_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_add_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_add_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_add_i64(*l, *r)?)),
+        (Value::PgLsn(l), r) if parsed_numeric_value(r).is_some() => {
+            Ok(Value::PgLsn(add_pg_lsn_offset(*l, r)?))
+        }
+        (l, Value::PgLsn(r)) if parsed_numeric_value(l).is_some() => {
+            Ok(Value::PgLsn(add_pg_lsn_offset(*r, l)?))
+        }
         (Value::Money(l), Value::Money(r)) => Ok(Value::Money(money_add(*l, *r)?)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l + r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
@@ -403,6 +412,13 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_sub_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_sub_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_sub_i64(*l, *r)?)),
+        (Value::PgLsn(l), Value::PgLsn(r)) => Ok(Value::Numeric(NumericValue::finite(
+            BigInt::from(*l) - BigInt::from(*r),
+            0,
+        ))),
+        (Value::PgLsn(l), r) if parsed_numeric_value(r).is_some() => {
+            Ok(Value::PgLsn(sub_pg_lsn_offset(*l, r)?))
+        }
         (Value::Date(l), Value::Date(r)) => Ok(Value::Int32(l.0 - r.0)),
         (Value::Money(l), Value::Money(r)) => Ok(Value::Money(money_sub(*l, *r)?)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l - r)),
@@ -768,6 +784,7 @@ pub(crate) fn order_values(
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::PgLsn(l), Value::PgLsn(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Money(l), Value::Money(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Bit(l), Value::Bit(r)) => {
             let ordering = compare_bit_strings(l, r);
@@ -1513,6 +1530,37 @@ fn parsed_numeric_value(value: &Value) -> Option<NumericValue> {
         Value::Float64(_) => None,
         _ => None,
     }
+}
+
+fn numeric_value_to_i128(value: &Value, nan_message: &'static str) -> Result<i128, ExecError> {
+    match parsed_numeric_value(value).ok_or_else(|| ExecError::TypeMismatch {
+        op: "pg_lsn numeric offset",
+        left: value.clone(),
+        right: Value::Null,
+    })? {
+        NumericValue::Finite { coeff, scale, .. } if scale == 0 => {
+            coeff.to_i128().ok_or_else(pg_lsn_out_of_range)
+        }
+        NumericValue::NaN => Err(ExecError::DetailedError {
+            message: nan_message.into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22003",
+        }),
+        _ => Err(pg_lsn_out_of_range()),
+    }
+}
+
+fn add_pg_lsn_offset(lsn: u64, offset: &Value) -> Result<u64, ExecError> {
+    let offset = numeric_value_to_i128(offset, "cannot add NaN to pg_lsn")?;
+    let result = i128::from(lsn) + offset;
+    u64::try_from(result).map_err(|_| pg_lsn_out_of_range())
+}
+
+fn sub_pg_lsn_offset(lsn: u64, offset: &Value) -> Result<u64, ExecError> {
+    let offset = numeric_value_to_i128(offset, "cannot subtract NaN from pg_lsn")?;
+    let result = i128::from(lsn) - offset;
+    u64::try_from(result).map_err(|_| pg_lsn_out_of_range())
 }
 
 fn exact_numeric_binary(

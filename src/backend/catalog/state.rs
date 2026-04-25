@@ -2559,6 +2559,7 @@ fn format_sql_type_name(sql_type: SqlType) -> String {
             SqlTypeKind::Xml => "_xml",
             SqlTypeKind::TsVector => "_tsvector",
             SqlTypeKind::TsQuery => "_tsquery",
+            SqlTypeKind::PgLsn => "_pg_lsn",
             SqlTypeKind::RegConfig => "_regconfig",
             SqlTypeKind::RegDictionary => "_regdictionary",
             SqlTypeKind::Int2Vector
@@ -2660,6 +2661,7 @@ fn format_sql_type_name(sql_type: SqlType) -> String {
         SqlTypeKind::Circle => "circle",
         SqlTypeKind::TsVector => "tsvector",
         SqlTypeKind::TsQuery => "tsquery",
+        SqlTypeKind::PgLsn => "pg_lsn",
         SqlTypeKind::RegConfig => "regconfig",
         SqlTypeKind::RegDictionary => "regdictionary",
         SqlTypeKind::PgNodeTree => "pg_node_tree",

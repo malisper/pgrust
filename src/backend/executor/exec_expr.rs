@@ -2194,6 +2194,7 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
         Value::Int16(_) => 2,
         Value::Int32(_) | Value::Date(_) | Value::InternalChar(_) => 4,
         Value::Int64(_)
+        | Value::PgLsn(_)
         | Value::Money(_)
         | Value::Float64(_)
         | Value::Time(_)

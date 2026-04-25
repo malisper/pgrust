@@ -3108,6 +3108,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 });
             }
             if !*func_variadic
+                && !name.eq_ignore_ascii_case("pg_lsn")
                 && let Some(target_type) = resolve_function_cast_type(catalog, name)
                 && args_list.len() == 1
                 && args_list.iter().all(|arg| arg.name.is_none())

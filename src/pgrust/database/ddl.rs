@@ -889,6 +889,7 @@ pub(crate) fn format_sql_type_name(sql_type: SqlType) -> String {
         SqlTypeKind::TimeTz => "time with time zone",
         SqlTypeKind::TsVector => "tsvector",
         SqlTypeKind::TsQuery => "tsquery",
+        SqlTypeKind::PgLsn => "pg_lsn",
         SqlTypeKind::RegConfig => "regconfig",
         SqlTypeKind::RegDictionary => "regdictionary",
         SqlTypeKind::Text => "text",
