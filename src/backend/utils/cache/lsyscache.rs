@@ -1783,6 +1783,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         )
     }
 
+    fn type_default_sql(&self, type_oid: u32) -> Option<String> {
+        self.db.base_type_default(type_oid)
+    }
+
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
         visible_type_oid_for_sql_type(
             self.db,

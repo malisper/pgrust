@@ -9,6 +9,7 @@ use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
 use crate::backend::utils::misc::notices::{
     clear_notices as clear_backend_notices, take_notices as take_backend_notices,
 };
+use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BootstrapCatalogKind, CSTRING_TYPE_OID, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
     PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
@@ -11626,6 +11627,53 @@ fn create_function_creates_and_references_shell_return_type() {
         }
         other => panic!("expected shell column rejection, got {other:?}"),
     }
+}
+
+#[test]
+fn create_type_base_completes_shell_and_applies_type_default() {
+    let base = temp_dir("base_type_create_default");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create type int42").unwrap();
+    db.execute(
+        1,
+        "create function int42_in(cstring) returns int42 as 'pg_rust_test_int42_in' language internal strict immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function int42_out(int42) returns cstring as 'pg_rust_test_int42_out' language internal strict immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create type int42 (internallength = 4, input = int42_in, output = int42_out, alignment = int4, default = 42, passedbyvalue)",
+    )
+    .unwrap();
+
+    let catalog = db.lazy_catalog_lookup(1, None, None);
+    let int42_type = catalog.type_by_name("int42").expect("int42 type row");
+    let int42_array = catalog
+        .type_by_name("_int42")
+        .expect("int42 array type row");
+    assert_eq!(int42_type.sql_type.kind, SqlTypeKind::Text);
+    assert_eq!(int42_type.sql_type.type_oid, int42_type.oid);
+    assert_eq!(int42_type.typlen, 4);
+    assert_eq!(int42_type.typalign, AttributeAlign::Int);
+    assert_eq!(int42_type.typstorage, AttributeStorage::Plain);
+    assert_eq!(int42_type.typelem, 0);
+    assert_eq!(int42_type.typarray, int42_array.oid);
+    assert_eq!(int42_array.typelem, int42_type.oid);
+    drop(catalog);
+
+    db.execute(1, "create table int42_rows (value int42)")
+        .unwrap();
+    db.execute(1, "insert into int42_rows default values")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select value from int42_rows"),
+        vec![vec![Value::Text("42".into())]]
+    );
 }
 
 #[test]

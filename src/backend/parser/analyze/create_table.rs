@@ -202,7 +202,13 @@ pub fn lower_create_table(
                     desc.identity = Some(identity);
                 } else {
                     desc.default_expr = column.default_expr.clone();
-                    desc.missing_default_value = column
+                    if desc.default_expr.is_none()
+                        && let Some(type_oid) = catalog.type_oid_for_sql_type(sql_type)
+                        && let Some(type_default) = catalog.type_default_sql(type_oid)
+                    {
+                        desc.default_expr = Some(type_default);
+                    }
+                    desc.missing_default_value = desc
                         .default_expr
                         .as_deref()
                         .and_then(|sql| super::derive_literal_default_value(sql, sql_type).ok());

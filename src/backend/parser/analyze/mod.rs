@@ -781,6 +781,10 @@ pub trait CatalogLookup {
         None
     }
 
+    fn type_default_sql(&self, _type_oid: u32) -> Option<String> {
+        None
+    }
+
     fn range_rows(&self) -> Vec<PgRangeRow> {
         builtin_range_rows()
     }

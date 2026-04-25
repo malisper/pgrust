@@ -382,8 +382,8 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
         SqlTypeKind::Record => 1,
         SqlTypeKind::Composite => 2,
         SqlTypeKind::Internal => 64,
-        SqlTypeKind::Shell => 77,
-        SqlTypeKind::Cstring => 76,
+        SqlTypeKind::Shell => 78,
+        SqlTypeKind::Cstring => 79,
         SqlTypeKind::Trigger => 54,
         SqlTypeKind::Void => 51,
         SqlTypeKind::FdwHandler => 69,
@@ -501,8 +501,8 @@ fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
         1 => SqlTypeKind::Record,
         2 => SqlTypeKind::Composite,
         64 => SqlTypeKind::Internal,
-        77 => SqlTypeKind::Shell,
-        76 => SqlTypeKind::Cstring,
+        78 => SqlTypeKind::Shell,
+        79 => SqlTypeKind::Cstring,
         54 => SqlTypeKind::Trigger,
         51 => SqlTypeKind::Void,
         69 => SqlTypeKind::FdwHandler,
@@ -1972,6 +1972,7 @@ pub(crate) fn decode_value_with_toast(
                     column: column.name.clone(),
                     ty: column.ty.clone(),
                     attlen: column.storage.attlen,
+                    actual_len: Some(bytes.len()),
                 });
             }
             Ok(Value::EnumOid(u32::from_le_bytes(
@@ -2110,6 +2111,7 @@ pub(crate) fn decode_value_with_toast(
                     column: column.name.clone(),
                     ty: column.ty.clone(),
                     attlen: column.storage.attlen,
+                    actual_len: Some(bytes.len()),
                 });
             }
             parse_macaddr_bytes(bytes).map(Value::MacAddr)
@@ -2120,6 +2122,7 @@ pub(crate) fn decode_value_with_toast(
                     column: column.name.clone(),
                     ty: column.ty.clone(),
                     attlen: column.storage.attlen,
+                    actual_len: Some(bytes.len()),
                 });
             }
             parse_macaddr8_bytes(bytes).map(Value::MacAddr8)
