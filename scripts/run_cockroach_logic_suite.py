@@ -304,6 +304,8 @@ def run_record_replay(
         cmd.extend(["--limit", str(args.record_replay_limit)])
     if args.record_replay_jobs is not None:
         cmd.extend(["--jobs", str(args.record_replay_jobs)])
+    if args.record_replay_expected_success_only:
+        cmd.append("--expected-success-only")
 
     proc = subprocess.run(cmd, cwd=repo_root(), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     replay_log.write_text(proc.stdout)
@@ -324,6 +326,8 @@ def run_record_replay(
         "summary_path": str(summary_path),
         "jobs": summary.get("jobs"),
         "elapsed_seconds": summary.get("elapsed_seconds"),
+        "target_filter": summary.get("target_filter"),
+        "source_total_records": summary.get("source_total_records"),
         "totals": summary["totals"],
     }
 
@@ -348,6 +352,7 @@ def main() -> int:
     parser.add_argument("--record-replay", action="store_true")
     parser.add_argument("--record-replay-limit", type=int)
     parser.add_argument("--record-replay-jobs", type=int)
+    parser.add_argument("--record-replay-expected-success-only", action="store_true")
     parser.add_argument("--record-replay-port-base", type=int, default=6450)
     args = parser.parse_args()
 

@@ -55,6 +55,10 @@ class SltRecord:
         return self.header.startswith("statement error") or self.header.startswith("query error")
 
     @property
+    def expected_outcome(self) -> str:
+        return "error" if self.expected_error else "success"
+
+    @property
     def first_sql_line(self) -> str:
         return self.sql.splitlines()[0] if self.sql else ""
 
@@ -258,6 +262,7 @@ def run_target(
         "kind": target.kind,
         "header": target.header,
         "sql": target.sql,
+        "expected_outcome": target.expected_outcome,
         "status": status,
         "exit_code": proc.returncode,
         "replay_file": str(replay_file),
@@ -325,6 +330,7 @@ def main() -> int:
     parser.add_argument("--port-base", type=int, default=6450)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--jobs", type=int, default=1)
+    parser.add_argument("--expected-success-only", action="store_true")
     parser.add_argument("--keep-data", action="store_true")
     args = parser.parse_args()
     if args.jobs < 1:
@@ -338,7 +344,9 @@ def main() -> int:
     sqllogictest_bin = resolve_sqllogictest_bin(args)
 
     records = parse_slt(args.file)
-    targets = records[: args.limit] if args.limit is not None else records
+    targets = [record for record in records if not record.expected_error] if args.expected_success_only else records
+    if args.limit is not None:
+        targets = targets[: args.limit]
     port_allocator = PortAllocator()
     replay_jobs = []
     results: list[dict[str, object]] = []
@@ -383,6 +391,8 @@ def main() -> int:
         "results_dir": str(args.results_dir),
         "metric": "independent_record_replay",
         "setup_policy": "replay earlier successful stateful records as statement ok",
+        "target_filter": "expected_success_only" if args.expected_success_only else "all_records",
+        "source_total_records": len(records),
         "jobs": args.jobs,
         "elapsed_seconds": elapsed_seconds,
         "records": results,
