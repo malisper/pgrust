@@ -14311,7 +14311,7 @@ fn explain_ordered_equijoin_can_choose_merge_join() {
             assert!(
                 lines
                     .iter()
-                    .any(|line| line.trim_start().starts_with("Merge Join  ")),
+                    .any(|line| line.trim_start().starts_with("->  Merge Join  ")),
                 "expected ordered equijoin to choose merge join, got {lines:?}"
             );
 
@@ -14354,13 +14354,13 @@ fn explain_cte_self_join_pushes_single_rel_filter_below_join() {
         .unwrap_or_else(|| panic!("expected nested loop explain output, got {lines:?}"));
     let filtered_child_pos = lines
         .iter()
-        .position(|line| line.trim_start().starts_with("Filter  (cost="))
+        .position(|line| line.trim_start().starts_with("->  Filter  (cost="))
         .unwrap_or_else(|| panic!("expected filtered child node in explain output, got {lines:?}"));
     let top_level_cte_pos = lines
         .iter()
         .enumerate()
         .skip(filtered_child_pos + 1)
-        .find(|(_, line)| line.trim_start().starts_with("CTE Scan  (cost="))
+        .find(|(_, line)| line.trim_start().starts_with("->  CTE Scan  (cost="))
         .map(|(idx, _)| idx)
         .unwrap_or_else(|| panic!("expected unfiltered cte scan in explain output, got {lines:?}"));
     let pushed_filter_pos = lines
@@ -14683,7 +14683,10 @@ fn explain_join_order_by_can_reuse_ordered_outer_path() {
     let sort_positions = lines
         .iter()
         .enumerate()
-        .filter_map(|(index, line)| line.trim_start().starts_with("Sort  ").then_some(index))
+        .filter_map(|(index, line)| {
+            let trimmed = line.trim_start();
+            (trimmed.starts_with("Sort  ") || trimmed.starts_with("->  Sort  ")).then_some(index)
+        })
         .collect::<Vec<_>>();
     assert!(
         sort_positions.len() == 1,
