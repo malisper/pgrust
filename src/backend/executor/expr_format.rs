@@ -1503,7 +1503,7 @@ fn format_scientific(value: i128, spec: &FormatSpec) -> String {
     format!("{sign}{mantissa}e{exponent:+03}")
 }
 
-fn format_roman(value: i128, fill_mode: bool, lower: bool) -> String {
+pub(crate) fn format_roman(value: i128, fill_mode: bool, lower: bool) -> String {
     if value <= 0 || value > 3999 {
         return "#".repeat(15);
     }
@@ -1536,7 +1536,7 @@ fn format_roman(value: i128, fill_mode: bool, lower: bool) -> String {
     if fill_mode { out } else { format!("{out:>15}") }
 }
 
-fn ordinal_suffix(value: i128) -> &'static str {
+pub(crate) fn ordinal_suffix(value: i128) -> &'static str {
     let rem100 = value % 100;
     if (11..=13).contains(&rem100) {
         "TH"

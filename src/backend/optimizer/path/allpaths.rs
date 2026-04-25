@@ -8,14 +8,15 @@ use crate::backend::parser::{
     SerializedPartitionValue, deserialize_partition_bound, partition_value_to_value,
     relation_partition_spec,
 };
-use crate::include::nodes::parsenodes::{JoinTreeNode, RangeTblEntryKind};
+use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, PlannerSubroot, RelOptInfo, RelOptKind,
     RestrictInfo, SpecialJoinInfo,
 };
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::{
-    Expr, JoinType, OrderByEntry, QueryColumn, RelationDesc, ToastRelationRef, Var, user_attrno,
+    Expr, JoinType, OrderByEntry, QueryColumn, RelationDesc, ToastRelationRef, Var, attrno_index,
+    user_attrno,
 };
 
 use super::super::bestpath;
@@ -825,6 +826,315 @@ fn build_subquery_scan_path(
     }
 }
 
+fn subquery_filter_pushdown_is_safe(query: &Query) -> bool {
+    !query.distinct
+        && query.group_by.is_empty()
+        && query.accumulators.is_empty()
+        && query.window_clauses.is_empty()
+        && query.having_qual.is_none()
+        && query.sort_clause.is_empty()
+        && query.limit_count.is_none()
+        && query.limit_offset == 0
+        && query.locking_clause.is_none()
+        && query.row_marks.is_empty()
+        && !query.has_target_srfs
+        && query.recursive_union.is_none()
+        && query.set_operation.is_none()
+}
+
+fn push_subquery_filter(
+    rtindex: usize,
+    mut query: Query,
+    filter: Option<Expr>,
+) -> (Query, Option<Expr>) {
+    let Some(filter) = filter else {
+        return (query, None);
+    };
+    if !subquery_filter_pushdown_is_safe(&query) {
+        return (query, Some(filter));
+    }
+    let visible_targets = query
+        .target_list
+        .iter()
+        .filter(|target| !target.resjunk)
+        .collect::<Vec<_>>();
+    let Some(pushed) =
+        rewrite_filter_for_subquery(filter.clone(), rtindex, &visible_targets, &query)
+    else {
+        return (query, Some(filter));
+    };
+    query.where_qual = Some(match query.where_qual.take() {
+        Some(existing) => Expr::and(existing, pushed),
+        None => pushed,
+    });
+    (query, None)
+}
+
+fn subquery_target_preserves_simple_source_name(
+    query: &Query,
+    target: &crate::include::nodes::primnodes::TargetEntry,
+) -> bool {
+    let Expr::Var(var) = &target.expr else {
+        return true;
+    };
+    if var.varlevelsup != 0 {
+        return true;
+    }
+    let Some(rte_index) = var.varno.checked_sub(1) else {
+        return true;
+    };
+    let Some(att_index) = attrno_index(var.varattno) else {
+        return true;
+    };
+    query
+        .rtable
+        .get(rte_index)
+        .and_then(|rte| rte.desc.columns.get(att_index))
+        .map(|column| column.name.eq_ignore_ascii_case(&target.name))
+        .unwrap_or(true)
+}
+
+fn rewrite_filter_for_subquery(
+    expr: Expr,
+    rtindex: usize,
+    targets: &[&crate::include::nodes::primnodes::TargetEntry],
+    query: &Query,
+) -> Option<Expr> {
+    match expr {
+        Expr::Var(var) => {
+            if var.varlevelsup != 0 || var.varno != rtindex {
+                return None;
+            }
+            let index = crate::include::nodes::primnodes::attrno_index(var.varattno)?;
+            let target = targets.get(index)?;
+            // Preserve simple alias projection boundaries so pushed-down EXPLAIN
+            // details keep the user-visible column name instead of the source name.
+            if !subquery_target_preserves_simple_source_name(query, target) {
+                return None;
+            }
+            Some(target.expr.clone())
+        }
+        Expr::Param(_) | Expr::Const(_) => Some(expr),
+        Expr::Op(mut op) => {
+            op.args = op
+                .args
+                .into_iter()
+                .map(|arg| rewrite_filter_for_subquery(arg, rtindex, targets, query))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Expr::Op(op))
+        }
+        Expr::Bool(mut bool_expr) => {
+            bool_expr.args = bool_expr
+                .args
+                .into_iter()
+                .map(|arg| rewrite_filter_for_subquery(arg, rtindex, targets, query))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Expr::Bool(bool_expr))
+        }
+        Expr::Func(mut func) => {
+            func.args = func
+                .args
+                .into_iter()
+                .map(|arg| rewrite_filter_for_subquery(arg, rtindex, targets, query))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Expr::Func(func))
+        }
+        Expr::Cast(inner, ty) => Some(Expr::Cast(
+            Box::new(rewrite_filter_for_subquery(
+                *inner, rtindex, targets, query,
+            )?),
+            ty,
+        )),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Some(Expr::Collate {
+            expr: Box::new(rewrite_filter_for_subquery(*expr, rtindex, targets, query)?),
+            collation_oid,
+        }),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+            collation_oid,
+        } => Some(Expr::Like {
+            expr: Box::new(rewrite_filter_for_subquery(*expr, rtindex, targets, query)?),
+            pattern: Box::new(rewrite_filter_for_subquery(
+                *pattern, rtindex, targets, query,
+            )?),
+            escape: rewrite_optional_subquery_filter_expr(escape, rtindex, targets, query)?,
+            case_insensitive,
+            negated,
+            collation_oid,
+        }),
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+            collation_oid,
+        } => Some(Expr::Similar {
+            expr: Box::new(rewrite_filter_for_subquery(*expr, rtindex, targets, query)?),
+            pattern: Box::new(rewrite_filter_for_subquery(
+                *pattern, rtindex, targets, query,
+            )?),
+            escape: rewrite_optional_subquery_filter_expr(escape, rtindex, targets, query)?,
+            negated,
+            collation_oid,
+        }),
+        Expr::IsNull(inner) => Some(Expr::IsNull(Box::new(rewrite_filter_for_subquery(
+            *inner, rtindex, targets, query,
+        )?))),
+        Expr::IsNotNull(inner) => Some(Expr::IsNotNull(Box::new(rewrite_filter_for_subquery(
+            *inner, rtindex, targets, query,
+        )?))),
+        Expr::IsDistinctFrom(left, right) => Some(Expr::IsDistinctFrom(
+            Box::new(rewrite_filter_for_subquery(*left, rtindex, targets, query)?),
+            Box::new(rewrite_filter_for_subquery(
+                *right, rtindex, targets, query,
+            )?),
+        )),
+        Expr::IsNotDistinctFrom(left, right) => Some(Expr::IsNotDistinctFrom(
+            Box::new(rewrite_filter_for_subquery(*left, rtindex, targets, query)?),
+            Box::new(rewrite_filter_for_subquery(
+                *right, rtindex, targets, query,
+            )?),
+        )),
+        Expr::Coalesce(left, right) => Some(Expr::Coalesce(
+            Box::new(rewrite_filter_for_subquery(*left, rtindex, targets, query)?),
+            Box::new(rewrite_filter_for_subquery(
+                *right, rtindex, targets, query,
+            )?),
+        )),
+        Expr::ScalarArrayOp(mut saop) => {
+            saop.left = Box::new(rewrite_filter_for_subquery(
+                *saop.left, rtindex, targets, query,
+            )?);
+            saop.right = Box::new(rewrite_filter_for_subquery(
+                *saop.right,
+                rtindex,
+                targets,
+                query,
+            )?);
+            Some(Expr::ScalarArrayOp(saop))
+        }
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Some(Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|element| rewrite_filter_for_subquery(element, rtindex, targets, query))
+                .collect::<Option<Vec<_>>>()?,
+            array_type,
+        }),
+        Expr::Row { descriptor, fields } => Some(Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| {
+                    rewrite_filter_for_subquery(expr, rtindex, targets, query)
+                        .map(|expr| (name, expr))
+                })
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Some(Expr::FieldSelect {
+            expr: Box::new(rewrite_filter_for_subquery(*expr, rtindex, targets, query)?),
+            field,
+            field_type,
+        }),
+        Expr::ArraySubscript { array, subscripts } => Some(Expr::ArraySubscript {
+            array: Box::new(rewrite_filter_for_subquery(
+                *array, rtindex, targets, query,
+            )?),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| {
+                    rewrite_subquery_filter_subscript(subscript, rtindex, targets, query)
+                })
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        Expr::Case(mut case_expr) => {
+            case_expr.arg =
+                rewrite_optional_subquery_filter_expr(case_expr.arg, rtindex, targets, query)?;
+            case_expr.args = case_expr
+                .args
+                .into_iter()
+                .map(|arm| {
+                    Some(crate::include::nodes::primnodes::CaseWhen {
+                        expr: rewrite_filter_for_subquery(arm.expr, rtindex, targets, query)?,
+                        result: rewrite_filter_for_subquery(arm.result, rtindex, targets, query)?,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            case_expr.defresult = Box::new(rewrite_filter_for_subquery(
+                *case_expr.defresult,
+                rtindex,
+                targets,
+                query,
+            )?);
+            Some(Expr::Case(case_expr))
+        }
+        Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => Some(expr),
+        Expr::Aggref(_)
+        | Expr::WindowFunc(_)
+        | Expr::CaseTest(_)
+        | Expr::SetReturning(_)
+        | Expr::SubLink(_)
+        | Expr::SubPlan(_)
+        | Expr::Xml(_) => None,
+    }
+}
+
+fn rewrite_optional_subquery_filter_expr(
+    expr: Option<Box<Expr>>,
+    rtindex: usize,
+    targets: &[&crate::include::nodes::primnodes::TargetEntry],
+    query: &Query,
+) -> Option<Option<Box<Expr>>> {
+    match expr {
+        Some(expr) => rewrite_filter_for_subquery(*expr, rtindex, targets, query)
+            .map(Box::new)
+            .map(Some),
+        None => Some(None),
+    }
+}
+
+fn rewrite_subquery_filter_subscript(
+    subscript: crate::include::nodes::primnodes::ExprArraySubscript,
+    rtindex: usize,
+    targets: &[&crate::include::nodes::primnodes::TargetEntry],
+    query: &Query,
+) -> Option<crate::include::nodes::primnodes::ExprArraySubscript> {
+    Some(crate::include::nodes::primnodes::ExprArraySubscript {
+        is_slice: subscript.is_slice,
+        lower: match subscript.lower {
+            Some(expr) => Some(rewrite_filter_for_subquery(expr, rtindex, targets, query)?),
+            None => None,
+        },
+        upper: match subscript.upper {
+            Some(expr) => Some(rewrite_filter_for_subquery(expr, rtindex, targets, query)?),
+            None => None,
+        },
+    })
+}
+
 fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn CatalogLookup) {
     let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1)).cloned() else {
         return;
@@ -1170,9 +1480,10 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             rel.add_path(path);
         }
         RangeTblEntryKind::Subquery { query } => {
+            let (query, filter) = push_subquery_filter(rtindex, *query, base_filter_expr(rel));
             let mut path =
-                build_subquery_scan_path(rtindex, *query, &rte.desc, catalog, root.config);
-            if let Some(filter) = base_filter_expr(rel) {
+                build_subquery_scan_path(rtindex, query, &rte.desc, catalog, root.config);
+            if let Some(filter) = filter {
                 path = optimize_path(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),

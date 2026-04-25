@@ -736,6 +736,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 }
                 Some(BuiltinScalarFunction::DatePart) => SqlType::new(SqlTypeKind::Float8),
                 Some(BuiltinScalarFunction::TimeZone) => SqlType::new(SqlTypeKind::TimeTz),
+                Some(BuiltinScalarFunction::Extract) => SqlType::new(SqlTypeKind::Numeric),
                 Some(BuiltinScalarFunction::DateTrunc) => match args.args().get(1).map(|arg| {
                     infer_sql_expr_type_with_ctes(
                         &arg.value,
@@ -760,9 +761,27 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     }) => SqlType::new(SqlTypeKind::TimestampTz),
                     _ => SqlType::new(SqlTypeKind::Timestamp),
                 },
+                Some(BuiltinScalarFunction::DateBin) => match args.args().get(1).map(|arg| {
+                    infer_sql_expr_type_with_ctes(
+                        &arg.value,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                }) {
+                    Some(SqlType {
+                        kind: SqlTypeKind::TimestampTz,
+                        ..
+                    }) => SqlType::new(SqlTypeKind::TimestampTz),
+                    _ => SqlType::new(SqlTypeKind::Timestamp),
+                },
                 Some(BuiltinScalarFunction::IsFinite) => SqlType::new(SqlTypeKind::Bool),
                 Some(BuiltinScalarFunction::MakeDate) => SqlType::new(SqlTypeKind::Date),
                 Some(BuiltinScalarFunction::MakeTime) => SqlType::new(SqlTypeKind::Time),
+                Some(BuiltinScalarFunction::MakeTimestamp) => SqlType::new(SqlTypeKind::Timestamp),
+                Some(BuiltinScalarFunction::Age) => SqlType::new(SqlTypeKind::Interval),
                 Some(BuiltinScalarFunction::ToJson)
                 | Some(BuiltinScalarFunction::ArrayToJson)
                 | Some(BuiltinScalarFunction::JsonBuildArray)
@@ -1214,6 +1233,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         | SqlExpr::GeometryUnaryOp { .. }
         | SqlExpr::GeometryBinaryOp { .. } => unreachable!("handled before match"),
         SqlExpr::CurrentDate => SqlType::new(SqlTypeKind::Date),
+        SqlExpr::CurrentCatalog => SqlType::new(SqlTypeKind::Text),
+        SqlExpr::CurrentSchema => SqlType::new(SqlTypeKind::Text),
         SqlExpr::CurrentUser => SqlType::new(SqlTypeKind::Name),
         SqlExpr::SessionUser => SqlType::new(SqlTypeKind::Name),
         SqlExpr::CurrentRole => SqlType::new(SqlTypeKind::Name),

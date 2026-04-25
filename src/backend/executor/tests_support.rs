@@ -64,6 +64,8 @@ impl SeededSqlHarness {
                     crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(
                 ),
+                statement_timestamp_usecs:
+                    crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
                 gucs: std::collections::HashMap::new(),
                 interrupts: Arc::new(
                     crate::backend::utils::misc::interrupts::InterruptState::new(),
