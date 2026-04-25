@@ -585,6 +585,12 @@ fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usi
     if is_bit_string_type(actual_type) && is_bit_string_type(target_type) {
         return Some(1);
     }
+    if !target_type.is_array
+        && matches!(target_type.kind, SqlTypeKind::Uuid)
+        && is_text_like_type(actual_type)
+    {
+        return Some(2);
+    }
     None
 }
 
@@ -633,6 +639,23 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Random | BuiltinScalarFunction::RandomNormal => {
                 matches!(args.len(), 0 | 2)
             }
+            BuiltinScalarFunction::UuidIn
+            | BuiltinScalarFunction::UuidOut
+            | BuiltinScalarFunction::UuidRecv
+            | BuiltinScalarFunction::UuidSend
+            | BuiltinScalarFunction::UuidHash
+            | BuiltinScalarFunction::UuidExtractVersion
+            | BuiltinScalarFunction::UuidExtractTimestamp => args.len() == 1,
+            BuiltinScalarFunction::UuidEq
+            | BuiltinScalarFunction::UuidNe
+            | BuiltinScalarFunction::UuidLt
+            | BuiltinScalarFunction::UuidLe
+            | BuiltinScalarFunction::UuidGt
+            | BuiltinScalarFunction::UuidGe
+            | BuiltinScalarFunction::UuidCmp
+            | BuiltinScalarFunction::UuidHashExtended => args.len() == 2,
+            BuiltinScalarFunction::GenRandomUuid => args.is_empty(),
+            BuiltinScalarFunction::UuidV7 => matches!(args.len(), 0 | 1),
             BuiltinScalarFunction::Now
             | BuiltinScalarFunction::TransactionTimestamp
             | BuiltinScalarFunction::StatementTimestamp
@@ -1395,6 +1418,33 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("numeric_random", BuiltinScalarFunction::Random),
         ("random_normal", BuiltinScalarFunction::RandomNormal),
         ("drandom_normal", BuiltinScalarFunction::RandomNormal),
+        ("uuid_in", BuiltinScalarFunction::UuidIn),
+        ("uuid_out", BuiltinScalarFunction::UuidOut),
+        ("uuid_recv", BuiltinScalarFunction::UuidRecv),
+        ("uuid_send", BuiltinScalarFunction::UuidSend),
+        ("uuid_eq", BuiltinScalarFunction::UuidEq),
+        ("uuid_ne", BuiltinScalarFunction::UuidNe),
+        ("uuid_lt", BuiltinScalarFunction::UuidLt),
+        ("uuid_le", BuiltinScalarFunction::UuidLe),
+        ("uuid_gt", BuiltinScalarFunction::UuidGt),
+        ("uuid_ge", BuiltinScalarFunction::UuidGe),
+        ("uuid_cmp", BuiltinScalarFunction::UuidCmp),
+        ("uuid_hash", BuiltinScalarFunction::UuidHash),
+        (
+            "uuid_hash_extended",
+            BuiltinScalarFunction::UuidHashExtended,
+        ),
+        ("gen_random_uuid", BuiltinScalarFunction::GenRandomUuid),
+        ("uuidv7", BuiltinScalarFunction::UuidV7),
+        ("uuidv7_interval", BuiltinScalarFunction::UuidV7),
+        (
+            "uuid_extract_version",
+            BuiltinScalarFunction::UuidExtractVersion,
+        ),
+        (
+            "uuid_extract_timestamp",
+            BuiltinScalarFunction::UuidExtractTimestamp,
+        ),
         ("current_database", BuiltinScalarFunction::CurrentDatabase),
         ("version", BuiltinScalarFunction::Version),
         ("pgsql_version", BuiltinScalarFunction::Version),
@@ -2355,6 +2405,23 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::TsQueryNot
             | BuiltinScalarFunction::TsVectorConcat
             | BuiltinScalarFunction::RandomNormal
+            | BuiltinScalarFunction::UuidIn
+            | BuiltinScalarFunction::UuidOut
+            | BuiltinScalarFunction::UuidRecv
+            | BuiltinScalarFunction::UuidSend
+            | BuiltinScalarFunction::UuidEq
+            | BuiltinScalarFunction::UuidNe
+            | BuiltinScalarFunction::UuidLt
+            | BuiltinScalarFunction::UuidLe
+            | BuiltinScalarFunction::UuidGt
+            | BuiltinScalarFunction::UuidGe
+            | BuiltinScalarFunction::UuidCmp
+            | BuiltinScalarFunction::UuidHash
+            | BuiltinScalarFunction::UuidHashExtended
+            | BuiltinScalarFunction::GenRandomUuid
+            | BuiltinScalarFunction::UuidV7
+            | BuiltinScalarFunction::UuidExtractVersion
+            | BuiltinScalarFunction::UuidExtractTimestamp
             | BuiltinScalarFunction::CashLarger
             | BuiltinScalarFunction::CashSmaller
             | BuiltinScalarFunction::CashWords

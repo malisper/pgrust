@@ -38,9 +38,10 @@ use crate::include::catalog::{
     TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIME_ARRAY_TYPE_OID, TIME_TYPE_OID,
     TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_ARRAY_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
     TIMETZ_ARRAY_TYPE_OID, TIMETZ_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID,
-    TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
-    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID,
-    XML_TYPE_OID, bootstrap_composite_type_rows, builtin_type_rows, range_type_ref_for_sql_type,
+    TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, UUID_ARRAY_TYPE_OID, UUID_TYPE_OID,
+    VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
+    XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID, XML_TYPE_OID,
+    bootstrap_composite_type_rows, builtin_type_rows, range_type_ref_for_sql_type,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -349,6 +350,8 @@ fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::VarBit, true) => VARBIT_ARRAY_TYPE_OID,
         (SqlTypeKind::Bytea, false) => BYTEA_TYPE_OID,
         (SqlTypeKind::Bytea, true) => BYTEA_ARRAY_TYPE_OID,
+        (SqlTypeKind::Uuid, false) => UUID_TYPE_OID,
+        (SqlTypeKind::Uuid, true) => UUID_ARRAY_TYPE_OID,
         (SqlTypeKind::InternalChar, false) => INTERNAL_CHAR_TYPE_OID,
         (SqlTypeKind::InternalChar, true) => INTERNAL_CHAR_ARRAY_TYPE_OID,
         (SqlTypeKind::Internal, false) => crate::include::catalog::INTERNAL_TYPE_OID,

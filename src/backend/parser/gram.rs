@@ -2056,6 +2056,9 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         }
         "inet" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Inet))),
         "cidr" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Cidr))),
+        "uuid" | "pg_catalog.uuid" => {
+            return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Uuid)));
+        }
         "bpchar" | "pg_catalog.bpchar" => {
             return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Char)));
         }
@@ -11408,6 +11411,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Multirange => "multirange",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bytea => "bytea",
+        SqlTypeKind::Uuid => "uuid",
         SqlTypeKind::Bool => "bool",
         SqlTypeKind::Point => "point",
         SqlTypeKind::Lseg => "lseg",
@@ -12650,6 +12654,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                     .with_identity(crate::include::catalog::REFCURSOR_TYPE_OID, 0),
                 "bool" | "boolean" => SqlType::new(SqlTypeKind::Bool),
                 "bytea" => SqlType::new(SqlTypeKind::Bytea),
+                "uuid" => SqlType::new(SqlTypeKind::Uuid),
                 "inet" => SqlType::new(SqlTypeKind::Inet),
                 "cidr" => SqlType::new(SqlTypeKind::Cidr),
                 "money" => SqlType::new(SqlTypeKind::Money),
@@ -12697,6 +12702,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
             }
         }
         Rule::kw_bytea => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bytea)),
+        Rule::kw_uuid => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Uuid)),
         Rule::kw_inet => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Inet)),
         Rule::kw_cidr => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Cidr)),
         Rule::kw_money => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Money)),

@@ -73,7 +73,19 @@ const INTERNAL_VALUE_TAG_MULTIRANGE: u8 = 32;
 const INTERNAL_VALUE_TAG_INET: u8 = 34;
 const INTERNAL_VALUE_TAG_CIDR: u8 = 35;
 const INTERNAL_VALUE_TAG_INTERVAL: u8 = 36;
+const INTERNAL_VALUE_TAG_UUID: u8 = 37;
 const COMPOSITE_DATUM_VERSION: u8 = 1;
+
+pub fn render_uuid_text(value: &[u8; 16]) -> String {
+    let mut out = String::with_capacity(36);
+    for (idx, byte) in value.iter().enumerate() {
+        if matches!(idx, 4 | 6 | 8 | 10) {
+            out.push('-');
+        }
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
 
 pub(crate) fn format_record_text(record: &crate::include::nodes::datum::RecordValue) -> String {
     format_record_text_with_options(record, &FloatFormatOptions::default())
@@ -142,6 +154,7 @@ pub(crate) fn format_record_text_with_options(
                                 }
                                 rendered
                             }
+                            Value::Uuid(v) => render_uuid_text(v),
                             Value::Inet(v) => v.render_inet(),
                             Value::Cidr(v) => v.render_cidr(),
                             Value::Bit(v) => v.render(),
@@ -276,6 +289,7 @@ fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> 
             }
             rendered
         }
+        Value::Uuid(v) => render_uuid_text(v),
         Value::Inet(v) => v.render_inet(),
         Value::Cidr(v) => v.render_cidr(),
         Value::InternalChar(byte) => render_internal_char_text(*byte),
@@ -390,6 +404,7 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
         SqlTypeKind::Time => 29,
         SqlTypeKind::TimeTz => 30,
         SqlTypeKind::Interval => 31,
+        SqlTypeKind::Uuid => 70,
         SqlTypeKind::TsVector => 32,
         SqlTypeKind::TsQuery => 33,
         SqlTypeKind::RegConfig => 34,
@@ -497,6 +512,7 @@ fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
         29 => SqlTypeKind::Time,
         30 => SqlTypeKind::TimeTz,
         31 => SqlTypeKind::Interval,
+        70 => SqlTypeKind::Uuid,
         32 => SqlTypeKind::TsVector,
         33 => SqlTypeKind::TsQuery,
         34 => SqlTypeKind::RegConfig,
@@ -835,6 +851,10 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
             out.push(INTERNAL_VALUE_TAG_BYTEA);
             encode_internal_text(&v, &mut out);
         }
+        Value::Uuid(v) => {
+            out.push(INTERNAL_VALUE_TAG_UUID);
+            out.extend_from_slice(&v);
+        }
         Value::Inet(v) => {
             out.push(INTERNAL_VALUE_TAG_INET);
             encode_internal_text(v.render_inet().as_bytes(), &mut out);
@@ -1095,6 +1115,15 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
         INTERNAL_VALUE_TAG_BYTEA => {
             let mut offset = 0usize;
             Value::Bytea(decode_internal_text(rest, &mut offset)?.to_vec())
+        }
+        INTERNAL_VALUE_TAG_UUID => {
+            if rest.len() != 16 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "uuid payload must be 16 bytes".into(),
+                });
+            }
+            Value::Uuid(rest.try_into().unwrap())
         }
         INTERNAL_VALUE_TAG_INET => {
             let mut offset = 0usize;
@@ -1405,6 +1434,7 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
             Ok(TupleValue::Bytes(bytes))
         }
         (ScalarType::Bytea, Value::Bytea(v)) => Ok(TupleValue::Bytes(v)),
+        (ScalarType::Uuid, Value::Uuid(v)) => Ok(TupleValue::Bytes(v.to_vec())),
         (ScalarType::Inet, Value::Inet(v)) => {
             Ok(TupleValue::Bytes(encode_network_bytes(&v, false)))
         }
@@ -1641,6 +1671,7 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
         Value::Xml(text) => cast_text_value(text.as_str(), target, false),
         Value::Jsonb(bytes) => cast_text_value(&render_jsonb_bytes(bytes)?, target, false),
         Value::Bytea(bytes) => cast_value(Value::Bytea(bytes.clone()), target),
+        Value::Uuid(value) => cast_value(Value::Uuid(*value), target),
         Value::Inet(v) => cast_text_value(&v.render_inet(), target, false),
         Value::Cidr(v) => cast_text_value(&v.render_cidr(), target, false),
         Value::TsVector(vector) => cast_text_value(
@@ -1905,6 +1936,16 @@ pub(crate) fn decode_value_with_toast(
                 });
             }
             Ok(Value::Bytea(bytes.to_vec()))
+        }
+        ScalarType::Uuid => {
+            if column.storage.attlen != 16 || bytes.len() != 16 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Uuid(bytes.try_into().unwrap()))
         }
         ScalarType::Inet => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {

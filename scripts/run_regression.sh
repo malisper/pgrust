@@ -563,6 +563,39 @@ port_is_listening() {
     lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
 }
 
+listener_pids_for_port() {
+    local port="$1"
+
+    if ! command -v lsof >/dev/null 2>&1; then
+        return 0
+    fi
+
+    lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sort -u
+}
+
+verify_started_server_owns_port() {
+    local expected_pid="$1"
+    local pids=""
+
+    if ! command -v lsof >/dev/null 2>&1; then
+        return 0
+    fi
+
+    pids="$(listener_pids_for_port "$PORT" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+    if [[ -z "$pids" ]]; then
+        echo "ERROR: port $PORT is not listening after server readiness check"
+        return 1
+    fi
+    if [[ " $pids " != *" $expected_pid "* ]]; then
+        echo "ERROR: port $PORT is owned by another listener after startup"
+        echo "Expected pgrust server PID: $expected_pid"
+        echo "Observed listener PID(s): $pids"
+        lsof -nP -iTCP:"$PORT" -sTCP:LISTEN || true
+        return 1
+    fi
+    return 0
+}
+
 wait_for_server_ready() {
     local pid="$1"
     local attempts=$((STARTUP_WAIT_SECS * 2))
@@ -613,6 +646,9 @@ start_server() {
     SERVER_PID=$!
 
     if ! wait_for_server_ready "$SERVER_PID"; then
+        return 1
+    fi
+    if ! verify_started_server_owns_port "$SERVER_PID"; then
         return 1
     fi
 

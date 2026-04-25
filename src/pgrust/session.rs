@@ -5420,6 +5420,9 @@ impl Session {
                                     cast_value(Value::Text(raw.clone().into()), column.sql_type)?
                                 }
                                 ScalarType::Bytea => Value::Bytea(parse_bytea_text(raw)?),
+                                ScalarType::Uuid => {
+                                    cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                                }
                                 ScalarType::Text => Value::Text(raw.clone().into()),
                                 ScalarType::Record => {
                                     return Err(ExecError::UnsupportedStorageType {

@@ -21031,3 +21031,216 @@ fn large_object_metadata_tracks_create_and_unlink() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn uuid_type_accepts_input_round_trips_and_orders() {
+    let mut uuid_catalog = catalog();
+    uuid_catalog.insert(
+        "uuid_items",
+        test_catalog_entry(
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 14120,
+            },
+            RelationDesc {
+                columns: vec![
+                    crate::backend::catalog::catalog::column_desc(
+                        "id",
+                        crate::backend::parser::SqlType::new(
+                            crate::backend::parser::SqlTypeKind::Uuid,
+                        ),
+                        false,
+                    ),
+                    crate::backend::catalog::catalog::column_desc(
+                        "tags",
+                        crate::backend::parser::SqlType::array_of(
+                            crate::backend::parser::SqlType::new(
+                                crate::backend::parser::SqlTypeKind::Uuid,
+                            ),
+                        ),
+                        false,
+                    ),
+                ],
+            },
+        ),
+    );
+    let mut harness = SeededSqlHarness::new(
+        "uuid_type_accepts_input_round_trips_and_orders",
+        uuid_catalog,
+    );
+    let xid = harness.txns.begin();
+
+    assert_query_rows(
+        harness
+            .execute(
+                xid,
+                "select \
+                 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::uuid::text, \
+                 'a0eebc999c0b4ef8bb6d6bb9bd380a11'::uuid::text, \
+                 '{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}'::uuid::text, \
+                 'a0ee-bc99-9c0b-4ef8-bb6d-6bb9-bd38-0a11'::uuid::text",
+            )
+            .unwrap(),
+        vec![vec![
+            Value::Text("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11".into()),
+            Value::Text("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11".into()),
+            Value::Text("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11".into()),
+            Value::Text("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11".into()),
+        ]],
+    );
+
+    match harness
+        .execute(xid, "select 'not-a-uuid'::uuid")
+        .unwrap_err()
+    {
+        ExecError::InvalidUuidInput { value } => assert_eq!(value, "not-a-uuid"),
+        other => panic!("expected invalid uuid input, got {other:?}"),
+    }
+    assert_query_rows(
+        harness
+            .execute(
+                xid,
+                "select pg_input_is_valid('00000000-0000-0000-0000-000000000001', 'uuid'), \
+                 pg_input_is_valid('not-a-uuid', 'uuid')",
+            )
+            .unwrap(),
+        vec![vec![Value::Bool(true), Value::Bool(false)]],
+    );
+
+    harness
+        .execute(
+            xid,
+            "insert into uuid_items values \
+             ('00000000-0000-0000-0000-000000000002', ARRAY['00000000-0000-0000-0000-000000000002'::uuid]), \
+             ('00000000-0000-0000-0000-000000000001', ARRAY['00000000-0000-0000-0000-000000000001'::uuid]), \
+             ('00000000-0000-0000-0000-000000000001', ARRAY['00000000-0000-0000-0000-000000000001'::uuid])",
+        )
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
+
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select id::text from uuid_items order by id limit 2",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Text("00000000-0000-0000-0000-000000000001".into())],
+            vec![Value::Text("00000000-0000-0000-0000-000000000001".into())],
+        ],
+    );
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select count(distinct id) from uuid_items",
+            )
+            .unwrap(),
+        vec![vec![Value::Int64(2)]],
+    );
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select id::text, count(*) from uuid_items group by id order by id",
+            )
+            .unwrap(),
+        vec![
+            vec![
+                Value::Text("00000000-0000-0000-0000-000000000001".into()),
+                Value::Int64(2),
+            ],
+            vec![
+                Value::Text("00000000-0000-0000-0000-000000000002".into()),
+                Value::Int64(1),
+            ],
+        ],
+    );
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select uuid_eq(id, '00000000-0000-0000-0000-000000000001'::uuid), \
+                 uuid_cmp(id, '00000000-0000-0000-0000-000000000002'::uuid) \
+                 from uuid_items order by id limit 1",
+            )
+            .unwrap(),
+        vec![vec![Value::Bool(true), Value::Int32(-1)]],
+    );
+}
+
+#[test]
+fn uuid_type_supports_indexes_and_generation_functions() {
+    let mut uuid_catalog = catalog();
+    uuid_catalog.insert(
+        "uuid_index_items",
+        test_catalog_entry(
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 14121,
+            },
+            RelationDesc {
+                columns: vec![crate::backend::catalog::catalog::column_desc(
+                    "id",
+                    crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Uuid),
+                    false,
+                )],
+            },
+        ),
+    );
+    let mut harness = SeededSqlHarness::new(
+        "uuid_type_supports_indexes_and_generation_functions",
+        uuid_catalog,
+    );
+    let xid = harness.txns.begin();
+
+    harness
+        .execute(
+            xid,
+            "insert into uuid_index_items values \
+             ('00000000-0000-0000-0000-000000000001'), \
+             ('00000000-0000-0000-0000-000000000002')",
+        )
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "create index uuid_items_btree on uuid_index_items(id)",
+        )
+        .unwrap();
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select id::text from uuid_index_items \
+                 where id = '00000000-0000-0000-0000-000000000002'::uuid",
+            )
+            .unwrap(),
+        vec![vec![Value::Text(
+            "00000000-0000-0000-0000-000000000002".into(),
+        )]],
+    );
+
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select uuid_extract_version(gen_random_uuid()), \
+             uuid_extract_version(uuidv4()), \
+             uuid_extract_version(uuidv7()), \
+             uuid_extract_timestamp(uuidv7()) is not null",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows[0][0], Value::Int16(4));
+            assert_eq!(rows[0][1], Value::Int16(4));
+            assert_eq!(rows[0][2], Value::Int16(7));
+            assert_eq!(rows[0][3], Value::Bool(true));
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
