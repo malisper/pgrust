@@ -2857,6 +2857,8 @@ pub enum SqlTypeKind {
     Uuid,
     Inet,
     Cidr,
+    MacAddr,
+    MacAddr8,
     Float4,
     Float8,
     Money,
