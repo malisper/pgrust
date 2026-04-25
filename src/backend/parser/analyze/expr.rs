@@ -3600,6 +3600,8 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::CurrentDate => Expr::CurrentDate,
+        SqlExpr::CurrentCatalog => Expr::CurrentCatalog,
+        SqlExpr::CurrentSchema => Expr::CurrentSchema,
         SqlExpr::CurrentUser => Expr::CurrentUser,
         SqlExpr::SessionUser => Expr::SessionUser,
         SqlExpr::CurrentRole => Expr::CurrentRole,

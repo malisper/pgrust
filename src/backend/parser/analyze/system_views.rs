@@ -672,6 +672,8 @@ fn expr_contains_sublink(expr: &Expr) -> bool {
         | Expr::CaseTest(_)
         | Expr::Random
         | Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole

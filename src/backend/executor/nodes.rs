@@ -2352,6 +2352,8 @@ fn render_explain_expr_inner_with_qualifier(
                 format!("(SubPlan {})", subplan.plan_id + 1)
             }
         }
+        Expr::CurrentCatalog => "CURRENT_CATALOG".into(),
+        Expr::CurrentSchema => "CURRENT_SCHEMA".into(),
         Expr::CurrentUser => "CURRENT_USER".into(),
         Expr::CurrentRole => "CURRENT_ROLE".into(),
         Expr::SessionUser => "SESSION_USER".into(),

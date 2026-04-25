@@ -4763,6 +4763,8 @@ fn raw_expr_contains_pg_notify(expr: &crate::backend::parser::SqlExpr) -> bool {
         | crate::backend::parser::SqlExpr::NumericLiteral(_)
         | crate::backend::parser::SqlExpr::Random
         | crate::backend::parser::SqlExpr::CurrentDate
+        | crate::backend::parser::SqlExpr::CurrentCatalog
+        | crate::backend::parser::SqlExpr::CurrentSchema
         | crate::backend::parser::SqlExpr::CurrentUser
         | crate::backend::parser::SqlExpr::SessionUser
         | crate::backend::parser::SqlExpr::CurrentRole => false,

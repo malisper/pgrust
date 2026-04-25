@@ -963,6 +963,8 @@ fn validate_publication_filter_expr(expr: &SqlExpr) -> Result<(), ExecError> {
         | IntegerLiteral(_)
         | NumericLiteral(_)
         | CurrentDate
+        | CurrentCatalog
+        | CurrentSchema
         | CurrentUser
         | SessionUser
         | CurrentRole

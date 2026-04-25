@@ -1859,6 +1859,8 @@ fn collect_direct_expr_subplans<'a>(expr: &'a Expr, out: &mut Vec<&'a SubPlan>) 
         | Expr::CaseTest(_)
         | Expr::Random
         | Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole

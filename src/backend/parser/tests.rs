@@ -5307,6 +5307,14 @@ fn parse_standalone_type_names() {
         SqlType::with_char_len(SqlTypeKind::Char, 1)
     );
     assert_eq!(
+        parse_type_name("character").unwrap(),
+        SqlType::with_char_len(SqlTypeKind::Char, 1)
+    );
+    assert_eq!(
+        parse_type_name("character(16)").unwrap(),
+        SqlType::with_char_len(SqlTypeKind::Char, 16)
+    );
+    assert_eq!(
         parse_type_name("bytea").unwrap(),
         SqlType::new(SqlTypeKind::Bytea)
     );
@@ -8317,6 +8325,21 @@ fn parse_create_table_with_varchar_types() {
 }
 
 #[test]
+fn parse_create_table_with_character_types() {
+    match parse_statement("create table widgets (a character, b character(16), c char(7))").unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            let columns = ct.columns().collect::<Vec<_>>();
+            assert_eq!(columns.len(), 3);
+            assert_eq!(columns[0].ty, SqlType::with_char_len(SqlTypeKind::Char, 1));
+            assert_eq!(columns[1].ty, SqlType::with_char_len(SqlTypeKind::Char, 16));
+            assert_eq!(columns[2].ty, SqlType::with_char_len(SqlTypeKind::Char, 7));
+        }
+        other => panic!("expected create table, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_rejects_show_tables() {
     assert!(parse_statement("show tables").is_err());
 }
@@ -8352,6 +8375,13 @@ fn parse_current_datetime_forms() {
         stmt.targets[4].expr,
         SqlExpr::LocalTimestamp { precision: Some(4) }
     ));
+}
+
+#[test]
+fn parse_current_schema_and_catalog() {
+    let stmt = parse_select("select current_schema, current_catalog").unwrap();
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::CurrentSchema));
+    assert!(matches!(stmt.targets[1].expr, SqlExpr::CurrentCatalog));
 }
 
 #[test]

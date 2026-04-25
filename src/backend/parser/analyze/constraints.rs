@@ -2289,6 +2289,8 @@ fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {
         | Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole
