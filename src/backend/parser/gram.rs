@@ -124,6 +124,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_sequence_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_copy_statement(&sql, options)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_tablespace_statement(&sql)? {
         return Ok(stmt);
     }
@@ -149,9 +152,6 @@ fn parse_statement_with_options_inner(
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_view_statement(&sql)? {
-        return Ok(stmt);
-    }
-    if let Some(stmt) = try_parse_copy_statement(&sql, options)? {
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_unsupported_statement(&sql) {
@@ -242,37 +242,10 @@ fn try_parse_copy_statement(
     }
 
     let rest = consume_keyword(trimmed, "copy").trim_start();
-    if rest.starts_with('(') {
-        return build_copy_to_statement(rest, options).map(Some);
+    if let Some(stmt) = try_parse_copy_to_statement(trimmed, options)? {
+        return Ok(Some(stmt));
     }
     build_copy_from_statement(rest).map(Some)
-}
-
-fn build_copy_to_statement(rest: &str, options: ParseOptions) -> Result<Statement, ParseError> {
-    let (query_sql, rest) = take_parenthesized_segment(rest)?;
-    let mut rest = rest.trim_start();
-    if !keyword_at_start(rest, "to") {
-        return Err(ParseError::UnexpectedToken {
-            expected: "TO",
-            actual: rest.into(),
-        });
-    }
-    rest = consume_keyword(rest, "to").trim_start();
-    let (path, rest) = parse_copy_file_literal(rest)?;
-    let copy_options = parse_copy_options(rest)?;
-    let query = match parse_statement_with_options_inner(query_sql, options)? {
-        Statement::Select(select) => select,
-        _ => {
-            return Err(ParseError::FeatureNotSupported(
-                "COPY TO query other than SELECT".into(),
-            ));
-        }
-    };
-    Ok(Statement::CopyTo(CopyToStatement {
-        query,
-        target: CopyTarget::File(path),
-        options: copy_options,
-    }))
 }
 
 fn build_copy_from_statement(rest: &str) -> Result<Statement, ParseError> {
@@ -2330,6 +2303,643 @@ where
     StackDepthGuard::enter(max_stack_depth_kb).run(f)
 }
 
+fn try_parse_copy_to_statement(
+    sql: &str,
+    parse_options: ParseOptions,
+) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(trimmed, "copy") {
+        return Ok(None);
+    }
+
+    let mut rest = consume_keyword(trimmed, "copy").trim_start();
+    let mut options = CopyToOptions::default();
+    let mut explicit_format = false;
+    let mut explicit_delimiter = false;
+    let mut explicit_null = false;
+    let mut explicit_quote = false;
+    let mut explicit_escape = false;
+    if keyword_at_start(rest, "binary") {
+        set_copy_format(
+            &mut options,
+            &mut explicit_format,
+            CopyFormat::Binary,
+            &CopyOptionExplicit {
+                delimiter: explicit_delimiter,
+                null: explicit_null,
+                quote: explicit_quote,
+                escape: explicit_escape,
+            },
+        )?;
+        rest = consume_keyword(rest.trim_start(), "binary").trim_start();
+    }
+
+    if rest.starts_with('(') {
+        let (query_sql, after_query) = take_parenthesized_segment(rest)?;
+        rest = after_query.trim_start();
+        if keyword_at_start(rest, "from") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "TO",
+                actual: "syntax error at or near \"from\"".into(),
+            });
+        }
+        if rest.starts_with('(') {
+            return Err(ParseError::UnexpectedToken {
+                expected: "TO",
+                actual: "syntax error at or near \"(\"".into(),
+            });
+        }
+        rest = consume_keywords(rest, &["to"]).ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "TO",
+            actual: rest.into(),
+        })?;
+        let (destination, option_rest) = parse_copy_to_destination(rest)?;
+        parse_copy_to_options(
+            option_rest,
+            &mut options,
+            &mut explicit_format,
+            &mut explicit_delimiter,
+            &mut explicit_null,
+            &mut explicit_quote,
+            &mut explicit_escape,
+        )?;
+        validate_copy_to_options(
+            &options,
+            &CopyOptionExplicit {
+                delimiter: explicit_delimiter,
+                null: explicit_null,
+                quote: explicit_quote,
+                escape: explicit_escape,
+            },
+        )?;
+        let statement = parse_statement_with_options_inner(query_sql.clone(), parse_options)?;
+        return Ok(Some(Statement::CopyTo(CopyToStatement {
+            source: CopyToSource::Query {
+                statement: Box::new(statement),
+                sql: query_sql,
+            },
+            destination,
+            options,
+        })));
+    }
+
+    let (parts, mut rest) = parse_qualified_identifier_parts(rest)?;
+    let table_name = parts.join(".");
+    let mut columns = None;
+    rest = rest.trim_start();
+    if rest.starts_with('(') {
+        let (columns_sql, after_columns) = take_parenthesized_segment(rest)?;
+        let parsed_columns = split_top_level_items(&columns_sql, ',')?
+            .into_iter()
+            .map(|item| {
+                let (name, rest) = parse_unqualified_identifier(&item, "column name")?;
+                if !rest.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "column name",
+                        actual: rest.trim().into(),
+                    });
+                }
+                Ok(name)
+            })
+            .collect::<Result<Vec<_>, ParseError>>()?;
+        if parsed_columns.is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "column name",
+                actual: columns_sql,
+            });
+        }
+        columns = Some(parsed_columns);
+        rest = after_columns.trim_start();
+    }
+
+    if keyword_at_start(rest, "from") {
+        return Ok(None);
+    }
+
+    rest = consume_keywords(rest, &["to"]).ok_or_else(|| ParseError::UnexpectedToken {
+        expected: "TO",
+        actual: rest.into(),
+    })?;
+    let (destination, option_rest) = parse_copy_to_destination(rest)?;
+    parse_copy_to_options(
+        option_rest,
+        &mut options,
+        &mut explicit_format,
+        &mut explicit_delimiter,
+        &mut explicit_null,
+        &mut explicit_quote,
+        &mut explicit_escape,
+    )?;
+    validate_copy_to_options(
+        &options,
+        &CopyOptionExplicit {
+            delimiter: explicit_delimiter,
+            null: explicit_null,
+            quote: explicit_quote,
+            escape: explicit_escape,
+        },
+    )?;
+    Ok(Some(Statement::CopyTo(CopyToStatement {
+        source: CopyToSource::Relation {
+            table_name,
+            columns,
+        },
+        destination,
+        options,
+    })))
+}
+
+#[derive(Clone, Copy)]
+struct CopyOptionExplicit {
+    delimiter: bool,
+    null: bool,
+    quote: bool,
+    escape: bool,
+}
+
+fn parse_copy_to_destination(input: &str) -> Result<(CopyToDestination, &str), ParseError> {
+    let input = input.trim_start();
+    if keyword_at_start(input, "program") {
+        let rest = consume_keyword(input, "program").trim_start();
+        let (program, rest) = parse_copy_string_literal(rest)?;
+        return Ok((CopyToDestination::Program(program), rest));
+    }
+    if keyword_at_start(input, "stdout") {
+        return Ok((
+            CopyToDestination::Stdout,
+            consume_keyword(input, "stdout").trim_start(),
+        ));
+    }
+    let (path, rest) = parse_copy_string_literal(input)?;
+    Ok((CopyToDestination::File(path), rest))
+}
+
+fn parse_copy_string_literal(input: &str) -> Result<(String, &str), ParseError> {
+    let input = input.trim_start();
+    let token_len =
+        scan_string_literal_token_len(input).ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "string literal",
+            actual: input.into(),
+        })?;
+    Ok((
+        decode_string_literal(&input[..token_len])?,
+        &input[token_len..],
+    ))
+}
+
+fn parse_copy_to_options(
+    input: &str,
+    options: &mut CopyToOptions,
+    explicit_format: &mut bool,
+    explicit_delimiter: &mut bool,
+    explicit_null: &mut bool,
+    explicit_quote: &mut bool,
+    explicit_escape: &mut bool,
+) -> Result<(), ParseError> {
+    let mut rest = input.trim_start();
+    if rest.is_empty() {
+        return Ok(());
+    }
+    if keyword_at_start(rest, "with") {
+        rest = consume_keyword(rest, "with").trim_start();
+        if rest.starts_with('(') {
+            let (body, after) = take_parenthesized_segment(rest)?;
+            if !after.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "end of COPY options",
+                    actual: after.trim().into(),
+                });
+            }
+            return parse_copy_to_modern_options(
+                &body,
+                options,
+                explicit_format,
+                explicit_delimiter,
+                explicit_null,
+                explicit_quote,
+                explicit_escape,
+            );
+        }
+    }
+
+    parse_copy_to_legacy_options(
+        rest,
+        options,
+        explicit_format,
+        explicit_delimiter,
+        explicit_null,
+        explicit_quote,
+        explicit_escape,
+    )
+}
+
+fn parse_copy_to_modern_options(
+    body: &str,
+    options: &mut CopyToOptions,
+    explicit_format: &mut bool,
+    explicit_delimiter: &mut bool,
+    explicit_null: &mut bool,
+    explicit_quote: &mut bool,
+    explicit_escape: &mut bool,
+) -> Result<(), ParseError> {
+    let mut seen = BTreeSet::new();
+    for item in split_top_level_items(body, ',')? {
+        if item.is_empty() {
+            continue;
+        }
+        let (name, value) = split_copy_option_assignment(&item)?;
+        let key = name.to_ascii_lowercase();
+        if !seen.insert(key.clone()) {
+            return Err(ParseError::ConflictingOrRedundantOptions { option: key });
+        }
+        match key.as_str() {
+            "format" => {
+                let value = value.ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "COPY FORMAT value",
+                    actual: item.clone(),
+                })?;
+                let format = parse_copy_format_value(&value)?;
+                set_copy_format(
+                    options,
+                    explicit_format,
+                    format,
+                    &CopyOptionExplicit {
+                        delimiter: *explicit_delimiter,
+                        null: *explicit_null,
+                        quote: *explicit_quote,
+                        escape: *explicit_escape,
+                    },
+                )?;
+            }
+            "encoding" => {
+                options.encoding = Some(parse_copy_option_string_value(value.as_deref(), &item)?);
+            }
+            "delimiter" => {
+                options.delimiter = parse_copy_option_string_value(value.as_deref(), &item)?;
+                *explicit_delimiter = true;
+            }
+            "null" => {
+                options.null = parse_copy_option_string_value(value.as_deref(), &item)?;
+                *explicit_null = true;
+            }
+            "header" => {
+                options.header = match value.as_deref() {
+                    None => true,
+                    Some(value) => parse_copy_option_bool(value)?,
+                };
+            }
+            "quote" => {
+                options.quote = parse_copy_option_string_value(value.as_deref(), &item)?;
+                *explicit_quote = true;
+            }
+            "escape" => {
+                options.escape = parse_copy_option_string_value(value.as_deref(), &item)?;
+                *explicit_escape = true;
+            }
+            "force_quote" | "force quote" => {
+                options.force_quote = parse_copy_force_quote_value(value.as_deref(), &item)?;
+            }
+            other => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "COPY option",
+                    actual: other.into(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn split_copy_option_assignment(item: &str) -> Result<(String, Option<String>), ParseError> {
+    let trimmed = item.trim();
+    if let Some((name, value)) = trimmed.split_once('=') {
+        return Ok((name.trim().to_string(), Some(value.trim().to_string())));
+    }
+    if keyword_at_start(trimmed, "force") {
+        let rest = consume_keyword(trimmed, "force").trim_start();
+        if keyword_at_start(rest, "quote") {
+            let rest = consume_keyword(rest, "quote").trim_start();
+            return Ok((
+                "force_quote".into(),
+                (!rest.is_empty()).then(|| rest.to_string()),
+            ));
+        }
+    }
+    let (name, rest) = parse_sql_identifier(trimmed)?;
+    let rest = rest.trim_start();
+    Ok((name, (!rest.is_empty()).then(|| rest.to_string())))
+}
+
+fn parse_copy_to_legacy_options(
+    input: &str,
+    options: &mut CopyToOptions,
+    explicit_format: &mut bool,
+    explicit_delimiter: &mut bool,
+    explicit_null: &mut bool,
+    explicit_quote: &mut bool,
+    explicit_escape: &mut bool,
+) -> Result<(), ParseError> {
+    let mut rest = input.trim_start();
+    let mut seen = BTreeSet::new();
+    while !rest.is_empty() {
+        if keyword_at_start(rest, "binary") {
+            set_legacy_copy_option_seen(&mut seen, "format")?;
+            set_copy_format(
+                options,
+                explicit_format,
+                CopyFormat::Binary,
+                &CopyOptionExplicit {
+                    delimiter: *explicit_delimiter,
+                    null: *explicit_null,
+                    quote: *explicit_quote,
+                    escape: *explicit_escape,
+                },
+            )?;
+            rest = consume_keyword(rest, "binary").trim_start();
+        } else if keyword_at_start(rest, "csv") {
+            set_legacy_copy_option_seen(&mut seen, "format")?;
+            set_copy_format(
+                options,
+                explicit_format,
+                CopyFormat::Csv,
+                &CopyOptionExplicit {
+                    delimiter: *explicit_delimiter,
+                    null: *explicit_null,
+                    quote: *explicit_quote,
+                    escape: *explicit_escape,
+                },
+            )?;
+            rest = consume_keyword(rest, "csv").trim_start();
+        } else if keyword_at_start(rest, "header") {
+            set_legacy_copy_option_seen(&mut seen, "header")?;
+            options.header = true;
+            rest = consume_keyword(rest, "header").trim_start();
+        } else if keyword_at_start(rest, "delimiter") {
+            set_legacy_copy_option_seen(&mut seen, "delimiter")?;
+            rest = consume_keyword(rest, "delimiter").trim_start();
+            if keyword_at_start(rest, "as") {
+                rest = consume_keyword(rest, "as").trim_start();
+            }
+            let (value, after) = parse_copy_string_literal(rest)?;
+            options.delimiter = value;
+            *explicit_delimiter = true;
+            rest = after.trim_start();
+        } else if keyword_at_start(rest, "null") {
+            set_legacy_copy_option_seen(&mut seen, "null")?;
+            rest = consume_keyword(rest, "null").trim_start();
+            if keyword_at_start(rest, "as") {
+                rest = consume_keyword(rest, "as").trim_start();
+            }
+            let (value, after) = parse_copy_string_literal(rest)?;
+            options.null = value;
+            *explicit_null = true;
+            rest = after.trim_start();
+        } else if keyword_at_start(rest, "quote") {
+            set_legacy_copy_option_seen(&mut seen, "quote")?;
+            rest = consume_keyword(rest, "quote").trim_start();
+            if keyword_at_start(rest, "as") {
+                rest = consume_keyword(rest, "as").trim_start();
+            }
+            let (value, after) = parse_copy_string_literal(rest)?;
+            options.quote = value;
+            *explicit_quote = true;
+            rest = after.trim_start();
+        } else if keyword_at_start(rest, "escape") {
+            set_legacy_copy_option_seen(&mut seen, "escape")?;
+            rest = consume_keyword(rest, "escape").trim_start();
+            if keyword_at_start(rest, "as") {
+                rest = consume_keyword(rest, "as").trim_start();
+            }
+            let (value, after) = parse_copy_string_literal(rest)?;
+            options.escape = value;
+            *explicit_escape = true;
+            rest = after.trim_start();
+        } else if keyword_at_start(rest, "force") {
+            set_legacy_copy_option_seen(&mut seen, "force_quote")?;
+            rest = consume_keyword(rest, "force").trim_start();
+            rest =
+                consume_keywords(rest, &["quote"]).ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "QUOTE",
+                    actual: rest.into(),
+                })?;
+            let (force_quote, after) = parse_legacy_force_quote(rest)?;
+            options.force_quote = force_quote;
+            rest = after.trim_start();
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "COPY option",
+                actual: rest.into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn set_legacy_copy_option_seen(
+    seen: &mut BTreeSet<&'static str>,
+    option: &'static str,
+) -> Result<(), ParseError> {
+    if !seen.insert(option) {
+        return Err(ParseError::ConflictingOrRedundantOptions {
+            option: option.into(),
+        });
+    }
+    Ok(())
+}
+
+fn parse_copy_format_value(value: &str) -> Result<CopyFormat, ParseError> {
+    let value = parse_copy_bare_or_string_value(value)?;
+    match value.to_ascii_lowercase().as_str() {
+        "text" => Ok(CopyFormat::Text),
+        "csv" => Ok(CopyFormat::Csv),
+        "binary" => Ok(CopyFormat::Binary),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "text, csv, or binary",
+            actual: value,
+        }),
+    }
+}
+
+fn parse_copy_option_bool(value: &str) -> Result<bool, ParseError> {
+    match parse_copy_bare_or_string_value(value)?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "true" | "on" | "1" => Ok(true),
+        "false" | "off" | "0" => Ok(false),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "boolean COPY option",
+            actual: value.into(),
+        }),
+    }
+}
+
+fn parse_copy_option_string_value(value: Option<&str>, item: &str) -> Result<String, ParseError> {
+    let value = value.ok_or_else(|| ParseError::UnexpectedToken {
+        expected: "COPY option value",
+        actual: item.into(),
+    })?;
+    parse_copy_bare_or_string_value(value)
+}
+
+fn parse_copy_bare_or_string_value(value: &str) -> Result<String, ParseError> {
+    let value = value.trim();
+    if let Some(token_len) = scan_string_literal_token_len(value) {
+        if !value[token_len..].trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "COPY option value",
+                actual: value.into(),
+            });
+        }
+        return decode_string_literal(&value[..token_len]);
+    }
+    Ok(value.to_string())
+}
+
+fn parse_copy_force_quote_value(
+    value: Option<&str>,
+    item: &str,
+) -> Result<CopyForceQuote, ParseError> {
+    let value = value.ok_or_else(|| ParseError::UnexpectedToken {
+        expected: "FORCE_QUOTE value",
+        actual: item.into(),
+    })?;
+    let (force_quote, rest) = parse_legacy_force_quote(value)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "FORCE_QUOTE value",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(force_quote)
+}
+
+fn parse_legacy_force_quote(input: &str) -> Result<(CopyForceQuote, &str), ParseError> {
+    let rest = input.trim_start();
+    if let Some(after_star) = rest.strip_prefix('*') {
+        return Ok((CopyForceQuote::All, after_star));
+    }
+    if rest.starts_with('(') {
+        let (columns_sql, after) = take_parenthesized_segment(rest)?;
+        let columns = parse_copy_force_quote_columns(&columns_sql)?;
+        return Ok((CopyForceQuote::Columns(columns), after));
+    }
+    let mut columns = Vec::new();
+    let mut remaining = rest;
+    loop {
+        let (name, after) = parse_unqualified_identifier(remaining, "FORCE QUOTE column")?;
+        columns.push(name);
+        let after = after.trim_start();
+        if let Some(next) = after.strip_prefix(',') {
+            remaining = next.trim_start();
+            continue;
+        }
+        return Ok((CopyForceQuote::Columns(columns), after));
+    }
+}
+
+fn parse_copy_force_quote_columns(input: &str) -> Result<Vec<String>, ParseError> {
+    let columns = split_top_level_items(input, ',')?
+        .into_iter()
+        .map(|item| {
+            let (name, rest) = parse_unqualified_identifier(&item, "FORCE QUOTE column")?;
+            if !rest.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "FORCE QUOTE column",
+                    actual: rest.trim().into(),
+                });
+            }
+            Ok(name)
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    if columns.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "FORCE QUOTE column",
+            actual: input.into(),
+        });
+    }
+    Ok(columns)
+}
+
+fn set_copy_format(
+    options: &mut CopyToOptions,
+    explicit_format: &mut bool,
+    format: CopyFormat,
+    explicit: &CopyOptionExplicit,
+) -> Result<(), ParseError> {
+    if *explicit_format {
+        return Err(ParseError::ConflictingOrRedundantOptions {
+            option: "format".into(),
+        });
+    }
+    *explicit_format = true;
+    options.format = format;
+    if matches!(format, CopyFormat::Csv) {
+        if !explicit.delimiter {
+            options.delimiter = ",".into();
+        }
+        if !explicit.null {
+            options.null.clear();
+        }
+        if !explicit.quote {
+            options.quote = "\"".into();
+        }
+        if !explicit.escape {
+            options.escape = "\"".into();
+        }
+    }
+    Ok(())
+}
+
+fn validate_copy_to_options(
+    options: &CopyToOptions,
+    explicit: &CopyOptionExplicit,
+) -> Result<(), ParseError> {
+    validate_copy_single_char_option("DELIMITER", &options.delimiter)?;
+    validate_copy_single_char_option("QUOTE", &options.quote)?;
+    validate_copy_single_char_option("ESCAPE", &options.escape)?;
+    if options.delimiter == "\n" || options.delimiter == "\r" {
+        return Err(ParseError::UnexpectedToken {
+            expected: "valid COPY delimiter",
+            actual: "COPY delimiter cannot be newline or carriage return".into(),
+        });
+    }
+    if matches!(options.format, CopyFormat::Binary) {
+        if explicit.delimiter
+            || explicit.null
+            || explicit.quote
+            || explicit.escape
+            || options.header
+            || !matches!(options.force_quote, CopyForceQuote::None)
+        {
+            return Err(ParseError::UnexpectedToken {
+                expected: "binary COPY options",
+                actual: "COPY text or CSV options cannot be used with BINARY".into(),
+            });
+        }
+    }
+    if !matches!(options.format, CopyFormat::Csv) {
+        if options.header || !matches!(options.force_quote, CopyForceQuote::None) {
+            return Err(ParseError::UnexpectedToken {
+                expected: "CSV COPY options",
+                actual: "COPY HEADER/FORCE_QUOTE only available using CSV mode".into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_copy_single_char_option(name: &'static str, value: &str) -> Result<(), ParseError> {
+    if value.len() == 1 {
+        Ok(())
+    } else {
+        Err(ParseError::UnexpectedToken {
+            expected: name,
+            actual: format!("{name} must be a single one-byte character"),
+        })
+    }
+}
+
 fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -2354,8 +2964,6 @@ fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
         Some("COMMENT ON INDEX")
     } else if lowered.starts_with("create domain ") {
         Some("CREATE DOMAIN")
-    } else if lowered.starts_with("copy ") && lowered.contains(" to ") {
-        Some("COPY TO")
     } else if lowered.starts_with("create unique index ") {
         Some("CREATE UNIQUE INDEX")
     } else if lowered.starts_with("create index ") {
@@ -9869,11 +10477,7 @@ fn build_rule_action_statement_sql(sql: &str) -> Result<RuleActionStatement, Par
             ));
         }
         Statement::Insert(_) | Statement::Update(_) | Statement::Delete(_) => {}
-        _ => {
-            return Err(ParseError::FeatureNotSupported(
-                "rule action statement".into(),
-            ));
-        }
+        _ => {}
     }
     Ok(RuleActionStatement { statement, sql })
 }
@@ -13873,6 +14477,12 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::identifier => Ok(SqlExpr::Column(build_identifier(pair))),
         Rule::kw_default => Ok(SqlExpr::Default),
         Rule::numeric_literal => Ok(SqlExpr::NumericLiteral(pair.as_str().to_string())),
+        Rule::hex_integer => {
+            let raw = pair.as_str();
+            let value = u128::from_str_radix(&raw[2..], 16)
+                .map_err(|_| ParseError::InvalidInteger(raw.to_string()))?;
+            Ok(SqlExpr::IntegerLiteral(value.to_string()))
+        }
         Rule::integer => Ok(SqlExpr::IntegerLiteral(pair.as_str().to_string())),
         Rule::quoted_string_literal
         | Rule::string_literal

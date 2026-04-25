@@ -690,7 +690,8 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgNotificationQueueUsage => args.is_empty(),
             BuiltinScalarFunction::PgTypeof
             | BuiltinScalarFunction::PgColumnCompression
-            | BuiltinScalarFunction::PgColumnSize => args.len() == 1,
+            | BuiltinScalarFunction::PgColumnSize
+            | BuiltinScalarFunction::PgRelationSize => args.len() == 1,
             BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
@@ -1571,6 +1572,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgColumnCompression,
         ),
         ("pg_column_size", BuiltinScalarFunction::PgColumnSize),
+        ("pg_relation_size", BuiltinScalarFunction::PgRelationSize),
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),
         ("setval", BuiltinScalarFunction::SetVal),
@@ -2414,6 +2416,15 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
         }
         if by_func
             .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::PgRelationSize)
+        {
+            by_func.push((
+                BuiltinScalarFunction::PgRelationSize,
+                SqlType::new(SqlTypeKind::Int8),
+            ));
+        }
+        if by_func
+            .iter()
             .all(|(candidate, _)| *candidate != BuiltinScalarFunction::PgNotify)
         {
             by_func.push((
@@ -2536,6 +2547,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
             | BuiltinScalarFunction::PgStatisticsObjIsVisible
             | BuiltinScalarFunction::PgColumnSize
+            | BuiltinScalarFunction::PgRelationSize
             | BuiltinScalarFunction::PgRelationIsPublishable
             | BuiltinScalarFunction::PgIndexAmHasProperty
             | BuiltinScalarFunction::PgIndexHasProperty
