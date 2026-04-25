@@ -91,15 +91,14 @@ jobs:
           PGRUST_REGRESS_USER: postgres
         run: |
           status=0
-          mkdir -p "$REGRESS_RESULTS_DIR"
-          timeout --signal=TERM --kill-after=30s "$REGRESS_COMMAND_TIMEOUT" \
-            scripts/run_regression.sh \
-            --skip-build \
-            --jobs "$REGRESS_JOBS" \
-            --results-dir "$REGRESS_RESULTS_DIR" || status=$?
-          printf '%s\n' "$status" > "$REGRESS_RESULTS_DIR/exit_code.txt"
-          if [[ ! -f "$REGRESS_RESULTS_DIR/summary.json" ]]; then
-            cat > "$REGRESS_RESULTS_DIR/summary.json" <<EOF
+
+          finalize_regression_step() {
+            local final_status="$1"
+
+            mkdir -p "$REGRESS_RESULTS_DIR"
+            printf '%s\n' "$final_status" > "$REGRESS_RESULTS_DIR/exit_code.txt"
+            if [[ ! -f "$REGRESS_RESULTS_DIR/summary.json" ]]; then
+              cat > "$REGRESS_RESULTS_DIR/summary.json" <<EOF
           {
             "status": "aborted",
             "tests": {
@@ -108,6 +107,7 @@ jobs:
               "passed": 0,
               "failed": 0,
               "errored": 0,
+              "timed_out": 0,
               "pass_rate_pct": 0
             },
             "queries": {
@@ -118,14 +118,27 @@ jobs:
             }
           }
           EOF
-          fi
-          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
-          if [[ -f "$REGRESS_RESULTS_DIR/summary.json" ]]; then
-            echo "## Regression summary" >> "$GITHUB_STEP_SUMMARY"
-            echo '```json' >> "$GITHUB_STEP_SUMMARY"
-            cat "$REGRESS_RESULTS_DIR/summary.json" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-          fi
+            fi
+            echo "exit_code=$final_status" >> "$GITHUB_OUTPUT"
+            if [[ -f "$REGRESS_RESULTS_DIR/summary.json" ]]; then
+              echo "## Regression summary" >> "$GITHUB_STEP_SUMMARY"
+              echo '```json' >> "$GITHUB_STEP_SUMMARY"
+              cat "$REGRESS_RESULTS_DIR/summary.json" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+
+          trap 'status=143; finalize_regression_step "$status"; exit 0' TERM
+          trap 'status=130; finalize_regression_step "$status"; exit 0' INT
+
+          mkdir -p "$REGRESS_RESULTS_DIR"
+          timeout --signal=TERM --kill-after=30s "$REGRESS_COMMAND_TIMEOUT" \
+            scripts/run_regression.sh \
+            --skip-build \
+            --jobs "$REGRESS_JOBS" \
+            --results-dir "$REGRESS_RESULTS_DIR" || status=$?
+          trap - TERM INT
+          finalize_regression_step "$status"
           exit 0
 
       - name: Upload regression artifacts (workflow run)
