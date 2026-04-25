@@ -1,6 +1,7 @@
 use crate::backend::catalog::CatalogError;
 use crate::backend::executor::expr_geometry::{
-    box_box_distance, box_contains_box, box_overlap, box_same,
+    box_box_distance, box_contains_box, box_overlap, box_same, point_polygon_distance,
+    polygon_contains_polygon, polygon_overlap, polygon_same,
 };
 use crate::include::nodes::datum::{GeoBox, GeoPoint, Value};
 
@@ -24,6 +25,19 @@ fn expect_point(value: &Value) -> Result<&GeoPoint, CatalogError> {
         )),
         other => Err(CatalogError::Io(format!(
             "SP-GiST box ORDER BY expected point value, got {other:?}"
+        ))),
+    }
+}
+
+fn expect_box_or_polygon_bounds(value: &Value) -> Result<&GeoBox, CatalogError> {
+    match value {
+        Value::Box(geo_box) => Ok(geo_box),
+        Value::Polygon(poly) => Ok(&poly.bound_box),
+        Value::Null => Err(CatalogError::Io(
+            "SP-GiST quad support cannot index NULL".into(),
+        )),
+        other => Err(CatalogError::Io(format!(
+            "SP-GiST quad support expected box or polygon value, got {other:?}"
         ))),
     }
 }
@@ -83,7 +97,7 @@ pub(crate) fn median_centroid(values: &[Value]) -> Result<Option<GeoBox>, Catalo
     }
     let boxes = values
         .iter()
-        .map(expect_box)
+        .map(expect_box_or_polygon_bounds)
         .collect::<Result<Vec<_>, _>>()?;
     let mut low_xs = boxes
         .iter()
@@ -126,22 +140,45 @@ pub(crate) fn leaf_consistent(
     if matches!(key, Value::Null) || matches!(query, Value::Null) {
         return Ok(false);
     }
-    let key = expect_box(key)?;
-    let query = expect_box(query)?;
-    Ok(match strategy {
-        1 => box_left(key, query),
-        2 => box_over_left(key, query),
-        3 => box_overlap(key, query),
-        4 => box_over_right(key, query),
-        5 => box_right(key, query),
-        6 => box_same(key, query),
-        7 => box_contains_box(key, query),
-        8 => box_contains_box(query, key),
-        9 => box_over_below(key, query),
-        10 => box_below(key, query),
-        11 => box_above(key, query),
-        12 => box_over_above(key, query),
-        _ => return Err(CatalogError::Corrupt("unsupported SP-GiST box strategy")),
+    Ok(match (key, query) {
+        (Value::Polygon(key_poly), Value::Polygon(query_poly)) => match strategy {
+            1 => box_left(&key_poly.bound_box, &query_poly.bound_box),
+            2 => box_over_left(&key_poly.bound_box, &query_poly.bound_box),
+            3 => polygon_overlap(key_poly, query_poly),
+            4 => box_over_right(&key_poly.bound_box, &query_poly.bound_box),
+            5 => box_right(&key_poly.bound_box, &query_poly.bound_box),
+            6 => polygon_same(key_poly, query_poly),
+            7 => polygon_contains_polygon(key_poly, query_poly),
+            8 => polygon_contains_polygon(query_poly, key_poly),
+            9 => box_over_below(&key_poly.bound_box, &query_poly.bound_box),
+            10 => box_below(&key_poly.bound_box, &query_poly.bound_box),
+            11 => box_above(&key_poly.bound_box, &query_poly.bound_box),
+            12 => box_over_above(&key_poly.bound_box, &query_poly.bound_box),
+            _ => {
+                return Err(CatalogError::Corrupt(
+                    "unsupported SP-GiST polygon strategy",
+                ));
+            }
+        },
+        _ => {
+            let key = expect_box(key)?;
+            let query = expect_box(query)?;
+            match strategy {
+                1 => box_left(key, query),
+                2 => box_over_left(key, query),
+                3 => box_overlap(key, query),
+                4 => box_over_right(key, query),
+                5 => box_right(key, query),
+                6 => box_same(key, query),
+                7 => box_contains_box(key, query),
+                8 => box_contains_box(query, key),
+                9 => box_over_below(key, query),
+                10 => box_below(key, query),
+                11 => box_above(key, query),
+                12 => box_over_above(key, query),
+                _ => return Err(CatalogError::Corrupt("unsupported SP-GiST box strategy")),
+            }
+        }
     })
 }
 
@@ -149,13 +186,17 @@ pub(crate) fn order_distance(key: &Value, query: &Value) -> Result<Option<f64>, 
     if matches!(key, Value::Null) || matches!(query, Value::Null) {
         return Ok(None);
     }
-    let key_box = expect_box(key)?;
-    Ok(Some(match query {
-        Value::Point(point) => point_box_distance(point, key_box),
-        Value::Box(query_box) => box_box_distance(key_box, query_box),
-        other => {
+    Ok(Some(match (key, query) {
+        (Value::Polygon(poly), Value::Point(point)) => point_polygon_distance(point, poly),
+        (Value::Box(key_box), Value::Point(point)) => point_box_distance(point, key_box),
+        (Value::Box(key_box), Value::Box(query_box)) => box_box_distance(key_box, query_box),
+        (Value::Polygon(_), other) => {
+            let _ = expect_point(other)?;
+            unreachable!()
+        }
+        (_, other) => {
             return Err(CatalogError::Io(format!(
-                "SP-GiST box ORDER BY expected point or box value, got {other:?}"
+                "SP-GiST quad ORDER BY expected point or box value, got {other:?}"
             )));
         }
     }))
@@ -171,7 +212,10 @@ fn point_box_distance(point: &GeoPoint, geo_box: &GeoBox) -> f64 {
 
 pub(crate) fn choose(proc_oid: u32, centroid: &Value, leaf: &Value) -> Result<u8, CatalogError> {
     let _ = proc_oid;
-    Ok(quadrant(expect_box(centroid)?, expect_box(leaf)?))
+    Ok(quadrant(
+        expect_box_or_polygon_bounds(centroid)?,
+        expect_box_or_polygon_bounds(leaf)?,
+    ))
 }
 
 pub(crate) fn picksplit(
@@ -184,7 +228,7 @@ pub(crate) fn picksplit(
     };
     let assignments = values
         .iter()
-        .map(|value| Ok(quadrant(&centroid, expect_box(value)?)))
+        .map(|value| Ok(quadrant(&centroid, expect_box_or_polygon_bounds(value)?)))
         .collect::<Result<Vec<_>, CatalogError>>()?;
     Ok(Some((centroid, assignments)))
 }
