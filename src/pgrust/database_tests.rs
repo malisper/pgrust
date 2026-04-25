@@ -27651,6 +27651,18 @@ fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
     );
     db.execute(1, "insert into feelings values ('sad'), ('happy')")
         .unwrap();
+    db.execute(
+        1,
+        "create unique index feelings_mood_idx on feelings using btree (current_mood)",
+    )
+    .unwrap();
+    db.execute(1, "drop index feelings_mood_idx").unwrap();
+    db.execute(
+        1,
+        "create index feelings_mood_hash_idx on feelings using hash (current_mood)",
+    )
+    .unwrap();
+    db.execute(1, "drop index feelings_mood_hash_idx").unwrap();
     assert_eq!(
         query_rows(
             &db,

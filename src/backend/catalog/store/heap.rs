@@ -3034,6 +3034,59 @@ impl CatalogStore {
         Ok((entry, effect))
     }
 
+    pub fn create_index_for_entry_mvcc_with_options(
+        &mut self,
+        index_name: impl Into<String>,
+        table_entry: CatalogEntry,
+        unique: bool,
+        primary: bool,
+        columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
+        options: &CatalogIndexBuildOptions,
+        predicate_sql: Option<&str>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
+        let index_name = index_name.into();
+        if self
+            .get_relname_relid(
+                ctx,
+                &syscache_relname(&index_name),
+                table_entry.namespace_oid,
+            )?
+            .is_some()
+        {
+            return Err(CatalogError::TableAlreadyExists(
+                normalize_catalog_name(&index_name).to_ascii_lowercase(),
+            ));
+        }
+        let mut control = self.control_state()?;
+        let type_lookup = CatalogStoreTypeLookup { store: &*self, ctx };
+        let entry = build_index_entry(
+            &type_lookup,
+            index_name.clone(),
+            &table_entry,
+            unique,
+            primary,
+            columns,
+            options,
+            predicate_sql,
+            &mut control,
+        )?;
+        let kinds = create_index_sync_kinds();
+        self.persist_control_values(control.next_oid, control.next_rel_number)?;
+        let rows = rows_for_new_relation_entry(&type_lookup, &index_name, &entry)?;
+        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+        self.control = control;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_rel(&mut effect.created_rels, entry.rel);
+        effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
+        effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
+        effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
+        effect_record_oid(&mut effect.relation_oids, table_entry.relation_oid);
+        Ok((entry, effect))
+    }
+
     pub fn create_partitioned_index_for_relation_mvcc_with_options(
         &mut self,
         index_name: impl Into<String>,
@@ -3581,6 +3634,29 @@ impl CatalogStore {
         Ok((entry, effect))
     }
 
+    pub fn drop_relation_entry_mvcc(
+        &mut self,
+        entry: CatalogEntry,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let old_rows = rows_for_drop_relation_entry_mvcc(self, ctx, &entry)?;
+        let kinds = drop_relation_delete_kinds();
+        let control = self.control_state()?;
+        self.persist_control_values(control.next_oid, control.next_rel_number)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        self.control = control;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_rel(&mut effect.dropped_rels, entry.rel);
+        effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
+        effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
+        if entry.row_type_oid != 0 {
+            effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
+        }
+        Ok(effect)
+    }
+
     pub fn set_column_not_null_mvcc(
         &mut self,
         relation_oid: u32,
@@ -4092,6 +4168,61 @@ impl CatalogStore {
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_oid(&mut effect.relation_oids, relation_oid);
+        if let Some(index_meta) = &new_entry.index_meta {
+            effect_record_oid(&mut effect.relation_oids, index_meta.indrelid);
+        }
+        Ok(effect)
+    }
+
+    pub fn set_index_entry_ready_valid_mvcc(
+        &mut self,
+        old_entry: &CatalogEntry,
+        indisready: bool,
+        indisvalid: bool,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        if !matches!(old_entry.relkind, 'i' | 'I') {
+            return Err(CatalogError::UnknownTable(
+                old_entry.relation_oid.to_string(),
+            ));
+        }
+        let mut new_entry = old_entry.clone();
+        let index_meta = new_entry.index_meta.as_mut().ok_or(CatalogError::Corrupt(
+            "index relation missing index metadata",
+        ))?;
+        index_meta.indisready = indisready;
+        index_meta.indisvalid = indisvalid;
+
+        let control = self.control_state()?;
+        self.persist_control_values(control.next_oid, control.next_rel_number)?;
+        let kinds = vec![BootstrapCatalogKind::PgIndex];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                indexes: vec![index_row_for_entry(old_entry).ok_or(CatalogError::Corrupt(
+                    "index relation missing index metadata",
+                ))?],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                indexes: vec![index_row_for_entry(&new_entry).ok_or(CatalogError::Corrupt(
+                    "index relation missing index metadata",
+                ))?],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        self.control = control;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, old_entry.relation_oid);
         if let Some(index_meta) = &new_entry.index_meta {
             effect_record_oid(&mut effect.relation_oids, index_meta.indrelid);
         }
