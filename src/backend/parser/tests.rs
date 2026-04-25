@@ -1855,6 +1855,23 @@ fn pest_matches_minimal_select_statement() {
 }
 
 #[test]
+fn parse_select_table_star_as_inherited_table_reference() {
+    let stmt = parse_statement("select id from people*").unwrap();
+    match stmt {
+        Statement::Select(stmt) => {
+            assert_eq!(
+                stmt.from,
+                Some(FromItem::Table {
+                    name: "people".into(),
+                    only: false,
+                })
+            );
+        }
+        other => panic!("expected select statement, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_set_statement() {
     let stmt = parse_statement("set extra_float_digits = 0").unwrap();
     assert_eq!(
@@ -3108,6 +3125,21 @@ fn parse_alter_table_if_exists_only_statement() {
         Statement::AlterTableRenameColumn(AlterTableRenameColumnStatement {
             if_exists: true,
             only: true,
+            table_name: "items".into(),
+            column_name: "note".into(),
+            new_column_name: "body".into(),
+        })
+    );
+}
+
+#[test]
+fn parse_alter_table_star_target_as_inherited_target() {
+    let stmt = parse_statement("alter table items* rename column note to body").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableRenameColumn(AlterTableRenameColumnStatement {
+            if_exists: false,
+            only: false,
             table_name: "items".into(),
             column_name: "note".into(),
             new_column_name: "body".into(),

@@ -4519,6 +4519,77 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn ensure_relation_toast_table_mvcc(
+        &mut self,
+        relation_oid: u32,
+        toast_namespace_oid: u32,
+        toast_namespace_name: &str,
+        ctx: &CatalogWriteContext,
+    ) -> Result<Option<CatalogMutationEffect>, CatalogError> {
+        let class_row = class_row_by_oid_mvcc(self, ctx, relation_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let relation_name = class_row.relname.clone();
+        let relation = self
+            .relation_id_get_relation(ctx, relation_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_entry = catalog_entry_from_relation_row(&class_row, &relation);
+
+        let mut control = self.control_state()?;
+        let Some(toast) = build_toast_catalog_changes(
+            &relation_name,
+            &old_entry,
+            toast_namespace_name,
+            toast_namespace_oid,
+            &mut control,
+        )?
+        else {
+            return Ok(None);
+        };
+
+        self.persist_control_values(control.next_oid, control.next_rel_number)?;
+        let mut kinds = create_table_sync_kinds(&toast.new_parent);
+        merge_catalog_kinds(&mut kinds, &create_table_sync_kinds(&toast.toast_entry));
+        merge_catalog_kinds(&mut kinds, &create_index_sync_kinds());
+        kinds.retain(|kind| *kind != BootstrapCatalogKind::PgInherits);
+
+        let old_rows = rows_for_existing_relation_mvcc(self, ctx, &old_entry)?;
+        let mut new_rows = {
+            let type_lookup = CatalogStoreTypeLookup { store: &*self, ctx };
+            let mut rows =
+                rows_for_new_relation_entry(&type_lookup, &relation_name, &toast.new_parent)?;
+            extend_physical_catalog_rows(
+                &mut rows,
+                rows_for_new_relation_entry(&type_lookup, &toast.toast_name, &toast.toast_entry)?,
+            );
+            extend_physical_catalog_rows(
+                &mut rows,
+                rows_for_new_relation_entry(&type_lookup, &toast.index_name, &toast.index_entry)?,
+            );
+            rows
+        };
+        new_rows.depends.push(PgDependRow {
+            classid: PG_CLASS_RELATION_OID,
+            objid: toast.toast_entry.relation_oid,
+            objsubid: 0,
+            refclassid: PG_CLASS_RELATION_OID,
+            refobjid: relation_oid,
+            refobjsubid: 0,
+            deptype: crate::include::catalog::DEPENDENCY_INTERNAL,
+        });
+        sort_pg_depend_rows(&mut new_rows.depends);
+        preserve_non_derived_relation_rows_mvcc(self, ctx, &old_entry, &kinds, &mut new_rows)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, toast.new_parent.relation_oid);
+        effect_record_oid(&mut effect.namespace_oids, toast.new_parent.namespace_oid);
+        effect_record_oid(&mut effect.type_oids, toast.new_parent.row_type_oid);
+        record_toast_effects(&mut effect, &toast);
+        Ok(Some(effect))
+    }
+
     pub fn alter_table_drop_column_mvcc(
         &mut self,
         relation_oid: u32,

@@ -585,6 +585,13 @@ pub(super) fn supports_comparison_operator(
                 | SqlTypeKind::PgLsn
                 | SqlTypeKind::MacAddr
                 | SqlTypeKind::MacAddr8
+                | SqlTypeKind::RegClass
+                | SqlTypeKind::RegType
+                | SqlTypeKind::RegRole
+                | SqlTypeKind::RegOperator
+                | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegConfig
+                | SqlTypeKind::RegDictionary
         )
         && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
     {

@@ -9,7 +9,9 @@ use crate::backend::parser::{
     BoundRelation, CatalogLookup, parse_type_name, resolve_raw_type_name,
 };
 use crate::backend::utils::misc::notices::push_notice;
-use crate::include::catalog::{PG_CATALOG_NAMESPACE_OID, relkind_is_analyzable};
+use crate::include::catalog::{
+    PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID, relkind_is_analyzable,
+};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     CommentOnAggregateStatement, CommentOnFunctionStatement, CommentOnIndexStatement,
@@ -1638,13 +1640,6 @@ impl Database {
             return Ok(StatementResult::AffectedRows(0));
         };
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
-        if relation.relpersistence != 't' {
-            reject_inheritance_tree_ddl(
-                &catalog,
-                relation.relation_oid,
-                "ALTER TABLE ADD COLUMN on inheritance tree members is not supported yet",
-            )?;
-        }
         reject_relation_with_dependent_views(
             self,
             client_id,
@@ -1786,6 +1781,42 @@ impl Database {
                 .map_err(map_catalog_error)?;
             self.apply_catalog_mutation_effect_immediate(&effect)?;
             catalog_effects.push(effect);
+            let (toast_namespace_oid, toast_namespace_name) =
+                if target.relation.relpersistence == 't' {
+                    let temp_backend_id = self.temp_backend_id(client_id);
+                    (
+                        Self::temp_toast_namespace_oid(temp_backend_id),
+                        Self::temp_toast_namespace_name(temp_backend_id),
+                    )
+                } else {
+                    (
+                        PG_TOAST_NAMESPACE_OID,
+                        crate::backend::catalog::toasting::PG_TOAST_NAMESPACE.to_string(),
+                    )
+                };
+            let toast_ctx = CatalogWriteContext {
+                pool: ctx.pool.clone(),
+                txns: ctx.txns.clone(),
+                xid: ctx.xid,
+                cid: cid.saturating_add(1),
+                client_id: ctx.client_id,
+                waiter: ctx.waiter.clone(),
+                interrupts: ctx.interrupts.clone(),
+            };
+            if let Some(effect) = self
+                .catalog
+                .write()
+                .ensure_relation_toast_table_mvcc(
+                    target.relation.relation_oid,
+                    toast_namespace_oid,
+                    &toast_namespace_name,
+                    &toast_ctx,
+                )
+                .map_err(map_catalog_error)?
+            {
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+            }
             if target.relation.relpersistence == 't' {
                 self.replace_temp_entry_desc(
                     client_id,
