@@ -1129,6 +1129,15 @@ impl CatalogStore {
         self.comment_shared_object_mvcc(proc_oid, PG_PROC_RELATION_OID, comment, ctx)
     }
 
+    pub fn comment_operator_mvcc(
+        &mut self,
+        operator_oid: u32,
+        comment: Option<&str>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.comment_shared_object_mvcc(operator_oid, PG_OPERATOR_RELATION_OID, comment, ctx)
+    }
+
     pub fn replace_proc_mvcc(
         &mut self,
         old_row: &PgProcRow,

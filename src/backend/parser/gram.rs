@@ -94,6 +94,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_comment_on_function_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_comment_on_operator_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_operator_class_statement(&sql)? {
         return Ok(stmt);
     }
@@ -3763,6 +3766,17 @@ fn try_parse_comment_on_function_statement(sql: &str) -> Result<Option<Statement
     )))
 }
 
+fn try_parse_comment_on_operator_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("comment on operator ") {
+        return Ok(None);
+    }
+    Ok(Some(Statement::CommentOnOperator(
+        build_comment_on_operator_statement(trimmed)?,
+    )))
+}
+
 fn try_parse_create_operator_class_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -5313,6 +5327,50 @@ fn build_comment_on_function_statement(
     })
 }
 
+fn build_comment_on_operator_statement(
+    sql: &str,
+) -> Result<CommentOnOperatorStatement, ParseError> {
+    let Some(rest) = sql.get("comment on operator".len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "COMMENT ON OPERATOR name(leftarg, rightarg) IS ...",
+            actual: sql.into(),
+        });
+    };
+    let rest = rest.trim_start();
+    let ((schema_name, operator_name), rest_after_name) = parse_operator_name(rest)?;
+    let ((left_arg, right_arg), rest) = parse_operator_argtypes(rest_after_name.trim_start())?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "is") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "IS",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "is").trim_start();
+    let (comment, rest) = if keyword_at_start(rest, "null") {
+        (None, consume_keyword(rest, "null"))
+    } else {
+        let len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+            expected: "quoted string or NULL",
+            actual: rest.into(),
+        })?;
+        (Some(decode_string_literal(&rest[..len])?), &rest[len..])
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of COMMENT ON OPERATOR",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CommentOnOperatorStatement {
+        schema_name,
+        operator_name,
+        left_arg,
+        right_arg,
+        comment,
+    })
+}
+
 fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOptions, ParseError> {
     let mut parsed = ParsedCreateAggregateOptions {
         finalfunc_modify: 'r',
@@ -6508,6 +6566,7 @@ fn build_create_operator_statement(sql: &str) -> Result<CreateOperatorStatement,
     let mut join = None;
     let mut hashes = false;
     let mut merges = false;
+    let mut unrecognized_attributes = Vec::new();
 
     for item in split_top_level_items(&definition_sql, ',')? {
         let trimmed = item.trim();
@@ -6522,15 +6581,11 @@ fn build_create_operator_statement(sql: &str) -> Result<CreateOperatorStatement,
                     actual: trimmed.into(),
                 });
             }
-            match option_name.to_ascii_lowercase().as_str() {
+            match option_name.as_str() {
                 "hashes" => hashes = true,
                 "merges" => merges = true,
-                other => {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "recognized CREATE OPERATOR option",
-                        actual: other.into(),
-                    });
-                }
+                "sort1" | "sort2" | "ltcmp" | "gtcmp" => {}
+                _ => unrecognized_attributes.push(option_name),
             }
             continue;
         };
@@ -6543,7 +6598,7 @@ fn build_create_operator_statement(sql: &str) -> Result<CreateOperatorStatement,
             });
         }
         let value = trimmed[eq_idx + 1..].trim();
-        match option_name.to_ascii_lowercase().as_str() {
+        match option_name.as_str() {
             "procedure" | "function" => {
                 let (target, rest) = parse_qualified_name_ref(value, "procedure name")?;
                 if !rest.trim().is_empty() {
@@ -6596,12 +6651,8 @@ fn build_create_operator_statement(sql: &str) -> Result<CreateOperatorStatement,
             }
             "hashes" => hashes = parse_operator_bool_value(value)?,
             "merges" => merges = parse_operator_bool_value(value)?,
-            other => {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "recognized CREATE OPERATOR option",
-                    actual: other.into(),
-                });
-            }
+            "sort1" | "sort2" | "ltcmp" | "gtcmp" => {}
+            _ => unrecognized_attributes.push(option_name),
         }
     }
 
@@ -6610,16 +6661,14 @@ fn build_create_operator_statement(sql: &str) -> Result<CreateOperatorStatement,
         operator_name,
         left_arg,
         right_arg,
-        procedure: procedure.ok_or_else(|| ParseError::UnexpectedToken {
-            expected: "PROCEDURE option",
-            actual: sql.into(),
-        })?,
+        procedure,
         commutator,
         negator,
         restrict,
         join,
         hashes,
         merges,
+        unrecognized_attributes,
     })
 }
 
@@ -17183,10 +17232,10 @@ mod tests {
                 operator_name: "===".to_string(),
                 left_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
                 right_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
-                procedure: QualifiedNameRef {
+                procedure: Some(QualifiedNameRef {
                     schema_name: None,
                     name: "regoperator_test_fn".to_string(),
-                },
+                }),
                 commutator: None,
                 negator: None,
                 restrict: Some(QualifiedNameRef {
@@ -17199,6 +17248,7 @@ mod tests {
                 }),
                 hashes: true,
                 merges: true,
+                unrecognized_attributes: Vec::new(),
             })
         );
     }

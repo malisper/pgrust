@@ -4,6 +4,7 @@ use crate::backend::parser::{
     DropOperatorStatement, ParseError, QualifiedNameRef, resolve_raw_type_name,
 };
 use crate::backend::utils::cache::syscache::backend_catcache;
+use crate::backend::utils::misc::notices::push_warning;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, INT2_TYPE_OID, INT4_TYPE_OID, OID_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
     PUBLIC_NAMESPACE_OID, PgOperatorRow,
@@ -48,11 +49,11 @@ fn normalize_operator_namespace(
     }
 }
 
-fn operator_signature_display(name: &str, left_type: u32, right_type: u32) -> String {
+pub(super) fn operator_signature_display(name: &str, left_type: u32, right_type: u32) -> String {
     format!("{name}({left_type},{right_type})")
 }
 
-fn lookup_operator_row(
+pub(super) fn lookup_operator_row(
     db: &Database,
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
@@ -86,7 +87,7 @@ fn lookup_operator_row_by_oid(
         .find(|row| row.oid == oid))
 }
 
-fn resolve_operator_type_oid(
+pub(super) fn resolve_operator_type_oid(
     catalog: &dyn CatalogLookup,
     arg: &Option<RawTypeName>,
 ) -> Result<u32, ExecError> {
@@ -146,17 +147,26 @@ fn resolve_create_operator_proc_oid(
     left_type: u32,
     right_type: u32,
 ) -> Result<u32, ExecError> {
+    let procedure = stmt
+        .procedure
+        .as_ref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "operator function must be specified".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        })?;
     let arg_types = [left_type, right_type]
         .into_iter()
         .filter(|oid| *oid != 0)
         .collect::<Vec<_>>();
     resolve_proc_oid_for_name(
         catalog,
-        &stmt.procedure,
+        procedure,
         &arg_types,
         format!(
             "function {}({}) does not exist",
-            stmt.procedure.name,
+            procedure.name,
             arg_types
                 .iter()
                 .map(u32::to_string)
@@ -277,6 +287,33 @@ impl Database {
         )?;
         let left_type = resolve_operator_type_oid(&catalog, &stmt.left_arg)?;
         let right_type = resolve_operator_type_oid(&catalog, &stmt.right_arg)?;
+        for attribute in &stmt.unrecognized_attributes {
+            push_warning(format!("operator attribute \"{attribute}\" not recognized"));
+        }
+        if stmt.procedure.is_none() {
+            return Err(ExecError::DetailedError {
+                message: "operator function must be specified".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            });
+        }
+        if left_type == 0 && right_type == 0 {
+            return Err(ExecError::DetailedError {
+                message: "operator argument types must be specified".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            });
+        }
+        if right_type == 0 {
+            return Err(ExecError::DetailedError {
+                message: "operator right argument type must be specified".into(),
+                detail: Some("Postfix operators are not supported.".into()),
+                hint: None,
+                sqlstate: "42601",
+            });
+        }
         let proc_oid = resolve_create_operator_proc_oid(&catalog, stmt, left_type, right_type)?;
         let result_type = catalog
             .proc_row_by_oid(proc_oid)
@@ -284,7 +321,11 @@ impl Database {
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::UnexpectedToken {
                     expected: "existing procedure row",
-                    actual: stmt.procedure.name.clone(),
+                    actual: stmt
+                        .procedure
+                        .as_ref()
+                        .map(|procedure| procedure.name.clone())
+                        .unwrap_or_default(),
                 })
             })?;
         if lookup_operator_row(

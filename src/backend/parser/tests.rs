@@ -13,10 +13,11 @@ use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec,
     AlterColumnExpressionAction, AlterTableTriggerMode, AlterTableTriggerStateStatement,
     AlterTableTriggerTarget, AlterTriggerRenameStatement, ColumnConstraint, ColumnGeneratedKind,
-    CommentOnAggregateStatement, CommentOnFunctionStatement, CompositeTypeAttributeDef,
-    CreateAggregateStatement, CreateCompositeTypeStatement, CreateTriggerStatement,
-    CreateTypeStatement, DropAggregateStatement, DropTriggerStatement, DropTypeStatement,
-    ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef, InsertSource,
+    CommentOnAggregateStatement, CommentOnFunctionStatement, CommentOnOperatorStatement,
+    CompositeTypeAttributeDef, CreateAggregateStatement, CreateCompositeTypeStatement,
+    CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement, DropTriggerStatement,
+    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege,
+    IndexColumnDef, InsertSource,
     InsertStatement, JoinTreeNode, PartitionStrategy, PublicationObjectSpec, PublicationOption,
     PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
     RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
@@ -2086,6 +2087,37 @@ fn parse_comment_on_function_null_statement() {
             schema_name: None,
             function_name: "noop".into(),
             arg_types: Vec::new(),
+            comment: None,
+        })
+    );
+}
+
+#[test]
+fn parse_comment_on_operator_statement() {
+    let stmt =
+        parse_statement("comment on operator public.@#@ (none, int8) is 'prefix op'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnOperator(CommentOnOperatorStatement {
+            schema_name: Some("public".into()),
+            operator_name: "@#@".into(),
+            left_arg: None,
+            right_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int8))),
+            comment: Some("prefix op".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_comment_on_operator_null_statement() {
+    let stmt = parse_statement("comment on operator ## (path, path) is null").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnOperator(CommentOnOperatorStatement {
+            schema_name: None,
+            operator_name: "##".into(),
+            left_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Path))),
+            right_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Path))),
             comment: None,
         })
     );

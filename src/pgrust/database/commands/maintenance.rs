@@ -1,6 +1,7 @@
 use super::super::*;
 use super::constraint::{find_constraint_row, validate_check_rows, validate_not_null_rows};
 use super::create::{aggregate_signature_arg_oids, resolve_aggregate_proc_rows};
+use super::operator::{lookup_operator_row, operator_signature_display, resolve_operator_type_oid};
 use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_indexes_for_row};
 use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
@@ -10,12 +11,13 @@ use crate::backend::parser::{
 };
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::{
-    PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID, relkind_is_analyzable,
+    BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, relkind_is_analyzable,
+    PG_TOAST_NAMESPACE_OID,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     CommentOnAggregateStatement, CommentOnFunctionStatement, CommentOnIndexStatement,
-    MaintenanceTarget, VacuumStatement,
+    CommentOnOperatorStatement, MaintenanceTarget, VacuumStatement,
 };
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::autovacuum::{AutovacuumRelationInput, relation_needs_vacanalyze};
@@ -830,6 +832,28 @@ impl Database {
         result
     }
 
+    pub(crate) fn execute_comment_on_operator_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnOperatorStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_comment_on_operator_stmt_in_transaction_with_search_path(
+            client_id,
+            comment_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
     pub(crate) fn execute_comment_on_index_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -972,6 +996,84 @@ impl Database {
             .catalog
             .write()
             .comment_proc_mvcc(proc_row.oid, comment_stmt.comment.as_deref(), &ctx)
+            .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_comment_on_operator_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnOperatorStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        if comment_stmt.right_arg.is_none() {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "postfix operators are not supported".into(),
+            )));
+        }
+        let txn_ctx = Some((xid, cid));
+        let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+        let left_type = resolve_operator_type_oid(&catalog, &comment_stmt.left_arg)?;
+        let right_type = resolve_operator_type_oid(&catalog, &comment_stmt.right_arg)?;
+        let namespace_oid = comment_stmt
+            .schema_name
+            .as_deref()
+            .map(|schema_name| {
+                self.visible_namespace_oid_by_name(client_id, txn_ctx, schema_name)
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("schema \"{schema_name}\" does not exist"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "3F000",
+                    })
+            })
+            .transpose()?;
+        let operator = lookup_operator_row(
+            self,
+            client_id,
+            txn_ctx,
+            namespace_oid,
+            &comment_stmt.operator_name,
+            left_type,
+            right_type,
+        )?
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!(
+                "operator does not exist: {}",
+                operator_signature_display(&comment_stmt.operator_name, left_type, right_type)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
+        })?;
+        if catalog.current_user_oid() != BOOTSTRAP_SUPERUSER_OID
+            && catalog.current_user_oid() != operator.oprowner
+        {
+            return Err(ExecError::DetailedError {
+                message: format!("must be owner of operator {}", comment_stmt.operator_name),
+                detail: None,
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .comment_operator_mvcc(operator.oid, comment_stmt.comment.as_deref(), &ctx)
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);

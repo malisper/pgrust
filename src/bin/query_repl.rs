@@ -500,6 +500,7 @@ fn run_statement(
         | Statement::CommentOnPublication(_)
         | Statement::CommentOnAggregate(_)
         | Statement::CommentOnFunction(_)
+        | Statement::CommentOnOperator(_)
         | Statement::CreateTrigger(_)
         | Statement::DropTrigger(_)
         | Statement::AlterTableTriggerState(_)

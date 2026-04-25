@@ -11,7 +11,8 @@ use crate::backend::utils::misc::notices::{
 };
 use crate::include::catalog::{
     BootstrapCatalogKind, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
-    PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
+    PG_CLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID,
+    PgAggregateRow,
 };
 use crate::include::nodes::datum::{ArrayValue, IntervalValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
@@ -9478,6 +9479,60 @@ fn comment_on_function_uses_pg_proc_description_rows() {
                    and d.classoid = {} \
                    and d.objsubid = 0",
                 PG_PROC_RELATION_OID
+            )
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn comment_on_operator_uses_pg_operator_description_rows() {
+    let base = temp_dir("comment_on_operator");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create operator @#@ (rightarg = int8, procedure = factorial)",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "comment on operator @#@ (none, int8) is 'factorial prefix'",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!(
+                "select d.description \
+                 from pg_description d \
+                 join pg_operator o on o.oid = d.objoid \
+                 where o.oprname = '@#@' \
+                   and d.classoid = {} \
+                   and d.objsubid = 0",
+                PG_OPERATOR_RELATION_OID
+            )
+        ),
+        vec![vec![Value::Text("factorial prefix".into())]]
+    );
+
+    db.execute(1, "comment on operator @#@ (none, int8) is null")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!(
+                "select count(*) \
+                 from pg_description d \
+                 join pg_operator o on o.oid = d.objoid \
+                 where o.oprname = '@#@' \
+                   and d.classoid = {} \
+                   and d.objsubid = 0",
+                PG_OPERATOR_RELATION_OID
             )
         ),
         vec![vec![Value::Int64(0)]]
@@ -22486,6 +22541,125 @@ fn create_operator_bool_bool_regression_debug() {
         .write()
         .replace_operator_mvcc(&current, updated, &replace_ctx);
     assert!(replace_result.is_ok(), "{replace_result:?}");
+}
+
+#[test]
+fn create_operator_resolves_factorial_int8() {
+    let base = temp_dir("create_operator_resolves_factorial_int8");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create operator @#@ (rightarg = int8, procedure = factorial)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select o.oprright, o.oprresult, p.proname from pg_operator o join pg_proc p on p.oid = o.oprcode where o.oprname = '@#@'",
+        ),
+        vec![vec![
+            Value::Int64(20),
+            Value::Int64(1700),
+            Value::Text("factorial".into())
+        ]]
+    );
+}
+
+#[test]
+fn create_operator_validation_matches_postgres_order() {
+    let base = temp_dir("create_operator_validation_order");
+    let db = Database::open(&base, 16).unwrap();
+
+    match db.execute(
+        1,
+        "create operator #%# (leftarg = int8, procedure = factorial)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, detail, ..
+        }) => {
+            assert_eq!(message, "operator right argument type must be specified");
+            assert_eq!(
+                detail.as_deref(),
+                Some("Postfix operators are not supported.")
+            );
+        }
+        other => panic!("expected postfix operator error, got {:?}", other),
+    }
+
+    match db.execute(1, "create operator #@%# (procedure = factorial)") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "operator argument types must be specified");
+        }
+        other => panic!("expected missing operator argument error, got {:?}", other),
+    }
+
+    match db.execute(1, "create operator #@%# (rightarg = int8)") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "operator function must be specified");
+        }
+        other => panic!("expected missing operator function error, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_operator_unrecognized_attributes_warn_and_continue() {
+    let base = temp_dir("create_operator_unrecognized_attr");
+    let db = Database::open(&base, 16).unwrap();
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "create operator #@%# (rightarg = int8, procedure = factorial, invalid_att = int8)",
+    )
+    .unwrap();
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].severity, "WARNING");
+    assert_eq!(
+        notices[0].message,
+        "operator attribute \"invalid_att\" not recognized"
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select o.oprright, p.proname from pg_operator o join pg_proc p on p.oid = o.oprcode where o.oprname = '#@%#'",
+        ),
+        vec![vec![Value::Int64(20), Value::Text("factorial".into())]]
+    );
+}
+
+#[test]
+fn create_operator_quoted_attributes_warn_before_missing_function() {
+    let base = temp_dir("create_operator_quoted_attr_warning");
+    let db = Database::open(&base, 16).unwrap();
+
+    clear_backend_notices();
+    match db.execute(
+        1,
+        "create operator === (\"Leftarg\" = box, \"Rightarg\" = box, \"Procedure\" = area_equal_function)",
+    ) {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "operator function must be specified");
+        }
+        other => panic!("expected missing operator function error, got {:?}", other),
+    }
+    let notices = take_backend_notices();
+    assert_eq!(
+        notices
+            .iter()
+            .map(|notice| notice.message.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "operator attribute \"Leftarg\" not recognized",
+            "operator attribute \"Rightarg\" not recognized",
+            "operator attribute \"Procedure\" not recognized",
+        ]
+    );
 }
 
 #[test]

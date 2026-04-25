@@ -361,6 +361,7 @@ pub enum Statement {
     CommentOnStatistics(CommentOnStatisticsStatement),
     CommentOnAggregate(CommentOnAggregateStatement),
     CommentOnFunction(CommentOnFunctionStatement),
+    CommentOnOperator(CommentOnOperatorStatement),
     CreateDomain(CreateDomainStatement),
     CreateConversion(CreateConversionStatement),
     CreatePublication(CreatePublicationStatement),
@@ -1703,13 +1704,14 @@ pub struct CreateOperatorStatement {
     pub operator_name: String,
     pub left_arg: Option<RawTypeName>,
     pub right_arg: Option<RawTypeName>,
-    pub procedure: QualifiedNameRef,
+    pub procedure: Option<QualifiedNameRef>,
     pub commutator: Option<String>,
     pub negator: Option<String>,
     pub restrict: Option<QualifiedNameRef>,
     pub join: Option<QualifiedNameRef>,
     pub hashes: bool,
     pub merges: bool,
+    pub unrecognized_attributes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2398,6 +2400,15 @@ pub struct CommentOnFunctionStatement {
     pub schema_name: Option<String>,
     pub function_name: String,
     pub arg_types: Vec<String>,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnOperatorStatement {
+    pub schema_name: Option<String>,
+    pub operator_name: String,
+    pub left_arg: Option<RawTypeName>,
+    pub right_arg: Option<RawTypeName>,
     pub comment: Option<String>,
 }
 
