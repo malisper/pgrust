@@ -1,13 +1,14 @@
 use super::bestpath::{self, CostSelector};
-use crate::backend::catalog::Catalog;
 use crate::backend::catalog::catalog::column_desc;
+use crate::backend::catalog::{Catalog, CatalogIndexBuildOptions};
 use crate::backend::optimizer::pathnodes::rte_slot_id;
 use crate::backend::optimizer::util;
+use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::analyze::LiteralDefaultCatalog;
 use crate::backend::parser::{
-    LoweredPartitionSpec, ParseOptions, PartitionBoundSpec, PartitionRangeDatumValue,
-    PartitionStrategy, SerializedPartitionValue, SqlType, SqlTypeKind, Statement,
-    parse_statement_with_options, pg_partitioned_table_row, serialize_partition_bound,
+    IndexColumnDef, LoweredPartitionSpec, ParseOptions, PartitionBoundSpec,
+    PartitionRangeDatumValue, PartitionStrategy, SerializedPartitionValue, SqlType, SqlTypeKind,
+    Statement, parse_statement_with_options, pg_partitioned_table_row, serialize_partition_bound,
 };
 use crate::backend::parser::{analyze_select_query_with_outer, parse_select};
 use crate::include::catalog::{
@@ -18,7 +19,7 @@ use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, RelOptInfo, RelOptKind,
 };
 use crate::include::nodes::plannodes::{
-    AggregateStrategy, IndexScanKeyArgument, Plan, PlanEstimate,
+    AggregateStrategy, IndexScanKeyArgument, Plan, PlanEstimate, PlannedStmt,
 };
 use crate::include::nodes::primnodes::{
     Aggref, AttrNumber, Expr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind, OrderByEntry,
@@ -519,7 +520,10 @@ fn planner_info_for_sql(sql: &str) -> PlannerInfo {
     let stmt = parse_select(sql).expect("parse");
     let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
         .expect("analyze");
-    PlannerInfo::new(query)
+    let query = super::root::prepare_query_for_planning(query, &catalog);
+    let query = super::pull_up_sublinks(query);
+    let aggregate_layout = super::groupby_rewrite::build_aggregate_layout(&query, &catalog);
+    PlannerInfo::new(query, aggregate_layout)
 }
 
 fn planned_stmt_for_sql(sql: &str) -> crate::include::nodes::plannodes::PlannedStmt {
@@ -581,6 +585,101 @@ fn planned_stmt_for_values_sql(sql: &str) -> crate::include::nodes::plannodes::P
     let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
         .expect("analyze");
     super::planner(query, &catalog).expect("plan")
+}
+
+fn aggregate_layout_for_sql_with_catalog(
+    sql: &str,
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+) -> crate::include::nodes::pathnodes::AggregateLayout {
+    let stmt = parse_select(sql).expect("parse");
+    let (query, _) = analyze_select_query_with_outer(&stmt, catalog, &[], None, None, &[], &[])
+        .expect("analyze");
+    let query = super::root::prepare_query_for_planning(query, catalog);
+    let query = super::pull_up_sublinks(query);
+    super::groupby_rewrite::build_aggregate_layout(&query, catalog)
+}
+
+fn explain_lines_for_planned_stmt(planned: &PlannedStmt) -> Vec<String> {
+    let mut lines = Vec::new();
+    crate::backend::commands::explain::format_explain_plan_with_subplans(
+        &planned.plan_tree,
+        &planned.subplans,
+        0,
+        false,
+        &mut lines,
+    );
+    lines
+}
+
+fn int4_btree_options(num_keys: usize, indnullsnotdistinct: bool) -> CatalogIndexBuildOptions {
+    CatalogIndexBuildOptions {
+        am_oid: crate::include::catalog::BTREE_AM_OID,
+        indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID; num_keys],
+        indcollation: vec![0; num_keys],
+        indoption: vec![0; num_keys],
+        indnullsnotdistinct,
+        indisexclusion: false,
+        indimmediate: true,
+        brin_options: None,
+        gin_options: None,
+        hash_options: None,
+    }
+}
+
+fn add_ready_index(
+    catalog: &mut Catalog,
+    table_name: &str,
+    index_name: &str,
+    unique: bool,
+    primary: bool,
+    columns: &[IndexColumnDef],
+    options: Option<CatalogIndexBuildOptions>,
+    predicate_sql: Option<&str>,
+) {
+    let relation_oid = catalog
+        .lookup_any_relation(table_name)
+        .expect("table should exist")
+        .relation_oid;
+    let entry = match options.as_ref() {
+        Some(options) => catalog
+            .create_index_for_relation_with_options_and_flags(
+                index_name,
+                relation_oid,
+                unique,
+                primary,
+                columns,
+                options,
+                predicate_sql,
+            )
+            .expect("create index"),
+        None => catalog
+            .create_index_for_relation_with_flags(
+                index_name,
+                relation_oid,
+                unique,
+                primary,
+                columns,
+            )
+            .expect("create index"),
+    };
+    catalog
+        .set_index_ready_valid(entry.relation_oid, true, true)
+        .expect("mark index ready");
+}
+
+fn var_keys(exprs: &[Expr]) -> Vec<(usize, AttrNumber)> {
+    exprs
+        .iter()
+        .map(|expr| match expr {
+            Expr::Var(Var {
+                varno,
+                varattno,
+                varlevelsup: 0,
+                ..
+            }) => (*varno, *varattno),
+            other => panic!("expected simple Var, got {other:?}"),
+        })
+        .collect()
 }
 
 fn catalog_with_indexed_items() -> Catalog {
@@ -929,6 +1028,143 @@ fn partitionwise_join_requires_complete_key_equality() {
     );
 }
 
+fn catalog_with_t1_primary_key() -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog
+        .create_table(
+            "t1",
+            RelationDesc {
+                columns: vec![
+                    column_desc("a", int4(), false),
+                    column_desc("b", int4(), false),
+                    column_desc("c", int4(), false),
+                    column_desc("d", int4(), false),
+                ],
+            },
+        )
+        .expect("create t1");
+    add_ready_index(
+        &mut catalog,
+        "t1",
+        "t1_pkey",
+        true,
+        true,
+        &[IndexColumnDef::from("a"), IndexColumnDef::from("b")],
+        None,
+        None,
+    );
+    catalog
+}
+
+fn catalog_with_t2_unique_z(z_nullable: bool, indnullsnotdistinct: bool) -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog
+        .create_table(
+            "t2",
+            RelationDesc {
+                columns: vec![
+                    column_desc("x", int4(), false),
+                    column_desc("y", int4(), false),
+                    column_desc("z", int4(), z_nullable),
+                ],
+            },
+        )
+        .expect("create t2");
+    add_ready_index(
+        &mut catalog,
+        "t2",
+        "t2_z_key",
+        true,
+        false,
+        &[IndexColumnDef::from("z")],
+        Some(int4_btree_options(1, indnullsnotdistinct)),
+        None,
+    );
+    catalog
+}
+
+fn catalog_with_t3_multiple_unique_keys() -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog
+        .create_table(
+            "t3",
+            RelationDesc {
+                columns: vec![
+                    column_desc("x", int4(), false),
+                    column_desc("y", int4(), false),
+                    column_desc("z", int4(), false),
+                ],
+            },
+        )
+        .expect("create t3");
+    add_ready_index(
+        &mut catalog,
+        "t3",
+        "t3_x_key",
+        true,
+        false,
+        &[IndexColumnDef::from("x")],
+        None,
+        None,
+    );
+    add_ready_index(
+        &mut catalog,
+        "t3",
+        "t3_xy_key",
+        true,
+        false,
+        &[IndexColumnDef::from("x"), IndexColumnDef::from("y")],
+        None,
+        None,
+    );
+    catalog
+}
+
+fn catalog_with_t4_partial_and_expression_indexes() -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog
+        .create_table(
+            "t4",
+            RelationDesc {
+                columns: vec![
+                    column_desc("x", int4(), false),
+                    column_desc("y", int4(), false),
+                    column_desc("z", int4(), false),
+                ],
+            },
+        )
+        .expect("create t4");
+    add_ready_index(
+        &mut catalog,
+        "t4",
+        "t4_x_partial_key",
+        true,
+        false,
+        &[IndexColumnDef::from("x")],
+        Some(int4_btree_options(1, false)),
+        Some("x > 0"),
+    );
+    add_ready_index(
+        &mut catalog,
+        "t4",
+        "t4_expr_key",
+        true,
+        false,
+        &[IndexColumnDef {
+            name: "expr".into(),
+            expr_sql: Some("(x + 1)".into()),
+            expr_type: Some(int4()),
+            collation: None,
+            opclass: None,
+            descending: false,
+            nulls_first: None,
+        }],
+        Some(int4_btree_options(1, false)),
+        None,
+    );
+    catalog
+}
+
 fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool {
     if predicate(plan) {
         return true;
@@ -1008,6 +1244,165 @@ fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. } => None,
     }
+}
+
+#[test]
+fn aggregate_layout_removes_non_primary_key_group_columns() {
+    let catalog = catalog_with_t1_primary_key();
+    let layout =
+        aggregate_layout_for_sql_with_catalog("select * from t1 group by a, b, c, d", &catalog);
+
+    assert_eq!(var_keys(&layout.group_by), vec![(1, 1), (1, 2)]);
+    assert_eq!(var_keys(&layout.passthrough_exprs), vec![(1, 3), (1, 4)]);
+}
+
+#[test]
+fn aggregate_layout_keeps_group_columns_when_primary_key_is_incomplete() {
+    let catalog = catalog_with_t1_primary_key();
+    let layout =
+        aggregate_layout_for_sql_with_catalog("select a, c from t1 group by a, c, d", &catalog);
+
+    assert_eq!(var_keys(&layout.group_by), vec![(1, 1), (1, 3), (1, 4)]);
+    assert!(layout.passthrough_exprs.is_empty());
+}
+
+#[test]
+fn aggregate_layout_skips_nullable_unique_key() {
+    let catalog = catalog_with_t2_unique_z(true, false);
+    let layout =
+        aggregate_layout_for_sql_with_catalog("select y, z from t2 group by y, z", &catalog);
+
+    assert_eq!(var_keys(&layout.group_by), vec![(1, 2), (1, 3)]);
+    assert!(layout.passthrough_exprs.is_empty());
+}
+
+#[test]
+fn aggregate_layout_uses_not_null_unique_key() {
+    let catalog = catalog_with_t2_unique_z(false, false);
+    let layout =
+        aggregate_layout_for_sql_with_catalog("select y, z from t2 group by y, z", &catalog);
+
+    assert_eq!(var_keys(&layout.group_by), vec![(1, 3)]);
+    assert_eq!(var_keys(&layout.passthrough_exprs), vec![(1, 2)]);
+}
+
+#[test]
+fn aggregate_layout_uses_nulls_not_distinct_unique_key() {
+    let catalog = catalog_with_t2_unique_z(true, true);
+    let layout =
+        aggregate_layout_for_sql_with_catalog("select y, z from t2 group by y, z", &catalog);
+
+    assert_eq!(var_keys(&layout.group_by), vec![(1, 3)]);
+    assert_eq!(var_keys(&layout.passthrough_exprs), vec![(1, 2)]);
+}
+
+#[test]
+fn aggregate_layout_picks_smallest_unique_key() {
+    let catalog = catalog_with_t3_multiple_unique_keys();
+    let layout =
+        aggregate_layout_for_sql_with_catalog("select x, y, z from t3 group by x, y, z", &catalog);
+
+    assert_eq!(var_keys(&layout.group_by), vec![(1, 1)]);
+    assert_eq!(var_keys(&layout.passthrough_exprs), vec![(1, 2), (1, 3)]);
+}
+
+#[test]
+fn aggregate_layout_ignores_partial_and_expression_indexes() {
+    let catalog = catalog_with_t4_partial_and_expression_indexes();
+    let layout =
+        aggregate_layout_for_sql_with_catalog("select x, y, z from t4 group by x, y, z", &catalog);
+
+    assert_eq!(var_keys(&layout.group_by), vec![(1, 1), (1, 2), (1, 3)]);
+    assert!(layout.passthrough_exprs.is_empty());
+}
+
+#[test]
+fn aggregate_layout_collapses_inner_join_duplicate_group_keys() {
+    let catalog = catalog_with_people_and_pets();
+    let layout = aggregate_layout_for_sql_with_catalog(
+        "select p.id, q.owner_id
+         from people p
+         join pets q on q.owner_id = p.id
+         group by p.id, q.owner_id",
+        &catalog,
+    );
+
+    assert_eq!(layout.group_by.len(), 1);
+    assert_eq!(layout.passthrough_exprs.len(), 1);
+    assert!(matches!(layout.group_by[0], Expr::Var(_)));
+    assert!(matches!(layout.passthrough_exprs[0], Expr::Var(_)));
+}
+
+#[test]
+fn aggregate_layout_drops_unreferenced_join_duplicate_group_keys() {
+    let catalog = catalog_with_people_and_pets();
+    let sql = "select p.id
+               from people p
+               join pets q on q.owner_id = p.id
+               group by p.id, q.owner_id";
+    let layout = aggregate_layout_for_sql_with_catalog(sql, &catalog);
+
+    assert_eq!(layout.group_by.len(), 1);
+    assert!(matches!(layout.group_by[0], Expr::Var(_)));
+    assert!(layout.passthrough_exprs.is_empty());
+
+    let planned = planned_stmt_for_sql_with_catalog(sql, &catalog);
+    assert!(plan_contains(&planned.plan_tree, |plan| match plan {
+        Plan::Aggregate {
+            group_by,
+            passthrough_exprs,
+            ..
+        } => group_by.len() == 1 && passthrough_exprs.is_empty(),
+        _ => false,
+    }));
+}
+
+#[test]
+fn explain_hides_projection_for_trimmed_aggregate_output_after_reduction() {
+    let catalog = catalog_with_t1_primary_key();
+    let planned =
+        planned_stmt_for_sql_with_catalog("select a, c from t1 group by a, b, c, d", &catalog);
+    let lines = explain_lines_for_planned_stmt(&planned);
+    let rendered = lines.join("\n");
+
+    assert!(
+        lines.iter().any(|line| line.trim() == "HashAggregate"),
+        "{rendered}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim() == "Group Key: (a), (b)"),
+        "{rendered}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("Projection")),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn explain_hides_projection_for_trimmed_aggregate_output_without_reduction() {
+    let catalog = catalog_with_t1_primary_key();
+    let planned =
+        planned_stmt_for_sql_with_catalog("select a, c from t1 group by a, c, d", &catalog);
+    let lines = explain_lines_for_planned_stmt(&planned);
+    let rendered = lines.join("\n");
+
+    assert!(
+        lines.iter().any(|line| line.trim() == "HashAggregate"),
+        "{rendered}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim() == "Group Key: (a), (c), (d)"),
+        "{rendered}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("Projection")),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -1332,6 +1727,7 @@ fn aggregate_pathkeys_follow_strategy() {
         pathkeys: vec![key.clone()],
         input: Box::new(values_path(10, 1.0, 1.0)),
         group_by: vec![var(10, 1)],
+        passthrough_exprs: Vec::new(),
         accumulators: Vec::new(),
         having: None,
         output_columns: vec![QueryColumn {
@@ -1350,6 +1746,7 @@ fn aggregate_pathkeys_follow_strategy() {
         pathkeys: vec![key.clone()],
         input: Box::new(values_path(10, 1.0, 1.0)),
         group_by: vec![var(10, 1)],
+        passthrough_exprs: Vec::new(),
         accumulators: Vec::new(),
         having: None,
         output_columns: vec![QueryColumn {

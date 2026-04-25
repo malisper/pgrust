@@ -179,10 +179,19 @@ fn projection_targets_are_explain_passthrough(input: &Plan, targets: &[TargetEnt
     if matches!(input, Plan::WindowAgg { .. }) && full_width_projection {
         return true;
     }
-    full_width_projection
-        && targets
-            .iter()
-            .all(|target| matches!(target.expr, Expr::Var(_)))
+    matches!(input, Plan::Aggregate { .. })
+        && targets.iter().all(|target| !target.resjunk)
+        && targets.iter().enumerate().all(|(index, target)| {
+            matches!(target.expr, Expr::Var(_))
+                && target.input_resno.is_some_and(|resno| {
+                    resno > 0
+                        && resno <= input_names.len()
+                        && (index == 0
+                            || targets[index - 1]
+                                .input_resno
+                                .is_some_and(|prev| prev < resno))
+                })
+        })
 }
 
 pub(crate) fn format_buffer_usage(stats: BufferUsageStats) -> String {
@@ -351,7 +360,7 @@ fn push_verbose_plan_details(
             if let Some(having) = having {
                 lines.push(format!(
                     "{prefix}Filter: {}",
-                    render_verbose_expr(having, &verbose_plan_output_exprs(plan, ctx, true), ctx)
+                    render_verbose_expr(having, &verbose_plan_output_exprs(plan, ctx, true), ctx,)
                 ));
             }
         }
@@ -603,6 +612,7 @@ fn verbose_plan_output_exprs(
         Plan::Aggregate {
             input,
             group_by,
+            passthrough_exprs,
             accumulators,
             ..
         } => {
@@ -611,6 +621,11 @@ fn verbose_plan_output_exprs(
                 .iter()
                 .map(|expr| render_verbose_expr(expr, &input_names, ctx))
                 .collect::<Vec<_>>();
+            output.extend(
+                passthrough_exprs
+                    .iter()
+                    .map(|expr| render_verbose_expr(expr, &input_names, ctx)),
+            );
             output.extend(accumulators.iter().map(|accum| {
                 let rendered = render_verbose_agg_accum(accum, &input_names, ctx);
                 if for_parent_ref {
@@ -1039,11 +1054,15 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
         }
         Plan::Aggregate {
             group_by,
+            passthrough_exprs,
             accumulators,
             having,
             ..
         } => {
             for expr in group_by {
+                collect_direct_expr_subplans(expr, &mut found);
+            }
+            for expr in passthrough_exprs {
                 collect_direct_expr_subplans(expr, &mut found);
             }
             for accum in accumulators {
