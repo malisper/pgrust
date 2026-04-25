@@ -472,7 +472,10 @@ fn type_row_by_name_namespace(
     })
 }
 
-fn dynamic_type_rows_for_search_path(db: &Database, search_path: &[String]) -> Vec<PgTypeRow> {
+pub(crate) fn dynamic_type_rows_for_search_path(
+    db: &Database,
+    search_path: &[String],
+) -> Vec<PgTypeRow> {
     let mut rows = db.domain_type_rows_for_search_path(search_path);
     rows.extend(db.enum_type_rows_for_search_path(search_path));
     rows.extend(db.range_type_rows_for_search_path(search_path));

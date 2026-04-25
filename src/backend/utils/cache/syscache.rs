@@ -21,6 +21,7 @@ use crate::backend::catalog::rowcodec::{
 use crate::backend::catalog::store::{CatalogStore, CatalogWriteContext};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::inval::CatalogInvalidation;
+use crate::backend::utils::cache::lsyscache::dynamic_type_rows_for_search_path;
 use crate::backend::utils::cache::relcache::{
     IndexAmOpEntry, IndexAmProcEntry, IndexRelCacheEntry, RelCache, RelCacheEntry,
     relation_locator_for_class_row,
@@ -1537,8 +1538,13 @@ pub fn backend_relcache(
         return Ok(cache);
     }
 
-    let relcache =
-        RelCache::from_catcache_in_db(&backend_catcache(db, client_id, txn_ctx)?, db.database_oid)?;
+    let search_path = db.effective_search_path(client_id, None);
+    let dynamic_type_rows = dynamic_type_rows_for_search_path(db, &search_path);
+    let relcache = RelCache::from_catcache_in_db_with_type_rows(
+        &backend_catcache(db, client_id, txn_ctx)?,
+        db.database_oid,
+        &dynamic_type_rows,
+    )?;
     let mut states = db.backend_cache_states.write();
     let state = states.entry(client_id).or_default();
     state.cache_ctx = Some(cache_ctx);

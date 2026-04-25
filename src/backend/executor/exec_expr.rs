@@ -1,5 +1,6 @@
 use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
+use std::cmp::Ordering;
 
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use crate::backend::utils::trigger::format_trigger_definition;
@@ -2654,29 +2655,41 @@ fn eval_op_expr(
             expr_sql_type_hint(right),
             op.collation_oid,
         ),
-        (OpExprKind::Lt, [left, right]) => order_values(
+        (OpExprKind::Lt, [left, right]) => order_values_with_type(
             "<",
             eval_expr(left, slot, ctx)?,
+            expr_sql_type_hint(left),
             eval_expr(right, slot, ctx)?,
+            expr_sql_type_hint(right),
             op.collation_oid,
+            ctx,
         ),
-        (OpExprKind::LtEq, [left, right]) => order_values(
+        (OpExprKind::LtEq, [left, right]) => order_values_with_type(
             "<=",
             eval_expr(left, slot, ctx)?,
+            expr_sql_type_hint(left),
             eval_expr(right, slot, ctx)?,
+            expr_sql_type_hint(right),
             op.collation_oid,
+            ctx,
         ),
-        (OpExprKind::Gt, [left, right]) => order_values(
+        (OpExprKind::Gt, [left, right]) => order_values_with_type(
             ">",
             eval_expr(left, slot, ctx)?,
+            expr_sql_type_hint(left),
             eval_expr(right, slot, ctx)?,
+            expr_sql_type_hint(right),
             op.collation_oid,
+            ctx,
         ),
-        (OpExprKind::GtEq, [left, right]) => order_values(
+        (OpExprKind::GtEq, [left, right]) => order_values_with_type(
             ">=",
             eval_expr(left, slot, ctx)?,
+            expr_sql_type_hint(left),
             eval_expr(right, slot, ctx)?,
+            expr_sql_type_hint(right),
             op.collation_oid,
+            ctx,
         ),
         (OpExprKind::RegexMatch, [left, right]) => {
             let text = eval_expr(left, slot, ctx)?;
@@ -2719,6 +2732,61 @@ fn eval_op_expr(
         (OpExprKind::JsonPathText, [left, right]) => eval_json_path(left, right, true, slot, ctx),
         _ => Err(malformed_expr_error("operator")),
     }
+}
+
+fn order_values_with_type(
+    op: &'static str,
+    left: Value,
+    left_type: Option<SqlType>,
+    right: Value,
+    right_type: Option<SqlType>,
+    collation_oid: Option<u32>,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    if let (
+        Value::EnumOid(left_oid),
+        Some(SqlType {
+            kind: SqlTypeKind::Enum,
+            type_oid: left_type_oid,
+            ..
+        }),
+        Value::EnumOid(right_oid),
+        Some(SqlType {
+            kind: SqlTypeKind::Enum,
+            type_oid: right_type_oid,
+            ..
+        }),
+    ) = (&left, left_type, &right, right_type)
+        && left_type_oid == right_type_oid
+        && left_type_oid != 0
+        && let Some(catalog) = ctx.catalog.as_ref()
+    {
+        let rows = catalog.enum_rows();
+        let left_sort = rows
+            .iter()
+            .find(|row| row.enumtypid == left_type_oid && row.oid == *left_oid)
+            .map(|row| row.enumsortorder);
+        let right_sort = rows
+            .iter()
+            .find(|row| row.enumtypid == right_type_oid && row.oid == *right_oid)
+            .map(|row| row.enumsortorder);
+        if let (Some(left_sort), Some(right_sort)) = (left_sort, right_sort) {
+            let ordering = left_sort
+                .partial_cmp(&right_sort)
+                .unwrap_or(Ordering::Equal);
+            return Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }));
+        }
+    }
+    order_values(op, left, right, collation_oid)
 }
 
 fn eval_bool_expr(
@@ -4675,6 +4743,9 @@ fn eval_builtin_function(
     if let Some(result) = crate::backend::executor::eval_network_function(func, &values) {
         return result;
     }
+    if let Some(result) = eval_enum_function(func, &values, result_type, ctx) {
+        return result;
+    }
     if let Some(result) = eval_json_builtin_function(
         func,
         &values,
@@ -5356,6 +5427,95 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ToDate => eval_to_date_function(&values),
         BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
         _ => unreachable!("json builtins handled by expr_json"),
+    }
+}
+
+fn eval_enum_function(
+    func: BuiltinScalarFunction,
+    values: &[Value],
+    result_type: Option<SqlType>,
+    ctx: &ExecutorContext,
+) -> Option<Result<Value, ExecError>> {
+    if !matches!(
+        func,
+        BuiltinScalarFunction::EnumFirst
+            | BuiltinScalarFunction::EnumLast
+            | BuiltinScalarFunction::EnumRange
+    ) {
+        return None;
+    }
+    Some(eval_enum_function_inner(func, values, result_type, ctx))
+}
+
+fn eval_enum_function_inner(
+    func: BuiltinScalarFunction,
+    values: &[Value],
+    result_type: Option<SqlType>,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    let enum_type = result_type
+        .map(|ty| if ty.is_array { ty.element_type() } else { ty })
+        .filter(|ty| matches!(ty.kind, SqlTypeKind::Enum) && ty.type_oid != 0)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "enum support function requires a concrete enum type".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        })?;
+    let catalog = executor_catalog(ctx)?;
+    let mut labels = catalog
+        .enum_rows()
+        .into_iter()
+        .filter(|row| row.enumtypid == enum_type.type_oid)
+        .collect::<Vec<_>>();
+    labels.sort_by(|left, right| {
+        left.enumsortorder
+            .partial_cmp(&right.enumsortorder)
+            .unwrap_or(Ordering::Equal)
+    });
+    match func {
+        BuiltinScalarFunction::EnumFirst => Ok(labels
+            .first()
+            .map(|row| Value::EnumOid(row.oid))
+            .unwrap_or(Value::Null)),
+        BuiltinScalarFunction::EnumLast => Ok(labels
+            .last()
+            .map(|row| Value::EnumOid(row.oid))
+            .unwrap_or(Value::Null)),
+        BuiltinScalarFunction::EnumRange => {
+            let lower = values.first().and_then(|value| match value {
+                Value::EnumOid(oid) => labels.iter().position(|row| row.oid == *oid),
+                Value::Null => Some(0),
+                _ => None,
+            });
+            let upper = values.get(1).and_then(|value| match value {
+                Value::EnumOid(oid) => labels.iter().position(|row| row.oid == *oid),
+                Value::Null => labels.len().checked_sub(1),
+                _ => None,
+            });
+            let (start, end) = match values.len() {
+                1 => (0, labels.len().saturating_sub(1)),
+                2 => (lower.unwrap_or(labels.len()), upper.unwrap_or(0)),
+                _ => {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "enum_range(anyenum [, anyenum])",
+                        actual: format!("enum_range({} args)", values.len()),
+                    }));
+                }
+            };
+            let items = if labels.is_empty() || start > end {
+                Vec::new()
+            } else {
+                labels[start..=end]
+                    .iter()
+                    .map(|row| Value::EnumOid(row.oid))
+                    .collect()
+            };
+            Ok(Value::PgArray(
+                ArrayValue::from_1d(items).with_element_type_oid(enum_type.type_oid),
+            ))
+        }
+        _ => unreachable!(),
     }
 }
 
