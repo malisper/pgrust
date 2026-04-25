@@ -304,6 +304,8 @@ pub enum Statement {
     CreateStatistics(CreateStatisticsStatement),
     AlterStatistics(AlterStatisticsStatement),
     CreateForeignDataWrapper(CreateForeignDataWrapperStatement),
+    CreateForeignServer(CreateForeignServerStatement),
+    CreateForeignTable(CreateForeignTableStatement),
     CreateIndex(CreateIndexStatement),
     CreateOperator(CreateOperatorStatement),
     CreateOperatorClass(CreateOperatorClassStatement),
@@ -2221,6 +2223,18 @@ pub struct CreateForeignDataWrapperStatement {
     pub handler_name: Option<String>,
     pub validator_name: Option<String>,
     pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateForeignServerStatement {
+    pub server_name: String,
+    pub fdw_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateForeignTableStatement {
+    pub create_table: CreateTableStatement,
+    pub server_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

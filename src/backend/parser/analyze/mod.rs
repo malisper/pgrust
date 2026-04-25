@@ -66,6 +66,7 @@ use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
     build_pg_rules_rows, build_pg_stats_rows, build_pg_views_rows,
+    current_pg_stat_progress_copy_rows,
 };
 use agg::*;
 use agg_output::*;
@@ -1054,6 +1055,10 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn pg_stat_progress_copy_rows(&self) -> Vec<Vec<Value>> {
+        current_pg_stat_progress_copy_rows()
+    }
+
     fn pg_locks_rows(&self) -> Vec<Vec<Value>> {
         build_pg_locks_rows(Vec::new())
     }
@@ -1782,6 +1787,35 @@ fn literal_sql_expr_value(expr: &SqlExpr) -> Option<Value> {
         }
         _ => None,
     }
+}
+
+fn group_by_target_ordinal_expr(
+    expr: &SqlExpr,
+    targets: &[SelectItem],
+) -> Result<Option<SqlExpr>, ParseError> {
+    let SqlExpr::IntegerLiteral(value) = expr else {
+        return Ok(None);
+    };
+    let Ok(ordinal) = value.parse::<usize>() else {
+        return Ok(None);
+    };
+    if ordinal == 0 || ordinal > targets.len() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "GROUP BY position in select list",
+            actual: value.clone(),
+        });
+    }
+    Ok(Some(targets[ordinal - 1].expr.clone()))
+}
+
+fn normalize_group_by_exprs(stmt: &SelectStatement) -> Result<Vec<SqlExpr>, ParseError> {
+    stmt.group_by
+        .iter()
+        .map(|expr| {
+            group_by_target_ordinal_expr(expr, &stmt.targets)
+                .map(|resolved| resolved.unwrap_or_else(|| expr.clone()))
+        })
+        .collect()
 }
 
 pub(crate) fn raw_type_name_hint(raw: &RawTypeName) -> SqlType {
@@ -3604,7 +3638,7 @@ fn bind_select_query_with_outer(
                 .map(|target| target.expr.clone())
                 .collect::<Vec<_>>()
         } else {
-            stmt.group_by.clone()
+            normalize_group_by_exprs(stmt)?
         };
 
         for group_expr in &effective_group_by {
