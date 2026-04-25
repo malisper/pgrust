@@ -317,6 +317,81 @@ add_aggregate_dependencies() {
     TEST_FILES=("${expanded_files[@]}")
 }
 
+direct_test_dependencies() {
+    local test_name="$1"
+
+    # Keep this aligned with dependency comments in PostgreSQL's parallel_schedule.
+    # Isolated workers cannot rely on earlier schedule groups having populated the
+    # same database, so they replay these prerequisites locally.
+    case "$test_name" in
+        multirangetypes)
+            echo "rangetypes"
+            ;;
+        geometry)
+            echo "point lseg line box path polygon circle"
+            ;;
+        horology)
+            echo "date time timetz timestamp timestamptz interval"
+            ;;
+        aggregates)
+            echo "create_aggregate"
+            ;;
+        join|select_parallel|with)
+            echo "create_misc"
+            ;;
+        psql|event_trigger)
+            echo "create_am"
+            ;;
+        amutils)
+            echo "geometry create_index_spgist hash_index brin"
+            ;;
+        select_views)
+            echo "create_view"
+            ;;
+        *)
+            ;;
+    esac
+}
+
+dependency_already_collected() {
+    local needle="$1"
+    local existing=""
+
+    if [[ ${#collected_dependencies[@]} -eq 0 ]]; then
+        return 1
+    fi
+
+    for existing in "${collected_dependencies[@]}"; do
+        [[ "$existing" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+collect_test_dependencies_recursive() {
+    local test_name="$1"
+    local dep=""
+
+    for dep in $(direct_test_dependencies "$test_name"); do
+        if dependency_already_collected "$dep"; then
+            continue
+        fi
+        collect_test_dependencies_recursive "$dep"
+        if ! dependency_already_collected "$dep"; then
+            collected_dependencies+=("$dep")
+        fi
+    done
+}
+
+collect_test_dependencies() {
+    local test_name="$1"
+    local -a collected_dependencies=()
+
+    collect_test_dependencies_recursive "$test_name"
+    if [[ ${#collected_dependencies[@]} -gt 0 ]]; then
+        printf '%s\n' "${collected_dependencies[@]}"
+    fi
+}
+
 PORT=5433
 SKIP_BUILD=false
 SKIP_SERVER=false
@@ -655,7 +730,9 @@ else
     done
 fi
 
-add_aggregate_dependencies
+if [[ -n "$SINGLE_TEST" && "$ISOLATED_PARALLEL" != true ]]; then
+    add_aggregate_dependencies
+fi
 
 if [[ -n "$SINGLE_TEST" ]]; then
     TEST_GROUPS=()
@@ -1059,6 +1136,57 @@ run_one_regression_test() {
     fi
 }
 
+run_regression_dependency_setup() {
+    local dependency_name="$1"
+    local dependent_name="$2"
+    local sql_file="$SQL_DIR/${dependency_name}.sql"
+    local expected_file="$EXPECTED_DIR/${dependency_name}.out"
+    local output_stem="${PGRUST_SETUP_OUTPUT_STEM:-test_setup}_dependency_${dependency_name}"
+    local output_file="$RESULTS_DIR/output/${output_stem}.out"
+    local exit_code=0
+
+    if [[ ! -f "$sql_file" ]]; then
+        echo "ERROR: dependency SQL not found for $dependent_name: $sql_file" >&2
+        return 1
+    fi
+
+    prepare_test_fixture "$sql_file" "$expected_file" "$dependency_name"
+    mkdir -p "$(dirname "$output_file")"
+    echo "Running dependency setup for $dependent_name: $dependency_name"
+    if run_psql_file "$TIMEOUT" "$PREPARED_SQL_FILE" "$output_file" psql "${PG_ARGS[@]}" -a -q; then
+        return 0
+    fi
+
+    exit_code=$?
+    if [[ $exit_code -eq 124 ]]; then
+        echo "TIMEOUT" >> "$output_file"
+    fi
+    echo "ERROR: dependency setup failed for $dependent_name: $dependency_name" >&2
+    echo "See: $output_file" >&2
+    return 1
+}
+
+run_regression_dependency_setups() {
+    local dependent_name="$1"
+    local dep=""
+    local -a dependencies=()
+
+    while IFS= read -r dep; do
+        [[ -n "$dep" ]] && dependencies+=("$dep")
+    done < <(collect_test_dependencies "$dependent_name")
+
+    if [[ ${#dependencies[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    echo "Dependency setup for $dependent_name: ${dependencies[*]}"
+    for dep in "${dependencies[@]}"; do
+        if ! run_regression_dependency_setup "$dep" "$dependent_name"; then
+            return 1
+        fi
+    done
+}
+
 run_one_regression_test_isolated() (
     local sql_file="$1"
     local worker_slot="$2"
@@ -1103,6 +1231,16 @@ run_one_regression_test_isolated() (
             echo "port: $PORT"
             echo "data dir: $DATA_DIR"
         } >> "$output_file"
+        write_test_status "$status_file" "error" "$test_name" 0 0 0 0
+        return 1
+    fi
+
+    if ! run_regression_dependency_setups "$test_name"; then
+        {
+            echo "ERROR: isolated worker $worker_name failed dependency setup"
+            echo "port: $PORT"
+            echo "data dir: $DATA_DIR"
+        } > "$output_file"
         write_test_status "$status_file" "error" "$test_name" 0 0 0 0
         return 1
     fi
