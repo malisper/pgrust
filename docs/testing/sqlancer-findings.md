@@ -46,7 +46,7 @@ existing blocker. Add one finding row per distinct blocker.
 | SQLANCER-003 | fixed-in-branch | `IN` semantics | All-NULL `IN` lists now bind against the left-hand expression type, so SQLancer's `IN (NULL)` cases no longer fail as ambiguous `ARRAY[]`. Confirmation artifact: `/tmp/pgrust-sqlancer-triage-sqlancer003/seed-1`. |
 | SQLANCER-004 | fixed-in-branch | SELECT syntax | pgrust now accepts `SELECT ALL` as PostgreSQL's explicit duplicate-preserving select modifier. Confirmation artifact: `/tmp/pgrust-sqlancer-triage-sqlancer004/seed-1`. |
 | SQLANCER-005 | fixed-in-branch | FROM syntax | pgrust now accepts PostgreSQL's legacy `FROM table*` inheritance marker as the same default relation scan behavior pgrust already used for bare table references. Confirmation artifact: `/tmp/pgrust-sqlancer-triage-sqlancer005/seed-1`. |
-| SQLANCER-006 | common-unsupported | scalar function | Current seed-1 blocker after SQLANCER-005: generated expressions use `upper(text)`, which binds but fails during execution with a scalar-function type mismatch. Artifact: `/tmp/pgrust-sqlancer-triage-sqlancer005/seed-1`. |
+| SQLANCER-006 | fixed-in-branch | scalar function | pgrust now resolves and executes `upper(text)` through the builtin scalar-function path. Confirmation artifact: `/tmp/pgrust-sqlancer-triage-sqlancer006/seed-1`. |
 | SQLANCER-007 | robustness | numeric expression | Huge negative numeric exponent generated an arithmetic overflow path. |
 | SQLANCER-008 | protocol compatibility | extended protocol | DML `RETURNING` needs row descriptions for JDBC extended-protocol execution. |
 | SQLANCER-009 | robustness | server execution | Deep generated SQL triggered a pgrust client-thread stack overflow. |
