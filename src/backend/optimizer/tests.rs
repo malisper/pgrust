@@ -2000,7 +2000,11 @@ fn explain_shows_initplan_for_rewritten_minmax_aggregate() {
 
     assert!(lines.iter().any(|line| line == "  InitPlan 1"));
     assert!(lines.iter().any(|line| line.trim() == "Limit"));
-    assert!(lines.iter().any(|line| line.contains("Index Scan")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Index Scan") || line.contains("Index Only Scan"))
+    );
     assert!(!lines.iter().any(|line| line.contains("Aggregate")));
 }
 
