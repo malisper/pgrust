@@ -36,13 +36,14 @@ regression failures, timeouts, or catchable termination signals.
 - `status/`: per-test status records used to aggregate parallel results.
 - `fixtures/`: rewritten SQL/expected fixtures used by pgrust compatibility
   shims.
+- `base/`: staged isolated base clusters.
 - `workers/`: isolated worker database state.
 - `tablespaces/`: tablespace state.
 
 The Actions artifact intentionally uploads only the compact text/debug bundle:
 summary files, exit code, `output/`, `diff/`, `status/`, and `fixtures/`.
-It excludes `workers/` and `tablespaces/` because those are large database
-directories used only to isolate in-run workers.
+It excludes `base/`, `workers/`, and `tablespaces/` because those are large
+database directories used only to isolate in-run workers.
 
 `regression-history` stores the text results under:
 
@@ -64,13 +65,23 @@ With `--jobs > 1` in managed-server mode, each concurrent test file gets its own
 - TCP port
 - data directory
 - tablespace directory
-- bootstrap setup output
+- cloned base-cluster state
 
 The isolation boundary is the test file, not the SQL statement. Ordinary SQL
 errors inside a file do not stop `psql`, so later statements in that same file
 can be affected by earlier failed setup. That is intentional: PostgreSQL
 regression files are mini-scenarios, and splitting them into independent
 statements would change the coverage.
+
+Before running isolated workers, the script stages reusable base clusters:
+
+- `test_setup`: bootstrap fixture state only.
+- `post_create_index`: a copy of `test_setup` after running `create_index.sql`.
+
+Tests before the `create_index` schedule group clone the `test_setup` base.
+Tests after that group clone the `post_create_index` base. This preserves
+PostgreSQL's broad `create_index` setup assumption without replaying
+`create_index.sql` before every later test.
 
 For explicit named cross-file dependencies documented by PostgreSQL's schedule,
 isolated workers replay the prerequisite SQL files in the same worker database
@@ -80,15 +91,6 @@ before running the dependent file. For example, `aggregates.sql` replays
 When PostgreSQL adds or changes schedule dependency comments, update
 `direct_test_dependencies` in `scripts/run_regression.sh` so isolated workers
 keep matching the upstream schedule assumptions.
-
-PostgreSQL also documents a broader dependency class: many later tests can
-depend on `create_index.sql` because their output order, `EXPLAIN` output, or
-catalog-visible index objects differ when those indexes are absent. The current
-isolated runner does not replay `create_index.sql` for every later test because
-doing that naively would add a large setup cost to most workers. If those missing
-indexes become a material source of noise, prefer adding a staged base-cluster
-snapshot after `create_index.sql` over replaying the whole file before every
-test.
 
 ## Query Match Rate
 
