@@ -1084,11 +1084,15 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::DateTrunc => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::DateBin => args.len() == 3,
             BuiltinScalarFunction::TimeZone => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::DateAdd | BuiltinScalarFunction::DateSubtract => {
+                matches!(args.len(), 2 | 3)
+            }
             BuiltinScalarFunction::IsFinite => args.len() == 1,
             BuiltinScalarFunction::MakeDate | BuiltinScalarFunction::MakeTime => args.len() == 3,
             BuiltinScalarFunction::MakeTimestamp => args.len() == 6,
             BuiltinScalarFunction::MakeTimestampTz => matches!(args.len(), 6 | 7),
             BuiltinScalarFunction::Age => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::ToTimestamp => args.len() == 1,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
             BuiltinScalarFunction::PgMyTempSchema => args.is_empty(),
             BuiltinScalarFunction::PgRustInternalBinaryCoercible => args.len() == 2,
@@ -1975,6 +1979,9 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("date_trunc", BuiltinScalarFunction::DateTrunc),
         ("date_bin", BuiltinScalarFunction::DateBin),
         ("timezone", BuiltinScalarFunction::TimeZone),
+        ("date_bin", BuiltinScalarFunction::DateBin),
+        ("date_add", BuiltinScalarFunction::DateAdd),
+        ("date_subtract", BuiltinScalarFunction::DateSubtract),
         ("isfinite", BuiltinScalarFunction::IsFinite),
         ("make_date", BuiltinScalarFunction::MakeDate),
         ("make_time", BuiltinScalarFunction::MakeTime),
@@ -2506,6 +2513,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("to_char", BuiltinScalarFunction::ToChar),
         ("to_date", BuiltinScalarFunction::ToDate),
         ("to_number", BuiltinScalarFunction::ToNumber),
+        ("to_timestamp", BuiltinScalarFunction::ToTimestamp),
         ("abs", BuiltinScalarFunction::Abs),
         ("log", BuiltinScalarFunction::Log),
         ("log10", BuiltinScalarFunction::Log10),
@@ -3163,6 +3171,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ToChar
             | BuiltinScalarFunction::ToDate
             | BuiltinScalarFunction::ToNumber
+            | BuiltinScalarFunction::ToTimestamp
             | BuiltinScalarFunction::RegexpMatch
             | BuiltinScalarFunction::RegexpReplace
             | BuiltinScalarFunction::RegexpCount

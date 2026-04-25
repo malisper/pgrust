@@ -592,6 +592,55 @@ pub(super) fn bind_scalar_function_call(
             }
             Ok(build_func(false, args))
         }
+        BuiltinScalarFunction::DateBin => {
+            let target_type = match arg_types[1].kind {
+                SqlTypeKind::TimestampTz => SqlType::new(SqlTypeKind::TimestampTz),
+                _ => SqlType::new(SqlTypeKind::Timestamp),
+            };
+            Ok(Expr::resolved_builtin_func(
+                func,
+                func_oid,
+                Some(target_type),
+                false,
+                vec![
+                    coerce_bound_expr(
+                        bound_args[0].clone(),
+                        arg_types[0],
+                        SqlType::new(SqlTypeKind::Interval),
+                    ),
+                    coerce_bound_expr(bound_args[1].clone(), arg_types[1], target_type),
+                    coerce_bound_expr(bound_args[2].clone(), arg_types[2], target_type),
+                ],
+            ))
+        }
+        BuiltinScalarFunction::DateAdd | BuiltinScalarFunction::DateSubtract => {
+            let mut args = vec![
+                coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_types[0],
+                    SqlType::new(SqlTypeKind::TimestampTz),
+                ),
+                coerce_bound_expr(
+                    bound_args[1].clone(),
+                    arg_types[1],
+                    SqlType::new(SqlTypeKind::Interval),
+                ),
+            ];
+            if bound_args.len() == 3 {
+                args.push(coerce_bound_expr(
+                    bound_args[2].clone(),
+                    arg_types[2],
+                    SqlType::new(SqlTypeKind::Text),
+                ));
+            }
+            Ok(Expr::resolved_builtin_func(
+                func,
+                func_oid,
+                Some(SqlType::new(SqlTypeKind::TimestampTz)),
+                false,
+                args,
+            ))
+        }
         BuiltinScalarFunction::PgSleep => Ok(build_func(
             false,
             vec![coerce_bound_expr(
@@ -2028,6 +2077,17 @@ pub(super) fn bind_scalar_function_call(
                 .zip(bound_args)
                 .map(|(ty, arg)| coerce_bound_expr(arg, ty, SqlType::new(SqlTypeKind::Text)))
                 .collect(),
+        )),
+        BuiltinScalarFunction::ToTimestamp => Ok(Expr::resolved_builtin_func(
+            func,
+            func_oid,
+            Some(SqlType::new(SqlTypeKind::TimestampTz)),
+            false,
+            vec![coerce_bound_expr(
+                bound_args[0].clone(),
+                arg_types[0],
+                SqlType::new(SqlTypeKind::Float8),
+            )],
         )),
         BuiltinScalarFunction::NumericInc
         | BuiltinScalarFunction::Factorial
