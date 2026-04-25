@@ -672,7 +672,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::DatePart | BuiltinScalarFunction::DateTrunc => args.len() == 2,
             BuiltinScalarFunction::TimeZone => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::IsFinite => args.len() == 1,
-            BuiltinScalarFunction::MakeDate => args.len() == 3,
+            BuiltinScalarFunction::MakeDate | BuiltinScalarFunction::MakeTime => args.len() == 3,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
             BuiltinScalarFunction::PgMyTempSchema => args.is_empty(),
             BuiltinScalarFunction::PgRustInternalBinaryCoercible => args.len() == 2,
@@ -1508,6 +1508,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("timezone", BuiltinScalarFunction::TimeZone),
         ("isfinite", BuiltinScalarFunction::IsFinite),
         ("make_date", BuiltinScalarFunction::MakeDate),
+        ("make_time", BuiltinScalarFunction::MakeTime),
         (
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,

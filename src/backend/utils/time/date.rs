@@ -3,8 +3,8 @@ use crate::backend::utils::time::datetime::{
     DateTimeKeyword, DateTimeParseError, TimeZoneSpec, days_from_ymd, format_offset,
     format_time_usecs, month_number, named_timezone_offset_seconds_for_date,
     parse_date_token_with_config, parse_fraction_to_usecs, parse_keyword, parse_time_components,
-    parse_timezone_spec, split_time_and_offset, timezone_offset_seconds, today_pg_days,
-    ymd_from_days,
+    parse_timezone_spec, postgres_date_from_ymd_i64, split_time_and_offset,
+    timezone_offset_seconds, today_pg_days, ymd_from_days,
 };
 use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, POSTGRES_EPOCH_JDATE, TimeADT, TimeTzADT,
@@ -48,14 +48,14 @@ fn build_date(
     day: u32,
     datestyle_hint: bool,
 ) -> Result<DateADT, DateParseError> {
-    let Some(days) = days_from_ymd(year, month, day) else {
+    let Some(days) = postgres_date_from_ymd_i64(year, month, day) else {
         return Err(DateParseError::FieldOutOfRange { datestyle_hint });
     };
     let (min, max) = supported_date_bounds();
-    if days < min || days > max {
+    if days < i64::from(min) || days > i64::from(max) {
         return Err(DateParseError::OutOfRange);
     }
-    Ok(DateADT(days))
+    Ok(DateADT(days as i32))
 }
 
 fn parse_numeric_tokens(
@@ -217,7 +217,13 @@ fn parse_named_month_tokens(
                     DateOrder::Mdy => {
                         let day = first.parse::<u32>().map_err(|_| DateParseError::Invalid)?;
                         if day > 31 {
-                            Err(DateParseError::Invalid)
+                            if hyphenated {
+                                Err(DateParseError::FieldOutOfRange {
+                                    datestyle_hint: true,
+                                })
+                            } else {
+                                Err(DateParseError::Invalid)
+                            }
                         } else {
                             build_date(
                                 parse_year_number(third, allow_two_digit_year)?,
@@ -1069,7 +1075,7 @@ mod tests {
             parse_date_text("1999-01-08", &ymd)
         );
         assert_eq!(parse_date_text("99-Jan-08", &dmy), out_of_range);
-        assert_eq!(parse_date_text("99-Jan-08", &mdy), invalid);
+        assert_eq!(parse_date_text("99-Jan-08", &mdy), out_of_range);
 
         assert_eq!(parse_date_text("08-Jan-99", &ymd), out_of_range);
         assert_eq!(

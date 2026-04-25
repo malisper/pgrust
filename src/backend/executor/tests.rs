@@ -12,7 +12,7 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
 use crate::include::catalog::{CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};
-use crate::include::nodes::datetime::{DateADT, TimestampADT};
+use crate::include::nodes::datetime::{DateADT, TimestampADT, TimestampTzADT};
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::{OrderByEntry, Var, user_attrno};
 use crate::pgrust::database::{Database, Session};
@@ -6014,11 +6014,11 @@ fn select_date_trunc_on_date_values() {
     )
     .unwrap(),
         vec![vec![
-            Value::Timestamp(TimestampADT(
+            Value::TimestampTz(TimestampTzADT(
                 i64::from(crate::backend::utils::time::datetime::days_from_ymd(2001, 1, 1).unwrap())
                     * crate::include::nodes::datetime::USECS_PER_DAY,
             )),
-            Value::Timestamp(TimestampADT(
+            Value::TimestampTz(TimestampTzADT(
                 i64::from(crate::backend::utils::time::datetime::days_from_ymd(-10, 1, 1).unwrap())
                     * crate::include::nodes::datetime::USECS_PER_DAY,
             )),

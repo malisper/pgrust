@@ -571,6 +571,7 @@ pub enum BuiltinScalarFunction {
     TimeZone,
     IsFinite,
     MakeDate,
+    MakeTime,
     Abs,
     Log,
     Log10,

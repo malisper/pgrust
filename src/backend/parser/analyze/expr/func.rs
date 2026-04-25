@@ -563,14 +563,30 @@ pub(super) fn bind_scalar_function_call(
         }
         BuiltinScalarFunction::IsFinite => Ok(build_func(false, bound_args)),
         BuiltinScalarFunction::PgColumnSize => Ok(build_func(false, bound_args)),
-        BuiltinScalarFunction::MakeDate => Ok(build_func(
-            false,
-            arg_types
-                .into_iter()
-                .zip(bound_args)
-                .map(|(ty, arg)| coerce_bound_expr(arg, ty, SqlType::new(SqlTypeKind::Int4)))
-                .collect(),
-        )),
+        BuiltinScalarFunction::MakeDate | BuiltinScalarFunction::MakeTime => {
+            let target_types = if func == BuiltinScalarFunction::MakeDate {
+                [
+                    SqlType::new(SqlTypeKind::Int4),
+                    SqlType::new(SqlTypeKind::Int4),
+                    SqlType::new(SqlTypeKind::Int4),
+                ]
+            } else {
+                [
+                    SqlType::new(SqlTypeKind::Int4),
+                    SqlType::new(SqlTypeKind::Int4),
+                    SqlType::new(SqlTypeKind::Float8),
+                ]
+            };
+            Ok(build_func(
+                false,
+                arg_types
+                    .into_iter()
+                    .zip(bound_args)
+                    .zip(target_types)
+                    .map(|((ty, arg), target)| coerce_bound_expr(arg, ty, target))
+                    .collect(),
+            ))
+        }
         BuiltinScalarFunction::ToTsVector => Ok(build_func(
             false,
             args.iter()

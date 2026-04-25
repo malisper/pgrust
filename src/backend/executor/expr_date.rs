@@ -528,8 +528,9 @@ pub(crate) fn eval_date_trunc_function(
                     hint: None,
                     sqlstate: "0A000",
                 })?;
-            Ok(Value::Timestamp(TimestampADT(
-                i64::from(days) * USECS_PER_DAY,
+            let offset_seconds = i64::from(timezone_offset_seconds(config));
+            Ok(Value::TimestampTz(TimestampTzADT(
+                i64::from(days) * USECS_PER_DAY - offset_seconds * USECS_PER_SEC,
             )))
         }
         Value::Timestamp(timestamp) => {
@@ -595,6 +596,51 @@ pub(crate) fn eval_make_date_function(values: &[Value]) -> Result<Value, ExecErr
     let days = days_from_ymd(astronomical_year, month_u32, day_u32)
         .ok_or_else(|| invalid_make_date(year, month, day))?;
     Ok(Value::Date(crate::include::nodes::datetime::DateADT(days)))
+}
+
+fn invalid_make_time(hour: i32, minute: i32, second: f64) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("time field value out of range: {hour:02}:{minute:02}:{second}"),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    }
+}
+
+pub(crate) fn eval_make_time_function(values: &[Value]) -> Result<Value, ExecError> {
+    let [hour_value, minute_value, second_value] = values else {
+        return Err(ExecError::DetailedError {
+            message: "malformed make_time call".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let (hour, minute, second) = match (hour_value, minute_value, second_value) {
+        (Value::Int32(hour), Value::Int32(minute), Value::Float64(second)) => {
+            (*hour, *minute, *second)
+        }
+        _ => {
+            return Err(ExecError::TypeMismatch {
+                op: "make_time",
+                left: hour_value.clone(),
+                right: minute_value.clone(),
+            });
+        }
+    };
+    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0.0..60.0).contains(&second) {
+        return Err(invalid_make_time(hour, minute, second));
+    }
+    let whole_seconds = second.trunc() as i64;
+    let micros = ((second.fract() * USECS_PER_SEC as f64).round()) as i64;
+    let usecs = i64::from(hour) * USECS_PER_HOUR
+        + i64::from(minute) * USECS_PER_MINUTE
+        + whole_seconds * USECS_PER_SEC
+        + micros;
+    Ok(Value::Time(TimeADT(usecs)))
 }
 
 fn to_date_parse_error(input: &str) -> ExecError {
@@ -768,7 +814,7 @@ mod tests {
                 &DateTimeConfig::default()
             )
             .unwrap(),
-            Value::Timestamp(TimestampADT(
+            Value::TimestampTz(TimestampTzADT(
                 i64::from(days_from_ymd(-99, 1, 1).unwrap()) * USECS_PER_DAY,
             ))
         );
@@ -781,7 +827,7 @@ mod tests {
                 &DateTimeConfig::default()
             )
             .unwrap(),
-            Value::Timestamp(TimestampADT(
+            Value::TimestampTz(TimestampTzADT(
                 i64::from(days_from_ymd(0, 1, 1).unwrap()) * USECS_PER_DAY,
             ))
         );
@@ -835,6 +881,21 @@ mod tests {
                 .unwrap(),
             Value::Date(DateADT(days_from_ymd(-43, 3, 15).unwrap()))
         );
+    }
+
+    #[test]
+    fn make_date_rejects_minimum_i32_year() {
+        match eval_make_date_function(&[Value::Int32(i32::MIN), Value::Int32(1), Value::Int32(1)])
+            .unwrap_err()
+        {
+            ExecError::DetailedError {
+                message, sqlstate, ..
+            } => {
+                assert_eq!(message, "date field value out of range: -2147483648-01-01");
+                assert_eq!(sqlstate, "22008");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
