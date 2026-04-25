@@ -1005,7 +1005,9 @@ use crate::ClientId;
 use crate::pgrust::cluster::Cluster;
 use crate::pgrust::database::Database;
 use crate::pgrust::portal::{CursorOptions, PortalFetchDirection, PortalFetchLimit};
-use crate::pgrust::session::Session;
+use crate::pgrust::session::{
+    CopyCommand, CopyDirection, CopyEndpoint, CopyExecutionResult, Session, parse_copy_command,
+};
 
 const SSL_REQUEST_CODE: i32 = 80877103;
 pub(crate) const PROTOCOL_VERSION_3_0: i32 = 196608;
@@ -1033,9 +1035,7 @@ struct ConnectionState {
 }
 
 struct CopyInState {
-    table_name: String,
-    columns: Option<Vec<String>>,
-    null_marker: String,
+    copy: CopyCommand,
     pending: Vec<u8>,
     continuation: Vec<String>,
 }
@@ -1643,16 +1643,61 @@ fn execute_query_statement(
         return Ok(QueryStatementFlow::Continue);
     }
 
-    if let Some((table_name, columns, null_marker)) = parse_copy_from_stdin(&sql) {
-        state.copy_in = Some(CopyInState {
-            table_name,
-            columns,
-            null_marker,
-            pending: Vec::new(),
-            continuation: Vec::new(),
-        });
-        send_copy_in_response(stream)?;
-        return Ok(QueryStatementFlow::CopyInStarted);
+    if let Some(copy) = parse_copy_command(&sql) {
+        match copy {
+            Ok(copy) => match &copy.direction {
+                CopyDirection::From(CopyEndpoint::Stdin) => {
+                    if let Err(e) = state.session.validate_copy_from_stdin_start(db, &copy) {
+                        send_exec_error(stream, &sql, &e)?;
+                        return Ok(QueryStatementFlow::Continue);
+                    }
+                    state.copy_in = Some(CopyInState {
+                        copy,
+                        pending: Vec::new(),
+                        continuation: Vec::new(),
+                    });
+                    send_copy_in_response(stream)?;
+                    return Ok(QueryStatementFlow::CopyInStarted);
+                }
+                CopyDirection::To(CopyEndpoint::Stdout) => {
+                    match state.session.execute_copy_command(db, &copy) {
+                        Ok(CopyExecutionResult::Output { data, rows }) => {
+                            flush_pending_backend_messages(stream, db, &state.session)?;
+                            send_copy_out_response(stream, CopyFormat::Text, 0)?;
+                            send_copy_data(stream, &data)?;
+                            send_copy_done(stream)?;
+                            send_command_complete(stream, &format!("COPY {rows}"))?;
+                            return Ok(QueryStatementFlow::Continue);
+                        }
+                        Ok(CopyExecutionResult::AffectedRows(rows)) => {
+                            flush_pending_backend_messages(stream, db, &state.session)?;
+                            send_command_complete(stream, &format!("COPY {rows}"))?;
+                            return Ok(QueryStatementFlow::Continue);
+                        }
+                        Err(e) => {
+                            send_exec_error(stream, &sql, &e)?;
+                            return Ok(QueryStatementFlow::Stop);
+                        }
+                    }
+                }
+                _ => match state.session.execute_copy_command(db, &copy) {
+                    Ok(CopyExecutionResult::AffectedRows(rows))
+                    | Ok(CopyExecutionResult::Output { rows, .. }) => {
+                        flush_pending_backend_messages(stream, db, &state.session)?;
+                        send_command_complete(stream, &format!("COPY {rows}"))?;
+                        return Ok(QueryStatementFlow::Continue);
+                    }
+                    Err(e) => {
+                        send_exec_error(stream, &sql, &e)?;
+                        return Ok(QueryStatementFlow::Stop);
+                    }
+                },
+            },
+            Err(e) => {
+                send_exec_error(stream, &sql, &e)?;
+                return Ok(QueryStatementFlow::Stop);
+            }
+        }
     }
 
     if !state.session.standard_conforming_strings()
@@ -3976,33 +4021,8 @@ fn handle_copy_done(
         ));
     };
     let text = String::from_utf8_lossy(&copy.pending);
-    let rows = text
-        .lines()
-        .map(|line| line.trim_end_matches('\r'))
-        .filter(|line| !line.is_empty() && *line != "\\.")
-        .map(|line| {
-            line.split('\t')
-                .map(|part| part.to_string())
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    let copy_sql = if let Some(columns) = &copy.columns {
-        format!(
-            "copy {} ({}) from stdin",
-            copy.table_name,
-            columns.join(", ")
-        )
-    } else {
-        format!("copy {} from stdin", copy.table_name)
-    };
-    if let Err(e) = state.session.copy_from_rows_into_with_null_marker(
-        db,
-        &copy.table_name,
-        copy.columns.as_deref(),
-        &rows,
-        &copy.null_marker,
-    ) {
-        send_exec_error(stream, &copy_sql, &e)?;
+    if let Err(e) = state.session.copy_from_text(db, &copy.copy, &text) {
+        send_exec_error(stream, "copy from stdin", &e)?;
         send_ready_with_pending_messages(stream, db, &state.session)?;
         return Ok(());
     }
@@ -4554,6 +4574,7 @@ fn handle_close(
 fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> io::Result<()> {
     for notice in notices {
         let (severity, sqlstate) = match notice.level {
+            RaiseLevel::Info => ("INFO", "00000"),
             RaiseLevel::Notice => ("NOTICE", "00000"),
             RaiseLevel::Warning => ("WARNING", "01000"),
             RaiseLevel::Exception => continue,

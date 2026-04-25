@@ -45,6 +45,7 @@ pub enum Decl {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RaiseLevel {
+    Info,
     Notice,
     Warning,
     Exception,

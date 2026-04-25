@@ -515,7 +515,9 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         match part.as_rule() {
             Rule::raise_level => {
                 let token = part.as_str();
-                level = if token.eq_ignore_ascii_case("notice") {
+                level = if token.eq_ignore_ascii_case("info") {
+                    RaiseLevel::Info
+                } else if token.eq_ignore_ascii_case("notice") {
                     RaiseLevel::Notice
                 } else if token.eq_ignore_ascii_case("warning") {
                     RaiseLevel::Warning

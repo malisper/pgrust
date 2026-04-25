@@ -635,12 +635,8 @@ mod tests {
         send_startup(&mut stream);
         let _ = read_until_ready(&mut stream, "startup");
         send_query(&mut stream, "copy missing_copy_target from stdin");
-        let copy_start = read_message(&mut stream, "copy_start");
-        assert_eq!(copy_start.0, b'G');
-        send_copy_data(&mut stream, b"1\n");
-        send_copy_done(&mut stream);
-        let copy_finish = read_until_ready(&mut stream, "copy_finish");
-        let error = copy_finish
+        let copy_error = read_until_ready(&mut stream, "copy_error");
+        let error = copy_error
             .iter()
             .find(|(kind, _)| *kind == b'E')
             .expect("copy should return an error");
@@ -648,7 +644,7 @@ mod tests {
         assert!(fields.iter().any(|(code, value)| {
             *code == b'M' && value.contains("relation \"missing_copy_target\" does not exist")
         }));
-        assert!(matches!(copy_finish.last(), Some((b'Z', _))));
+        assert!(matches!(copy_error.last(), Some((b'Z', _))));
 
         send_query(&mut stream, "select 1");
         let select = read_until_ready(&mut stream, "select_after_copy_error");
