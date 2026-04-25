@@ -57,10 +57,12 @@ simple_select_stmt = {
     cte_clause? ~ simple_select_core ~ window_clause? ~ order_by_clause? ~ select_limit_clause? ~ locking_clause?
   | cte_clause? ~ simple_select_core ~ window_clause? ~ order_by_clause? ~ locking_clause ~ select_limit_clause?
 }
-select_into_core = { kw_select ~ select_distinct_clause? ~ (empty_select_list | select_list)? ~ kw_into ~ select_into_target ~ (kw_from ~ from_item)? ~ (kw_where ~ expr)? ~ group_by_clause? ~ having_clause? }
-simple_select_core = { kw_select ~ select_distinct_clause? ~ (empty_select_list | select_list)? ~ (kw_from ~ from_item)? ~ (kw_where ~ expr)? ~ group_by_clause? ~ having_clause? }
+select_into_core = { kw_select ~ select_quantifier_clause? ~ (empty_select_list | select_list)? ~ kw_into ~ select_into_target ~ (kw_from ~ from_item)? ~ (kw_where ~ expr)? ~ group_by_clause? ~ having_clause? }
+simple_select_core = { kw_select ~ select_quantifier_clause? ~ (empty_select_list | select_list)? ~ (kw_from ~ from_item)? ~ (kw_where ~ expr)? ~ group_by_clause? ~ having_clause? }
 select_into_target = { temp_clause? ~ kw_table? ~ identifier }
+select_quantifier_clause = _{ select_distinct_clause | select_all_clause }
 select_distinct_clause = { kw_distinct ~ (kw_on ~ "(" ~ expr ~ ("," ~ expr)* ~ ")")? }
+select_all_clause = { kw_all }
 set_operation_stmt = {
     cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause? ~ order_by_clause? ~ select_limit_clause? ~ locking_clause?
   | cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause? ~ order_by_clause? ~ locking_clause ~ select_limit_clause?

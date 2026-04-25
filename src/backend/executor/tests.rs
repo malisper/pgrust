@@ -3339,6 +3339,24 @@ fn select_sql_varchar_cast_truncates() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn select_all_preserves_duplicates() {
+    let base = temp_dir("select_all_preserves_duplicates");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select all x from (values (1), (1)) as t(x) order by x",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(1)]],
+    );
+}
+
 #[test]
 fn setop_join_branch_executes_with_child_local_vars() {
     let base = temp_dir("setop_join_branch_child_roots");
