@@ -2,7 +2,9 @@ use super::super::*;
 use crate::backend::executor::{
     ExecutorTransactionState, SharedExecutorTransactionState, execute_planned_stmt,
 };
+use crate::backend::parser::ParseOptions;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::misc::stack_depth::StackDepthGuard;
 
 impl Database {
     pub(crate) fn execute_truncate_table_in_transaction_with_search_path(
@@ -118,13 +120,21 @@ impl Database {
         datetime_config: &DateTimeConfig,
     ) -> Result<StatementResult, ExecError> {
         stacker::grow(32 * 1024 * 1024, || {
-            let stmt = self.plan_cache.get_statement(sql)?;
-            self.execute_statement_with_search_path_and_datetime_config(
-                client_id,
-                stmt,
-                configured_search_path,
-                datetime_config,
-            )
+            StackDepthGuard::enter(datetime_config.max_stack_depth_kb).run(|| {
+                let stmt = self.plan_cache.get_statement_with_options(
+                    sql,
+                    ParseOptions {
+                        max_stack_depth_kb: datetime_config.max_stack_depth_kb,
+                        ..ParseOptions::default()
+                    },
+                )?;
+                self.execute_statement_with_search_path_and_datetime_config(
+                    client_id,
+                    stmt,
+                    configured_search_path,
+                    datetime_config,
+                )
+            })
         })
     }
 

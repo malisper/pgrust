@@ -12186,6 +12186,7 @@ fn parse_unicode_string_rejects_when_standard_conforming_strings_is_off() {
         "select U&'d\\0061ta'",
         ParseOptions {
             standard_conforming_strings: false,
+            ..ParseOptions::default()
         },
     )
     .unwrap_err();

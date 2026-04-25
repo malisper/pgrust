@@ -240,6 +240,18 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             's',
         ),
+        proc_row(
+            89,
+            "version",
+            TEXT_TYPE_OID,
+            "",
+            "pgsql_version",
+            0,
+            false,
+            false,
+            'f',
+            's',
+        ),
         proc_row_with_parallel(
             2026,
             "pg_backend_pid",

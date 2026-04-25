@@ -1,7 +1,7 @@
 use crate::backend::executor::execute_readonly_statement;
 use crate::backend::executor::{ExecError, ExecutorContext, StatementResult, TupleSlot, Value};
 use crate::backend::libpq::pqformat::format_bytea_text;
-use crate::backend::parser::parse_statement;
+use crate::backend::parser::{ParseOptions, parse_statement_with_options};
 use crate::include::catalog::PG_LANGUAGE_SQL_OID;
 use crate::include::catalog::PgProcRow;
 use crate::include::nodes::datum::{ArrayValue, RecordValue};
@@ -26,6 +26,7 @@ pub(crate) fn execute_user_defined_sql_scalar_function_values(
     arg_values: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    ctx.check_stack_depth()?;
     if row.prolang != PG_LANGUAGE_SQL_OID {
         return Err(sql_function_runtime_error(
             "only LANGUAGE sql functions are supported by the SQL-function runtime",
@@ -43,7 +44,13 @@ pub(crate) fn execute_user_defined_sql_scalar_function_values(
     }
 
     let sql = inline_sql_function_body(row, &arg_values)?;
-    let stmt = parse_statement(&sql)?;
+    let stmt = parse_statement_with_options(
+        &sql,
+        ParseOptions {
+            max_stack_depth_kb: ctx.datetime_config.max_stack_depth_kb,
+            ..ParseOptions::default()
+        },
+    )?;
     let catalog = ctx.catalog.clone().ok_or_else(|| {
         sql_function_runtime_error(
             "LANGUAGE sql functions require executor catalog context",

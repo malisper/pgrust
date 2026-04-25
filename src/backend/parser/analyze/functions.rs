@@ -621,9 +621,9 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::StatementTimestamp
             | BuiltinScalarFunction::ClockTimestamp
             | BuiltinScalarFunction::TimeOfDay => args.is_empty(),
-            BuiltinScalarFunction::CurrentDatabase | BuiltinScalarFunction::PgBackendPid => {
-                args.is_empty()
-            }
+            BuiltinScalarFunction::CurrentDatabase
+            | BuiltinScalarFunction::Version
+            | BuiltinScalarFunction::PgBackendPid => args.is_empty(),
             BuiltinScalarFunction::PgGetTriggerDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgTriggerDepth => args.is_empty(),
             BuiltinScalarFunction::PgPartitionRoot => args.len() == 1,
@@ -1353,6 +1353,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("random_normal", BuiltinScalarFunction::RandomNormal),
         ("drandom_normal", BuiltinScalarFunction::RandomNormal),
         ("current_database", BuiltinScalarFunction::CurrentDatabase),
+        ("version", BuiltinScalarFunction::Version),
+        ("pgsql_version", BuiltinScalarFunction::Version),
         ("pg_backend_pid", BuiltinScalarFunction::PgBackendPid),
         ("cashlarger", BuiltinScalarFunction::CashLarger),
         ("cashsmaller", BuiltinScalarFunction::CashSmaller),

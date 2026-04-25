@@ -9,6 +9,9 @@ use super::comments::{
 };
 use super::parsenodes::*;
 use crate::backend::executor::Value;
+use crate::backend::utils::misc::stack_depth::{
+    DEFAULT_MAX_STACK_DEPTH_KB, StackDepthGuard, check_parse_stack_depth,
+};
 use crate::include::catalog::PolicyCommand;
 use crate::include::nodes::datum::BitString;
 
@@ -19,12 +22,14 @@ struct SqlParser;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseOptions {
     pub standard_conforming_strings: bool,
+    pub max_stack_depth_kb: u32,
 }
 
 impl Default for ParseOptions {
     fn default() -> Self {
         Self {
             standard_conforming_strings: true,
+            max_stack_depth_kb: DEFAULT_MAX_STACK_DEPTH_KB,
         }
     }
 }
@@ -41,7 +46,7 @@ pub fn parse_statement_with_options(
     // default Rust test-thread stack on modest statements (for example certain
     // `unnest(...)` forms). Run parsing on a dedicated larger stack until the
     // underlying recursion is flattened.
-    run_with_parser_stack({
+    run_with_parser_stack(options.max_stack_depth_kb, {
         let sql = sql.to_string();
         move || parse_statement_with_options_inner(sql, options)
     })
@@ -1837,19 +1842,24 @@ fn build_create_tablespace_statement(sql: &str) -> Result<CreateTablespaceStatem
 }
 
 pub fn parse_expr(sql: &str) -> Result<SqlExpr, ParseError> {
-    let sql = strip_sql_comments_preserving_layout(sql);
-    SqlParser::parse(Rule::expr, &sql)
-        .map_err(|e| map_pest_error("expression", &sql, e))
-        .and_then(|mut pairs| {
-            let pair = pairs.next().ok_or(ParseError::UnexpectedEof)?;
-            if pairs.next().is_some() {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "expression",
-                    actual: sql.clone(),
-                });
-            }
-            build_expr(pair)
-        })
+    run_with_parser_stack(DEFAULT_MAX_STACK_DEPTH_KB, {
+        let sql = sql.to_string();
+        move || {
+            let sql = strip_sql_comments_preserving_layout(&sql);
+            SqlParser::parse(Rule::expr, &sql)
+                .map_err(|e| map_pest_error("expression", &sql, e))
+                .and_then(|mut pairs| {
+                    let pair = pairs.next().ok_or(ParseError::UnexpectedEof)?;
+                    if pairs.next().is_some() {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "expression",
+                            actual: sql.clone(),
+                        });
+                    }
+                    build_expr(pair)
+                })
+        }
+    })
 }
 
 pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
@@ -1899,7 +1909,7 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn run_with_parser_stack<F, T>(f: F) -> T
+fn run_with_parser_stack<F, T>(max_stack_depth_kb: u32, f: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -1907,21 +1917,21 @@ where
     std::thread::Builder::new()
         .name("pgrust-parser".into())
         .stack_size(32 * 1024 * 1024)
-        .spawn(f)
+        .spawn(move || StackDepthGuard::enter(max_stack_depth_kb).run(f))
         .expect("spawn parser thread")
         .join()
         .expect("parser thread panicked")
 }
 
 #[cfg(target_arch = "wasm32")]
-fn run_with_parser_stack<F, T>(f: F) -> T
+fn run_with_parser_stack<F, T>(max_stack_depth_kb: u32, f: F) -> T
 where
     F: FnOnce() -> T,
 {
     // Browser wasm cannot spawn threads without a different runtime model.
     // Run inline there and keep the larger parser stack workaround only on
     // native targets.
-    f()
+    StackDepthGuard::enter(max_stack_depth_kb).run(f)
 }
 
 fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
@@ -7868,6 +7878,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
 }
 
 pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
+    check_parse_stack_depth()?;
     let raw = pair.as_str().to_string();
     let parts: Vec<Pair<'_, Rule>> = match pair.as_rule() {
         Rule::select_stmt => {
@@ -12598,6 +12609,7 @@ fn build_identifier(pair: Pair<'_, Rule>) -> String {
 }
 
 pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    check_parse_stack_depth()?;
     match pair.as_rule() {
         Rule::expr
         | Rule::or_expr

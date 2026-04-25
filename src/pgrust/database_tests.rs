@@ -394,6 +394,26 @@ fn quantified_similar_any_all_array_operators_work() {
     );
 }
 
+fn assert_stack_depth_limit_error(err: ExecError) {
+    match err {
+        ExecError::DetailedError {
+            message,
+            hint: Some(hint),
+            sqlstate,
+            ..
+        }
+        | ExecError::Parse(ParseError::DetailedError {
+            message,
+            hint: Some(hint),
+            sqlstate,
+            ..
+        }) if message == "stack depth limit exceeded"
+            && sqlstate == "54001"
+            && hint.contains("\"max_stack_depth\" (currently 100kB)") => {}
+        other => panic!("expected stack depth error, got {other:?}"),
+    }
+}
+
 #[test]
 fn jsonb_input_respects_max_stack_depth_setting() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
@@ -406,17 +426,84 @@ fn jsonb_input_respects_max_stack_depth_setting() {
     let err = session
         .execute(&db, &format!("select '{}'::jsonb", "[".repeat(10_000)))
         .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::DetailedError {
-            message,
-            hint: Some(hint),
-            sqlstate,
-            ..
-        } if message == "stack depth limit exceeded"
-            && sqlstate == "54001"
-            && hint.contains("\"max_stack_depth\" (currently 100kB)")
-    ));
+    assert_stack_depth_limit_error(err);
+}
+
+#[test]
+fn sql_function_recursion_respects_max_stack_depth_setting() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set max_stack_depth = '100kB'")
+        .expect("set max_stack_depth");
+    session
+        .execute(
+            &db,
+            "create function infinite_recurse() returns int4 as \
+             'select infinite_recurse()' language sql",
+        )
+        .expect("create recursive function");
+
+    let err = session
+        .execute(&db, "select infinite_recurse()")
+        .unwrap_err();
+    assert_stack_depth_limit_error(err);
+}
+
+#[test]
+fn mutually_recursive_sql_functions_respect_max_stack_depth_setting() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set max_stack_depth = '100kB'")
+        .expect("set max_stack_depth");
+    session
+        .execute(
+            &db,
+            "create function recurse_a() returns int4 as 'select recurse_b()' language sql",
+        )
+        .expect("create recurse_a");
+    session
+        .execute(
+            &db,
+            "create function recurse_b() returns int4 as 'select recurse_a()' language sql",
+        )
+        .expect("create recurse_b");
+
+    let err = session.execute(&db, "select recurse_a()").unwrap_err();
+    assert_stack_depth_limit_error(err);
+}
+
+#[test]
+fn large_rust_stack_still_respects_sql_max_stack_depth() {
+    std::thread::Builder::new()
+        .name("large_rust_stack_still_respects_sql_max_stack_depth".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let db = Database::open_ephemeral(32).expect("open ephemeral database");
+            let mut session = Session::new(1);
+
+            session
+                .execute(&db, "set max_stack_depth = '100kB'")
+                .expect("set max_stack_depth");
+            session
+                .execute(
+                    &db,
+                    "create function large_stack_recurse() returns int4 as \
+                     'select large_stack_recurse()' language sql",
+                )
+                .expect("create recursive function");
+
+            let err = session
+                .execute(&db, "select large_stack_recurse()")
+                .unwrap_err();
+            assert_stack_depth_limit_error(err);
+        })
+        .expect("spawn large-stack test")
+        .join()
+        .expect("large-stack test panicked");
 }
 
 #[test]
