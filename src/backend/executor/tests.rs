@@ -6073,8 +6073,45 @@ fn select_extract_uses_date_part_runtime() {
             "select extract(week from date '2020-08-11'), extract(isodow from date '2020-08-16')",
         )
         .unwrap(),
-        vec![vec![Value::Float64(33.0), Value::Float64(7.0)]],
+        vec![vec![
+            Value::Numeric(crate::include::nodes::datum::NumericValue::from_i64(33)),
+            Value::Numeric(crate::include::nodes::datum::NumericValue::from_i64(7)),
+        ]],
     );
+}
+
+#[test]
+fn select_extract_returns_numeric_with_postgres_scale() {
+    let base = temp_dir("select_extract_numeric_scale");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select \
+         extract(microseconds from timestamp '1997-02-10 17:32:01.4'), \
+         extract(milliseconds from timestamp '1997-02-10 17:32:01.4'), \
+         extract(seconds from timestamp '1997-02-10 17:32:01.4'), \
+         extract(epoch from timestamp '1970-01-01 00:00:00')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows[0]
+                .iter()
+                .map(|value| match value {
+                    Value::Numeric(value) => value.render(),
+                    other => panic!("expected numeric extract result, got {other:?}"),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                rendered,
+                vec!["1400000", "1400.000", "1.400000", "0.000000"]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
 }
 
 #[test]
@@ -6094,7 +6131,12 @@ fn select_extract_uses_extract_as_default_column_name() {
             column_names, rows, ..
         } => {
             assert_eq!(column_names, vec!["extract"]);
-            assert_eq!(rows, vec![vec![Value::Float64(11.0)]]);
+            assert_eq!(
+                rows,
+                vec![vec![Value::Numeric(
+                    crate::include::nodes::datum::NumericValue::from_i64(11)
+                )]]
+            );
         }
         other => panic!("expected query result, got {other:?}"),
     }

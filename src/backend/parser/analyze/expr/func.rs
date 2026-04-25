@@ -531,7 +531,7 @@ pub(super) fn bind_scalar_function_call(
                 )],
             ))
         }
-        BuiltinScalarFunction::DatePart => Ok(build_func(
+        BuiltinScalarFunction::DatePart | BuiltinScalarFunction::Extract => Ok(build_func(
             false,
             vec![
                 coerce_bound_expr(

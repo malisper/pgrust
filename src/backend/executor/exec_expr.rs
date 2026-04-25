@@ -26,8 +26,9 @@ pub(crate) use super::expr_compile::{
 };
 use super::expr_date::{
     eval_age_function, eval_date_bin_function, eval_date_part_function, eval_date_trunc_function,
-    eval_isfinite_function, eval_make_date_function, eval_make_time_function,
-    eval_make_timestamp_function, eval_timezone_function, eval_to_date_function,
+    eval_extract_function, eval_isfinite_function, eval_make_date_function,
+    eval_make_time_function, eval_make_timestamp_function, eval_timezone_function,
+    eval_to_date_function,
 };
 use super::expr_datetime::{
     current_date_value, current_date_value_with_config, current_time_value,
@@ -4729,6 +4730,7 @@ fn eval_builtin_function(
             unreachable!("sequence builtins handled earlier");
         }
         BuiltinScalarFunction::DatePart => eval_date_part_function(&values),
+        BuiltinScalarFunction::Extract => eval_extract_function(&values),
         BuiltinScalarFunction::DateTrunc => eval_date_trunc_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::DateBin => eval_date_bin_function(&values),
         BuiltinScalarFunction::TimeZone => eval_timezone_function(&values, &ctx.datetime_config),

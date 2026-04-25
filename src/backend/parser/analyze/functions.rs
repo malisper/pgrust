@@ -669,7 +669,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgGetTriggerDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgTriggerDepth => args.is_empty(),
             BuiltinScalarFunction::PgPartitionRoot => args.len() == 1,
-            BuiltinScalarFunction::DatePart | BuiltinScalarFunction::DateTrunc => args.len() == 2,
+            BuiltinScalarFunction::DatePart
+            | BuiltinScalarFunction::Extract
+            | BuiltinScalarFunction::DateTrunc => args.len() == 2,
             BuiltinScalarFunction::DateBin => args.len() == 3,
             BuiltinScalarFunction::TimeZone => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::IsFinite => args.len() == 1,
@@ -1507,6 +1509,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("clock_timestamp", BuiltinScalarFunction::ClockTimestamp),
         ("timeofday", BuiltinScalarFunction::TimeOfDay),
         ("date_part", BuiltinScalarFunction::DatePart),
+        ("extract", BuiltinScalarFunction::Extract),
         ("date_trunc", BuiltinScalarFunction::DateTrunc),
         ("date_bin", BuiltinScalarFunction::DateBin),
         ("timezone", BuiltinScalarFunction::TimeZone),

@@ -12,7 +12,7 @@ use crate::include::nodes::datetime::{
     TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE,
     USECS_PER_SEC,
 };
-use crate::include::nodes::datum::IntervalValue;
+use crate::include::nodes::datum::{IntervalValue, NumericValue};
 
 fn extract_year_number(astronomical_year: i32) -> i32 {
     if astronomical_year > 0 {
@@ -179,6 +179,13 @@ fn timezone_target_offset_seconds(
                         "22007",
                     )
                 }
+                DateTimeParseError::TimeZoneDisplacementOutOfRange => {
+                    timezone_function_error("time zone displacement out of range", "22008")
+                }
+                DateTimeParseError::TimestampOutOfRange => timezone_function_error(
+                    format!("invalid input syntax for type time zone: \"{name}\""),
+                    "22007",
+                ),
             })?;
             match spec {
                 Some(TimeZoneSpec::FixedOffset(offset)) => Ok(offset),
@@ -514,6 +521,57 @@ pub(crate) fn eval_timezone_function(
     };
 
     Ok(Value::TimeTz(retime_timetz(timetz, target_offset_seconds)))
+}
+
+fn extract_numeric_display_scale(field: &str) -> usize {
+    match normalize_datetime_part(field) {
+        "millisecond" | "milliseconds" => 3,
+        "second" | "seconds" | "epoch" | "julian" => 6,
+        _ => 0,
+    }
+}
+
+fn float_part_to_numeric(value: Value, field: &str) -> Value {
+    let Value::Float64(value) = value else {
+        return value;
+    };
+    let numeric = if value.is_nan() {
+        NumericValue::NaN
+    } else if value.is_infinite() {
+        if value.is_sign_negative() {
+            NumericValue::NegInf
+        } else {
+            NumericValue::PosInf
+        }
+    } else {
+        let scale = extract_numeric_display_scale(field);
+        NumericValue::from(format!("{value:.scale$}"))
+    };
+    Value::Numeric(numeric)
+}
+
+pub(crate) fn eval_extract_function(values: &[Value]) -> Result<Value, ExecError> {
+    let [field_value, _] = values else {
+        return Err(ExecError::DetailedError {
+            message: "malformed extract call".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    if matches!(field_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let field = field_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "extract",
+            left: field_value.clone(),
+            right: Value::Text("".into()),
+        })?
+        .trim()
+        .to_ascii_lowercase();
+    eval_date_part_function(values).map(|value| float_part_to_numeric(value, &field))
 }
 
 pub(crate) fn eval_isfinite_function(values: &[Value]) -> Result<Value, ExecError> {

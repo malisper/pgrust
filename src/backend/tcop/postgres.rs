@@ -309,6 +309,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::InvalidFloatInput { value, .. } => value.as_str(),
         ExecError::FloatOutOfRange { value, .. } => value.as_str(),
         ExecError::InvalidStorageValue { details, .. } => {
+            if details.starts_with("time zone \"") && details.ends_with("\" not recognized") {
+                return find_first_string_literal_position(sql);
+            }
             if let Some(value) = extract_quoted_error_value(details) {
                 value
             } else {
@@ -320,6 +323,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         } => {
             if message.starts_with("invalid value for parameter \"default_toast_compression\"") {
                 return None;
+            }
+            if message.starts_with("time zone \"") && message.ends_with("\" not recognized") {
+                return find_first_string_literal_position(sql);
             }
             if message.starts_with("invalid size: \"") {
                 return None;
@@ -570,6 +576,10 @@ fn find_error_value_position(sql: &str, value: &str) -> Option<usize> {
         return Some(index + 1);
     }
     sql.find(value).map(|index| index + 1)
+}
+
+fn find_first_string_literal_position(sql: &str) -> Option<usize> {
+    sql.find('\'').map(|index| index + 1)
 }
 
 fn find_detailed_operator_position(sql: &str, message: &str) -> Option<usize> {
@@ -7531,6 +7541,17 @@ mod tests {
         };
 
         assert_eq!(exec_error_position(sql, &err), Some(14));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_timestamp_literal_for_unknown_timezone() {
+        let sql = "INSERT INTO TIMESTAMP_TBL VALUES ('19970710 173201 America/Does_not_exist');";
+        let err = ExecError::InvalidStorageValue {
+            column: "timestamp".into(),
+            details: "time zone \"america/does_not_exist\" not recognized".into(),
+        };
+
+        assert_eq!(exec_error_position(sql, &err), Some(35));
     }
 
     #[test]
