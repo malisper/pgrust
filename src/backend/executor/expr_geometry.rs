@@ -1984,14 +1984,14 @@ fn poly_center(poly: &GeoPolygon) -> GeoPoint {
     center
 }
 
-fn polygon_same(left: &GeoPolygon, right: &GeoPolygon) -> bool {
+pub(crate) fn polygon_same(left: &GeoPolygon, right: &GeoPolygon) -> bool {
     if left.points.len() != right.points.len() {
         return false;
     }
     plist_same(&left.points, &right.points)
 }
 
-fn polygon_overlap(left: &GeoPolygon, right: &GeoPolygon) -> bool {
+pub(crate) fn polygon_overlap(left: &GeoPolygon, right: &GeoPolygon) -> bool {
     if !box_overlap(&left.bound_box, &right.bound_box) {
         return false;
     }
@@ -2001,7 +2001,7 @@ fn polygon_overlap(left: &GeoPolygon, right: &GeoPolygon) -> bool {
     point_in_polygon(&left.points[0], right) != 0 || point_in_polygon(&right.points[0], left) != 0
 }
 
-fn polygon_contains_polygon(outer: &GeoPolygon, inner: &GeoPolygon) -> bool {
+pub(crate) fn polygon_contains_polygon(outer: &GeoPolygon, inner: &GeoPolygon) -> bool {
     inner
         .points
         .iter()
@@ -2329,7 +2329,7 @@ fn point_path_distance(point: &GeoPoint, path: &GeoPath) -> f64 {
     if best.is_infinite() { 0.0 } else { best }
 }
 
-fn point_polygon_distance(point: &GeoPoint, poly: &GeoPolygon) -> f64 {
+pub(crate) fn point_polygon_distance(point: &GeoPoint, poly: &GeoPolygon) -> f64 {
     if point_in_polygon(point, poly) != 0 {
         return 0.0;
     }
