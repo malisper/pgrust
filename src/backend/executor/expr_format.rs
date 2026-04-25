@@ -51,6 +51,18 @@ pub(crate) fn to_char_numeric(value: &NumericValue, format: &str) -> Result<Stri
 }
 
 pub(crate) fn to_char_float(value: f64, format: &str) -> Result<String, ExecError> {
+    to_char_float_with_max_digits(value, format, f64::DIGITS as usize)
+}
+
+pub(crate) fn to_char_float4(value: f64, format: &str) -> Result<String, ExecError> {
+    to_char_float_with_max_digits(value, format, f32::DIGITS as usize)
+}
+
+fn to_char_float_with_max_digits(
+    value: f64,
+    format: &str,
+    max_digits: usize,
+) -> Result<String, ExecError> {
     let mut parser = FormatParser::new(format);
     let spec = parser.parse()?;
     if spec.roman {
@@ -98,8 +110,9 @@ pub(crate) fn to_char_float(value: f64, format: &str) -> Result<String, ExecErro
 
     let abs_text = format!("{:.0}", adjusted_value.abs());
     let pre_len = abs_text.len();
-    let max_digits = f64::DIGITS as usize;
-    let effective_post = if pre_len >= max_digits {
+    let effective_post = if adjusted_value.is_infinite() && max_digits == f32::DIGITS as usize {
+        0
+    } else if pre_len >= max_digits {
         0
     } else {
         post_slots.min(max_digits.saturating_sub(pre_len))
@@ -118,6 +131,15 @@ pub(crate) fn to_char_float(value: f64, format: &str) -> Result<String, ExecErro
     let rounded_text = format!("{adjusted_value:.effective_post$}");
     let numeric = parse_numeric_text(&rounded_text)
         .ok_or_else(|| ExecError::InvalidNumericInput(rounded_text.clone()))?;
+    if effective_post == 0 {
+        if let Some(dot_idx) = adjusted_spec
+            .tokens
+            .iter()
+            .position(|token| matches!(token, Token::Decimal))
+        {
+            adjusted_spec.tokens[dot_idx] = Token::Literal(String::new());
+        }
+    }
     Ok(format_standard_numeric(&numeric, &adjusted_spec))
 }
 
@@ -1530,7 +1552,7 @@ fn ordinal_suffix(value: i128) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{to_char_float, to_char_int, to_char_numeric, to_number_numeric};
+    use super::{to_char_float, to_char_float4, to_char_int, to_char_numeric, to_number_numeric};
     use crate::backend::executor::ExecError;
     use crate::include::nodes::datum::NumericValue;
 
@@ -1598,6 +1620,27 @@ mod tests {
                 .unwrap()
                 .trim(),
             "Infinity"
+        );
+    }
+
+    #[test]
+    fn formats_float4_to_char_overflow_like_postgres() {
+        assert_eq!(
+            to_char_float4(4.2e9f32 as f64, "MI9999999999.99").unwrap(),
+            " 4200000000"
+        );
+        assert_eq!(to_char_float4(4.2e9f32 as f64, "MI99.99").unwrap(), " ##.");
+        assert_eq!(
+            to_char_float4(f32::INFINITY as f64, "MI99.99").unwrap(),
+            " ##."
+        );
+        assert_eq!(
+            to_char_float4(f32::NEG_INFINITY as f64, "MI99.99").unwrap(),
+            "-##."
+        );
+        assert_eq!(
+            to_char_float4(f32::NAN as f64, "MI99.99").unwrap(),
+            " ##.##"
         );
     }
 
