@@ -2803,6 +2803,9 @@ fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) 
         if row.sql_type.is_range() || row.sql_type.is_multirange() {
             return true;
         }
+        if matches!(row.sql_type.kind, SqlTypeKind::Enum) {
+            return true;
+        }
         if matches!(
             row.sql_type.kind,
             SqlTypeKind::RegProc

@@ -262,15 +262,15 @@ pub(crate) struct DomainEntry {
     pub comment: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EnumLabelEntry {
     pub oid: u32,
     pub label: String,
-    pub sort_order: u32,
+    pub sort_order: f64,
     pub committed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EnumTypeEntry {
     pub oid: u32,
     pub array_oid: u32,
@@ -749,7 +749,7 @@ impl Database {
                     .map(|label| PgEnumRow {
                         oid: label.oid,
                         enumtypid: entry.oid,
-                        enumsortorder: f64::from(label.sort_order),
+                        enumsortorder: label.sort_order,
                         enumlabel: label.label.clone(),
                     })
                     .collect::<Vec<_>>()

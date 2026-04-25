@@ -27636,6 +27636,32 @@ fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
             vec![Value::Text("happy".into()), Value::Float64(3.0)],
         ]
     );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select 'sad'::mood::text, pg_input_is_valid('fine', 'mood'), \
+             pg_input_is_valid('missing', 'mood')",
+        ),
+        vec![vec![
+            Value::Text("sad".into()),
+            Value::Bool(true),
+            Value::Bool(false),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select enumlabel from pg_enum where enumtypid = 'mood'::regtype \
+             order by enumlabel::mood",
+        ),
+        vec![
+            vec![Value::Text("sad".into())],
+            vec![Value::Text("fine".into())],
+            vec![Value::Text("happy".into())],
+        ]
+    );
 }
 
 #[test]
