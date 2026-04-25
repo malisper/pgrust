@@ -4964,12 +4964,12 @@ fn parse_position_in_syntax_as_builtin_call() {
 }
 
 #[test]
-fn parse_extract_in_syntax_as_date_part_call() {
+fn parse_extract_in_syntax_as_extract_call() {
     let stmt = parse_select("select extract(week from date '2020-08-11')").unwrap();
     assert!(matches!(
         stmt.targets[0].expr,
         SqlExpr::FuncCall { ref name, ref args, .. }
-            if name == "date_part"
+            if name == "extract"
                 && args.args().len() == 2
                 && matches!(args.args()[0].value, SqlExpr::Const(Value::Text(ref field)) if &field[..] == "week")
     ));
@@ -5233,7 +5233,7 @@ fn analyze_extract_keeps_extract_as_default_output_name() {
 
     assert_eq!(
         query_column_names_and_types(&query),
-        vec![("extract".into(), SqlType::new(SqlTypeKind::Float8))]
+        vec![("extract".into(), SqlType::new(SqlTypeKind::Numeric))]
     );
 }
 

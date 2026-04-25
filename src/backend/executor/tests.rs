@@ -18315,7 +18315,7 @@ fn jsonpath_datetime_method_calls_work() {
             match &rows[0][2] {
                 Value::Jsonb(bytes) => assert_eq!(
                     crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
-                    "\"12:34:56.78\""
+                    "\"12:34:56.79\""
                 ),
                 other => panic!("expected jsonb, got {:?}", other),
             }
@@ -18329,7 +18329,7 @@ fn jsonpath_datetime_method_calls_work() {
             match &rows[0][4] {
                 Value::Jsonb(bytes) => assert_eq!(
                     crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
-                    "\"2023-08-15T12:34:56.78\""
+                    "\"2023-08-15T12:34:56.79\""
                 ),
                 other => panic!("expected jsonb, got {:?}", other),
             }
