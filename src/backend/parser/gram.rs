@@ -2077,6 +2077,7 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "regoperator" => {
             return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegOperator)));
         }
+        "pg_lsn" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::PgLsn))),
         _ => {}
     }
     SqlParser::parse(Rule::type_name, &sql)
@@ -11402,6 +11403,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Interval => "interval",
         SqlTypeKind::TsVector => "tsvector",
         SqlTypeKind::TsQuery => "tsquery",
+        SqlTypeKind::PgLsn => "pg_lsn",
         SqlTypeKind::RegConfig => "regconfig",
         SqlTypeKind::RegDictionary => "regdictionary",
         SqlTypeKind::AnyArray => "anyarray",
@@ -12738,6 +12740,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
         Rule::kw_regdictionary => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegDictionary)),
         Rule::kw_regoperator => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegOperator)),
         Rule::kw_regprocedure => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegProcedure)),
+        Rule::kw_pg_lsn => RawTypeName::Builtin(SqlType::new(SqlTypeKind::PgLsn)),
         Rule::kw_bool | Rule::kw_boolean => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool)),
         Rule::date_type | Rule::kw_date => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Date)),
         Rule::time_type

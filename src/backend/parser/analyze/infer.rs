@@ -212,6 +212,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::Circle(_)) => SqlType::new(SqlTypeKind::Circle),
         SqlExpr::Const(Value::TsVector(_)) => SqlType::new(SqlTypeKind::TsVector),
         SqlExpr::Const(Value::TsQuery(_)) => SqlType::new(SqlTypeKind::TsQuery),
+        SqlExpr::Const(Value::PgLsn(_)) => SqlType::new(SqlTypeKind::PgLsn),
         SqlExpr::Const(Value::InternalChar(_)) => SqlType::new(SqlTypeKind::InternalChar),
         SqlExpr::Const(Value::Record(record)) => record.sql_type(),
         SqlExpr::Const(Value::Text(_))
@@ -759,8 +760,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::SimilarSubstring)
                 | Some(BuiltinScalarFunction::ToBin)
                 | Some(BuiltinScalarFunction::ToOct)
-                | Some(BuiltinScalarFunction::ToHex)
-                | Some(BuiltinScalarFunction::PgLsn) => SqlType::new(SqlTypeKind::Text),
+                | Some(BuiltinScalarFunction::ToHex) => SqlType::new(SqlTypeKind::Text),
+                Some(BuiltinScalarFunction::PgLsn) => SqlType::new(SqlTypeKind::PgLsn),
                 Some(BuiltinScalarFunction::Decode)
                 | Some(BuiltinScalarFunction::Sha224)
                 | Some(BuiltinScalarFunction::Sha256)

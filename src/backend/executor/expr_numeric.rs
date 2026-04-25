@@ -4,6 +4,7 @@ use num_traits::{Signed, ToPrimitive, Zero};
 use std::cmp::Ordering;
 
 use super::ExecError;
+use super::expr_casts::pg_lsn_out_of_range;
 use super::expr_ops::parse_numeric_text;
 use super::node_types::{NumericValue, Value};
 
@@ -1404,19 +1405,13 @@ pub(super) fn eval_pg_lsn_function(values: &[Value]) -> Result<Value, ExecError>
             })?;
             match numeric {
                 NumericValue::NaN => Err(numeric_domain_error("cannot convert NaN to pg_lsn")),
-                NumericValue::PosInf | NumericValue::NegInf => {
-                    Err(numeric_domain_error("pg_lsn out of range"))
-                }
+                NumericValue::PosInf | NumericValue::NegInf => Err(pg_lsn_out_of_range()),
                 NumericValue::Finite { coeff, scale, .. } => {
                     if scale != 0 {
-                        return Err(numeric_domain_error("pg_lsn out of range"));
+                        return Err(pg_lsn_out_of_range());
                     }
-                    let value = coeff
-                        .to_u64()
-                        .ok_or_else(|| numeric_domain_error("pg_lsn out of range"))?;
-                    Ok(Value::Text(
-                        format!("{:X}/{:X}", value >> 32, value & 0xFFFF_FFFF).into(),
-                    ))
+                    let value = coeff.to_u64().ok_or_else(pg_lsn_out_of_range)?;
+                    Ok(Value::PgLsn(value))
                 }
             }
         }
