@@ -2815,6 +2815,75 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
 }
 
 #[test]
+fn explain_expr_renders_geometry_consts_as_sql_literals() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::datum::{GeoBox, GeoCircle, GeoPoint, GeoPolygon};
+    use crate::include::nodes::primnodes::{BuiltinScalarFunction, ScalarFunctionImpl};
+
+    let bool_ty = SqlType::new(SqlTypeKind::Bool);
+    let polygon_ty = SqlType::new(SqlTypeKind::Polygon);
+    let circle_ty = SqlType::new(SqlTypeKind::Circle);
+
+    let polygon_expr = Expr::func_with_impl(
+        0,
+        Some(bool_ty),
+        false,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoOverlap),
+        vec![
+            Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(0),
+                varlevelsup: 0,
+                vartype: polygon_ty,
+            }),
+            Expr::Const(Value::Polygon(GeoPolygon {
+                bound_box: GeoBox {
+                    high: GeoPoint {
+                        x: 1000.0,
+                        y: 1000.0,
+                    },
+                    low: GeoPoint { x: 0.0, y: 0.0 },
+                },
+                points: vec![
+                    GeoPoint {
+                        x: 1000.0,
+                        y: 1000.0,
+                    },
+                    GeoPoint { x: 0.0, y: 0.0 },
+                ],
+            })),
+        ],
+    );
+    assert_eq!(
+        render_explain_expr(&polygon_expr, &["f1".into()]),
+        "(f1 && '((1000,1000),(0,0))'::polygon)"
+    );
+
+    let circle_expr = Expr::func_with_impl(
+        0,
+        Some(bool_ty),
+        false,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoOverlap),
+        vec![
+            Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(0),
+                varlevelsup: 0,
+                vartype: circle_ty,
+            }),
+            Expr::Const(Value::Circle(GeoCircle {
+                center: GeoPoint { x: 500.0, y: 500.0 },
+                radius: 500.0,
+            })),
+        ],
+    );
+    assert_eq!(
+        render_explain_expr(&circle_expr, &["f1".into()]),
+        "(f1 && '<(500,500),500>'::circle)"
+    );
+}
+
+#[test]
 fn explain_const_false_scan_filter_uses_one_time_filter() {
     let base = temp_dir("explain_const_false_scan_filter");
     let txns = TransactionManager::new_durable(&base).unwrap();
