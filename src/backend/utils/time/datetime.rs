@@ -573,6 +573,7 @@ pub fn named_timezone_offset_seconds(name: &str) -> Option<i32> {
         "mdt" => Some(-6 * 3600),
         "pst" | "america/los_angeles" => Some(-8 * 3600),
         "pdt" => Some(-7 * 3600),
+        "bst" => Some(3600),
         _ => None,
     }
 }

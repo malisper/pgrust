@@ -1,9 +1,15 @@
 use super::agg::AccumState;
 use super::exec_expr::eval_expr;
-use super::expr_ops::{add_values, compare_order_values, sub_values, values_are_distinct};
+use super::expr_ops::{compare_order_values, values_are_distinct};
 use super::{ExecError, ExecutorContext};
+use crate::backend::utils::time::datetime::{
+    days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
+};
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
-use crate::include::nodes::datum::Value;
+use crate::include::nodes::datetime::{
+    DATEVAL_NOBEGIN, DATEVAL_NOEND, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, USECS_PER_DAY,
+};
+use crate::include::nodes::datum::{IntervalValue, NumericValue, Value};
 use crate::include::nodes::execnodes::{MaterializedRow, SystemVarBinding, TupleSlot};
 use crate::include::nodes::parsenodes::WindowFrameMode;
 use crate::include::nodes::primnodes::{
@@ -175,17 +181,24 @@ fn unsupported_range_offset_error() -> ExecError {
     }
 }
 
-fn evaluate_frame_offset_value(
+fn invalid_range_offset_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "invalid preceding or following size in window function".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22013",
+    }
+}
+
+fn evaluate_range_frame_offset_value(
     ctx: &mut ExecutorContext,
     current_row: &mut PreparedWindowRow,
-    expr: &crate::include::nodes::primnodes::Expr,
+    offset: &crate::include::nodes::primnodes::WindowFrameOffset,
+    which: &'static str,
 ) -> Result<Value, ExecError> {
-    let value = evaluate_window_expr_on_row(ctx, current_row, expr)?;
+    let value = evaluate_window_expr_on_row(ctx, current_row, &offset.expr)?;
     if matches!(value, Value::Null) {
-        return Err(current_row_frame_error("starting"));
-    }
-    if offset_is_negative(&value)? {
-        return Err(negative_frame_error("starting"));
+        return Err(current_row_frame_error(which));
     }
     Ok(value)
 }
@@ -196,11 +209,13 @@ fn evaluate_frame_bound_i64(
     bound: &WindowFrameBound,
     which: &'static str,
 ) -> Result<Option<i64>, ExecError> {
-    let expr = match bound {
-        WindowFrameBound::OffsetPreceding(expr) | WindowFrameBound::OffsetFollowing(expr) => expr,
+    let offset = match bound {
+        WindowFrameBound::OffsetPreceding(offset) | WindowFrameBound::OffsetFollowing(offset) => {
+            offset
+        }
         _ => return Ok(None),
     };
-    let value = evaluate_window_expr_on_row(ctx, current_row, expr)?;
+    let value = evaluate_window_expr_on_row(ctx, current_row, &offset.expr)?;
     if matches!(value, Value::Null) {
         return Err(current_row_frame_error(which));
     }
@@ -220,30 +235,6 @@ fn evaluate_frame_bound_i64(
         return Err(negative_frame_error(which));
     }
     Ok(Some(offset))
-}
-
-fn offset_is_negative(value: &Value) -> Result<bool, ExecError> {
-    Ok(match value {
-        Value::Int16(value) => *value < 0,
-        Value::Int32(value) => *value < 0,
-        Value::Int64(value) => *value < 0,
-        Value::Float64(value) => *value < 0.0,
-        Value::Numeric(value) => match value {
-            crate::include::nodes::datum::NumericValue::Finite { coeff, .. } => {
-                coeff < &num_bigint::BigInt::from(0)
-            }
-            crate::include::nodes::datum::NumericValue::NegInf => true,
-            crate::include::nodes::datum::NumericValue::PosInf
-            | crate::include::nodes::datum::NumericValue::NaN => false,
-        },
-        other => {
-            return Err(ExecError::TypeMismatch {
-                op: "window frame offset",
-                left: other.clone(),
-                right: Value::Int32(1),
-            });
-        }
-    })
 }
 
 fn move_group_start(
@@ -309,64 +300,408 @@ fn rows_frame_end(len: usize, row_index: usize, offset: i64, following: bool) ->
     }
 }
 
-fn compute_range_boundary_key(
-    current_key: &Value,
-    offset: Value,
-    descending: bool,
-    following: bool,
-) -> Result<Value, ExecError> {
-    let move_toward_higher_values = descending ^ following;
-    if move_toward_higher_values {
-        add_values(current_key.clone(), offset).map_err(|_| unsupported_range_offset_error())
-    } else {
-        sub_values(current_key.clone(), offset).map_err(|_| unsupported_range_offset_error())
-    }
-}
-
-fn range_frame_start_from_boundary(
+fn range_frame_start_from_offset(
     partition_rows: &[PreparedWindowRow],
     order_by: &[OrderByEntry],
-    boundary_key: &Value,
-    current_order: usize,
-    nulls_first: Option<bool>,
-    descending: bool,
+    row_index: usize,
+    offset: &Value,
+    following: bool,
 ) -> Result<usize, ExecError> {
+    let item = &order_by[0];
+    let current_key = &partition_rows[row_index].order_keys[0];
+    let nulls_first = item.nulls_first.unwrap_or(item.descending);
+    let mut sub = !following;
+    let mut less = false;
+    if item.descending {
+        sub = !sub;
+        less = true;
+    }
     for (index, row) in partition_rows.iter().enumerate() {
-        if compare_order_values(
-            &row.order_keys[current_order],
-            boundary_key,
-            order_by[current_order].collation_oid,
-            nulls_first,
-            descending,
-        )? != Ordering::Less
-        {
+        let key = &row.order_keys[0];
+        if matches!(key, Value::Null) || matches!(current_key, Value::Null) {
+            if if nulls_first {
+                !matches!(key, Value::Null) || matches!(current_key, Value::Null)
+            } else {
+                matches!(key, Value::Null) || !matches!(current_key, Value::Null)
+            } {
+                return Ok(index);
+            }
+        } else if in_range_value(key, current_key, offset, sub, less)? {
             return Ok(index);
         }
     }
     Ok(partition_rows.len())
 }
 
-fn range_frame_end_from_boundary(
+fn range_frame_end_from_offset(
     partition_rows: &[PreparedWindowRow],
     order_by: &[OrderByEntry],
-    boundary_key: &Value,
-    current_order: usize,
-    nulls_first: Option<bool>,
-    descending: bool,
+    row_index: usize,
+    offset: &Value,
+    following: bool,
 ) -> Result<usize, ExecError> {
-    for (index, row) in partition_rows.iter().enumerate().rev() {
-        if compare_order_values(
-            &row.order_keys[current_order],
-            boundary_key,
-            order_by[current_order].collation_oid,
-            nulls_first,
-            descending,
-        )? != Ordering::Greater
-        {
-            return Ok(index + 1);
+    let item = &order_by[0];
+    let current_key = &partition_rows[row_index].order_keys[0];
+    let nulls_first = item.nulls_first.unwrap_or(item.descending);
+    let mut sub = !following;
+    let mut less = true;
+    if item.descending {
+        sub = !sub;
+        less = false;
+    }
+    for (index, row) in partition_rows.iter().enumerate() {
+        let key = &row.order_keys[0];
+        if matches!(key, Value::Null) || matches!(current_key, Value::Null) {
+            if if nulls_first {
+                !matches!(key, Value::Null)
+            } else {
+                !matches!(current_key, Value::Null)
+            } {
+                return Ok(index);
+            }
+        } else if !in_range_value(key, current_key, offset, sub, less)? {
+            return Ok(index);
         }
     }
-    Ok(0)
+    Ok(partition_rows.len())
+}
+
+fn in_range_value(
+    val: &Value,
+    base: &Value,
+    offset: &Value,
+    sub: bool,
+    less: bool,
+) -> Result<bool, ExecError> {
+    match (val, base) {
+        (Value::Int16(_), Value::Int16(_))
+        | (Value::Int16(_), Value::Int32(_))
+        | (Value::Int16(_), Value::Int64(_))
+        | (Value::Int32(_), Value::Int16(_))
+        | (Value::Int32(_), Value::Int32(_))
+        | (Value::Int32(_), Value::Int64(_))
+        | (Value::Int64(_), Value::Int16(_))
+        | (Value::Int64(_), Value::Int32(_))
+        | (Value::Int64(_), Value::Int64(_)) => in_range_int(
+            int_value_for_range(val).expect("matched int val"),
+            int_value_for_range(base).expect("matched int base"),
+            int_value_for_range(offset).ok_or_else(unsupported_range_offset_error)?,
+            sub,
+            less,
+        ),
+        (Value::Float64(val), Value::Float64(base)) => {
+            in_range_float(*val, *base, float_offset_for_range(offset)?, sub, less)
+        }
+        (left, right)
+            if numeric_value_for_range(left).is_some()
+                && numeric_value_for_range(right).is_some() =>
+        {
+            in_range_numeric(
+                numeric_value_for_range(left).expect("checked numeric val"),
+                numeric_value_for_range(right).expect("checked numeric base"),
+                numeric_value_for_range(offset).ok_or_else(unsupported_range_offset_error)?,
+                sub,
+                less,
+            )
+        }
+        (Value::Date(val), Value::Date(base)) => {
+            let Value::Interval(offset) = offset else {
+                return Err(unsupported_range_offset_error());
+            };
+            in_range_timestamp(
+                date_as_timestamp_usecs(val.0),
+                date_as_timestamp_usecs(base.0),
+                *offset,
+                sub,
+                less,
+            )
+        }
+        (Value::Timestamp(val), Value::Timestamp(base)) => {
+            let Value::Interval(offset) = offset else {
+                return Err(unsupported_range_offset_error());
+            };
+            in_range_timestamp(val.0, base.0, *offset, sub, less)
+        }
+        (Value::TimestampTz(val), Value::TimestampTz(base)) => {
+            let Value::Interval(offset) = offset else {
+                return Err(unsupported_range_offset_error());
+            };
+            in_range_timestamp(val.0, base.0, *offset, sub, less)
+        }
+        (Value::Time(val), Value::Time(base)) => {
+            let Value::Interval(offset) = offset else {
+                return Err(unsupported_range_offset_error());
+            };
+            in_range_time(val.0, base.0, *offset, sub, less)
+        }
+        (Value::TimeTz(val), Value::TimeTz(base)) => {
+            let Value::Interval(offset) = offset else {
+                return Err(unsupported_range_offset_error());
+            };
+            in_range_time(val.time.0, base.time.0, *offset, sub, less)
+        }
+        (Value::Interval(val), Value::Interval(base)) => {
+            let Value::Interval(offset) = offset else {
+                return Err(unsupported_range_offset_error());
+            };
+            in_range_interval(*val, *base, *offset, sub, less)
+        }
+        _ => Err(unsupported_range_offset_error()),
+    }
+}
+
+fn int_value_for_range(value: &Value) -> Option<i128> {
+    match value {
+        Value::Int16(value) => Some(i128::from(*value)),
+        Value::Int32(value) => Some(i128::from(*value)),
+        Value::Int64(value) => Some(i128::from(*value)),
+        _ => None,
+    }
+}
+
+fn in_range_int(
+    val: i128,
+    base: i128,
+    offset: i128,
+    sub: bool,
+    less: bool,
+) -> Result<bool, ExecError> {
+    if offset < 0 {
+        return Err(invalid_range_offset_error());
+    }
+    let sum = if sub { base - offset } else { base + offset };
+    Ok(if less { val <= sum } else { val >= sum })
+}
+
+fn float_offset_for_range(value: &Value) -> Result<f64, ExecError> {
+    match value {
+        Value::Int16(value) => Ok(f64::from(*value)),
+        Value::Int32(value) => Ok(f64::from(*value)),
+        Value::Int64(value) => Ok(*value as f64),
+        Value::Float64(value) => Ok(*value),
+        _ => Err(unsupported_range_offset_error()),
+    }
+}
+
+fn in_range_float(
+    val: f64,
+    base: f64,
+    offset: f64,
+    sub: bool,
+    less: bool,
+) -> Result<bool, ExecError> {
+    if offset.is_nan() || offset < 0.0 {
+        return Err(invalid_range_offset_error());
+    }
+    if val.is_nan() {
+        return Ok(if base.is_nan() { true } else { !less });
+    }
+    if base.is_nan() {
+        return Ok(less);
+    }
+    if offset.is_infinite() && base.is_infinite() && if sub { base > 0.0 } else { base < 0.0 } {
+        return Ok(true);
+    }
+    let sum = if sub { base - offset } else { base + offset };
+    Ok(if less { val <= sum } else { val >= sum })
+}
+
+fn numeric_value_for_range(value: &Value) -> Option<NumericValue> {
+    match value {
+        Value::Int16(value) => Some(NumericValue::from_i64(i64::from(*value))),
+        Value::Int32(value) => Some(NumericValue::from_i64(i64::from(*value))),
+        Value::Int64(value) => Some(NumericValue::from_i64(*value)),
+        Value::Numeric(value) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn numeric_is_negative(value: &NumericValue) -> bool {
+    match value {
+        NumericValue::Finite { coeff, .. } => coeff < &num_bigint::BigInt::from(0),
+        NumericValue::NegInf => true,
+        NumericValue::PosInf | NumericValue::NaN => false,
+    }
+}
+
+fn in_range_numeric(
+    val: NumericValue,
+    base: NumericValue,
+    offset: NumericValue,
+    sub: bool,
+    less: bool,
+) -> Result<bool, ExecError> {
+    if matches!(offset, NumericValue::NaN) || numeric_is_negative(&offset) {
+        return Err(invalid_range_offset_error());
+    }
+    if matches!(val, NumericValue::NaN) {
+        return Ok(if matches!(base, NumericValue::NaN) {
+            true
+        } else {
+            !less
+        });
+    }
+    if matches!(base, NumericValue::NaN) {
+        return Ok(less);
+    }
+    if matches!(offset, NumericValue::PosInf) {
+        if if sub {
+            matches!(base, NumericValue::PosInf)
+        } else {
+            matches!(base, NumericValue::NegInf)
+        } {
+            return Ok(true);
+        }
+    }
+    let sum = if sub {
+        base.sub(&offset)
+    } else {
+        base.add(&offset)
+    };
+    Ok(if less {
+        val.cmp(&sum) != Ordering::Greater
+    } else {
+        val.cmp(&sum) != Ordering::Less
+    })
+}
+
+fn date_as_timestamp_usecs(days: i32) -> i64 {
+    match days {
+        DATEVAL_NOBEGIN => TIMESTAMP_NOBEGIN,
+        DATEVAL_NOEND => TIMESTAMP_NOEND,
+        days => {
+            let usecs = i128::from(days) * i128::from(USECS_PER_DAY);
+            if usecs > i128::from(TIMESTAMP_NOEND) {
+                TIMESTAMP_NOEND
+            } else if usecs < i128::from(TIMESTAMP_NOBEGIN) {
+                TIMESTAMP_NOBEGIN
+            } else {
+                usecs as i64
+            }
+        }
+    }
+}
+
+fn in_range_timestamp(
+    val: i64,
+    base: i64,
+    offset: IntervalValue,
+    sub: bool,
+    less: bool,
+) -> Result<bool, ExecError> {
+    if offset.is_negative() {
+        return Err(invalid_range_offset_error());
+    }
+    if offset.is_infinity()
+        && if sub {
+            base == TIMESTAMP_NOEND
+        } else {
+            base == TIMESTAMP_NOBEGIN
+        }
+    {
+        return Ok(true);
+    }
+    let sum = timestamp_add_interval(base, offset, sub);
+    Ok(if less { val <= sum } else { val >= sum })
+}
+
+fn timestamp_add_interval(base: i64, offset: IntervalValue, subtract: bool) -> i64 {
+    if base == TIMESTAMP_NOBEGIN || base == TIMESTAMP_NOEND {
+        return base;
+    }
+    let offset = if subtract { offset.negate() } else { offset };
+    if offset.is_infinity() {
+        return TIMESTAMP_NOEND;
+    }
+    if offset.is_neg_infinity() {
+        return TIMESTAMP_NOBEGIN;
+    }
+
+    let (mut days, time_usecs) = timestamp_parts_from_usecs(base);
+    if offset.months != 0 {
+        days = add_months_to_days(days, offset.months).unwrap_or_else(|| {
+            if offset.months.is_negative() {
+                DATEVAL_NOBEGIN
+            } else {
+                DATEVAL_NOEND
+            }
+        });
+    }
+    let total = i128::from(days) * i128::from(USECS_PER_DAY)
+        + i128::from(time_usecs)
+        + i128::from(offset.days) * i128::from(USECS_PER_DAY)
+        + i128::from(offset.time_micros);
+    if total > i128::from(TIMESTAMP_NOEND) {
+        TIMESTAMP_NOEND
+    } else if total < i128::from(TIMESTAMP_NOBEGIN) {
+        TIMESTAMP_NOBEGIN
+    } else {
+        total as i64
+    }
+}
+
+fn add_months_to_days(days: i32, months: i32) -> Option<i32> {
+    let (year, month, day) = ymd_from_days(days);
+    let month_index = i64::from(year) * 12 + i64::from(month) - 1 + i64::from(months);
+    let new_year = i32::try_from(month_index.div_euclid(12)).ok()?;
+    let new_month = (month_index.rem_euclid(12) + 1) as u32;
+    let new_day = day.min(days_in_month(new_year, new_month));
+    days_from_ymd(new_year, new_month, new_day)
+}
+
+fn in_range_time(
+    val: i64,
+    base: i64,
+    offset: IntervalValue,
+    sub: bool,
+    less: bool,
+) -> Result<bool, ExecError> {
+    if offset.is_negative() {
+        return Err(invalid_range_offset_error());
+    }
+    let sum = if sub {
+        i128::from(base) - i128::from(offset.time_micros)
+    } else {
+        let sum = i128::from(base) + i128::from(offset.time_micros);
+        if sum > i128::from(i64::MAX) {
+            return Ok(less);
+        }
+        sum
+    };
+    let val = i128::from(val);
+    Ok(if less { val <= sum } else { val >= sum })
+}
+
+fn in_range_interval(
+    val: IntervalValue,
+    base: IntervalValue,
+    offset: IntervalValue,
+    sub: bool,
+    less: bool,
+) -> Result<bool, ExecError> {
+    if offset.is_negative() {
+        return Err(invalid_range_offset_error());
+    }
+    if offset.is_infinity()
+        && if sub {
+            base.is_infinity()
+        } else {
+            base.is_neg_infinity()
+        }
+    {
+        return Ok(true);
+    }
+    let sum = if sub {
+        base.checked_sub(offset)
+    } else {
+        base.checked_add(offset)
+    }
+    .ok_or_else(invalid_range_offset_error)?;
+    Ok(if less {
+        val.cmp_key() <= sum.cmp_key()
+    } else {
+        val.cmp_key() >= sum.cmp_key()
+    })
 }
 
 fn evaluate_window_frame(
@@ -379,7 +714,6 @@ fn evaluate_window_frame(
     let len = partition_rows.len();
     let peer_start = peer_group_start_for_index(partition_rows, &clause.spec.order_by, row_index)?;
     let peer_end = peer_group_end_for_index(partition_rows, &clause.spec.order_by, row_index)?;
-    let current_key = partition_rows[row_index].order_keys.first().cloned();
 
     let start = match (&frame.mode, &frame.start_bound) {
         (_, WindowFrameBound::UnboundedPreceding) => 0,
@@ -440,30 +774,21 @@ fn evaluate_window_frame(
                 true,
             )?
         }
-        (WindowFrameMode::Range, WindowFrameBound::OffsetPreceding(expr))
-        | (WindowFrameMode::Range, WindowFrameBound::OffsetFollowing(expr)) => {
-            let current_key = current_key.as_ref().expect("range frame without order key");
-            if matches!(current_key, Value::Null) {
-                peer_start
-            } else {
-                let offset =
-                    evaluate_frame_offset_value(ctx, &mut partition_rows[row_index], expr)?;
-                let item = &clause.spec.order_by[0];
-                let boundary = compute_range_boundary_key(
-                    current_key,
-                    offset,
-                    item.descending,
-                    matches!(&frame.start_bound, WindowFrameBound::OffsetFollowing(_)),
-                )?;
-                range_frame_start_from_boundary(
-                    partition_rows,
-                    &clause.spec.order_by,
-                    &boundary,
-                    0,
-                    item.nulls_first,
-                    item.descending,
-                )?
-            }
+        (WindowFrameMode::Range, WindowFrameBound::OffsetPreceding(offset))
+        | (WindowFrameMode::Range, WindowFrameBound::OffsetFollowing(offset)) => {
+            let offset = evaluate_range_frame_offset_value(
+                ctx,
+                &mut partition_rows[row_index],
+                offset,
+                "starting",
+            )?;
+            range_frame_start_from_offset(
+                partition_rows,
+                &clause.spec.order_by,
+                row_index,
+                &offset,
+                matches!(&frame.start_bound, WindowFrameBound::OffsetFollowing(_)),
+            )?
         }
     };
 
@@ -526,30 +851,21 @@ fn evaluate_window_frame(
                 true,
             )?
         }
-        (WindowFrameMode::Range, WindowFrameBound::OffsetPreceding(expr))
-        | (WindowFrameMode::Range, WindowFrameBound::OffsetFollowing(expr)) => {
-            let current_key = current_key.as_ref().expect("range frame without order key");
-            if matches!(current_key, Value::Null) {
-                peer_end
-            } else {
-                let offset =
-                    evaluate_frame_offset_value(ctx, &mut partition_rows[row_index], expr)?;
-                let item = &clause.spec.order_by[0];
-                let boundary = compute_range_boundary_key(
-                    current_key,
-                    offset,
-                    item.descending,
-                    matches!(&frame.end_bound, WindowFrameBound::OffsetFollowing(_)),
-                )?;
-                range_frame_end_from_boundary(
-                    partition_rows,
-                    &clause.spec.order_by,
-                    &boundary,
-                    0,
-                    item.nulls_first,
-                    item.descending,
-                )?
-            }
+        (WindowFrameMode::Range, WindowFrameBound::OffsetPreceding(offset))
+        | (WindowFrameMode::Range, WindowFrameBound::OffsetFollowing(offset)) => {
+            let offset = evaluate_range_frame_offset_value(
+                ctx,
+                &mut partition_rows[row_index],
+                offset,
+                "ending",
+            )?;
+            range_frame_end_from_offset(
+                partition_rows,
+                &clause.spec.order_by,
+                row_index,
+                &offset,
+                matches!(&frame.end_bound, WindowFrameBound::OffsetFollowing(_)),
+            )?
         }
     };
 
@@ -870,7 +1186,7 @@ fn evaluate_value_window(
             evaluate_window_frame(ctx, clause, partition_rows, row_index)?;
         let frame_row_index = match builtin {
             BuiltinWindowFunction::FirstValue => (frame_start < frame_end).then_some(frame_start),
-            BuiltinWindowFunction::LastValue => (frame_start < frame_end).then_some(frame_end - 1),
+            BuiltinWindowFunction::LastValue => (frame_start < frame_end).then(|| frame_end - 1),
             BuiltinWindowFunction::NthValue => {
                 let Some(offset) =
                     evaluate_nth_value_offset(ctx, func, &mut partition_rows[row_index])?

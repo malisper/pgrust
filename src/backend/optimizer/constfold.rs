@@ -421,11 +421,13 @@ fn simplify_window_frame(frame: WindowFrame) -> Result<WindowFrame, ParseError> 
 
 fn simplify_window_frame_bound(bound: WindowFrameBound) -> Result<WindowFrameBound, ParseError> {
     Ok(match bound {
-        WindowFrameBound::OffsetPreceding(expr) => {
-            WindowFrameBound::OffsetPreceding(simplify_expr(expr, None)?)
+        WindowFrameBound::OffsetPreceding(offset) => {
+            let expr = simplify_expr(offset.expr.clone(), None)?;
+            WindowFrameBound::OffsetPreceding(offset.with_expr(expr))
         }
-        WindowFrameBound::OffsetFollowing(expr) => {
-            WindowFrameBound::OffsetFollowing(simplify_expr(expr, None)?)
+        WindowFrameBound::OffsetFollowing(offset) => {
+            let expr = simplify_expr(offset.expr.clone(), None)?;
+            WindowFrameBound::OffsetFollowing(offset.with_expr(expr))
         }
         other => other,
     })

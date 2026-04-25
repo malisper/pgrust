@@ -1244,8 +1244,8 @@ fn collect_direct_window_bound_subplans<'a>(
     out: &mut Vec<&'a SubPlan>,
 ) {
     match bound {
-        WindowFrameBound::OffsetPreceding(expr) | WindowFrameBound::OffsetFollowing(expr) => {
-            collect_direct_expr_subplans(expr, out)
+        WindowFrameBound::OffsetPreceding(offset) | WindowFrameBound::OffsetFollowing(offset) => {
+            collect_direct_expr_subplans(&offset.expr, out)
         }
         WindowFrameBound::UnboundedPreceding
         | WindowFrameBound::CurrentRow

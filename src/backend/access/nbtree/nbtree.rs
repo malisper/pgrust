@@ -158,6 +158,13 @@ fn encode_index_value(
         | Value::TimestampTz(_) => Ok(render_datetime_value_text(value)
             .expect("datetime values must render")
             .into_bytes()),
+        Value::Interval(v) => {
+            let mut bytes = Vec::with_capacity(16);
+            bytes.extend_from_slice(&v.time_micros.to_le_bytes());
+            bytes.extend_from_slice(&v.days.to_le_bytes());
+            bytes.extend_from_slice(&v.months.to_le_bytes());
+            Ok(bytes)
+        }
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)

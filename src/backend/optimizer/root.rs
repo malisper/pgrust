@@ -326,12 +326,14 @@ fn prepare_window_frame_for_locking(
     use crate::include::nodes::primnodes::WindowFrameBound;
 
     let prepare_bound = |bound| match bound {
-        WindowFrameBound::OffsetPreceding(expr) => Ok(WindowFrameBound::OffsetPreceding(
-            prepare_expr_for_locking(expr)?,
-        )),
-        WindowFrameBound::OffsetFollowing(expr) => Ok(WindowFrameBound::OffsetFollowing(
-            prepare_expr_for_locking(expr)?,
-        )),
+        WindowFrameBound::OffsetPreceding(offset) => {
+            let expr = prepare_expr_for_locking(offset.expr.clone())?;
+            Ok(WindowFrameBound::OffsetPreceding(offset.with_expr(expr)))
+        }
+        WindowFrameBound::OffsetFollowing(offset) => {
+            let expr = prepare_expr_for_locking(offset.expr.clone())?;
+            Ok(WindowFrameBound::OffsetFollowing(offset.with_expr(expr)))
+        }
         other => Ok(other),
     };
     Ok(crate::include::nodes::primnodes::WindowFrame {
@@ -1727,18 +1729,18 @@ fn make_window_input_target(
             collect_window_input_exprs(&item.expr, has_grouping(parse), &mut input_target);
         }
         match &clause.spec.frame.start_bound {
-            crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(expr)
-            | crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(expr) => {
-                collect_window_input_exprs(expr, has_grouping(parse), &mut input_target);
+            crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(offset)
+            | crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(offset) => {
+                collect_window_input_exprs(&offset.expr, has_grouping(parse), &mut input_target);
             }
             crate::include::nodes::primnodes::WindowFrameBound::UnboundedPreceding
             | crate::include::nodes::primnodes::WindowFrameBound::CurrentRow
             | crate::include::nodes::primnodes::WindowFrameBound::UnboundedFollowing => {}
         }
         match &clause.spec.frame.end_bound {
-            crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(expr)
-            | crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(expr) => {
-                collect_window_input_exprs(expr, has_grouping(parse), &mut input_target);
+            crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(offset)
+            | crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(offset) => {
+                collect_window_input_exprs(&offset.expr, has_grouping(parse), &mut input_target);
             }
             crate::include::nodes::primnodes::WindowFrameBound::UnboundedPreceding
             | crate::include::nodes::primnodes::WindowFrameBound::CurrentRow
