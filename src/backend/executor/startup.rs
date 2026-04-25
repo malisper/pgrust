@@ -865,13 +865,18 @@ pub fn executor_start(plan: Plan) -> PlanState {
             plan_info,
             stats: NodeExecStats::default(),
         }),
-        Plan::FunctionScan { plan_info, call } => Box::new(FunctionScanState {
+        Plan::FunctionScan {
+            plan_info,
+            call,
+            table_alias,
+        } => Box::new(FunctionScanState {
             output_columns: call
                 .output_columns()
                 .iter()
                 .map(|c| c.name.clone())
                 .collect(),
             call,
+            table_alias,
             rows: None,
             next_index: 0,
             current_bindings: Vec::new(),
