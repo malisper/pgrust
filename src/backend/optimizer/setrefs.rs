@@ -582,9 +582,9 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
             output_columns,
             ..
         } => build_subquery_tlist(*rtindex, query, output_columns),
-        Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
-            build_join_tlist(root, path, left, right)
-        }
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. } => build_join_tlist(root, path, left, right),
         _ => build_simple_tlist(root, path),
     }
 }
@@ -2627,6 +2627,33 @@ fn validate_executable_plan(plan: &Plan) {
             validate_executable_plan(left);
             validate_executable_plan(right);
         }
+        Plan::MergeJoin {
+            left,
+            right,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            merge_clauses
+                .iter()
+                .for_each(|expr| validate_executable_expr(expr, "MergeJoin", "merge_clauses"));
+            outer_merge_keys
+                .iter()
+                .for_each(|expr| validate_executable_expr(expr, "MergeJoin", "outer_merge_keys"));
+            inner_merge_keys
+                .iter()
+                .for_each(|expr| validate_executable_expr(expr, "MergeJoin", "inner_merge_keys"));
+            join_qual
+                .iter()
+                .for_each(|expr| validate_executable_expr(expr, "MergeJoin", "join_qual"));
+            qual.iter()
+                .for_each(|expr| validate_executable_expr(expr, "MergeJoin", "qual"));
+            validate_executable_plan(left);
+            validate_executable_plan(right);
+        }
         Plan::Filter {
             input, predicate, ..
         } => {
@@ -2982,6 +3009,30 @@ fn validate_planner_path(path: &Path) {
             }
             for expr in inner_hash_keys {
                 validate_planner_expr(expr, "HashJoin", "inner_hash_keys");
+            }
+            validate_planner_path(left);
+            validate_planner_path(right);
+        }
+        Path::MergeJoin {
+            left,
+            right,
+            restrict_clauses,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            ..
+        } => {
+            for restrict in restrict_clauses {
+                validate_planner_expr(&restrict.clause, "MergeJoin", "restrict_clauses");
+            }
+            for restrict in merge_clauses {
+                validate_planner_expr(&restrict.clause, "MergeJoin", "merge_clauses");
+            }
+            for expr in outer_merge_keys {
+                validate_planner_expr(expr, "MergeJoin", "outer_merge_keys");
+            }
+            for expr in inner_merge_keys {
+                validate_planner_expr(expr, "MergeJoin", "inner_merge_keys");
             }
             validate_planner_path(left);
             validate_planner_path(right);
@@ -3498,6 +3549,99 @@ fn set_hash_join_references(
         kind,
         hash_clauses: lowered_hash_clauses,
         hash_keys: outer_hash_keys,
+        join_qual,
+        qual,
+    }
+}
+
+fn set_merge_join_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    left: Box<Path>,
+    right: Box<Path>,
+    kind: crate::include::nodes::primnodes::JoinType,
+    merge_clauses: Vec<RestrictInfo>,
+    outer_merge_keys: Vec<Expr>,
+    inner_merge_keys: Vec<Expr>,
+    restrict_clauses: Vec<RestrictInfo>,
+) -> Plan {
+    let left_tlist = build_path_tlist(ctx.root, &left);
+    let right_tlist = build_path_tlist(ctx.root, &right);
+    let merge_restrict_clauses = merge_clauses.clone();
+
+    let outer_merge_keys = outer_merge_keys
+        .into_iter()
+        .map(|expr| fix_upper_expr_for_input(ctx.root, expr, &left, &left_tlist))
+        .collect::<Vec<_>>();
+    let inner_merge_keys = inner_merge_keys
+        .into_iter()
+        .map(|expr| fix_upper_expr_for_input(ctx.root, expr, &right, &right_tlist))
+        .collect::<Vec<_>>();
+
+    let outer_merge_keys = outer_merge_keys
+        .into_iter()
+        .map(|expr| {
+            lower_expr(
+                ctx,
+                expr,
+                LowerMode::Input {
+                    path: Some(&left),
+                    tlist: &left_tlist,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let inner_merge_keys = inner_merge_keys
+        .into_iter()
+        .map(|expr| {
+            lower_expr(
+                ctx,
+                expr,
+                LowerMode::Input {
+                    path: Some(&right),
+                    tlist: &right_tlist,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let lowered_merge_clauses = merge_clauses
+        .into_iter()
+        .map(|restrict| {
+            let expr = fix_join_expr_for_inputs(
+                ctx.root,
+                restrict.clause,
+                &left,
+                &right,
+                &left_tlist,
+                &right_tlist,
+            );
+            lower_expr(
+                ctx,
+                expr,
+                LowerMode::Join {
+                    outer_tlist: &left_tlist,
+                    inner_tlist: &right_tlist,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let (join_restrict_clauses, other_restrict_clauses) =
+        split_join_restrict_clauses(kind, &restrict_clauses);
+    let join_restrict_clauses = remove_hash_clauses(join_restrict_clauses, &merge_restrict_clauses);
+    let join_qual = lower_join_clause_list(ctx, &join_restrict_clauses, &left, &right);
+    let qual = lower_join_clause_list(ctx, other_restrict_clauses, &left, &right);
+
+    let left_plan = set_plan_refs(ctx, *left);
+    let right_plan = set_plan_refs(ctx, *right);
+
+    Plan::MergeJoin {
+        plan_info,
+        left: Box::new(left_plan),
+        right: Box::new(right_plan),
+        kind,
+        merge_clauses: lowered_merge_clauses,
+        outer_merge_keys,
+        inner_merge_keys,
         join_qual,
         qual,
     }
@@ -4140,6 +4284,27 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             inner_hash_keys,
             restrict_clauses,
         ),
+        Path::MergeJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            restrict_clauses,
+            ..
+        } => set_merge_join_references(
+            ctx,
+            plan_info,
+            left,
+            right,
+            kind,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            restrict_clauses,
+        ),
         Path::Projection {
             plan_info,
             input,
@@ -4729,7 +4894,9 @@ fn expand_output_var(var: Var, path: &Path) -> Expr {
         | Path::OrderBy { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => expand_output_var(var, input),
-        Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. } => {
             let expr = Expr::Var(var.clone());
             if left.output_vars().contains(&expr) {
                 fully_expand_output_expr(expr, left)

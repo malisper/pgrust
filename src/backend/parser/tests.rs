@@ -6584,6 +6584,23 @@ fn build_join_plan_resolves_qualified_columns() {
                             if op.op == crate::include::nodes::primnodes::OpExprKind::Eq
                     ));
                 }
+                Plan::MergeJoin {
+                    kind,
+                    merge_clauses,
+                    join_qual,
+                    qual,
+                    ..
+                } => {
+                    assert_eq!(*kind, JoinType::Inner);
+                    assert_eq!(merge_clauses.len(), 1);
+                    assert!(join_qual.is_empty());
+                    assert!(qual.is_empty());
+                    assert!(matches!(
+                        merge_clauses.first(),
+                        Some(Expr::Op(op))
+                            if op.op == crate::include::nodes::primnodes::OpExprKind::Eq
+                    ));
+                }
                 other => panic!("expected join, got {:?}", other),
             }
         }
@@ -7237,7 +7254,7 @@ fn plan_merge_uses_join_shape_for_explain() {
     assert_eq!(bound.explain_target_name, "people p");
     assert!(matches!(
         strip_projections(&bound.input_plan.plan_tree),
-        Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. }
+        Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. } | Plan::MergeJoin { .. }
     ));
 }
 
@@ -8713,7 +8730,9 @@ fn build_plan_for_recursive_mixed_cte_query() {
             | Plan::BitmapHeapScan {
                 bitmapqual: input, ..
             } => plan_contains_cte_scan(input),
-            Plan::NestedLoopJoin { left, right, .. } | Plan::HashJoin { left, right, .. } => {
+            Plan::NestedLoopJoin { left, right, .. }
+            | Plan::HashJoin { left, right, .. }
+            | Plan::MergeJoin { left, right, .. } => {
                 plan_contains_cte_scan(left) || plan_contains_cte_scan(right)
             }
             Plan::RecursiveUnion {

@@ -30,7 +30,7 @@ use super::super::pathnodes::{expr_sql_type, slot_output_target};
 use super::super::{
     AccessCandidate, CPU_INDEX_TUPLE_COST, CPU_OPERATOR_COST, CPU_TUPLE_COST, DEFAULT_BOOL_SEL,
     DEFAULT_EQ_SEL, DEFAULT_INEQ_SEL, DEFAULT_NUM_PAGES, DEFAULT_NUM_ROWS, HashJoinClauses,
-    IndexPathSpec, IndexableQual, RANDOM_PAGE_COST, RelationStats, SEQ_PAGE_COST,
+    IndexPathSpec, IndexableQual, MergeJoinClauses, RANDOM_PAGE_COST, RelationStats, SEQ_PAGE_COST,
     STATISTIC_KIND_CORRELATION, STATISTIC_KIND_HISTOGRAM, STATISTIC_KIND_MCV, path_relids,
     relids_subset,
 };
@@ -673,6 +673,39 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     hash_clauses,
                     outer_hash_keys,
                     inner_hash_keys,
+                    join_clauses,
+                    restrict_clauses,
+                )
+            }
+            Path::MergeJoin {
+                pathtarget,
+                output_columns,
+                left,
+                right,
+                kind,
+                merge_clauses,
+                outer_merge_keys,
+                inner_merge_keys,
+                restrict_clauses,
+                ..
+            } => {
+                let left = optimize_path(*left, catalog);
+                let right = optimize_path(*right, catalog);
+                let left_relids = path_relids(&left);
+                let right_relids = path_relids(&right);
+                let join_clauses =
+                    extract_merge_join_clauses(&restrict_clauses, &left_relids, &right_relids)
+                        .map(|clauses| clauses.join_clauses)
+                        .unwrap_or_default();
+                estimate_merge_join(
+                    left,
+                    right,
+                    kind,
+                    pathtarget,
+                    output_columns,
+                    merge_clauses,
+                    outer_merge_keys,
+                    inner_merge_keys,
                     join_clauses,
                     restrict_clauses,
                 )
@@ -1631,21 +1664,61 @@ fn build_join_paths_internal(
     }
 
     if !lateral_orientation_locked
+        && !matches!(kind, JoinType::Cross)
+        && let Some(merge_join) =
+            extract_merge_join_clauses(&restrict_clauses, left_relids, right_relids)
+    {
+        paths.push(estimate_merge_join_internal(
+            root,
+            left.clone(),
+            right.clone(),
+            kind,
+            pathtarget.clone(),
+            output_columns.clone(),
+            merge_join.merge_clauses,
+            merge_join.outer_merge_keys,
+            merge_join.inner_merge_keys,
+            merge_join.join_clauses,
+            restrict_clauses.clone(),
+        ));
+    }
+
+    if !lateral_orientation_locked
         && matches!(kind, JoinType::Inner)
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, right_relids, left_relids)
     {
         paths.push(estimate_hash_join_internal(
             root,
+            right.clone(),
+            left.clone(),
+            kind,
+            pathtarget.clone(),
+            output_columns.clone(),
+            hash_join.hash_clauses,
+            hash_join.outer_hash_keys,
+            hash_join.inner_hash_keys,
+            hash_join.join_clauses,
+            restrict_clauses.clone(),
+        ));
+    }
+
+    if !lateral_orientation_locked
+        && matches!(kind, JoinType::Inner)
+        && let Some(merge_join) =
+            extract_merge_join_clauses(&restrict_clauses, right_relids, left_relids)
+    {
+        paths.push(estimate_merge_join_internal(
+            root,
             right,
             left,
             kind,
             pathtarget,
             output_columns,
-            hash_join.hash_clauses,
-            hash_join.outer_hash_keys,
-            hash_join.inner_hash_keys,
-            hash_join.join_clauses,
+            merge_join.merge_clauses,
+            merge_join.outer_merge_keys,
+            merge_join.inner_merge_keys,
+            merge_join.join_clauses,
             restrict_clauses,
         ));
     }
@@ -1712,6 +1785,36 @@ pub(super) fn extract_hash_join_clauses(
         hash_clauses,
         outer_hash_keys,
         inner_hash_keys,
+        join_clauses: residual,
+    })
+}
+
+pub(super) fn extract_merge_join_clauses(
+    restrict_clauses: &[RestrictInfo],
+    left_relids: &[usize],
+    right_relids: &[usize],
+) -> Option<MergeJoinClauses> {
+    let mut merge_clauses = Vec::new();
+    let mut outer_merge_keys = Vec::new();
+    let mut inner_merge_keys = Vec::new();
+    let mut residual = Vec::new();
+
+    for restrict in restrict_clauses {
+        if let Some((outer_key, inner_key)) =
+            clause_sides_match_join(restrict, left_relids, right_relids)
+        {
+            merge_clauses.push(restrict.clone());
+            outer_merge_keys.push(outer_key);
+            inner_merge_keys.push(inner_key);
+        } else {
+            residual.push(restrict.clone());
+        }
+    }
+
+    (!merge_clauses.is_empty()).then_some(MergeJoinClauses {
+        merge_clauses,
+        outer_merge_keys,
+        inner_merge_keys,
         join_clauses: residual,
     })
 }
@@ -1945,6 +2048,12 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
             ..
         }
         | Path::HashJoin {
+            left,
+            right,
+            restrict_clauses,
+            ..
+        }
+        | Path::MergeJoin {
             left,
             right,
             restrict_clauses,
@@ -2232,6 +2341,156 @@ fn estimate_hash_join_internal(
         outer_hash_keys,
         inner_hash_keys,
         restrict_clauses,
+    }
+}
+
+fn estimate_merge_join(
+    left: Path,
+    right: Path,
+    kind: JoinType,
+    pathtarget: PathTarget,
+    output_columns: Vec<QueryColumn>,
+    merge_clauses: Vec<RestrictInfo>,
+    outer_merge_keys: Vec<Expr>,
+    inner_merge_keys: Vec<Expr>,
+    join_clauses: Vec<RestrictInfo>,
+    restrict_clauses: Vec<RestrictInfo>,
+) -> Path {
+    estimate_merge_join_internal(
+        None,
+        left,
+        right,
+        kind,
+        pathtarget,
+        output_columns,
+        merge_clauses,
+        outer_merge_keys,
+        inner_merge_keys,
+        join_clauses,
+        restrict_clauses,
+    )
+}
+
+fn estimate_merge_join_internal(
+    _root: Option<&PlannerInfo>,
+    left: Path,
+    right: Path,
+    kind: JoinType,
+    pathtarget: PathTarget,
+    output_columns: Vec<QueryColumn>,
+    merge_clauses: Vec<RestrictInfo>,
+    outer_merge_keys: Vec<Expr>,
+    inner_merge_keys: Vec<Expr>,
+    join_clauses: Vec<RestrictInfo>,
+    restrict_clauses: Vec<RestrictInfo>,
+) -> Path {
+    debug_assert!(
+        !merge_clauses.is_empty(),
+        "merge join should only be built with at least one merge clause"
+    );
+    debug_assert!(
+        !matches!(kind, JoinType::Cross),
+        "merge join does not support cross joins"
+    );
+
+    let outer_pathkeys = merge_pathkeys(&outer_merge_keys, &merge_clauses);
+    let inner_pathkeys = merge_pathkeys(&inner_merge_keys, &merge_clauses);
+    let left = ensure_path_sorted_for_merge(left, &outer_pathkeys);
+    let right = ensure_path_sorted_for_merge(right, &inner_pathkeys);
+    let left_info = left.plan_info();
+    let right_info = right.plan_info();
+    let join_sel = hash_join_selectivity(
+        &clause_exprs(&merge_clauses),
+        &clause_exprs(&join_clauses),
+        left_info.plan_rows.as_f64(),
+    );
+    let rows = estimate_join_rows(
+        left_info.plan_rows.as_f64(),
+        right_info.plan_rows.as_f64(),
+        kind,
+        join_sel,
+    );
+    let key_compare_cpu = (left_info.plan_rows.as_f64() + right_info.plan_rows.as_f64())
+        * (outer_merge_keys.len() as f64)
+        * CPU_OPERATOR_COST;
+    let recheck_cpu = rows
+        * (predicate_cost_for_restrict_clauses(&merge_clauses)
+            + predicate_cost_for_restrict_clauses(&join_clauses))
+        * CPU_OPERATOR_COST;
+    let total = left_info.total_cost.as_f64()
+        + right_info.total_cost.as_f64()
+        + key_compare_cpu
+        + recheck_cpu;
+
+    Path::MergeJoin {
+        plan_info: PlanEstimate::new(
+            left_info.startup_cost.as_f64() + right_info.startup_cost.as_f64(),
+            total,
+            rows,
+            if matches!(kind, JoinType::Semi | JoinType::Anti) {
+                left_info.plan_width
+            } else {
+                left_info.plan_width + right_info.plan_width
+            },
+        ),
+        pathtarget,
+        output_columns,
+        left: Box::new(left),
+        right: Box::new(right),
+        kind,
+        merge_clauses,
+        outer_merge_keys,
+        inner_merge_keys,
+        restrict_clauses,
+    }
+}
+
+fn merge_pathkeys(keys: &[Expr], clauses: &[RestrictInfo]) -> Vec<PathKey> {
+    keys.iter()
+        .zip(clauses.iter())
+        .map(|(expr, restrict)| PathKey {
+            expr: expr.clone(),
+            ressortgroupref: 0,
+            descending: false,
+            nulls_first: Some(false),
+            collation_oid: merge_clause_collation(restrict),
+        })
+        .collect()
+}
+
+fn merge_clause_collation(restrict: &RestrictInfo) -> Option<u32> {
+    match &restrict.clause {
+        Expr::Op(op) => op.collation_oid,
+        _ => None,
+    }
+}
+
+fn ensure_path_sorted_for_merge(path: Path, pathkeys: &[PathKey]) -> Path {
+    if super::super::bestpath::pathkeys_satisfy(&path.pathkeys(), pathkeys) {
+        return path;
+    }
+
+    let input_info = path.plan_info();
+    let sort_cost = estimate_sort_cost(input_info.plan_rows.as_f64(), pathkeys.len());
+    Path::OrderBy {
+        plan_info: PlanEstimate::new(
+            input_info.total_cost.as_f64(),
+            input_info.total_cost.as_f64() + sort_cost,
+            input_info.plan_rows.as_f64(),
+            input_info.plan_width,
+        ),
+        pathtarget: path.semantic_output_target(),
+        input: Box::new(path),
+        items: pathkeys
+            .iter()
+            .map(|key| OrderByEntry {
+                expr: key.expr.clone(),
+                ressortgroupref: key.ressortgroupref,
+                descending: key.descending,
+                nulls_first: key.nulls_first,
+                collation_oid: key.collation_oid,
+            })
+            .collect(),
     }
 }
 
