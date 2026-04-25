@@ -1741,7 +1741,10 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 grouped_outer,
                 ctes,
             );
-            if !is_integer_family(inner_type) && !is_bit_string_type(inner_type) {
+            if !is_integer_family(inner_type)
+                && !is_bit_string_type(inner_type)
+                && !is_macaddr_type(inner_type)
+            {
                 return Err(ParseError::UndefinedOperator {
                     op: "~",
                     left_type: sql_type_name(inner_type),

@@ -2751,6 +2751,45 @@ pub(super) fn bind_scalar_function_call(
                 .collect();
             Ok(build_func(func_variadic, coerced))
         }
+        BuiltinScalarFunction::MacAddrEq
+        | BuiltinScalarFunction::MacAddrNe
+        | BuiltinScalarFunction::MacAddrLt
+        | BuiltinScalarFunction::MacAddrLe
+        | BuiltinScalarFunction::MacAddrGt
+        | BuiltinScalarFunction::MacAddrGe
+        | BuiltinScalarFunction::MacAddrCmp
+        | BuiltinScalarFunction::MacAddrNot
+        | BuiltinScalarFunction::MacAddrAnd
+        | BuiltinScalarFunction::MacAddrOr
+        | BuiltinScalarFunction::MacAddrTrunc
+        | BuiltinScalarFunction::MacAddrToMacAddr8
+        | BuiltinScalarFunction::MacAddr8Eq
+        | BuiltinScalarFunction::MacAddr8Ne
+        | BuiltinScalarFunction::MacAddr8Lt
+        | BuiltinScalarFunction::MacAddr8Le
+        | BuiltinScalarFunction::MacAddr8Gt
+        | BuiltinScalarFunction::MacAddr8Ge
+        | BuiltinScalarFunction::MacAddr8Cmp
+        | BuiltinScalarFunction::MacAddr8Not
+        | BuiltinScalarFunction::MacAddr8And
+        | BuiltinScalarFunction::MacAddr8Or
+        | BuiltinScalarFunction::MacAddr8Trunc
+        | BuiltinScalarFunction::MacAddr8ToMacAddr
+        | BuiltinScalarFunction::MacAddr8Set7Bit
+        | BuiltinScalarFunction::HashMacAddr
+        | BuiltinScalarFunction::HashMacAddrExtended
+        | BuiltinScalarFunction::HashMacAddr8
+        | BuiltinScalarFunction::HashMacAddr8Extended => {
+            let coerced = bound_args
+                .into_iter()
+                .zip(arg_types)
+                .zip(declared_arg_types.iter().copied())
+                .map(|((arg, actual_type), declared_type)| {
+                    coerce_bound_expr(arg, actual_type, declared_type)
+                })
+                .collect();
+            Ok(build_func(func_variadic, coerced))
+        }
         _ => Ok(build_func(func_variadic, rewritten_bound_args)),
     }
 }

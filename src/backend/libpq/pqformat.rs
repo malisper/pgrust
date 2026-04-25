@@ -7,7 +7,8 @@ use crate::backend::executor::value_io::builtin_type_oid_for_sql_type;
 use crate::backend::executor::{
     ArrayValue, ExecError, QueryColumn, Value, geometry_input_error_message,
     render_datetime_value_text_with_config, render_geometry_text, render_internal_char_text,
-    render_interval_text, render_pg_lsn_text, render_range_text,
+    render_interval_text, render_macaddr_text, render_macaddr8_text, render_pg_lsn_text,
+    render_range_text,
 };
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::statistics::{
@@ -370,6 +371,8 @@ fn validate_binary_output_type(sql_type: SqlType) -> Result<(), ExecError> {
                 | SqlTypeKind::Bytea
                 | SqlTypeKind::Inet
                 | SqlTypeKind::Cidr
+                | SqlTypeKind::MacAddr
+                | SqlTypeKind::MacAddr8
                 | SqlTypeKind::Text
                 | SqlTypeKind::Varchar
                 | SqlTypeKind::Char
@@ -485,6 +488,8 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Uuid => crate::include::catalog::UUID_ARRAY_TYPE_OID as i32,
             SqlTypeKind::Inet => crate::include::catalog::INET_ARRAY_TYPE_OID as i32,
             SqlTypeKind::Cidr => crate::include::catalog::CIDR_ARRAY_TYPE_OID as i32,
+            SqlTypeKind::MacAddr => crate::include::catalog::MACADDR_ARRAY_TYPE_OID as i32,
+            SqlTypeKind::MacAddr8 => crate::include::catalog::MACADDR8_ARRAY_TYPE_OID as i32,
             SqlTypeKind::Float4 => 1021,
             SqlTypeKind::Float8 => 1022,
             SqlTypeKind::Money => 791,
@@ -592,6 +597,8 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Uuid => (crate::include::catalog::UUID_TYPE_OID as i32, 16, -1),
         SqlTypeKind::Inet => (crate::include::catalog::INET_TYPE_OID as i32, -1, -1),
         SqlTypeKind::Cidr => (crate::include::catalog::CIDR_TYPE_OID as i32, -1, -1),
+        SqlTypeKind::MacAddr => (crate::include::catalog::MACADDR_TYPE_OID as i32, 6, -1),
+        SqlTypeKind::MacAddr8 => (crate::include::catalog::MACADDR8_TYPE_OID as i32, 8, -1),
         SqlTypeKind::Float4 => (700, 4, -1),
         SqlTypeKind::Float8 => (701, 8, -1),
         SqlTypeKind::Money => (790, 8, -1),
@@ -921,6 +928,16 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
+            Value::MacAddr(v) => {
+                let rendered = render_macaddr_text(v);
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
+            }
+            Value::MacAddr8(v) => {
+                let rendered = render_macaddr8_text(v);
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
+            }
             Value::Date(_)
             | Value::Time(_)
             | Value::TimeTz(_)
@@ -1132,6 +1149,12 @@ fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<
         }
         Value::Cidr(value) if matches!(sql_type.kind, SqlTypeKind::Cidr) => {
             Ok(encode_binary_network_value(value, true))
+        }
+        Value::MacAddr(value) if matches!(sql_type.kind, SqlTypeKind::MacAddr) => {
+            Ok(value.to_vec())
+        }
+        Value::MacAddr8(value) if matches!(sql_type.kind, SqlTypeKind::MacAddr8) => {
+            Ok(value.to_vec())
         }
         Value::Text(text)
             if matches!(
@@ -2331,5 +2354,67 @@ mod tests {
             out.windows("{\"@ 0\",\"@ 1 hour 42 mins 20 secs\"}".len())
                 .any(|window| window == b"{\"@ 0\",\"@ 1 hour 42 mins 20 secs\"}")
         );
+    }
+
+    #[test]
+    fn macaddr_protocol_metadata_and_binary_output_use_postgres_oids() {
+        assert_eq!(
+            super::wire_type_info(&QueryColumn {
+                name: "m".into(),
+                sql_type: SqlType::new(SqlTypeKind::MacAddr),
+                wire_type_oid: None,
+            }),
+            (crate::include::catalog::MACADDR_TYPE_OID as i32, 6, -1)
+        );
+        assert_eq!(
+            super::wire_type_info(&QueryColumn {
+                name: "m8".into(),
+                sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::MacAddr8)),
+                wire_type_oid: None,
+            }),
+            (
+                crate::include::catalog::MACADDR8_ARRAY_TYPE_OID as i32,
+                -1,
+                -1
+            )
+        );
+
+        let mut out = Vec::new();
+        let mut row_buf = Vec::new();
+        send_typed_data_row(
+            &mut out,
+            &[
+                Value::MacAddr([0x08, 0x00, 0x2b, 0x01, 0x02, 0x03]),
+                Value::MacAddr8([0x08, 0x00, 0x2b, 0x01, 0x02, 0x03, 0x04, 0x05]),
+            ],
+            &[
+                QueryColumn {
+                    name: "m".into(),
+                    sql_type: SqlType::new(SqlTypeKind::MacAddr),
+                    wire_type_oid: None,
+                },
+                QueryColumn {
+                    name: "m8".into(),
+                    sql_type: SqlType::new(SqlTypeKind::MacAddr8),
+                    wire_type_oid: None,
+                },
+            ],
+            &[1, 1],
+            &mut row_buf,
+            FloatFormatOptions::default(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            out.windows(10)
+                .any(|window| { window == [0, 0, 0, 6, 0x08, 0x00, 0x2b, 0x01, 0x02, 0x03] })
+        );
+        assert!(out.windows(12).any(|window| {
+            window == [0, 0, 0, 8, 0x08, 0x00, 0x2b, 0x01, 0x02, 0x03, 0x04, 0x05]
+        }));
     }
 }

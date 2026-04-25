@@ -843,6 +843,15 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::RegCollationToText
             | BuiltinScalarFunction::RegRoleToText
             | BuiltinScalarFunction::BpcharToText
+            | BuiltinScalarFunction::MacAddrNot
+            | BuiltinScalarFunction::MacAddrTrunc
+            | BuiltinScalarFunction::MacAddrToMacAddr8
+            | BuiltinScalarFunction::MacAddr8Not
+            | BuiltinScalarFunction::MacAddr8Trunc
+            | BuiltinScalarFunction::MacAddr8ToMacAddr
+            | BuiltinScalarFunction::MacAddr8Set7Bit
+            | BuiltinScalarFunction::HashMacAddr
+            | BuiltinScalarFunction::HashMacAddr8
             | BuiltinScalarFunction::BitCount => args.len() == 1,
             BuiltinScalarFunction::Trunc | BuiltinScalarFunction::Round => {
                 matches!(args.len(), 1 | 2)
@@ -855,6 +864,26 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::BoolNe
             | BuiltinScalarFunction::BoolAndStateFunc
             | BuiltinScalarFunction::BoolOrStateFunc
+            | BuiltinScalarFunction::MacAddrEq
+            | BuiltinScalarFunction::MacAddrNe
+            | BuiltinScalarFunction::MacAddrLt
+            | BuiltinScalarFunction::MacAddrLe
+            | BuiltinScalarFunction::MacAddrGt
+            | BuiltinScalarFunction::MacAddrGe
+            | BuiltinScalarFunction::MacAddrCmp
+            | BuiltinScalarFunction::MacAddrAnd
+            | BuiltinScalarFunction::MacAddrOr
+            | BuiltinScalarFunction::MacAddr8Eq
+            | BuiltinScalarFunction::MacAddr8Ne
+            | BuiltinScalarFunction::MacAddr8Lt
+            | BuiltinScalarFunction::MacAddr8Le
+            | BuiltinScalarFunction::MacAddr8Gt
+            | BuiltinScalarFunction::MacAddr8Ge
+            | BuiltinScalarFunction::MacAddr8Cmp
+            | BuiltinScalarFunction::MacAddr8And
+            | BuiltinScalarFunction::MacAddr8Or
+            | BuiltinScalarFunction::HashMacAddrExtended
+            | BuiltinScalarFunction::HashMacAddr8Extended
             | BuiltinScalarFunction::Div
             | BuiltinScalarFunction::Mod => args.len() == 2,
             BuiltinScalarFunction::Float8Accum | BuiltinScalarFunction::Float8Combine => {
@@ -2032,6 +2061,47 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("factorial", BuiltinScalarFunction::Factorial),
         ("pg_lsn", BuiltinScalarFunction::PgLsn),
         ("trunc", BuiltinScalarFunction::Trunc),
+        ("macaddr_eq", BuiltinScalarFunction::MacAddrEq),
+        ("macaddr_ne", BuiltinScalarFunction::MacAddrNe),
+        ("macaddr_lt", BuiltinScalarFunction::MacAddrLt),
+        ("macaddr_le", BuiltinScalarFunction::MacAddrLe),
+        ("macaddr_gt", BuiltinScalarFunction::MacAddrGt),
+        ("macaddr_ge", BuiltinScalarFunction::MacAddrGe),
+        ("macaddr_cmp", BuiltinScalarFunction::MacAddrCmp),
+        ("macaddr_not", BuiltinScalarFunction::MacAddrNot),
+        ("macaddr_and", BuiltinScalarFunction::MacAddrAnd),
+        ("macaddr_or", BuiltinScalarFunction::MacAddrOr),
+        ("macaddr_trunc", BuiltinScalarFunction::MacAddrTrunc),
+        (
+            "macaddrtomacaddr8",
+            BuiltinScalarFunction::MacAddrToMacAddr8,
+        ),
+        ("macaddr8_eq", BuiltinScalarFunction::MacAddr8Eq),
+        ("macaddr8_ne", BuiltinScalarFunction::MacAddr8Ne),
+        ("macaddr8_lt", BuiltinScalarFunction::MacAddr8Lt),
+        ("macaddr8_le", BuiltinScalarFunction::MacAddr8Le),
+        ("macaddr8_gt", BuiltinScalarFunction::MacAddr8Gt),
+        ("macaddr8_ge", BuiltinScalarFunction::MacAddr8Ge),
+        ("macaddr8_cmp", BuiltinScalarFunction::MacAddr8Cmp),
+        ("macaddr8_not", BuiltinScalarFunction::MacAddr8Not),
+        ("macaddr8_and", BuiltinScalarFunction::MacAddr8And),
+        ("macaddr8_or", BuiltinScalarFunction::MacAddr8Or),
+        ("macaddr8_trunc", BuiltinScalarFunction::MacAddr8Trunc),
+        (
+            "macaddr8tomacaddr",
+            BuiltinScalarFunction::MacAddr8ToMacAddr,
+        ),
+        ("macaddr8_set7bit", BuiltinScalarFunction::MacAddr8Set7Bit),
+        ("hashmacaddr", BuiltinScalarFunction::HashMacAddr),
+        (
+            "hashmacaddrextended",
+            BuiltinScalarFunction::HashMacAddrExtended,
+        ),
+        ("hashmacaddr8", BuiltinScalarFunction::HashMacAddr8),
+        (
+            "hashmacaddr8extended",
+            BuiltinScalarFunction::HashMacAddr8Extended,
+        ),
         ("round", BuiltinScalarFunction::Round),
         ("width_bucket", BuiltinScalarFunction::WidthBucket),
         ("ceil", BuiltinScalarFunction::Ceil),
@@ -2117,6 +2187,22 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::XmlIsWellFormedContent,
         ),
         ("pg_input_is_valid", BuiltinScalarFunction::PgInputIsValid),
+        (
+            "pg_input_error_message",
+            BuiltinScalarFunction::PgInputErrorMessage,
+        ),
+        (
+            "pg_input_error_detail",
+            BuiltinScalarFunction::PgInputErrorDetail,
+        ),
+        (
+            "pg_input_error_hint",
+            BuiltinScalarFunction::PgInputErrorHint,
+        ),
+        (
+            "pg_input_error_sqlstate",
+            BuiltinScalarFunction::PgInputErrorSqlState,
+        ),
         ("range_constructor", BuiltinScalarFunction::RangeConstructor),
         ("range_isempty", BuiltinScalarFunction::RangeIsEmpty),
         ("range_lower", BuiltinScalarFunction::RangeLower),

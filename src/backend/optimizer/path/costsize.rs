@@ -3144,7 +3144,9 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::Time
         | SqlTypeKind::TimeTz
         | SqlTypeKind::Tid
+        | SqlTypeKind::MacAddr8
         | SqlTypeKind::Float8 => 8,
+        SqlTypeKind::MacAddr => 6,
         SqlTypeKind::Numeric => 16,
         SqlTypeKind::Bit
         | SqlTypeKind::VarBit
