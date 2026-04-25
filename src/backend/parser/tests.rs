@@ -8859,6 +8859,62 @@ fn parse_create_table_partition_of_with_table_elements() {
 }
 
 #[test]
+fn parse_create_table_partition_of_with_column_options() {
+    match parse_statement(
+        "create table part_b partition of parted \
+         (b with options not null default 0) \
+         for values in ('b')",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.partition_of.as_deref(), Some("parted"));
+            assert_eq!(ct.elements.len(), 1);
+            assert!(matches!(
+                &ct.elements[0],
+                CreateTableElement::PartitionColumnOverride(override_)
+                    if override_.name == "b"
+                        && override_.default_expr.as_deref() == Some("0")
+                        && override_.constraints.iter().any(|constraint| {
+                            matches!(constraint, ColumnConstraint::NotNull { .. })
+                        })
+            ));
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_table_partition_of_with_short_column_options() {
+    match parse_statement(
+        "create table part_b partition of parted \
+         (a not null, b default 1) \
+         for values in ('b')",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.partition_of.as_deref(), Some("parted"));
+            assert_eq!(ct.elements.len(), 2);
+            assert!(matches!(
+                &ct.elements[0],
+                CreateTableElement::PartitionColumnOverride(override_)
+                    if override_.name == "a"
+                        && override_.constraints.iter().any(|constraint| {
+                            matches!(constraint, ColumnConstraint::NotNull { .. })
+                        })
+            ));
+            assert!(matches!(
+                &ct.elements[1],
+                CreateTableElement::PartitionColumnOverride(override_)
+                    if override_.name == "b" && override_.default_expr.as_deref() == Some("1")
+            ));
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
 fn parse_alter_table_attach_partition() {
     match parse_statement(
         "alter table measurement attach partition measurement_mid \

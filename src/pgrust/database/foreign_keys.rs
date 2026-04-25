@@ -109,17 +109,38 @@ pub(crate) fn alter_table_add_constraint_lock_requests(
         catalog,
     )
     .map_err(ExecError::Parse)?;
-    if let crate::backend::parser::NormalizedAlterTableConstraint::ForeignKey(action) = normalized {
-        let referenced_relation = catalog
-            .lookup_relation_by_oid(action.referenced_relation_oid)
-            .ok_or_else(|| {
-                ExecError::Parse(ParseError::UnknownTable(action.referenced_table.clone()))
-            })?;
-        add_lock_request(
-            &mut requests,
-            referenced_relation.rel,
-            TableLockMode::ShareUpdateExclusive,
-        );
+    match normalized {
+        crate::backend::parser::NormalizedAlterTableConstraint::ForeignKey(action) => {
+            let referenced_relation = catalog
+                .lookup_relation_by_oid(action.referenced_relation_oid)
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnknownTable(action.referenced_table.clone()))
+                })?;
+            add_lock_request(
+                &mut requests,
+                referenced_relation.rel,
+                TableLockMode::ShareUpdateExclusive,
+            );
+        }
+        crate::backend::parser::NormalizedAlterTableConstraint::Check(action)
+            if !stmt.only && !action.no_inherit =>
+        {
+            for child_oid in catalog.find_all_inheritors(relation.relation_oid) {
+                if child_oid == relation.relation_oid {
+                    continue;
+                }
+                let child_relation =
+                    catalog.lookup_relation_by_oid(child_oid).ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnknownTable(child_oid.to_string()))
+                    })?;
+                add_lock_request(
+                    &mut requests,
+                    child_relation.rel,
+                    TableLockMode::AccessExclusive,
+                );
+            }
+        }
+        _ => {}
     }
 
     Ok(requests.into_iter().collect())
