@@ -4,7 +4,9 @@ use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, QueryRowMark, RangeTblEntry, RangeTblEntryKind, SelectLockingClause,
 };
-use crate::include::nodes::pathnodes::{PathTarget, PlannerConfig, PlannerInfo, RelOptInfo};
+use crate::include::nodes::pathnodes::{
+    AggregateLayout, PathTarget, PlannerConfig, PlannerInfo, RelOptInfo,
+};
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, Aggref, Expr, SetReturningCall, SortGroupClause, SubLink, SubLinkType,
     TargetEntry, Var, expr_contains_set_returning, is_system_attr, set_returning_call_exprs,
@@ -800,22 +802,26 @@ fn prepare_expr_for_locking(expr: Expr) -> Result<Expr, ParseError> {
 }
 
 impl PlannerInfo {
-    pub fn new(parse: Query) -> Self {
-        Self::new_with_config(parse, PlannerConfig::default())
+    pub fn new(parse: Query, aggregate_layout: AggregateLayout) -> Self {
+        Self::new_with_config(parse, aggregate_layout, PlannerConfig::default())
     }
 
-    pub fn new_with_config(parse: Query, config: PlannerConfig) -> Self {
+    pub fn new_with_config(
+        parse: Query,
+        aggregate_layout: AggregateLayout,
+        config: PlannerConfig,
+    ) -> Self {
         let processed_tlist = make_processed_tlist(&parse);
         let final_target = PathTarget::from_target_list(&parse.target_list);
         let query_pathkeys = PathTarget::from_sort_clause(&parse.sort_clause, &processed_tlist);
         let sort_input_target = make_sort_input_target(&parse, &processed_tlist, &final_target);
         let group_input_target = if has_grouping(&parse) {
-            make_group_input_target(&parse)
+            make_group_input_target(&parse, &aggregate_layout.group_by)
         } else {
             sort_input_target.clone()
         };
         let grouped_target = if has_grouping(&parse) {
-            build_grouped_target(&parse)
+            build_grouped_target(&aggregate_layout, &parse.accumulators)
         } else {
             final_target.clone()
         };
@@ -849,9 +855,18 @@ impl PlannerInfo {
             upper_rels: Vec::new(),
             join_info_list,
             inner_join_clauses: Vec::new(),
+            aggregate_layout,
             final_rel: None,
             parse,
         }
+    }
+
+    pub fn aggregate_group_by(&self) -> &[Expr] {
+        &self.aggregate_layout.group_by
+    }
+
+    pub fn aggregate_passthrough_exprs(&self) -> &[Expr] {
+        &self.aggregate_layout.passthrough_exprs
     }
 }
 
@@ -1948,34 +1963,38 @@ fn make_sort_input_target(
     PathTarget::from_target_list(processed_tlist)
 }
 
-fn make_group_input_target(parse: &Query) -> PathTarget {
+fn make_group_input_target(parse: &Query, group_by: &[Expr]) -> PathTarget {
     let mut exprs = Vec::new();
-    for group_expr in &parse.group_by {
+    for group_expr in group_by {
         push_expr(&mut exprs, group_expr.clone());
     }
     for target in &parse.target_list {
-        collect_group_input_exprs(&target.expr, &parse.group_by, &mut exprs);
+        collect_group_input_exprs(&target.expr, group_by, &mut exprs);
     }
     for accum in &parse.accumulators {
         for arg in &accum.args {
-            collect_group_input_exprs(arg, &parse.group_by, &mut exprs);
+            collect_group_input_exprs(arg, group_by, &mut exprs);
         }
         if let Some(filter) = accum.filter.as_ref() {
-            collect_group_input_exprs(filter, &parse.group_by, &mut exprs);
+            collect_group_input_exprs(filter, group_by, &mut exprs);
         }
     }
     if let Some(having) = parse.having_qual.as_ref() {
-        collect_group_input_exprs(having, &parse.group_by, &mut exprs);
+        collect_group_input_exprs(having, group_by, &mut exprs);
     }
     if let Some(where_qual) = parse.where_qual.as_ref() {
-        collect_group_input_exprs(where_qual, &parse.group_by, &mut exprs);
+        collect_group_input_exprs(where_qual, group_by, &mut exprs);
     }
     PathTarget::new(exprs)
 }
 
-fn build_grouped_target(parse: &Query) -> PathTarget {
-    let mut exprs = parse.group_by.clone();
-    exprs.extend(parse.accumulators.iter().enumerate().map(|(aggno, accum)| {
+fn build_grouped_target(layout: &AggregateLayout, accumulators: &[AggAccum]) -> PathTarget {
+    let mut exprs = Vec::with_capacity(
+        layout.group_by.len() + layout.passthrough_exprs.len() + accumulators.len(),
+    );
+    exprs.extend(layout.group_by.iter().cloned());
+    exprs.extend(layout.passthrough_exprs.iter().cloned());
+    exprs.extend(accumulators.iter().enumerate().map(|(aggno, accum)| {
         Expr::Aggref(Box::new(Aggref {
             aggfnoid: accum.aggfnoid,
             aggtype: accum.sql_type,

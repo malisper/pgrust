@@ -27,12 +27,21 @@ pub(super) fn pathkeys_to_order_items(pathkeys: &[PathKey]) -> Vec<OrderByEntry>
 
 pub(super) fn build_aggregate_output_columns(
     group_by: &[Expr],
+    passthrough_exprs: &[Expr],
     accumulators: &[AggAccum],
 ) -> Vec<QueryColumn> {
-    let mut output_columns = Vec::with_capacity(group_by.len() + accumulators.len());
+    let mut output_columns =
+        Vec::with_capacity(group_by.len() + passthrough_exprs.len() + accumulators.len());
     for (index, expr) in group_by.iter().enumerate() {
         output_columns.push(QueryColumn {
             name: format!("group{}", index + 1),
+            sql_type: expr_sql_type(expr),
+            wire_type_oid: None,
+        });
+    }
+    for (index, expr) in passthrough_exprs.iter().enumerate() {
+        output_columns.push(QueryColumn {
+            name: format!("pass{}", index + 1),
             sql_type: expr_sql_type(expr),
             wire_type_oid: None,
         });
@@ -198,14 +207,15 @@ pub(super) fn lower_pathkeys_for_path(
     path: &Path,
     pathkeys: &[PathKey],
 ) -> Vec<PathKey> {
-    match aggregate_group_by(path) {
-        Some(group_by) => pathkeys
+    match aggregate_layout(path) {
+        Some((group_by, passthrough_exprs)) => pathkeys
             .iter()
             .cloned()
             .map(|key| PathKey {
                 expr: lower_agg_output_expr(
                     expand_join_rte_vars(root, key.expr),
                     group_by,
+                    passthrough_exprs,
                     &path.output_vars(),
                 ),
                 ressortgroupref: key.ressortgroupref,
@@ -306,12 +316,20 @@ pub(super) fn projection_is_identity(path: &Path, targets: &[TargetEntry]) -> bo
         })
 }
 
-pub(super) fn aggregate_group_by(path: &Path) -> Option<&[Expr]> {
+fn aggregate_layout(path: &Path) -> Option<(&[Expr], &[Expr])> {
     match path {
-        Path::Aggregate { group_by, .. } => Some(group_by),
+        Path::Aggregate {
+            group_by,
+            passthrough_exprs,
+            ..
+        } => Some((group_by, passthrough_exprs)),
         Path::Filter { input, .. } | Path::OrderBy { input, .. } | Path::Limit { input, .. } => {
-            aggregate_group_by(input)
+            aggregate_layout(input)
         }
         _ => None,
     }
+}
+
+pub(super) fn aggregate_group_by(path: &Path) -> Option<&[Expr]> {
+    aggregate_layout(path).map(|(group_by, _)| group_by)
 }

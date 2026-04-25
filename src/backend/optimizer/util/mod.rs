@@ -13,9 +13,10 @@ pub(super) use indexed_pathtarget::{
 
 pub(super) fn build_aggregate_output_columns(
     group_by: &[Expr],
+    passthrough_exprs: &[Expr],
     accumulators: &[AggAccum],
 ) -> Vec<QueryColumn> {
-    tlist::build_aggregate_output_columns(group_by, accumulators)
+    tlist::build_aggregate_output_columns(group_by, passthrough_exprs, accumulators)
 }
 
 pub(super) fn project_to_slot_layout(
