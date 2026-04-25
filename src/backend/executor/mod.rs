@@ -21,7 +21,7 @@ mod expr_math;
 mod expr_money;
 pub(crate) mod expr_multirange;
 mod expr_network;
-mod expr_numeric;
+pub(crate) mod expr_numeric;
 pub(crate) mod expr_ops;
 pub(crate) mod expr_range;
 pub(crate) mod expr_reg;

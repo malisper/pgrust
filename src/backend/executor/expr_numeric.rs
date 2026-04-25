@@ -114,7 +114,8 @@ fn numeric_to_f64(value: &NumericValue) -> Option<f64> {
         NumericValue::NaN => Some(f64::NAN),
         NumericValue::Finite { coeff, scale, .. } => {
             let coeff = coeff.to_f64()?;
-            Some(coeff / 10f64.powi(*scale as i32))
+            let scale = i32::try_from(*scale).ok()?;
+            Some(coeff / 10f64.powi(scale))
         }
     }
 }
@@ -195,13 +196,13 @@ fn numeric_to_f64_approx(value: &NumericValue) -> f64 {
             let digits = coeff.abs().to_str_radix(10);
             let head_len = digits.len().min(16);
             let head = digits[..head_len].parse::<f64>().unwrap_or(0.0);
-            let exp10 = digits.len() as i32 - head_len as i32 - *scale as i32;
+            let exp10 = digits.len() as i64 - head_len as i64 - i64::from(*scale);
             let magnitude = if exp10 > 308 {
                 f64::INFINITY
             } else if exp10 < -350 {
                 0.0
             } else {
-                head * 10f64.powi(exp10)
+                head * 10f64.powi(exp10 as i32)
             };
             if coeff.is_negative() {
                 -magnitude
@@ -302,7 +303,8 @@ fn floor_div_i32(value: i32, divisor: i32) -> i32 {
 fn decimal_weight(value: &NumericValue) -> i32 {
     match value {
         NumericValue::Finite { coeff, scale, .. } if !coeff.is_zero() => {
-            coeff.abs().to_str_radix(10).len() as i32 - (*scale as i32) - 1
+            let weight = coeff.abs().to_str_radix(10).len() as i64 - i64::from(*scale) - 1;
+            weight.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
         }
         _ => 0,
     }
@@ -340,8 +342,8 @@ fn estimate_ln_dweight(value: &NumericValue) -> i32 {
                 let digits = coeff.abs().to_str_radix(10);
                 let head_len = digits.len().min(16);
                 let head = digits[..head_len].parse::<f64>().unwrap_or(1.0);
-                let dweight = digits.len() as i32 - head_len as i32 - *scale as i32;
-                let ln_approx = head.ln() + f64::from(dweight) * LN_10;
+                let dweight = digits.len() as f64 - head_len as f64 - f64::from(*scale);
+                let ln_approx = head.ln() + dweight * LN_10;
                 if ln_approx == 0.0 {
                     0
                 } else {
@@ -1088,7 +1090,7 @@ pub(super) fn eval_ln_function(values: &[Value]) -> Result<Value, ExecError> {
     }
 }
 
-pub(super) fn eval_power_function(values: &[Value]) -> Result<Value, ExecError> {
+pub(crate) fn eval_power_function(values: &[Value]) -> Result<Value, ExecError> {
     match values {
         [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
         [Value::Float64(base), Value::Float64(exp)] => {
