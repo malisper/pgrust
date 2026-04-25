@@ -533,13 +533,7 @@ fn format_standard(value: i128, spec: &FormatSpec) -> String {
     for (idx, token) in spec.tokens.iter().enumerate() {
         if let Token::Sign(kind) = token {
             rendered[idx] = match kind {
-                SignKind::S if idx == 0 => {
-                    if spec.fill_mode {
-                        sign_text(*kind, negative).into()
-                    } else {
-                        " ".into()
-                    }
-                }
+                SignKind::S if idx == 0 => " ".into(),
                 SignKind::Pl if negative => " ".into(),
                 _ => sign_text(*kind, negative).into(),
             };
@@ -559,9 +553,7 @@ fn format_standard(value: i128, spec: &FormatSpec) -> String {
         }
     }
 
-    if !(spec.fill_mode && matches!(spec.tokens.first(), Some(Token::Sign(SignKind::S)))) {
-        move_s_sign_to_number(spec, &mut rendered, negative);
-    }
+    move_s_sign_to_number(spec, &mut rendered, negative);
     apply_implicit_sign(spec, &mut rendered, negative);
 
     let mut out = rendered.concat();
@@ -1564,6 +1556,13 @@ mod tests {
     fn formats_scientific_notation() {
         assert_eq!(to_char_int(1234, "9.99EEEE").unwrap(), " 1.23e+03");
         assert_eq!(to_char_int(-1234, "9.99eeee").unwrap(), "-1.23e+03");
+    }
+
+    #[test]
+    fn formats_fill_mode_leading_s_for_integers() {
+        assert_eq!(to_char_int(456, "FMS9999999999999999").unwrap(), "+456");
+        assert_eq!(to_char_int(123, "FMS9999999999999999").unwrap(), "+123");
+        assert_eq!(to_char_int(-456, "FMS9999999999999999").unwrap(), "-456");
     }
 
     #[test]
