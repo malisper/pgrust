@@ -14,11 +14,12 @@ use crate::include::catalog::{
     PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
     PgForeignDataWrapperRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
     PgOperatorRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
-    bootstrap_pg_aggregate_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_database_rows, bootstrap_pg_language_rows,
-    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTsConfigRow,
+    PgTsDictRow, PgTypeRow, bootstrap_pg_aggregate_rows, bootstrap_pg_amproc_rows,
+    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_database_rows,
+    bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, bootstrap_pg_ts_config_rows,
+    bootstrap_pg_ts_dict_rows, builtin_range_rows, builtin_type_rows,
     synthetic_range_proc_rows_by_name,
 };
 use crate::pgrust::database::DatabaseStatsStore;
@@ -426,6 +427,27 @@ impl CatalogLookup for VisibleCatalog {
                     .into_iter()
                     .find(|row| row.oid == oid)
             })
+    }
+
+    fn operator_rows(&self) -> Vec<PgOperatorRow> {
+        self.catcache
+            .as_ref()
+            .map(CatCache::operator_rows)
+            .unwrap_or_else(bootstrap_pg_operator_rows)
+    }
+
+    fn ts_config_rows(&self) -> Vec<PgTsConfigRow> {
+        self.catcache
+            .as_ref()
+            .map(CatCache::ts_config_rows)
+            .unwrap_or_else(|| bootstrap_pg_ts_config_rows().to_vec())
+    }
+
+    fn ts_dict_rows(&self) -> Vec<PgTsDictRow> {
+        self.catcache
+            .as_ref()
+            .map(CatCache::ts_dict_rows)
+            .unwrap_or_else(|| bootstrap_pg_ts_dict_rows().to_vec())
     }
 
     fn cast_by_source_target(

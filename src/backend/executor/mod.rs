@@ -24,6 +24,7 @@ mod expr_network;
 mod expr_numeric;
 pub(crate) mod expr_ops;
 pub(crate) mod expr_range;
+pub(crate) mod expr_reg;
 mod expr_string;
 mod expr_txid;
 mod expr_xml;
