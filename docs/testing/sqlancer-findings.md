@@ -41,8 +41,8 @@ existing blocker. Add one finding row per distinct blocker.
 
 | ID | Class | Signal | Notes |
 |---|---|---|---|
-| SQLANCER-001 | common-unsupported | schema introspection | Current seed-1 blocker on unmodified pgrust: `ERROR: column "table_schema" does not exist` while SQLancer reads `information_schema.tables`. SQLancer also needs `information_schema.columns` to read generated schemas. |
-| SQLANCER-002 | common-unsupported | scalar compatibility | Generated expressions use bool-to-integer casts that PostgreSQL accepts. |
+| SQLANCER-001 | fixed-in-branch | schema introspection | pgrust now exposes base-table metadata through `information_schema.tables` and `information_schema.columns`, including the `table_schema`, `table_type`, and `data_type` columns SQLancer needs for schema loading. |
+| SQLANCER-002 | common-unsupported | scalar compatibility | Current seed-1 blocker after SQLANCER-001: generated expressions use bool-to-integer casts that PostgreSQL accepts, e.g. `CAST((-980570755) NOT IN (-582498801) AS INT)`. Artifact: `/tmp/pgrust-sqlancer-triage-sqlancer001/seed-1`. |
 | SQLANCER-003 | wrong-result / binder edge | `IN` semantics | All-NULL `IN` lists exposed a binding/type edge case. |
 | SQLANCER-004 | common-unsupported | SELECT syntax | SQLancer emits `SELECT ALL`, which is standard PostgreSQL-compatible syntax. |
 | SQLANCER-005 | common-unsupported | FROM syntax | SQLancer can emit legacy `FROM table*` inheritance syntax. |

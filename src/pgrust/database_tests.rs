@@ -18393,6 +18393,67 @@ fn pg_views_includes_pg_policies_metadata() {
 }
 
 #[test]
+fn information_schema_tables_and_columns_expose_base_table_metadata() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table sqlancer_items(id integer not null, name text, active boolean)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select table_schema, table_name, table_type, is_insertable_into
+             from information_schema.tables
+             where table_name = 'sqlancer_items'",
+        ),
+        vec![vec![
+            Value::Text("public".into()),
+            Value::Text("sqlancer_items".into()),
+            Value::Text("BASE TABLE".into()),
+            Value::Text("YES".into()),
+        ]]
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select table_schema, table_name, column_name, data_type, is_updatable
+             from information_schema.columns
+             where table_name = 'sqlancer_items'
+             order by ordinal_position",
+        ),
+        vec![
+            vec![
+                Value::Text("public".into()),
+                Value::Text("sqlancer_items".into()),
+                Value::Text("id".into()),
+                Value::Text("integer".into()),
+                Value::Text("YES".into()),
+            ],
+            vec![
+                Value::Text("public".into()),
+                Value::Text("sqlancer_items".into()),
+                Value::Text("name".into()),
+                Value::Text("text".into()),
+                Value::Text("YES".into()),
+            ],
+            vec![
+                Value::Text("public".into()),
+                Value::Text("sqlancer_items".into()),
+                Value::Text("active".into()),
+                Value::Text("boolean".into()),
+                Value::Text("YES".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
 fn information_schema_view_metadata_tracks_updatable_views() {
     let dir = temp_dir("info_schema_updatable_views");
     let db = Database::open(&dir, 128).unwrap();
