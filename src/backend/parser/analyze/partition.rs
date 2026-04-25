@@ -1,26 +1,30 @@
 use serde::{Deserialize, Serialize};
 
-use super::collation::default_collation_oid_for_type;
+use super::collation::{default_collation_oid_for_type, strip_explicit_collation};
 use super::{
     BoundRelation, CatalogLookup, CreateTableStatement, IndexBackedConstraintAction, ParseError,
-    PartitionStrategy, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
-    RawPartitionSpec, SqlType, TablePersistence, bind_scalar_expr_in_scope, sql_type_name,
+    PartitionStrategy, RawPartitionBoundSpec, RawPartitionRangeDatum, RawPartitionSpec, SqlType,
+    TablePersistence, bind_expr_with_outer_and_ctes, bind_scalar_expr_in_scope,
+    expr_contains_set_returning, infer_sql_expr_type, scope_for_relation, sql_type_name,
 };
 use crate::backend::executor::{Value, cast_value};
+use crate::backend::parser::parse_expr;
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
-    PgPartitionedTableRow, RANGE_GIST_OPCLASS_OID, builtin_range_spec_by_multirange_oid,
-    builtin_range_spec_by_oid, default_btree_opclass_oid, default_hash_opclass_oid,
-    range_type_ref_for_sql_type,
+    ANYARRAYOID, ANYMULTIRANGEOID, BTREE_AM_OID, GIST_AM_OID, HASH_AM_OID, PgPartitionedTableRow,
+    RANGE_GIST_OPCLASS_OID, builtin_range_spec_by_multirange_oid, builtin_range_spec_by_oid,
+    default_btree_opclass_oid, default_hash_opclass_oid, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{MultirangeTypeRef, MultirangeValue, RangeBound, RangeValue};
-use crate::include::nodes::primnodes::Expr;
-use crate::include::nodes::primnodes::RelationDesc;
+use crate::include::nodes::primnodes::{Expr, RelationDesc, Var, attrno_index, user_attrno};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoweredPartitionSpec {
     pub strategy: PartitionStrategy,
     pub key_columns: Vec<String>,
+    pub key_exprs: Vec<Expr>,
+    pub key_types: Vec<SqlType>,
+    pub key_sqls: Vec<String>,
     pub partattrs: Vec<i16>,
     pub partclass: Vec<u32>,
     pub partcollation: Vec<u32>,
@@ -138,7 +142,7 @@ pub(crate) fn lower_partition_clause(
     let spec = stmt
         .partition_spec
         .as_ref()
-        .map(|spec| lower_partition_spec(spec, relation_desc))
+        .map(|spec| lower_partition_spec(spec, relation_desc, catalog))
         .transpose()?;
 
     let Some(parent_name) = stmt.partition_of.as_deref() else {
@@ -200,6 +204,17 @@ pub(crate) fn validate_partitioned_index_backed_constraints(
     let Some(partition_spec) = partition_spec else {
         return Ok(());
     };
+    if partition_spec.partattrs.iter().any(|attnum| *attnum == 0) && !constraint_actions.is_empty()
+    {
+        return Err(ParseError::DetailedError {
+            message: "unsupported UNIQUE constraint with partition key expressions".into(),
+            detail: Some(format!(
+                "Table \"{relation_name}\" uses an expression in the partition key."
+            )),
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
     for action in constraint_actions {
         let normalized_columns = action
             .columns
@@ -249,12 +264,41 @@ pub(crate) fn relation_partition_spec(
             ));
         }
     };
+    let serialized_exprs =
+        deserialize_partition_exprs(row.partexprs.as_deref(), row.partattrs.len())?;
+    let scope = scope_for_relation(None, &relation.desc);
+    let catalog = super::LiteralDefaultCatalog;
     let mut key_columns = Vec::with_capacity(row.partattrs.len());
-    for attnum in &row.partattrs {
+    let mut key_exprs = Vec::with_capacity(row.partattrs.len());
+    let mut key_types = Vec::with_capacity(row.partattrs.len());
+    let mut key_sqls = Vec::with_capacity(row.partattrs.len());
+    for (index, attnum) in row.partattrs.iter().copied().enumerate() {
+        if attnum == 0 {
+            let Some(expr_sql) = serialized_exprs.get(index).and_then(Option::as_deref) else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "partition key expression",
+                    actual: "missing partition key expression metadata".into(),
+                });
+            };
+            let raw = parse_expr(expr_sql)?;
+            let bound = bind_expr_with_outer_and_ctes(&raw, &scope, &catalog, &[], None, &[])?;
+            let key_type = infer_sql_expr_type(&raw, &scope, &catalog, &[], None);
+            let (bound, _) = strip_explicit_collation(bound);
+            key_exprs.push(bound);
+            key_types.push(key_type);
+            key_sqls.push(expr_sql.to_string());
+            continue;
+        }
+        let Some(column_index) = attrno_index(attnum.into()) else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "partition key column",
+                actual: format!("invalid partition key attribute {}", attnum),
+            });
+        };
         let Some(column) = relation
             .desc
             .columns
-            .get(attnum.saturating_sub(1) as usize)
+            .get(column_index)
             .filter(|column| !column.dropped)
         else {
             return Err(ParseError::UnexpectedToken {
@@ -263,14 +307,38 @@ pub(crate) fn relation_partition_spec(
             });
         };
         key_columns.push(column.name.clone());
+        key_exprs.push(Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(column_index),
+            varlevelsup: 0,
+            vartype: column.sql_type,
+        }));
+        key_types.push(column.sql_type);
+        key_sqls.push(column.name.clone());
     }
     Ok(LoweredPartitionSpec {
         strategy,
         key_columns,
+        key_exprs,
+        key_types,
+        key_sqls,
         partattrs: row.partattrs.clone(),
         partclass: row.partclass.clone(),
         partcollation: row.partcollation.clone(),
     })
+}
+
+fn deserialize_partition_exprs(
+    partexprs: Option<&str>,
+    key_count: usize,
+) -> Result<Vec<Option<String>>, ParseError> {
+    match partexprs {
+        Some(text) => serde_json::from_str(text).map_err(|_| ParseError::UnexpectedToken {
+            expected: "serialized partition expression metadata",
+            actual: text.to_string(),
+        }),
+        None => Ok(vec![None; key_count]),
+    }
 }
 
 pub(crate) fn lower_partition_bound_for_relation(
@@ -287,6 +355,8 @@ pub(crate) fn pg_partitioned_table_row(
     spec: &LoweredPartitionSpec,
     partdefid: u32,
 ) -> PgPartitionedTableRow {
+    let partexprs =
+        serialize_partition_exprs(spec).expect("partition expression metadata must serialize");
     PgPartitionedTableRow {
         partrelid: relation_oid,
         partstrat: spec.strategy.catalog_code(),
@@ -295,8 +365,26 @@ pub(crate) fn pg_partitioned_table_row(
         partattrs: spec.partattrs.clone(),
         partclass: spec.partclass.clone(),
         partcollation: spec.partcollation.clone(),
-        partexprs: None,
+        partexprs,
     }
+}
+
+fn serialize_partition_exprs(spec: &LoweredPartitionSpec) -> Result<Option<String>, ParseError> {
+    if !spec.partattrs.iter().any(|attnum| *attnum == 0) {
+        return Ok(None);
+    }
+    let exprs = spec
+        .partattrs
+        .iter()
+        .zip(spec.key_sqls.iter())
+        .map(|(attnum, expr_sql)| (*attnum == 0).then_some(expr_sql.clone()))
+        .collect::<Vec<_>>();
+    serde_json::to_string(&exprs)
+        .map(Some)
+        .map_err(|_| ParseError::UnexpectedToken {
+            expected: "partition expression metadata",
+            actual: "invalid partition expressions".into(),
+        })
 }
 
 pub(crate) fn serialize_partition_bound(bound: &PartitionBoundSpec) -> Result<String, ParseError> {
@@ -507,6 +595,7 @@ fn deserialize_partition_multirange_value(
 fn lower_partition_spec(
     spec: &RawPartitionSpec,
     relation_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
 ) -> Result<LoweredPartitionSpec, ParseError> {
     if spec.keys.is_empty() {
         return Err(ParseError::InvalidTableDefinition(
@@ -523,56 +612,133 @@ fn lower_partition_spec(
     }
 
     let mut key_columns = Vec::with_capacity(spec.keys.len());
+    let mut key_exprs = Vec::with_capacity(spec.keys.len());
+    let mut key_types = Vec::with_capacity(spec.keys.len());
+    let mut key_sqls = Vec::with_capacity(spec.keys.len());
     let mut partattrs = Vec::with_capacity(spec.keys.len());
     let mut partclass = Vec::with_capacity(spec.keys.len());
     let mut partcollation = Vec::with_capacity(spec.keys.len());
+    let scope = scope_for_relation(None, relation_desc);
 
     for key in &spec.keys {
-        let RawPartitionKey::Column(name) = key;
-        if is_system_column_name(name) {
+        let bound = bind_expr_with_outer_and_ctes(&key.expr, &scope, catalog, &[], None, &[])?;
+        if expr_contains_set_returning(&bound) {
+            return Err(ParseError::FeatureNotSupported(
+                "set-returning functions are not allowed in partition key expressions".into(),
+            ));
+        }
+        let key_type = infer_sql_expr_type(&key.expr, &scope, catalog, &[], None);
+        let (bound, explicit_collation_oid) = strip_explicit_collation(bound);
+        let simple_column_index = match &bound {
+            Expr::Var(var) if var.varlevelsup == 0 && var.varno == 1 && var.varattno > 0 => {
+                attrno_index(var.varattno)
+            }
+            _ => None,
+        };
+        if let Some(index) = simple_column_index
+            && is_system_column_name(&relation_desc.columns[index].name)
+        {
             return Err(ParseError::InvalidTableDefinition(format!(
                 "cannot use system column \"{}\" in partition key",
-                name
+                relation_desc.columns[index].name
             )));
         }
-        let Some((index, column)) = relation_desc
-            .columns
-            .iter()
-            .enumerate()
-            .find(|(_, column)| !column.dropped && column.name.eq_ignore_ascii_case(name))
-        else {
-            return Err(ParseError::UnknownColumn(name.clone()));
+        let key_collation_oid = if let Some(collation_oid) = explicit_collation_oid {
+            collation_oid
+        } else if let Some(index) = simple_column_index {
+            relation_desc.columns[index].collation_oid
+        } else {
+            default_collation_oid_for_type(key_type).unwrap_or(0)
         };
-        if column.generated.is_some() {
-            return Err(ParseError::DetailedError {
-                message: "cannot use generated column in partition key".into(),
-                detail: Some(format!("Column \"{}\" is a generated column.", column.name)),
-                hint: None,
-                sqlstate: "42P17",
-            });
+        let type_oid = sql_type_oid(key_type);
+        let opclass = partition_opclass_for_key(
+            spec.strategy,
+            type_oid,
+            key_type,
+            key.opclass.as_deref(),
+            catalog,
+        )?;
+        if let Some(index) = simple_column_index {
+            let column = &relation_desc.columns[index];
+            if column.dropped {
+                return Err(ParseError::UnknownColumn(column.name.clone()));
+            }
+            if column.generated.is_some() {
+                return Err(ParseError::DetailedError {
+                    message: "cannot use generated column in partition key".into(),
+                    detail: Some(format!("Column \"{}\" is a generated column.", column.name)),
+                    hint: None,
+                    sqlstate: "42P17",
+                });
+            }
+            key_columns.push(column.name.clone());
+            key_sqls.push(column.name.clone());
+            partattrs.push(index as i16 + 1);
+        } else {
+            key_sqls.push(key.expr_sql.clone());
+            partattrs.push(0);
         }
-        let type_oid = sql_type_oid(column.sql_type);
-        let opclass =
-            default_opclass_for_partition_strategy(spec.strategy, type_oid, column.sql_type)
-                .ok_or_else(|| {
-                    ParseError::FeatureNotSupported(format!(
-                        "partition key type {}",
-                        sql_type_name(column.sql_type)
-                    ))
-                })?;
-        key_columns.push(column.name.clone());
-        partattrs.push(index as i16 + 1);
+        key_exprs.push(bound);
+        key_types.push(key_type);
         partclass.push(opclass);
-        partcollation.push(default_collation_oid_for_type(column.sql_type).unwrap_or(0));
+        partcollation.push(key_collation_oid);
     }
 
     Ok(LoweredPartitionSpec {
         strategy: spec.strategy,
         key_columns,
+        key_exprs,
+        key_types,
+        key_sqls,
         partattrs,
         partclass,
         partcollation,
     })
+}
+
+fn partition_opclass_for_key(
+    strategy: PartitionStrategy,
+    type_oid: u32,
+    sql_type: SqlType,
+    explicit_opclass: Option<&str>,
+    catalog: &dyn CatalogLookup,
+) -> Result<u32, ParseError> {
+    let access_method = partition_access_method_oid(strategy, sql_type);
+    if let Some(name) = explicit_opclass {
+        let normalized = super::normalize_catalog_lookup_name(name);
+        return catalog
+            .opclass_rows()
+            .into_iter()
+            .find(|row| {
+                row.opcmethod == access_method
+                    && row.opcname.eq_ignore_ascii_case(normalized)
+                    && opclass_accepts_type(row.opcintype, type_oid)
+            })
+            .map(|row| row.oid)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "known partition operator class",
+                actual: name.to_string(),
+            });
+    }
+    default_opclass_for_partition_strategy(strategy, type_oid, sql_type).ok_or_else(|| {
+        ParseError::FeatureNotSupported(format!("partition key type {}", sql_type_name(sql_type)))
+    })
+}
+
+fn partition_access_method_oid(strategy: PartitionStrategy, sql_type: SqlType) -> u32 {
+    match strategy {
+        PartitionStrategy::Hash => HASH_AM_OID,
+        PartitionStrategy::List | PartitionStrategy::Range
+            if range_type_ref_for_sql_type(sql_type).is_some() =>
+        {
+            GIST_AM_OID
+        }
+        PartitionStrategy::List | PartitionStrategy::Range => BTREE_AM_OID,
+    }
+}
+
+fn opclass_accepts_type(opcintype: u32, type_oid: u32) -> bool {
+    opcintype == type_oid || opcintype == ANYARRAYOID || opcintype == ANYMULTIRANGEOID
 }
 
 fn lower_partition_bound(
@@ -582,6 +748,16 @@ fn lower_partition_bound(
     catalog: &dyn CatalogLookup,
 ) -> Result<PartitionBoundSpec, ParseError> {
     match (bound, parent_spec.strategy) {
+        (
+            RawPartitionBoundSpec::List {
+                is_default: true, ..
+            },
+            PartitionStrategy::Range,
+        ) => Ok(PartitionBoundSpec::Range {
+            from: Vec::new(),
+            to: Vec::new(),
+            is_default: true,
+        }),
         (RawPartitionBoundSpec::List { values, is_default }, PartitionStrategy::List) => {
             let key_type = parent_spec_key_types(parent_spec, parent_desc)
                 .into_iter()
@@ -714,9 +890,14 @@ fn lower_range_datums(
 }
 
 fn parent_spec_key_types(spec: &LoweredPartitionSpec, desc: &RelationDesc) -> Vec<SqlType> {
+    if !spec.key_types.is_empty() {
+        return spec.key_types.clone();
+    }
     spec.partattrs
         .iter()
-        .filter_map(|attnum| desc.columns.get(attnum.saturating_sub(1) as usize))
+        .filter_map(|attnum| {
+            attrno_index(i32::from(*attnum)).and_then(|index| desc.columns.get(index))
+        })
         .map(|column| column.sql_type)
         .collect()
 }

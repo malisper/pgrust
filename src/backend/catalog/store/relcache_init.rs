@@ -13,7 +13,7 @@ use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
 use crate::pgrust::database::default_sequence_oid_from_default_expr;
 
 const RELCACHE_INIT_MAGIC: u32 = 0x5052_494E;
-const RELCACHE_INIT_VERSION: u32 = 5;
+const RELCACHE_INIT_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum RelCacheInitScopeFile {
@@ -69,6 +69,8 @@ struct ColumnDescFile {
     attstattarget: i16,
     attinhcount: i16,
     attislocal: bool,
+    #[serde(default)]
+    collation_oid: u32,
     not_null_constraint_oid: Option<u32>,
     not_null_constraint_name: Option<String>,
     not_null_constraint_validated: bool,
@@ -256,6 +258,7 @@ fn column_desc_to_file(column: &ColumnDesc) -> ColumnDescFile {
         attstattarget: column.attstattarget,
         attinhcount: column.attinhcount,
         attislocal: column.attislocal,
+        collation_oid: column.collation_oid,
         not_null_constraint_oid: column.not_null_constraint_oid,
         not_null_constraint_name: column.not_null_constraint_name.clone(),
         not_null_constraint_validated: column.not_null_constraint_validated,
@@ -284,6 +287,11 @@ fn column_desc_from_file(column: ColumnDescFile) -> ColumnDesc {
         attstattarget: column.attstattarget,
         attinhcount: column.attinhcount,
         attislocal: column.attislocal,
+        collation_oid: if column.collation_oid == 0 {
+            crate::backend::catalog::catalog::default_column_collation_oid(column.sql_type)
+        } else {
+            column.collation_oid
+        },
         not_null_constraint_oid: column.not_null_constraint_oid,
         not_null_constraint_name: column.not_null_constraint_name,
         not_null_constraint_validated: column.not_null_constraint_validated,

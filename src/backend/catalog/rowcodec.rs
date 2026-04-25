@@ -760,6 +760,7 @@ pub(crate) fn pg_tablespace_row_from_values(
 pub(crate) fn pg_attribute_row_from_values(
     values: Vec<Value>,
 ) -> Result<PgAttributeRow, CatalogError> {
+    let atttypid = expect_oid(&values[2])?;
     let attalign = expect_char(&values[8], "attalign")?;
     let attstorage = expect_char(&values[9], "attstorage")?;
     let attcompression = match &values[10] {
@@ -782,10 +783,14 @@ pub(crate) fn pg_attribute_row_from_values(
         })
         .transpose()?
         .unwrap_or('\0');
+    let attcollation = match values.get(16) {
+        Some(Value::Null) | None => default_attcollation_for_type_oid(atttypid),
+        Some(value) => expect_oid(value)?,
+    };
     Ok(PgAttributeRow {
         attrelid: expect_oid(&values[0])?,
         attname: expect_text(&values[1])?,
-        atttypid: expect_oid(&values[2])?,
+        atttypid,
         attlen: expect_int16(&values[3])?,
         attnum: expect_int16(&values[4])?,
         attnotnull: expect_bool(&values[5])?,
@@ -802,8 +807,18 @@ pub(crate) fn pg_attribute_row_from_values(
         attislocal: expect_bool(&values[13])?,
         attidentity,
         attgenerated,
+        attcollation,
         sql_type: SqlType::new(SqlTypeKind::Text),
     })
+}
+
+fn default_attcollation_for_type_oid(type_oid: u32) -> u32 {
+    builtin_type_rows()
+        .into_iter()
+        .chain(bootstrap_composite_type_rows())
+        .find(|row| row.oid == type_oid)
+        .map(|row| crate::backend::catalog::catalog::default_column_collation_oid(row.sql_type))
+        .unwrap_or(0)
 }
 
 pub(crate) fn pg_inherits_row_from_values(
@@ -1455,6 +1470,7 @@ fn pg_attribute_row_values(row: PgAttributeRow) -> Vec<Value> {
         Value::Bool(row.attislocal),
         Value::InternalChar(row.attidentity as u8),
         Value::InternalChar(row.attgenerated as u8),
+        Value::Int32(row.attcollation as i32),
     ]
 }
 

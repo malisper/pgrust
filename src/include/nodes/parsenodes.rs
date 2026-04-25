@@ -1319,8 +1319,10 @@ pub struct RawPartitionSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RawPartitionKey {
-    Column(String),
+pub struct RawPartitionKey {
+    pub expr: SqlExpr,
+    pub expr_sql: String,
+    pub opclass: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2459,6 +2461,7 @@ pub struct VacuumStatement {
 pub struct ColumnDef {
     pub name: String,
     pub ty: RawTypeName,
+    pub collation: Option<String>,
     pub default_expr: Option<String>,
     pub generated: Option<ColumnGeneratedDef>,
     pub identity: Option<ColumnIdentityKind>,

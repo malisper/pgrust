@@ -5946,6 +5946,7 @@ fn rows_for_new_relation_entry(
                         .generated
                         .map(|kind| kind.catalog_char())
                         .unwrap_or('\0'),
+                    attcollation: column.collation_oid,
                     sql_type: column.sql_type,
                 })
             })
