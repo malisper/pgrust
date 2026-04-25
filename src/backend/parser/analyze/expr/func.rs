@@ -481,6 +481,46 @@ pub(super) fn bind_scalar_function_call(
                 SqlType::new(SqlTypeKind::Money),
             )],
         )),
+        BuiltinScalarFunction::Abs => {
+            let raw_arg_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let arg_type = coerce_unknown_string_literal_type(
+                &args[0],
+                raw_arg_type,
+                SqlType::new(SqlTypeKind::Numeric),
+            );
+            if !is_numeric_family(arg_type) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "numeric argument",
+                    actual: format!("{func:?}({})", sql_type_name(arg_type)),
+                });
+            }
+            let target_type = match arg_type.element_type().kind {
+                SqlTypeKind::Int2 => SqlType::new(SqlTypeKind::Int2),
+                SqlTypeKind::Int4 => SqlType::new(SqlTypeKind::Int4),
+                SqlTypeKind::Int8 => SqlType::new(SqlTypeKind::Int8),
+                SqlTypeKind::Float4 => SqlType::new(SqlTypeKind::Float4),
+                SqlTypeKind::Float8 => SqlType::new(SqlTypeKind::Float8),
+                _ => SqlType::new(SqlTypeKind::Numeric),
+            };
+            Ok(Expr::resolved_builtin_func(
+                func,
+                func_oid,
+                Some(target_type),
+                func_variadic,
+                vec![coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_type,
+                    target_type,
+                )],
+            ))
+        }
         BuiltinScalarFunction::DatePart => Ok(build_func(
             false,
             vec![
