@@ -429,6 +429,133 @@ mod tests {
     }
 
     #[test]
+    fn copy_from_stdin_resumes_remaining_simple_query_statements() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+        send_query(&mut stream, "create table t (c int)");
+        let _ = read_until_ready(&mut stream, "create");
+
+        send_query(
+            &mut stream,
+            "select 0; copy t from stdin; copy t from stdin; select 1",
+        );
+        let mut first_batch = Vec::new();
+        loop {
+            let msg = read_message(&mut stream, "first copy start");
+            let done = msg.0 == b'G';
+            first_batch.push(msg);
+            if done {
+                break;
+            }
+        }
+        let first_rows = first_batch
+            .iter()
+            .filter(|(kind, _)| *kind == b'D')
+            .map(|(_, body)| data_row_values(body))
+            .collect::<Vec<_>>();
+        assert_eq!(first_rows, vec![vec![Some("0".into())]]);
+
+        send_copy_data(&mut stream, b"1\n");
+        send_copy_done(&mut stream);
+        let mut second_batch = Vec::new();
+        loop {
+            let msg = read_message(&mut stream, "second copy start");
+            let done = msg.0 == b'G';
+            second_batch.push(msg);
+            if done {
+                break;
+            }
+        }
+        assert_eq!(
+            second_batch
+                .iter()
+                .find(|(kind, _)| *kind == b'C')
+                .map(|(_, body)| command_tag(body)),
+            Some("COPY".to_string())
+        );
+
+        send_copy_data(&mut stream, b"2\n");
+        send_copy_done(&mut stream);
+        let finish = read_until_ready(&mut stream, "finish");
+        let final_rows = finish
+            .iter()
+            .filter(|(kind, _)| *kind == b'D')
+            .map(|(_, body)| data_row_values(body))
+            .collect::<Vec<_>>();
+        assert_eq!(final_rows, vec![vec![Some("1".into())]]);
+        assert!(
+            finish
+                .iter()
+                .any(|(kind, body)| *kind == b'C' && command_tag(body) == "COPY")
+        );
+        assert!(
+            finish
+                .iter()
+                .any(|(kind, body)| *kind == b'C' && command_tag(body) == "SELECT 1")
+        );
+
+        send_query(&mut stream, "select c from t order by c");
+        let select = read_until_ready(&mut stream, "select copied rows");
+        let rows = select
+            .iter()
+            .filter(|(kind, _)| *kind == b'D')
+            .map(|(_, body)| data_row_values(body))
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![vec![Some("1".into())], vec![Some("2".into())]]);
+
+        let _ = stream.shutdown(Shutdown::Both);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn copy_to_stdout_streams_copy_out_messages() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let startup = read_until_ready(&mut stream, "startup");
+        assert!(startup.iter().any(|(kind, _)| *kind == b'R'));
+        assert!(matches!(startup.last(), Some((b'Z', _))));
+
+        send_query(&mut stream, "create table t (id int, name text)");
+        let create = read_until_ready(&mut stream, "create");
+        assert_eq!(
+            create
+                .iter()
+                .find(|(kind, _)| *kind == b'C')
+                .map(|(_, body)| command_tag(body)),
+            Some("CREATE TABLE".to_string())
+        );
+        send_query(&mut stream, "insert into t values (1, 'alice')");
+        let insert = read_until_ready(&mut stream, "insert");
+        assert_eq!(
+            insert
+                .iter()
+                .find(|(kind, _)| *kind == b'C')
+                .map(|(_, body)| command_tag(body)),
+            Some("INSERT 0 1".to_string())
+        );
+
+        send_query(&mut stream, "copy t to stdout");
+        let copy = read_until_ready(&mut stream, "copy");
+        assert_eq!(copy.iter().filter(|(kind, _)| *kind == b'H').count(), 1);
+        let copy_data = copy
+            .iter()
+            .filter(|(kind, _)| *kind == b'd')
+            .map(|(_, body)| body.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(copy_data, vec![b"1\talice\n".to_vec()]);
+        assert_eq!(copy.iter().filter(|(kind, _)| *kind == b'c').count(), 1);
+        assert_eq!(
+            copy.iter()
+                .find(|(kind, _)| *kind == b'C')
+                .map(|(_, body)| command_tag(body)),
+            Some("COPY 1".to_string())
+        );
+        let _ = stream.shutdown(Shutdown::Both);
+        server.join().unwrap();
+    }
+
+    #[test]
     fn copy_from_stdin_accepts_legacy_end_marker_before_copy_done() {
         let (mut stream, server) = start_test_connection();
         send_startup(&mut stream);
