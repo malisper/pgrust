@@ -304,6 +304,42 @@ pub(super) fn bind_arithmetic_expr(
             ),
         ));
     }
+    if !left_type.is_array
+        && !right_type.is_array
+        && matches!(op, "+" | "-")
+        && matches!(left_type.kind, SqlTypeKind::Interval)
+        && matches!(right_type.kind, SqlTypeKind::Interval)
+    {
+        let interval = SqlType::new(SqlTypeKind::Interval);
+        return Ok(Expr::binary_op(
+            make,
+            interval,
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_left_type,
+                interval,
+            ),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_right_type,
+                interval,
+            ),
+        ));
+    }
     let common = resolve_numeric_binary_type(op, left_type, right_type)?;
     let left = coerce_bound_expr(
         bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,
@@ -638,6 +674,9 @@ pub(super) fn supports_comparison_operator(
     if supports_builtin_datetime_comparison(op, left, right) {
         return true;
     }
+    if supports_builtin_interval_comparison(op, left, right) {
+        return true;
+    }
     if supports_builtin_money_comparison(op, left, right) {
         return true;
     }
@@ -824,6 +863,17 @@ fn supports_builtin_datetime_comparison(op: &str, left: SqlType, right: SqlType)
                 | SqlTypeKind::Timestamp
                 | SqlTypeKind::TimestampTz
         )
+        && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
+}
+
+// :HACK: PostgreSQL exposes interval comparison operators through pg_operator.
+// pgrust's bootstrap operator catalog is still sparse, while the executor
+// already compares interval values using the same normalized sort key.
+fn supports_builtin_interval_comparison(op: &str, left: SqlType, right: SqlType) -> bool {
+    !left.is_array
+        && !right.is_array
+        && left.kind == right.kind
+        && matches!(left.kind, SqlTypeKind::Interval)
         && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
 }
 

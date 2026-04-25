@@ -659,7 +659,6 @@ pub(crate) fn render_interval_text(value: IntervalValue) -> String {
         }
     }
 
-    let (value, negative) = value.abs_for_display();
     let mut parts = Vec::new();
     let years = value.months / 12;
     let rem_months = value.months % 12;
@@ -673,40 +672,33 @@ pub(crate) fn render_interval_text(value: IntervalValue) -> String {
         parts.push(unit_suffix(i64::from(value.days), "day", "days"));
     }
 
-    let total_seconds = value.time_micros / 1_000_000;
-    let subsec = value.time_micros % 1_000_000;
+    let abs_time = value.time_micros.unsigned_abs();
+    let total_seconds = abs_time / 1_000_000;
+    let subsec = abs_time % 1_000_000;
     let hours = total_seconds / 3600;
     let minutes = (total_seconds % 3600) / 60;
     let seconds = total_seconds % 60;
-    if hours != 0 {
-        parts.push(unit_suffix(hours, "hour", "hours"));
-    }
-    if minutes != 0 {
-        parts.push(unit_suffix(minutes, "min", "mins"));
-    }
-    if seconds != 0 || subsec != 0 {
-        let seconds_text = if subsec == 0 {
-            seconds.to_string()
+    if value.time_micros != 0 || parts.is_empty() {
+        let sign = if value.time_micros < 0 {
+            "-"
+        } else if parts.iter().any(|part| part.starts_with('-')) {
+            "+"
         } else {
-            let mut rendered = format!("{seconds}.{subsec:06}");
+            ""
+        };
+        let time_text = if subsec == 0 {
+            format!("{sign}{hours:02}:{minutes:02}:{seconds:02}")
+        } else {
+            let mut rendered = format!("{sign}{hours:02}:{minutes:02}:{seconds:02}.{subsec:06}");
             while rendered.ends_with('0') {
                 rendered.pop();
             }
             rendered
         };
-        let label = if seconds_text == "1" { "sec" } else { "secs" };
-        parts.push(format!("{seconds_text} {label}"));
+        parts.push(time_text);
     }
 
-    if parts.is_empty() {
-        return "@ 0".into();
-    }
-
-    let mut out = format!("@ {}", parts.join(" "));
-    if negative && out != "@ 0" {
-        out.push_str(" ago");
-    }
-    out
+    parts.join(" ")
 }
 
 pub(crate) fn parse_interval_text_value(text: &str) -> Result<IntervalValue, ExecError> {
@@ -736,13 +728,14 @@ pub(crate) fn parse_interval_text_value(text: &str) -> Result<IntervalValue, Exe
         return Err(invalid(text));
     }
 
-    let mut negative = false;
-    if let Some(stripped) = rest.strip_prefix('-') {
-        negative = true;
-        rest = stripped.trim();
-    } else if let Some(stripped) = rest.strip_prefix('+') {
-        rest = stripped.trim();
+    if rest.eq_ignore_ascii_case("-infinity") || rest.eq_ignore_ascii_case("-inf") {
+        return Ok(IntervalValue::neg_infinity());
     }
+    if rest.eq_ignore_ascii_case("+infinity") || rest.eq_ignore_ascii_case("+inf") {
+        return Ok(IntervalValue::infinity());
+    }
+
+    let mut negative = false;
     if let Some(stripped) = rest.strip_prefix('@') {
         rest = stripped.trim();
     }
@@ -761,106 +754,126 @@ pub(crate) fn parse_interval_text_value(text: &str) -> Result<IntervalValue, Exe
             IntervalValue::infinity()
         });
     }
-    if rest.eq_ignore_ascii_case("-infinity") || rest.eq_ignore_ascii_case("-inf") {
-        return Ok(IntervalValue::neg_infinity());
-    }
 
-    if rest.contains(':') {
-        let parsed =
-            parse_time_text(rest, &DateTimeConfig::default()).map_err(|_| invalid(text))?;
+    let tokens = expand_interval_tokens(rest);
+    if let Some(value) = parse_year_month_interval(&tokens) {
+        return Ok(if negative { value.negate() } else { value });
+    }
+    if tokens.len() == 1 && !tokens[0].contains(':') {
+        let seconds = tokens[0].parse::<f64>().map_err(|_| invalid(text))?;
+        if !seconds.is_finite() {
+            return Err(invalid(text));
+        }
         let value = IntervalValue {
-            time_micros: parsed.0,
+            time_micros: (seconds * 1_000_000.0).round() as i64,
             days: 0,
             months: 0,
         };
         return Ok(if negative { value.negate() } else { value });
     }
-
-    let raw_tokens = rest.split_whitespace().collect::<Vec<_>>();
-    let mut compact_tokens = Vec::new();
-    for token in &raw_tokens {
-        if let Some((value, unit)) = split_compact_interval_token(token) {
-            compact_tokens.push(value);
-            compact_tokens.push(unit);
-        } else {
-            compact_tokens.push(*token);
-        }
-    }
-    let tokens = compact_tokens;
-    if tokens.len() % 2 != 0 {
-        return Err(invalid(text));
-    }
-
     let mut months = 0i32;
     let mut days = 0i32;
     let mut micros = 0i64;
-    for pair in tokens.chunks(2) {
-        match pair[1].to_ascii_lowercase().as_str() {
-            "y" | "year" | "years" => {
-                let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
-                months = months
-                    .checked_add(
-                        i32::try_from(value.saturating_mul(12)).map_err(|_| invalid(text))?,
-                    )
+
+    let mut idx = 0;
+    while idx < tokens.len() {
+        let token = tokens[idx].as_str();
+        if token.contains(':') {
+            micros = micros
+                .checked_add(parse_interval_time_token(token).ok_or_else(|| invalid(text))?)
+                .ok_or_else(|| invalid(text))?;
+            idx += 1;
+            continue;
+        }
+
+        let value = token.parse::<f64>().map_err(|_| invalid(text))?;
+        if !value.is_finite() {
+            return Err(invalid(text));
+        }
+
+        let Some(unit) = tokens.get(idx + 1) else {
+            return Err(invalid(text));
+        };
+        if unit.contains(':') {
+            days = add_i32_checked(days, value.trunc() as i64).ok_or_else(|| invalid(text))?;
+            micros = micros
+                .checked_add(parse_interval_time_token(unit).ok_or_else(|| invalid(text))?)
+                .ok_or_else(|| invalid(text))?;
+            idx += 2;
+            continue;
+        }
+        if unit.eq_ignore_ascii_case("to") {
+            return Err(invalid(text));
+        }
+
+        match normalize_interval_unit(unit).as_deref() {
+            Some("year") => {
+                let total_months = value * 12.0;
+                months = add_i32_checked(months, total_months.trunc() as i64)
                     .ok_or_else(|| invalid(text))?;
-            }
-            "mon" | "mons" | "month" | "months" => {
-                let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
-                months = months
-                    .checked_add(i32::try_from(value).map_err(|_| invalid(text))?)
-                    .ok_or_else(|| invalid(text))?;
-            }
-            "d" | "day" | "days" => {
-                let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
-                days = days
-                    .checked_add(i32::try_from(value).map_err(|_| invalid(text))?)
-                    .ok_or_else(|| invalid(text))?;
-            }
-            "h" | "hour" | "hours" => {
-                let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
-                micros = micros
-                    .checked_add(
-                        value
-                            .checked_mul(3_600_000_000)
-                            .ok_or_else(|| invalid(text))?,
-                    )
-                    .ok_or_else(|| invalid(text))?;
-            }
-            "m" | "min" | "mins" | "minute" | "minutes" => {
-                let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
-                micros = micros
-                    .checked_add(value.checked_mul(60_000_000).ok_or_else(|| invalid(text))?)
-                    .ok_or_else(|| invalid(text))?;
-            }
-            "s" | "sec" | "secs" | "second" | "seconds" => {
-                let value = pair[0].parse::<f64>().map_err(|_| invalid(text))?;
-                if !value.is_finite() {
-                    return Err(invalid(text));
+                let rem = total_months.fract();
+                if rem != 0.0 {
+                    days = add_i32_checked(days, (rem * 30.0).trunc() as i64)
+                        .ok_or_else(|| invalid(text))?;
                 }
+            }
+            Some("month") => {
+                months =
+                    add_i32_checked(months, value.trunc() as i64).ok_or_else(|| invalid(text))?;
+                let rem = value.fract();
+                if rem != 0.0 {
+                    days = add_i32_checked(days, (rem * 30.0).trunc() as i64)
+                        .ok_or_else(|| invalid(text))?;
+                }
+            }
+            Some("week") => {
+                let total_days = value * 7.0;
+                days = add_i32_checked(days, total_days.trunc() as i64)
+                    .ok_or_else(|| invalid(text))?;
+                let rem = total_days.fract();
+                if rem != 0.0 {
+                    micros = micros
+                        .checked_add((rem * 86_400_000_000.0).round() as i64)
+                        .ok_or_else(|| invalid(text))?;
+                }
+            }
+            Some("day") => {
+                days = add_i32_checked(days, value.trunc() as i64).ok_or_else(|| invalid(text))?;
+                let rem = value.fract();
+                if rem != 0.0 {
+                    micros = micros
+                        .checked_add((rem * 86_400_000_000.0).round() as i64)
+                        .ok_or_else(|| invalid(text))?;
+                }
+            }
+            Some("hour") => {
+                micros = micros
+                    .checked_add((value * 3_600_000_000.0).round() as i64)
+                    .ok_or_else(|| invalid(text))?;
+            }
+            Some("minute") => {
+                micros = micros
+                    .checked_add((value * 60_000_000.0).round() as i64)
+                    .ok_or_else(|| invalid(text))?;
+            }
+            Some("second") => {
                 micros = micros
                     .checked_add((value * 1_000_000.0).round() as i64)
                     .ok_or_else(|| invalid(text))?;
             }
-            "ms" | "msec" | "msecs" | "millisecond" | "milliseconds" => {
-                let value = pair[0].parse::<f64>().map_err(|_| invalid(text))?;
-                if !value.is_finite() {
-                    return Err(invalid(text));
-                }
+            Some("millisecond") => {
                 micros = micros
                     .checked_add((value * 1_000.0).round() as i64)
                     .ok_or_else(|| invalid(text))?;
             }
-            "us" | "usec" | "usecs" | "microsecond" | "microseconds" => {
-                let value = pair[0].parse::<f64>().map_err(|_| invalid(text))?;
-                if !value.is_finite() {
-                    return Err(invalid(text));
-                }
+            Some("microsecond") => {
                 micros = micros
                     .checked_add(value.round() as i64)
                     .ok_or_else(|| invalid(text))?;
             }
             _ => return Err(invalid(text)),
         }
+        idx += 2;
     }
 
     let value = IntervalValue {
@@ -869,6 +882,114 @@ pub(crate) fn parse_interval_text_value(text: &str) -> Result<IntervalValue, Exe
         months,
     };
     Ok(if negative { value.negate() } else { value })
+}
+
+fn expand_interval_tokens(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .flat_map(|token| {
+            if token.contains(':') {
+                return vec![token.to_string()];
+            }
+            split_compact_interval_token(token)
+                .map(|(value, unit)| vec![value, unit])
+                .unwrap_or_else(|| vec![token.to_string()])
+        })
+        .collect()
+}
+
+fn parse_year_month_interval(tokens: &[String]) -> Option<IntervalValue> {
+    if !(tokens.len() == 1
+        || (tokens.len() == 4
+            && tokens[1].eq_ignore_ascii_case("year")
+            && tokens[2].eq_ignore_ascii_case("to")
+            && tokens[3].eq_ignore_ascii_case("month")))
+    {
+        return None;
+    }
+    let value = tokens[0].as_str();
+    let split = value.strip_prefix('-').unwrap_or(value).find('-')?;
+    let split = if value.starts_with('-') {
+        split + 1
+    } else {
+        split
+    };
+    let years = value[..split].parse::<i64>().ok()?;
+    let month_text = &value[split + 1..];
+    let month_sign = if years < 0 { -1 } else { 1 };
+    let months = month_text.parse::<i64>().ok()? * month_sign;
+    Some(IntervalValue {
+        time_micros: 0,
+        days: 0,
+        months: i32::try_from(years.checked_mul(12)?.checked_add(months)?).ok()?,
+    })
+}
+
+fn split_compact_interval_token(token: &str) -> Option<(String, String)> {
+    let split = token
+        .char_indices()
+        .find(|(_, ch)| ch.is_ascii_alphabetic())
+        .map(|(idx, _)| idx)?;
+    if split == 0 {
+        return None;
+    }
+    let (value, unit) = token.split_at(split);
+    value.parse::<f64>().ok()?;
+    Some((value.to_string(), unit.to_string()))
+}
+
+fn normalize_interval_unit(unit: &str) -> Option<String> {
+    let normalized = unit.to_ascii_lowercase();
+    match normalized.as_str() {
+        "ms" | "msec" | "msecs" => return Some("millisecond".to_string()),
+        "us" | "usec" | "usecs" => return Some("microsecond".to_string()),
+        _ => {}
+    }
+    let singular = normalized.trim_end_matches('s');
+    Some(
+        match singular {
+            "y" | "year" => "year",
+            "mon" | "month" => "month",
+            "w" | "week" => "week",
+            "d" | "day" => "day",
+            "h" | "hour" | "hr" => "hour",
+            "m" | "min" | "minute" => "minute",
+            "s" | "sec" | "second" => "second",
+            "ms" | "msec" | "millisecond" => "millisecond",
+            "us" | "usec" | "microsecond" => "microsecond",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
+fn parse_interval_time_token(token: &str) -> Option<i64> {
+    let (sign, rest) = if let Some(rest) = token.strip_prefix('-') {
+        (-1i64, rest)
+    } else if let Some(rest) = token.strip_prefix('+') {
+        (1i64, rest)
+    } else {
+        (1i64, token)
+    };
+    let mut parts = rest.split(':');
+    let hours = parts.next()?.parse::<i64>().ok()?;
+    let minutes = parts.next()?.parse::<i64>().ok()?;
+    let seconds = parts.next().unwrap_or("0").parse::<f64>().ok()?;
+    if parts.next().is_some()
+        || minutes.abs() >= 60
+        || !seconds.is_finite()
+        || seconds.abs() >= 60.0
+    {
+        return None;
+    }
+    let micros = hours
+        .checked_mul(3_600_000_000)?
+        .checked_add(minutes.checked_mul(60_000_000)?)?
+        .checked_add((seconds * 1_000_000.0).round() as i64)?;
+    micros.checked_mul(sign)
+}
+
+fn add_i32_checked(value: i32, delta: i64) -> Option<i32> {
+    value.checked_add(i32::try_from(delta).ok()?)
 }
 
 pub(crate) fn canonicalize_interval_text(text: &str) -> Result<String, ExecError> {

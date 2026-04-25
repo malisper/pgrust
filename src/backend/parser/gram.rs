@@ -15430,6 +15430,7 @@ fn build_array_literal(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
 fn build_interval_string_literal(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     let mut ty = RawTypeName::Builtin(SqlType::new(SqlTypeKind::Interval));
     let mut literal = None;
+    let mut trailing_field_clause = None;
     let mut trailing_precision = None;
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -15440,6 +15441,7 @@ fn build_interval_string_literal(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseE
             | Rule::escape_string_literal
             | Rule::dollar_string_literal => literal = Some(decode_string_literal_pair(part)?),
             Rule::interval_field_clause => {
+                trailing_field_clause = Some(part.as_str().to_string());
                 trailing_precision = interval_field_clause_precision(part)?;
             }
             _ => {}
@@ -15448,10 +15450,16 @@ fn build_interval_string_literal(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseE
     if let Some(precision) = trailing_precision {
         ty = RawTypeName::Builtin(SqlType::new(SqlTypeKind::Interval).with_typmod(precision));
     }
+    let mut literal = literal.ok_or(ParseError::UnexpectedEof)?;
+    if let Some(field_clause) = trailing_field_clause
+        && !literal.contains(char::is_whitespace)
+        && !literal.contains(':')
+    {
+        literal.push(' ');
+        literal.push_str(&field_clause);
+    }
     Ok(SqlExpr::Cast(
-        Box::new(SqlExpr::Const(Value::Text(
-            literal.ok_or(ParseError::UnexpectedEof)?.into(),
-        ))),
+        Box::new(SqlExpr::Const(Value::Text(literal.into()))),
         ty,
     ))
 }

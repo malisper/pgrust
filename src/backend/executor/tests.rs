@@ -6482,6 +6482,73 @@ fn select_isfinite_and_make_date_for_date() {
 }
 
 #[test]
+fn select_interval_literals_comparison_and_arithmetic() {
+    let base = temp_dir("select_interval_literals_comparison_arithmetic");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select interval '1.5 weeks', interval '-1 +02:03', interval '1-2', interval '1' year, interval '999' second",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Interval(IntervalValue {
+                time_micros: 43_200_000_000,
+                days: 10,
+                months: 0,
+            }),
+            Value::Interval(IntervalValue {
+                time_micros: 7_380_000_000,
+                days: -1,
+                months: 0,
+            }),
+            Value::Interval(IntervalValue {
+                time_micros: 0,
+                days: 0,
+                months: 14,
+            }),
+            Value::Interval(IntervalValue {
+                time_micros: 0,
+                days: 0,
+                months: 12,
+            }),
+            Value::Interval(IntervalValue {
+                time_micros: 999_000_000,
+                days: 0,
+                months: 0,
+            }),
+        ]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select interval '2 hours' > interval '1 hour', -interval '1 hour', interval '2 hours' - interval '30 minutes', isfinite(interval 'infinity')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Bool(true),
+            Value::Interval(IntervalValue {
+                time_micros: -3_600_000_000,
+                days: 0,
+                months: 0,
+            }),
+            Value::Interval(IntervalValue {
+                time_micros: 5_400_000_000,
+                days: 0,
+                months: 0,
+            }),
+            Value::Bool(false),
+        ]],
+    );
+}
+
+#[test]
 fn pg_input_error_info_supports_oidvector_tokens() {
     let valid = expr_casts::soft_input_error_info(" 1 2  4 ", "oidvector").unwrap();
     assert!(valid.is_none());

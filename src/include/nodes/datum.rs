@@ -631,6 +631,20 @@ impl IntervalValue {
         }
     }
 
+    pub fn checked_negate(self) -> Option<Self> {
+        if self.is_neg_infinity() {
+            return Some(Self::infinity());
+        }
+        if self.is_infinity() {
+            return Some(Self::neg_infinity());
+        }
+        Some(Self {
+            time_micros: self.time_micros.checked_neg()?,
+            days: self.days.checked_neg()?,
+            months: self.months.checked_neg()?,
+        })
+    }
+
     pub fn abs_for_display(self) -> (Self, bool) {
         if self.is_negative() {
             (self.negate(), true)
@@ -661,7 +675,7 @@ impl IntervalValue {
     }
 
     pub fn checked_sub(self, rhs: Self) -> Option<Self> {
-        self.checked_add(rhs.negate())
+        self.checked_add(rhs.checked_negate()?)
     }
 }
 

@@ -592,6 +592,7 @@ pub(crate) fn eval_isfinite_function(values: &[Value]) -> Result<Value, ExecErro
     match value {
         Value::Null => Ok(Value::Null),
         Value::Date(date) => Ok(Value::Bool(date.is_finite())),
+        Value::Interval(interval) => Ok(Value::Bool(interval.is_finite())),
         other => Err(ExecError::TypeMismatch {
             op: "isfinite",
             left: other.clone(),

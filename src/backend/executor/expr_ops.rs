@@ -409,6 +409,10 @@ pub(crate) fn add_values(left: Value, right: Value) -> Result<Value, ExecError> 
             Ok(Value::PgLsn(add_pg_lsn_offset(*r, l)?))
         }
         (Value::Money(l), Value::Money(r)) => Ok(Value::Money(money_add(*l, *r)?)),
+        (Value::Interval(l), Value::Interval(r)) => l
+            .checked_add(*r)
+            .map(Value::Interval)
+            .ok_or_else(interval_out_of_range),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l + r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| Some(lv.add(rv)), "+")
@@ -505,6 +509,10 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Timestamp(l), Value::Timestamp(r)) => timestamp_diff_interval(l.0, r.0),
         (Value::TimestampTz(l), Value::TimestampTz(r)) => timestamp_diff_interval(l.0, r.0),
         (Value::Money(l), Value::Money(r)) => Ok(Value::Money(money_sub(*l, *r)?)),
+        (Value::Interval(l), Value::Interval(r)) => l
+            .checked_sub(*r)
+            .map(Value::Interval)
+            .ok_or_else(interval_out_of_range),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l - r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| Some(lv.sub(rv)), "-")
@@ -949,6 +957,10 @@ pub(crate) fn negate_value(value: Value) -> Result<Value, ExecError> {
         Value::Money(v) => Ok(Value::Money(checked_neg_i64(v)?)),
         Value::Float64(v) => Ok(Value::Float64(-v)),
         Value::Numeric(v) => Ok(Value::Numeric(v.negate())),
+        Value::Interval(v) => v
+            .checked_negate()
+            .map(Value::Interval)
+            .ok_or_else(interval_out_of_range),
         other => Err(ExecError::TypeMismatch {
             op: "unary -",
             left: other,
@@ -1018,6 +1030,9 @@ pub(crate) fn order_values(
         ))),
         (Value::Timestamp(l), Value::Timestamp(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::TimestampTz(l), Value::TimestampTz(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::Interval(l), Value::Interval(r)) => {
+            Ok(Value::Bool(compare_ord(l.cmp_key(), r.cmp_key(), op)))
+        }
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(match op {
             "<" => pg_float_cmp(*l, *r) == Ordering::Less,
             "<=" => pg_float_cmp(*l, *r) != Ordering::Greater,
@@ -1166,8 +1181,13 @@ fn compare_ord<T: Ord>(left: T, right: T, op: &'static str) -> bool {
     }
 }
 
-fn timetz_order_key(value: TimeTzADT) -> i64 {
-    value.time.0 - i64::from(value.offset_seconds) * USECS_PER_SEC
+fn interval_out_of_range() -> ExecError {
+    ExecError::DetailedError {
+        message: "interval out of range".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    }
 }
 
 fn compare_record_values(
