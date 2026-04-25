@@ -249,8 +249,8 @@ pub(crate) fn current_timestamp_value_from_timestamp_with_config(
     if with_time_zone {
         Value::TimestampTz(TimestampTzADT(rounded_usecs(timestamp_usecs, precision)))
     } else {
-        let local =
-            timestamp_usecs + i64::from(timezone_offset_seconds_at_utc(config, timestamp_usecs)) * 1_000_000;
+        let local = timestamp_usecs
+            + i64::from(timezone_offset_seconds_at_utc(config, timestamp_usecs)) * 1_000_000;
         Value::Timestamp(TimestampADT(rounded_usecs(local, precision)))
     }
 }

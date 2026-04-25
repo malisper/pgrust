@@ -110,11 +110,11 @@ const MONTH_NAMES: [&str; 12] = [
 ];
 const DATETIME_TO_CHAR_PATTERNS: &[&str] = &[
     "A.D.", "a.d.", "B.C.", "b.c.", "P.M.", "p.m.", "A.M.", "a.m.", "Y,YYY", "HH24", "HH12",
-    "IYYY", "IDDD", "YYYY", "MONTH", "Month", "month", "DAY", "Day", "day", "SSSS", "TZH",
-    "tzh", "TZM", "tzm", "FF1", "FF2", "FF3", "FF4", "FF5", "FF6", "ff1", "ff2", "ff3", "ff4",
-    "ff5", "ff6", "IYY", "YYY", "MON", "Mon", "mon", "DY", "Dy", "dy", "HH", "MI", "SS", "MS",
-    "US", "DDD", "YY", "CC", "MM", "WW", "DD", "IW", "IY", "ID", "RM", "rm", "AD", "ad", "BC",
-    "bc", "PM", "pm", "AM", "am", "OF", "of", "Y", "I", "Q", "J", "D",
+    "IYYY", "IDDD", "YYYY", "MONTH", "Month", "month", "DAY", "Day", "day", "SSSS", "TZH", "tzh",
+    "TZM", "tzm", "FF1", "FF2", "FF3", "FF4", "FF5", "FF6", "ff1", "ff2", "ff3", "ff4", "ff5",
+    "ff6", "IYY", "YYY", "MON", "Mon", "mon", "DY", "Dy", "dy", "HH", "MI", "SS", "MS", "US",
+    "DDD", "YY", "CC", "MM", "WW", "DD", "IW", "IY", "ID", "RM", "rm", "AD", "ad", "BC", "bc",
+    "PM", "pm", "AM", "am", "OF", "of", "Y", "I", "Q", "J", "D",
 ];
 
 struct TimestampFormatParts {
@@ -631,11 +631,7 @@ fn eval_to_char_function_with_float4(
         }
         Value::TimestampTz(v) => {
             let offset = timezone_offset_seconds_at_utc(datetime_config, v.0);
-            to_char_timestamp_usecs(
-                v.0 + i64::from(offset) * USECS_PER_SEC,
-                fmt,
-                Some(offset),
-            )
+            to_char_timestamp_usecs(v.0 + i64::from(offset) * USECS_PER_SEC, fmt, Some(offset))
         }
         Value::Interval(v) => {
             to_char_interval_value(*v, fmt).ok_or_else(|| ExecError::TypeMismatch {
