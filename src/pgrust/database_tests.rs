@@ -22877,6 +22877,178 @@ fn copy_from_rows_into_column_subset_leaves_other_columns_null() {
 }
 
 #[test]
+fn copy_from_csv_header_match_ignores_dropped_columns() {
+    let base = temp_dir("copy_csv_header_dropped");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table header_copytest (a int4, b int4, c text)")
+        .unwrap();
+    session
+        .execute(&db, "alter table header_copytest drop column c")
+        .unwrap();
+    session
+        .execute(&db, "alter table header_copytest add column c text")
+        .unwrap();
+
+    let copy = crate::pgrust::session::parse_copy_command(
+        "copy header_copytest from stdin with (header match, format csv)",
+    )
+    .unwrap()
+    .unwrap();
+    let inserted = session
+        .copy_from_text(&db, &copy, "a,b,c\n1,2,foo\n")
+        .unwrap();
+    assert_eq!(inserted, 1);
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from header_copytest"),
+        vec![vec![
+            Value::Int32(1),
+            Value::Int32(2),
+            Value::Text("foo".into())
+        ]]
+    );
+}
+
+#[test]
+fn copy_from_on_error_ignore_skips_bad_rows() {
+    let base = temp_dir("copy_on_error_ignore");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table copy_errors (a int4, b text)")
+        .unwrap();
+    let copy = crate::pgrust::session::parse_copy_command(
+        "copy copy_errors from stdin with (on_error ignore)",
+    )
+    .unwrap()
+    .unwrap();
+    let inserted = session
+        .copy_from_text(&db, &copy, "bad\tnope\n1\tok\n")
+        .unwrap();
+    assert_eq!(inserted, 1);
+    assert_eq!(
+        query_rows(&db, 1, "select * from copy_errors"),
+        vec![vec![Value::Int32(1), Value::Text("ok".into())]]
+    );
+}
+
+#[test]
+fn copy_to_stdout_renders_header_and_csv_rows() {
+    let base = temp_dir("copy_to_stdout_csv");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table copy_out (a int4, b text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into copy_out values (1, 'hello, csv')")
+        .unwrap();
+    let copy = crate::pgrust::session::parse_copy_command("copy copy_out to stdout csv header")
+        .unwrap()
+        .unwrap();
+    let result = session.execute_copy_command(&db, &copy).unwrap();
+    match result {
+        crate::pgrust::session::CopyExecutionResult::Output { data, rows } => {
+            assert_eq!(rows, 1);
+            assert_eq!(String::from_utf8(data).unwrap(), "a,b\n1,\"hello, csv\"\n");
+        }
+        other => panic!(
+            "expected COPY output, got {:?}",
+            std::mem::discriminant(&other)
+        ),
+    }
+}
+
+#[test]
+fn copy_to_rejects_header_match() {
+    let base = temp_dir("copy_to_header_match");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table copy_out (a int4)")
+        .unwrap();
+    let copy =
+        crate::pgrust::session::parse_copy_command("copy copy_out to stdout with (header match)")
+            .unwrap()
+            .unwrap();
+    match session.execute_copy_command(&db, &copy) {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "cannot use \"match\" with HEADER in COPY TO");
+        }
+        other => panic!("expected header match COPY TO error, got {other:?}"),
+    }
+}
+
+#[test]
+fn copy_into_partitioned_table_handles_reordered_child_columns() {
+    let base = temp_dir("copy_partition_reordered_columns");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parted_copytest (a int4, b int4, c text) partition by list (b)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table parted_copytest_a1 (c text, b int4, a int4)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table parted_copytest attach partition parted_copytest_a1 for values in (1)",
+        )
+        .unwrap();
+    let copy = crate::pgrust::session::parse_copy_command("copy parted_copytest from stdin")
+        .unwrap()
+        .unwrap();
+    session.copy_from_text(&db, &copy, "10\t1\tstr1\n").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select c, b, a from parted_copytest_a1"),
+        vec![vec![
+            Value::Text("str1".into()),
+            Value::Int32(1),
+            Value::Int32(10)
+        ]]
+    );
+}
+
+#[test]
+fn copy_freeze_rejects_partitioned_table() {
+    let base = temp_dir("copy_freeze_partitioned");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parted_copytest (a int4, b int4) partition by list (b)",
+        )
+        .unwrap();
+    let copy =
+        crate::pgrust::session::parse_copy_command("copy parted_copytest from stdin (freeze)")
+            .unwrap()
+            .unwrap();
+    match session.copy_from_text(&db, &copy, "1\t1\n") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "cannot perform COPY FREEZE on a partitioned table");
+        }
+        other => panic!("expected COPY FREEZE partitioned error, got {other:?}"),
+    }
+}
+
+#[test]
 fn copy_from_rows_into_failed_implicit_transaction_cleans_session_state() {
     let base = temp_dir("copy_from_rows_cleanup");
     let db = Database::open(&base, 16).unwrap();
