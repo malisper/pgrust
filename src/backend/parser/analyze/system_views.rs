@@ -155,6 +155,7 @@ pub(super) fn bind_builtin_system_view(
         SyntheticSystemViewKind::PgStatioUserTables => catalog.pg_statio_user_tables_rows(),
         SyntheticSystemViewKind::PgStatUserFunctions => catalog.pg_stat_user_functions_rows(),
         SyntheticSystemViewKind::PgStatIo => catalog.pg_stat_io_rows(),
+        SyntheticSystemViewKind::PgStatProgressCopy => catalog.pg_stat_progress_copy_rows(),
         SyntheticSystemViewKind::PgLocks => unreachable!("pg_locks is bound as pg_lock_status()"),
         SyntheticSystemViewKind::InformationSchemaTables => information_schema_table_rows(catalog),
         SyntheticSystemViewKind::InformationSchemaViews => information_schema_view_rows(catalog),
