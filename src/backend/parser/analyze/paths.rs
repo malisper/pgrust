@@ -595,14 +595,7 @@ pub(super) fn bind_order_by_items(
                 Some(collation) => bind_explicit_collation(expr, expr_type, collation, catalog)?,
                 None => expr,
             };
-            let (expr, collation_oid) = finalize_order_by_expr(expr, catalog)?;
-            Ok(crate::backend::executor::OrderByEntry {
-                expr,
-                ressortgroupref,
-                descending: item.descending,
-                nulls_first: item.nulls_first,
-                collation_oid,
-            })
+            build_bound_order_by_entry(item, expr, ressortgroupref, catalog)
         })
         .collect()
 }

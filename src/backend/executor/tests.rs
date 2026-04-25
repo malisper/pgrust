@@ -14014,6 +14014,33 @@ fn jsonb_agg_supports_whole_row_alias_arguments() {
 }
 
 #[test]
+fn jsonb_agg_supports_local_order_by_using_operator() {
+    let base = temp_dir("jsonb_agg_order_by_using");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_agg(note order by note using ~<~) \
+         from (values ('foo'::text), (null::text), ('bar'::text)) as q(note)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Jsonb(
+                    crate::backend::executor::jsonb::parse_jsonb_text("[\"bar\", \"foo\", null]")
+                        .unwrap()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
 fn json_strip_nulls_functions_work() {
     let base = temp_dir("json_strip_nulls");
     let txns = TransactionManager::new_durable(&base).unwrap();
