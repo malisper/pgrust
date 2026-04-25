@@ -8061,6 +8061,16 @@ fn create_index_and_alter_table_set_are_noops() {
                         Value::Text("text".into()),
                         Value::Text("text".into()),
                     ],
+                    vec![
+                        Value::Text("macaddr".into()),
+                        Value::Text("macaddr8".into()),
+                        Value::Text("macaddr8".into()),
+                    ],
+                    vec![
+                        Value::Text("macaddr8".into()),
+                        Value::Text("macaddr".into()),
+                        Value::Text("macaddr".into()),
+                    ],
                 ]
             );
         }

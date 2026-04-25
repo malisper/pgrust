@@ -150,6 +150,8 @@ fn encode_array_element_payload(
         Value::Uuid(v) => Ok(v.to_vec()),
         Value::Inet(v) => Ok(crate::backend::executor::encode_network_bytes(&v, false)),
         Value::Cidr(v) => Ok(crate::backend::executor::encode_network_bytes(&v, true)),
+        Value::MacAddr(v) => Ok(v.to_vec()),
+        Value::MacAddr8(v) => Ok(v.to_vec()),
         Value::Bool(v) => Ok(vec![u8::from(v)]),
         Value::Numeric(text) => Ok(text.render().into_bytes()),
         Value::Json(text) => Ok(text.as_bytes().to_vec()),
@@ -572,6 +574,8 @@ fn array_element_layout(
         SqlTypeKind::Uuid => (16, AttributeAlign::Char),
         SqlTypeKind::TimeTz => (12, AttributeAlign::Double),
         SqlTypeKind::Point => (16, AttributeAlign::Double),
+        SqlTypeKind::MacAddr => (6, AttributeAlign::Int),
+        SqlTypeKind::MacAddr8 => (8, AttributeAlign::Int),
         SqlTypeKind::Line | SqlTypeKind::Circle => (24, AttributeAlign::Double),
         SqlTypeKind::Lseg | SqlTypeKind::Box => (32, AttributeAlign::Double),
         SqlTypeKind::Bool => (1, AttributeAlign::Char),
@@ -785,6 +789,8 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
         Value::Bytea(_) => Some(SqlType::new(SqlTypeKind::Bytea)),
         Value::Inet(_) => Some(SqlType::new(SqlTypeKind::Inet)),
         Value::Cidr(_) => Some(SqlType::new(SqlTypeKind::Cidr)),
+        Value::MacAddr(_) => Some(SqlType::new(SqlTypeKind::MacAddr)),
+        Value::MacAddr8(_) => Some(SqlType::new(SqlTypeKind::MacAddr8)),
         Value::Bit(_) => Some(SqlType::new(SqlTypeKind::VarBit)),
         Value::PgArray(array) => anyarray_element_type(array).ok().map(SqlType::array_of),
         Value::Array(_) => Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
@@ -1060,6 +1066,12 @@ fn decode_array_element_value(
         }
         SqlTypeKind::Inet => crate::backend::executor::parse_inet_bytes(bytes).map(Value::Inet),
         SqlTypeKind::Cidr => crate::backend::executor::parse_cidr_bytes(bytes).map(Value::Cidr),
+        SqlTypeKind::MacAddr => {
+            crate::backend::executor::parse_macaddr_bytes(bytes).map(Value::MacAddr)
+        }
+        SqlTypeKind::MacAddr8 => {
+            crate::backend::executor::parse_macaddr8_bytes(bytes).map(Value::MacAddr8)
+        }
         SqlTypeKind::Point => {
             if bytes.len() != 16 {
                 return Err(ExecError::InvalidStorageValue {
@@ -1309,6 +1321,13 @@ fn format_array_values_nested(
             Value::Uuid(v) => push_array_text_element(&mut out, &render_uuid_text(v)),
             Value::Inet(v) => push_array_text_element(&mut out, &v.render_inet()),
             Value::Cidr(v) => push_array_text_element(&mut out, &v.render_cidr()),
+            Value::MacAddr(v) => {
+                push_array_text_element(&mut out, &crate::backend::executor::render_macaddr_text(v))
+            }
+            Value::MacAddr8(v) => push_array_text_element(
+                &mut out,
+                &crate::backend::executor::render_macaddr8_text(v),
+            ),
             Value::Json(v) => {
                 out.push('"');
                 for ch in v.chars() {

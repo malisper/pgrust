@@ -6253,7 +6253,10 @@ impl Session {
                                 ScalarType::BitString => {
                                     cast_value(Value::Text(raw.clone().into()), column.sql_type)?
                                 }
-                                ScalarType::Inet | ScalarType::Cidr => {
+                                ScalarType::Inet
+                                | ScalarType::Cidr
+                                | ScalarType::MacAddr
+                                | ScalarType::MacAddr8 => {
                                     cast_value(Value::Text(raw.clone().into()), column.sql_type)?
                                 }
                                 ScalarType::Float32 | ScalarType::Float64 => raw
@@ -7713,6 +7716,8 @@ fn copy_value_to_field(
         Value::PgLsn(v) => crate::backend::executor::render_pg_lsn_text(*v),
         Value::Inet(v) => v.render_inet(),
         Value::Cidr(v) => v.render_cidr(),
+        Value::MacAddr(v) => crate::backend::executor::render_macaddr_text(v),
+        Value::MacAddr8(v) => crate::backend::executor::render_macaddr8_text(v),
         Value::Money(v) => crate::backend::executor::money_format_text(*v),
         Value::TsVector(v) => crate::backend::executor::render_tsvector_text(v),
         Value::TsQuery(v) => crate::backend::executor::render_tsquery_text(v),
