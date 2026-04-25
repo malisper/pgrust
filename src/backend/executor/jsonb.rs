@@ -11,6 +11,7 @@ use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::misc::stack_depth::stack_depth_limit_error;
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
 use crate::include::nodes::execnodes::{NumericValue, Value};
 use crate::pgrust::compact_string::CompactString;
@@ -223,17 +224,6 @@ fn enforce_json_stack_limit(text: &str, max_stack_depth_kb: u32) -> Result<(), E
     }
 
     Ok(())
-}
-
-fn stack_depth_limit_error(max_stack_depth_kb: u32) -> ExecError {
-    ExecError::DetailedError {
-        message: "stack depth limit exceeded".into(),
-        detail: None,
-        hint: Some(format!(
-            "Increase the configuration parameter \"max_stack_depth\" (currently {max_stack_depth_kb}kB), after ensuring the platform's stack depth limit is adequate."
-        )),
-        sqlstate: "54001",
-    }
 }
 
 pub(crate) fn json_input_error(text: &str, err: SerdeJsonError) -> ExecError {

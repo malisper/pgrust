@@ -200,6 +200,7 @@ pub struct NodeExecStats {
     pub total_time: Duration,
     pub first_tuple_time: Option<Duration>,
     pub rows_removed_by_filter: u64,
+    pub stack_depth_checked: bool,
     pub buffer_usage: BufferUsageStats,
     pub buffer_usage_start: Option<BufferUsageStats>,
 }

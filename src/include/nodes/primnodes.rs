@@ -305,6 +305,7 @@ pub enum BuiltinScalarFunction {
     Random,
     RandomNormal,
     CurrentDatabase,
+    Version,
     PgBackendPid,
     PgPartitionRoot,
     GetDatabaseEncoding,
