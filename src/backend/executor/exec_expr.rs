@@ -79,6 +79,7 @@ use super::expr_string::{
     eval_to_char_function, eval_to_hex_function, eval_to_number_function, eval_to_oct_function,
     eval_translate_function, eval_trim_function, eval_unistr_function,
 };
+use super::expr_txid::eval_txid_builtin_function;
 use super::expr_xml::{eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function};
 use super::node_types::*;
 use super::pg_regex::{
@@ -4471,6 +4472,11 @@ fn eval_builtin_function(
         | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(func, &values),
         BuiltinScalarFunction::Random => eval_random_function(&values),
         BuiltinScalarFunction::RandomNormal => eval_random_normal_function(&values),
+        BuiltinScalarFunction::TxidCurrent
+        | BuiltinScalarFunction::TxidCurrentIfAssigned
+        | BuiltinScalarFunction::TxidVisibleInSnapshot => {
+            eval_txid_builtin_function(func, &values, ctx)
+        }
         BuiltinScalarFunction::CashLarger => match values.as_slice() {
             [Value::Money(left), Value::Money(right)] => {
                 Ok(Value::Money(money_larger(*left, *right)))

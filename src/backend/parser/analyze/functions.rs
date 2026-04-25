@@ -640,7 +640,9 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::TimeOfDay => args.is_empty(),
             BuiltinScalarFunction::CurrentDatabase
             | BuiltinScalarFunction::Version
-            | BuiltinScalarFunction::PgBackendPid => args.is_empty(),
+            | BuiltinScalarFunction::PgBackendPid
+            | BuiltinScalarFunction::TxidCurrent
+            | BuiltinScalarFunction::TxidCurrentIfAssigned => args.is_empty(),
             BuiltinScalarFunction::PgGetTriggerDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgTriggerDepth => args.is_empty(),
             BuiltinScalarFunction::PgPartitionRoot => args.len() == 1,
@@ -863,7 +865,8 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgInputErrorMessage
             | BuiltinScalarFunction::PgInputErrorDetail
             | BuiltinScalarFunction::PgInputErrorHint
-            | BuiltinScalarFunction::PgInputErrorSqlState => args.len() == 2,
+            | BuiltinScalarFunction::PgInputErrorSqlState
+            | BuiltinScalarFunction::TxidVisibleInSnapshot => args.len() == 2,
             BuiltinScalarFunction::RegexpLike => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::RegexpMatch => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::Replace
@@ -1132,6 +1135,12 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::CurrentSetting => {
             return Some(SqlType::new(SqlTypeKind::Text));
         }
+        BuiltinScalarFunction::TxidCurrent | BuiltinScalarFunction::TxidCurrentIfAssigned => {
+            return Some(SqlType::new(SqlTypeKind::Int8));
+        }
+        BuiltinScalarFunction::TxidVisibleInSnapshot => {
+            return Some(SqlType::new(SqlTypeKind::Bool));
+        }
         _ => {}
     }
     scalar_fixed_return_types()
@@ -1373,6 +1382,15 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("version", BuiltinScalarFunction::Version),
         ("pgsql_version", BuiltinScalarFunction::Version),
         ("pg_backend_pid", BuiltinScalarFunction::PgBackendPid),
+        ("txid_current", BuiltinScalarFunction::TxidCurrent),
+        (
+            "txid_current_if_assigned",
+            BuiltinScalarFunction::TxidCurrentIfAssigned,
+        ),
+        (
+            "txid_visible_in_snapshot",
+            BuiltinScalarFunction::TxidVisibleInSnapshot,
+        ),
         ("cashlarger", BuiltinScalarFunction::CashLarger),
         ("cashsmaller", BuiltinScalarFunction::CashSmaller),
         ("cash_words", BuiltinScalarFunction::CashWords),

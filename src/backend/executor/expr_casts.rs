@@ -14,6 +14,7 @@ use super::expr_money::{
 use super::expr_multirange::{multirange_from_range, parse_multirange_text};
 use super::expr_network::{parse_cidr_text, parse_inet_text};
 use super::expr_range::{parse_range_text, render_range_text};
+use super::expr_txid::{cast_text_to_txid_snapshot, is_txid_snapshot_type_oid};
 use super::node_types::*;
 use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, jsonb_to_value, parse_json_text_input, parse_jsonb_text,
@@ -2909,6 +2910,9 @@ pub(crate) fn cast_text_value_with_config(
     explicit: bool,
     config: &DateTimeConfig,
 ) -> Result<Value, ExecError> {
+    if !ty.is_array && is_txid_snapshot_type_oid(ty.type_oid) {
+        return cast_text_to_txid_snapshot(text);
+    }
     if ty.is_range() {
         return parse_range_text(text, ty);
     }
