@@ -7403,10 +7403,13 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create schema if not exists tenant").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: None, if_not_exists: true, elements }) if schema_name == "tenant" && elements.is_empty())
     );
     assert!(
-        matches!(parse_statement("create schema authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: None, auth_role: Some(auth_role), if_not_exists: false, elements }) if auth_role == "app_user" && elements.is_empty())
+        matches!(parse_statement("create schema authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: None, auth_role: Some(RoleSpec::RoleName(auth_role)), if_not_exists: false, elements }) if auth_role == "app_user" && elements.is_empty())
     );
     assert!(
-        matches!(parse_statement("create schema tenant authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: Some(auth_role), if_not_exists: false, elements }) if schema_name == "tenant" && auth_role == "app_user" && elements.is_empty())
+        matches!(parse_statement("create schema tenant authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: Some(RoleSpec::RoleName(auth_role)), if_not_exists: false, elements }) if schema_name == "tenant" && auth_role == "app_user" && elements.is_empty())
+    );
+    assert!(
+        matches!(parse_statement("create schema authorization current_role").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: None, auth_role: Some(RoleSpec::CurrentRole), if_not_exists: false, elements }) if elements.is_empty())
     );
     assert!(
         matches!(
