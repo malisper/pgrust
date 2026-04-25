@@ -1237,6 +1237,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             plan_info,
             input,
             items,
+            display_items,
         } => Plan::OrderBy {
             plan_info,
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
@@ -1250,6 +1251,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                     collation_oid: item.collation_oid,
                 })
                 .collect(),
+            display_items,
         },
         Plan::Limit {
             plan_info,
@@ -1610,6 +1612,7 @@ pub(super) fn finalize_plan_subqueries(
             plan_info,
             input,
             items,
+            display_items,
         } => Plan::OrderBy {
             plan_info,
             input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
@@ -1623,6 +1626,7 @@ pub(super) fn finalize_plan_subqueries(
                     collation_oid: item.collation_oid,
                 })
                 .collect(),
+            display_items,
         },
         Plan::Limit {
             plan_info,

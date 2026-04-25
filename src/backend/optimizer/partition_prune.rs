@@ -327,6 +327,102 @@ fn compare_partition_value(
     .ok()
 }
 
+fn serialized_partition_value_cmp(
+    left: &SerializedPartitionValue,
+    right: &SerializedPartitionValue,
+) -> Ordering {
+    compare_order_values(
+        &partition_value_to_value(left),
+        &partition_value_to_value(right),
+        None,
+        None,
+        false,
+    )
+    .unwrap_or_else(|_| format!("{left:?}").cmp(&format!("{right:?}")))
+}
+
+fn range_datum_cmp(left: &PartitionRangeDatumValue, right: &PartitionRangeDatumValue) -> Ordering {
+    match (left, right) {
+        (PartitionRangeDatumValue::MinValue, PartitionRangeDatumValue::MinValue)
+        | (PartitionRangeDatumValue::MaxValue, PartitionRangeDatumValue::MaxValue) => {
+            Ordering::Equal
+        }
+        (PartitionRangeDatumValue::MinValue, _) | (_, PartitionRangeDatumValue::MaxValue) => {
+            Ordering::Less
+        }
+        (PartitionRangeDatumValue::MaxValue, _) | (_, PartitionRangeDatumValue::MinValue) => {
+            Ordering::Greater
+        }
+        (PartitionRangeDatumValue::Value(left), PartitionRangeDatumValue::Value(right)) => {
+            serialized_partition_value_cmp(left, right)
+        }
+    }
+}
+
+fn range_datums_cmp(
+    left: &[PartitionRangeDatumValue],
+    right: &[PartitionRangeDatumValue],
+) -> Ordering {
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| range_datum_cmp(left, right))
+        .find(|ordering| *ordering != Ordering::Equal)
+        .unwrap_or_else(|| left.len().cmp(&right.len()))
+}
+
+pub(super) fn partition_bound_cmp(
+    left: &PartitionBoundSpec,
+    right: &PartitionBoundSpec,
+) -> Ordering {
+    match (left, right) {
+        (
+            PartitionBoundSpec::Range {
+                from: left_from,
+                to: left_to,
+                is_default: left_default,
+            },
+            PartitionBoundSpec::Range {
+                from: right_from,
+                to: right_to,
+                is_default: right_default,
+            },
+        ) => left_default.cmp(right_default).then_with(|| {
+            range_datums_cmp(left_from, right_from)
+                .then_with(|| range_datums_cmp(left_to, right_to))
+        }),
+        (
+            PartitionBoundSpec::List {
+                values: left_values,
+                is_default: left_default,
+            },
+            PartitionBoundSpec::List {
+                values: right_values,
+                is_default: right_default,
+            },
+        ) => left_default.cmp(right_default).then_with(|| {
+            left_values
+                .iter()
+                .zip(right_values)
+                .map(|(left, right)| serialized_partition_value_cmp(left, right))
+                .find(|ordering| *ordering != Ordering::Equal)
+                .unwrap_or_else(|| left_values.len().cmp(&right_values.len()))
+        }),
+        (
+            PartitionBoundSpec::Hash {
+                modulus: left_modulus,
+                remainder: left_remainder,
+            },
+            PartitionBoundSpec::Hash {
+                modulus: right_modulus,
+                remainder: right_remainder,
+            },
+        ) => left_modulus
+            .cmp(right_modulus)
+            .then_with(|| left_remainder.cmp(right_remainder)),
+        _ => format!("{left:?}").cmp(&format!("{right:?}")),
+    }
+}
+
 fn cmp_satisfies(cmp: Ordering, op: OpExprKind) -> bool {
     match op {
         OpExprKind::Lt => cmp == Ordering::Less,
