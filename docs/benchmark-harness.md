@@ -87,6 +87,27 @@ python scripts/run_bench.py --report-json /tmp/pgrust-bench-run/summary.json
 
 Use `--no-report` when you only want JSON and artifacts.
 
+Record a run into local history:
+
+```bash
+python scripts/run_bench.py --suite pgbench --history-dir .bench-history --history-label local
+```
+
+The runner writes timestamped summaries under `.bench-history/runs/` and updates
+`.bench-history/index.json`. The `.bench-history/` directory is ignored by git;
+it is meant for local iteration, not checked-in benchmark data.
+
+Render recent local history:
+
+```bash
+python scripts/run_bench.py --report-history .bench-history
+```
+
+The history report shows recent runs plus the latest pgrust/PostgreSQL ratios
+and the delta from the most recent earlier recorded run with the same workload.
+This is intentionally lightweight tracking; dashboard publishing and regression
+alerting are separate later phases.
+
 By default it also builds benchmark binaries into a worktree-local
 `.bench-target/` directory instead of the repo's shared `/tmp/pgrust-target`.
 That avoids cargo lock contention with other agents working in parallel.
@@ -131,5 +152,6 @@ This is intentionally local-only for now:
 - no CI integration
 - no dashboard publishing
 - no regression alerting
+- no checked-in benchmark history
 
 Those come later once the local harness and result format settle down.
