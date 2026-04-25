@@ -829,6 +829,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
         }
         Plan::Aggregate {
             plan_info,
+            strategy,
             input,
             group_by,
             passthrough_exprs,
@@ -840,6 +841,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             let key_buffer = Vec::with_capacity(group_by.len());
             Box::new(AggregateState {
                 input: executor_start(*input),
+                strategy,
                 group_by,
                 passthrough_exprs,
                 accumulators,

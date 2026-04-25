@@ -430,6 +430,8 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 having,
                 output_columns,
                 slot_id,
+                strategy,
+                pathkeys,
                 ..
             } => {
                 let input = optimize_path(*input, catalog);
@@ -451,6 +453,8 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     plan_info: PlanEstimate::new(total, total, rows, width),
                     pathtarget,
                     slot_id,
+                    strategy,
+                    pathkeys,
                     input: Box::new(input),
                     group_by,
                     passthrough_exprs,

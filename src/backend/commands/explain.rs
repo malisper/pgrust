@@ -4,7 +4,7 @@ use crate::backend::executor::{executor_start, render_explain_expr, set_returnin
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::*;
-use crate::include::nodes::plannodes::{Plan, PlanEstimate};
+use crate::include::nodes::plannodes::{AggregateStrategy, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, Expr, ParamKind, ProjectSetTarget, ScalarFunctionImpl,
     SetReturningCall, SubPlan, TargetEntry, WindowClause, WindowFrameBound, WindowFuncKind,
@@ -278,7 +278,11 @@ fn push_explain_plan_line(
 
 fn verbose_plan_label(plan: &Plan) -> Option<String> {
     match plan {
-        Plan::Aggregate { group_by, .. } if !group_by.is_empty() => Some("HashAggregate".into()),
+        Plan::Aggregate { strategy, .. } => match strategy {
+            AggregateStrategy::Plain => Some("Aggregate".into()),
+            AggregateStrategy::Sorted => Some("GroupAggregate".into()),
+            AggregateStrategy::Hashed => Some("HashAggregate".into()),
+        },
         Plan::FunctionScan { call, .. } => Some(verbose_function_scan_label(call)),
         _ => None,
     }
