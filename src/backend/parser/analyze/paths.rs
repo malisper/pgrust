@@ -3,8 +3,9 @@ use super::*;
 use crate::backend::executor::cast_value;
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
-    BTREE_AM_OID, GIST_AM_OID, HASH_AM_OID, SPGIST_AM_OID, bootstrap_pg_operator_rows,
-    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
+    BTREE_AM_OID, GIST_AM_OID, GIST_MULTIRANGE_FAMILY_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID,
+    SPGIST_AM_OID, bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
+    proc_oid_for_builtin_scalar_function,
 };
 use crate::include::nodes::primnodes::{BuiltinScalarFunction, OpExprKind, expr_sql_type_hint};
 
@@ -211,7 +212,7 @@ fn gist_builtin_strategy(proc_oid: u32, argument: &Value) -> Option<u16> {
         BuiltinScalarFunction::RangeStrictRight => 5,
         BuiltinScalarFunction::RangeAdjacent => 6,
         BuiltinScalarFunction::RangeContains => {
-            if matches!(argument, Value::Range(_)) {
+            if matches!(argument, Value::Range(_) | Value::Multirange(_)) {
                 7
             } else {
                 16
@@ -225,6 +226,21 @@ fn gist_builtin_strategy(proc_oid: u32, argument: &Value) -> Option<u16> {
         BuiltinScalarFunction::NetworkOverlap => 5,
         _ => return None,
     })
+}
+
+fn gist_operator_builtin_strategy(
+    index: &BoundIndexRelation,
+    index_pos: usize,
+    kind: OpExprKind,
+) -> Option<u16> {
+    if index.index_meta.am_oid != GIST_AM_OID {
+        return None;
+    }
+    let opfamily_oid = index.index_meta.opfamily_oids.get(index_pos).copied()?;
+    match (opfamily_oid, kind) {
+        (GIST_RANGE_FAMILY_OID | GIST_MULTIRANGE_FAMILY_OID, OpExprKind::Eq) => Some(18),
+        _ => None,
+    }
 }
 
 fn qual_strategy(
@@ -244,6 +260,7 @@ fn qual_strategy(
                         (index.index_meta.am_oid == HASH_AM_OID && kind == OpExprKind::Eq)
                             .then_some(1)
                     })
+                    .or_else(|| gist_operator_builtin_strategy(index, index_pos, kind))
             }),
         IndexStrategyLookup::Proc(proc_oid) => index
             .index_meta

@@ -90,22 +90,22 @@ pub(crate) use expr_mac::{
 pub use expr_mac::{render_macaddr_text, render_macaddr8_text};
 pub use expr_money::money_format_text;
 pub(crate) use expr_money::money_parse_text;
-pub use expr_multirange::render_multirange_text;
 pub(crate) use expr_multirange::{
     compare_multirange_values, decode_multirange_bytes, encode_multirange_bytes,
     eval_multirange_function, multirange_intersection_agg_transition, parse_multirange_text,
     range_agg_transition,
 };
+pub use expr_multirange::{render_multirange_text, render_multirange_text_with_config};
 pub(crate) use expr_network::{
     compare_network_values, encode_network_bytes, eval_network_function, network_btree_upper_bound,
     network_contains, network_merge, network_prefix, parse_cidr_bytes, parse_cidr_text,
     parse_inet_bytes, parse_inet_text, render_network_text,
 };
-pub use expr_range::render_range_text;
 pub(crate) use expr_range::{
     compare_range_values, decode_range_bytes, encode_range_bytes, eval_range_function,
     parse_range_text,
 };
+pub use expr_range::{render_range_text, render_range_text_with_config};
 pub(crate) use expr_txid::{
     cast_text_to_txid_snapshot, eval_txid_builtin_function, is_txid_snapshot_type_oid,
 };

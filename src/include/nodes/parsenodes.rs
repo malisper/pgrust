@@ -291,6 +291,7 @@ pub enum Statement {
     CreateTrigger(CreateTriggerStatement),
     CreateType(CreateTypeStatement),
     AlterType(AlterTypeStatement),
+    AlterTypeOwner(AlterTypeOwnerStatement),
     CreateDatabase(CreateDatabaseStatement),
     CreateSchema(CreateSchemaStatement),
     CreateTablespace(CreateTablespaceStatement),
@@ -2394,6 +2395,7 @@ pub enum GrantObjectPrivilege {
     SelectOnTable,
     AllPrivilegesOnSchema,
     ExecuteOnFunction,
+    UsageOnType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2410,6 +2412,12 @@ pub struct RevokeObjectStatement {
     pub object_names: Vec<String>,
     pub grantee_names: Vec<String>,
     pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTypeOwnerStatement {
+    pub type_name: String,
+    pub new_owner: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2704,7 +2712,10 @@ impl ColumnGeneratedKind {
 pub struct CreateDomainStatement {
     pub domain_name: String,
     pub ty: RawTypeName,
-    pub check: Option<DomainCheckConstraint>,
+    pub default: Option<String>,
+    pub check: Option<String>,
+    pub not_null: bool,
+    pub enum_check: Option<DomainCheckConstraint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

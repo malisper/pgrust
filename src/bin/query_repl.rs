@@ -931,6 +931,7 @@ fn run_statement(
         | Statement::CreateDomain(_)
         | Statement::CreateType(_)
         | Statement::AlterType(_)
+        | Statement::AlterTypeOwner(_)
         | Statement::CreateSequence(_)
         | Statement::DropFunction(_)
         | Statement::DropOperator(_)

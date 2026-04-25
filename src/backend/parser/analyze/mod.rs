@@ -777,6 +777,10 @@ pub trait CatalogLookup {
             .find(|row| row.typname.eq_ignore_ascii_case(normalized))
     }
 
+    fn domain_by_name(&self, _name: &str) -> Option<DomainLookup> {
+        None
+    }
+
     fn range_rows(&self) -> Vec<PgRangeRow> {
         builtin_range_rows()
     }
@@ -1197,6 +1201,10 @@ impl CatalogLookup for IndexExpressionCatalogLookup<'_> {
 
     fn type_by_name(&self, name: &str) -> Option<PgTypeRow> {
         self.inner.type_by_name(name)
+    }
+
+    fn domain_by_name(&self, name: &str) -> Option<DomainLookup> {
+        self.inner.domain_by_name(name)
     }
 
     fn range_rows(&self) -> Vec<PgRangeRow> {
@@ -1774,6 +1782,15 @@ fn composite_type_rows_from_relcache(relcache: &RelCache) -> Vec<PgTypeRow> {
 
 #[derive(Default)]
 pub(crate) struct LiteralDefaultCatalog;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainLookup {
+    pub name: String,
+    pub sql_type: SqlType,
+    pub default: Option<String>,
+    pub check: Option<String>,
+    pub not_null: bool,
+}
 
 impl CatalogLookup for LiteralDefaultCatalog {
     fn lookup_any_relation(&self, _name: &str) -> Option<BoundRelation> {

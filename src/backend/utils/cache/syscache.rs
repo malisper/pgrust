@@ -816,6 +816,15 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
         relation_oid: u32,
     ) -> Result<Option<RelCacheEntry>, CatalogError> {
+        self.relation_id_get_relation_with_extra_type_rows(ctx, relation_oid, &[])
+    }
+
+    pub(crate) fn relation_id_get_relation_with_extra_type_rows(
+        &self,
+        ctx: &CatalogWriteContext,
+        relation_oid: u32,
+        extra_type_rows: &[PgTypeRow],
+    ) -> Result<Option<RelCacheEntry>, CatalogError> {
         let Some(class_row) = self
             .search_sys_cache1(ctx, SysCacheId::RelOid, oid_key(relation_oid))?
             .into_iter()
@@ -885,6 +894,10 @@ impl CatalogStore {
             );
         }
 
+        let extra_types_by_oid = extra_type_rows
+            .iter()
+            .map(|row| (row.oid, row.sql_type))
+            .collect::<BTreeMap<_, _>>();
         let mut columns = Vec::with_capacity(attributes.len());
         for attr in attributes {
             let sql_type = self
@@ -894,6 +907,7 @@ impl CatalogStore {
                     SysCacheTuple::Type(row) => Some(row.sql_type),
                     _ => None,
                 })
+                .or_else(|| extra_types_by_oid.get(&attr.atttypid).copied())
                 .ok_or(CatalogError::Corrupt("unknown atttypid"))?;
             let mut desc = column_desc(
                 attr.attname,
@@ -1155,6 +1169,15 @@ pub(crate) fn relation_id_get_relation_db(
         );
     }
 
+    let search_path = db.effective_search_path(client_id, None);
+    let mut dynamic_type_rows = db.domain_type_rows_for_search_path(&search_path);
+    dynamic_type_rows.extend(db.enum_type_rows_for_search_path(&search_path));
+    dynamic_type_rows.extend(db.range_type_rows_for_search_path(&search_path));
+    let dynamic_types_by_oid = dynamic_type_rows
+        .iter()
+        .map(|row| (row.oid, row.sql_type))
+        .collect::<BTreeMap<_, _>>();
+
     let mut columns = Vec::with_capacity(attributes.len());
     for attr in attributes {
         let sql_type = search_sys_cache1_db(
@@ -1169,6 +1192,7 @@ pub(crate) fn relation_id_get_relation_db(
             SysCacheTuple::Type(row) => Some(row.sql_type),
             _ => None,
         })
+        .or_else(|| dynamic_types_by_oid.get(&attr.atttypid).copied())
         .ok_or(CatalogError::Corrupt("unknown atttypid"))?;
         let mut desc = column_desc(
             attr.attname,
@@ -1540,7 +1564,7 @@ pub fn backend_relcache(
 
     let search_path = db.effective_search_path(client_id, None);
     let dynamic_type_rows = dynamic_type_rows_for_search_path(db, &search_path);
-    let relcache = RelCache::from_catcache_in_db_with_type_rows(
+    let relcache = RelCache::from_catcache_in_db_with_extra_type_rows(
         &backend_catcache(db, client_id, txn_ctx)?,
         db.database_oid,
         &dynamic_type_rows,

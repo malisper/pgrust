@@ -3709,7 +3709,12 @@ fn try_parse_create_type_statement(sql: &str) -> Result<Option<Statement>, Parse
         return build_create_type_statement(trimmed).map(|stmt| Some(Statement::CreateType(stmt)));
     }
     if lowered.starts_with("alter type ") {
-        return build_alter_type_statement(trimmed).map(|stmt| Some(Statement::AlterType(stmt)));
+        return match build_alter_type_statement(trimmed) {
+            Ok(stmt) => Ok(Some(Statement::AlterType(stmt))),
+            Err(ParseError::FeatureNotSupported(_)) => build_alter_type_owner_statement(trimmed)
+                .map(|stmt| Some(Statement::AlterTypeOwner(stmt))),
+            Err(err) => Err(err),
+        };
     }
     if lowered.starts_with("drop type ") {
         return build_drop_type_statement(trimmed).map(|stmt| Some(Statement::DropType(stmt)));
@@ -3761,6 +3766,9 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("revoke create on database ") {
         return Ok(Statement::RevokeObject(build_revoke_database_create(sql)?));
     }
+    if lowered.starts_with("revoke usage on type ") {
+        return Ok(Statement::RevokeObject(build_revoke_type_usage(sql)?));
+    }
     if lowered.starts_with("revoke all privileges on ") {
         return Ok(Statement::RevokeObject(build_revoke_table_all_privileges(
             sql,
@@ -3769,6 +3777,42 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     Ok(Statement::RevokeRoleMembership(
         build_revoke_role_membership(sql)?,
     ))
+}
+
+fn build_alter_type_owner_statement(sql: &str) -> Result<AlterTypeOwnerStatement, ParseError> {
+    let prefix = "alter type ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "ALTER TYPE name OWNER TO role",
+            actual: sql.into(),
+        })?
+        .trim();
+    let Some(owner_idx) = find_next_top_level_keyword(rest, &["owner"]) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "OWNER TO",
+            actual: rest.into(),
+        });
+    };
+    let type_name = rest[..owner_idx].trim();
+    let after_owner = rest[owner_idx + "owner".len()..].trim_start();
+    if !keyword_at_boundary(after_owner, 0, "to") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "TO",
+            actual: after_owner.into(),
+        });
+    }
+    let new_owner = after_owner["to".len()..].trim();
+    if type_name.is_empty() || new_owner.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER TYPE name OWNER TO role",
+            actual: sql.into(),
+        });
+    }
+    Ok(AlterTypeOwnerStatement {
+        type_name: normalize_simple_identifier(type_name)?,
+        new_owner: normalize_simple_identifier(new_owner)?,
+    })
 }
 
 fn build_grant_database_create(sql: &str) -> Result<GrantObjectStatement, ParseError> {
@@ -3893,6 +3937,22 @@ fn build_revoke_table_all_privileges(sql: &str) -> Result<RevokeObjectStatement,
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
+        object_names: vec![normalize_simple_identifier(object_name)?],
+        grantee_names,
+        cascade,
+    })
+}
+
+fn build_revoke_type_usage(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let prefix = "revoke usage on type ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege: GrantObjectPrivilege::UsageOnType,
         object_names: vec![normalize_simple_identifier(object_name)?],
         grantee_names,
         cascade,
@@ -7754,33 +7814,173 @@ fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, Par
             actual: sql.into(),
         });
     }
-    let (type_sql, check) = split_domain_type_and_check(type_sql)?;
+    let (type_sql, clauses_sql) = split_create_domain_type_and_clauses(type_sql);
     let normalized_type_sql = normalize_domain_type_sql(type_sql);
-    if normalized_type_sql.split_whitespace().any(|tok| {
-        matches!(
-            tok.to_ascii_lowercase().as_str(),
-            "constraint"
-                | "default"
-                | "check"
-                | "not"
-                | "null"
-                | "collate"
-                | "references"
-                | "unique"
-                | "primary"
-                | "generated"
-                | "deferrable"
-                | "no"
-        )
-    }) {
-        return Err(ParseError::FeatureNotSupported(
-            "CREATE DOMAIN constraints/defaults are not supported yet".into(),
-        ));
-    }
+    let clauses = parse_create_domain_clauses(clauses_sql)?;
+    let enum_check = clauses.check.as_ref().and_then(|check| {
+        parse_domain_value_in_check_body(check)
+            .ok()
+            .map(|allowed_values| DomainCheckConstraint {
+                name: clauses.check_name.clone(),
+                allowed_values,
+            })
+    });
     Ok(CreateDomainStatement {
         domain_name: domain_name.to_string(),
         ty: parse_type_name(&normalized_type_sql)?,
-        check,
+        default: clauses.default,
+        check: clauses.check,
+        not_null: clauses.not_null,
+        enum_check,
+    })
+}
+
+#[derive(Default)]
+struct CreateDomainClauses {
+    default: Option<String>,
+    check: Option<String>,
+    check_name: Option<String>,
+    not_null: bool,
+}
+
+fn split_create_domain_type_and_clauses(type_sql: &str) -> (&str, &str) {
+    let boundary = find_next_top_level_keyword(
+        type_sql,
+        &[
+            "constraint",
+            "default",
+            "check",
+            "not",
+            "null",
+            "collate",
+            "references",
+            "unique",
+            "primary",
+            "generated",
+            "deferrable",
+            "no",
+        ],
+    )
+    .unwrap_or(type_sql.len());
+    (
+        type_sql[..boundary].trim_end(),
+        type_sql[boundary..].trim_start(),
+    )
+}
+
+fn parse_create_domain_clauses(mut input: &str) -> Result<CreateDomainClauses, ParseError> {
+    let mut clauses = CreateDomainClauses::default();
+    let mut pending_constraint_name = None;
+    input = input.trim_start();
+    while !input.is_empty() {
+        if keyword_at_boundary(input, 0, "constraint") {
+            let after_constraint = input["constraint".len()..].trim_start();
+            let (constraint_name, after_name) = parse_domain_constraint_name(after_constraint)?;
+            let Some(next_clause) = find_next_top_level_keyword(
+                after_name,
+                &["default", "check", "not", "null", "collate"],
+            ) else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "domain constraint",
+                    actual: after_name.into(),
+                });
+            };
+            pending_constraint_name = Some(constraint_name);
+            input = after_name[next_clause..].trim_start();
+            continue;
+        }
+        if keyword_at_boundary(input, 0, "check") {
+            let (check, rest) = parse_create_domain_check_clause(input)?;
+            clauses.check_name = pending_constraint_name.take();
+            clauses.check = Some(check);
+            input = rest.trim_start();
+            continue;
+        }
+        if keyword_at_boundary(input, 0, "default") {
+            let after_default = input["default".len()..].trim_start();
+            let boundary = find_next_top_level_keyword(
+                after_default,
+                &["constraint", "check", "not", "null", "collate"],
+            )
+            .unwrap_or(after_default.len());
+            clauses.default = Some(after_default[..boundary].trim().to_string());
+            input = after_default[boundary..].trim_start();
+            continue;
+        }
+        if keyword_at_boundary(input, 0, "not") {
+            let after_not = input["not".len()..].trim_start();
+            if !keyword_at_boundary(after_not, 0, "null") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "NULL",
+                    actual: after_not.into(),
+                });
+            }
+            clauses.not_null = true;
+            input = after_not["null".len()..].trim_start();
+            continue;
+        }
+        if keyword_at_boundary(input, 0, "null") {
+            input = input["null".len()..].trim_start();
+            continue;
+        }
+        if keyword_at_boundary(input, 0, "collate") {
+            let after_collate = input["collate".len()..].trim_start();
+            let boundary = find_next_top_level_keyword(
+                after_collate,
+                &["constraint", "default", "check", "not", "null"],
+            )
+            .unwrap_or(after_collate.len());
+            input = after_collate[boundary..].trim_start();
+            continue;
+        }
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE DOMAIN constraint is not supported yet".into(),
+        ));
+    }
+    Ok(clauses)
+}
+
+fn parse_create_domain_check_clause(input: &str) -> Result<(String, &str), ParseError> {
+    let rest = input["check".len()..].trim_start();
+    if !rest.starts_with('(') {
+        return Err(ParseError::UnexpectedToken {
+            expected: "domain CHECK expression",
+            actual: rest.into(),
+        });
+    }
+    let bytes = rest.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = parse_delimited_token_end(bytes, i, b'\'');
+                continue;
+            }
+            b'"' => {
+                i = parse_delimited_token_end(bytes, i, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(rest, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Ok((rest[1..i].trim().to_string(), &rest[i + 1..]));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "closing parenthesis",
+        actual: rest.into(),
     })
 }
 
@@ -7903,7 +8103,10 @@ fn parse_domain_value_in_check(input: &str) -> Result<Vec<String>, ParseError> {
             "CREATE DOMAIN only supports CHECK (VALUE IN (...)) constraints".into(),
         ));
     }
-    let check_body = rest[1..rest.len() - 1].trim();
+    parse_domain_value_in_check_body(rest[1..rest.len() - 1].trim())
+}
+
+fn parse_domain_value_in_check_body(check_body: &str) -> Result<Vec<String>, ParseError> {
     let mut inner = check_body;
     if !inner
         .get(..5)

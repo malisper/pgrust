@@ -1438,12 +1438,16 @@ fn format_array_values_nested(
             }
             Value::Range(_) => {
                 let rendered =
-                    crate::backend::executor::render_range_text(item).unwrap_or_default();
+                    crate::backend::executor::render_range_text_with_config(item, datetime_config)
+                        .unwrap_or_default();
                 push_array_text_element(&mut out, &rendered);
             }
             Value::Multirange(_) => {
-                let rendered =
-                    crate::backend::executor::render_multirange_text(item).unwrap_or_default();
+                let rendered = crate::backend::executor::render_multirange_text_with_config(
+                    item,
+                    datetime_config,
+                )
+                .unwrap_or_default();
                 push_array_text_element(&mut out, &rendered);
             }
             Value::Text(_) | Value::TextRef(_, _) => {
