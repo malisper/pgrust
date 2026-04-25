@@ -41,6 +41,18 @@ pub(crate) struct GroupedOuterScope {
     pub(crate) group_by_exprs: Vec<SqlExpr>,
 }
 
+pub(super) fn matches_grouped_outer_expr(
+    expr: &SqlExpr,
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> bool {
+    grouped_outer.is_some_and(|grouped| {
+        grouped
+            .group_by_exprs
+            .iter()
+            .any(|group_expr| group_expr == expr)
+    })
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct BoundCte {
     pub(crate) name: String,
