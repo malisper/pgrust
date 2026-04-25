@@ -2,15 +2,16 @@ use std::cmp::Ordering;
 
 use super::ExecError;
 use super::expr_range::{
-    empty_range, normalize_range, parse_range_text, range_adjacent, range_contains_element,
-    range_contains_range, range_difference_segments, range_intersection, range_merge,
-    range_over_left_bounds, range_over_right_bounds, range_overlap, range_strict_left,
-    range_strict_right, render_range_value,
+    bounds_adjacent, empty_range, normalize_range, parse_range_text, range_adjacent,
+    range_contains_element, range_contains_range, range_difference_segments, range_intersection,
+    range_merge, range_over_left_bounds, range_over_right_bounds, range_overlap, range_strict_left,
+    range_strict_right, render_range_value_with_config,
 };
 use super::node_types::{
     BuiltinScalarFunction, MultirangeTypeRef, MultirangeValue, RangeValue, Value,
 };
 use crate::backend::parser::SqlType;
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::catalog::multirange_type_ref_for_sql_type;
 
 pub(crate) fn parse_multirange_text(text: &str, ty: SqlType) -> Result<Value, ExecError> {
@@ -99,20 +100,34 @@ pub(crate) fn parse_multirange_text(text: &str, ty: SqlType) -> Result<Value, Ex
 }
 
 pub fn render_multirange_text(value: &Value) -> Option<String> {
+    render_multirange_text_with_config(value, &DateTimeConfig::default())
+}
+
+pub fn render_multirange_text_with_config(
+    value: &Value,
+    datetime_config: &DateTimeConfig,
+) -> Option<String> {
     let Value::Multirange(multirange) = value else {
         return None;
     };
-    Some(render_multirange(multirange))
+    Some(render_multirange_with_config(multirange, datetime_config))
 }
 
 pub(crate) fn render_multirange(multirange: &MultirangeValue) -> String {
+    render_multirange_with_config(multirange, &DateTimeConfig::default())
+}
+
+pub(crate) fn render_multirange_with_config(
+    multirange: &MultirangeValue,
+    datetime_config: &DateTimeConfig,
+) -> String {
     if multirange.ranges.is_empty() {
         return "{}".to_string();
     }
     let parts = multirange
         .ranges
         .iter()
-        .map(render_range_value)
+        .map(|range| render_range_value_with_config(range, datetime_config))
         .collect::<Vec<_>>();
     format!("{{{}}}", parts.join(","))
 }
@@ -197,6 +212,10 @@ pub(crate) fn multirange_from_range(range: &RangeValue) -> Result<MultirangeValu
         SqlType::multirange(
             range.range_type.multirange_type_oid,
             range.range_type.type_oid(),
+        )
+        .with_identity(
+            range.range_type.multirange_type_oid,
+            range.range_type.sql_type.typrelid,
         )
         .with_range_metadata(
             range.range_type.subtype_oid(),
@@ -781,7 +800,7 @@ fn eval_multirange_merge(values: &[Value]) -> Result<Value, ExecError> {
     }
 }
 
-fn multirange_contains_element(
+pub(crate) fn multirange_contains_element(
     multirange: &MultirangeValue,
     value: &Value,
 ) -> Result<bool, ExecError> {
@@ -793,7 +812,7 @@ fn multirange_contains_element(
     Ok(false)
 }
 
-fn multirange_contains_range(multirange: &MultirangeValue, range: &RangeValue) -> bool {
+pub(crate) fn multirange_contains_range(multirange: &MultirangeValue, range: &RangeValue) -> bool {
     if range.empty {
         return true;
     }
@@ -803,14 +822,17 @@ fn multirange_contains_range(multirange: &MultirangeValue, range: &RangeValue) -
         .any(|candidate| range_contains_range(candidate, range))
 }
 
-fn range_contains_multirange(range: &RangeValue, multirange: &MultirangeValue) -> bool {
+pub(crate) fn range_contains_multirange(range: &RangeValue, multirange: &MultirangeValue) -> bool {
     multirange
         .ranges
         .iter()
         .all(|candidate| range_contains_range(range, candidate))
 }
 
-fn multirange_contains_multirange(left: &MultirangeValue, right: &MultirangeValue) -> bool {
+pub(crate) fn multirange_contains_multirange(
+    left: &MultirangeValue,
+    right: &MultirangeValue,
+) -> bool {
     right
         .ranges
         .iter()
@@ -836,22 +858,31 @@ pub(crate) fn multirange_overlaps_multirange(
     })
 }
 
-fn multirange_adjacent_range(multirange: &MultirangeValue, range: &RangeValue) -> bool {
-    !multirange_overlaps_range(multirange, range)
-        && multirange
-            .ranges
-            .iter()
-            .any(|candidate| range_adjacent(candidate, range))
+pub(crate) fn multirange_adjacent_range(multirange: &MultirangeValue, range: &RangeValue) -> bool {
+    let Some(first) = multirange.ranges.first() else {
+        return false;
+    };
+    let Some(last) = multirange.ranges.last() else {
+        return false;
+    };
+    bounds_adjacent(range.upper.as_ref(), first.lower.as_ref())
+        || bounds_adjacent(last.upper.as_ref(), range.lower.as_ref())
 }
 
-fn multirange_adjacent_multirange(left: &MultirangeValue, right: &MultirangeValue) -> bool {
-    !multirange_overlaps_multirange(left, right)
-        && left.ranges.iter().any(|left_range| {
-            right
-                .ranges
-                .iter()
-                .any(|right_range| range_adjacent(left_range, right_range))
-        })
+pub(crate) fn multirange_adjacent_multirange(
+    left: &MultirangeValue,
+    right: &MultirangeValue,
+) -> bool {
+    let (Some(left_first), Some(left_last), Some(right_first), Some(right_last)) = (
+        left.ranges.first(),
+        left.ranges.last(),
+        right.ranges.first(),
+        right.ranges.last(),
+    ) else {
+        return false;
+    };
+    bounds_adjacent(left_last.upper.as_ref(), right_first.lower.as_ref())
+        || bounds_adjacent(right_last.upper.as_ref(), left_first.lower.as_ref())
 }
 
 fn multirange_union(
@@ -942,7 +973,7 @@ fn span_value(value: &Value, op: &'static str) -> Result<RangeValue, ExecError> 
     }
 }
 
-fn span_multirange(multirange: &MultirangeValue) -> RangeValue {
+pub(crate) fn span_multirange(multirange: &MultirangeValue) -> RangeValue {
     match (multirange.ranges.first(), multirange.ranges.last()) {
         (Some(first), Some(last)) => RangeValue {
             range_type: multirange.multirange_type.range_type,

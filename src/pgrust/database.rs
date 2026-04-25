@@ -1,5 +1,5 @@
 use parking_lot::RwLock;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -259,6 +259,9 @@ pub(crate) struct DomainEntry {
     pub name: String,
     pub namespace_oid: u32,
     pub sql_type: SqlType,
+    pub default: Option<String>,
+    pub check: Option<String>,
+    pub not_null: bool,
     pub comment: Option<String>,
 }
 
@@ -281,10 +284,67 @@ pub(crate) struct RangeTypeEntry {
     pub name: String,
     pub multirange_name: String,
     pub namespace_oid: u32,
+    pub owner_oid: u32,
+    pub public_usage: bool,
+    pub owner_usage: bool,
     pub subtype: SqlType,
     pub subtype_diff: Option<String>,
     pub collation: Option<String>,
     pub comment: Option<String>,
+}
+
+fn dynamic_range_array_type_names(
+    range_types: &BTreeMap<String, RangeTypeEntry>,
+) -> BTreeMap<u32, String> {
+    let non_array_type_names = range_types
+        .values()
+        .flat_map(|entry| {
+            [
+                (entry.namespace_oid, entry.name.to_ascii_lowercase()),
+                (
+                    entry.namespace_oid,
+                    entry.multirange_name.to_ascii_lowercase(),
+                ),
+            ]
+        })
+        .collect::<BTreeSet<_>>();
+    let mut used_array_type_names = BTreeSet::new();
+    let mut names = BTreeMap::new();
+
+    for entry in range_types.values() {
+        let array_name = reserve_dynamic_array_type_name(
+            &entry.name,
+            entry.namespace_oid,
+            &non_array_type_names,
+            &mut used_array_type_names,
+        );
+        names.insert(entry.array_oid, array_name);
+        let multirange_array_name = reserve_dynamic_array_type_name(
+            &entry.multirange_name,
+            entry.namespace_oid,
+            &non_array_type_names,
+            &mut used_array_type_names,
+        );
+        names.insert(entry.multirange_array_oid, multirange_array_name);
+    }
+
+    names
+}
+
+fn reserve_dynamic_array_type_name(
+    type_name: &str,
+    namespace_oid: u32,
+    non_array_type_names: &BTreeSet<(u32, String)>,
+    used_array_type_names: &mut BTreeSet<(u32, String)>,
+) -> String {
+    let mut candidate = format!("_{type_name}");
+    while non_array_type_names.contains(&(namespace_oid, candidate.to_ascii_lowercase()))
+        || used_array_type_names.contains(&(namespace_oid, candidate.to_ascii_lowercase()))
+    {
+        candidate.insert(0, '_');
+    }
+    used_array_type_names.insert((namespace_oid, candidate.to_ascii_lowercase()));
+    candidate
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -712,6 +772,7 @@ impl Database {
 
     pub(crate) fn range_type_rows_for_search_path(&self, search_path: &[String]) -> Vec<PgTypeRow> {
         let range_types = self.range_types.read();
+        let array_type_names = dynamic_range_array_type_names(&range_types);
         let mut rows = range_types
             .values()
             .flat_map(|entry| {
@@ -720,16 +781,26 @@ impl Database {
                     SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Date
                 );
                 let base_sql_type = SqlType::range(entry.oid, entry.subtype.type_oid)
+                    .with_identity(entry.oid, entry.subtype.typrelid)
                     .with_range_metadata(entry.subtype.type_oid, entry.multirange_oid, discrete);
                 let multirange_sql_type = SqlType::multirange(entry.multirange_oid, entry.oid)
+                    .with_identity(entry.multirange_oid, entry.subtype.typrelid)
                     .with_range_metadata(entry.subtype.type_oid, entry.multirange_oid, discrete)
                     .with_multirange_range_oid(entry.oid);
+                let array_name = array_type_names
+                    .get(&entry.array_oid)
+                    .cloned()
+                    .unwrap_or_else(|| format!("_{}", entry.name));
+                let multirange_array_name = array_type_names
+                    .get(&entry.multirange_array_oid)
+                    .cloned()
+                    .unwrap_or_else(|| format!("_{}", entry.multirange_name));
                 [
                     PgTypeRow {
                         oid: entry.oid,
                         typname: entry.name.clone(),
                         typnamespace: entry.namespace_oid,
-                        typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typowner: entry.owner_oid,
                         typlen: -1,
                         typalign: AttributeAlign::Int,
                         typstorage: AttributeStorage::Extended,
@@ -740,9 +811,9 @@ impl Database {
                     },
                     PgTypeRow {
                         oid: entry.array_oid,
-                        typname: format!("_{}", entry.name),
+                        typname: array_name,
                         typnamespace: entry.namespace_oid,
-                        typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typowner: entry.owner_oid,
                         typlen: -1,
                         typalign: AttributeAlign::Int,
                         typstorage: AttributeStorage::Extended,
@@ -755,7 +826,7 @@ impl Database {
                         oid: entry.multirange_oid,
                         typname: entry.multirange_name.clone(),
                         typnamespace: entry.namespace_oid,
-                        typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typowner: entry.owner_oid,
                         typlen: -1,
                         typalign: AttributeAlign::Int,
                         typstorage: AttributeStorage::Extended,
@@ -766,9 +837,9 @@ impl Database {
                     },
                     PgTypeRow {
                         oid: entry.multirange_array_oid,
-                        typname: format!("_{}", entry.multirange_name),
+                        typname: multirange_array_name,
                         typnamespace: entry.namespace_oid,
-                        typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typowner: entry.owner_oid,
                         typlen: -1,
                         typalign: AttributeAlign::Int,
                         typstorage: AttributeStorage::Extended,

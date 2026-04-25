@@ -1,11 +1,12 @@
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, DATE_TYPE_OID, DATEMULTIRANGE_TYPE_OID,
-    DATERANGE_TYPE_OID, INT4_TYPE_OID, INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID,
-    INT8MULTIRANGE_TYPE_OID, INT8RANGE_TYPE_OID, NUMERIC_TYPE_OID, NUMMULTIRANGE_TYPE_OID,
-    NUMRANGE_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, TEXT_TYPE_OID,
-    TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSMULTIRANGE_TYPE_OID, TSRANGE_TYPE_OID,
-    TSTZMULTIRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
+    ARRAYMULTIRANGE_TYPE_OID, ARRAYRANGE_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
+    DATE_TYPE_OID, DATEMULTIRANGE_TYPE_OID, DATERANGE_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
+    INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8MULTIRANGE_TYPE_OID,
+    INT8RANGE_TYPE_OID, NUMERIC_TYPE_OID, NUMMULTIRANGE_TYPE_OID, NUMRANGE_TYPE_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID,
+    TIMESTAMPTZ_TYPE_OID, TSMULTIRANGE_TYPE_OID, TSRANGE_TYPE_OID, TSTZMULTIRANGE_TYPE_OID,
+    TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID, VARBITMULTIRANGE_TYPE_OID, VARBITRANGE_TYPE_OID,
 };
 use crate::include::catalog::{PgProcRow, PgRangeRow, PgTypeRow};
 use crate::include::nodes::datum::{MultirangeTypeRef, RangeTypeRef};
@@ -27,7 +28,7 @@ pub struct BuiltinRangeSpec {
     pub multirange_name: &'static str,
 }
 
-const BUILTIN_RANGE_SPECS: [BuiltinRangeSpec; 6] =
+const BUILTIN_RANGE_SPECS: [BuiltinRangeSpec; 8] =
     [
         BuiltinRangeSpec {
             range_type: RangeTypeRef {
@@ -122,6 +123,34 @@ const BUILTIN_RANGE_SPECS: [BuiltinRangeSpec; 6] =
             name: "tstzrange",
             multirange_oid: TSTZMULTIRANGE_TYPE_OID,
             multirange_name: "tstzmultirange",
+        },
+        BuiltinRangeSpec {
+            range_type: RangeTypeRef {
+                sql_type: SqlType::range(ARRAYRANGE_TYPE_OID, INT4_ARRAY_TYPE_OID)
+                    .with_range_metadata(INT4_ARRAY_TYPE_OID, ARRAYMULTIRANGE_TYPE_OID, false),
+                subtype: SqlType::array_of(
+                    SqlType::new(SqlTypeKind::Int4).with_identity(INT4_TYPE_OID, 0),
+                ),
+                multirange_type_oid: ARRAYMULTIRANGE_TYPE_OID,
+                canonicalization: RangeCanonicalization::Continuous,
+            },
+            oid: ARRAYRANGE_TYPE_OID,
+            name: "arrayrange",
+            multirange_oid: ARRAYMULTIRANGE_TYPE_OID,
+            multirange_name: "arraymultirange",
+        },
+        BuiltinRangeSpec {
+            range_type: RangeTypeRef {
+                sql_type: SqlType::range(VARBITRANGE_TYPE_OID, VARBIT_TYPE_OID)
+                    .with_range_metadata(VARBIT_TYPE_OID, VARBITMULTIRANGE_TYPE_OID, false),
+                subtype: SqlType::new(SqlTypeKind::VarBit).with_identity(VARBIT_TYPE_OID, 0),
+                multirange_type_oid: VARBITMULTIRANGE_TYPE_OID,
+                canonicalization: RangeCanonicalization::Continuous,
+            },
+            oid: VARBITRANGE_TYPE_OID,
+            name: "varbitrange",
+            multirange_oid: VARBITMULTIRANGE_TYPE_OID,
+            multirange_name: "varbitmultirange",
         },
     ];
 
@@ -240,7 +269,13 @@ pub fn range_type_ref_for_sql_type(sql_type: SqlType) -> Option<RangeTypeRef> {
     let subtype = crate::include::catalog::builtin_type_rows()
         .into_iter()
         .find(|row| row.oid == sql_type.range_subtype_oid)
-        .map(|row| row.sql_type.with_identity(row.oid, row.typrelid))?;
+        .map(|row| row.sql_type.with_identity(row.oid, row.typrelid))
+        .or_else(|| {
+            (sql_type.typrelid != 0).then_some(SqlType::named_composite(
+                sql_type.range_subtype_oid,
+                sql_type.typrelid,
+            ))
+        })?;
     Some(RangeTypeRef {
         sql_type,
         subtype,
@@ -264,7 +299,13 @@ pub fn range_type_ref_for_multirange_sql_type(sql_type: SqlType) -> Option<Range
     let subtype = crate::include::catalog::builtin_type_rows()
         .into_iter()
         .find(|row| row.oid == sql_type.range_subtype_oid)
-        .map(|row| row.sql_type.with_identity(row.oid, row.typrelid))?;
+        .map(|row| row.sql_type.with_identity(row.oid, row.typrelid))
+        .or_else(|| {
+            (sql_type.typrelid != 0).then_some(SqlType::named_composite(
+                sql_type.range_subtype_oid,
+                sql_type.typrelid,
+            ))
+        })?;
     Some(RangeTypeRef {
         sql_type: SqlType::range(sql_type.multirange_range_oid, sql_type.range_subtype_oid)
             .with_identity(sql_type.multirange_range_oid, 0)

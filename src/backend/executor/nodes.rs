@@ -1755,14 +1755,28 @@ fn render_index_scan_key(
             entry.purpose == purpose && u16::try_from(entry.strategy).ok() == Some(key.strategy)
         })
         .filter(|entry| {
-            right_type_oid.is_none()
-                || Some(entry.righttype) == right_type_oid
+            let Some(actual) = right_type_oid else {
+                return true;
+            };
+            entry.righttype == actual
                 || entry.righttype == crate::include::catalog::ANYOID
+                || (entry.righttype == crate::include::catalog::ANYRANGEOID
+                    && crate::include::catalog::builtin_range_spec_by_oid(actual).is_some())
+                || (entry.righttype == crate::include::catalog::ANYMULTIRANGEOID
+                    && crate::include::catalog::builtin_range_spec_by_multirange_oid(actual)
+                        .is_some())
+                || entry.righttype == crate::include::catalog::ANYELEMENTOID
         })
         .max_by_key(|entry| {
             if Some(entry.righttype) == right_type_oid {
+                4
+            } else if entry.righttype == crate::include::catalog::ANYRANGEOID
+                || entry.righttype == crate::include::catalog::ANYMULTIRANGEOID
+            {
                 2
-            } else if entry.righttype == crate::include::catalog::ANYOID {
+            } else if entry.righttype == crate::include::catalog::ANYOID
+                || entry.righttype == crate::include::catalog::ANYELEMENTOID
+            {
                 1
             } else {
                 0

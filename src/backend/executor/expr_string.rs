@@ -9,7 +9,7 @@ use super::expr_format::{
     to_char_float, to_char_float4, to_char_int, to_char_numeric, to_number_numeric,
 };
 use super::expr_ops::ensure_builtin_collation_supported;
-use super::expr_range::render_range_text;
+use super::expr_range::render_range_text_with_config;
 use super::node_types::Value;
 use super::value_io::format_array_text;
 use crate::backend::executor::jsonb::render_jsonb_bytes;
@@ -476,9 +476,12 @@ fn value_output_text_with_config(
             crate::backend::executor::render_geometry_text(value, Default::default())
                 .unwrap_or_default()
         }
-        Value::Range(_) => render_range_text(value).unwrap_or_default(),
+        Value::Range(_) => {
+            render_range_text_with_config(value, datetime_config).unwrap_or_default()
+        }
         Value::Multirange(_) => {
-            crate::backend::executor::render_multirange_text(value).unwrap_or_default()
+            crate::backend::executor::render_multirange_text_with_config(value, datetime_config)
+                .unwrap_or_default()
         }
         Value::InternalChar(byte) => render_internal_char_text(*byte),
         Value::Date(_)
