@@ -1268,6 +1268,7 @@ fn partitionwise_join_guc_on_builds_append_of_child_joins_in_bound_order() {
         &catalog,
         PlannerConfig {
             enable_partitionwise_join: true,
+            ..PlannerConfig::default()
         },
     );
     let children = append_with_join_children(&planned.plan_tree).unwrap_or_else(|| {
@@ -1299,6 +1300,7 @@ fn partitionwise_join_requires_complete_key_equality() {
         &catalog,
         PlannerConfig {
             enable_partitionwise_join: true,
+            ..PlannerConfig::default()
         },
     );
 

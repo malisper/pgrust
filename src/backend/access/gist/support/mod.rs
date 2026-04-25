@@ -1,4 +1,5 @@
 mod box_ops;
+mod network_ops;
 mod point_ops;
 mod range_ops;
 
@@ -13,6 +14,8 @@ use crate::backend::catalog::CatalogError;
 use crate::include::catalog::{
     GIST_BOX_CONSISTENT_PROC_OID, GIST_BOX_DISTANCE_PROC_OID, GIST_BOX_PENALTY_PROC_OID,
     GIST_BOX_PICKSPLIT_PROC_OID, GIST_BOX_SAME_PROC_OID, GIST_BOX_UNION_PROC_OID,
+    GIST_NETWORK_CONSISTENT_PROC_OID, GIST_NETWORK_PENALTY_PROC_OID,
+    GIST_NETWORK_PICKSPLIT_PROC_OID, GIST_NETWORK_SAME_PROC_OID, GIST_NETWORK_UNION_PROC_OID,
     GIST_POINT_CONSISTENT_PROC_OID, GIST_POINT_PENALTY_PROC_OID, GIST_POINT_PICKSPLIT_PROC_OID,
     GIST_POINT_SAME_PROC_OID, GIST_POINT_UNION_PROC_OID, GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID,
     RANGE_GIST_CONSISTENT_PROC_OID, RANGE_GIST_PENALTY_PROC_OID, RANGE_GIST_PICKSPLIT_PROC_OID,
@@ -53,6 +56,7 @@ pub(crate) fn consistent(
         GIST_BOX_CONSISTENT_PROC_OID => box_ops::consistent(strategy, key, query, is_leaf),
         GIST_POINT_CONSISTENT_PROC_OID => point_ops::consistent(strategy, key, query, is_leaf),
         RANGE_GIST_CONSISTENT_PROC_OID => range_ops::consistent(strategy, key, query, is_leaf),
+        GIST_NETWORK_CONSISTENT_PROC_OID => network_ops::consistent(strategy, key, query, is_leaf),
         _ => Err(CatalogError::Io(format!(
             "unsupported GiST consistent proc {proc_oid}"
         ))),
@@ -64,6 +68,7 @@ pub(crate) fn union(proc_oid: u32, values: &[Value]) -> Result<Value, CatalogErr
         GIST_BOX_UNION_PROC_OID => box_ops::union(values),
         GIST_POINT_UNION_PROC_OID => point_ops::union(values),
         RANGE_GIST_UNION_PROC_OID => range_ops::union(values),
+        GIST_NETWORK_UNION_PROC_OID => network_ops::union(values),
         _ => Err(CatalogError::Io(format!(
             "unsupported GiST union proc {proc_oid}"
         ))),
@@ -79,6 +84,7 @@ pub(crate) fn penalty(
         GIST_BOX_PENALTY_PROC_OID => box_ops::penalty(original, candidate),
         GIST_POINT_PENALTY_PROC_OID => point_ops::penalty(original, candidate),
         RANGE_GIST_PENALTY_PROC_OID => range_ops::penalty(original, candidate),
+        GIST_NETWORK_PENALTY_PROC_OID => network_ops::penalty(original, candidate),
         _ => Err(CatalogError::Io(format!(
             "unsupported GiST penalty proc {proc_oid}"
         ))),
@@ -93,6 +99,7 @@ pub(crate) fn picksplit(
         GIST_BOX_PICKSPLIT_PROC_OID => box_ops::picksplit(values),
         GIST_POINT_PICKSPLIT_PROC_OID => point_ops::picksplit(values),
         RANGE_GIST_PICKSPLIT_PROC_OID => range_ops::picksplit(values),
+        GIST_NETWORK_PICKSPLIT_PROC_OID => network_ops::picksplit(values),
         _ => Err(CatalogError::Io(format!(
             "unsupported GiST picksplit proc {proc_oid}"
         ))),
@@ -104,6 +111,7 @@ pub(crate) fn same(proc_oid: u32, left: &Value, right: &Value) -> Result<bool, C
         GIST_BOX_SAME_PROC_OID => box_ops::same(left, right),
         GIST_POINT_SAME_PROC_OID => point_ops::same(left, right),
         RANGE_GIST_SAME_PROC_OID => range_ops::same(left, right),
+        GIST_NETWORK_SAME_PROC_OID => network_ops::same(left, right),
         _ => Err(CatalogError::Io(format!(
             "unsupported GiST same proc {proc_oid}"
         ))),

@@ -141,7 +141,7 @@ impl fmt::Display for ParseError {
                 "INSERT has {actual} values but target list requires {expected}"
             ),
             ParseError::TableAlreadyExists(name) => write!(f, "table already exists: {name}"),
-            ParseError::TableDoesNotExist(name) => write!(f, "table does not exist: {name}"),
+            ParseError::TableDoesNotExist(name) => write!(f, "table \"{name}\" does not exist"),
             ParseError::UnsupportedType(name) => write!(f, "type \"{name}\" does not exist"),
             ParseError::MissingDefaultOpclass {
                 access_method,

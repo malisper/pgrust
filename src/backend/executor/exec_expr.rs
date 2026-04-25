@@ -3628,6 +3628,9 @@ fn eval_plpgsql_builtin_function(
     if let Some(result) = eval_range_function(func, &values, result_type, func_variadic) {
         return result;
     }
+    if let Some(result) = crate::backend::executor::eval_network_function(func, &values) {
+        return result;
+    }
     match func {
         BuiltinScalarFunction::ToTsVector
         | BuiltinScalarFunction::JsonbToTsVector
@@ -4592,6 +4595,9 @@ fn eval_builtin_function(
         return result;
     }
     if let Some(result) = eval_range_function(func, &values, result_type, func_variadic) {
+        return result;
+    }
+    if let Some(result) = crate::backend::executor::eval_network_function(func, &values) {
         return result;
     }
     if let Some(result) = eval_json_builtin_function(
