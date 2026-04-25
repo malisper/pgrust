@@ -63,6 +63,16 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
             .map(|rel| rel.baserestrictinfo.clone())
             .unwrap_or_default();
         let mut partition_members = Vec::new();
+        let parent_alias = parent_rte
+            .alias
+            .clone()
+            .or_else(|| {
+                catalog
+                    .class_row_by_oid(relation_oid)
+                    .map(|row| row.relname)
+            })
+            .unwrap_or_else(|| relation_oid.to_string());
+        let mut child_alias_index = 1usize;
 
         for child_row in child_rows {
             let child_oid = child_row.inhrelid;
@@ -76,10 +86,7 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
             let translated_vars =
                 translate_parent_vars_to_child(&parent_rte.desc, child_rtindex, &child.desc);
             let child_rte = RangeTblEntry {
-                alias: catalog
-                    .class_row_by_oid(child.relation_oid)
-                    .map(|row| row.relname)
-                    .or_else(|| Some(child.relation_oid.to_string())),
+                alias: Some(format!("{parent_alias}_{child_alias_index}")),
                 desc: child.desc.clone(),
                 inh: false,
                 security_quals: Vec::new(),
@@ -93,6 +100,7 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
             };
             let mut child_rte = child_rte;
             child_rte.inh = relkind == 'p' && child.relkind == 'p';
+            child_alias_index += 1;
             root.parse.rtable.push(child_rte.clone());
             root.simple_rel_array
                 .push(Some(RelOptInfo::from_rte(child_rtindex, &child_rte)));

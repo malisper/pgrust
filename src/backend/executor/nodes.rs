@@ -2043,10 +2043,16 @@ fn render_explain_const(value: &Value) -> String {
             "'{}'::date",
             format_date_text(*date, &DateTimeConfig::default())
         ),
-        Value::Int16(v) => format!("{v}::smallint"),
-        Value::Int32(v) => format!("{v}::integer"),
-        Value::Int64(v) => format!("{v}::bigint"),
-        Value::Bool(v) => format!("{}::boolean", if *v { "true" } else { "false" }),
+        Value::Int16(v) => v.to_string(),
+        Value::Int32(v) => v.to_string(),
+        Value::Int64(v) => v.to_string(),
+        Value::Bool(v) => {
+            if *v {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
         Value::Null => "NULL".to_string(),
         other => format!("{other:?}"),
     }
@@ -2417,11 +2423,11 @@ impl PlanNode for NestedLoopJoinState {
             JoinType::Cross => "Nested Loop".into(),
         }
     }
-    fn explain_children(
+    fn explain_details(
         &self,
         indent: usize,
-        analyze: bool,
-        show_costs: bool,
+        _analyze: bool,
+        _show_costs: bool,
         lines: &mut Vec<String>,
     ) {
         let prefix = "  ".repeat(indent + 1);
@@ -2443,6 +2449,14 @@ impl PlanNode for NestedLoopJoinState {
                 render_explain_join_expr(&format_qual_list(&self.qual), left_names, right_names)
             ));
         }
+    }
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
         format_explain_lines_with_costs(&*self.left, indent + 1, analyze, show_costs, lines);
         format_explain_lines_with_costs(&*self.right, indent + 1, analyze, show_costs, lines);
     }
@@ -2786,12 +2800,15 @@ impl PlanNode for OrderByState {
         lines: &mut Vec<String>,
     ) {
         let prefix = "  ".repeat(indent + 1);
-        let sort_keys = self
-            .items
-            .iter()
-            .map(|item| render_explain_expr(&item.expr, self.column_names()))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let sort_keys = if self.display_items.is_empty() {
+            self.items
+                .iter()
+                .map(|item| render_explain_expr(&item.expr, self.column_names()))
+                .collect::<Vec<_>>()
+        } else {
+            self.display_items.clone()
+        }
+        .join(", ");
         lines.push(format!("{prefix}Sort Key: {sort_keys}"));
         if analyze {
             let memory_kb = self
@@ -3040,11 +3057,10 @@ fn projection_is_explain_passthrough(state: &ProjectionState) -> bool {
     if state.input.node_label() == "WindowAgg" && full_width_projection {
         return true;
     }
-    full_width_projection
-        && state
-            .targets
-            .iter()
-            .all(|target| matches!(target.expr, Expr::Var(_)))
+    state
+        .targets
+        .iter()
+        .all(|target| !target.resjunk && matches!(target.expr, Expr::Var(_)))
 }
 
 impl PlanNode for AggregateState {

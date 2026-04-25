@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use crate::backend::parser::CatalogLookup;
-use crate::include::nodes::parsenodes::Query;
+use crate::include::nodes::parsenodes::{Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerGlobal, PlannerInfo, RelOptInfo, RelOptKind,
     UpperRelKind,
@@ -91,6 +91,7 @@ fn ordered_group_input(path: Path, group_pathkeys: &[PathKey]) -> Path {
             plan_info: PlanEstimate::default(),
             pathtarget: path.semantic_output_target(),
             items: pathkeys_to_order_items(group_pathkeys),
+            display_items: Vec::new(),
             input: Box::new(path),
         }
     }
@@ -466,6 +467,7 @@ fn make_window_rel(
                     plan_info: PlanEstimate::default(),
                     pathtarget: path.semantic_output_target(),
                     items: pathkeys_to_order_items(&required_pathkeys),
+                    display_items: Vec::new(),
                     input: Box::new(path),
                 },
                 catalog,
@@ -929,7 +931,8 @@ fn make_ordered_rel(
                 .unwrap_or(Ordering::Equal)
         });
     if let Some(path) = cheapest_presorted {
-        rel.add_path(path.clone());
+        let display_items = sort_key_display_items(root, &root.query_pathkeys);
+        rel.add_path(path_with_sort_display_items(path.clone(), &display_items));
     }
     if root.parse.limit_count.is_some() || root.parse.limit_offset != 0 {
         let cheapest_presorted_startup = input_rel
@@ -953,11 +956,13 @@ fn make_ordered_rel(
     if let Some(path) = input_rel.cheapest_total_path() {
         let required_pathkeys = required_query_pathkeys_for_path(root, path);
         if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
+            let display_items = sort_key_display_items(root, &root.query_pathkeys);
             rel.add_path(optimize_path(
                 Path::OrderBy {
                     plan_info: PlanEstimate::default(),
                     pathtarget: path.semantic_output_target(),
                     items: pathkeys_to_order_items(&required_pathkeys),
+                    display_items,
                     input: Box::new(path.clone()),
                 },
                 catalog,
@@ -1022,6 +1027,154 @@ fn make_lock_rows_rel(
     }
     bestpath::set_cheapest(&mut rel);
     rel
+}
+
+fn sort_key_display_items(root: &PlannerInfo, pathkeys: &[PathKey]) -> Vec<String> {
+    let mut display_items = Vec::new();
+    let mut display_exprs = Vec::new();
+    for key in pathkeys {
+        let display_expr = root
+            .query_pathkeys
+            .iter()
+            .find(|query_key| {
+                key.ressortgroupref != 0 && query_key.ressortgroupref == key.ressortgroupref
+            })
+            .map(|query_key| query_key.expr.clone())
+            .unwrap_or_else(|| key.expr.clone());
+        let dedupe_expr = expand_join_rte_vars(root, display_expr.clone());
+        if display_exprs
+            .iter()
+            .any(|existing| inner_join_equates_exprs(root, existing, &dedupe_expr))
+        {
+            continue;
+        }
+        let mut rendered = render_sort_key_expr(root, &display_expr);
+        if key.descending {
+            rendered.push_str(" DESC");
+        }
+        if let Some(nulls_first) = key.nulls_first {
+            rendered.push_str(if nulls_first {
+                " NULLS FIRST"
+            } else {
+                " NULLS LAST"
+            });
+        }
+        display_exprs.push(dedupe_expr);
+        display_items.push(rendered);
+    }
+    display_items
+}
+
+fn path_with_sort_display_items(mut path: Path, display_items: &[String]) -> Path {
+    set_sort_display_items(&mut path, display_items);
+    path
+}
+
+fn set_sort_display_items(path: &mut Path, display_items: &[String]) -> bool {
+    match path {
+        Path::OrderBy {
+            display_items: existing,
+            ..
+        } => {
+            if existing.is_empty() {
+                *existing = display_items.to_vec();
+            }
+            true
+        }
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::WindowAgg { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => set_sort_display_items(input, display_items),
+        _ => false,
+    }
+}
+
+fn inner_join_equates_exprs(root: &PlannerInfo, left: &Expr, right: &Expr) -> bool {
+    if left == right {
+        return true;
+    }
+    root.inner_join_clauses.iter().any(|restrict| {
+        let Expr::Op(op) = &restrict.clause else {
+            return false;
+        };
+        if !matches!(op.op, crate::include::nodes::primnodes::OpExprKind::Eq) {
+            return false;
+        }
+        let [op_left, op_right] = op.args.as_slice() else {
+            return false;
+        };
+        (op_left == left && op_right == right) || (op_left == right && op_right == left)
+    })
+}
+
+fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr) -> String {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 => root
+            .parse
+            .rtable
+            .get(var.varno.saturating_sub(1))
+            .and_then(|rte| {
+                crate::include::nodes::primnodes::attrno_index(var.varattno).and_then(|index| {
+                    if let RangeTblEntryKind::Join { joinaliasvars, .. } = &rte.kind
+                        && let Some(alias_expr) = joinaliasvars.get(index)
+                    {
+                        return Some(render_sort_key_expr(root, alias_expr));
+                    }
+                    rte.desc.columns.get(index).map(|column| {
+                        let qualifier = rte.alias.clone();
+                        match qualifier {
+                            Some(qualifier) => format!("{qualifier}.{}", column.name),
+                            None => column.name.clone(),
+                        }
+                    })
+                })
+            })
+            .unwrap_or_else(|| format!("{expr:?}")),
+        Expr::Op(op) => {
+            let [left, right] = op.args.as_slice() else {
+                return format!("{expr:?}");
+            };
+            let op_text = match op.op {
+                crate::include::nodes::primnodes::OpExprKind::Add => "+",
+                crate::include::nodes::primnodes::OpExprKind::Sub => "-",
+                crate::include::nodes::primnodes::OpExprKind::Mul => "*",
+                crate::include::nodes::primnodes::OpExprKind::Div => "/",
+                crate::include::nodes::primnodes::OpExprKind::Mod => "%",
+                crate::include::nodes::primnodes::OpExprKind::Eq => "=",
+                crate::include::nodes::primnodes::OpExprKind::NotEq => "<>",
+                crate::include::nodes::primnodes::OpExprKind::Lt => "<",
+                crate::include::nodes::primnodes::OpExprKind::LtEq => "<=",
+                crate::include::nodes::primnodes::OpExprKind::Gt => ">",
+                crate::include::nodes::primnodes::OpExprKind::GtEq => ">=",
+                _ => return format!("{expr:?}"),
+            };
+            format!(
+                "({} {} {})",
+                render_sort_key_expr(root, left),
+                op_text,
+                render_sort_key_expr(root, right)
+            )
+        }
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            render_sort_key_expr(root, inner)
+        }
+        Expr::Coalesce(left, right) => format!(
+            "COALESCE({}, {})",
+            render_sort_key_expr(root, left),
+            render_sort_key_expr(root, right)
+        ),
+        Expr::Const(value) => {
+            let rendered =
+                crate::backend::executor::render_explain_expr(&Expr::Const(value.clone()), &[]);
+            rendered
+                .strip_prefix('(')
+                .and_then(|value| value.strip_suffix(')'))
+                .unwrap_or(&rendered)
+                .to_string()
+        }
+        _ => crate::backend::executor::render_explain_expr(expr, &[]),
+    }
 }
 
 fn make_projection_rel(

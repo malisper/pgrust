@@ -2364,6 +2364,9 @@ fn apply_relation_alias(
     let mut columns = scope.columns.clone();
     let mut relations = scope.relations.clone();
     let mut renamed = false;
+    if let Some(rte) = plan.rtable.last_mut() {
+        rte.alias = Some(alias.to_string());
+    }
 
     if alias_single_function_output && column_aliases.is_empty() && visible_positions.len() == 1 {
         let column_index = visible_positions[0];
