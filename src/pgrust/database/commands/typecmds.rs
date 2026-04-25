@@ -195,6 +195,12 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        if drop_stmt.cascade {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "DROP TYPE CASCADE is not supported yet".into(),
+            )));
+        }
+
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let interrupts = self.interrupt_state(client_id);
         let mut dropped = 0usize;

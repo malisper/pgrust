@@ -3219,7 +3219,6 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
             if !*func_variadic
                 && !name.eq_ignore_ascii_case("pg_lsn")
-                && catalog.proc_rows_by_name(name).is_empty()
                 && let Some(target_type) = resolve_function_cast_type(catalog, name)
                 && args_list.len() == 1
                 && args_list.iter().all(|arg| arg.name.is_none())
@@ -3280,80 +3279,64 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 resolution_types[0] = common_type;
                 resolution_types[2] = common_type;
             }
-            match resolve_function_call(catalog, name, &resolution_types, *func_variadic) {
-                Ok(resolved) => {
-                    if resolved.window_impl.is_some() {
-                        return Err(window_function_requires_over_error(name));
-                    }
-                    if resolved.prokind != 'f' {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "supported scalar function",
-                            actual: name.clone(),
-                        });
-                    }
-                    if resolved.proretset {
-                        return bind_set_returning_expr_from_parts(
-                            name,
-                            args_list,
-                            *func_variadic,
-                            None,
-                            scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        );
-                    }
-                    if let Some(func) = resolved.scalar_impl {
-                        let lowered_args = lower_named_scalar_function_args(func, args_list)?;
-                        return bind_scalar_function_call(
-                            func,
-                            resolved.proc_oid,
-                            Some(resolved.result_type),
-                            resolved.func_variadic,
-                            resolved.nvargs,
-                            resolved.vatype_oid,
-                            &resolved.declared_arg_types,
-                            &lowered_args,
-                            scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        );
-                    }
-                    return bind_user_defined_scalar_function_call(
-                        resolved.proc_oid,
-                        Some(resolved.proname.clone()),
-                        resolved.result_type,
-                        &resolved.declared_arg_types,
-                        args_list,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    );
-                }
-                Err(err) => {
-                    if !catalog.proc_rows_by_name(name).is_empty() {
-                        if matches!(
-                            err,
-                            ParseError::UnexpectedToken {
-                                expected: "supported function",
-                                ..
-                            }
-                        ) {
-                            return Err(function_does_not_exist_error(
-                                name,
-                                &actual_types,
-                                catalog,
-                            ));
+            let proc_resolution_error =
+                match resolve_function_call(catalog, name, &resolution_types, *func_variadic) {
+                    Ok(resolved) => {
+                        if resolved.window_impl.is_some() {
+                            return Err(window_function_requires_over_error(name));
                         }
-                        return Err(err);
+                        if resolved.prokind != 'f' {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "supported scalar function",
+                                actual: name.clone(),
+                            });
+                        }
+                        if resolved.proretset {
+                            return bind_set_returning_expr_from_parts(
+                                name,
+                                args_list,
+                                *func_variadic,
+                                None,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            );
+                        }
+                        if let Some(func) = resolved.scalar_impl {
+                            let lowered_args = lower_named_scalar_function_args(func, args_list)?;
+                            return bind_scalar_function_call(
+                                func,
+                                resolved.proc_oid,
+                                Some(resolved.result_type),
+                                resolved.func_variadic,
+                                resolved.nvargs,
+                                resolved.vatype_oid,
+                                &resolved.declared_arg_types,
+                                &lowered_args,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            );
+                        }
+                        return bind_user_defined_scalar_function_call(
+                            resolved.proc_oid,
+                            Some(resolved.proname.clone()),
+                            resolved.result_type,
+                            &resolved.declared_arg_types,
+                            args_list,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        );
                     }
-                }
-            }
+                    Err(err) => Some(err),
+                };
             if name.eq_ignore_ascii_case("xmlconcat") {
                 if args.args().iter().any(|arg| arg.name.is_some()) {
                     return Err(ParseError::UnexpectedToken {
@@ -3424,11 +3407,33 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     ctes,
                 );
             }
-            let legacy_func =
-                resolve_scalar_function(name).ok_or_else(|| ParseError::UnexpectedToken {
-                    expected: "supported builtin function",
-                    actual: name.clone(),
-                })?;
+            let legacy_func = match resolve_scalar_function(name) {
+                Some(func) => func,
+                None => {
+                    if !catalog.proc_rows_by_name(name).is_empty()
+                        && let Some(err) = proc_resolution_error
+                    {
+                        if matches!(
+                            err,
+                            ParseError::UnexpectedToken {
+                                expected: "supported function",
+                                ..
+                            }
+                        ) {
+                            return Err(function_does_not_exist_error(
+                                name,
+                                &actual_types,
+                                catalog,
+                            ));
+                        }
+                        return Err(err);
+                    }
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "supported builtin function",
+                        actual: name.clone(),
+                    });
+                }
+            };
             let lowered_args = lower_named_scalar_function_args(legacy_func, args_list)?;
             let actual_types = lowered_args
                 .iter()
