@@ -405,7 +405,7 @@ fn plan_query_path(
     catalog: &dyn CatalogLookup,
     config: PlannerConfig,
 ) -> (PlannerInfo, Path) {
-    let query = super::super::root::prepare_query_for_planning(query);
+    let query = super::super::root::prepare_query_for_planning(query, catalog);
     let aggregate_layout = super::super::groupby_rewrite::build_aggregate_layout(&query, catalog);
     let mut root = PlannerInfo::new_with_config(query, aggregate_layout, config);
     let scanjoin_rel = query_planner(&mut root, catalog);
@@ -525,7 +525,7 @@ fn build_cte_scan_path(
     catalog: &dyn CatalogLookup,
     config: PlannerConfig,
 ) -> Path {
-    let query = super::super::root::prepare_query_for_planning(query);
+    let query = super::super::root::prepare_query_for_planning(query, catalog);
     let (subroot, cte_path) = if let Some(recursive_union) = query.recursive_union.clone() {
         let planned_query = query.clone();
         let aggregate_layout =
@@ -565,7 +565,7 @@ fn build_subquery_scan_path(
     catalog: &dyn CatalogLookup,
     config: PlannerConfig,
 ) -> Path {
-    let query = super::super::root::prepare_query_for_planning(query);
+    let query = super::super::root::prepare_query_for_planning(query, catalog);
     let (subroot, input) = if let Some(recursive_union) = query.recursive_union.clone() {
         let planned_query = query.clone();
         let aggregate_layout =
