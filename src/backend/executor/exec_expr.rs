@@ -26,7 +26,7 @@ pub(crate) use super::expr_compile::{
 };
 use super::expr_date::{
     eval_date_part_function, eval_date_trunc_function, eval_isfinite_function,
-    eval_make_date_function, eval_to_date_function,
+    eval_make_date_function, eval_make_time_function, eval_to_date_function,
 };
 use super::expr_datetime::{
     current_date_value, current_date_value_with_config, current_time_value,
@@ -4722,6 +4722,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::DateTrunc => eval_date_trunc_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::IsFinite => eval_isfinite_function(&values),
         BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
+        BuiltinScalarFunction::MakeTime => eval_make_time_function(&values),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
         BuiltinScalarFunction::PgMyTempSchema => Ok(Value::Int64(i64::from(
             current_temp_namespace_oid(ctx).unwrap_or(0),

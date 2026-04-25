@@ -29,8 +29,8 @@ use crate::backend::utils::misc::guc::{
     is_postgres_guc, normalize_guc_name, plpgsql_guc_default_value,
 };
 use crate::backend::utils::misc::guc_datetime::{
-    DateTimeConfig, default_datestyle, default_timezone, format_datestyle, parse_datestyle,
-    parse_timezone,
+    DateTimeConfig, default_datestyle, default_datetime_config, default_timezone, format_datestyle,
+    parse_datestyle, parse_timezone,
 };
 use crate::backend::utils::misc::guc_xml::{
     format_xmlbinary, format_xmloption, parse_xmlbinary, parse_xmloption,
@@ -328,7 +328,7 @@ impl Session {
             temp_backend_id,
             active_txn: None,
             gucs: HashMap::new(),
-            datetime_config: DateTimeConfig::default(),
+            datetime_config: default_datetime_config(),
             interrupts: Arc::new(InterruptState::new()),
             auth: AuthState::default(),
             stats_state: Arc::new(RwLock::new(SessionStatsState::default())),
@@ -5004,14 +5004,13 @@ impl Session {
     }
 
     fn guc_reset_datestyle(&mut self) {
-        let (date_style_format, date_order) =
-            parse_datestyle(default_datestyle()).expect("default DateStyle must parse");
-        self.datetime_config.date_style_format = date_style_format;
-        self.datetime_config.date_order = date_order;
+        let defaults = default_datetime_config();
+        self.datetime_config.date_style_format = defaults.date_style_format;
+        self.datetime_config.date_order = defaults.date_order;
     }
 
     fn guc_reset_timezone(&mut self) {
-        self.datetime_config.time_zone = default_timezone().to_string();
+        self.datetime_config.time_zone = default_datetime_config().time_zone;
     }
 
     fn guc_reset_max_stack_depth(&mut self) {

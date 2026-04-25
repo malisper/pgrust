@@ -4448,6 +4448,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("date_trunc", BuiltinScalarFunction::DateTrunc),
         ("isfinite", BuiltinScalarFunction::IsFinite),
         ("make_date", BuiltinScalarFunction::MakeDate),
+        ("make_time", BuiltinScalarFunction::MakeTime),
         (
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,

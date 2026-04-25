@@ -711,8 +711,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     Some(SqlType {
                         kind: SqlTypeKind::Date,
                         ..
-                    })
-                    | Some(SqlType {
+                    }) => SqlType::new(SqlTypeKind::TimestampTz),
+                    Some(SqlType {
                         kind: SqlTypeKind::Timestamp,
                         ..
                     }) => SqlType::new(SqlTypeKind::Timestamp),
@@ -724,6 +724,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 },
                 Some(BuiltinScalarFunction::IsFinite) => SqlType::new(SqlTypeKind::Bool),
                 Some(BuiltinScalarFunction::MakeDate) => SqlType::new(SqlTypeKind::Date),
+                Some(BuiltinScalarFunction::MakeTime) => SqlType::new(SqlTypeKind::Time),
                 Some(BuiltinScalarFunction::ToJson)
                 | Some(BuiltinScalarFunction::ArrayToJson)
                 | Some(BuiltinScalarFunction::JsonBuildArray)

@@ -52,6 +52,17 @@ fn format_timestamp_year_suffix(pg_days: i32) -> String {
     }
 }
 
+fn format_timestamptz_year_zone_suffix(pg_days: i32, zone: &str) -> String {
+    let (mut year, _, _) = ymd_from_days(pg_days);
+    let bc = year <= 0;
+    if bc {
+        year = 1 - year;
+        format!("{year:04} {zone} BC")
+    } else {
+        format!("{year:04} {zone}")
+    }
+}
+
 fn timezone_abbrev_for_output(config: &DateTimeConfig, pg_days: i32) -> Option<&'static str> {
     match current_timezone_name(config)
         .trim()
@@ -490,11 +501,10 @@ pub fn format_timestamptz_text(value: TimestampTzADT, config: &DateTimeConfig) -
                 .map(str::to_string)
                 .unwrap_or_else(|| format_offset(offset_seconds));
             format!(
-                "{} {} {} {}",
+                "{} {} {}",
                 format_timestamp_date(days, config, true),
                 format_time_usecs(time_usecs),
-                format_timestamp_year_suffix(days),
-                zone,
+                format_timestamptz_year_zone_suffix(days, &zone),
             )
         }
         _ => format!(
