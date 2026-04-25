@@ -7634,10 +7634,15 @@ fn parse_drop_rule_statement() {
 }
 
 #[test]
-fn parse_rejects_unsupported_rule_action_statement() {
-    let err =
-        parse_statement("create rule r1 as on insert to people do instead select 1").unwrap_err();
-    assert!(matches!(err, ParseError::FeatureNotSupported(_)));
+fn parse_create_rule_preserves_utility_action_statement() {
+    let stmt =
+        parse_statement("create rule r1 as on insert to people do instead select 1").unwrap();
+    let Statement::CreateRule(stmt) = stmt else {
+        panic!("expected create rule");
+    };
+    assert_eq!(stmt.actions.len(), 1);
+    assert_eq!(stmt.actions[0].sql, "select 1");
+    assert!(matches!(stmt.actions[0].statement, Statement::Select(_)));
 }
 
 #[test]
