@@ -344,6 +344,7 @@ pub enum BuiltinScalarFunction {
     PgTypeof,
     PgColumnCompression,
     PgColumnSize,
+    PgRelationSize,
     PgStatGetCheckpointerNumTimed,
     PgStatGetCheckpointerNumRequested,
     PgStatGetCheckpointerNumPerformed,

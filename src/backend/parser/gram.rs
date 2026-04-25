@@ -14477,6 +14477,12 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::identifier => Ok(SqlExpr::Column(build_identifier(pair))),
         Rule::kw_default => Ok(SqlExpr::Default),
         Rule::numeric_literal => Ok(SqlExpr::NumericLiteral(pair.as_str().to_string())),
+        Rule::hex_integer => {
+            let raw = pair.as_str();
+            let value = u128::from_str_radix(&raw[2..], 16)
+                .map_err(|_| ParseError::InvalidInteger(raw.to_string()))?;
+            Ok(SqlExpr::IntegerLiteral(value.to_string()))
+        }
         Rule::integer => Ok(SqlExpr::IntegerLiteral(pair.as_str().to_string())),
         Rule::quoted_string_literal
         | Rule::string_literal
