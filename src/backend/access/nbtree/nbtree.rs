@@ -136,6 +136,8 @@ fn encode_index_value(
         Value::Uuid(v) => Ok(v.to_vec()),
         Value::Inet(v) => Ok(v.render_inet().into_bytes()),
         Value::Cidr(v) => Ok(v.render_cidr().into_bytes()),
+        Value::MacAddr(v) => Ok(v.to_vec()),
+        Value::MacAddr8(v) => Ok(v.to_vec()),
         Value::Bit(v) => {
             let mut bytes = Vec::with_capacity(4 + v.bytes.len());
             bytes.extend_from_slice(&(v.bit_len as u32).to_le_bytes());

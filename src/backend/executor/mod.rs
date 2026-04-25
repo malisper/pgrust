@@ -17,6 +17,7 @@ mod expr_format;
 pub(crate) mod expr_geometry;
 mod expr_json;
 mod expr_locks;
+mod expr_mac;
 mod expr_math;
 mod expr_money;
 pub(crate) mod expr_multirange;
@@ -82,6 +83,11 @@ pub(crate) use expr_geometry::eval_geometry_function;
 pub(crate) use expr_geometry::geometry_input_error_message;
 pub(crate) use expr_geometry::render_geometry_text;
 pub(crate) use expr_json::apply_jsonb_subscript_assignment;
+pub(crate) use expr_mac::{
+    eval_macaddr_function, macaddr_to_macaddr8, macaddr8_to_macaddr, parse_macaddr_bytes,
+    parse_macaddr_text, parse_macaddr8_bytes, parse_macaddr8_text,
+};
+pub use expr_mac::{render_macaddr_text, render_macaddr8_text};
 pub use expr_money::money_format_text;
 pub(crate) use expr_money::money_parse_text;
 pub use expr_multirange::render_multirange_text;

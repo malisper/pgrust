@@ -5,24 +5,30 @@ use crate::include::catalog::{
     BIT_TYPE_OID, BOOL_TYPE_OID, BOX_TYPE_OID, BPCHAR_TYPE_OID, BRIN_AM_OID,
     BRIN_BIT_MINMAX_FAMILY_OID, BRIN_BPCHAR_MINMAX_FAMILY_OID, BRIN_BYTEA_MINMAX_FAMILY_OID,
     BRIN_CHAR_MINMAX_FAMILY_OID, BRIN_DATETIME_MINMAX_FAMILY_OID, BRIN_FLOAT_MINMAX_FAMILY_OID,
-    BRIN_INTEGER_MINMAX_FAMILY_OID, BRIN_OID_MINMAX_FAMILY_OID, BRIN_TEXT_MINMAX_FAMILY_OID,
-    BRIN_TIME_MINMAX_FAMILY_OID, BRIN_TIMETZ_MINMAX_FAMILY_OID, BRIN_VARBIT_MINMAX_FAMILY_OID,
-    BTREE_AM_OID, BTREE_BIT_FAMILY_OID, BTREE_BOOL_FAMILY_OID, BTREE_BYTEA_FAMILY_OID,
-    BTREE_FLOAT_FAMILY_OID, BTREE_INTEGER_FAMILY_OID, BTREE_TEXT_FAMILY_OID, BTREE_UUID_FAMILY_OID,
-    BTREE_VARBIT_FAMILY_OID, BYTEA_TYPE_OID, DATE_TYPE_OID, DATERANGE_TYPE_OID, FLOAT4_TYPE_OID,
-    FLOAT8_TYPE_OID, GIN_AM_OID, GIN_JSONB_FAMILY_OID, GIST_AM_OID, GIST_BOX_FAMILY_OID,
-    GIST_POINT_FAMILY_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID, HASH_BOOL_FAMILY_OID,
-    HASH_BPCHAR_FAMILY_OID, HASH_BYTEA_FAMILY_OID, HASH_CHAR_FAMILY_OID, HASH_DATE_FAMILY_OID,
-    HASH_FLOAT_FAMILY_OID, HASH_INTEGER_FAMILY_OID, HASH_NUMERIC_FAMILY_OID, HASH_OID_FAMILY_OID,
-    HASH_TEXT_FAMILY_OID, HASH_TIME_FAMILY_OID, HASH_TIMESTAMP_FAMILY_OID,
-    HASH_TIMESTAMPTZ_FAMILY_OID, HASH_TIMETZ_FAMILY_OID, HASH_UUID_FAMILY_OID, INT2_TYPE_OID,
-    INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID, INTERNAL_CHAR_TYPE_OID,
-    JSONB_CONTAINS_OPERATOR_OID, JSONB_EXISTS_ALL_OPERATOR_OID, JSONB_EXISTS_ANY_OPERATOR_OID,
-    JSONB_EXISTS_OPERATOR_OID, JSONB_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID,
-    OID_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, SPGIST_AM_OID, SPGIST_BOX_FAMILY_OID,
-    SPGIST_POLY_FAMILY_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID,
-    TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, UUID_TYPE_OID,
-    VARBIT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_operator_rows,
+    BRIN_INTEGER_MINMAX_FAMILY_OID, BRIN_MACADDR_BLOOM_FAMILY_OID, BRIN_MACADDR_MINMAX_FAMILY_OID,
+    BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID, BRIN_MACADDR8_BLOOM_FAMILY_OID,
+    BRIN_MACADDR8_MINMAX_FAMILY_OID, BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID,
+    BRIN_OID_MINMAX_FAMILY_OID, BRIN_TEXT_MINMAX_FAMILY_OID, BRIN_TIME_MINMAX_FAMILY_OID,
+    BRIN_TIMETZ_MINMAX_FAMILY_OID, BRIN_VARBIT_MINMAX_FAMILY_OID, BTREE_AM_OID,
+    BTREE_BIT_FAMILY_OID, BTREE_BOOL_FAMILY_OID, BTREE_BYTEA_FAMILY_OID, BTREE_FLOAT_FAMILY_OID,
+    BTREE_INTEGER_FAMILY_OID, BTREE_MACADDR_FAMILY_OID, BTREE_MACADDR8_FAMILY_OID,
+    BTREE_TEXT_FAMILY_OID, BTREE_UUID_FAMILY_OID, BTREE_VARBIT_FAMILY_OID, BYTEA_TYPE_OID,
+    DATE_TYPE_OID, DATERANGE_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, GIN_AM_OID,
+    GIN_JSONB_FAMILY_OID, GIST_AM_OID, GIST_BOX_FAMILY_OID, GIST_POINT_FAMILY_OID,
+    GIST_RANGE_FAMILY_OID, HASH_AM_OID, HASH_BOOL_FAMILY_OID, HASH_BPCHAR_FAMILY_OID,
+    HASH_BYTEA_FAMILY_OID, HASH_CHAR_FAMILY_OID, HASH_DATE_FAMILY_OID, HASH_FLOAT_FAMILY_OID,
+    HASH_INTEGER_FAMILY_OID, HASH_MACADDR_FAMILY_OID, HASH_MACADDR8_FAMILY_OID,
+    HASH_NUMERIC_FAMILY_OID, HASH_OID_FAMILY_OID, HASH_TEXT_FAMILY_OID, HASH_TIME_FAMILY_OID,
+    HASH_TIMESTAMP_FAMILY_OID, HASH_TIMESTAMPTZ_FAMILY_OID, HASH_TIMETZ_FAMILY_OID,
+    HASH_UUID_FAMILY_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID,
+    INT8RANGE_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSONB_CONTAINS_OPERATOR_OID,
+    JSONB_EXISTS_ALL_OPERATOR_OID, JSONB_EXISTS_ANY_OPERATOR_OID, JSONB_EXISTS_OPERATOR_OID,
+    JSONB_TYPE_OID, MACADDR_TYPE_OID, MACADDR8_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID,
+    NUMRANGE_TYPE_OID, OID_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, SPGIST_AM_OID,
+    SPGIST_BOX_FAMILY_OID, SPGIST_POLY_FAMILY_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
+    TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TSRANGE_TYPE_OID,
+    TSTZRANGE_TYPE_OID, UUID_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID,
+    bootstrap_pg_operator_rows,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +102,16 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
             BTREE_UUID_FAMILY_OID,
             UUID_TYPE_OID,
             [2974, 2976, 2972, 2977, 2975],
+        ),
+        (
+            BTREE_MACADDR_FAMILY_OID,
+            MACADDR_TYPE_OID,
+            [1222, 1223, 1220, 1225, 1224],
+        ),
+        (
+            BTREE_MACADDR8_FAMILY_OID,
+            MACADDR8_TYPE_OID,
+            [3364, 3365, 3362, 3367, 3366],
         ),
     ] {
         for (strategy, operator_oid) in (1_i16..=5).zip(operators) {
@@ -329,6 +345,13 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         (BRIN_DATETIME_MINMAX_FAMILY_OID, TIMESTAMPTZ_TYPE_OID),
         (BRIN_BIT_MINMAX_FAMILY_OID, BIT_TYPE_OID),
         (BRIN_VARBIT_MINMAX_FAMILY_OID, VARBIT_TYPE_OID),
+        (BRIN_MACADDR_MINMAX_FAMILY_OID, MACADDR_TYPE_OID),
+        (BRIN_MACADDR8_MINMAX_FAMILY_OID, MACADDR8_TYPE_OID),
+        // :HACK: pgrust only executes generic BRIN minmax today. Keep these
+        // PostgreSQL-compatible catalog rows visible until generic
+        // minmax-multi runtime support lands.
+        (BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID, MACADDR_TYPE_OID),
+        (BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID, MACADDR8_TYPE_OID),
     ] {
         for (strategy, name) in [(1_i16, "<"), (2, "<="), (3, "="), (4, ">="), (5, ">")] {
             rows.push(PgAmopRow {
@@ -344,6 +367,25 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
             });
             oid = oid.saturating_add(1);
         }
+    }
+    // :HACK: Generic BRIN bloom runtime support is not implemented yet; these
+    // rows expose PostgreSQL-compatible catalogs for MAC address types.
+    for (family, type_oid) in [
+        (BRIN_MACADDR_BLOOM_FAMILY_OID, MACADDR_TYPE_OID),
+        (BRIN_MACADDR8_BLOOM_FAMILY_OID, MACADDR8_TYPE_OID),
+    ] {
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: family,
+            amoplefttype: type_oid,
+            amoprighttype: type_oid,
+            amopstrategy: 1,
+            amoppurpose: 's',
+            amopopr: operator_oid(&operators, "=", type_oid, type_oid),
+            amopmethod: BRIN_AM_OID,
+            amopsortfamily: 0,
+        });
+        oid = oid.saturating_add(1);
     }
     for (strategy, righttype, operator_oid) in [
         (7_i16, JSONB_TYPE_OID, JSONB_CONTAINS_OPERATOR_OID),
@@ -385,6 +427,8 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         (HASH_TIMETZ_FAMILY_OID, TIMETZ_TYPE_OID),
         (HASH_BYTEA_FAMILY_OID, BYTEA_TYPE_OID),
         (HASH_UUID_FAMILY_OID, UUID_TYPE_OID),
+        (HASH_MACADDR_FAMILY_OID, MACADDR_TYPE_OID),
+        (HASH_MACADDR8_FAMILY_OID, MACADDR8_TYPE_OID),
     ] {
         rows.push(PgAmopRow {
             oid,
@@ -417,7 +461,11 @@ fn operator_oid(
 #[cfg(test)]
 mod tests {
     use crate::include::catalog::{
-        BOX_TYPE_OID, BTREE_FLOAT_FAMILY_OID, POINT_TYPE_OID, SPGIST_AM_OID, SPGIST_BOX_FAMILY_OID,
+        BOX_TYPE_OID, BRIN_AM_OID, BRIN_MACADDR_MINMAX_FAMILY_OID, BRIN_MACADDR8_BLOOM_FAMILY_OID,
+        BRIN_MACADDR8_MINMAX_FAMILY_OID, BTREE_AM_OID, BTREE_FLOAT_FAMILY_OID,
+        BTREE_MACADDR_FAMILY_OID, BTREE_MACADDR8_FAMILY_OID, HASH_AM_OID, HASH_MACADDR_FAMILY_OID,
+        HASH_MACADDR8_FAMILY_OID, MACADDR_TYPE_OID, MACADDR8_TYPE_OID, POINT_TYPE_OID,
+        SPGIST_AM_OID, SPGIST_BOX_FAMILY_OID,
     };
 
     use super::bootstrap_pg_amop_rows;
@@ -434,5 +482,62 @@ mod tests {
         assert_eq!(row.amoplefttype, BOX_TYPE_OID);
         assert_eq!(row.amoprighttype, POINT_TYPE_OID);
         assert_eq!(row.amopsortfamily, BTREE_FLOAT_FAMILY_OID);
+    }
+
+    #[test]
+    fn macaddr_amop_rows_cover_btree_hash_and_brin_catalogs() {
+        let rows = bootstrap_pg_amop_rows();
+        assert!(rows.iter().any(|row| {
+            row.amopfamily == BTREE_MACADDR_FAMILY_OID
+                && row.amoplefttype == MACADDR_TYPE_OID
+                && row.amoprighttype == MACADDR_TYPE_OID
+                && row.amopstrategy == 3
+                && row.amopopr == 1220
+                && row.amopmethod == BTREE_AM_OID
+                && row.amopsortfamily == BTREE_MACADDR_FAMILY_OID
+        }));
+        assert!(rows.iter().any(|row| {
+            row.amopfamily == BTREE_MACADDR8_FAMILY_OID
+                && row.amoplefttype == MACADDR8_TYPE_OID
+                && row.amoprighttype == MACADDR8_TYPE_OID
+                && row.amopstrategy == 1
+                && row.amopopr == 3364
+                && row.amopmethod == BTREE_AM_OID
+        }));
+        assert!(rows.iter().any(|row| {
+            row.amopfamily == HASH_MACADDR_FAMILY_OID
+                && row.amoplefttype == MACADDR_TYPE_OID
+                && row.amopstrategy == 1
+                && row.amopopr == 1220
+                && row.amopmethod == HASH_AM_OID
+        }));
+        assert!(rows.iter().any(|row| {
+            row.amopfamily == HASH_MACADDR8_FAMILY_OID
+                && row.amoplefttype == MACADDR8_TYPE_OID
+                && row.amopstrategy == 1
+                && row.amopopr == 3362
+                && row.amopmethod == HASH_AM_OID
+        }));
+        assert!(rows.iter().any(|row| {
+            row.amopfamily == BRIN_MACADDR_MINMAX_FAMILY_OID
+                && row.amoplefttype == MACADDR_TYPE_OID
+                && row.amopstrategy == 5
+                && row.amopopr == 1224
+                && row.amopmethod == BRIN_AM_OID
+        }));
+        assert!(rows.iter().any(|row| {
+            row.amopfamily == BRIN_MACADDR8_MINMAX_FAMILY_OID
+                && row.amoplefttype == MACADDR8_TYPE_OID
+                && row.amopstrategy == 3
+                && row.amopopr == 3362
+                && row.amopmethod == BRIN_AM_OID
+        }));
+        assert!(rows.iter().any(|row| {
+            row.amopfamily == BRIN_MACADDR8_BLOOM_FAMILY_OID
+                && row.amoplefttype == MACADDR8_TYPE_OID
+                && row.amopstrategy == 1
+                && row.amopopr == 3362
+                && row.amopmethod == BRIN_AM_OID
+        }));
     }
 }

@@ -15,6 +15,8 @@ use crate::backend::executor::jsonpath::{
 use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
 use crate::backend::executor::render_interval_text;
+use crate::backend::executor::render_macaddr_text;
+use crate::backend::executor::render_macaddr8_text;
 use crate::backend::executor::render_range_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{CatalogLookup, ParseError};
@@ -1793,6 +1795,8 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
         Value::Bytea(v) => Ok(format_bytea_text(v, ByteaOutputFormat::Hex)),
         Value::Inet(v) => Ok(v.render_inet()),
         Value::Cidr(v) => Ok(v.render_cidr()),
+        Value::MacAddr(v) => Ok(render_macaddr_text(v)),
+        Value::MacAddr8(v) => Ok(render_macaddr8_text(v)),
         Value::InternalChar(v) => Ok(crate::backend::executor::render_internal_char_text(*v)),
         Value::EnumOid(v) => Ok(v.to_string()),
         Value::Int16(v) => Ok(v.to_string()),
@@ -3065,6 +3069,8 @@ fn value_to_json_serde_with_config(
         Value::Bytea(v) => SerdeJsonValue::String(format_bytea_text(v, ByteaOutputFormat::Hex)),
         Value::Inet(v) => SerdeJsonValue::String(v.render_inet()),
         Value::Cidr(v) => SerdeJsonValue::String(v.render_cidr()),
+        Value::MacAddr(v) => SerdeJsonValue::String(render_macaddr_text(v)),
+        Value::MacAddr8(v) => SerdeJsonValue::String(render_macaddr8_text(v)),
         Value::InternalChar(v) => {
             SerdeJsonValue::String(crate::backend::executor::render_internal_char_text(*v))
         }
@@ -3185,6 +3191,8 @@ fn render_json_value_text_with_config(
         }
         Value::Inet(v) => serde_json::to_string(&v.render_inet()).unwrap(),
         Value::Cidr(v) => serde_json::to_string(&v.render_cidr()).unwrap(),
+        Value::MacAddr(v) => serde_json::to_string(&render_macaddr_text(v)).unwrap(),
+        Value::MacAddr8(v) => serde_json::to_string(&render_macaddr8_text(v)).unwrap(),
         Value::InternalChar(v) => {
             serde_json::to_string(&crate::backend::executor::render_internal_char_text(*v)).unwrap()
         }

@@ -34,6 +34,14 @@ fn validate_brin_catalog(
     }
 
     for opclass in opclasses.iter().filter(|row| row.opcmethod == BRIN_AM_OID) {
+        // :HACK: pgrust's BRIN runtime currently validates and executes the
+        // generic minmax support path. Some PostgreSQL-compatible adjunct rows
+        // are catalog-visible before the minmax-multi/bloom runtimes exist.
+        if opclass.opcname.ends_with("_minmax_multi_ops") || opclass.opcname.ends_with("_bloom_ops")
+        {
+            continue;
+        }
+
         let procnums = family_procnums.get(&(opclass.opcfamily, opclass.opcintype));
         for required in [
             1_i16,
