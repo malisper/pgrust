@@ -1615,8 +1615,13 @@ fn build_join_paths_internal(
     let right_uses_immediate_outer = path_uses_immediate_outer_columns(&right);
     let lateral_orientation_locked = left_uses_immediate_outer ^ right_uses_immediate_outer;
     let allow_default_orientation = !left_uses_immediate_outer || !lateral_orientation_locked;
+    let allow_base_cross_swap = matches!(kind, JoinType::Cross)
+        && !lateral_orientation_locked
+        && path_relids(&left).len() == 1
+        && path_relids(&right).len() == 1;
     let allow_swapped_orientation = matches!(kind, JoinType::Inner)
-        && (!right_uses_immediate_outer || !lateral_orientation_locked);
+        && (!right_uses_immediate_outer || !lateral_orientation_locked)
+        || allow_base_cross_swap;
 
     let mut paths = Vec::new();
     if allow_default_orientation {
@@ -1747,13 +1752,6 @@ fn better_join_path(candidate: &Path, current: &Path) -> bool {
     {
         return candidate_left_relids > current_left_relids;
     }
-    if let (Some(candidate_pathkeys), Some(current_pathkeys)) =
-        (join_pathkey_count(candidate), join_pathkey_count(current))
-        && candidate_pathkeys != current_pathkeys
-    {
-        return candidate_pathkeys > current_pathkeys;
-    }
-
     let candidate_info = candidate.plan_info();
     let current_info = current.plan_info();
     let total_cmp = candidate_info
@@ -1771,20 +1769,6 @@ fn better_join_path(candidate: &Path, current: &Path) -> bool {
         .unwrap_or(Ordering::Equal);
     startup_cmp == Ordering::Less
         || (startup_cmp == Ordering::Equal && candidate.pathkeys().len() > current.pathkeys().len())
-}
-
-fn join_pathkey_count(path: &Path) -> Option<usize> {
-    match path {
-        Path::NestedLoopJoin { .. } | Path::HashJoin { .. } | Path::MergeJoin { .. } => {
-            Some(path.pathkeys().len())
-        }
-        Path::Filter { input, .. }
-        | Path::Projection { input, .. }
-        | Path::OrderBy { input, .. }
-        | Path::Limit { input, .. }
-        | Path::LockRows { input, .. } => join_pathkey_count(input),
-        _ => None,
-    }
 }
 
 fn cross_join_left_relid_count(path: &Path) -> Option<usize> {
