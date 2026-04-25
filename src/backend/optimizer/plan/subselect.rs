@@ -1320,6 +1320,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             strategy,
             input,
             group_by,
+            passthrough_exprs,
             accumulators,
             having,
             output_columns,
@@ -1328,6 +1329,10 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             strategy,
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
             group_by: group_by
+                .into_iter()
+                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
+            passthrough_exprs: passthrough_exprs
                 .into_iter()
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
@@ -1725,6 +1730,7 @@ pub(super) fn finalize_plan_subqueries(
             strategy,
             input,
             group_by,
+            passthrough_exprs,
             accumulators,
             having,
             output_columns,
@@ -1733,6 +1739,10 @@ pub(super) fn finalize_plan_subqueries(
             strategy,
             input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
             group_by: group_by
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                .collect(),
+            passthrough_exprs: passthrough_exprs
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
                 .collect(),

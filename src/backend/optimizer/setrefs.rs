@@ -74,6 +74,7 @@ enum LowerMode<'a> {
     },
     Aggregate {
         group_by: &'a [Expr],
+        passthrough_exprs: &'a [Expr],
         layout: &'a [Expr],
         tlist: &'a IndexedTlist,
     },
@@ -304,9 +305,11 @@ fn build_aggregate_tlist(
     root: Option<&PlannerInfo>,
     slot_id: usize,
     group_by: &[Expr],
+    passthrough_exprs: &[Expr],
     accumulators: &[crate::include::nodes::primnodes::AggAccum],
 ) -> IndexedTlist {
-    let mut entries = Vec::with_capacity(group_by.len() + accumulators.len());
+    let mut entries =
+        Vec::with_capacity(group_by.len() + passthrough_exprs.len() + accumulators.len());
     for (index, expr) in group_by.iter().enumerate() {
         let mut match_exprs = vec![
             slot_var(slot_id, user_attrno(index), expr_sql_type(expr)),
@@ -322,8 +325,24 @@ fn build_aggregate_tlist(
             match_exprs: dedup_match_exprs(match_exprs),
         });
     }
+    for (index, expr) in passthrough_exprs.iter().enumerate() {
+        let index = group_by.len() + index;
+        let mut match_exprs = vec![
+            slot_var(slot_id, user_attrno(index), expr_sql_type(expr)),
+            expr.clone(),
+        ];
+        if let Some(root) = root {
+            match_exprs.push(flatten_join_alias_vars(root, expr.clone()));
+        }
+        entries.push(IndexedTlistEntry {
+            index,
+            sql_type: expr_sql_type(expr),
+            ressortgroupref: 0,
+            match_exprs: dedup_match_exprs(match_exprs),
+        });
+    }
     for (aggno, accum) in accumulators.iter().enumerate() {
-        let index = group_by.len() + aggno;
+        let index = group_by.len() + passthrough_exprs.len() + aggno;
         entries.push(IndexedTlistEntry {
             index,
             sql_type: accum.sql_type,
@@ -583,9 +602,10 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
         Path::Aggregate {
             slot_id,
             group_by,
+            passthrough_exprs,
             accumulators,
             ..
-        } => build_aggregate_tlist(root, *slot_id, group_by, accumulators),
+        } => build_aggregate_tlist(root, *slot_id, group_by, passthrough_exprs, accumulators),
         Path::WindowAgg {
             slot_id,
             input,
@@ -2162,14 +2182,23 @@ fn lower_sublink(
                     .map(|path| fix_upper_expr_for_input(ctx.root, param.expr.clone(), path, tlist))
                     .unwrap_or_else(|| fix_upper_expr(ctx.root, param.expr.clone(), tlist)),
                 LowerMode::Aggregate {
-                    group_by, layout, ..
+                    group_by,
+                    passthrough_exprs,
+                    layout,
+                    ..
                 } => match ctx.root {
                     Some(root) => lower_agg_output_expr(
                         expand_join_rte_vars(root, param.expr.clone()),
                         group_by,
+                        passthrough_exprs,
                         layout,
                     ),
-                    None => lower_agg_output_expr(param.expr.clone(), group_by, layout),
+                    None => lower_agg_output_expr(
+                        param.expr.clone(),
+                        group_by,
+                        passthrough_exprs,
+                        layout,
+                    ),
                 },
                 LowerMode::Join {
                     outer_tlist,
@@ -2888,6 +2917,7 @@ fn validate_executable_plan(plan: &Plan) {
         Plan::Aggregate {
             input,
             group_by,
+            passthrough_exprs,
             accumulators,
             having,
             ..
@@ -2895,6 +2925,9 @@ fn validate_executable_plan(plan: &Plan) {
             group_by
                 .iter()
                 .for_each(|expr| validate_executable_expr(expr, "Aggregate", "group_by"));
+            passthrough_exprs
+                .iter()
+                .for_each(|expr| validate_executable_expr(expr, "Aggregate", "passthrough_exprs"));
             accumulators
                 .iter()
                 .for_each(|accum| validate_agg_accum(accum, "Aggregate", "accumulators"));
@@ -3284,12 +3317,16 @@ fn validate_planner_path(path: &Path) {
         Path::Aggregate {
             input,
             group_by,
+            passthrough_exprs,
             accumulators,
             having,
             ..
         } => {
             for expr in group_by {
                 validate_planner_expr(expr, "Aggregate", "group_by");
+            }
+            for expr in passthrough_exprs {
+                validate_planner_expr(expr, "Aggregate", "passthrough_exprs");
             }
             for accum in accumulators {
                 validate_planner_agg_accum(accum, "Aggregate", "accumulators");
@@ -4108,16 +4145,39 @@ fn set_aggregate_references(
     strategy: crate::include::nodes::plannodes::AggregateStrategy,
     input: Box<Path>,
     group_by: Vec<Expr>,
+    passthrough_exprs: Vec<Expr>,
     accumulators: Vec<AggAccum>,
     having: Option<Expr>,
     output_columns: Vec<QueryColumn>,
 ) -> Plan {
     let input_tlist = build_path_tlist(ctx.root, &input);
-    let aggregate_layout = aggregate_output_vars(slot_id, &group_by, &accumulators);
-    let aggregate_tlist = build_aggregate_tlist(ctx.root, slot_id, &group_by, &accumulators);
+    let aggregate_layout =
+        aggregate_output_vars(slot_id, &group_by, &passthrough_exprs, &accumulators);
+    let aggregate_tlist = build_aggregate_tlist(
+        ctx.root,
+        slot_id,
+        &group_by,
+        &passthrough_exprs,
+        &accumulators,
+    );
     let semantic_group_by = group_by.clone();
+    let semantic_passthrough_exprs = passthrough_exprs.clone();
     let root = ctx.root;
     let group_by = group_by
+        .into_iter()
+        .map(|expr| fix_upper_expr_for_input(root, expr, &input, &input_tlist))
+        .map(|expr| {
+            lower_expr(
+                ctx,
+                expr,
+                LowerMode::Input {
+                    path: Some(&input),
+                    tlist: &input_tlist,
+                },
+            )
+        })
+        .collect();
+    let passthrough_exprs = passthrough_exprs
         .into_iter()
         .map(|expr| fix_upper_expr_for_input(root, expr, &input, &input_tlist))
         .map(|expr| {
@@ -4140,15 +4200,22 @@ fn set_aggregate_references(
             Some(root) => lower_agg_output_expr(
                 expand_join_rte_vars(root, expr),
                 &semantic_group_by,
+                &semantic_passthrough_exprs,
                 &aggregate_layout,
             ),
-            None => lower_agg_output_expr(expr, &semantic_group_by, &aggregate_layout),
+            None => lower_agg_output_expr(
+                expr,
+                &semantic_group_by,
+                &semantic_passthrough_exprs,
+                &aggregate_layout,
+            ),
         };
         lower_expr(
             ctx,
             expr,
             LowerMode::Aggregate {
                 group_by: &semantic_group_by,
+                passthrough_exprs: &semantic_passthrough_exprs,
                 layout: &aggregate_layout,
                 tlist: &aggregate_tlist,
             },
@@ -4159,6 +4226,7 @@ fn set_aggregate_references(
         strategy,
         input: Box::new(set_plan_refs(ctx, *input)),
         group_by,
+        passthrough_exprs,
         accumulators,
         having,
         output_columns,
@@ -4713,6 +4781,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             strategy,
             input,
             group_by,
+            passthrough_exprs,
             accumulators,
             having,
             output_columns,
@@ -4724,6 +4793,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             strategy,
             input,
             group_by,
+            passthrough_exprs,
             accumulators,
             having,
             output_columns,

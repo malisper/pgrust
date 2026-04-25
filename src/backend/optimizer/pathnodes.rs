@@ -193,9 +193,10 @@ impl Path {
             Self::Aggregate {
                 slot_id,
                 group_by,
+                passthrough_exprs,
                 accumulators,
                 ..
-            } => aggregate_output_vars(*slot_id, group_by, accumulators),
+            } => aggregate_output_vars(*slot_id, group_by, passthrough_exprs, accumulators),
             Self::WindowAgg {
                 slot_id,
                 output_columns,
@@ -680,9 +681,15 @@ fn aggregate_output_expr(accum: &AggAccum, aggno: usize) -> Expr {
     }))
 }
 
-fn aggregate_output_target(group_by: &[Expr], accumulators: &[AggAccum]) -> PathTarget {
-    let mut exprs = Vec::with_capacity(group_by.len() + accumulators.len());
+fn aggregate_output_target(
+    group_by: &[Expr],
+    passthrough_exprs: &[Expr],
+    accumulators: &[AggAccum],
+) -> PathTarget {
+    let mut exprs =
+        Vec::with_capacity(group_by.len() + passthrough_exprs.len() + accumulators.len());
     exprs.extend(group_by.iter().cloned());
+    exprs.extend(passthrough_exprs.iter().cloned());
     exprs.extend(
         accumulators
             .iter()
@@ -734,40 +741,68 @@ fn window_semantic_output_target(input: &Path, clause: &WindowClause) -> PathTar
 pub(super) fn aggregate_output_vars(
     slot_id: usize,
     group_by: &[Expr],
+    passthrough_exprs: &[Expr],
     accumulators: &[AggAccum],
 ) -> Vec<Expr> {
-    let mut vars = Vec::with_capacity(group_by.len() + accumulators.len());
+    let mut vars =
+        Vec::with_capacity(group_by.len() + passthrough_exprs.len() + accumulators.len());
     for (index, expr) in group_by.iter().enumerate() {
         vars.push(slot_var(slot_id, user_attrno(index), expr_sql_type(expr)));
+    }
+    for (index, expr) in passthrough_exprs.iter().enumerate() {
+        vars.push(slot_var(
+            slot_id,
+            user_attrno(group_by.len() + index),
+            expr_sql_type(expr),
+        ));
     }
     for (index, accum) in accumulators.iter().enumerate() {
         vars.push(slot_var(
             slot_id,
-            user_attrno(group_by.len() + index),
+            user_attrno(group_by.len() + passthrough_exprs.len() + index),
             accum.sql_type,
         ));
     }
     vars
 }
 
+fn aggregate_expr_index(
+    expr: &Expr,
+    group_by: &[Expr],
+    passthrough_exprs: &[Expr],
+) -> Option<usize> {
+    group_by
+        .iter()
+        .position(|group_expr| group_expr == expr)
+        .or_else(|| {
+            passthrough_exprs
+                .iter()
+                .position(|passthrough_expr| passthrough_expr == expr)
+                .map(|index| group_by.len() + index)
+        })
+}
+
 pub(super) fn lower_agg_output_expr(
     expr: Expr,
     group_by: &[Expr],
+    passthrough_exprs: &[Expr],
     agg_output_layout: &[Expr],
 ) -> Expr {
-    if let Some(index) = group_by.iter().position(|group_expr| *group_expr == expr) {
+    if let Some(index) = aggregate_expr_index(&expr, group_by, passthrough_exprs) {
         return agg_output_layout[index].clone();
     }
     match expr {
         Expr::Aggref(aggref) => agg_output_layout
-            .get(group_by.len() + aggref.aggno)
+            .get(group_by.len() + passthrough_exprs.len() + aggref.aggno)
             .cloned()
             .unwrap_or_else(|| panic!("aggregate output slot {} missing", aggref.aggno)),
         Expr::Op(op) => Expr::Op(Box::new(OpExpr {
             args: op
                 .args
                 .into_iter()
-                .map(|arg| lower_agg_output_expr(arg, group_by, agg_output_layout))
+                .map(|arg| {
+                    lower_agg_output_expr(arg, group_by, passthrough_exprs, agg_output_layout)
+                })
                 .collect(),
             ..*op
         })),
@@ -775,7 +810,9 @@ pub(super) fn lower_agg_output_expr(
             args: bool_expr
                 .args
                 .into_iter()
-                .map(|arg| lower_agg_output_expr(arg, group_by, agg_output_layout))
+                .map(|arg| {
+                    lower_agg_output_expr(arg, group_by, passthrough_exprs, agg_output_layout)
+                })
                 .collect(),
             ..*bool_expr
         })),
@@ -783,7 +820,9 @@ pub(super) fn lower_agg_output_expr(
             args: func
                 .args
                 .into_iter()
-                .map(|arg| lower_agg_output_expr(arg, group_by, agg_output_layout))
+                .map(|arg| {
+                    lower_agg_output_expr(arg, group_by, passthrough_exprs, agg_output_layout)
+                })
                 .collect(),
             ..*func
         })),
@@ -791,17 +830,24 @@ pub(super) fn lower_agg_output_expr(
             left: Box::new(lower_agg_output_expr(
                 *saop.left,
                 group_by,
+                passthrough_exprs,
                 agg_output_layout,
             )),
             right: Box::new(lower_agg_output_expr(
                 *saop.right,
                 group_by,
+                passthrough_exprs,
                 agg_output_layout,
             )),
             ..*saop
         })),
         Expr::Cast(inner, ty) => Expr::Cast(
-            Box::new(lower_agg_output_expr(*inner, group_by, agg_output_layout)),
+            Box::new(lower_agg_output_expr(
+                *inner,
+                group_by,
+                passthrough_exprs,
+                agg_output_layout,
+            )),
             ty,
         ),
         Expr::Like {
@@ -812,10 +858,26 @@ pub(super) fn lower_agg_output_expr(
             negated,
             collation_oid,
         } => Expr::Like {
-            expr: Box::new(lower_agg_output_expr(*expr, group_by, agg_output_layout)),
-            pattern: Box::new(lower_agg_output_expr(*pattern, group_by, agg_output_layout)),
-            escape: escape
-                .map(|expr| Box::new(lower_agg_output_expr(*expr, group_by, agg_output_layout))),
+            expr: Box::new(lower_agg_output_expr(
+                *expr,
+                group_by,
+                passthrough_exprs,
+                agg_output_layout,
+            )),
+            pattern: Box::new(lower_agg_output_expr(
+                *pattern,
+                group_by,
+                passthrough_exprs,
+                agg_output_layout,
+            )),
+            escape: escape.map(|expr| {
+                Box::new(lower_agg_output_expr(
+                    *expr,
+                    group_by,
+                    passthrough_exprs,
+                    agg_output_layout,
+                ))
+            }),
             case_insensitive,
             negated,
             collation_oid,
@@ -827,30 +889,68 @@ pub(super) fn lower_agg_output_expr(
             negated,
             collation_oid,
         } => Expr::Similar {
-            expr: Box::new(lower_agg_output_expr(*expr, group_by, agg_output_layout)),
-            pattern: Box::new(lower_agg_output_expr(*pattern, group_by, agg_output_layout)),
-            escape: escape
-                .map(|expr| Box::new(lower_agg_output_expr(*expr, group_by, agg_output_layout))),
+            expr: Box::new(lower_agg_output_expr(
+                *expr,
+                group_by,
+                passthrough_exprs,
+                agg_output_layout,
+            )),
+            pattern: Box::new(lower_agg_output_expr(
+                *pattern,
+                group_by,
+                passthrough_exprs,
+                agg_output_layout,
+            )),
+            escape: escape.map(|expr| {
+                Box::new(lower_agg_output_expr(
+                    *expr,
+                    group_by,
+                    passthrough_exprs,
+                    agg_output_layout,
+                ))
+            }),
             negated,
             collation_oid,
         },
         Expr::IsNull(inner) => Expr::IsNull(Box::new(lower_agg_output_expr(
             *inner,
             group_by,
+            passthrough_exprs,
             agg_output_layout,
         ))),
         Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(lower_agg_output_expr(
             *inner,
             group_by,
+            passthrough_exprs,
             agg_output_layout,
         ))),
         Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
-            Box::new(lower_agg_output_expr(*left, group_by, agg_output_layout)),
-            Box::new(lower_agg_output_expr(*right, group_by, agg_output_layout)),
+            Box::new(lower_agg_output_expr(
+                *left,
+                group_by,
+                passthrough_exprs,
+                agg_output_layout,
+            )),
+            Box::new(lower_agg_output_expr(
+                *right,
+                group_by,
+                passthrough_exprs,
+                agg_output_layout,
+            )),
         ),
         Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
-            Box::new(lower_agg_output_expr(*left, group_by, agg_output_layout)),
-            Box::new(lower_agg_output_expr(*right, group_by, agg_output_layout)),
+            Box::new(lower_agg_output_expr(
+                *left,
+                group_by,
+                passthrough_exprs,
+                agg_output_layout,
+            )),
+            Box::new(lower_agg_output_expr(
+                *right,
+                group_by,
+                passthrough_exprs,
+                agg_output_layout,
+            )),
         ),
         Expr::ArrayLiteral {
             elements,
@@ -858,14 +958,21 @@ pub(super) fn lower_agg_output_expr(
         } => Expr::ArrayLiteral {
             elements: elements
                 .into_iter()
-                .map(|element| lower_agg_output_expr(element, group_by, agg_output_layout))
+                .map(|element| {
+                    lower_agg_output_expr(element, group_by, passthrough_exprs, agg_output_layout)
+                })
                 .collect(),
             array_type,
         },
         Expr::SubLink(sublink) => {
             Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
                 testexpr: sublink.testexpr.map(|expr| {
-                    Box::new(lower_agg_output_expr(*expr, group_by, agg_output_layout))
+                    Box::new(lower_agg_output_expr(
+                        *expr,
+                        group_by,
+                        passthrough_exprs,
+                        agg_output_layout,
+                    ))
                 }),
                 ..*sublink
             }))
@@ -873,27 +980,47 @@ pub(super) fn lower_agg_output_expr(
         Expr::SubPlan(subplan) => {
             Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
                 testexpr: subplan.testexpr.map(|expr| {
-                    Box::new(lower_agg_output_expr(*expr, group_by, agg_output_layout))
+                    Box::new(lower_agg_output_expr(
+                        *expr,
+                        group_by,
+                        passthrough_exprs,
+                        agg_output_layout,
+                    ))
                 }),
                 ..*subplan
             }))
         }
         Expr::Coalesce(left, right) => Expr::Coalesce(
-            Box::new(lower_agg_output_expr(*left, group_by, agg_output_layout)),
-            Box::new(lower_agg_output_expr(*right, group_by, agg_output_layout)),
+            Box::new(lower_agg_output_expr(
+                *left,
+                group_by,
+                passthrough_exprs,
+                agg_output_layout,
+            )),
+            Box::new(lower_agg_output_expr(
+                *right,
+                group_by,
+                passthrough_exprs,
+                agg_output_layout,
+            )),
         ),
         Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
-            array: Box::new(lower_agg_output_expr(*array, group_by, agg_output_layout)),
+            array: Box::new(lower_agg_output_expr(
+                *array,
+                group_by,
+                passthrough_exprs,
+                agg_output_layout,
+            )),
             subscripts: subscripts
                 .into_iter()
                 .map(|subscript| ExprArraySubscript {
                     is_slice: subscript.is_slice,
-                    lower: subscript
-                        .lower
-                        .map(|expr| lower_agg_output_expr(expr, group_by, agg_output_layout)),
-                    upper: subscript
-                        .upper
-                        .map(|expr| lower_agg_output_expr(expr, group_by, agg_output_layout)),
+                    lower: subscript.lower.map(|expr| {
+                        lower_agg_output_expr(expr, group_by, passthrough_exprs, agg_output_layout)
+                    }),
+                    upper: subscript.upper.map(|expr| {
+                        lower_agg_output_expr(expr, group_by, passthrough_exprs, agg_output_layout)
+                    }),
                 })
                 .collect(),
         },
