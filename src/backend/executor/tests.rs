@@ -893,6 +893,8 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        statement_timestamp_usecs:
+            crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
         gucs: std::collections::HashMap::new(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -959,6 +961,8 @@ fn run_plan(
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        statement_timestamp_usecs:
+            crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
         gucs: std::collections::HashMap::new(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -1061,6 +1065,8 @@ fn first_tuple_slot_kind_for_sql(
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            statement_timestamp_usecs:
+                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
             gucs: std::collections::HashMap::new(),
             interrupts: std::sync::Arc::new(
                 crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -1145,6 +1151,8 @@ fn first_tuple_slot_kind_for_plan(
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            statement_timestamp_usecs:
+                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
             gucs: std::collections::HashMap::new(),
             interrupts: std::sync::Arc::new(
                 crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -1243,6 +1251,8 @@ fn run_sql_with_catalog(
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            statement_timestamp_usecs:
+                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
             gucs: std::collections::HashMap::new(),
             interrupts: std::sync::Arc::new(
                 crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -1382,6 +1392,94 @@ fn expr_eval_obeys_null_semantics() {
         )
         .unwrap(),
         Value::Bool(true)
+    );
+}
+
+#[test]
+fn eval_current_catalog_and_schema() {
+    let base = temp_dir("eval_current_catalog_and_schema");
+    let mut ctx = empty_executor_context(&base);
+    ctx.catalog = Some(
+        crate::backend::utils::cache::visible_catalog::VisibleCatalog::new(
+            crate::backend::utils::cache::relcache::RelCache::default(),
+            None,
+        ),
+    );
+    let mut slot = TupleSlot::virtual_row(Vec::new());
+
+    assert_eq!(
+        eval_expr(&Expr::CurrentCatalog, &mut slot, &mut ctx).unwrap(),
+        Value::Text("postgres".into())
+    );
+    assert_eq!(
+        eval_expr(&Expr::CurrentSchema, &mut slot, &mut ctx).unwrap(),
+        Value::Text("public".into())
+    );
+
+    ctx.gucs.insert("search_path".into(), "notme".into());
+    assert_eq!(
+        eval_expr(&Expr::CurrentSchema, &mut slot, &mut ctx).unwrap(),
+        Value::Null
+    );
+
+    ctx.gucs.insert("search_path".into(), "pg_catalog".into());
+    assert_eq!(
+        eval_expr(&Expr::CurrentSchema, &mut slot, &mut ctx).unwrap(),
+        Value::Text("pg_catalog".into())
+    );
+
+    ctx.catalog = Some(
+        crate::backend::utils::cache::visible_catalog::VisibleCatalog::with_search_path(
+            crate::backend::utils::cache::relcache::RelCache::default(),
+            None,
+            vec!["pg_catalog".into(), "notme".into()],
+        ),
+    );
+    assert_eq!(
+        eval_expr(&Expr::CurrentSchema, &mut slot, &mut ctx).unwrap(),
+        Value::Null
+    );
+
+    ctx.catalog = Some(
+        crate::backend::utils::cache::visible_catalog::VisibleCatalog::with_search_path(
+            crate::backend::utils::cache::relcache::RelCache::default(),
+            None,
+            vec!["pg_catalog".into()],
+        ),
+    );
+    assert_eq!(
+        eval_expr(&Expr::CurrentSchema, &mut slot, &mut ctx).unwrap(),
+        Value::Text("pg_catalog".into())
+    );
+}
+
+#[test]
+fn eval_current_timestamp_uses_statement_timestamp() {
+    let base = temp_dir("eval_current_timestamp_uses_statement_timestamp");
+    let mut ctx = empty_executor_context(&base);
+    ctx.statement_timestamp_usecs = 123_456_789;
+    let mut slot = TupleSlot::virtual_row(Vec::new());
+    let timestamptz =
+        crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::TimestampTz);
+    let now = Expr::builtin_func(
+        crate::include::nodes::primnodes::BuiltinScalarFunction::Now,
+        Some(timestamptz),
+        false,
+        Vec::new(),
+    );
+
+    assert_eq!(
+        eval_expr(
+            &Expr::CurrentTimestamp { precision: None },
+            &mut slot,
+            &mut ctx
+        )
+        .unwrap(),
+        Value::TimestampTz(TimestampTzADT(123_456_789))
+    );
+    assert_eq!(
+        eval_expr(&now, &mut slot, &mut ctx).unwrap(),
+        Value::TimestampTz(TimestampTzADT(123_456_789))
     );
 }
 
@@ -4062,6 +4160,54 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
             ],
         ),
         "((dlevel <= (InitPlan 1).col1 AND f_leak(dtitle) AND pguser = CURRENT_USER))"
+    );
+}
+
+#[test]
+fn explain_expr_renders_scalar_array_op_with_typed_array_literal() {
+    use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
+    use crate::include::nodes::datum::NumericValue;
+
+    let float_array = Expr::scalar_array_op(
+        SubqueryComparisonOp::Eq,
+        true,
+        Expr::Random,
+        Expr::ArrayLiteral {
+            elements: vec![
+                Expr::Const(Value::Int32(1)),
+                Expr::Const(Value::Int32(4)),
+                Expr::Const(Value::Numeric(NumericValue::from("8.0"))),
+            ],
+            array_type: SqlType::array_of(SqlType::new(SqlTypeKind::Float8)),
+        },
+    );
+    assert_eq!(
+        render_explain_expr(&float_array, &[]),
+        "(random() = ANY ('{1,4,8}'::double precision[]))"
+    );
+
+    let numeric_array = Expr::scalar_array_op(
+        SubqueryComparisonOp::Eq,
+        true,
+        Expr::Cast(
+            Box::new(Expr::Cast(
+                Box::new(Expr::Random),
+                SqlType::new(SqlTypeKind::Int4),
+            )),
+            SqlType::new(SqlTypeKind::Numeric),
+        ),
+        Expr::ArrayLiteral {
+            elements: vec![
+                Expr::Const(Value::Int32(1)),
+                Expr::Const(Value::Int32(4)),
+                Expr::Const(Value::Numeric(NumericValue::from("8.0"))),
+            ],
+            array_type: SqlType::array_of(SqlType::new(SqlTypeKind::Numeric)),
+        },
+    );
+    assert_eq!(
+        render_explain_expr(&numeric_array, &[]),
+        "(((random())::integer)::numeric = ANY ('{1,4,8.0}'::numeric[]))"
     );
 }
 
@@ -9904,6 +10050,8 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        statement_timestamp_usecs:
+            crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
         gucs: std::collections::HashMap::new(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -21272,6 +21420,8 @@ fn large_object_metadata_tracks_create_and_unlink() {
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            statement_timestamp_usecs:
+                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
             gucs: std::collections::HashMap::new(),
             interrupts: std::sync::Arc::new(
                 crate::backend::utils::misc::interrupts::InterruptState::new(),

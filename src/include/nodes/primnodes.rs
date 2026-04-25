@@ -1618,6 +1618,8 @@ pub enum Expr {
     CurrentUser,
     SessionUser,
     CurrentRole,
+    CurrentCatalog,
+    CurrentSchema,
     CurrentDate,
     CurrentTime {
         precision: Option<i32>,
@@ -1946,6 +1948,7 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         Expr::CurrentUser | Expr::SessionUser | Expr::CurrentRole => {
             Some(SqlType::new(SqlTypeKind::Name))
         }
+        Expr::CurrentCatalog | Expr::CurrentSchema => Some(SqlType::new(SqlTypeKind::Text)),
         Expr::Xml(xml) => Some(match xml.op {
             XmlExprOp::Serialize => xml.target_type.unwrap_or(SqlType::new(SqlTypeKind::Text)),
             XmlExprOp::IsDocument => SqlType::new(SqlTypeKind::Bool),
@@ -2130,6 +2133,8 @@ pub fn expr_contains_set_returning(expr: &Expr) -> bool {
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentDate
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }

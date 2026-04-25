@@ -611,6 +611,8 @@ impl Database {
             row_locks: Arc::clone(&self.row_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            statement_timestamp_usecs:
+                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
             gucs: std::collections::HashMap::new(),
             interrupts: Arc::clone(&interrupts),
             stats: Arc::clone(&self.stats),
@@ -1266,6 +1268,8 @@ impl Database {
             row_locks: Arc::clone(&self.row_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            statement_timestamp_usecs:
+                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
             gucs: std::collections::HashMap::new(),
             interrupts: Arc::clone(&interrupts),
             stats: Arc::clone(&self.stats),
@@ -1371,6 +1375,8 @@ impl Database {
             row_locks: Arc::clone(&self.row_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            statement_timestamp_usecs:
+                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
             gucs: std::collections::HashMap::new(),
             interrupts: Arc::clone(&interrupts),
             stats: Arc::clone(&self.stats),
@@ -1711,6 +1717,8 @@ impl Database {
                 checkpoint_stats: self.checkpoint_stats_snapshot(),
                 datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(
                 ),
+                statement_timestamp_usecs:
+                    crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
                 gucs: std::collections::HashMap::new(),
                 interrupts: Arc::clone(&interrupts),
                 stats: Arc::clone(&self.stats),
