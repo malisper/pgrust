@@ -1870,6 +1870,15 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
     decode_value_with_toast(column, bytes, None)
 }
 
+fn unsupported_storage_type(column: &ColumnDesc, bytes: &[u8]) -> ExecError {
+    ExecError::UnsupportedStorageType {
+        column: column.name.clone(),
+        ty: column.ty.clone(),
+        attlen: column.storage.attlen,
+        actual_len: Some(bytes.len()),
+    }
+}
+
 pub(crate) fn decode_value_with_toast(
     column: &ColumnDesc,
     bytes: Option<&[u8]>,
@@ -1913,11 +1922,7 @@ pub(crate) fn decode_value_with_toast(
     match column.ty {
         ScalarType::Int16 => {
             if column.storage.attlen != 2 || bytes.len() != 2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Int16(i16::from_le_bytes(bytes.try_into().map_err(
                 |_| ExecError::InvalidStorageValue {
@@ -1928,11 +1933,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Int32 => {
             if column.storage.attlen != 4 || bytes.len() != 4 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             let raw = i32::from_le_bytes(bytes.try_into().map_err(|_| {
                 ExecError::InvalidStorageValue {
@@ -1980,11 +1981,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Int64 => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Int64(i64::from_le_bytes(bytes.try_into().map_err(
                 |_| ExecError::InvalidStorageValue {
@@ -1995,11 +1992,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Money => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Money(i64::from_le_bytes(bytes.try_into().map_err(
                 |_| ExecError::InvalidStorageValue {
@@ -2010,11 +2003,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Date => {
             if column.storage.attlen != 4 || bytes.len() != 4 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Date(crate::include::nodes::datetime::DateADT(
                 i32::from_le_bytes(bytes.try_into().unwrap()),
@@ -2022,11 +2011,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Time => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Time(crate::include::nodes::datetime::TimeADT(
                 i64::from_le_bytes(bytes.try_into().unwrap()),
@@ -2034,11 +2019,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::TimeTz => {
             if column.storage.attlen != 12 || bytes.len() != 12 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::TimeTz(crate::include::nodes::datetime::TimeTzADT {
                 time: crate::include::nodes::datetime::TimeADT(i64::from_le_bytes(
@@ -2049,11 +2030,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Timestamp => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Timestamp(
                 crate::include::nodes::datetime::TimestampADT(i64::from_le_bytes(
@@ -2063,11 +2040,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::TimestampTz => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::TimestampTz(
                 crate::include::nodes::datetime::TimestampTzADT(i64::from_le_bytes(
@@ -2077,11 +2050,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Interval => {
             if column.storage.attlen != 16 || bytes.len() != 16 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Interval(
                 crate::include::nodes::datum::IntervalValue {
@@ -2093,11 +2062,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::BitString => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             if bytes.len() < 4 {
                 return Err(ExecError::InvalidStorageValue {
@@ -2113,41 +2078,25 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Bytea => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Bytea(bytes.to_vec()))
         }
         ScalarType::Uuid => {
             if column.storage.attlen != 16 || bytes.len() != 16 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Uuid(bytes.try_into().unwrap()))
         }
         ScalarType::Inet => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             parse_inet_bytes(bytes).map(Value::Inet)
         }
         ScalarType::Cidr => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             parse_cidr_bytes(bytes).map(Value::Cidr)
         }
@@ -2173,11 +2122,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Float32 => {
             if column.storage.attlen != 4 || bytes.len() != 4 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Float64(
                 f32::from_le_bytes(bytes.try_into().map_err(|_| {
@@ -2190,11 +2135,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Float64 => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Float64(f64::from_le_bytes(
                 bytes
@@ -2207,11 +2148,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Point => {
             if column.storage.attlen != 16 || bytes.len() != 16 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Point(GeoPoint {
                 x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
@@ -2220,11 +2157,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Line => {
             if column.storage.attlen != 24 || bytes.len() != 24 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Line(GeoLine {
                 a: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
@@ -2234,11 +2167,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Lseg => {
             if column.storage.attlen != 32 || bytes.len() != 32 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Lseg(GeoLseg {
                 p: [
@@ -2255,11 +2184,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Box => {
             if column.storage.attlen != 32 || bytes.len() != 32 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Box(GeoBox {
                 high: GeoPoint {
@@ -2274,11 +2199,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Circle => {
             if column.storage.attlen != 24 || bytes.len() != 24 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Circle(GeoCircle {
                 center: GeoPoint {
@@ -2290,11 +2211,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Numeric => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Numeric(
                 parse_numeric_text(unsafe { std::str::from_utf8_unchecked(bytes) }).ok_or_else(
@@ -2307,11 +2224,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Json => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             let text = unsafe { std::str::from_utf8_unchecked(bytes) };
             validate_json_text(text)?;
@@ -2319,44 +2232,28 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Jsonb => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             decode_jsonb(bytes)?;
             Ok(Value::Jsonb(bytes.to_vec()))
         }
         ScalarType::JsonPath => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             let text = unsafe { std::str::from_utf8_unchecked(bytes) };
             Ok(Value::JsonPath(canonicalize_jsonpath_text(text)?))
         }
         ScalarType::Xml => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             let text = unsafe { std::str::from_utf8_unchecked(bytes) };
             Ok(Value::Xml(CompactString::new(text)))
         }
         ScalarType::TsVector => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::TsVector(
                 crate::backend::executor::decode_tsvector_bytes(bytes)?,
@@ -2364,11 +2261,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::TsQuery => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::TsQuery(
                 crate::backend::executor::decode_tsquery_bytes(bytes)?,
@@ -2376,11 +2269,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::PgLsn => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::PgLsn(u64::from_le_bytes(bytes.try_into().map_err(
                 |_| ExecError::InvalidStorageValue {
@@ -2391,11 +2280,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Text => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Text(CompactString::new(unsafe {
                 std::str::from_utf8_unchecked(bytes)
@@ -2403,41 +2288,25 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Record => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             decode_composite_datum(bytes).map(Value::Record)
         }
         ScalarType::Path => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Path(decode_path_bytes(bytes)?))
         }
         ScalarType::Polygon => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Polygon(decode_polygon_bytes(bytes)?))
         }
         ScalarType::Bool => {
             if column.storage.attlen != 1 || bytes.len() != 1 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             match bytes[0] {
                 0 => Ok(Value::Bool(false)),
@@ -2450,11 +2319,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Array(_) => {
             if column.storage.attlen != -1 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             if column.sql_type.kind == SqlTypeKind::AnyArray {
                 decode_anyarray_bytes(bytes)
@@ -2464,11 +2329,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Multirange(multirange_type) => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Multirange(
                 crate::backend::executor::decode_multirange_bytes(multirange_type, bytes)?,
@@ -2476,11 +2337,7 @@ pub(crate) fn decode_value_with_toast(
         }
         ScalarType::Range(range_type) => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty.clone(),
-                    attlen: column.storage.attlen,
-                });
+                return Err(unsupported_storage_type(column, bytes));
             }
             Ok(Value::Range(decode_range_bytes(range_type, bytes)?))
         }

@@ -8,7 +8,9 @@ use super::*;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io;
+#[cfg(not(unix))]
+use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -318,6 +320,76 @@ impl MdStorageManager {
             }
         }
     }
+
+    fn fork_has_segment_after_zero(&self, rel: RelFileLocator, fork: ForkNumber) -> bool {
+        self.seg_path(rel, fork, 1).exists()
+    }
+
+    pub fn replace_relation_main_fork_from_shadow(
+        &mut self,
+        shadow: RelFileLocator,
+        target: RelFileLocator,
+    ) -> Result<(), SmgrError> {
+        if shadow == target {
+            return Err(SmgrError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "shadow and target relfiles must differ",
+            )));
+        }
+        if self.fork_has_segment_after_zero(shadow, ForkNumber::Main)
+            || self.fork_has_segment_after_zero(target, ForkNumber::Main)
+        {
+            return Err(SmgrError::Io(io::Error::new(
+                io::ErrorKind::Other,
+                "atomic relfile replacement only supports single-segment main forks",
+            )));
+        }
+
+        self.close(shadow, ForkNumber::Main)?;
+        self.close(target, ForkNumber::Main)?;
+
+        let shadow_path = self.seg_path(shadow, ForkNumber::Main, 0);
+        let target_path = self.seg_path(target, ForkNumber::Main, 0);
+        if !shadow_path.exists() {
+            return Err(SmgrError::RelationNotFound {
+                rel: shadow,
+                fork: ForkNumber::Main,
+            });
+        }
+
+        let shadow_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&shadow_path)?;
+        crate::backend::storage::fsync_file(&shadow_file)?;
+        drop(shadow_file);
+
+        let parent = target_path.parent().ok_or_else(|| {
+            SmgrError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "target relfile has no parent directory",
+            ))
+        })?;
+        crate::backend::storage::fsync_dir(parent)?;
+        fs::rename(&shadow_path, &target_path)?;
+        crate::backend::storage::fsync_dir(parent)?;
+
+        for fork in [
+            ForkNumber::Main,
+            ForkNumber::Fsm,
+            ForkNumber::VisibilityMap,
+            ForkNumber::Init,
+        ] {
+            self.nblocks_cache.remove(&(shadow, fork));
+            self.nblocks_cache.remove(&(target, fork));
+            self.created_forks.remove(&(shadow, fork));
+        }
+        self.opened_rels.remove(&shadow);
+        self.created_forks.insert((target, ForkNumber::Main));
+        self.opened_rels.insert(target);
+
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
@@ -333,14 +405,45 @@ fn file_read_at(file: &mut File, buf: &mut [u8], byte_offset: u64) -> io::Result
 }
 
 #[cfg(unix)]
-fn file_write_at(file: &mut File, data: &[u8], byte_offset: u64) -> io::Result<usize> {
-    file.write_at(data, byte_offset)
+fn file_write_all_at(file: &mut File, mut data: &[u8], mut byte_offset: u64) -> io::Result<()> {
+    while !data.is_empty() {
+        let written = match file.write_at(data, byte_offset) {
+            Ok(written) => written,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        };
+        if written == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "failed to write a complete page",
+            ));
+        }
+        data = &data[written..];
+        byte_offset += written as u64;
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn file_write_at(file: &mut File, data: &[u8], byte_offset: u64) -> io::Result<usize> {
+fn file_write_all_at(file: &mut File, mut data: &[u8], mut byte_offset: u64) -> io::Result<()> {
     file.seek(SeekFrom::Start(byte_offset))?;
-    file.write(data)
+    while !data.is_empty() {
+        let written = match file.write(data) {
+            Ok(written) => written,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        };
+        if written == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "failed to write a complete page",
+            ));
+        }
+        data = &data[written..];
+        byte_offset += written as u64;
+        file.seek(SeekFrom::Start(byte_offset))?;
+    }
+    Ok(())
 }
 
 impl StorageManager for MdStorageManager {
@@ -482,13 +585,7 @@ impl StorageManager for MdStorageManager {
         let byte_offset = seg_offset as u64 * BLCKSZ as u64;
 
         let seg = self.get_seg(rel, fork, segno)?;
-        let n = file_write_at(&mut seg.file, data, byte_offset)?;
-        if n != BLCKSZ {
-            return Err(SmgrError::ShortIo {
-                expected: BLCKSZ,
-                actual: n,
-            });
-        }
+        file_write_all_at(&mut seg.file, data, byte_offset)?;
 
         if !skip_fsync {
             crate::backend::storage::fsync_file(&seg.file)?;
@@ -596,14 +693,7 @@ impl StorageManager for MdStorageManager {
         let byte_offset = seg_offset as u64 * BLCKSZ as u64;
 
         let seg = self.get_or_create_seg(rel, fork, segno)?;
-        seg.file.seek(SeekFrom::Start(byte_offset))?;
-        let n = seg.file.write(data)?;
-        if n != BLCKSZ {
-            return Err(SmgrError::ShortIo {
-                expected: BLCKSZ,
-                actual: n,
-            });
-        }
+        file_write_all_at(&mut seg.file, data, byte_offset)?;
 
         if !skip_fsync {
             crate::backend::storage::fsync_file(&seg.file)?;
@@ -724,6 +814,7 @@ impl StorageManager for MdStorageManager {
 mod tests {
     use super::*;
     use std::env;
+    use std::io::Write;
 
     fn temp_smgr(label: &str) -> (MdStorageManager, PathBuf) {
         let base = env::temp_dir().join(format!("pgrust_smgr_test_{}", label));
@@ -973,6 +1064,80 @@ mod tests {
 
         assert!(!smgr.exists(rel, ForkNumber::Main));
         assert!(!smgr.exists(rel, ForkNumber::Fsm));
+    }
+
+    #[test]
+    fn test_replace_relation_main_fork_from_shadow() {
+        let (mut smgr, base) = temp_smgr("replace_shadow");
+        let target = test_rel(6100);
+        let shadow = test_rel(6101);
+
+        smgr.open(target).unwrap();
+        smgr.create(target, ForkNumber::Main, false).unwrap();
+        smgr.extend(target, ForkNumber::Main, 0, &page_pattern(1), true)
+            .unwrap();
+
+        smgr.open(shadow).unwrap();
+        smgr.create(shadow, ForkNumber::Main, false).unwrap();
+        smgr.extend(shadow, ForkNumber::Main, 0, &page_pattern(2), true)
+            .unwrap();
+
+        smgr.replace_relation_main_fork_from_shadow(shadow, target)
+            .unwrap();
+
+        let target_path = segment_path(&base, target, ForkNumber::Main, 0);
+        let shadow_path = segment_path(&base, shadow, ForkNumber::Main, 0);
+        assert!(target_path.exists(), "target relfile should remain");
+        assert!(!shadow_path.exists(), "shadow relfile should be consumed");
+
+        let mut buf = vec![0u8; BLCKSZ];
+        smgr.read_block(target, ForkNumber::Main, 0, &mut buf)
+            .unwrap();
+        assert_eq!(buf, page_pattern(2));
+    }
+
+    #[test]
+    fn test_replace_relation_main_fork_rejects_multisegment() {
+        let (mut smgr, base) = temp_smgr("replace_shadow_multiseg");
+        let target = test_rel(6110);
+        let shadow = test_rel(6111);
+
+        smgr.open(target).unwrap();
+        smgr.create(target, ForkNumber::Main, false).unwrap();
+        smgr.extend(target, ForkNumber::Main, 0, &page_pattern(1), true)
+            .unwrap();
+
+        smgr.open(shadow).unwrap();
+        smgr.create(shadow, ForkNumber::Main, false).unwrap();
+        smgr.extend(shadow, ForkNumber::Main, 0, &page_pattern(2), true)
+            .unwrap();
+
+        let shadow_seg1 = segment_path(&base, shadow, ForkNumber::Main, 1);
+        fs::write(&shadow_seg1, page_pattern(3)).unwrap();
+        let err = smgr
+            .replace_relation_main_fork_from_shadow(shadow, target)
+            .unwrap_err();
+        assert!(matches!(err, SmgrError::Io(_)));
+
+        let mut buf = vec![0u8; BLCKSZ];
+        smgr.read_block(target, ForkNumber::Main, 0, &mut buf)
+            .unwrap();
+        assert_eq!(buf, page_pattern(1));
+        assert!(
+            segment_path(&base, shadow, ForkNumber::Main, 0).exists(),
+            "shadow segment 0 should remain after rejected replacement"
+        );
+
+        fs::remove_file(&shadow_seg1).unwrap();
+        let target_seg1 = segment_path(&base, target, ForkNumber::Main, 1);
+        fs::write(&target_seg1, page_pattern(4)).unwrap();
+        let err = smgr
+            .replace_relation_main_fork_from_shadow(shadow, target)
+            .unwrap_err();
+        assert!(matches!(err, SmgrError::Io(_)));
+        smgr.read_block(target, ForkNumber::Main, 0, &mut buf)
+            .unwrap();
+        assert_eq!(buf, page_pattern(1));
     }
 
     #[test]
