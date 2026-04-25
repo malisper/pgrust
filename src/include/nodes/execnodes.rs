@@ -625,6 +625,7 @@ pub struct ProjectionState {
 pub struct OrderByState {
     pub(crate) input: PlanState,
     pub(crate) items: Vec<OrderByEntry>,
+    pub(crate) display_items: Vec<String>,
     pub(crate) rows: Option<Vec<MaterializedRow>>,
     pub(crate) next_index: usize,
     pub(crate) current_bindings: Vec<SystemVarBinding>,

@@ -1631,6 +1631,16 @@ fn analyze_join_using_creates_join_rte_alias_vars() {
 }
 
 #[test]
+fn analyze_from_alias_updates_rte_alias() {
+    let stmt = parse_select("select t.id from people t").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+
+    assert_eq!(query.rtable.len(), 1);
+    assert_eq!(query.rtable[0].alias.as_deref(), Some("t"));
+}
+
+#[test]
 fn rewrite_query_expands_view_relation_rtes() {
     let mut catalog = catalog();
     let view = people_view_entry();
