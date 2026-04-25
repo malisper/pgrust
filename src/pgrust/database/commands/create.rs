@@ -1944,7 +1944,7 @@ impl Database {
                 let created = self.create_temp_relation_with_relkind_in_transaction(
                     client_id,
                     table_name.clone(),
-                    desc,
+                    desc.clone(),
                     create_stmt.on_commit,
                     xid,
                     table_cid,
@@ -2059,6 +2059,7 @@ impl Database {
                     configured_search_path,
                     catalog_effects,
                 )?;
+                self.replace_temp_entry_desc(client_id, relation.relation_oid, desc)?;
                 if let Some(parent_oid) = lowered.partition_parent_oid {
                     let next_cid = self
                         .reconcile_partitioned_parent_indexes_for_attached_child_in_transaction(

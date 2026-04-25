@@ -261,6 +261,7 @@ fn print_result(result: StatementResult) {
 fn print_plpgsql_notices() {
     for notice in take_notices() {
         let level = match notice.level {
+            RaiseLevel::Info => "INFO",
             RaiseLevel::Notice => "NOTICE",
             RaiseLevel::Warning => "WARNING",
             RaiseLevel::Exception => "EXCEPTION",
@@ -552,6 +553,8 @@ fn run_statement(
         | Statement::CommentOnConversion(_)
         | Statement::CommentOnForeignDataWrapper(_)
         | Statement::CreateForeignDataWrapper(_)
+        | Statement::CreateForeignServer(_)
+        | Statement::CreateForeignTable(_)
         | Statement::AlterForeignDataWrapper(_)
         | Statement::AlterForeignDataWrapperOwner(_)
         | Statement::AlterForeignDataWrapperRename(_)

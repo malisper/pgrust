@@ -25,7 +25,7 @@ impl Database {
 
         for table_name in &stmt.table_names {
             let entry = match catalog.lookup_any_relation(table_name) {
-                Some(entry) if entry.relkind == 'r' => entry,
+                Some(entry) if entry.relkind == 'r' || entry.relkind == 'p' => entry,
                 Some(_) => {
                     return Err(ExecError::Parse(ParseError::WrongObjectType {
                         name: table_name.clone(),
@@ -38,30 +38,37 @@ impl Database {
                     )));
                 }
             };
-            if catalog.has_subclass(entry.relation_oid) {
+            let truncate_targets = if entry.relkind == 'p' {
+                partitioned_truncate_targets(&catalog, entry.relation_oid)
+            } else if catalog.has_subclass(entry.relation_oid) {
                 return Err(ExecError::Parse(ParseError::FeatureNotSupported(
                     "TRUNCATE on inherited parents is not supported yet".into(),
                 )));
-            }
-            if !truncated_relation_oids.contains(&entry.relation_oid) {
-                truncated_relation_oids.push(entry.relation_oid);
-            }
+            } else {
+                vec![entry]
+            };
 
-            if !rewrite_oids.contains(&entry.relation_oid) {
-                rewrite_oids.push(entry.relation_oid);
-            }
-            for index in catalog.index_relations_for_heap(entry.relation_oid) {
-                if !rewrite_oids.contains(&index.relation_oid) {
-                    rewrite_oids.push(index.relation_oid);
+            for target in truncate_targets {
+                if !truncated_relation_oids.contains(&target.relation_oid) {
+                    truncated_relation_oids.push(target.relation_oid);
                 }
-            }
-            if let Some(toast) = entry.toast {
-                if !rewrite_oids.contains(&toast.relation_oid) {
-                    rewrite_oids.push(toast.relation_oid);
+
+                if !rewrite_oids.contains(&target.relation_oid) {
+                    rewrite_oids.push(target.relation_oid);
                 }
-                for index in catalog.index_relations_for_heap(toast.relation_oid) {
+                for index in catalog.index_relations_for_heap(target.relation_oid) {
                     if !rewrite_oids.contains(&index.relation_oid) {
                         rewrite_oids.push(index.relation_oid);
+                    }
+                }
+                if let Some(toast) = target.toast {
+                    if !rewrite_oids.contains(&toast.relation_oid) {
+                        rewrite_oids.push(toast.relation_oid);
+                    }
+                    for index in catalog.index_relations_for_heap(toast.relation_oid) {
+                        if !rewrite_oids.contains(&index.relation_oid) {
+                            rewrite_oids.push(index.relation_oid);
+                        }
                     }
                 }
             }
@@ -841,6 +848,26 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateForeignServer(ref create_stmt) => {
+                self.execute_create_foreign_server_stmt(client_id, create_stmt)
+            }
+            Statement::CreateForeignTable(ref create_stmt) => {
+                let xid = self.txns.write().begin();
+                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let mut catalog_effects = Vec::new();
+                let result = self
+                    .execute_create_foreign_table_stmt_in_transaction_with_search_path(
+                        client_id,
+                        create_stmt,
+                        xid,
+                        0,
+                        configured_search_path,
+                        &mut catalog_effects,
+                    );
+                let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+                guard.disarm();
+                result
+            }
             Statement::AlterForeignDataWrapper(ref alter_stmt) => self
                 .execute_alter_foreign_data_wrapper_stmt_with_search_path(
                     client_id,
@@ -1836,4 +1863,17 @@ impl Database {
             interrupt_guard: None,
         })
     }
+}
+
+fn partitioned_truncate_targets(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    root_oid: u32,
+) -> Vec<crate::backend::parser::BoundRelation> {
+    catalog
+        .find_all_inheritors(root_oid)
+        .into_iter()
+        .filter(|oid| *oid != root_oid)
+        .filter_map(|oid| catalog.relation_by_oid(oid))
+        .filter(|entry| entry.relkind == 'r')
+        .collect()
 }

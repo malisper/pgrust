@@ -235,6 +235,7 @@ fn main() -> Result<(), ExecError> {
     };
     for notice in take_notices() {
         let level = match notice.level {
+            RaiseLevel::Info => "INFO",
             RaiseLevel::Notice => "NOTICE",
             RaiseLevel::Warning => "WARNING",
             RaiseLevel::Exception => "EXCEPTION",
