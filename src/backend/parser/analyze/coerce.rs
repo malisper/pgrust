@@ -266,9 +266,11 @@ pub(crate) fn sql_type_name(ty: SqlType) -> String {
             SqlTypeKind::Enum => return ty.type_oid.to_string(),
             SqlTypeKind::Record => "record",
             SqlTypeKind::Composite => "record",
+            SqlTypeKind::Shell => "shell",
             SqlTypeKind::Internal => "internal",
             SqlTypeKind::Trigger => "trigger",
             SqlTypeKind::Void => "void",
+            SqlTypeKind::Cstring => "cstring",
             SqlTypeKind::FdwHandler => "fdw_handler",
             SqlTypeKind::Int2 => "smallint",
             SqlTypeKind::Int2Vector => "int2vector",
@@ -457,6 +459,8 @@ pub(super) fn coerce_unknown_string_literal_type(
             SqlTypeKind::TsVector => return SqlType::new(SqlTypeKind::TsVector),
             SqlTypeKind::Tid => return SqlType::new(SqlTypeKind::Tid),
             SqlTypeKind::Void => return SqlType::new(SqlTypeKind::Void),
+            SqlTypeKind::Shell => return SqlType::new(SqlTypeKind::Shell),
+            SqlTypeKind::Cstring => return SqlType::new(SqlTypeKind::Cstring),
             SqlTypeKind::FdwHandler => return SqlType::new(SqlTypeKind::FdwHandler),
             SqlTypeKind::RegClass => return SqlType::new(SqlTypeKind::RegClass),
             SqlTypeKind::RegType => return SqlType::new(SqlTypeKind::RegType),
@@ -478,6 +482,10 @@ pub(super) fn coerce_unknown_string_literal_type(
                     return SqlType::array_of(SqlType::new(SqlTypeKind::TsVector));
                 }
                 SqlTypeKind::Void => return SqlType::array_of(SqlType::new(SqlTypeKind::Void)),
+                SqlTypeKind::Shell => return SqlType::array_of(SqlType::new(SqlTypeKind::Shell)),
+                SqlTypeKind::Cstring => {
+                    return SqlType::array_of(SqlType::new(SqlTypeKind::Cstring));
+                }
                 SqlTypeKind::FdwHandler => {
                     return SqlType::array_of(SqlType::new(SqlTypeKind::FdwHandler));
                 }

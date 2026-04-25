@@ -705,9 +705,16 @@ pub struct CreateTriggerStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateTypeStatement {
+    Shell(CreateShellTypeStatement),
     Composite(CreateCompositeTypeStatement),
     Enum(CreateEnumTypeStatement),
     Range(CreateRangeTypeStatement),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateShellTypeStatement {
+    pub schema_name: Option<String>,
+    pub type_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2919,6 +2926,7 @@ pub enum SqlTypeKind {
     Record,
     Composite,
     Enum,
+    Shell,
     Void,
     Trigger,
     FdwHandler,
@@ -2986,6 +2994,7 @@ pub enum SqlTypeKind {
     TimestampTz,
     PgNodeTree,
     Internal,
+    Cstring,
     InternalChar,
     Char,
     Varchar,

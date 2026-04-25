@@ -537,6 +537,13 @@ fn array_element_layout(
                 details: "internal arrays are unsupported".into(),
             });
         }
+        SqlTypeKind::Shell => {
+            return Err(ExecError::InvalidStorageValue {
+                column: column.into(),
+                details: "shell type arrays are unsupported".into(),
+            });
+        }
+        SqlTypeKind::Cstring => (-2, AttributeAlign::Char),
         SqlTypeKind::Trigger => {
             return Err(ExecError::InvalidStorageValue {
                 column: column.into(),
@@ -892,6 +899,10 @@ fn decode_array_element_value(
             column: column.into(),
             details: "internal arrays are unsupported".into(),
         }),
+        SqlTypeKind::Shell => Err(ExecError::InvalidStorageValue {
+            column: column.into(),
+            details: "shell type arrays are unsupported".into(),
+        }),
         SqlTypeKind::Trigger => Err(ExecError::InvalidStorageValue {
             column: column.into(),
             details: "trigger arrays are unsupported".into(),
@@ -1222,6 +1233,7 @@ fn decode_array_element_value(
             Ok(Value::Bool(bytes[0] != 0))
         }
         SqlTypeKind::Text
+        | SqlTypeKind::Cstring
         | SqlTypeKind::Tid
         | SqlTypeKind::Name
         | SqlTypeKind::Int2Vector

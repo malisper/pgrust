@@ -30,9 +30,11 @@ use crate::backend::catalog::toasting::{
     relation_needs_toast_table, toast_index_name, toast_relation_desc, toast_relation_name,
 };
 use crate::backend::executor::{ColumnDesc, RelationDesc};
+use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, sql_type_oid};
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::backend::utils::cache::syscache::{SysCacheId, SysCacheTuple};
+use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BootstrapCatalogKind, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
     CONSTRAINT_UNIQUE, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_AM_RELATION_OID,
@@ -2930,6 +2932,50 @@ impl CatalogStore {
         Ok((entry, effect))
     }
 
+    pub fn create_shell_type_mvcc(
+        &mut self,
+        name: impl Into<String>,
+        namespace_oid: u32,
+        owner_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let name = name.into();
+        let object_name = relation_object_name(&name).to_ascii_lowercase();
+        if type_row_by_name_namespace_mvcc(self, ctx, &object_name, namespace_oid)?.is_some() {
+            return Err(CatalogError::TableAlreadyExists(object_name));
+        }
+        let oid = self.allocate_next_oid(0)?;
+        let row = PgTypeRow {
+            oid,
+            typname: object_name,
+            typnamespace: namespace_oid,
+            typowner: owner_oid,
+            typlen: -1,
+            typalign: AttributeAlign::Int,
+            typstorage: AttributeStorage::Plain,
+            typrelid: 0,
+            typelem: 0,
+            typarray: 0,
+            sql_type: SqlType::new(SqlTypeKind::Shell).with_identity(oid, 0),
+        };
+        let kinds = [BootstrapCatalogKind::PgType];
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                types: vec![row],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.namespace_oids, namespace_oid);
+        effect_record_oid(&mut effect.type_oids, oid);
+        Ok((oid, effect))
+    }
+
     pub fn create_index_for_relation_mvcc(
         &mut self,
         index_name: impl Into<String>,
@@ -4442,6 +4488,45 @@ impl CatalogStore {
         effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
         effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
         Ok((entry, effect))
+    }
+
+    pub fn drop_shell_type_by_oid_mvcc(
+        &mut self,
+        type_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let type_row = type_row_by_oid_mvcc(self, ctx, type_oid)?
+            .ok_or_else(|| CatalogError::UnknownType(type_oid.to_string()))?;
+        if !matches!(type_row.sql_type.kind, SqlTypeKind::Shell) {
+            return Err(CatalogError::UnknownType(type_oid.to_string()));
+        }
+        let description_rows =
+            description_rows_for_object_mvcc(self, ctx, type_oid, PG_TYPE_RELATION_OID, 0)?;
+        let depend_rows = depend_rows_for_object_mvcc(self, ctx, PG_TYPE_RELATION_OID, type_oid)?;
+        let mut kinds = vec![BootstrapCatalogKind::PgType];
+        if !description_rows.is_empty() {
+            kinds.push(BootstrapCatalogKind::PgDescription);
+        }
+        if !depend_rows.is_empty() {
+            kinds.push(BootstrapCatalogKind::PgDepend);
+        }
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                types: vec![type_row.clone()],
+                descriptions: description_rows,
+                depends: depend_rows,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.namespace_oids, type_row.typnamespace);
+        effect_record_oid(&mut effect.type_oids, type_row.oid);
+        Ok(effect)
     }
 
     pub fn set_index_ready_valid_mvcc(

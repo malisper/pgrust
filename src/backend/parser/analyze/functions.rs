@@ -1101,6 +1101,11 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgRustTestFdwHandler => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncSetup => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncConversion => args.len() == 4,
+            BuiltinScalarFunction::PgRustTestWidgetIn
+            | BuiltinScalarFunction::PgRustTestWidgetOut
+            | BuiltinScalarFunction::PgRustTestInt44In
+            | BuiltinScalarFunction::PgRustTestInt44Out => args.len() == 1,
+            BuiltinScalarFunction::PgRustTestPtInWidget => args.len() == 2,
             BuiltinScalarFunction::CurrentSetting => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgNotify => args.len() == 2,
             BuiltinScalarFunction::PgNotificationQueueUsage => args.is_empty(),
@@ -2014,6 +2019,26 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_rust_test_enc_conversion",
             BuiltinScalarFunction::PgRustTestEncConversion,
+        ),
+        (
+            "pg_rust_test_widget_in",
+            BuiltinScalarFunction::PgRustTestWidgetIn,
+        ),
+        (
+            "pg_rust_test_widget_out",
+            BuiltinScalarFunction::PgRustTestWidgetOut,
+        ),
+        (
+            "pg_rust_test_int44in",
+            BuiltinScalarFunction::PgRustTestInt44In,
+        ),
+        (
+            "pg_rust_test_int44out",
+            BuiltinScalarFunction::PgRustTestInt44Out,
+        ),
+        (
+            "pg_rust_test_pt_in_widget",
+            BuiltinScalarFunction::PgRustTestPtInWidget,
         ),
         ("pg_notify", BuiltinScalarFunction::PgNotify),
         (

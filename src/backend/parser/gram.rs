@@ -2382,6 +2382,9 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "pg_node_tree" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::PgNodeTree))),
         "trigger" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Trigger))),
         "void" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Void))),
+        "cstring" | "pg_catalog.cstring" => {
+            return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Cstring)));
+        }
         "fdw_handler" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::FdwHandler))),
         "regrole" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegRole))),
         "regproc" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegProc))),
@@ -6364,9 +6367,10 @@ fn build_create_type_statement(sql: &str) -> Result<CreateTypeStatement, ParseEr
     let ((schema_name, type_name), rest) = parse_qualified_sql_name(rest)?;
     let rest = rest.trim_start();
     if rest.is_empty() {
-        return Err(ParseError::FeatureNotSupported(
-            "shell types are not supported in CREATE TYPE".into(),
-        ));
+        return Ok(CreateTypeStatement::Shell(CreateShellTypeStatement {
+            schema_name,
+            type_name,
+        }));
     }
     if rest.starts_with('(') {
         return Err(ParseError::FeatureNotSupported(
@@ -13003,8 +13007,10 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Enum => "enum",
         SqlTypeKind::Record => "record",
         SqlTypeKind::Composite => "record",
+        SqlTypeKind::Shell => "shell",
         SqlTypeKind::Trigger => "trigger",
         SqlTypeKind::Void => "void",
+        SqlTypeKind::Cstring => "cstring",
         SqlTypeKind::FdwHandler => "fdw_handler",
         SqlTypeKind::Int2 => "int2",
         SqlTypeKind::Int2Vector => "int2vector",
