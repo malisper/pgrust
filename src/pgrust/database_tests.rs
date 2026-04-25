@@ -22877,6 +22877,36 @@ fn copy_from_rows_into_column_subset_leaves_other_columns_null() {
 }
 
 #[test]
+fn copy_from_text_null_marker_is_checked_before_unescape() {
+    let base = temp_dir("copy_text_null_marker");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table copy_nulls (a int4, b text)")
+        .unwrap();
+    let copy = crate::pgrust::session::parse_copy_command("copy copy_nulls from stdin")
+        .unwrap()
+        .unwrap();
+    let inserted = session
+        .copy_from_text(&db, &copy, "\\N\t\\\\N\n1\tplain\n")
+        .unwrap();
+    assert_eq!(inserted, 2);
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a is null, b from copy_nulls order by a is null"
+        ),
+        vec![
+            vec![Value::Bool(false), Value::Text("plain".into())],
+            vec![Value::Bool(true), Value::Text("\\N".into())],
+        ]
+    );
+}
+
+#[test]
 fn copy_from_csv_header_match_ignores_dropped_columns() {
     let base = temp_dir("copy_csv_header_dropped");
     let db = Database::open(&base, 16).unwrap();
