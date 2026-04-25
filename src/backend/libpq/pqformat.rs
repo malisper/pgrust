@@ -20,6 +20,7 @@ use crate::include::catalog::{
     builtin_type_rows, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::InetValue;
+use crate::include::nodes::parsenodes::CopyFormat;
 use crate::pgrust::session::ByteaOutputFormat;
 use num_bigint::BigInt;
 use num_traits::One;
@@ -1095,7 +1096,81 @@ pub(crate) fn send_typed_data_row(
     Ok(())
 }
 
-fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<u8>, ExecError> {
+pub(crate) fn format_text_data_value(
+    value: &Value,
+    column: &QueryColumn,
+    float_format: FloatFormatOptions,
+    role_names: Option<&HashMap<u32, String>>,
+    relation_names: Option<&HashMap<u32, String>>,
+    proc_names: Option<&HashMap<u32, String>>,
+    namespace_names: Option<&HashMap<u32, String>>,
+) -> Result<Option<String>, ExecError> {
+    let mut row = Vec::new();
+    let mut buf = Vec::new();
+    send_typed_data_row(
+        &mut row,
+        std::slice::from_ref(value),
+        std::slice::from_ref(column),
+        &[0],
+        &mut buf,
+        float_format,
+        role_names,
+        relation_names,
+        proc_names,
+        namespace_names,
+    )
+    .map_err(|err| ExecError::DetailedError {
+        message: format!("could not format COPY data: {err}"),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    if row.len() < 11 || row[0] != b'D' {
+        return Err(ExecError::DetailedError {
+            message: "could not format COPY data".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    }
+    let field_count = i16::from_be_bytes([row[5], row[6]]);
+    if field_count != 1 {
+        return Err(ExecError::DetailedError {
+            message: "could not format COPY data".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    }
+    let len = i32::from_be_bytes([row[7], row[8], row[9], row[10]]);
+    if len < 0 {
+        return Ok(None);
+    }
+    let len = len as usize;
+    let start = 11usize;
+    let end = start.saturating_add(len);
+    if end > row.len() {
+        return Err(ExecError::DetailedError {
+            message: "could not format COPY data".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    }
+    String::from_utf8(row[start..end].to_vec())
+        .map(Some)
+        .map_err(|err| ExecError::DetailedError {
+            message: format!("could not format COPY data: {err}"),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })
+}
+
+pub(crate) fn encode_binary_data_row_value(
+    value: &Value,
+    sql_type: SqlType,
+) -> Result<Vec<u8>, ExecError> {
     match value {
         Value::Null => Ok(Vec::new()),
         Value::Int16(v) if matches!(sql_type.kind, SqlTypeKind::Int2) => {
@@ -1340,6 +1415,10 @@ pub fn format_bytea_text(bytes: &[u8], output: ByteaOutputFormat) -> String {
                 match byte {
                     b'\\' => out.push_str("\\\\"),
                     0x20..=0x7e => out.push(byte as char),
+                    0x01..=0x1f | 0x7f => {
+                        use std::fmt::Write as _;
+                        let _ = write!(&mut out, "\\x{byte:02x}");
+                    }
                     _ => {
                         use std::fmt::Write as _;
                         let _ = write!(&mut out, "\\{:03o}", byte);
@@ -1406,6 +1485,40 @@ pub(crate) fn send_copy_in_response(w: &mut impl Write) -> io::Result<()> {
     w.write_all(&7_i32.to_be_bytes())?;
     w.write_all(&[0])?;
     w.write_all(&0_i16.to_be_bytes())?;
+    Ok(())
+}
+
+pub(crate) fn send_copy_out_response(
+    w: &mut impl Write,
+    format: CopyFormat,
+    column_count: usize,
+) -> io::Result<()> {
+    let format_code = if matches!(format, CopyFormat::Binary) {
+        1_i16
+    } else {
+        0_i16
+    };
+    let len = 4 + 1 + 2 + column_count * 2;
+    w.write_all(&[b'H'])?;
+    w.write_all(&(len as i32).to_be_bytes())?;
+    w.write_all(&[format_code as u8])?;
+    w.write_all(&(column_count as i16).to_be_bytes())?;
+    for _ in 0..column_count {
+        w.write_all(&format_code.to_be_bytes())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn send_copy_data(w: &mut impl Write, data: &[u8]) -> io::Result<()> {
+    w.write_all(&[b'd'])?;
+    w.write_all(&((4 + data.len()) as i32).to_be_bytes())?;
+    w.write_all(data)?;
+    Ok(())
+}
+
+pub(crate) fn send_copy_done(w: &mut impl Write) -> io::Result<()> {
+    w.write_all(&[b'c'])?;
+    w.write_all(&4_i32.to_be_bytes())?;
     Ok(())
 }
 
@@ -1534,6 +1647,45 @@ pub(crate) fn send_notice_with_severity(
     if let Some(detail) = detail {
         body.push(b'D');
         body.extend_from_slice(detail.as_bytes());
+        body.push(0);
+    }
+    if let Some(position) = position {
+        body.push(b'P');
+        body.extend_from_slice(position.to_string().as_bytes());
+        body.push(0);
+    }
+    body.push(0);
+
+    w.write_all(&[b'N'])?;
+    w.write_all(&((body.len() + 4) as i32).to_be_bytes())?;
+    w.write_all(&body)?;
+    Ok(())
+}
+
+pub(crate) fn send_notice_with_hint(
+    w: &mut impl Write,
+    severity: &str,
+    sqlstate: &str,
+    message: &str,
+    hint: Option<&str>,
+    position: Option<usize>,
+) -> io::Result<()> {
+    let mut body = Vec::new();
+    body.push(b'S');
+    body.extend_from_slice(severity.as_bytes());
+    body.push(0);
+    body.push(b'V');
+    body.extend_from_slice(severity.as_bytes());
+    body.push(0);
+    body.push(b'C');
+    body.extend_from_slice(sqlstate.as_bytes());
+    body.push(0);
+    body.push(b'M');
+    body.extend_from_slice(message.as_bytes());
+    body.push(0);
+    if let Some(hint) = hint {
+        body.push(b'H');
+        body.extend_from_slice(hint.as_bytes());
         body.push(0);
     }
     if let Some(position) = position {

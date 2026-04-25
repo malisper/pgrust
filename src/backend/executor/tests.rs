@@ -17082,13 +17082,17 @@ fn text_helper_functions_work() {
             &base,
             &txns,
             INVALID_TRANSACTION_ID,
-            "select strpos('high', 'ig'), replace('abcdef', 'cd', 'XX'), split_part('a,b,c', ',', 2), initcap('hi THOMAS'), lpad('hi', 5, 'xy'), rpad('hi', 5, 'xy'), translate('12345', '143', 'ax'), ascii('x'), chr(120)",
+            "select strpos('high', 'ig'), replace('abcdef', 'cd', 'XX'), split_part('a,b,c', ',', 2), split_part('joeuser@mydatabase', '', 1), split_part('joeuser@mydatabase', '', 2), split_part('joeuser@mydatabase', '', -1), split_part('joeuser@mydatabase', '', -2), initcap('hi THOMAS'), lpad('hi', 5, 'xy'), rpad('hi', 5, 'xy'), translate('12345', '143', 'ax'), ascii('x'), chr(120)",
         )
         .unwrap(),
         vec![vec![
             Value::Int32(2),
             Value::Text("abXXef".into()),
             Value::Text("b".into()),
+            Value::Text("joeuser@mydatabase".into()),
+            Value::Text("".into()),
+            Value::Text("joeuser@mydatabase".into()),
+            Value::Text("".into()),
             Value::Text("Hi Thomas".into()),
             Value::Text("xyxhi".into()),
             Value::Text("hixyx".into()),
@@ -17179,11 +17183,16 @@ fn bytea_hash_and_encoding_functions_work() {
             &base,
             &txns,
             INVALID_TRANSACTION_ID,
-            "select encode(E'\\\\336\\\\255\\\\276\\\\357'::bytea, 'hex'), decode('deadbeef', 'hex'), sha256('abc'), crc32('abc'), crc32c('abc'), reverse(E'\\\\001\\\\002\\\\003'::bytea), position(E'\\\\002\\\\003'::bytea in E'\\\\001\\\\002\\\\003\\\\002'::bytea), substring(E'\\\\001\\\\002\\\\003\\\\004'::bytea from 2 for 2), overlay(E'\\\\001\\\\002\\\\003\\\\004'::bytea placing E'\\\\252\\\\273'::bytea from 2 for 2), get_bit(E'\\\\200'::bytea, 0), set_bit(E'\\\\000'::bytea, 0, 1), get_byte(E'\\\\001\\\\002'::bytea, 1), set_byte(E'\\\\001\\\\002'::bytea, 1, 255), bit_count(E'\\\\360'::bytea)",
+            "select encode(E'\\\\336\\\\255\\\\276\\\\357'::bytea, 'hex'), encode('\\x1234567890abcdef00', 'hex'), encode(('\\x' || repeat('1234567890abcdef0001', 7))::bytea, 'base64'), decode('deadbeef', 'hex'), sha256('abc'), crc32('abc'), crc32c('abc'), reverse(E'\\\\001\\\\002\\\\003'::bytea), position(E'\\\\002\\\\003'::bytea in E'\\\\001\\\\002\\\\003\\\\002'::bytea), substring(E'\\\\001\\\\002\\\\003\\\\004'::bytea from 2 for 2), overlay(E'\\\\001\\\\002\\\\003\\\\004'::bytea placing E'\\\\252\\\\273'::bytea from 2 for 2), get_bit(E'\\\\200'::bytea, 0), set_bit(E'\\\\000'::bytea, 0, 1), get_byte(E'\\\\001\\\\002'::bytea, 1), set_byte(E'\\\\001\\\\002'::bytea, 1, 255), bit_count(E'\\\\360'::bytea), 'abc'::bytea LIKE '_b_'::bytea, 'abc'::bytea NOT LIKE '_b_'::bytea",
         )
         .unwrap(),
         vec![vec![
             Value::Text("deadbeef".into()),
+            Value::Text("1234567890abcdef00".into()),
+            Value::Text(
+                "EjRWeJCrze8AARI0VniQq83vAAESNFZ4kKvN7wABEjRWeJCrze8AARI0VniQq83vAAESNFZ4kKvN\n7wABEjRWeJCrze8AAQ=="
+                    .into(),
+            ),
             Value::Bytea(vec![0xde, 0xad, 0xbe, 0xef]),
             Value::Bytea(Sha256::digest(b"abc").to_vec()),
             Value::Int64(crc32fast::hash(b"abc") as i64),
@@ -17192,11 +17201,29 @@ fn bytea_hash_and_encoding_functions_work() {
             Value::Int32(2),
             Value::Bytea(vec![2, 3]),
             Value::Bytea(vec![1, 0xaa, 0xbb, 4]),
-            Value::Int32(1),
-            Value::Bytea(vec![0x80]),
+            Value::Int32(0),
+            Value::Bytea(vec![0x01]),
             Value::Int32(2),
             Value::Bytea(vec![1, 255]),
             Value::Int64(4),
+            Value::Bool(true),
+            Value::Bool(false),
+        ]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 0x1234::int2::bytea, '\\x1234'::bytea::int2, ''::bytea::int4, '\\x8000000000000000'::bytea::int8",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Bytea(vec![0x12, 0x34]),
+            Value::Int16(4660),
+            Value::Int32(0),
+            Value::Int64(i64::MIN),
         ]],
     );
 }
@@ -19506,13 +19533,16 @@ fn char_to_text_cast_trims_trailing_spaces() {
         &base,
         &txns,
         INVALID_TRANSACTION_ID,
-        "select lower(name) from t",
+        "select lower(name), length(name) from t",
         char_catalog("t", 8),
     )
     .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Text("bbbb".into())]]);
+            assert_eq!(
+                rows,
+                vec![vec![Value::Text("bbbb".into()), Value::Int32(4)]]
+            );
         }
         other => panic!("expected query result, got {:?}", other),
     }

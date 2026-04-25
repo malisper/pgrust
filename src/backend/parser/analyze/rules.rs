@@ -150,6 +150,12 @@ pub(crate) fn validate_rule_definition(
 
     let mut returning_count = 0usize;
     for action in &stmt.actions {
+        if !matches!(
+            action.statement,
+            Statement::Insert(_) | Statement::Update(_) | Statement::Delete(_)
+        ) {
+            continue;
+        }
         let bound = bind_rule_action_statement(&action.statement, relation_desc, catalog)?;
         let returning = rule_action_returning_targets(&bound);
         if returning.is_empty() {
