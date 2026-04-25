@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::backend::executor::expr_reg::format_type_text;
 use crate::backend::parser::{
     AlterOperatorOption, AlterOperatorStatement, CatalogLookup, CreateOperatorStatement,
     DropOperatorStatement, ParseError, QualifiedNameRef, resolve_raw_type_name,
@@ -49,8 +50,31 @@ fn normalize_operator_namespace(
     }
 }
 
-pub(super) fn operator_signature_display(name: &str, left_type: u32, right_type: u32) -> String {
-    format!("{name}({left_type},{right_type})")
+pub(super) fn operator_signature_display(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    left_type: u32,
+    right_type: u32,
+) -> String {
+    match (left_type, right_type) {
+        (0, 0) => name.to_string(),
+        (0, right) => format!("{name} {}", format_type_text(right, None, catalog)),
+        (left, 0) => format!("{} {name}", format_type_text(left, None, catalog)),
+        (left, right) => format!(
+            "{} {name} {}",
+            format_type_text(left, None, catalog),
+            format_type_text(right, None, catalog)
+        ),
+    }
+}
+
+pub(super) fn unsupported_postfix_operator_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "postfix operators are not supported".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
 }
 
 pub(super) fn lookup_operator_row(
@@ -343,7 +367,12 @@ impl Database {
                 expected: "new operator signature",
                 actual: format!(
                     "operator {} already exists",
-                    operator_signature_display(&stmt.operator_name, left_type, right_type)
+                    operator_signature_display(
+                        &catalog,
+                        &stmt.operator_name,
+                        left_type,
+                        right_type
+                    )
                 ),
             }));
         }
@@ -522,7 +551,12 @@ impl Database {
             ExecError::Parse(ParseError::DetailedError {
                 message: format!(
                     "operator does not exist: {}",
-                    operator_signature_display(&stmt.operator_name, left_type, right_type)
+                    operator_signature_display(
+                        &catalog,
+                        &stmt.operator_name,
+                        left_type,
+                        right_type
+                    )
                 ),
                 detail: None,
                 hint: None,
@@ -794,6 +828,9 @@ impl Database {
             .transpose()?;
         let left_type = resolve_operator_type_oid(&catalog, &stmt.left_arg)?;
         let right_type = resolve_operator_type_oid(&catalog, &stmt.right_arg)?;
+        if right_type == 0 {
+            return Err(unsupported_postfix_operator_error());
+        }
         let Some(row) = lookup_operator_row(
             self,
             client_id,
@@ -810,7 +847,12 @@ impl Database {
             return Err(ExecError::Parse(ParseError::DetailedError {
                 message: format!(
                     "operator does not exist: {}",
-                    operator_signature_display(&stmt.operator_name, left_type, right_type)
+                    operator_signature_display(
+                        &catalog,
+                        &stmt.operator_name,
+                        left_type,
+                        right_type
+                    )
                 ),
                 detail: None,
                 hint: None,

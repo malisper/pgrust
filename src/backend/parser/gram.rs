@@ -170,9 +170,46 @@ fn parse_statement_with_options_inner(
     }
     match SqlParser::parse(Rule::statement, &sql) {
         Ok(mut pairs) => build_statement(pairs.next().ok_or(ParseError::UnexpectedEof)?),
-        Err(err) => try_parse_unsupported_statement(&sql)
-            .ok_or_else(|| map_pest_error("statement", &sql, err)),
+        Err(err) => {
+            if is_select_with_trailing_operator(&sql) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "statement",
+                    actual: "syntax error at or near \";\"".into(),
+                });
+            }
+            try_parse_unsupported_statement(&sql)
+                .ok_or_else(|| map_pest_error("statement", &sql, err))
+        }
     }
+}
+
+fn is_select_with_trailing_operator(sql: &str) -> bool {
+    let trimmed = sql.trim().trim_end_matches(';').trim_end();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("select ") && !lowered.starts_with("with ") {
+        return false;
+    }
+    let Some(last) = trimmed.chars().next_back() else {
+        return false;
+    };
+    matches!(
+        last,
+        '!' | '#'
+            | '%'
+            | '&'
+            | '*'
+            | '+'
+            | '-'
+            | '/'
+            | '<'
+            | '='
+            | '>'
+            | '?'
+            | '@'
+            | '^'
+            | '|'
+            | '~'
+    )
 }
 
 fn try_parse_alter_table_add_unnamed_constraint_statement(
@@ -6959,6 +6996,12 @@ fn parse_operator_token(input: &str) -> Result<(String, &str), ParseError> {
         return Err(ParseError::UnexpectedToken {
             expected: "operator name",
             actual: input.into(),
+        });
+    }
+    if &input[..token_len] == "=>" {
+        return Err(ParseError::UnexpectedToken {
+            expected: "operator name",
+            actual: "syntax error at or near \"=>\"".into(),
         });
     }
     Ok((input[..token_len].to_string(), &input[token_len..]))
@@ -14733,57 +14776,63 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
         )?))),
         Rule::negated_expr => {
-            let raw = pair.as_str().trim_start();
-            let expr = build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)?;
-            if raw.starts_with("@-@") {
+            let mut inner = pair.into_inner();
+            let op = inner.next().ok_or(ParseError::UnexpectedEof)?.as_str();
+            let expr = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+            if op == "@-@" {
                 Ok(SqlExpr::GeometryUnaryOp {
                     op: GeometryUnaryOp::Length,
                     expr: Box::new(expr),
                 })
-            } else if raw.starts_with('#') {
+            } else if op == "#" {
                 Ok(SqlExpr::GeometryUnaryOp {
                     op: GeometryUnaryOp::Npoints,
                     expr: Box::new(expr),
                 })
-            } else if raw.starts_with("@@") {
+            } else if op == "@@" {
                 Ok(SqlExpr::GeometryUnaryOp {
                     op: GeometryUnaryOp::Center,
                     expr: Box::new(expr),
                 })
-            } else if raw.starts_with("?|") {
+            } else if op == "?|" {
                 Ok(SqlExpr::GeometryUnaryOp {
                     op: GeometryUnaryOp::IsVertical,
                     expr: Box::new(expr),
                 })
-            } else if raw.starts_with("?-") {
+            } else if op == "?-" {
                 Ok(SqlExpr::GeometryUnaryOp {
                     op: GeometryUnaryOp::IsHorizontal,
                     expr: Box::new(expr),
                 })
-            } else if raw.starts_with("||/") {
+            } else if op == "||/" {
                 Ok(simple_func_call(
                     "cbrt",
                     vec![SqlFunctionArg::positional(expr)],
                 ))
-            } else if raw.starts_with("!!") {
+            } else if op == "!!" {
                 Ok(SqlExpr::PrefixOperator {
                     op: "!!".into(),
                     expr: Box::new(expr),
                 })
-            } else if raw.starts_with("|/") {
+            } else if op == "|/" {
                 Ok(simple_func_call(
                     "sqrt",
                     vec![SqlFunctionArg::positional(expr)],
                 ))
-            } else if raw.starts_with('@') {
+            } else if op == "@" {
                 Ok(simple_func_call(
                     "abs",
                     vec![SqlFunctionArg::positional(expr)],
                 ))
-            } else if raw.starts_with('~') {
+            } else if op == "~" {
                 Ok(SqlExpr::BitNot(Box::new(expr)))
-            } else {
+            } else if op == "-" {
                 Ok(SqlExpr::Negate(Box::new(expr)))
+            } else {
+                Ok(SqlExpr::PrefixOperator {
+                    op: op.into(),
+                    expr: Box::new(expr),
+                })
             }
         }
         Rule::not_expr => {
@@ -17250,6 +17299,9 @@ mod tests {
                 merges: true,
                 unrecognized_attributes: Vec::new(),
             })
+        );
+        assert!(
+            parse_statement("create operator => (rightarg = int8, procedure = factorial)").is_err()
         );
     }
 

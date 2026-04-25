@@ -9,7 +9,8 @@ use crate::backend::executor::{
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{
-    CatalogLookup, ParseError, SqlType, SqlTypeKind, TriggerLevel, TriggerTiming, parse_statement,
+    Catalog, CatalogLookup, ParseError, SqlType, SqlTypeKind, Statement, TriggerLevel,
+    TriggerTiming, bind_scalar_expr_in_named_slot_scope, parse_statement,
     pg_plan_query_with_outer_scopes_and_ctes, pg_plan_values_query_with_outer_scopes_and_ctes,
 };
 use crate::backend::utils::record::{
@@ -776,6 +777,11 @@ fn exec_do_stmt(
             }
             Ok(())
         }
+        CompiledStmt::DynamicExecute {
+            sql_expr,
+            into_targets,
+            using_exprs,
+        } => exec_do_dynamic_execute(sql_expr, into_targets, using_exprs, values),
         CompiledStmt::Return { .. }
         | CompiledStmt::ReturnNext { .. }
         | CompiledStmt::ReturnTriggerRow { .. }
@@ -784,7 +790,6 @@ fn exec_do_stmt(
         | CompiledStmt::ForQuery { .. }
         | CompiledStmt::ReturnQuery { .. }
         | CompiledStmt::Perform { .. }
-        | CompiledStmt::DynamicExecute { .. }
         | CompiledStmt::OpenCursor { .. }
         | CompiledStmt::FetchCursor { .. }
         | CompiledStmt::CloseCursor { .. }
@@ -801,6 +806,67 @@ fn exec_do_stmt(
             )))
         }
     }
+}
+
+fn exec_do_dynamic_execute(
+    sql_expr: &CompiledExpr,
+    into_targets: &[CompiledSelectIntoTarget],
+    using_exprs: &[CompiledExpr],
+    values: &mut [Value],
+) -> Result<(), ExecError> {
+    if !using_exprs.is_empty() {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "EXECUTE USING is only supported inside CREATE FUNCTION".into(),
+        )));
+    }
+    let sql_value = eval_do_expr(sql_expr, values)?;
+    if matches!(sql_value, Value::Null) {
+        return Err(function_runtime_error(
+            "query string argument of EXECUTE is null",
+            None,
+            "22004",
+        ));
+    }
+    let sql_text = cast_value(sql_value, SqlType::new(SqlTypeKind::Text))?;
+    let sql_text = sql_text.as_text().ok_or_else(|| {
+        function_runtime_error(
+            "EXECUTE query string did not evaluate to text",
+            None,
+            "42804",
+        )
+    })?;
+    if into_targets.is_empty() {
+        return Ok(());
+    }
+
+    let Statement::Select(stmt) = parse_statement(sql_text).map_err(ExecError::Parse)? else {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "EXECUTE INTO in DO supports scalar SELECT statements".into(),
+        )));
+    };
+    if stmt.from.is_some()
+        || !stmt.with.is_empty()
+        || stmt.where_clause.is_some()
+        || !stmt.group_by.is_empty()
+        || stmt.having.is_some()
+        || stmt.set_operation.is_some()
+        || stmt.targets.len() != 1
+    {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "EXECUTE INTO in DO supports scalar SELECT statements".into(),
+        )));
+    }
+
+    let catalog = Catalog::default();
+    let (expr, _) =
+        bind_scalar_expr_in_named_slot_scope(&stmt.targets[0].expr, &[], &[], &catalog, &[])
+            .map_err(ExecError::Parse)?;
+    let mut slot = TupleSlot::virtual_row(Vec::new());
+    let value = eval_plpgsql_expr(&expr, &mut slot)?;
+    for target in into_targets {
+        values[target.slot] = cast_value(value.clone(), target.ty)?;
+    }
+    Ok(())
 }
 
 fn exec_function_block(
@@ -2112,7 +2178,8 @@ fn render_dynamic_query_param_base_sql(
             }
         }
         Value::Bit(bits) => quote_sql_string(&crate::backend::executor::render_bit_text(bits)),
-        Value::Bool(v) => v.to_string(),
+        Value::Bool(true) => "t".to_string(),
+        Value::Bool(false) => "f".to_string(),
         Value::Numeric(v) => v.render(),
         Value::Interval(v) => quote_sql_string(&render_interval_text(*v)),
         Value::Uuid(v) => {
@@ -2625,7 +2692,8 @@ fn render_raise_value(value: &Value) -> String {
         Value::Null => "<NULL>".to_string(),
         Value::Text(text) => text.to_string(),
         Value::TextRef(_, _) => value.as_text().unwrap_or_default().to_string(),
-        Value::Bool(v) => v.to_string(),
+        Value::Bool(true) => "t".to_string(),
+        Value::Bool(false) => "f".to_string(),
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),

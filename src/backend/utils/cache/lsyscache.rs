@@ -1597,6 +1597,12 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         })
     }
 
+    fn operator_rows(&self) -> Vec<PgOperatorRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .map(|cache| cache.operator_rows())
+            .unwrap_or_default()
+    }
+
     fn current_user_oid(&self) -> u32 {
         self.db.auth_state(self.client_id).current_user_oid()
     }

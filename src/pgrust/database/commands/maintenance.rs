@@ -1,7 +1,10 @@
 use super::super::*;
 use super::constraint::{find_constraint_row, validate_check_rows, validate_not_null_rows};
 use super::create::{aggregate_signature_arg_oids, resolve_aggregate_proc_rows};
-use super::operator::{lookup_operator_row, operator_signature_display, resolve_operator_type_oid};
+use super::operator::{
+    lookup_operator_row, operator_signature_display, resolve_operator_type_oid,
+    unsupported_postfix_operator_error,
+};
 use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_indexes_for_row};
 use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
@@ -1012,9 +1015,7 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         if comment_stmt.right_arg.is_none() {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "postfix operators are not supported".into(),
-            )));
+            return Err(unsupported_postfix_operator_error());
         }
         let txn_ctx = Some((xid, cid));
         let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
@@ -1045,7 +1046,12 @@ impl Database {
         .ok_or_else(|| ExecError::DetailedError {
             message: format!(
                 "operator does not exist: {}",
-                operator_signature_display(&comment_stmt.operator_name, left_type, right_type)
+                operator_signature_display(
+                    &catalog,
+                    &comment_stmt.operator_name,
+                    left_type,
+                    right_type
+                )
             ),
             detail: None,
             hint: None,

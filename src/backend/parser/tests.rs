@@ -5813,6 +5813,45 @@ fn parse_prefix_float_operator_sugar() {
 }
 
 #[test]
+fn parse_custom_prefix_operator_uses_full_token() {
+    let stmt = parse_select("select @#@ 24, !=- 10").unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::PrefixOperator { op, .. } if op == "@#@"
+    ));
+    assert!(matches!(
+        &stmt.targets[1].expr,
+        SqlExpr::PrefixOperator { op, .. } if op == "!=-"
+    ));
+}
+
+#[test]
+fn parse_postgres_operator_edge_cases() {
+    match parse_statement("create operator => (rightarg = int8, procedure = factorial)") {
+        Err(ParseError::UnexpectedToken { actual, .. }) => {
+            assert_eq!(actual, "syntax error at or near \"=>\"");
+        }
+        other => panic!("expected => syntax error, got {other:?}"),
+    }
+
+    match parse_statement("select 10 !=-;") {
+        Err(ParseError::UnexpectedToken { actual, .. }) => {
+            assert_eq!(actual, "syntax error at or near \";\"");
+        }
+        other => panic!("expected postfix operator syntax error, got {other:?}"),
+    }
+
+    for sql in [
+        "select true<>-1 between 1 and 1",
+        "select false<>1 between 1 and 1",
+        "select false<=-1 between 1 and 1",
+        "select false>=-1 between 1 and 1",
+    ] {
+        parse_select(sql).unwrap_or_else(|err| panic!("{sql}: {err:?}"));
+    }
+}
+
+#[test]
 fn parse_power_operator_and_in_list() {
     let stmt = parse_select("select x ^ '2.0', x in (0, 1, 2) from metrics").unwrap();
     assert!(matches!(

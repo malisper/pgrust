@@ -22566,6 +22566,20 @@ fn create_operator_resolves_factorial_int8() {
             Value::Text("factorial".into())
         ]]
     );
+    assert_eq!(
+        query_rows(&db, 1, "select @#@ 24"),
+        vec![vec![Value::Numeric("620448401733239439360000".into())]]
+    );
+
+    db.execute(
+        1,
+        "create operator !=- (rightarg = int8, procedure = factorial)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select !=- 10"),
+        vec![vec![Value::Numeric("3628800".into())]]
+    );
 }
 
 #[test]
@@ -22601,6 +22615,40 @@ fn create_operator_validation_matches_postgres_order() {
             assert_eq!(message, "operator function must be specified");
         }
         other => panic!("expected missing operator function error, got {:?}", other),
+    }
+}
+
+#[test]
+fn operator_lookup_errors_match_postgres_style() {
+    let base = temp_dir("operator_lookup_errors_pg_style");
+    let db = Database::open(&base, 16).unwrap();
+
+    match db.execute(1, "drop operator ###### (none, int4)") {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. })) => {
+            assert_eq!(message, "operator does not exist: ###### integer");
+        }
+        other => panic!("expected missing prefix operator error, got {:?}", other),
+    }
+
+    match db.execute(1, "comment on operator ###### (none, int4) is 'missing'") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "operator does not exist: ###### integer");
+        }
+        other => panic!("expected missing prefix operator error, got {:?}", other),
+    }
+
+    match db.execute(1, "drop operator ###### (int4, none)") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "postfix operators are not supported");
+        }
+        other => panic!("expected postfix operator error, got {:?}", other),
+    }
+
+    match db.execute(1, "comment on operator ###### (int4, none) is 'missing'") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "postfix operators are not supported");
+        }
+        other => panic!("expected postfix operator error, got {:?}", other),
     }
 }
 
