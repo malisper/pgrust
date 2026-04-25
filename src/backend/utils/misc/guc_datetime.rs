@@ -29,7 +29,7 @@ impl Default for DateTimeConfig {
             date_order: DateOrder::Mdy,
             time_zone: "UTC".into(),
             max_stack_depth_kb:
-                crate::backend::utils::misc::stack_depth::DEFAULT_MAX_STACK_DEPTH_KB,
+                crate::backend::utils::misc::stack_depth::effective_default_max_stack_depth_kb(),
             xml: XmlConfig::default(),
         }
     }

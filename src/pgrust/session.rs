@@ -36,7 +36,10 @@ use crate::backend::utils::misc::guc_xml::{
     format_xmlbinary, format_xmloption, parse_xmlbinary, parse_xmloption,
 };
 use crate::backend::utils::misc::interrupts::{InterruptState, StatementInterruptGuard};
-use crate::backend::utils::misc::stack_depth::StackDepthGuard;
+use crate::backend::utils::misc::stack_depth::{
+    MIN_MAX_STACK_DEPTH_KB, StackDepthGuard, effective_default_max_stack_depth_kb,
+    max_stack_depth_limit_kb,
+};
 use crate::include::catalog::PG_CHECKPOINT_OID;
 use crate::include::nodes::execnodes::ScalarType;
 use crate::include::nodes::pathnodes::PlannerConfig;
@@ -4812,6 +4815,7 @@ impl Session {
             match normalized.as_str() {
                 "datestyle" => self.guc_reset_datestyle(),
                 "timezone" => self.guc_reset_timezone(),
+                "max_stack_depth" => self.guc_reset_max_stack_depth(),
                 "xmlbinary" => self.datetime_config.xml.binary = Default::default(),
                 "xmloption" => self.datetime_config.xml.option = Default::default(),
                 "stats_fetch_consistency" => self
@@ -4841,6 +4845,7 @@ impl Session {
             self.gucs.clear();
             self.guc_reset_datestyle();
             self.guc_reset_timezone();
+            self.guc_reset_max_stack_depth();
             self.datetime_config.xml = Default::default();
             self.stats_state
                 .write()
@@ -4965,6 +4970,10 @@ impl Session {
 
     fn guc_reset_timezone(&mut self) {
         self.datetime_config.time_zone = default_timezone().to_string();
+    }
+
+    fn guc_reset_max_stack_depth(&mut self) {
+        self.datetime_config.max_stack_depth_kb = effective_default_max_stack_depth_kb();
     }
 
     fn apply_guc_value(&mut self, name: &str, value: &str) -> Result<(), ExecError> {
@@ -5566,9 +5575,40 @@ fn parse_max_stack_depth(value: &str) -> Result<u32, ExecError> {
             )));
         }
     };
-    amount
+    let max_stack_depth_kb = amount
         .checked_mul(multiplier_kb)
-        .ok_or_else(|| ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string())))
+        .ok_or_else(|| ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string())))?;
+    validate_max_stack_depth(value, max_stack_depth_kb)?;
+    Ok(max_stack_depth_kb)
+}
+
+fn validate_max_stack_depth(value: &str, max_stack_depth_kb: u32) -> Result<(), ExecError> {
+    if max_stack_depth_kb < MIN_MAX_STACK_DEPTH_KB {
+        return Err(ExecError::DetailedError {
+            message: format!("invalid value for parameter \"max_stack_depth\": \"{value}\""),
+            detail: Some(format!(
+                "\"max_stack_depth\" must be at least {MIN_MAX_STACK_DEPTH_KB}kB."
+            )),
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+
+    if let Some(limit_kb) = max_stack_depth_limit_kb()
+        && max_stack_depth_kb > limit_kb
+    {
+        return Err(ExecError::DetailedError {
+            message: format!("invalid value for parameter \"max_stack_depth\": \"{value}\""),
+            detail: Some(format!("\"max_stack_depth\" must not exceed {limit_kb}kB.")),
+            hint: Some(
+                "Increase the platform's stack depth limit via \"ulimit -s\" or local equivalent."
+                    .into(),
+            ),
+            sqlstate: "22023",
+        });
+    }
+
+    Ok(())
 }
 
 fn parse_startup_options(options: &str) -> Result<Vec<(String, String)>, ExecError> {
@@ -5684,10 +5724,11 @@ fn parse_copy_from_file(sql: &str) -> Option<(String, Option<Vec<String>>, Strin
 mod tests {
     use super::{
         parse_default_toast_compression_guc_value, parse_max_stack_depth, parse_startup_options,
-        parse_statement_timeout,
+        parse_statement_timeout, validate_max_stack_depth,
     };
     use crate::backend::executor::ExecError;
     use crate::backend::parser::ParseError;
+    use crate::backend::utils::misc::stack_depth::max_stack_depth_limit_kb;
     use std::time::Duration;
 
     #[test]
@@ -5739,6 +5780,59 @@ mod tests {
                 parse_max_stack_depth(value),
                 Err(ExecError::Parse(ParseError::UnrecognizedParameter(_)))
             ));
+        }
+    }
+
+    #[test]
+    fn parse_max_stack_depth_rejects_values_below_postgres_minimum() {
+        let err = parse_max_stack_depth("99kB").unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message,
+                detail: Some(detail),
+                sqlstate,
+                ..
+            } => {
+                assert_eq!(
+                    message,
+                    "invalid value for parameter \"max_stack_depth\": \"99kB\""
+                );
+                assert_eq!(detail, "\"max_stack_depth\" must be at least 100kB.");
+                assert_eq!(sqlstate, "22023");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_max_stack_depth_rejects_values_above_platform_limit() {
+        let Some(limit_kb) = max_stack_depth_limit_kb() else {
+            return;
+        };
+        let value = format!("{}kB", limit_kb.saturating_add(1));
+        let err = validate_max_stack_depth(&value, limit_kb.saturating_add(1)).unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message,
+                detail: Some(detail),
+                hint: Some(hint),
+                sqlstate,
+            } => {
+                assert_eq!(
+                    message,
+                    format!("invalid value for parameter \"max_stack_depth\": \"{value}\"")
+                );
+                assert_eq!(
+                    detail,
+                    format!("\"max_stack_depth\" must not exceed {limit_kb}kB.")
+                );
+                assert_eq!(
+                    hint,
+                    "Increase the platform's stack depth limit via \"ulimit -s\" or local equivalent."
+                );
+                assert_eq!(sqlstate, "22023");
+            }
+            other => panic!("unexpected error: {other:?}"),
         }
     }
 
