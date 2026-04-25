@@ -626,6 +626,7 @@ pub struct ValuesState {
 #[derive(Debug)]
 pub struct FunctionScanState {
     pub(crate) call: SetReturningCall,
+    pub(crate) table_alias: Option<String>,
     pub(crate) output_columns: Vec<String>,
     pub(crate) rows: Option<Vec<MaterializedRow>>,
     pub(crate) next_index: usize,

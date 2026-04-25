@@ -854,6 +854,57 @@ impl SetReturningCall {
         }
     }
 
+    pub fn set_output_columns(&mut self, output_columns: Vec<QueryColumn>) {
+        match self {
+            SetReturningCall::GenerateSeries {
+                output_columns: existing,
+                ..
+            }
+            | SetReturningCall::Unnest {
+                output_columns: existing,
+                ..
+            }
+            | SetReturningCall::JsonTableFunction {
+                output_columns: existing,
+                ..
+            }
+            | SetReturningCall::JsonRecordFunction {
+                output_columns: existing,
+                ..
+            }
+            | SetReturningCall::RegexTableFunction {
+                output_columns: existing,
+                ..
+            }
+            | SetReturningCall::StringTableFunction {
+                output_columns: existing,
+                ..
+            }
+            | SetReturningCall::PartitionTree {
+                output_columns: existing,
+                ..
+            }
+            | SetReturningCall::PartitionAncestors {
+                output_columns: existing,
+                ..
+            }
+            | SetReturningCall::PgLockStatus {
+                output_columns: existing,
+                ..
+            }
+            | SetReturningCall::TextSearchTableFunction {
+                output_columns: existing,
+                ..
+            }
+            | SetReturningCall::UserDefined {
+                output_columns: existing,
+                ..
+            } => {
+                *existing = output_columns;
+            }
+        }
+    }
+
     pub fn with_ordinality(&self) -> bool {
         match self {
             SetReturningCall::GenerateSeries {

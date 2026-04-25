@@ -3348,7 +3348,13 @@ impl PlanNode for FunctionScanState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        format!("Function Scan on {}", set_returning_call_label(&self.call))
+        match &self.table_alias {
+            Some(alias) => format!(
+                "Function Scan on {} {alias}",
+                set_returning_call_label(&self.call)
+            ),
+            None => format!("Function Scan on {}", set_returning_call_label(&self.call)),
+        }
     }
     fn explain_children(
         &self,
