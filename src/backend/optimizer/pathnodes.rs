@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo};
-use crate::include::nodes::plannodes::{Plan, PlanEstimate};
+use crate::include::nodes::plannodes::{AggregateStrategy, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExpr,
     ProjectSetTarget, QueryColumn, ScalarArrayOpExpr, SubLinkType, TargetEntry, Var, WindowClause,
@@ -332,7 +332,6 @@ impl Path {
             | Self::SeqScan { .. }
             | Self::BitmapIndexScan { .. }
             | Self::BitmapHeapScan { .. }
-            | Self::Aggregate { .. }
             | Self::CteScan { .. }
             | Self::WorkTableScan { .. }
             | Self::RecursiveUnion { .. }
@@ -340,6 +339,10 @@ impl Path {
             | Self::Values { .. }
             | Self::FunctionScan { .. }
             | Self::ProjectSet { .. } => Vec::new(),
+            Self::Aggregate {
+                strategy, pathkeys, ..
+            } if *strategy == AggregateStrategy::Sorted => pathkeys.clone(),
+            Self::Aggregate { .. } => Vec::new(),
             Self::IndexScan { pathkeys, .. } => pathkeys.clone(),
             Self::SubqueryScan { pathkeys, .. } => pathkeys.clone(),
             Self::Filter { input, .. }

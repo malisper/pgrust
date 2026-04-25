@@ -20,6 +20,7 @@ use std::time::Duration;
 use crate::backend::executor::{AggregateRuntime, ExecError, ExecutorContext};
 pub use crate::include::nodes::datum::{NumericValue, Value};
 pub use crate::include::nodes::parsenodes::{SetOperator, SqlType};
+use crate::include::nodes::plannodes::AggregateStrategy;
 pub use crate::include::nodes::plannodes::Plan;
 pub use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, ColumnDesc, Expr, JoinType, JsonTableFunction,
@@ -584,6 +585,7 @@ pub struct LockRowsState {
 #[derive(Debug)]
 pub struct AggregateState {
     pub(crate) input: PlanState,
+    pub(crate) strategy: AggregateStrategy,
     pub(crate) group_by: Vec<Expr>,
     pub(crate) passthrough_exprs: Vec<Expr>,
     pub(crate) accumulators: Vec<AggAccum>,

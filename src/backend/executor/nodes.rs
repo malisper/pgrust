@@ -3191,10 +3191,10 @@ impl PlanNode for AggregateState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        if self.group_by.is_empty() {
-            "Aggregate".into()
-        } else {
-            "HashAggregate".into()
+        match self.strategy {
+            crate::include::nodes::plannodes::AggregateStrategy::Plain => "Aggregate".into(),
+            crate::include::nodes::plannodes::AggregateStrategy::Sorted => "GroupAggregate".into(),
+            crate::include::nodes::plannodes::AggregateStrategy::Hashed => "HashAggregate".into(),
         }
     }
     fn explain_details(
