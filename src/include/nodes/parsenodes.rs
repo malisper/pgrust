@@ -414,6 +414,8 @@ pub enum Statement {
     Begin,
     Commit,
     Rollback,
+    Savepoint(String),
+    RollbackTo(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2680,6 +2682,13 @@ impl ColumnGeneratedKind {
 pub struct CreateDomainStatement {
     pub domain_name: String,
     pub ty: RawTypeName,
+    pub check: Option<DomainCheckConstraint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainCheckConstraint {
+    pub name: Option<String>,
+    pub allowed_values: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

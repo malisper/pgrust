@@ -964,6 +964,42 @@ impl Database {
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let sql_type = crate::backend::parser::resolve_raw_type_name(&create_stmt.ty, &catalog)
             .map_err(ExecError::Parse)?;
+        let check = match &create_stmt.check {
+            Some(check) if matches!(sql_type.kind, crate::backend::parser::SqlTypeKind::Enum) => {
+                let mut allowed_enum_label_oids = Vec::with_capacity(check.allowed_values.len());
+                for value in &check.allowed_values {
+                    let label_oid = catalog
+                        .enum_label_oid(sql_type.type_oid, value)
+                        .ok_or_else(|| ExecError::DetailedError {
+                            message: format!(
+                                "invalid input value for enum {}: \"{}\"",
+                                catalog
+                                    .type_by_oid(sql_type.type_oid)
+                                    .map(|row| row.typname)
+                                    .unwrap_or_else(|| sql_type.type_oid.to_string()),
+                                value
+                            ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "22P02",
+                        })?;
+                    allowed_enum_label_oids.push(label_oid);
+                }
+                Some(crate::pgrust::database::DomainCheckEntry {
+                    name: check
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("{}_check", create_stmt.domain_name)),
+                    allowed_enum_label_oids,
+                })
+            }
+            Some(_) => {
+                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                    "CREATE DOMAIN CHECK constraints are only supported for enum domains".into(),
+                )));
+            }
+            None => None,
+        };
         let (normalized, object_name, namespace_oid) = self
             .normalize_domain_name_for_create(&create_stmt.domain_name, configured_search_path)?;
         let mut domains = self.domains.write();
@@ -973,9 +1009,7 @@ impl Database {
             )));
         }
         let oid = {
-            let catalog = self.catalog.write();
-            let snapshot = catalog.catalog_snapshot().map_err(map_catalog_error)?;
-            let next_catalog_oid = snapshot.next_oid();
+            let next_catalog_oid = self.catalog.read().next_oid();
             domains
                 .values()
                 .map(|domain| domain.oid.saturating_add(1))
@@ -990,6 +1024,7 @@ impl Database {
                 name: object_name,
                 namespace_oid,
                 sql_type,
+                check,
                 comment: None,
             },
         );

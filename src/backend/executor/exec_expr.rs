@@ -5471,10 +5471,15 @@ fn eval_enum_function_inner(
             sqlstate: "42804",
         })?;
     let catalog = executor_catalog(ctx)?;
+    let enum_type_oid = if enum_type.typrelid != 0 {
+        enum_type.typrelid
+    } else {
+        enum_type.type_oid
+    };
     let mut labels = catalog
         .enum_rows()
         .into_iter()
-        .filter(|row| row.enumtypid == enum_type.type_oid)
+        .filter(|row| row.enumtypid == enum_type_oid)
         .collect::<Vec<_>>();
     labels.sort_by(|left, right| {
         left.enumsortorder
@@ -5482,14 +5487,20 @@ fn eval_enum_function_inner(
             .unwrap_or(Ordering::Equal)
     });
     match func {
-        BuiltinScalarFunction::EnumFirst => Ok(labels
+        BuiltinScalarFunction::EnumFirst => labels
             .first()
-            .map(|row| Value::EnumOid(row.oid))
-            .unwrap_or(Value::Null)),
-        BuiltinScalarFunction::EnumLast => Ok(labels
+            .map(|row| {
+                ensure_enum_function_label_safe(catalog, enum_type_oid, row.oid)?;
+                Ok(Value::EnumOid(row.oid))
+            })
+            .unwrap_or(Ok(Value::Null)),
+        BuiltinScalarFunction::EnumLast => labels
             .last()
-            .map(|row| Value::EnumOid(row.oid))
-            .unwrap_or(Value::Null)),
+            .map(|row| {
+                ensure_enum_function_label_safe(catalog, enum_type_oid, row.oid)?;
+                Ok(Value::EnumOid(row.oid))
+            })
+            .unwrap_or(Ok(Value::Null)),
         BuiltinScalarFunction::EnumRange => {
             let lower = values.first().and_then(|value| match value {
                 Value::EnumOid(oid) => labels.iter().position(|row| row.oid == *oid),
@@ -5514,17 +5525,43 @@ fn eval_enum_function_inner(
             let items = if labels.is_empty() || start > end {
                 Vec::new()
             } else {
-                labels[start..=end]
-                    .iter()
-                    .map(|row| Value::EnumOid(row.oid))
-                    .collect()
+                let mut items = Vec::new();
+                for row in &labels[start..=end] {
+                    ensure_enum_function_label_safe(catalog, enum_type_oid, row.oid)?;
+                    items.push(Value::EnumOid(row.oid));
+                }
+                items
             };
             Ok(Value::PgArray(
-                ArrayValue::from_1d(items).with_element_type_oid(enum_type.type_oid),
+                ArrayValue::from_1d(items).with_element_type_oid(enum_type_oid),
             ))
         }
         _ => unreachable!(),
     }
+}
+
+fn ensure_enum_function_label_safe(
+    catalog: &dyn CatalogLookup,
+    enum_type_oid: u32,
+    label_oid: u32,
+) -> Result<(), ExecError> {
+    if catalog.enum_label_is_committed(enum_type_oid, label_oid) {
+        return Ok(());
+    }
+    let label = catalog
+        .enum_label(enum_type_oid, label_oid)
+        .or_else(|| catalog.enum_label_by_oid(label_oid))
+        .unwrap_or_else(|| label_oid.to_string());
+    let type_name = catalog
+        .type_by_oid(enum_type_oid)
+        .map(|row| row.typname)
+        .unwrap_or_else(|| enum_type_oid.to_string());
+    Err(ExecError::DetailedError {
+        message: format!("unsafe use of new value \"{label}\" of enum type {type_name}"),
+        detail: None,
+        hint: Some("New enum values must be committed before they can be used.".into()),
+        sqlstate: "55P04",
+    })
 }
 
 fn eval_jsonb_contains(left: Value, right: Value) -> Result<Value, ExecError> {

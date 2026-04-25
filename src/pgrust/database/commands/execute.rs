@@ -1665,9 +1665,11 @@ impl Database {
                 vacuum_stmt,
                 configured_search_path,
             ),
-            Statement::Begin | Statement::Commit | Statement::Rollback => {
-                Ok(StatementResult::AffectedRows(0))
-            }
+            Statement::Begin
+            | Statement::Commit
+            | Statement::Rollback
+            | Statement::Savepoint(_)
+            | Statement::RollbackTo(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::DeclareCursor(_)
             | Statement::Fetch(_)
             | Statement::Move(_)

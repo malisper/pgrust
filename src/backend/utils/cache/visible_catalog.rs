@@ -23,7 +23,7 @@ use crate::include::catalog::{
     synthetic_range_proc_rows_by_name,
 };
 use crate::pgrust::database::DatabaseStatsStore;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone)]
 pub struct VisibleCatalog {
@@ -31,6 +31,8 @@ pub struct VisibleCatalog {
     catcache: Option<CatCache>,
     search_path: Vec<String>,
     enum_rows: Vec<PgEnumRow>,
+    uncommitted_enum_label_oids: BTreeSet<u32>,
+    domain_checks: BTreeMap<u32, (String, Vec<u32>)>,
     dynamic_type_rows: Vec<PgTypeRow>,
 }
 
@@ -49,6 +51,8 @@ impl VisibleCatalog {
             catcache,
             search_path,
             enum_rows: Vec::new(),
+            uncommitted_enum_label_oids: BTreeSet::new(),
+            domain_checks: BTreeMap::new(),
             dynamic_type_rows: Vec::new(),
         }
     }
@@ -59,6 +63,16 @@ impl VisibleCatalog {
 
     pub fn with_enum_rows(mut self, enum_rows: Vec<PgEnumRow>) -> Self {
         self.enum_rows = enum_rows;
+        self
+    }
+
+    pub fn with_uncommitted_enum_label_oids(mut self, label_oids: Vec<u32>) -> Self {
+        self.uncommitted_enum_label_oids = label_oids.into_iter().collect();
+        self
+    }
+
+    pub fn with_domain_checks(mut self, checks: BTreeMap<u32, (String, Vec<u32>)>) -> Self {
+        self.domain_checks = checks;
         self
     }
 
@@ -528,6 +542,22 @@ impl CatalogLookup for VisibleCatalog {
             return bootstrap_pg_enum_rows().to_vec();
         }
         self.enum_rows.clone()
+    }
+
+    fn enum_label_is_committed(&self, _type_oid: u32, label_oid: u32) -> bool {
+        !self.uncommitted_enum_label_oids.contains(&label_oid)
+    }
+
+    fn domain_allowed_enum_label_oids(&self, domain_oid: u32) -> Option<Vec<u32>> {
+        self.domain_checks
+            .get(&domain_oid)
+            .map(|(_, allowed)| allowed.clone())
+    }
+
+    fn domain_check_name(&self, domain_oid: u32) -> Option<String> {
+        self.domain_checks
+            .get(&domain_oid)
+            .map(|(name, _)| name.clone())
     }
 
     fn language_rows(&self) -> Vec<PgLanguageRow> {

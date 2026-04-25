@@ -805,6 +805,18 @@ pub trait CatalogLookup {
         bootstrap_pg_enum_rows().to_vec()
     }
 
+    fn enum_label_is_committed(&self, _type_oid: u32, _label_oid: u32) -> bool {
+        true
+    }
+
+    fn domain_allowed_enum_label_oids(&self, _domain_oid: u32) -> Option<Vec<u32>> {
+        None
+    }
+
+    fn domain_check_name(&self, _domain_oid: u32) -> Option<String> {
+        None
+    }
+
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
         if let Some(range_type) = range_type_ref_for_sql_type(sql_type) {
             if sql_type.is_array {
@@ -1204,6 +1216,18 @@ impl CatalogLookup for IndexExpressionCatalogLookup<'_> {
 
     fn enum_rows(&self) -> Vec<PgEnumRow> {
         self.inner.enum_rows()
+    }
+
+    fn enum_label_is_committed(&self, type_oid: u32, label_oid: u32) -> bool {
+        self.inner.enum_label_is_committed(type_oid, label_oid)
+    }
+
+    fn domain_allowed_enum_label_oids(&self, domain_oid: u32) -> Option<Vec<u32>> {
+        self.inner.domain_allowed_enum_label_oids(domain_oid)
+    }
+
+    fn domain_check_name(&self, domain_oid: u32) -> Option<String> {
+        self.inner.domain_check_name(domain_oid)
     }
 
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {

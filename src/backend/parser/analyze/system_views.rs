@@ -126,6 +126,24 @@ pub(super) fn bind_builtin_system_view(
                 ]
             })
             .collect(),
+        SyntheticSystemViewKind::PgType => catalog
+            .type_rows()
+            .into_iter()
+            .map(|row| {
+                vec![
+                    Value::Int32(row.oid as i32),
+                    Value::Text(row.typname.into()),
+                    Value::Int32(row.typnamespace as i32),
+                    Value::Int32(row.typowner as i32),
+                    Value::Int16(row.typlen),
+                    Value::InternalChar(row.typalign.as_char() as u8),
+                    Value::InternalChar(row.typstorage.as_char() as u8),
+                    Value::Int32(row.typrelid as i32),
+                    Value::Int32(row.typelem as i32),
+                    Value::Int32(row.typarray as i32),
+                ]
+            })
+            .collect(),
         SyntheticSystemViewKind::PgViews => catalog.pg_views_rows(),
         SyntheticSystemViewKind::PgMatviews => catalog.pg_matviews_rows(),
         SyntheticSystemViewKind::PgIndexes => catalog.pg_indexes_rows(),

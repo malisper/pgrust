@@ -1299,7 +1299,9 @@ fn run_statement(
         | Statement::ClosePortal(_)
         | Statement::Begin
         | Statement::Commit
-        | Statement::Rollback => {
+        | Statement::Rollback
+        | Statement::Savepoint(_)
+        | Statement::RollbackTo(_) => {
             Ok(StatementResult::AffectedRows(0))
         }
     };
