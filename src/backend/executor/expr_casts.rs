@@ -630,7 +630,7 @@ pub(crate) fn render_interval_text(value: IntervalValue) -> String {
     if minutes != 0 {
         parts.push(unit_suffix(minutes, "min", "mins"));
     }
-    if seconds != 0 || subsec != 0 || parts.is_empty() {
+    if seconds != 0 || subsec != 0 {
         let seconds_text = if subsec == 0 {
             seconds.to_string()
         } else {
@@ -644,8 +644,12 @@ pub(crate) fn render_interval_text(value: IntervalValue) -> String {
         parts.push(format!("{seconds_text} {label}"));
     }
 
+    if parts.is_empty() {
+        return "@ 0".into();
+    }
+
     let mut out = format!("@ {}", parts.join(" "));
-    if negative && out != "@ 0 secs" {
+    if negative && out != "@ 0" {
         out.push_str(" ago");
     }
     out
@@ -3544,7 +3548,7 @@ mod tests {
     use crate::backend::executor::{ExecError, Value};
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
-    use crate::include::nodes::datum::ArrayValue;
+    use crate::include::nodes::datum::{ArrayValue, IntervalValue};
 
     #[test]
     fn float4_text_input_rounds_at_float4_width() {
@@ -3695,8 +3699,16 @@ mod tests {
             .unwrap(),
             Value::PgArray(
                 ArrayValue::from_1d(vec![
-                    Value::Text("@ 0 secs".into()),
-                    Value::Text("@ 1 hour 42 mins 20 secs".into()),
+                    Value::Interval(IntervalValue {
+                        time_micros: 0,
+                        days: 0,
+                        months: 0,
+                    }),
+                    Value::Interval(IntervalValue {
+                        time_micros: 6_140_000_000,
+                        days: 0,
+                        months: 0,
+                    }),
                 ])
                 .with_element_type_oid(crate::include::catalog::INTERVAL_TYPE_OID),
             )

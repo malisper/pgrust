@@ -5425,8 +5425,16 @@ fn interval_array_literals_preserve_interval_array_values() {
         .unwrap(),
         vec![vec![Value::PgArray(
             ArrayValue::from_1d(vec![
-                Value::Text("@ 0 secs".into()),
-                Value::Text("@ 1 hour 42 mins 20 secs".into()),
+                Value::Interval(IntervalValue {
+                    time_micros: 0,
+                    days: 0,
+                    months: 0,
+                }),
+                Value::Interval(IntervalValue {
+                    time_micros: 6_140_000_000,
+                    days: 0,
+                    months: 0,
+                }),
             ])
             .with_element_type_oid(crate::include::catalog::INTERVAL_TYPE_OID),
         )]],
@@ -5446,7 +5454,11 @@ fn interval_text_cast_canonicalizes_interval_value() {
             "select '1 day'::interval",
         )
         .unwrap(),
-        vec![vec![Value::Text("@ 1 day".into())]],
+        vec![vec![Value::Interval(IntervalValue {
+            time_micros: 0,
+            days: 1,
+            months: 0,
+        })]],
     );
 }
 
@@ -5465,7 +5477,7 @@ fn interval_array_text_casts_render_postgres_interval_style() {
         .unwrap(),
         vec![vec![
             Value::Text("{\"@ 0\",\"@ 1 hour 42 mins 20 secs\"}".into()),
-            Value::Text("@ 0 secs".into()),
+            Value::Text("@ 0".into()),
         ]],
     );
 }
