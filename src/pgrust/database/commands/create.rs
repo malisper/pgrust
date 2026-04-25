@@ -2303,6 +2303,7 @@ impl Database {
                                     ty: crate::backend::parser::RawTypeName::Builtin(
                                         column.sql_type,
                                     ),
+                                    collation: None,
                                     default_expr: None,
                                     generated: None,
                                     identity: None,

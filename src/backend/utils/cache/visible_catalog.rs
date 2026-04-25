@@ -10,14 +10,15 @@ use crate::backend::utils::cache::system_views::{
     build_pg_views_rows,
 };
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgForeignDataWrapperRow,
-    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
-    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticExtDataRow,
-    PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow, bootstrap_pg_aggregate_rows,
-    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_database_rows,
-    bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
-    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
+    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
+    PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
+    PgForeignDataWrapperRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
+    PgOperatorRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
+    bootstrap_pg_aggregate_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
+    bootstrap_pg_collation_rows, bootstrap_pg_database_rows, bootstrap_pg_language_rows,
+    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
     synthetic_range_proc_rows_by_name,
 };
 use crate::pgrust::database::DatabaseStatsStore;
@@ -146,6 +147,13 @@ impl VisibleCatalog {
             .as_ref()
             .map(|catcache| catcache.proc_rows())
             .unwrap_or_else(crate::include::catalog::bootstrap_pg_proc_rows)
+    }
+
+    pub fn amproc_rows(&self) -> Vec<PgAmprocRow> {
+        self.catcache
+            .as_ref()
+            .map(CatCache::amproc_rows)
+            .unwrap_or_else(bootstrap_pg_amproc_rows)
     }
 
     pub fn database_row_by_oid(&self, oid: u32) -> Option<PgDatabaseRow> {

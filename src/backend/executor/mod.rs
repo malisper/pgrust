@@ -65,6 +65,7 @@ pub use driver::{
 };
 pub use exec_expr::{eval_expr, eval_plpgsql_expr};
 pub(crate) use expr_agg_support::build_aggregate_runtime;
+pub(crate) use expr_agg_support::execute_scalar_function_value_call;
 pub(crate) use expr_bit::render_bit_text;
 pub(crate) use expr_casts::cast_value;
 pub(crate) use expr_casts::parse_bytea_text;
