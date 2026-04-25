@@ -426,6 +426,7 @@ pub struct Query {
     pub rtable: Vec<RangeTblEntry>,
     pub jointree: Option<JoinTreeNode>,
     pub target_list: Vec<TargetEntry>,
+    pub distinct: bool,
     pub where_qual: Option<Expr>,
     pub group_by: Vec<Expr>,
     pub accumulators: Vec<AggAccum>,

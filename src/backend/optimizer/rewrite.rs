@@ -56,13 +56,15 @@ fn path_relids(path: &Path) -> Vec<usize> {
     let slot_relid = |slot_id: usize| rte_slot_varno(slot_id).unwrap_or(slot_id);
     match path {
         Path::Result { .. } => Vec::new(),
-        Path::Append { source_id, .. } => vec![*source_id],
+        Path::Append { source_id, .. } | Path::MergeAppend { source_id, .. } => vec![*source_id],
         Path::SetOp { slot_id, .. } => vec![*slot_id],
         Path::SeqScan { source_id, .. }
+        | Path::IndexOnlyScan { source_id, .. }
         | Path::IndexScan { source_id, .. }
         | Path::BitmapIndexScan { source_id, .. }
         | Path::BitmapHeapScan { source_id, .. } => vec![*source_id],
-        Path::Filter { input, .. }
+        Path::Unique { input, .. }
+        | Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
         | Path::Limit { input, .. }

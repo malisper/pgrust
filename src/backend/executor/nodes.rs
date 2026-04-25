@@ -6,6 +6,7 @@ use crate::backend::access::heap::heapam::{
     heap_scan_page_next_tuple, heap_scan_prepare_next_page,
 };
 use crate::backend::access::index::indexam;
+use crate::backend::access::nbtree::nbtree::decode_key_payload;
 use crate::backend::commands::explain::format_explain_lines_with_costs;
 use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
 use crate::backend::executor::expr_geometry::render_geometry_text;
@@ -26,20 +27,22 @@ use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::date::format_date_text;
 use crate::backend::utils::time::instant::Instant;
 use crate::include::access::scankey::ScanKeyData;
+use crate::include::access::visibilitymap::visibilitymap_get_status;
+use crate::include::access::visibilitymapdefs::VISIBILITYMAP_ALL_VISIBLE;
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, CteScanState,
-    FilterState, FunctionScanState, IndexScanState, LimitState, LockRowsState, MaterializedRow,
-    NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState, ProjectSetState,
-    ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState, SlotKind,
-    SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState, WindowAggState,
-    WorkTableScanState,
+    FilterState, FunctionScanState, IndexOnlyScanState, IndexScanState, LimitState, LockRowsState,
+    MaterializedRow, MergeAppendState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode,
+    PlanState, ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState,
+    SetOpState, SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot,
+    UniqueState, ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument};
 use crate::include::nodes::primnodes::{
-    BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, ParamKind,
-    RelationDesc, ScalarFunctionImpl, Var, attrno_index,
+    BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, OrderByEntry,
+    ParamKind, RelationDesc, ScalarFunctionImpl, Var, attrno_index,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashSet};
@@ -240,6 +243,42 @@ fn begin_node(stats: &mut NodeExecStats, ctx: &ExecutorContext) -> Result<(), Ex
 
 fn note_filtered_row(stats: &mut NodeExecStats) {
     stats.rows_removed_by_filter += 1;
+}
+
+fn render_order_by_key(item: &OrderByEntry, column_names: &[String]) -> String {
+    let mut rendered = render_explain_expr_inner(&item.expr, column_names);
+    if item.descending {
+        rendered.push_str(" DESC");
+    }
+    if let Some(nulls_first) = item.nulls_first {
+        rendered.push_str(if nulls_first {
+            " NULLS FIRST"
+        } else {
+            " NULLS LAST"
+        });
+    }
+    rendered
+}
+
+fn render_index_scan_condition(
+    keys: &[IndexScanKey],
+    qual_expr: Option<&Expr>,
+    desc: &RelationDesc,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    column_names: &[String],
+) -> Option<String> {
+    let mut rendered = keys
+        .iter()
+        .filter_map(|key| render_index_scan_key(key, desc, index_meta))
+        .collect::<Vec<_>>();
+    if let Some(qual_expr) = qual_expr {
+        rendered.push(render_explain_expr_inner(qual_expr, column_names));
+    }
+    match rendered.len() {
+        0 => None,
+        1 => rendered.into_iter().next(),
+        _ => Some(rendered.join(" AND ")),
+    }
 }
 
 fn materialize_cte_row(
@@ -600,6 +639,211 @@ impl PlanNode for AppendState {
     }
 }
 
+impl PlanNode for MergeAppendState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx)?;
+        if self.rows.is_none() {
+            let mut rows = Vec::new();
+            for child in &mut self.children {
+                while child.exec_proc_node(ctx)?.is_some() {
+                    ctx.check_for_interrupts()?;
+                    rows.push(child.materialize_current_row()?);
+                }
+            }
+
+            let mut keyed_rows = Vec::with_capacity(rows.len());
+            for mut row in rows {
+                ctx.check_for_interrupts()?;
+                set_active_system_bindings(ctx, &row.system_bindings);
+                set_outer_expr_bindings(ctx, row.slot.tts_values.clone(), &row.system_bindings);
+                let mut keys = Vec::with_capacity(self.items.len());
+                for item in &self.items {
+                    keys.push(eval_expr(&item.expr, &mut row.slot, ctx)?);
+                }
+                keyed_rows.push((keys, row));
+            }
+
+            let mut sort_error = None;
+            keyed_rows.sort_by(|(left_keys, _), (right_keys, _)| {
+                match compare_order_by_keys(&self.items, left_keys, right_keys) {
+                    Ok(ordering) => ordering,
+                    Err(err) => {
+                        if sort_error.is_none() {
+                            sort_error = Some(err);
+                        }
+                        std::cmp::Ordering::Equal
+                    }
+                }
+            });
+            if let Some(err) = sort_error {
+                return Err(err);
+            }
+            self.rows = Some(keyed_rows.into_iter().map(|(_, row)| row).collect());
+        }
+
+        let rows = self.rows.as_mut().unwrap();
+        if self.next_index >= rows.len() {
+            finish_eof(&mut self.stats, start, ctx);
+            return Ok(None);
+        }
+
+        let idx = self.next_index;
+        self.next_index += 1;
+        let row = &rows[idx];
+        let table_oid = row.slot.table_oid;
+        let tid = row.slot.tid();
+        self.current_bindings = table_oid
+            .map(|table_oid| {
+                vec![SystemVarBinding {
+                    varno: self.source_id,
+                    table_oid,
+                    tid,
+                }]
+            })
+            .unwrap_or_default();
+        self.slot
+            .store_virtual_row(row.slot.tts_values.clone(), tid, table_oid);
+        set_active_system_bindings(ctx, &self.current_bindings);
+        finish_row(&mut self.stats, start);
+        Ok(Some(&mut self.slot))
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
+    }
+
+    fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        "Merge Append".into()
+    }
+
+    fn explain_details(
+        &self,
+        indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        let prefix = "  ".repeat(indent + 1);
+        let sort_keys = self
+            .items
+            .iter()
+            .map(|item| render_order_by_key(item, &self.column_names))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("{prefix}Sort Key: {sort_keys}"));
+    }
+
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        for child in &self.children {
+            format_explain_lines_with_costs(child.as_ref(), indent + 1, analyze, show_costs, lines);
+        }
+    }
+}
+
+impl PlanNode for UniqueState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx)?;
+        loop {
+            if self.input.exec_proc_node(ctx)?.is_none() {
+                finish_eof(&mut self.stats, start, ctx);
+                return Ok(None);
+            }
+            let row = self.input.materialize_current_row()?;
+            if self
+                .previous_values
+                .as_ref()
+                .is_some_and(|prev| *prev == row.slot.tts_values)
+            {
+                continue;
+            }
+            self.previous_values = Some(row.slot.tts_values.clone());
+            load_materialized_row(&mut self.slot, &row, &mut self.current_bindings, ctx);
+            finish_row(&mut self.stats, start);
+            return Ok(Some(&mut self.slot));
+        }
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
+    }
+
+    fn column_names(&self) -> &[String] {
+        self.input.column_names()
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        "Unique".into()
+    }
+
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
+    }
+}
+
 impl PlanNode for SeqScanState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -849,6 +1093,305 @@ impl PlanNode for SeqScanState {
     }
 }
 
+fn decode_index_only_values(
+    desc: &RelationDesc,
+    index_desc: &RelationDesc,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    tuple: &crate::include::access::itup::IndexTuple,
+) -> Result<Vec<Value>, ExecError> {
+    let index_values = decode_key_payload(index_desc, &tuple.payload).map_err(|err| {
+        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            expected: "index-only tuple decode",
+            actual: format!("{err:?}"),
+        })
+    })?;
+    let mut values = vec![None; desc.columns.len()];
+    for (index_pos, value) in index_values.into_iter().enumerate() {
+        let Some(attnum) = index_meta.indkey.get(index_pos).copied() else {
+            continue;
+        };
+        if attnum <= 0 {
+            continue;
+        }
+        let heap_index = usize::try_from(attnum - 1).unwrap_or(usize::MAX);
+        if let Some(slot) = values.get_mut(heap_index) {
+            *slot = Some(value);
+        }
+    }
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value.ok_or(ExecError::Parse(
+                crate::backend::parser::ParseError::UnexpectedToken {
+                    expected: "covering index column",
+                    actual: format!("missing heap column {}", desc.columns[index].name),
+                },
+            ))
+        })
+        .collect()
+}
+
+impl PlanNode for IndexOnlyScanState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        if self.scan_exhausted {
+            finish_eof(&mut self.stats, start, ctx);
+            return Ok(None);
+        }
+        if self.scan.is_none() {
+            let Some(key_data) = eval_index_scan_keys(&self.keys, ctx, true)? else {
+                self.scan_exhausted = true;
+                finish_eof(&mut self.stats, start, ctx);
+                return Ok(None);
+            };
+            let order_by_data =
+                eval_index_scan_keys(&self.order_by_keys, ctx, false)?.unwrap_or_default();
+            let begin = crate::include::access::amapi::IndexBeginScanContext {
+                pool: ctx.pool.clone(),
+                client_id: ctx.client_id,
+                snapshot: ctx.snapshot.clone(),
+                heap_relation: self.rel,
+                index_relation: self.index_rel,
+                index_desc: (*self.index_desc).clone(),
+                index_meta: self.index_meta.clone(),
+                key_data,
+                order_by_data,
+                direction: self.direction,
+                want_itup: true,
+            };
+            self.scan = Some(
+                indexam::index_beginscan(&begin, self.am_oid).map_err(|err| {
+                    ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                        expected: "index access method begin scan",
+                        actual: format!("{err:?}"),
+                    })
+                })?,
+            );
+            let mut session_stats = ctx.session_stats.write();
+            session_stats.note_relation_scan(self.index_meta.indexrelid);
+            session_stats.note_io_read("client backend", "relation", "normal", 8192);
+        }
+
+        loop {
+            ctx.check_for_interrupts()?;
+            let has_tuple = {
+                let scan = self.scan.as_mut().expect("index-only scan must exist");
+                indexam::index_getnext(scan, self.am_oid).map_err(|err| {
+                    ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                        expected: "index access method tuple",
+                        actual: format!("{err:?}"),
+                    })
+                })?
+            };
+            if !has_tuple {
+                if let Some(scan) = self.scan.take() {
+                    indexam::index_endscan(scan, self.am_oid).map_err(|err| {
+                        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                            expected: "index access method end scan",
+                            actual: format!("{err:?}"),
+                        })
+                    })?;
+                }
+                self.scan_exhausted = true;
+                finish_eof(&mut self.stats, start, ctx);
+                return Ok(None);
+            }
+
+            let (tid, index_tuple) = {
+                let scan = self
+                    .scan
+                    .as_ref()
+                    .expect("index-only scan must exist after tuple fetch");
+                (
+                    scan.xs_heaptid
+                        .expect("index-only scan tuple must set heap tid"),
+                    scan.xs_itup.clone(),
+                )
+            };
+            {
+                let mut session_stats = ctx.session_stats.write();
+                session_stats.note_relation_tuple_returned(self.index_meta.indexrelid);
+                session_stats.note_relation_block_fetched(self.index_meta.indexrelid);
+            }
+
+            let vm_status = visibilitymap_get_status(
+                &ctx.pool,
+                ctx.client_id,
+                self.rel,
+                tid.block_number,
+                &mut self.vm_buf,
+            )
+            .map_err(|err| {
+                ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                    expected: "visibility map status",
+                    actual: format!("{err:?}"),
+                })
+            })?;
+            let all_visible = (vm_status & VISIBILITYMAP_ALL_VISIBLE) != 0;
+            if all_visible && let Some(tuple) = index_tuple.as_ref() {
+                let values = decode_index_only_values(
+                    &self.desc,
+                    &self.index_desc,
+                    &self.index_meta,
+                    tuple,
+                )?;
+                self.slot
+                    .store_virtual_row(values, Some(tid), Some(self.relation_oid));
+                self.current_bindings = vec![SystemVarBinding {
+                    varno: self.source_id,
+                    table_oid: self.relation_oid,
+                    tid: Some(tid),
+                }];
+                set_active_system_bindings(ctx, &self.current_bindings);
+
+                if let Some(qual) = &self.qual {
+                    let outer_values = materialize_slot_values(&mut self.slot)?;
+                    let current_bindings = self.current_bindings.clone();
+                    set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                    clear_inner_expr_bindings(ctx);
+                    if !qual(&mut self.slot, ctx)? {
+                        note_filtered_row(&mut self.stats);
+                        continue;
+                    }
+                }
+
+                finish_row(&mut self.stats, start);
+                return Ok(Some(&mut self.slot));
+            }
+
+            let visible = heap_fetch_visible_with_txns(
+                &ctx.pool,
+                ctx.client_id,
+                self.rel,
+                tid,
+                &ctx.txns,
+                &ctx.snapshot,
+            )?;
+            let Some(tuple) = visible else {
+                continue;
+            };
+            {
+                let mut session_stats = ctx.session_stats.write();
+                session_stats.note_relation_tuple_fetched(self.relation_oid);
+                session_stats.note_relation_block_fetched(self.relation_oid);
+                session_stats.note_io_read("client backend", "relation", "normal", 8192);
+            }
+            self.slot.kind = SlotKind::HeapTuple {
+                desc: self.desc.clone(),
+                attr_descs: self.attr_descs.clone(),
+                tid,
+                tuple,
+            };
+            self.slot.toast = slot_toast_context(self.toast_relation, ctx);
+            self.slot.tts_nvalid = 0;
+            self.slot.tts_values.clear();
+            self.slot.decode_offset = 0;
+            self.slot.table_oid = Some(self.relation_oid);
+            self.current_bindings = vec![SystemVarBinding {
+                varno: self.source_id,
+                table_oid: self.relation_oid,
+                tid: Some(tid),
+            }];
+            set_active_system_bindings(ctx, &self.current_bindings);
+
+            if let Some(qual) = &self.qual {
+                let outer_values = materialize_slot_values(&mut self.slot)?;
+                let current_bindings = self.current_bindings.clone();
+                set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                clear_inner_expr_bindings(ctx);
+                if !qual(&mut self.slot, ctx)? {
+                    note_filtered_row(&mut self.stats);
+                    continue;
+                }
+            }
+
+            finish_row(&mut self.stats, start);
+            return Ok(Some(&mut self.slot));
+        }
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
+    }
+
+    fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        let direction = if matches!(
+            self.direction,
+            crate::include::access::relscan::ScanDirection::Backward
+        ) {
+            " Backward"
+        } else {
+            ""
+        };
+        format!(
+            "Index Only Scan{direction} using {} on {}",
+            self.index_name, self.relation_name
+        )
+    }
+
+    fn explain_details(
+        &self,
+        indent: usize,
+        analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        let prefix = "  ".repeat(indent + 1);
+        if let Some(detail) = render_index_scan_condition(
+            &self.keys,
+            self.qual_expr.as_ref(),
+            &self.desc,
+            &self.index_meta,
+            &self.column_names,
+        ) {
+            lines.push(format!("{prefix}Index Cond: ({detail})"));
+        }
+        if analyze && self.stats.rows_removed_by_filter > 0 {
+            lines.push(format!(
+                "{prefix}Rows Removed by Filter: {}",
+                self.stats.rows_removed_by_filter
+            ));
+        }
+    }
+
+    fn explain_children(
+        &self,
+        _indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        _lines: &mut Vec<String>,
+    ) {
+    }
+}
+
 impl PlanNode for IndexScanState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -967,6 +1510,17 @@ impl PlanNode for IndexScanState {
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
 
+            if let Some(qual) = &self.qual {
+                let outer_values = materialize_slot_values(&mut self.slot)?;
+                let current_bindings = self.current_bindings.clone();
+                set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                clear_inner_expr_bindings(ctx);
+                if !qual(&mut self.slot, ctx)? {
+                    note_filtered_row(&mut self.stats);
+                    continue;
+                }
+            }
+
             finish_row(&mut self.stats, start);
             return Ok(Some(&mut self.slot));
         }
@@ -990,36 +1544,42 @@ impl PlanNode for IndexScanState {
         self.plan_info
     }
     fn node_label(&self) -> String {
+        let direction = if matches!(
+            self.direction,
+            crate::include::access::relscan::ScanDirection::Backward
+        ) {
+            " Backward"
+        } else {
+            ""
+        };
         format!(
-            "Index Scan using {} on {}",
+            "Index Scan{direction} using {} on {}",
             self.index_name, self.relation_name
         )
     }
     fn explain_details(
         &self,
         indent: usize,
-        _analyze: bool,
+        analyze: bool,
         _show_costs: bool,
         lines: &mut Vec<String>,
     ) {
-        if self.keys.is_empty() {
-            return;
-        }
-        let rendered = self
-            .keys
-            .iter()
-            .filter_map(|key| render_index_scan_key(key, &self.desc, &self.index_meta))
-            .collect::<Vec<_>>();
-        if rendered.is_empty() {
-            return;
-        }
         let prefix = "  ".repeat(indent + 1);
-        let detail = if rendered.len() == 1 {
-            rendered[0].clone()
-        } else {
-            format!("({})", rendered.join(" AND "))
-        };
-        lines.push(format!("{prefix}Index Cond: ({detail})"));
+        if let Some(detail) = render_index_scan_condition(
+            &self.keys,
+            self.qual_expr.as_ref(),
+            &self.desc,
+            &self.index_meta,
+            &self.column_names,
+        ) {
+            lines.push(format!("{prefix}Index Cond: ({detail})"));
+        }
+        if analyze && self.stats.rows_removed_by_filter > 0 {
+            lines.push(format!(
+                "{prefix}Rows Removed by Filter: {}",
+                self.stats.rows_removed_by_filter
+            ));
+        }
     }
     fn explain_children(
         &self,
@@ -2708,7 +3268,7 @@ impl PlanNode for OrderByState {
         let sort_keys = self
             .items
             .iter()
-            .map(|item| render_explain_expr(&item.expr, self.column_names()))
+            .map(|item| render_order_by_key(item, self.column_names()))
             .collect::<Vec<_>>()
             .join(", ");
         lines.push(format!("{prefix}Sort Key: {sort_keys}"));

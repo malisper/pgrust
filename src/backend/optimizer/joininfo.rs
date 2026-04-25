@@ -754,6 +754,7 @@ mod tests {
                 SqlType::new(SqlTypeKind::Int4),
                 1,
             )],
+            distinct: false,
             where_qual: None,
             group_by: Vec::new(),
             accumulators: Vec::new(),

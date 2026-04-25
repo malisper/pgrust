@@ -8799,15 +8799,16 @@ fn build_plan_for_recursive_mixed_cte_query() {
     fn plan_contains_cte_scan(plan: &Plan) -> bool {
         match plan {
             Plan::CteScan { .. } => true,
-            Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
-                children.iter().any(plan_contains_cte_scan)
-            }
+            Plan::Append { children, .. }
+            | Plan::MergeAppend { children, .. }
+            | Plan::SetOp { children, .. } => children.iter().any(plan_contains_cte_scan),
             Plan::Hash { input, .. }
             | Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
             | Plan::Limit { input, .. }
             | Plan::LockRows { input, .. }
             | Plan::Projection { input, .. }
+            | Plan::Unique { input, .. }
             | Plan::Aggregate { input, .. }
             | Plan::WindowAgg { input, .. }
             | Plan::SubqueryScan { input, .. }
@@ -8825,6 +8826,7 @@ fn build_plan_for_recursive_mixed_cte_query() {
             } => plan_contains_cte_scan(anchor) || plan_contains_cte_scan(recursive),
             Plan::Result { .. }
             | Plan::SeqScan { .. }
+            | Plan::IndexOnlyScan { .. }
             | Plan::IndexScan { .. }
             | Plan::BitmapIndexScan { .. }
             | Plan::FunctionScan { .. }

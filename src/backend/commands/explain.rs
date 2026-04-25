@@ -122,7 +122,7 @@ fn format_explain_plan_with_subplans_inner(
         push_explain_plan_line(plan, state.as_ref(), indent, show_costs, lines);
         push_verbose_plan_details(plan, indent, ctx, lines);
     } else {
-        push_explain_state_line(state.as_ref(), indent, false, show_costs, lines);
+        push_explain_plan_state_line(plan, state.as_ref(), indent, show_costs, lines);
         state.explain_details(indent, false, show_costs, lines);
     }
 
@@ -250,6 +250,23 @@ fn push_explain_state_line(
     }
 }
 
+fn push_explain_plan_state_line(
+    plan: &Plan,
+    state: &dyn PlanNode,
+    indent: usize,
+    show_costs: bool,
+    lines: &mut Vec<String>,
+) {
+    let prefix = "  ".repeat(indent);
+    let label = nonverbose_plan_label(plan).unwrap_or_else(|| state.node_label());
+    push_explain_line(
+        &format!("{prefix}{label}"),
+        state.plan_info(),
+        show_costs,
+        lines,
+    );
+}
+
 fn push_explain_plan_line(
     plan: &Plan,
     state: &dyn PlanNode,
@@ -275,6 +292,15 @@ fn verbose_plan_label(plan: &Plan) -> Option<String> {
             AggregateStrategy::Hashed => Some("HashAggregate".into()),
         },
         Plan::FunctionScan { call, .. } => Some(verbose_function_scan_label(call)),
+        _ => None,
+    }
+}
+
+fn nonverbose_plan_label(plan: &Plan) -> Option<String> {
+    match plan {
+        Plan::Projection { input, .. } if matches!(input.as_ref(), Plan::Result { .. }) => {
+            Some("Result".into())
+        }
         _ => None,
     }
 }
@@ -564,12 +590,15 @@ fn verbose_plan_output_exprs(
 ) -> Vec<String> {
     match plan {
         Plan::Result { .. } => Vec::new(),
-        Plan::Append { desc, .. } | Plan::SeqScan { desc, .. } | Plan::IndexScan { desc, .. } => {
-            desc.columns
-                .iter()
-                .map(|column| column.name.clone())
-                .collect()
-        }
+        Plan::Append { desc, .. }
+        | Plan::MergeAppend { desc, .. }
+        | Plan::SeqScan { desc, .. }
+        | Plan::IndexOnlyScan { desc, .. }
+        | Plan::IndexScan { desc, .. } => desc
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect(),
         Plan::BitmapHeapScan { desc, .. } => desc
             .columns
             .iter()
@@ -577,6 +606,7 @@ fn verbose_plan_output_exprs(
             .collect(),
         Plan::BitmapIndexScan { .. } => Vec::new(),
         Plan::Hash { input, .. }
+        | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::Limit { input, .. }
@@ -909,15 +939,29 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
     match plan {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. }
         | Plan::Values { .. } => Vec::new(),
         Plan::BitmapHeapScan { bitmapqual, .. } => vec![bitmapqual.as_ref()],
-        Plan::Append { children, .. } | Plan::SetOp { children, .. } => children.iter().collect(),
-        Plan::Filter { input, .. } if matches!(input.as_ref(), Plan::SeqScan { .. }) => Vec::new(),
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().collect(),
+        Plan::Filter { input, .. }
+            if matches!(
+                input.as_ref(),
+                Plan::SeqScan { .. } | Plan::IndexOnlyScan { .. } | Plan::IndexScan { .. }
+            ) =>
+        {
+            Vec::new()
+        }
+        Plan::Projection { input, .. } if matches!(input.as_ref(), Plan::Result { .. }) => {
+            Vec::new()
+        }
         Plan::Hash { input, .. }
+        | Plan::Unique { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
@@ -957,7 +1001,9 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
     match plan {
         Plan::Result { .. }
         | Plan::Append { .. }
+        | Plan::Unique { .. }
         | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::BitmapHeapScan { .. }
@@ -1029,6 +1075,11 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
         }
         Plan::Filter { predicate, .. } => collect_direct_expr_subplans(predicate, &mut found),
         Plan::OrderBy { items, .. } => {
+            for item in items {
+                collect_direct_expr_subplans(&item.expr, &mut found);
+            }
+        }
+        Plan::MergeAppend { items, .. } => {
             for item in items {
                 collect_direct_expr_subplans(&item.expr, &mut found);
             }
