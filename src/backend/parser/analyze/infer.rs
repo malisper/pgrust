@@ -737,6 +737,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 }
                 Some(BuiltinScalarFunction::DatePart) => SqlType::new(SqlTypeKind::Float8),
                 Some(BuiltinScalarFunction::TimeZone) => SqlType::new(SqlTypeKind::TimeTz),
+                Some(BuiltinScalarFunction::Extract) => SqlType::new(SqlTypeKind::Numeric),
                 Some(BuiltinScalarFunction::DateTrunc) => match args.args().get(1).map(|arg| {
                     infer_sql_expr_type_with_ctes(
                         &arg.value,
@@ -755,6 +756,22 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                         kind: SqlTypeKind::Timestamp,
                         ..
                     }) => SqlType::new(SqlTypeKind::Timestamp),
+                    Some(SqlType {
+                        kind: SqlTypeKind::TimestampTz,
+                        ..
+                    }) => SqlType::new(SqlTypeKind::TimestampTz),
+                    _ => SqlType::new(SqlTypeKind::Timestamp),
+                },
+                Some(BuiltinScalarFunction::DateBin) => match args.args().get(1).map(|arg| {
+                    infer_sql_expr_type_with_ctes(
+                        &arg.value,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                }) {
                     Some(SqlType {
                         kind: SqlTypeKind::TimestampTz,
                         ..
@@ -803,6 +820,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 ) => SqlType::new(SqlTypeKind::MacAddr8),
                 Some(BuiltinScalarFunction::MakeDate) => SqlType::new(SqlTypeKind::Date),
                 Some(BuiltinScalarFunction::MakeTime) => SqlType::new(SqlTypeKind::Time),
+                Some(BuiltinScalarFunction::MakeTimestamp) => SqlType::new(SqlTypeKind::Timestamp),
+                Some(BuiltinScalarFunction::Age) => SqlType::new(SqlTypeKind::Interval),
                 Some(BuiltinScalarFunction::ToJson)
                 | Some(BuiltinScalarFunction::ArrayToJson)
                 | Some(BuiltinScalarFunction::JsonBuildArray)

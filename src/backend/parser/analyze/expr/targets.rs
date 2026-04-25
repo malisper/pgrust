@@ -429,7 +429,15 @@ fn bind_select_list_srf_call(
                     ctes,
                 )?;
                 let step_type = step_type.expect("generate_series step type");
-                coerce_bound_expr(step_expr, step_type, common)
+                let step_target = if matches!(
+                    common.kind,
+                    SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+                ) {
+                    SqlType::new(SqlTypeKind::Interval)
+                } else {
+                    common
+                };
+                coerce_bound_expr(step_expr, step_type, step_target)
             } else {
                 match common.kind {
                     SqlTypeKind::Int8 => Expr::Const(Value::Int64(1)),

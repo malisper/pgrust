@@ -1362,7 +1362,9 @@ fn compile_exec_sql_stmt(
         });
     }
 
-    if let Some((target_name, select_sql)) = split_select_into_target(sql) {
+    if let Some((target_name, select_sql)) =
+        split_cte_prefixed_select_into_target(sql).or_else(|| split_select_into_target(sql))
+    {
         return compile_select_into_stmt(
             &select_sql,
             &[AssignTarget::Name(target_name)],
@@ -1544,6 +1546,32 @@ fn split_select_into_target(sql: &str) -> Option<(String, String)> {
         return None;
     }
     let rest = trimmed[12..].trim_start();
+    let (target, rest) = split_leading_select_into_target(rest)?;
+    let select_sql = format!("select {}", rest.trim_start());
+    Some((target, select_sql))
+}
+
+fn split_cte_prefixed_select_into_target(sql: &str) -> Option<(String, String)> {
+    let trimmed = sql.trim_start();
+    if !keyword_at(trimmed, 0, "with") {
+        return None;
+    }
+    let select_idx = find_next_top_level_keyword(trimmed, &["select"])?;
+    let after_select = trimmed[select_idx + "select".len()..].trim_start();
+    if !keyword_at(after_select, 0, "into") {
+        return None;
+    }
+    let rest = after_select["into".len()..].trim_start();
+    let (target, rest) = split_leading_select_into_target(rest)?;
+    let select_sql = format!(
+        "{} select {}",
+        trimmed[..select_idx].trim_end(),
+        rest.trim_start()
+    );
+    Some((target, select_sql))
+}
+
+fn split_leading_select_into_target(rest: &str) -> Option<(String, &str)> {
     let mut chars = rest.char_indices();
     let end = if rest.starts_with('"') {
         let mut escaped = false;
@@ -1570,8 +1598,7 @@ fn split_select_into_target(sql: &str) -> Option<(String, String)> {
             .unwrap_or(rest.len())
     };
     let target = rest[..end].trim().trim_matches('"').to_ascii_lowercase();
-    let select_sql = format!("select {}", rest[end..].trim_start());
-    Some((target, select_sql))
+    Some((target, &rest[end..]))
 }
 
 fn split_select_with_into_targets(sql: &str) -> Option<(Vec<String>, String, bool)> {
