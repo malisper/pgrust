@@ -87,7 +87,7 @@ use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_NAME, PUBLIC_NAMESPACE_OID, PgConstraintRow,
-    PgRangeRow, PgTypeRow, RangeCanonicalization, system_catalog_indexes,
+    PgEnumRow, PgRangeRow, PgTypeRow, RangeCanonicalization, system_catalog_indexes,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 pub use crate::pgrust::autovacuum::AutovacuumConfig;
@@ -737,18 +737,31 @@ impl Database {
             .map(|entry| entry.label.clone())
     }
 
-    pub(crate) fn enum_label_rows_for_catalog(&self) -> Vec<(u32, u32, String)> {
-        self.enum_types
+    pub(crate) fn enum_rows_for_catalog(&self) -> Vec<PgEnumRow> {
+        let mut rows = self
+            .enum_types
             .read()
             .values()
             .flat_map(|entry| {
                 entry
                     .labels
                     .iter()
-                    .map(|label| (entry.oid, label.oid, label.label.clone()))
+                    .map(|label| PgEnumRow {
+                        oid: label.oid,
+                        enumtypid: entry.oid,
+                        enumsortorder: f64::from(label.sort_order),
+                        enumlabel: label.label.clone(),
+                    })
                     .collect::<Vec<_>>()
             })
-            .collect()
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            left.enumtypid
+                .cmp(&right.enumtypid)
+                .then_with(|| left.enumsortorder.total_cmp(&right.enumsortorder))
+                .then_with(|| left.enumlabel.cmp(&right.enumlabel))
+        });
+        rows
     }
 
     pub(crate) fn range_type_rows_for_search_path(&self, search_path: &[String]) -> Vec<PgTypeRow> {

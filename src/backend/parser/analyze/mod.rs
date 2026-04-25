@@ -36,11 +36,11 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgConstraintRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgPartitionedTableRow, PgProcRow, PgRangeRow, PgRewriteRow,
+    PgCollationRow, PgConstraintRow, PgEnumRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgPartitionedTableRow, PgProcRow, PgRangeRow, PgRewriteRow,
     PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTsConfigRow, PgTsDictRow,
     PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_enum_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
     bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
     bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, builtin_range_rows, builtin_type_rows,
     is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
@@ -792,6 +792,10 @@ pub trait CatalogLookup {
 
     fn enum_label(&self, _type_oid: u32, _label_oid: u32) -> Option<String> {
         None
+    }
+
+    fn enum_rows(&self) -> Vec<PgEnumRow> {
+        bootstrap_pg_enum_rows().to_vec()
     }
 
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {

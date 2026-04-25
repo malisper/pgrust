@@ -27606,6 +27606,36 @@ fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
     assert_eq!(mood_array_type.typelem, mood_type.oid);
     assert_eq!(mood_type.sql_type.kind, SqlTypeKind::Enum);
     assert_eq!(mood_type.sql_type.type_oid, mood_type.oid);
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select enumlabel, enumsortorder from pg_enum \
+             where enumtypid = 'mood'::regtype order by enumsortorder",
+        ),
+        vec![
+            vec![Value::Text("sad".into()), Value::Float64(1.0)],
+            vec![Value::Text("ok".into()), Value::Float64(2.0)],
+        ]
+    );
+
+    db.execute(1, "alter type mood add value 'happy' after 'ok'")
+        .unwrap();
+    db.execute(1, "alter type mood rename value 'ok' to 'fine'")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select enumlabel, enumsortorder from pg_catalog.pg_enum \
+             where enumtypid = 'mood'::regtype order by enumsortorder",
+        ),
+        vec![
+            vec![Value::Text("sad".into()), Value::Float64(1.0)],
+            vec![Value::Text("fine".into()), Value::Float64(2.0)],
+            vec![Value::Text("happy".into()), Value::Float64(3.0)],
+        ]
+    );
 }
 
 #[test]

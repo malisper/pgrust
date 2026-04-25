@@ -11,15 +11,15 @@ use crate::backend::utils::cache::system_views::{
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
-    PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
+    PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgEnumRow,
     PgForeignDataWrapperRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
     PgOperatorRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow,
     PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTsConfigRow,
     PgTsDictRow, PgTypeRow, bootstrap_pg_aggregate_rows, bootstrap_pg_amproc_rows,
     bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_database_rows,
-    bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
-    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, bootstrap_pg_ts_config_rows,
-    bootstrap_pg_ts_dict_rows, builtin_range_rows, builtin_type_rows,
+    bootstrap_pg_enum_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
+    bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, builtin_range_rows, builtin_type_rows,
     synthetic_range_proc_rows_by_name,
 };
 use crate::pgrust::database::DatabaseStatsStore;
@@ -30,7 +30,7 @@ pub struct VisibleCatalog {
     relcache: RelCache,
     catcache: Option<CatCache>,
     search_path: Vec<String>,
-    enum_labels: Vec<(u32, u32, String)>,
+    enum_rows: Vec<PgEnumRow>,
 }
 
 impl VisibleCatalog {
@@ -47,7 +47,7 @@ impl VisibleCatalog {
             relcache,
             catcache,
             search_path,
-            enum_labels: Vec::new(),
+            enum_rows: Vec::new(),
         }
     }
 
@@ -55,8 +55,8 @@ impl VisibleCatalog {
         &self.relcache
     }
 
-    pub fn with_enum_labels(mut self, enum_labels: Vec<(u32, u32, String)>) -> Self {
-        self.enum_labels = enum_labels;
+    pub fn with_enum_rows(mut self, enum_rows: Vec<PgEnumRow>) -> Self {
+        self.enum_rows = enum_rows;
         self
     }
 
@@ -491,17 +491,24 @@ impl CatalogLookup for VisibleCatalog {
     }
 
     fn enum_label_oid(&self, type_oid: u32, label: &str) -> Option<u32> {
-        self.enum_labels
+        self.enum_rows
             .iter()
-            .find(|(typid, _, enum_label)| *typid == type_oid && enum_label == label)
-            .map(|(_, label_oid, _)| *label_oid)
+            .find(|row| row.enumtypid == type_oid && row.enumlabel == label)
+            .map(|row| row.oid)
     }
 
     fn enum_label(&self, type_oid: u32, label_oid: u32) -> Option<String> {
-        self.enum_labels
+        self.enum_rows
             .iter()
-            .find(|(typid, oid, _)| *typid == type_oid && *oid == label_oid)
-            .map(|(_, _, label)| label.clone())
+            .find(|row| row.enumtypid == type_oid && row.oid == label_oid)
+            .map(|row| row.enumlabel.clone())
+    }
+
+    fn enum_rows(&self) -> Vec<PgEnumRow> {
+        if self.enum_rows.is_empty() {
+            return bootstrap_pg_enum_rows().to_vec();
+        }
+        self.enum_rows.clone()
     }
 
     fn language_rows(&self) -> Vec<PgLanguageRow> {

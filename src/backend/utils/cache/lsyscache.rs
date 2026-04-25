@@ -28,8 +28,8 @@ use crate::include::access::brin_page::{
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PgAggregateRow, PgAmRow,
     PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticExtDataRow,
+    PgConstraintRow, PgEnumRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticExtDataRow,
     PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
@@ -1754,6 +1754,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         self.db.enum_label(type_oid, label_oid)
     }
 
+    fn enum_rows(&self) -> Vec<PgEnumRow> {
+        self.db.enum_rows_for_catalog()
+    }
+
     fn language_rows(&self) -> Vec<PgLanguageRow> {
         language_rows(self.db, self.client_id, self.txn_ctx)
     }
@@ -2056,7 +2060,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
                 Some(catcache),
                 self.search_path.clone(),
             )
-            .with_enum_labels(self.db.enum_label_rows_for_catalog()),
+            .with_enum_rows(self.db.enum_rows_for_catalog()),
         )
     }
 }
