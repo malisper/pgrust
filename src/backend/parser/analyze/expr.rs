@@ -1841,7 +1841,11 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             );
             let is_network = !inner_type.is_array
                 && matches!(inner_type.kind, SqlTypeKind::Inet | SqlTypeKind::Cidr);
-            if !is_integer_family(inner_type) && !is_bit_string_type(inner_type) && !is_network {
+            if !is_integer_family(inner_type)
+                && !is_bit_string_type(inner_type)
+                && !is_macaddr_type(inner_type)
+                && !is_network
+            {
                 return Err(ParseError::UndefinedOperator {
                     op: "~",
                     left_type: sql_type_name(inner_type),

@@ -45,7 +45,9 @@ use crate::include::nodes::primnodes::RelationDesc;
 use crate::{BufferPool, ClientId, PinnedBuffer, SmgrStorageBackend};
 use wal::{LoggedHashBlock, log_hash_record};
 
-pub(crate) use support::{HASH_PARTITION_SEED, hash_combine64, hash_value_extended};
+pub(crate) use support::{
+    HASH_PARTITION_SEED, hash_bytes_extended, hash_combine64, hash_value_extended,
+};
 
 fn hash_insert_mutex() -> &'static parking_lot::Mutex<()> {
     static HASH_INSERT_MUTEX: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();

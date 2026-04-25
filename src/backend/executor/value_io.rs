@@ -12,6 +12,9 @@ use super::expr_geometry::{
     decode_path_bytes, decode_polygon_bytes, encode_path_bytes, encode_polygon_bytes,
     render_geometry_text,
 };
+use super::expr_mac::{
+    parse_macaddr_bytes, parse_macaddr8_bytes, render_macaddr_text, render_macaddr8_text,
+};
 use super::expr_multirange::{render_multirange, render_multirange_text_with_config};
 use super::expr_network::{encode_network_bytes, parse_cidr_bytes, parse_inet_bytes};
 use super::expr_range::{
@@ -77,6 +80,8 @@ const INTERNAL_VALUE_TAG_CIDR: u8 = 35;
 const INTERNAL_VALUE_TAG_INTERVAL: u8 = 36;
 const INTERNAL_VALUE_TAG_UUID: u8 = 37;
 const INTERNAL_VALUE_TAG_PG_LSN: u8 = 38;
+const INTERNAL_VALUE_TAG_MACADDR: u8 = 39;
+const INTERNAL_VALUE_TAG_MACADDR8: u8 = 40;
 const COMPOSITE_DATUM_VERSION: u8 = 1;
 
 pub fn render_uuid_text(value: &[u8; 16]) -> String {
@@ -165,6 +170,8 @@ pub(crate) fn format_record_text_with_options(
                             Value::Uuid(v) => render_uuid_text(v),
                             Value::Inet(v) => v.render_inet(),
                             Value::Cidr(v) => v.render_cidr(),
+                            Value::MacAddr(v) => render_macaddr_text(v),
+                            Value::MacAddr8(v) => render_macaddr8_text(v),
                             Value::Bit(v) => v.render(),
                             Value::TsVector(v) => crate::backend::executor::render_tsvector_text(v),
                             Value::TsQuery(v) => crate::backend::executor::render_tsquery_text(v),
@@ -335,6 +342,8 @@ fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> 
         Value::Uuid(v) => render_uuid_text(v),
         Value::Inet(v) => v.render_inet(),
         Value::Cidr(v) => v.render_cidr(),
+        Value::MacAddr(v) => render_macaddr_text(v),
+        Value::MacAddr8(v) => render_macaddr8_text(v),
         Value::InternalChar(byte) => render_internal_char_text(*byte),
         Value::Date(_)
         | Value::Time(_)
@@ -433,6 +442,8 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
         SqlTypeKind::Bytea => 14,
         SqlTypeKind::Inet => 67,
         SqlTypeKind::Cidr => 68,
+        SqlTypeKind::MacAddr => 76,
+        SqlTypeKind::MacAddr8 => 77,
         SqlTypeKind::Float4 => 15,
         SqlTypeKind::Float8 => 16,
         SqlTypeKind::Money => 17,
@@ -545,6 +556,8 @@ fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
         14 => SqlTypeKind::Bytea,
         67 => SqlTypeKind::Inet,
         68 => SqlTypeKind::Cidr,
+        76 => SqlTypeKind::MacAddr,
+        77 => SqlTypeKind::MacAddr8,
         15 => SqlTypeKind::Float4,
         16 => SqlTypeKind::Float8,
         17 => SqlTypeKind::Money,
@@ -917,6 +930,14 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
             out.push(INTERNAL_VALUE_TAG_CIDR);
             encode_internal_text(v.render_cidr().as_bytes(), &mut out);
         }
+        Value::MacAddr(v) => {
+            out.push(INTERNAL_VALUE_TAG_MACADDR);
+            out.extend_from_slice(&v);
+        }
+        Value::MacAddr8(v) => {
+            out.push(INTERNAL_VALUE_TAG_MACADDR8);
+            out.extend_from_slice(&v);
+        }
         Value::Point(v) => {
             out.push(INTERNAL_VALUE_TAG_POINT);
             out.extend_from_slice(&v.x.to_le_bytes());
@@ -1191,6 +1212,8 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
             let mut offset = 0usize;
             Value::Cidr(parse_cidr_bytes(decode_internal_text(rest, &mut offset)?)?)
         }
+        INTERNAL_VALUE_TAG_MACADDR => Value::MacAddr(parse_macaddr_bytes(rest)?),
+        INTERNAL_VALUE_TAG_MACADDR8 => Value::MacAddr8(parse_macaddr8_bytes(rest)?),
         INTERNAL_VALUE_TAG_POINT => {
             if rest.len() != 16 {
                 return Err(ExecError::InvalidStorageValue {
@@ -1509,6 +1532,8 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
             Ok(TupleValue::Bytes(encode_network_bytes(&v, false)))
         }
         (ScalarType::Cidr, Value::Cidr(v)) => Ok(TupleValue::Bytes(encode_network_bytes(&v, true))),
+        (ScalarType::MacAddr, Value::MacAddr(v)) => Ok(TupleValue::Bytes(v.to_vec())),
+        (ScalarType::MacAddr8, Value::MacAddr8(v)) => Ok(TupleValue::Bytes(v.to_vec())),
         (ScalarType::Float32, Value::Float64(v)) => {
             Ok(TupleValue::Bytes((v as f32).to_le_bytes().to_vec()))
         }
@@ -1752,6 +1777,8 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
         Value::Uuid(value) => cast_value(Value::Uuid(*value), target),
         Value::Inet(v) => cast_text_value(&v.render_inet(), target, false),
         Value::Cidr(v) => cast_text_value(&v.render_cidr(), target, false),
+        Value::MacAddr(v) => cast_text_value(&render_macaddr_text(v), target, false),
+        Value::MacAddr8(v) => cast_text_value(&render_macaddr8_text(v), target, false),
         Value::TsVector(vector) => cast_text_value(
             &crate::backend::executor::render_tsvector_text(vector),
             target,
@@ -2047,6 +2074,26 @@ pub(crate) fn decode_value_with_toast(
                 });
             }
             parse_cidr_bytes(bytes).map(Value::Cidr)
+        }
+        ScalarType::MacAddr => {
+            if column.storage.attlen != 6 || bytes.len() != 6 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            parse_macaddr_bytes(bytes).map(Value::MacAddr)
+        }
+        ScalarType::MacAddr8 => {
+            if column.storage.attlen != 8 || bytes.len() != 8 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            parse_macaddr8_bytes(bytes).map(Value::MacAddr8)
         }
         ScalarType::Float32 => {
             if column.storage.attlen != 4 || bytes.len() != 4 {

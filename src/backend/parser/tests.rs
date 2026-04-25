@@ -10319,6 +10319,41 @@ fn parse_create_table_with_array_types() {
 }
 
 #[test]
+fn parse_macaddr_type_names_and_array_aliases() {
+    match parse_statement(
+        "create table mac_widgets (m macaddr, m8 macaddr8, ma _macaddr, m8a _macaddr8)",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            let columns = ct.columns().collect::<Vec<_>>();
+            assert_eq!(columns[0].ty, SqlType::new(SqlTypeKind::MacAddr));
+            assert_eq!(columns[1].ty, SqlType::new(SqlTypeKind::MacAddr8));
+            assert_eq!(
+                columns[2].ty,
+                SqlType::array_of(SqlType::new(SqlTypeKind::MacAddr))
+            );
+            assert_eq!(
+                columns[3].ty,
+                SqlType::array_of(SqlType::new(SqlTypeKind::MacAddr8))
+            );
+        }
+        other => panic!("expected create table, got {other:?}"),
+    }
+
+    let stmt =
+        parse_select("select macaddr '08:00:2b:01:02:03', '08002b0102030405'::macaddr8").unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::Cast(_, ty) if *ty == SqlType::new(SqlTypeKind::MacAddr)
+    ));
+    assert!(matches!(
+        &stmt.targets[1].expr,
+        SqlExpr::Cast(_, ty) if *ty == SqlType::new(SqlTypeKind::MacAddr8)
+    ));
+}
+
+#[test]
 fn parse_multidimensional_array_cast_type() {
     let stmt = parse_select("select '{{1,2},{3,4}}'::int4[][]").unwrap();
     assert!(matches!(
