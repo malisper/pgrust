@@ -38,15 +38,14 @@ use crate::backend::utils::misc::guc::{
 };
 use crate::backend::utils::misc::guc_datetime::{
     DateTimeConfig, default_datestyle, default_datetime_config, default_timezone, format_datestyle,
-    parse_datestyle, parse_timezone,
+    parse_datestyle_with_fallback, parse_timezone,
 };
 use crate::backend::utils::misc::guc_xml::{
     format_xmlbinary, format_xmloption, parse_xmlbinary, parse_xmloption,
 };
 use crate::backend::utils::misc::interrupts::{InterruptState, StatementInterruptGuard};
 use crate::backend::utils::misc::stack_depth::{
-    MIN_MAX_STACK_DEPTH_KB, StackDepthGuard, effective_default_max_stack_depth_kb,
-    max_stack_depth_limit_kb,
+    MIN_MAX_STACK_DEPTH_KB, StackDepthGuard, max_stack_depth_limit_kb,
 };
 use crate::include::catalog::{
     PG_CHECKPOINT_OID, PG_EXECUTE_SERVER_PROGRAM_OID, PG_WRITE_SERVER_FILES_OID,
@@ -462,6 +461,7 @@ pub struct Session {
     active_txn: Option<ActiveTransaction>,
     gucs: HashMap<String, String>,
     datetime_config: DateTimeConfig,
+    reset_datetime_config: DateTimeConfig,
     interrupts: Arc<InterruptState>,
     auth: AuthState,
     stats_state: Arc<RwLock<SessionStatsState>>,
@@ -628,12 +628,14 @@ impl Session {
         client_id: ClientId,
         temp_backend_id: crate::pgrust::database::TempBackendId,
     ) -> Self {
+        let datetime_config = default_datetime_config();
         Self {
             client_id,
             temp_backend_id,
             active_txn: None,
             gucs: HashMap::new(),
-            datetime_config: default_datetime_config(),
+            datetime_config: datetime_config.clone(),
+            reset_datetime_config: datetime_config,
             interrupts: Arc::new(InterruptState::new()),
             auth: AuthState::default(),
             stats_state: Arc::new(RwLock::new(SessionStatsState::default())),
@@ -917,6 +919,8 @@ impl Session {
             row_locks: Arc::clone(&db.row_locks),
             checkpoint_stats: db.checkpoint_stats_snapshot(),
             datetime_config: self.datetime_config.clone(),
+            statement_timestamp_usecs:
+                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
             gucs: self.gucs.clone(),
             interrupts: self.interrupts(),
             stats: Arc::clone(&db.stats),
@@ -2829,6 +2833,7 @@ impl Session {
                 self.apply_guc_value(name, value)?;
             }
         }
+        self.reset_datetime_config = self.datetime_config.clone();
         Ok(())
     }
 
@@ -5361,9 +5366,7 @@ impl Session {
             }
         } else {
             self.gucs.clear();
-            self.guc_reset_datestyle();
-            self.guc_reset_timezone();
-            self.guc_reset_max_stack_depth();
+            self.datetime_config = self.reset_datetime_config.clone();
             self.datetime_config.xml = Default::default();
             self.stats_state
                 .write()
@@ -5480,17 +5483,16 @@ impl Session {
     }
 
     fn guc_reset_datestyle(&mut self) {
-        let defaults = default_datetime_config();
-        self.datetime_config.date_style_format = defaults.date_style_format;
-        self.datetime_config.date_order = defaults.date_order;
+        self.datetime_config.date_style_format = self.reset_datetime_config.date_style_format;
+        self.datetime_config.date_order = self.reset_datetime_config.date_order;
     }
 
     fn guc_reset_timezone(&mut self) {
-        self.datetime_config.time_zone = default_datetime_config().time_zone;
+        self.datetime_config.time_zone = self.reset_datetime_config.time_zone.clone();
     }
 
     fn guc_reset_max_stack_depth(&mut self) {
-        self.datetime_config.max_stack_depth_kb = effective_default_max_stack_depth_kb();
+        self.datetime_config.max_stack_depth_kb = self.reset_datetime_config.max_stack_depth_kb;
     }
 
     fn apply_guc_value(&mut self, name: &str, value: &str) -> Result<(), ExecError> {
@@ -5508,7 +5510,11 @@ impl Session {
         let mut stored_value = value.to_string();
         match normalized.as_str() {
             "datestyle" => {
-                let Some((date_style_format, date_order)) = parse_datestyle(value) else {
+                let Some((date_style_format, date_order)) = parse_datestyle_with_fallback(
+                    value,
+                    self.datetime_config.date_style_format,
+                    self.datetime_config.date_order,
+                ) else {
                     return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
                         value.to_string(),
                     )));
@@ -8124,12 +8130,14 @@ fn unquote_identifier(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_default_toast_compression_guc_value, parse_max_stack_depth, parse_startup_options,
-        parse_statement_timeout, validate_max_stack_depth,
+        Session, parse_default_toast_compression_guc_value, parse_max_stack_depth,
+        parse_startup_options, parse_statement_timeout, validate_max_stack_depth,
     };
     use crate::backend::executor::ExecError;
     use crate::backend::parser::ParseError;
+    use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat};
     use crate::backend::utils::misc::stack_depth::max_stack_depth_limit_kb;
+    use std::collections::HashMap;
     use std::time::Duration;
 
     #[test]
@@ -8246,6 +8254,28 @@ mod tests {
                 ("DateStyle".to_string(), "SQL, DMY".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn datestyle_preserves_format_for_order_only_set_and_startup_reset() {
+        let mut session = Session::new(1);
+        let mut params = HashMap::new();
+        params.insert("DateStyle".to_string(), "Postgres, MDY".to_string());
+        session.apply_startup_parameters(&params).unwrap();
+
+        session.apply_guc_value("DateStyle", "ymd").unwrap();
+        assert_eq!(
+            session.datetime_config.date_style_format,
+            DateStyleFormat::Postgres
+        );
+        assert_eq!(session.datetime_config.date_order, DateOrder::Ymd);
+
+        session.guc_reset_datestyle();
+        assert_eq!(
+            session.datetime_config.date_style_format,
+            DateStyleFormat::Postgres
+        );
+        assert_eq!(session.datetime_config.date_order, DateOrder::Mdy);
     }
 
     #[test]

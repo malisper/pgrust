@@ -207,6 +207,28 @@ pub(super) fn resolve_generate_series_common_type(
     stop: SqlType,
     step: Option<SqlType>,
 ) -> Result<SqlType, ParseError> {
+    if matches!(
+        start.kind,
+        SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+    ) || matches!(stop.kind, SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz)
+    {
+        let common = if matches!(start.kind, SqlTypeKind::TimestampTz)
+            || matches!(stop.kind, SqlTypeKind::TimestampTz)
+        {
+            SqlType::new(SqlTypeKind::TimestampTz)
+        } else {
+            SqlType::new(SqlTypeKind::Timestamp)
+        };
+        if !matches!(step.map(|ty| ty.kind), Some(SqlTypeKind::Interval) | None) {
+            return Err(ParseError::UnexpectedToken {
+                expected: "generate_series timestamp bounds and interval step",
+                actual: step
+                    .map(sql_type_name)
+                    .unwrap_or_else(|| "missing step".into()),
+            });
+        }
+        return Ok(common);
+    }
     let mut common = resolve_numeric_binary_type("+", start, stop)?;
     if let Some(step_type) = step {
         common = resolve_numeric_binary_type("+", common, step_type)?;

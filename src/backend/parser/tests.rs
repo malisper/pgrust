@@ -4964,12 +4964,12 @@ fn parse_position_in_syntax_as_builtin_call() {
 }
 
 #[test]
-fn parse_extract_in_syntax_as_date_part_call() {
+fn parse_extract_in_syntax_as_extract_call() {
     let stmt = parse_select("select extract(week from date '2020-08-11')").unwrap();
     assert!(matches!(
         stmt.targets[0].expr,
         SqlExpr::FuncCall { ref name, ref args, .. }
-            if name == "date_part"
+            if name == "extract"
                 && args.args().len() == 2
                 && matches!(args.args()[0].value, SqlExpr::Const(Value::Text(ref field)) if &field[..] == "week")
     ));
@@ -5233,7 +5233,7 @@ fn analyze_extract_keeps_extract_as_default_output_name() {
 
     assert_eq!(
         query_column_names_and_types(&query),
-        vec![("extract".into(), SqlType::new(SqlTypeKind::Float8))]
+        vec![("extract".into(), SqlType::new(SqlTypeKind::Numeric))]
     );
 }
 
@@ -5307,6 +5307,14 @@ fn parse_standalone_type_names() {
         SqlType::with_char_len(SqlTypeKind::Char, 1)
     );
     assert_eq!(
+        parse_type_name("character").unwrap(),
+        SqlType::with_char_len(SqlTypeKind::Char, 1)
+    );
+    assert_eq!(
+        parse_type_name("character(16)").unwrap(),
+        SqlType::with_char_len(SqlTypeKind::Char, 16)
+    );
+    assert_eq!(
         parse_type_name("bytea").unwrap(),
         SqlType::new(SqlTypeKind::Bytea)
     );
@@ -5367,8 +5375,16 @@ fn parse_standalone_type_names() {
         SqlType::new(SqlTypeKind::TimeTz)
     );
     assert_eq!(
+        parse_type_name("timetz(4)").unwrap(),
+        SqlType::with_time_precision(SqlTypeKind::TimeTz, 4)
+    );
+    assert_eq!(
         parse_type_name("timestamptz").unwrap(),
         SqlType::new(SqlTypeKind::TimestampTz)
+    );
+    assert_eq!(
+        parse_type_name("timestamptz(5)").unwrap(),
+        SqlType::with_time_precision(SqlTypeKind::TimestampTz, 5)
     );
 }
 
@@ -5514,6 +5530,8 @@ fn parse_typed_string_literal_expression() {
     assert_eq!(stmt.targets[0].output_name, "int2");
     assert_eq!(stmt.targets[1].output_name, "int4");
     assert_eq!(stmt.targets[2].output_name, "varchar");
+    assert_eq!(stmt.targets[3].output_name, "date");
+    assert_eq!(stmt.targets[4].output_name, "timestamptz");
     match &stmt.targets[0].expr {
         SqlExpr::Cast(inner, ty) => {
             assert_eq!(*ty, SqlType::new(SqlTypeKind::Int2));
@@ -5549,6 +5567,21 @@ fn parse_typed_string_literal_expression() {
         &stmt.targets[4].expr,
         SqlExpr::Cast(_, ty) if *ty == SqlType::new(SqlTypeKind::TimestampTz)
     ));
+}
+
+#[test]
+fn parse_datetime_literal_output_names_use_postgres_aliases() {
+    let stmt = parse_select(
+        "select '2000-01-01'::timestamp, timestamp without time zone '2000-01-01', time without time zone '04:05', time with time zone '04:05+00'",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt.targets
+            .iter()
+            .map(|target| target.output_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["timestamp", "timestamp", "time", "timetz"]
+    );
 }
 
 #[test]
@@ -6252,6 +6285,76 @@ fn build_plan_coerces_unknown_string_literals_for_array_ops() {
                         if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
                             && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))
                 ) || matches!(saop.right.as_ref(), Expr::Const(Value::PgArray(_))))
+    ));
+}
+
+#[test]
+fn build_plan_handles_in_list_nulls_and_not_in_operator() {
+    let plan = build_plan(
+        &parse_select("select 1 in (null, null), 1 not in (2, null)").unwrap(),
+        &catalog(),
+    )
+    .unwrap();
+    let Plan::Projection { targets, .. } = plan else {
+        panic!("expected projection plan");
+    };
+
+    assert!(matches!(
+        &targets[0].expr,
+        Expr::ScalarArrayOp(saop)
+            if saop.op == SubqueryComparisonOp::Eq
+                && saop.use_or
+                && matches!(saop.right.as_ref(), Expr::ArrayLiteral { array_type, .. }
+                    if *array_type == SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
+    ));
+    assert!(matches!(
+        &targets[1].expr,
+        Expr::ScalarArrayOp(saop)
+            if saop.op == SubqueryComparisonOp::NotEq
+                && !saop.use_or
+                && matches!(saop.right.as_ref(), Expr::ArrayLiteral { array_type, .. }
+                    if *array_type == SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
+    ));
+
+    let err = build_plan(
+        &parse_select("select '(0,0)'::point in ('(0,0,0,0)'::box, point(0,0))").unwrap(),
+        &catalog(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UndefinedOperator {
+            op: "=",
+            left_type,
+            right_type,
+        } if left_type == "point" && right_type == "box"
+    ));
+}
+
+#[test]
+fn build_plan_in_list_common_type_includes_left_operand() {
+    let plan = build_plan(
+        &parse_select("select random() in (1, 4, 8.0), random()::int in (1, 4, 8.0)").unwrap(),
+        &catalog(),
+    )
+    .unwrap();
+    let Plan::Projection { targets, .. } = plan else {
+        panic!("expected projection plan");
+    };
+
+    assert!(matches!(
+        &targets[0].expr,
+        Expr::ScalarArrayOp(saop)
+            if matches!(saop.right.as_ref(), Expr::ArrayLiteral { array_type, .. }
+                if *array_type == SqlType::array_of(SqlType::new(SqlTypeKind::Float8)))
+    ));
+    assert!(matches!(
+        &targets[1].expr,
+        Expr::ScalarArrayOp(saop)
+            if matches!(saop.left.as_ref(), Expr::Cast(_, ty)
+                if *ty == SqlType::new(SqlTypeKind::Numeric))
+                && matches!(saop.right.as_ref(), Expr::ArrayLiteral { array_type, .. }
+                    if *array_type == SqlType::array_of(SqlType::new(SqlTypeKind::Numeric)))
     ));
 }
 
@@ -8317,6 +8420,21 @@ fn parse_create_table_with_varchar_types() {
 }
 
 #[test]
+fn parse_create_table_with_character_types() {
+    match parse_statement("create table widgets (a character, b character(16), c char(7))").unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            let columns = ct.columns().collect::<Vec<_>>();
+            assert_eq!(columns.len(), 3);
+            assert_eq!(columns[0].ty, SqlType::with_char_len(SqlTypeKind::Char, 1));
+            assert_eq!(columns[1].ty, SqlType::with_char_len(SqlTypeKind::Char, 16));
+            assert_eq!(columns[2].ty, SqlType::with_char_len(SqlTypeKind::Char, 7));
+        }
+        other => panic!("expected create table, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_rejects_show_tables() {
     assert!(parse_statement("show tables").is_err());
 }
@@ -8352,6 +8470,13 @@ fn parse_current_datetime_forms() {
         stmt.targets[4].expr,
         SqlExpr::LocalTimestamp { precision: Some(4) }
     ));
+}
+
+#[test]
+fn parse_current_schema_and_catalog() {
+    let stmt = parse_select("select current_schema, current_catalog").unwrap();
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::CurrentSchema));
+    assert!(matches!(stmt.targets[1].expr, SqlExpr::CurrentCatalog));
 }
 
 #[test]

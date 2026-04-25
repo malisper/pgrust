@@ -143,6 +143,8 @@ pub(super) fn expr_contains_agg(catalog: &dyn CatalogLookup, expr: &SqlExpr) -> 
         | SqlExpr::QuantifiedSubquery { .. }
         | SqlExpr::Random
         | SqlExpr::CurrentDate
+        | SqlExpr::CurrentCatalog
+        | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
         | SqlExpr::CurrentRole
@@ -315,6 +317,8 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         | SqlExpr::NumericLiteral(_)
         | SqlExpr::Random
         | SqlExpr::CurrentDate
+        | SqlExpr::CurrentCatalog
+        | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
         | SqlExpr::CurrentRole
@@ -483,6 +487,8 @@ pub(super) fn collect_aggs(
         | SqlExpr::QuantifiedSubquery { .. }
         | SqlExpr::Random
         | SqlExpr::CurrentDate
+        | SqlExpr::CurrentCatalog
+        | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
         | SqlExpr::CurrentRole

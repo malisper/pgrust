@@ -720,6 +720,8 @@ fn collect_expr_relids(expr: &Expr, relids: &mut Vec<usize>) {
         | Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole

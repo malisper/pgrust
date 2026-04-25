@@ -106,7 +106,7 @@ pub(crate) use expr_txid::{
 pub(crate) use expr_xml::validate_xml_input;
 pub(crate) use nodes::{
     render_explain_expr, render_explain_join_expr, render_explain_projection_expr_with_qualifier,
-    render_index_order_by,
+    render_index_order_by, render_index_scan_condition_with_key_names,
 };
 pub(crate) use srf::set_returning_call_label;
 pub use startup::executor_start;
@@ -341,6 +341,7 @@ pub struct ExecutorContext {
     pub row_locks: std::sync::Arc<RowLockManager>,
     pub checkpoint_stats: CheckpointStatsSnapshot,
     pub datetime_config: DateTimeConfig,
+    pub statement_timestamp_usecs: i64,
     pub gucs: HashMap<String, String>,
     pub interrupts: std::sync::Arc<InterruptState>,
     pub stats: std::sync::Arc<parking_lot::RwLock<DatabaseStatsStore>>,

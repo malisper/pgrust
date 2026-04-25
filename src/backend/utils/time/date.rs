@@ -268,6 +268,8 @@ fn map_single_token_parse_error(text: &str, err: DateTimeParseError) -> DatePars
                     .split('-')
                     .all(|part| part.chars().all(|ch| ch.is_ascii_digit())),
         },
+        DateTimeParseError::TimestampOutOfRange => DateParseError::Invalid,
+        DateTimeParseError::TimeZoneDisplacementOutOfRange => DateParseError::Invalid,
         DateTimeParseError::UnknownTimeZone(_) => DateParseError::Invalid,
     }
 }

@@ -12615,6 +12615,8 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::Case { .. } => "case".to_string(),
         SqlExpr::Row(_) => "row".to_string(),
         SqlExpr::Random => "random".to_string(),
+        SqlExpr::CurrentCatalog => "current_catalog".to_string(),
+        SqlExpr::CurrentSchema => "current_schema".to_string(),
         SqlExpr::CurrentUser => "current_user".to_string(),
         SqlExpr::SessionUser => "session_user".to_string(),
         SqlExpr::CurrentRole => "current_role".to_string(),
@@ -12691,7 +12693,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Cidr => "cidr",
         SqlTypeKind::Date => "date",
         SqlTypeKind::DateRange => "daterange",
-        SqlTypeKind::Time => "time without time zone",
+        SqlTypeKind::Time => "time",
         SqlTypeKind::TimeTz => "timetz",
         SqlTypeKind::Interval => "interval",
         SqlTypeKind::TsVector => "tsvector",
@@ -12712,9 +12714,9 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Polygon => "polygon",
         SqlTypeKind::Line => "line",
         SqlTypeKind::Circle => "circle",
-        SqlTypeKind::Timestamp => "timestamp without time zone",
+        SqlTypeKind::Timestamp => "timestamp",
         SqlTypeKind::TimestampRange => "tsrange",
-        SqlTypeKind::TimestampTz => "timestamp with time zone",
+        SqlTypeKind::TimestampTz => "timestamptz",
         SqlTypeKind::TimestampTzRange => "tstzrange",
         SqlTypeKind::PgNodeTree => "pg_node_tree",
         SqlTypeKind::Internal => "internal",
@@ -14055,7 +14057,8 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 .map(build_type_len)
                 .transpose()
                 .expect("time precision");
-            let kind = if normalized == "timetz" || normalized.contains("with time zone") {
+            let kind = if normalized.starts_with("timetz") || normalized.contains("with time zone")
+            {
                 SqlTypeKind::TimeTz
             } else {
                 SqlTypeKind::Time
@@ -14079,11 +14082,12 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 .map(build_type_len)
                 .transpose()
                 .expect("timestamp precision");
-            let kind = if normalized == "timestamptz" || normalized.contains("with time zone") {
-                SqlTypeKind::TimestampTz
-            } else {
-                SqlTypeKind::Timestamp
-            };
+            let kind =
+                if normalized.starts_with("timestamptz") || normalized.contains("with time zone") {
+                    SqlTypeKind::TimestampTz
+                } else {
+                    SqlTypeKind::Timestamp
+                };
             RawTypeName::Builtin(
                 precision
                     .map(|precision| SqlType::with_time_precision(kind, precision))
@@ -14457,7 +14461,11 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     }
                     Ok(SqlExpr::QuantifiedArray {
                         left: Box::new(left),
-                        op: SubqueryComparisonOp::Eq,
+                        op: if negated {
+                            SubqueryComparisonOp::NotEq
+                        } else {
+                            SubqueryComparisonOp::Eq
+                        },
                         is_all: negated,
                         array: Box::new(SqlExpr::ArrayLiteral(values)),
                     })
@@ -14853,7 +14861,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 }
             }
             Ok(simple_func_call(
-                "date_part",
+                "extract",
                 vec![
                     SqlFunctionArg::positional(field.ok_or(ParseError::UnexpectedEof)?),
                     SqlFunctionArg::positional(value.ok_or(ParseError::UnexpectedEof)?),
@@ -14942,6 +14950,8 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::kw_true => Ok(SqlExpr::Const(Value::Bool(true))),
         Rule::kw_false => Ok(SqlExpr::Const(Value::Bool(false))),
         Rule::kw_current_date => Ok(SqlExpr::CurrentDate),
+        Rule::kw_current_catalog => Ok(SqlExpr::CurrentCatalog),
+        Rule::kw_current_schema => Ok(SqlExpr::CurrentSchema),
         Rule::kw_current_user => Ok(SqlExpr::CurrentUser),
         Rule::kw_session_user => Ok(SqlExpr::SessionUser),
         Rule::kw_current_role => Ok(SqlExpr::CurrentRole),

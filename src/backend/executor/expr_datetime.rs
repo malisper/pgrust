@@ -6,8 +6,8 @@ use crate::backend::utils::time::datetime::{
 };
 use crate::backend::utils::time::timestamp::{format_timestamp_text, format_timestamptz_text};
 use crate::include::nodes::datetime::{
-    DATEVAL_NOBEGIN, DATEVAL_NOEND, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT, TimeTzADT,
-    TimestampADT, TimestampTzADT, USECS_PER_DAY,
+    DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT,
+    TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY,
 };
 use crate::include::nodes::datum::Value;
 
@@ -129,8 +129,10 @@ fn rounded_usecs(value: i64, precision: Option<i32>) -> i64 {
     let factor = 10_i64.pow((6 - precision) as u32);
     if factor <= 1 {
         value
+    } else if value >= 0 {
+        ((value + factor / 2) / factor) * factor
     } else {
-        value.div_euclid(factor) * factor
+        ((value - factor / 2) / factor) * factor
     }
 }
 
@@ -144,9 +146,11 @@ pub(crate) fn apply_time_precision(value: Value, precision: Option<i32>) -> Valu
                 crate::include::nodes::datetime::TimeADT(rounded_usecs(timetz.time.0, precision));
             Value::TimeTz(timetz)
         }
+        Value::Timestamp(timestamp) if !timestamp.is_finite() => Value::Timestamp(timestamp),
         Value::Timestamp(crate::include::nodes::datetime::TimestampADT(usecs)) => Value::Timestamp(
             crate::include::nodes::datetime::TimestampADT(rounded_usecs(usecs, precision)),
         ),
+        Value::TimestampTz(timestamp) if !timestamp.is_finite() => Value::TimestampTz(timestamp),
         Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(usecs)) => {
             Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(
                 rounded_usecs(usecs, precision),
@@ -157,13 +161,20 @@ pub(crate) fn apply_time_precision(value: Value, precision: Option<i32>) -> Valu
 }
 
 pub(crate) fn current_date_value_with_config(config: &DateTimeConfig) -> Value {
-    Value::Date(crate::include::nodes::datetime::DateADT(today_pg_days(
-        config,
-    )))
+    current_date_value_from_timestamp_with_config(config, current_postgres_timestamp_usecs())
 }
 
 pub(crate) fn current_date_value() -> Value {
     current_date_value_with_config(&DateTimeConfig::default())
+}
+
+pub(crate) fn current_date_value_from_timestamp_with_config(
+    config: &DateTimeConfig,
+    timestamp_usecs: i64,
+) -> Value {
+    let local = timestamp_usecs + i64::from(timezone_offset_seconds(config)) * 1_000_000;
+    let (days, _) = timestamp_parts_from_usecs(local);
+    Value::Date(DateADT(days))
 }
 
 pub(crate) fn current_time_value_with_config(
@@ -171,9 +182,22 @@ pub(crate) fn current_time_value_with_config(
     precision: Option<i32>,
     with_time_zone: bool,
 ) -> Value {
+    current_time_value_from_timestamp_with_config(
+        config,
+        current_postgres_timestamp_usecs(),
+        precision,
+        with_time_zone,
+    )
+}
+
+pub(crate) fn current_time_value_from_timestamp_with_config(
+    config: &DateTimeConfig,
+    timestamp_usecs: i64,
+    precision: Option<i32>,
+    with_time_zone: bool,
+) -> Value {
     let offset_seconds = timezone_offset_seconds(config);
-    let local_timestamp =
-        current_postgres_timestamp_usecs() + i64::from(offset_seconds) * 1_000_000;
+    let local_timestamp = timestamp_usecs + i64::from(offset_seconds) * 1_000_000;
     let (_, time_usecs) = timestamp_parts_from_usecs(local_timestamp);
     let time = TimeADT(rounded_usecs(
         time_usecs.rem_euclid(USECS_PER_DAY),
@@ -198,11 +222,24 @@ pub(crate) fn current_timestamp_value_with_config(
     precision: Option<i32>,
     with_time_zone: bool,
 ) -> Value {
-    let now = current_postgres_timestamp_usecs();
+    current_timestamp_value_from_timestamp_with_config(
+        config,
+        current_postgres_timestamp_usecs(),
+        precision,
+        with_time_zone,
+    )
+}
+
+pub(crate) fn current_timestamp_value_from_timestamp_with_config(
+    config: &DateTimeConfig,
+    timestamp_usecs: i64,
+    precision: Option<i32>,
+    with_time_zone: bool,
+) -> Value {
     if with_time_zone {
-        Value::TimestampTz(TimestampTzADT(rounded_usecs(now, precision)))
+        Value::TimestampTz(TimestampTzADT(rounded_usecs(timestamp_usecs, precision)))
     } else {
-        let local = now + i64::from(timezone_offset_seconds(config)) * 1_000_000;
+        let local = timestamp_usecs + i64::from(timezone_offset_seconds(config)) * 1_000_000;
         Value::Timestamp(TimestampADT(rounded_usecs(local, precision)))
     }
 }

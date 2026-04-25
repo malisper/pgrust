@@ -12,7 +12,9 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
 use crate::include::catalog::{CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};
-use crate::include::nodes::datetime::{DateADT, TimestampADT, TimestampTzADT};
+use crate::include::nodes::datetime::{
+    DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT,
+};
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::{OrderByEntry, Var, user_attrno};
 use crate::pgrust::database::{Database, Session};
@@ -891,6 +893,8 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        statement_timestamp_usecs:
+            crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
         gucs: std::collections::HashMap::new(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -957,6 +961,8 @@ fn run_plan(
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        statement_timestamp_usecs:
+            crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
         gucs: std::collections::HashMap::new(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -1059,6 +1065,8 @@ fn first_tuple_slot_kind_for_sql(
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            statement_timestamp_usecs:
+                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
             gucs: std::collections::HashMap::new(),
             interrupts: std::sync::Arc::new(
                 crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -1143,6 +1151,8 @@ fn first_tuple_slot_kind_for_plan(
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            statement_timestamp_usecs:
+                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
             gucs: std::collections::HashMap::new(),
             interrupts: std::sync::Arc::new(
                 crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -1241,6 +1251,8 @@ fn run_sql_with_catalog(
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            statement_timestamp_usecs:
+                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
             gucs: std::collections::HashMap::new(),
             interrupts: std::sync::Arc::new(
                 crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -1380,6 +1392,94 @@ fn expr_eval_obeys_null_semantics() {
         )
         .unwrap(),
         Value::Bool(true)
+    );
+}
+
+#[test]
+fn eval_current_catalog_and_schema() {
+    let base = temp_dir("eval_current_catalog_and_schema");
+    let mut ctx = empty_executor_context(&base);
+    ctx.catalog = Some(
+        crate::backend::utils::cache::visible_catalog::VisibleCatalog::new(
+            crate::backend::utils::cache::relcache::RelCache::default(),
+            None,
+        ),
+    );
+    let mut slot = TupleSlot::virtual_row(Vec::new());
+
+    assert_eq!(
+        eval_expr(&Expr::CurrentCatalog, &mut slot, &mut ctx).unwrap(),
+        Value::Text("postgres".into())
+    );
+    assert_eq!(
+        eval_expr(&Expr::CurrentSchema, &mut slot, &mut ctx).unwrap(),
+        Value::Text("public".into())
+    );
+
+    ctx.gucs.insert("search_path".into(), "notme".into());
+    assert_eq!(
+        eval_expr(&Expr::CurrentSchema, &mut slot, &mut ctx).unwrap(),
+        Value::Null
+    );
+
+    ctx.gucs.insert("search_path".into(), "pg_catalog".into());
+    assert_eq!(
+        eval_expr(&Expr::CurrentSchema, &mut slot, &mut ctx).unwrap(),
+        Value::Text("pg_catalog".into())
+    );
+
+    ctx.catalog = Some(
+        crate::backend::utils::cache::visible_catalog::VisibleCatalog::with_search_path(
+            crate::backend::utils::cache::relcache::RelCache::default(),
+            None,
+            vec!["pg_catalog".into(), "notme".into()],
+        ),
+    );
+    assert_eq!(
+        eval_expr(&Expr::CurrentSchema, &mut slot, &mut ctx).unwrap(),
+        Value::Null
+    );
+
+    ctx.catalog = Some(
+        crate::backend::utils::cache::visible_catalog::VisibleCatalog::with_search_path(
+            crate::backend::utils::cache::relcache::RelCache::default(),
+            None,
+            vec!["pg_catalog".into()],
+        ),
+    );
+    assert_eq!(
+        eval_expr(&Expr::CurrentSchema, &mut slot, &mut ctx).unwrap(),
+        Value::Text("pg_catalog".into())
+    );
+}
+
+#[test]
+fn eval_current_timestamp_uses_statement_timestamp() {
+    let base = temp_dir("eval_current_timestamp_uses_statement_timestamp");
+    let mut ctx = empty_executor_context(&base);
+    ctx.statement_timestamp_usecs = 123_456_789;
+    let mut slot = TupleSlot::virtual_row(Vec::new());
+    let timestamptz =
+        crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::TimestampTz);
+    let now = Expr::builtin_func(
+        crate::include::nodes::primnodes::BuiltinScalarFunction::Now,
+        Some(timestamptz),
+        false,
+        Vec::new(),
+    );
+
+    assert_eq!(
+        eval_expr(
+            &Expr::CurrentTimestamp { precision: None },
+            &mut slot,
+            &mut ctx
+        )
+        .unwrap(),
+        Value::TimestampTz(TimestampTzADT(123_456_789))
+    );
+    assert_eq!(
+        eval_expr(&now, &mut slot, &mut ctx).unwrap(),
+        Value::TimestampTz(TimestampTzADT(123_456_789))
     );
 }
 
@@ -4064,6 +4164,54 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
 }
 
 #[test]
+fn explain_expr_renders_scalar_array_op_with_typed_array_literal() {
+    use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
+    use crate::include::nodes::datum::NumericValue;
+
+    let float_array = Expr::scalar_array_op(
+        SubqueryComparisonOp::Eq,
+        true,
+        Expr::Random,
+        Expr::ArrayLiteral {
+            elements: vec![
+                Expr::Const(Value::Int32(1)),
+                Expr::Const(Value::Int32(4)),
+                Expr::Const(Value::Numeric(NumericValue::from("8.0"))),
+            ],
+            array_type: SqlType::array_of(SqlType::new(SqlTypeKind::Float8)),
+        },
+    );
+    assert_eq!(
+        render_explain_expr(&float_array, &[]),
+        "(random() = ANY ('{1,4,8}'::double precision[]))"
+    );
+
+    let numeric_array = Expr::scalar_array_op(
+        SubqueryComparisonOp::Eq,
+        true,
+        Expr::Cast(
+            Box::new(Expr::Cast(
+                Box::new(Expr::Random),
+                SqlType::new(SqlTypeKind::Int4),
+            )),
+            SqlType::new(SqlTypeKind::Numeric),
+        ),
+        Expr::ArrayLiteral {
+            elements: vec![
+                Expr::Const(Value::Int32(1)),
+                Expr::Const(Value::Int32(4)),
+                Expr::Const(Value::Numeric(NumericValue::from("8.0"))),
+            ],
+            array_type: SqlType::array_of(SqlType::new(SqlTypeKind::Numeric)),
+        },
+    );
+    assert_eq!(
+        render_explain_expr(&numeric_array, &[]),
+        "(((random())::integer)::numeric = ANY ('{1,4,8.0}'::numeric[]))"
+    );
+}
+
+#[test]
 fn explain_expr_renders_geometry_consts_as_sql_literals() {
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::include::nodes::datum::{GeoBox, GeoCircle, GeoPoint, GeoPolygon};
@@ -6013,6 +6161,150 @@ fn select_date_part_handles_infinity() {
 }
 
 #[test]
+fn timestamp_precision_preserves_infinity_sentinels() {
+    let base = temp_dir("timestamp_precision_infinity");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '-infinity'::timestamp(2), 'infinity'::timestamp(2)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Timestamp(TimestampADT(TIMESTAMP_NOBEGIN)),
+            Value::Timestamp(TimestampADT(TIMESTAMP_NOEND)),
+        ]],
+    );
+
+    assert_eq!(
+        expr_datetime::apply_time_precision(
+            Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOBEGIN)),
+            Some(2)
+        ),
+        Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOBEGIN))
+    );
+    assert_eq!(
+        expr_datetime::apply_time_precision(
+            Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOEND)),
+            Some(2)
+        ),
+        Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOEND))
+    );
+}
+
+#[test]
+fn timestamp_subtraction_returns_interval_and_handles_infinity() {
+    let base = temp_dir("timestamp_subtraction_interval");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select timestamp '2000-01-03 00:00:01' - timestamp '2000-01-01 00:00:00', timestamp 'infinity' - timestamp '1995-08-06 12:12:12', timestamp '-infinity' - timestamp 'infinity'",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Interval(IntervalValue {
+                time_micros: crate::include::nodes::datetime::USECS_PER_SEC,
+                days: 2,
+                months: 0,
+            }),
+            Value::Interval(IntervalValue::infinity()),
+            Value::Interval(IntervalValue::neg_infinity()),
+        ]],
+    );
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select timestamp 'infinity' - timestamp 'infinity'",
+    )
+    .unwrap_err()
+    {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } => {
+            assert_eq!(message, "interval out of range");
+            assert_eq!(sqlstate, "22008");
+        }
+        other => panic!("expected interval out-of-range error, got {other:?}"),
+    }
+}
+
+#[test]
+fn timestamp_regression_datetime_builtins_route_and_format() {
+    let base = temp_dir("timestamp_regression_datetime_builtins");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+             to_char(date_trunc('week', timestamp '2004-02-29 15:44:17.71393'), 'YYYY-MM-DD HH24:MI:SS'), \
+             to_char(date_bin('5 min'::interval, timestamp '2020-02-01 01:01:01', timestamp '2020-02-01 00:02:30'), 'YYYY-MM-DD HH24:MI:SS'), \
+             to_char(make_timestamp(1999, 12, 31, 24, 0, 0), 'YYYY-MM-DD HH24:MI:SS')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("2004-02-23 00:00:00".into()),
+            Value::Text("2020-02-01 00:57:30".into()),
+            Value::Text("2000-01-01 00:00:00".into()),
+        ]],
+    );
+}
+
+#[test]
+fn to_char_timestamp_supports_regression_tokens() {
+    let base = temp_dir("to_char_timestamp_regression_tokens");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+             to_char(timestamp '1997-02-10 17:32:01.789012', 'YYYYTH IYYY IW IDDD HH24:MI:SS FF3 MS US'), \
+             to_char(timestamp '0097-02-16 17:32:01 BC', 'YYYY A.D. FMDAY FMMONTH FMRM')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("1997TH 1997 07 043 17:32:01 789 789 789012".into()),
+            Value::Text("0097 B.C. TUESDAY FEBRUARY II".into()),
+        ]],
+    );
+}
+
+#[test]
+fn timestamp_generate_series_accepts_interval_steps() {
+    let base = temp_dir("timestamp_generate_series_interval_steps");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select to_char(generate_series(timestamp '2022-01-01 00:00', timestamp 'infinity', interval '1 month'), 'YYYY-MM-DD') limit 3",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Text("2022-01-01".into())],
+            vec![Value::Text("2022-02-01".into())],
+            vec![Value::Text("2022-03-01".into())],
+        ],
+    );
+}
+
+#[test]
 fn select_extract_uses_date_part_runtime() {
     let base = temp_dir("select_extract_date_part");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -6025,8 +6317,45 @@ fn select_extract_uses_date_part_runtime() {
             "select extract(week from date '2020-08-11'), extract(isodow from date '2020-08-16')",
         )
         .unwrap(),
-        vec![vec![Value::Float64(33.0), Value::Float64(7.0)]],
+        vec![vec![
+            Value::Numeric(crate::include::nodes::datum::NumericValue::from_i64(33)),
+            Value::Numeric(crate::include::nodes::datum::NumericValue::from_i64(7)),
+        ]],
     );
+}
+
+#[test]
+fn select_extract_returns_numeric_with_postgres_scale() {
+    let base = temp_dir("select_extract_numeric_scale");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select \
+         extract(microseconds from timestamp '1997-02-10 17:32:01.4'), \
+         extract(milliseconds from timestamp '1997-02-10 17:32:01.4'), \
+         extract(seconds from timestamp '1997-02-10 17:32:01.4'), \
+         extract(epoch from timestamp '1970-01-01 00:00:00')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows[0]
+                .iter()
+                .map(|value| match value {
+                    Value::Numeric(value) => value.render(),
+                    other => panic!("expected numeric extract result, got {other:?}"),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                rendered,
+                vec!["1400000", "1400.000", "1.400000", "0.000000"]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
 }
 
 #[test]
@@ -6046,7 +6375,12 @@ fn select_extract_uses_extract_as_default_column_name() {
             column_names, rows, ..
         } => {
             assert_eq!(column_names, vec!["extract"]);
-            assert_eq!(rows, vec![vec![Value::Float64(11.0)]]);
+            assert_eq!(
+                rows,
+                vec![vec![Value::Numeric(
+                    crate::include::nodes::datum::NumericValue::from_i64(11)
+                )]]
+            );
         }
         other => panic!("expected query result, got {other:?}"),
     }
@@ -9716,6 +10050,8 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        statement_timestamp_usecs:
+            crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
         gucs: std::collections::HashMap::new(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
@@ -18127,7 +18463,7 @@ fn jsonpath_datetime_method_calls_work() {
             match &rows[0][2] {
                 Value::Jsonb(bytes) => assert_eq!(
                     crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
-                    "\"12:34:56.78\""
+                    "\"12:34:56.79\""
                 ),
                 other => panic!("expected jsonb, got {:?}", other),
             }
@@ -18141,7 +18477,7 @@ fn jsonpath_datetime_method_calls_work() {
             match &rows[0][4] {
                 Value::Jsonb(bytes) => assert_eq!(
                     crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
-                    "\"2023-08-15T12:34:56.78\""
+                    "\"2023-08-15T12:34:56.79\""
                 ),
                 other => panic!("expected jsonb, got {:?}", other),
             }
@@ -21084,6 +21420,8 @@ fn large_object_metadata_tracks_create_and_unlink() {
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            statement_timestamp_usecs:
+                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
             gucs: std::collections::HashMap::new(),
             interrupts: std::sync::Arc::new(
                 crate::backend::utils::misc::interrupts::InterruptState::new(),
