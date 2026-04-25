@@ -5132,6 +5132,18 @@ fn parse_varchar_type_cast_expression() {
 }
 
 #[test]
+fn parse_time_type_cast_uses_short_default_output_name() {
+    let stmt = parse_select("select '23:59:59.999999'::time").unwrap();
+    assert_eq!(stmt.targets[0].output_name, "time");
+}
+
+#[test]
+fn parse_timestamptz_type_cast_uses_short_default_output_name() {
+    let stmt = parse_select("select '2020-01-01 00:00:00+00'::timestamptz").unwrap();
+    assert_eq!(stmt.targets[0].output_name, "timestamptz");
+}
+
+#[test]
 fn parse_standalone_type_names() {
     assert_eq!(
         parse_type_name("varchar(4)").unwrap(),
