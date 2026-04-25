@@ -569,7 +569,7 @@ fn parse_numeric_offset_seconds(text: &str) -> Option<i32> {
 pub fn named_timezone_offset_seconds(name: &str) -> Option<i32> {
     match name.trim().to_ascii_lowercase().as_str() {
         "utc" | "gmt" | "etc/utc" | "etc/gmt" | "z" | "zulu" => Some(0),
-        "est" | "america/new_york" => Some(-5 * 3600),
+        "est" => Some(-5 * 3600),
         "edt" => Some(-4 * 3600),
         "cst" => Some(-6 * 3600),
         "cdt" => Some(-5 * 3600),
@@ -580,6 +580,53 @@ pub fn named_timezone_offset_seconds(name: &str) -> Option<i32> {
         "bst" => Some(3600),
         _ => None,
     }
+}
+
+fn first_sunday_on_or_after(year: i32, month: u32, day: u32) -> Option<i32> {
+    let start = days_from_ymd(year, month, day)?;
+    let dow = day_of_week_from_julian_day(julian_day_from_postgres_date(start));
+    Some(start + (7 - dow as i32).rem_euclid(7))
+}
+
+fn last_sunday_on_or_before(year: i32, month: u32, day: u32) -> Option<i32> {
+    let start = days_from_ymd(year, month, day)?;
+    let dow = day_of_week_from_julian_day(julian_day_from_postgres_date(start));
+    Some(start - dow as i32)
+}
+
+fn new_york_offset_seconds(pg_days: i32) -> Option<i32> {
+    let (year, _, _) = ymd_from_days(pg_days);
+    let dst_start = if year >= 2007 {
+        first_sunday_on_or_after(year, 3, 8)?
+    } else if year >= 1987 {
+        first_sunday_on_or_after(year, 4, 1)?
+    } else {
+        return Some(-5 * 3600);
+    };
+    let dst_end = if year >= 2007 {
+        first_sunday_on_or_after(year, 11, 1)?
+    } else {
+        last_sunday_on_or_before(year, 10, 31)?
+    };
+    if (dst_start..dst_end).contains(&pg_days) {
+        Some(-4 * 3600)
+    } else {
+        Some(-5 * 3600)
+    }
+}
+
+pub fn named_timezone_offset_seconds_for_date(name: &str, pg_days: i32) -> Option<i32> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "america/new_york" => new_york_offset_seconds(pg_days),
+        other => named_timezone_offset_seconds(other),
+    }
+}
+
+fn supported_dynamic_timezone_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "america/new_york"
+    )
 }
 
 fn timezone_name_exists(name: &str) -> bool {
@@ -633,7 +680,7 @@ pub fn parse_timezone_spec(text: &str) -> Result<Option<TimeZoneSpec>, DateTimeP
             return Ok(Some(TimeZoneSpec::FixedOffset(offset)));
         }
     }
-    if timezone_name_exists(trimmed) {
+    if supported_dynamic_timezone_name(trimmed) || timezone_name_exists(trimmed) {
         return Ok(Some(TimeZoneSpec::Named(normalize_timezone_name(trimmed))));
     }
     if is_timezone_name_candidate(trimmed) {

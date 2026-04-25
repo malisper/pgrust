@@ -1,9 +1,11 @@
 use super::{ExecError, Value};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::time::datetime::{DateTimeParseError, TimeZoneSpec};
 use crate::backend::utils::time::datetime::{
     day_of_week_from_julian_day, day_of_year, days_from_ymd, iso_day_of_week_from_julian_day,
-    iso_week_and_year, julian_day_from_postgres_date, timestamp_parts_from_usecs,
-    timezone_offset_seconds, unix_days_from_postgres_date, ymd_from_days,
+    iso_week_and_year, julian_day_from_postgres_date, parse_timezone_spec,
+    timestamp_parts_from_usecs, timezone_offset_seconds, unix_days_from_postgres_date,
+    ymd_from_days,
 };
 use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT,
@@ -104,9 +106,11 @@ fn eval_time_part(field: &str, time: TimeADT, with_timezone: bool) -> Result<Val
         "minute" => time.0.div_euclid(USECS_PER_MINUTE).rem_euclid(60) as f64,
         "hour" => time.0.div_euclid(USECS_PER_HOUR) as f64,
         "epoch" => time.0 as f64 / USECS_PER_SEC as f64,
-        "timezone" | "timezone_h" | "timezone_m" | "day" | "month" | "year" | "quarter"
-        | "decade" | "century" | "millennium" | "isoyear" | "week" | "dow" | "isodow" | "doy"
-        | "julian" => return Err(unsupported_time_part(field, with_timezone)),
+        "timezone" | "timezone_h" | "timezone_hour" | "timezone_m" | "timezone_minute" | "day"
+        | "month" | "year" | "quarter" | "decade" | "century" | "millennium" | "isoyear"
+        | "week" | "dow" | "isodow" | "doy" | "julian" => {
+            return Err(unsupported_time_part(field, with_timezone));
+        }
         _ => return Err(unrecognized_time_part(field, with_timezone)),
     };
     Ok(Value::Float64(result))
@@ -115,10 +119,101 @@ fn eval_time_part(field: &str, time: TimeADT, with_timezone: bool) -> Result<Val
 fn eval_timetz_part(field: &str, timetz: TimeTzADT) -> Result<Value, ExecError> {
     let time_result = eval_time_part(field, timetz.time, true);
     match field {
-        "timezone" => Ok(Value::Float64((-timetz.offset_seconds) as f64)),
-        "timezone_h" => Ok(Value::Float64(((-timetz.offset_seconds) / 3_600) as f64)),
-        "timezone_m" => Ok(Value::Float64(((-timetz.offset_seconds) / 60 % 60) as f64)),
+        "epoch" => {
+            let utc_usecs = timetz.time.0 - i64::from(timetz.offset_seconds) * USECS_PER_SEC;
+            Ok(Value::Float64(
+                utc_usecs.rem_euclid(USECS_PER_DAY) as f64 / USECS_PER_SEC as f64,
+            ))
+        }
+        "timezone" => Ok(Value::Float64(timetz.offset_seconds as f64)),
+        "timezone_h" | "timezone_hour" => {
+            Ok(Value::Float64((timetz.offset_seconds / 3_600) as f64))
+        }
+        "timezone_m" | "timezone_minute" => {
+            Ok(Value::Float64(((timetz.offset_seconds / 60) % 60) as f64))
+        }
         _ => time_result,
+    }
+}
+
+fn timezone_function_error(message: impl Into<String>, sqlstate: &'static str) -> ExecError {
+    ExecError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate,
+    }
+}
+
+fn timezone_target_offset_seconds(
+    value: &Value,
+    config: &DateTimeConfig,
+) -> Result<i32, ExecError> {
+    match value {
+        Value::Text(name) => {
+            if let Some(offset) = parse_posix_timezone_offset(name) {
+                return Ok(offset);
+            }
+            let spec = parse_timezone_spec(name).map_err(|err| match err {
+                DateTimeParseError::UnknownTimeZone(zone) => {
+                    timezone_function_error(format!("time zone \"{zone}\" not recognized"), "22023")
+                }
+                DateTimeParseError::Invalid | DateTimeParseError::FieldOutOfRange => {
+                    timezone_function_error(
+                        format!("invalid input syntax for type time zone: \"{name}\""),
+                        "22007",
+                    )
+                }
+            })?;
+            match spec {
+                Some(TimeZoneSpec::FixedOffset(offset)) => Ok(offset),
+                Some(TimeZoneSpec::Named(_)) => Ok(timezone_offset_seconds(config)),
+                None => Err(timezone_function_error(
+                    format!("time zone \"{name}\" not recognized"),
+                    "22023",
+                )),
+            }
+        }
+        Value::Interval(interval) if interval.months == 0 && interval.days == 0 => {
+            i32::try_from(interval.time_micros / USECS_PER_SEC)
+                .map_err(|_| timezone_function_error("time zone interval out of range", "22008"))
+        }
+        other => Err(ExecError::TypeMismatch {
+            op: "timezone",
+            left: other.clone(),
+            right: Value::TimeTz(TimeTzADT {
+                time: TimeADT(0),
+                offset_seconds: 0,
+            }),
+        }),
+    }
+}
+
+fn parse_posix_timezone_offset(name: &str) -> Option<i32> {
+    let trimmed = name.trim();
+    let sign_idx = trimmed
+        .char_indices()
+        .skip(1)
+        .find_map(|(idx, ch)| matches!(ch, '+' | '-').then_some(idx))?;
+    let prefix = &trimmed[..sign_idx];
+    if !(prefix.eq_ignore_ascii_case("utc") || prefix.eq_ignore_ascii_case("gmt")) {
+        return None;
+    }
+    let suffix = &trimmed[sign_idx..];
+    let spec = parse_timezone_spec(suffix).ok()??;
+    match spec {
+        TimeZoneSpec::FixedOffset(offset) => Some(-offset),
+        TimeZoneSpec::Named(_) => None,
+    }
+}
+
+fn retime_timetz(timetz: TimeTzADT, target_offset_seconds: i32) -> TimeTzADT {
+    let utc_usecs = timetz.time.0 - i64::from(timetz.offset_seconds) * USECS_PER_SEC;
+    let target_time =
+        (utc_usecs + i64::from(target_offset_seconds) * USECS_PER_SEC).rem_euclid(USECS_PER_DAY);
+    TimeTzADT {
+        time: TimeADT(target_time),
+        offset_seconds: target_offset_seconds,
     }
 }
 
@@ -196,7 +291,9 @@ pub(crate) fn eval_date_part_function(values: &[Value]) -> Result<Value, ExecErr
             | "hour"
             | "timezone"
             | "timezone_m"
+            | "timezone_minute"
             | "timezone_h"
+            | "timezone_hour"
     ) {
         return Err(unsupported_date_part(&field));
     }
@@ -304,6 +401,44 @@ fn eval_timestamp_part(field: &str, timestamp_usecs: i64) -> Result<Value, ExecE
         _ => return Err(unrecognized_timestamp_part(field)),
     };
     Ok(Value::Float64(result))
+}
+
+pub(crate) fn eval_timezone_function(
+    values: &[Value],
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    let target_offset_seconds;
+    let timetz = match values {
+        [Value::Null] | [_, Value::Null] => return Ok(Value::Null),
+        [Value::TimeTz(value)] => {
+            target_offset_seconds = timezone_offset_seconds(config);
+            *value
+        }
+        [zone, Value::TimeTz(value)] => {
+            target_offset_seconds = timezone_target_offset_seconds(zone, config)?;
+            *value
+        }
+        [other] => {
+            return Err(ExecError::TypeMismatch {
+                op: "timezone",
+                left: other.clone(),
+                right: Value::TimeTz(TimeTzADT {
+                    time: TimeADT(0),
+                    offset_seconds: 0,
+                }),
+            });
+        }
+        _ => {
+            return Err(ExecError::DetailedError {
+                message: "malformed timezone call".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            });
+        }
+    };
+
+    Ok(Value::TimeTz(retime_timetz(timetz, target_offset_seconds)))
 }
 
 pub(crate) fn eval_isfinite_function(values: &[Value]) -> Result<Value, ExecError> {
@@ -835,17 +970,26 @@ mod tests {
         assert_eq!(
             eval_date_part_function(&[Value::Text("timezone".into()), Value::TimeTz(timetz)])
                 .unwrap(),
-            Value::Float64(25_200.0)
+            Value::Float64(-25_200.0)
         );
         assert_eq!(
             eval_date_part_function(&[Value::Text("timezone_h".into()), Value::TimeTz(timetz)])
                 .unwrap(),
-            Value::Float64(7.0)
+            Value::Float64(-7.0)
+        );
+        assert_eq!(
+            eval_date_part_function(&[Value::Text("timezone_hour".into()), Value::TimeTz(timetz)])
+                .unwrap(),
+            Value::Float64(-7.0)
         );
         assert_eq!(
             eval_date_part_function(&[Value::Text("timezone_m".into()), Value::TimeTz(timetz)])
                 .unwrap(),
             Value::Float64(0.0)
+        );
+        assert_eq!(
+            eval_date_part_function(&[Value::Text("epoch".into()), Value::TimeTz(timetz)]).unwrap(),
+            Value::Float64((20 * 60 * 60 + 30 * 60) as f64)
         );
     }
 }

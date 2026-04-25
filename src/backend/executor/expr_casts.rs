@@ -3101,9 +3101,9 @@ pub(crate) fn cast_text_value_with_config(
         SqlTypeKind::TimeTz => parse_timetz_text(text, config)
             .map(Value::TimeTz)
             .map(|value| apply_time_precision(value, ty.time_precision()))
-            .ok_or_else(|| ExecError::InvalidStorageValue {
+            .map_err(|err| ExecError::InvalidStorageValue {
                 column: "timetz".into(),
-                details: format!("invalid input syntax for type time with time zone: \"{text}\""),
+                details: datetime_parse_error_details("time with time zone", text, err),
             }),
         SqlTypeKind::Interval => Ok(Value::Interval(parse_interval_text_value(text)?)),
         SqlTypeKind::Timestamp => parse_timestamp_text(text, config)

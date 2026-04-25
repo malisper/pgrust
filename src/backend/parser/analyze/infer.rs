@@ -698,6 +698,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     SqlType::new(SqlTypeKind::RegCollation)
                 }
                 Some(BuiltinScalarFunction::DatePart) => SqlType::new(SqlTypeKind::Float8),
+                Some(BuiltinScalarFunction::TimeZone) => SqlType::new(SqlTypeKind::TimeTz),
                 Some(BuiltinScalarFunction::DateTrunc) => match args.args().get(1).map(|arg| {
                     infer_sql_expr_type_with_ctes(
                         &arg.value,
