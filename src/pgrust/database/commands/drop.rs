@@ -25,6 +25,39 @@ struct DropRulePlan {
     rewrite_oid: u32,
 }
 
+fn catalog_entry_from_bound_relation(
+    relation: &crate::backend::parser::BoundRelation,
+) -> crate::backend::catalog::CatalogEntry {
+    crate::backend::catalog::CatalogEntry {
+        rel: relation.rel,
+        relation_oid: relation.relation_oid,
+        namespace_oid: relation.namespace_oid,
+        owner_oid: relation.owner_oid,
+        relacl: None,
+        row_type_oid: 0,
+        array_type_oid: 0,
+        reltoastrelid: relation.toast.map(|toast| toast.relation_oid).unwrap_or(0),
+        relpersistence: relation.relpersistence,
+        relkind: relation.relkind,
+        am_oid: crate::include::catalog::relam_for_relkind(relation.relkind),
+        relhassubclass: false,
+        relhastriggers: false,
+        relispartition: relation.relispartition,
+        relispopulated: relation.relispopulated,
+        relpartbound: relation.relpartbound.clone(),
+        relrowsecurity: false,
+        relforcerowsecurity: false,
+        relpages: 0,
+        reltuples: 0.0,
+        relallvisible: 0,
+        relallfrozen: 0,
+        relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
+        desc: relation.desc.clone(),
+        partitioned_table: relation.partitioned_table.clone(),
+        index_meta: None,
+    }
+}
+
 #[derive(Debug, Clone)]
 enum DropTableDependency {
     Relation {
@@ -1184,20 +1217,34 @@ impl Database {
                     waiter: Some(self.txn_waiter.clone()),
                     interrupts: Arc::clone(&interrupts),
                 };
-                let effect = self
-                    .catalog
-                    .write()
-                    .drop_relation_entry_by_oid_mvcc(index_oid, &ctx)
-                    .map_err(|err| match err {
-                        CatalogError::UnknownTable(_) => {
-                            ExecError::Parse(ParseError::TableDoesNotExist(index_oid.to_string()))
-                        }
-                        other => ExecError::Parse(ParseError::UnexpectedToken {
-                            expected: "droppable index",
-                            actual: format!("{other:?}"),
-                        }),
-                    })?
-                    .1;
+                let effect = if let Some(entry) = catalog.relation_by_oid(index_oid) {
+                    let mut catalog_guard = self.catalog.write();
+                    catalog_guard
+                        .drop_relation_entry_mvcc(catalog_entry_from_bound_relation(&entry), &ctx)
+                        .map_err(|err| match err {
+                            CatalogError::UnknownTable(_) => ExecError::Parse(
+                                ParseError::TableDoesNotExist(index_oid.to_string()),
+                            ),
+                            other => ExecError::Parse(ParseError::UnexpectedToken {
+                                expected: "droppable index",
+                                actual: format!("{other:?}"),
+                            }),
+                        })?
+                } else {
+                    self.catalog
+                        .write()
+                        .drop_relation_entry_by_oid_mvcc(index_oid, &ctx)
+                        .map_err(|err| match err {
+                            CatalogError::UnknownTable(_) => ExecError::Parse(
+                                ParseError::TableDoesNotExist(index_oid.to_string()),
+                            ),
+                            other => ExecError::Parse(ParseError::UnexpectedToken {
+                                expected: "droppable index",
+                                actual: format!("{other:?}"),
+                            }),
+                        })?
+                        .1
+                };
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
                 dropped += 1;

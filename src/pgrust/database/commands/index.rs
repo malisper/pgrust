@@ -712,10 +712,38 @@ impl Database {
             indnullsnotdistinct: nulls_not_distinct,
             ..build_options.clone()
         };
+        let table_entry = crate::backend::catalog::CatalogEntry {
+            rel: relation.rel,
+            relation_oid: relation.relation_oid,
+            namespace_oid: relation.namespace_oid,
+            owner_oid: relation.owner_oid,
+            relacl: None,
+            row_type_oid: 0,
+            array_type_oid: 0,
+            reltoastrelid: relation.toast.map(|toast| toast.relation_oid).unwrap_or(0),
+            relpersistence: relation.relpersistence,
+            relkind: relation.relkind,
+            am_oid: crate::include::catalog::relam_for_relkind(relation.relkind),
+            relhassubclass: false,
+            relhastriggers: false,
+            relispartition: relation.relispartition,
+            relispopulated: relation.relispopulated,
+            relpartbound: relation.relpartbound.clone(),
+            relrowsecurity: false,
+            relforcerowsecurity: false,
+            relpages: 0,
+            reltuples: 0.0,
+            relallvisible: 0,
+            relallfrozen: 0,
+            relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
+            desc: relation.desc.clone(),
+            partitioned_table: relation.partitioned_table.clone(),
+            index_meta: None,
+        };
         let (index_entry, effect) = catalog_guard
-            .create_index_for_relation_mvcc_with_options(
+            .create_index_for_entry_mvcc_with_options(
                 index_name.to_string(),
-                relation.relation_oid,
+                table_entry,
                 unique,
                 primary,
                 columns,
@@ -766,7 +794,7 @@ impl Database {
                 interrupts,
             };
             let ready_effect = catalog_guard
-                .set_index_ready_valid_mvcc(index_entry.relation_oid, true, true, &readiness_ctx)
+                .set_index_entry_ready_valid_mvcc(&index_entry, true, true, &readiness_ctx)
                 .map_err(|err| match err {
                     CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
                     _ => ExecError::Parse(ParseError::UnexpectedToken {
@@ -878,7 +906,7 @@ impl Database {
             interrupts,
         };
         let ready_effect = catalog_guard
-            .set_index_ready_valid_mvcc(index_entry.relation_oid, true, true, &readiness_ctx)
+            .set_index_entry_ready_valid_mvcc(&index_entry, true, true, &readiness_ctx)
             .map_err(|err| match err {
                 CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
                 _ => ExecError::Parse(ParseError::UnexpectedToken {
