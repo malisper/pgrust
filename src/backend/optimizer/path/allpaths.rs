@@ -405,7 +405,7 @@ fn plan_query_path(
     catalog: &dyn CatalogLookup,
     config: PlannerConfig,
 ) -> (PlannerInfo, Path) {
-    let query = super::super::root::prepare_query_for_planning(query);
+    let query = super::super::root::prepare_query_for_planning(query, catalog);
     let mut root = PlannerInfo::new_with_config(query, config);
     let scanjoin_rel = query_planner(&mut root, catalog);
     let final_rel = grouping_planner(&mut root, scanjoin_rel, catalog);
@@ -524,11 +524,11 @@ fn build_cte_scan_path(
     catalog: &dyn CatalogLookup,
     config: PlannerConfig,
 ) -> Path {
-    let query = super::super::root::prepare_query_for_planning(query);
+    let query = super::super::root::prepare_query_for_planning(query, catalog);
     let (subroot, cte_path) = if let Some(recursive_union) = query.recursive_union.clone() {
         (
             PlannerInfo::new_with_config(
-                super::super::root::prepare_query_for_planning(query.clone()),
+                super::super::root::prepare_query_for_planning(query.clone(), catalog),
                 config,
             ),
             build_recursive_union_path(*recursive_union, catalog, config),
@@ -564,11 +564,11 @@ fn build_subquery_scan_path(
     catalog: &dyn CatalogLookup,
     config: PlannerConfig,
 ) -> Path {
-    let query = super::super::root::prepare_query_for_planning(query);
+    let query = super::super::root::prepare_query_for_planning(query, catalog);
     let (subroot, input) = if let Some(recursive_union) = query.recursive_union.clone() {
         (
             PlannerInfo::new_with_config(
-                super::super::root::prepare_query_for_planning(query.clone()),
+                super::super::root::prepare_query_for_planning(query.clone(), catalog),
                 config,
             ),
             build_recursive_union_path(*recursive_union, catalog, config),

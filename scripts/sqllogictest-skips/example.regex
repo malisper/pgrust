@@ -1,0 +1,6 @@
+# One regex per line.
+# Blank lines and comments are ignored.
+#
+# Example:
+# connection/counter
+# postgres_extended

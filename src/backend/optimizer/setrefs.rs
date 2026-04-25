@@ -3965,6 +3965,7 @@ fn set_aggregate_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
     slot_id: usize,
+    strategy: crate::include::nodes::plannodes::AggregateStrategy,
     input: Box<Path>,
     group_by: Vec<Expr>,
     accumulators: Vec<AggAccum>,
@@ -4015,6 +4016,7 @@ fn set_aggregate_references(
     });
     Plan::Aggregate {
         plan_info,
+        strategy,
         input: Box::new(set_plan_refs(ctx, *input)),
         group_by,
         accumulators,
@@ -4519,6 +4521,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
         Path::Aggregate {
             plan_info,
             slot_id,
+            strategy,
             input,
             group_by,
             accumulators,
@@ -4529,6 +4532,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             ctx,
             plan_info,
             slot_id,
+            strategy,
             input,
             group_by,
             accumulators,

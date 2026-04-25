@@ -313,6 +313,32 @@ fn resolve_builtin_aggregate_call(
 ) -> Option<ResolvedFunctionCall> {
     if matches!(
         func,
+        AggFunc::RegrCount
+            | AggFunc::RegrSxx
+            | AggFunc::RegrSyy
+            | AggFunc::RegrSxy
+            | AggFunc::RegrAvgX
+            | AggFunc::RegrAvgY
+            | AggFunc::RegrR2
+            | AggFunc::RegrSlope
+            | AggFunc::RegrIntercept
+            | AggFunc::CovarPop
+            | AggFunc::CovarSamp
+            | AggFunc::Corr
+    ) && arg_types.len() == 2
+    {
+        let float8_args = [
+            SqlType::new(SqlTypeKind::Float8),
+            SqlType::new(SqlTypeKind::Float8),
+        ];
+        if let Ok(resolved) =
+            resolve_function_call(catalog, func.name(), &float8_args, func_variadic)
+        {
+            return Some(resolved);
+        }
+    }
+    if matches!(
+        func,
         AggFunc::Sum
             | AggFunc::Avg
             | AggFunc::VarPop

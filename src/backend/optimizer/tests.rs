@@ -17,7 +17,9 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, RelOptInfo, RelOptKind,
 };
-use crate::include::nodes::plannodes::{IndexScanKeyArgument, Plan, PlanEstimate};
+use crate::include::nodes::plannodes::{
+    AggregateStrategy, IndexScanKeyArgument, Plan, PlanEstimate,
+};
 use crate::include::nodes::primnodes::{
     Aggref, AttrNumber, Expr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind, OrderByEntry,
     Param, ParamKind, QueryColumn, RelationDesc, TargetEntry, Var, WindowFrameBound, user_attrno,
@@ -563,6 +565,16 @@ fn parse_select_for_optimizer_test(
     })
 }
 
+fn planned_stmt_for_sql_with_catalog_and_larger_parse_stack(
+    sql: &str,
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+) -> crate::include::nodes::plannodes::PlannedStmt {
+    let stmt = parse_select_for_optimizer_test(sql).expect("parse");
+    let (query, _) = analyze_select_query_with_outer(&stmt, catalog, &[], None, None, &[], &[])
+        .expect("analyze");
+    super::planner(query, catalog).expect("plan")
+}
+
 fn planned_stmt_for_values_sql(sql: &str) -> crate::include::nodes::plannodes::PlannedStmt {
     let catalog = LiteralDefaultCatalog;
     let stmt = parse_select(sql).expect("parse");
@@ -583,6 +595,34 @@ fn catalog_with_indexed_items() -> Catalog {
         .expect("create test catalog relation");
     let index = catalog
         .create_index("items_id_idx", "items", false, &["id".into()])
+        .expect("create test catalog index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark test catalog index usable");
+    catalog
+        .set_relation_stats(table.relation_oid, 128, 10_000.0)
+        .expect("seed test catalog table stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 32, 10_000.0)
+        .expect("seed test catalog index stats");
+    catalog
+}
+
+fn catalog_with_unique_indexed_items() -> Catalog {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "items",
+            RelationDesc {
+                columns: vec![
+                    column_desc("id", int4(), false),
+                    column_desc("payload", int4(), true),
+                ],
+            },
+        )
+        .expect("create test catalog relation");
+    let index = catalog
+        .create_index("items_id_idx", "items", true, &["id".into()])
         .expect("create test catalog index");
     catalog
         .set_index_ready_valid(index.relation_oid, true, true)
@@ -931,6 +971,45 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
     }
 }
 
+fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
+    match plan {
+        Plan::Aggregate { .. } => Some(plan),
+        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
+            children.iter().find_map(find_aggregate_plan)
+        }
+        Plan::Hash { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::BitmapHeapScan {
+            bitmapqual: input, ..
+        }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => find_aggregate_plan(input),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. }
+        | Plan::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => find_aggregate_plan(left).or_else(|| find_aggregate_plan(right)),
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::Values { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. } => None,
+    }
+}
+
 #[test]
 fn outer_join_preserved_side_where_qual_pushes_to_base_scan() {
     let catalog = catalog_with_people_and_pets();
@@ -1175,6 +1254,80 @@ fn planned_grouped_window_query_keeps_aggregate_below_windowagg() {
         },
         other => panic!("expected final projection, got {other:?}"),
     }
+}
+
+#[test]
+fn distinct_grouped_aggregate_uses_sorted_strategy() {
+    let planned = planned_stmt_for_values_sql(
+        "select grp, sum(distinct val) from (values (2, 1), (1, 1), (2, 2)) as t(grp, val) group by grp",
+    );
+    let aggregate = find_aggregate_plan(&planned.plan_tree).expect("aggregate plan");
+    match aggregate {
+        Plan::Aggregate {
+            strategy, input, ..
+        } => {
+            assert_eq!(*strategy, AggregateStrategy::Sorted);
+            assert!(matches!(input.as_ref(), Plan::OrderBy { .. }));
+        }
+        other => panic!("expected aggregate plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn ordinary_grouped_aggregate_uses_hashed_strategy() {
+    let planned = planned_stmt_for_values_sql(
+        "select grp, count(*) from (values (2), (1), (2)) as t(grp) group by grp",
+    );
+    let aggregate = find_aggregate_plan(&planned.plan_tree).expect("aggregate plan");
+    match aggregate {
+        Plan::Aggregate {
+            strategy, input, ..
+        } => {
+            assert_eq!(*strategy, AggregateStrategy::Hashed);
+            assert!(!matches!(input.as_ref(), Plan::OrderBy { .. }));
+        }
+        other => panic!("expected aggregate plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn aggregate_pathkeys_follow_strategy() {
+    let key = pathkey(var(10, 1));
+    let hashed = Path::Aggregate {
+        plan_info: PlanEstimate::default(),
+        pathtarget: PathTarget::new(vec![var(10, 1)]),
+        slot_id: 20,
+        strategy: AggregateStrategy::Hashed,
+        pathkeys: vec![key.clone()],
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        group_by: vec![var(10, 1)],
+        accumulators: Vec::new(),
+        having: None,
+        output_columns: vec![QueryColumn {
+            name: "grp".into(),
+            sql_type: int4(),
+            wire_type_oid: None,
+        }],
+    };
+    assert!(hashed.pathkeys().is_empty());
+
+    let sorted = Path::Aggregate {
+        plan_info: PlanEstimate::default(),
+        pathtarget: PathTarget::new(vec![var(10, 1)]),
+        slot_id: 20,
+        strategy: AggregateStrategy::Sorted,
+        pathkeys: vec![key.clone()],
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        group_by: vec![var(10, 1)],
+        accumulators: Vec::new(),
+        having: None,
+        output_columns: vec![QueryColumn {
+            name: "grp".into(),
+            sql_type: int4(),
+            wire_type_oid: None,
+        }],
+    };
+    assert_eq!(sorted.pathkeys(), vec![key]);
 }
 
 #[test]
@@ -1890,8 +2043,6 @@ fn planner_keeps_nested_sublink_max_as_aggregate() {
             .any(|subplan| plan_contains(subplan, |plan| matches!(plan, Plan::Aggregate { .. })))
     );
 }
-
-#[test]
 fn planner_rewrites_correlated_min_with_index_subplan() {
     let catalog = catalog_with_indexed_items();
     let stmt =
@@ -1939,6 +2090,42 @@ fn planner_uses_runtime_index_key_for_correlated_limit_subplan() {
                 _ => false,
             })
     }));
+    for subplan in &planned.subplans {
+        super::setrefs::validate_executable_plan_for_tests(subplan);
+    }
+}
+
+#[test]
+fn planner_simplifies_outer_max_of_unique_scalar_sublink() {
+    let catalog = catalog_with_unique_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog_and_larger_parse_stack(
+        "select (select max((select i.payload from items i where i.id = o.id))) from items o",
+        &catalog,
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::SeqScan { .. }
+        )),
+        "expected the outer query to keep scanning one output row per outer tuple: {planned:#?}"
+    );
+    assert!(
+        planned
+            .subplans
+            .iter()
+            .all(|subplan| !plan_contains(subplan, |plan| matches!(plan, Plan::Aggregate { .. }))),
+        "outer max should not remain as a per-row aggregate subplan: {planned:#?}"
+    );
+    assert!(
+        planned
+            .subplans
+            .iter()
+            .any(|subplan| plan_contains(subplan, |plan| matches!(plan, Plan::IndexScan { .. }))),
+        "expected the remaining scalar lookup subplan to use the unique index: {planned:#?}"
+    );
+
+    super::setrefs::validate_executable_plan_for_tests(&planned.plan_tree);
     for subplan in &planned.subplans {
         super::setrefs::validate_executable_plan_for_tests(subplan);
     }
