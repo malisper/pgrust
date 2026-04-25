@@ -15,6 +15,10 @@ pass at that local harness.
 - `pgbench-like`
   Runs the existing in-repo `pgbench_like.rs` binary as a pgrust-only internal
   benchmark.
+- `sysbench`
+  Runs upstream sysbench OLTP Lua workloads through the PostgreSQL driver
+  against pgrust and PostgreSQL. This suite is opt-in because it requires the
+  external `sysbench` binary.
 
 ## Why both `pgbench` and `pgbench_like`
 
@@ -54,6 +58,24 @@ Run one workload shape:
 
 ```bash
 python scripts/run_bench.py --suite pgbench --pgbench-workload point-select
+```
+
+Run a sysbench OLTP workload:
+
+```bash
+python scripts/run_bench.py --suite sysbench --sysbench-workload point-select
+```
+
+Run a tiny sysbench smoke:
+
+```bash
+python scripts/run_bench.py --suite sysbench --sysbench-workload point-select --sysbench-table-size 20 --sysbench-events 1 --clients 1
+```
+
+Pass an upstream sysbench Lua option to both engines:
+
+```bash
+python scripts/run_bench.py --suite sysbench --sysbench-workload read-only --sysbench-option=--distinct_ranges=0
 ```
 
 Run with no warmup:
@@ -173,6 +195,40 @@ The fixture data seeds `scanbench.touched` across 10 buckets and inserts one
 seed event per row in `scanbench_events`. Workloads that need secondary access
 paths create matching indexes for both pgrust and PostgreSQL during the
 per-workload setup.
+
+## sysbench workloads
+
+- `point-select`
+  Upstream `oltp_point_select` single-row OLTP reads.
+- `read-only`
+  Upstream `oltp_read_only` transaction mix.
+- `read-write`
+  Upstream `oltp_read_write` transaction mix.
+- `write-only`
+  Upstream `oltp_write_only` transaction mix.
+- `insert`
+  Upstream `oltp_insert` append workload.
+- `update-index`
+  Upstream `oltp_update_index` indexed update workload.
+- `update-non-index`
+  Upstream `oltp_update_non_index` non-indexed update workload.
+
+The sysbench suite disables sysbench prepared statements for both engines with
+`--db-ps-mode=disable` so the comparison exercises the same simple PostgreSQL
+wire path pgrust is most likely to support today. It also uses
+`--auto_inc=off` to avoid PostgreSQL `SERIAL` setup differences.
+
+Use `--sysbench-option=--name=value` for upstream Lua knobs when pgrust does
+not yet support a default sysbench query shape. For example, upstream
+`read-only` and `read-write` include a `SELECT DISTINCT ... ORDER BY` query
+that pgrust currently reports as unsupported; `--sysbench-option=--distinct_ranges=0`
+keeps the rest of the transaction mix comparable across both engines.
+
+Install sysbench locally before running this suite. On macOS with Homebrew:
+
+```bash
+brew install sysbench
+```
 
 ## Manual only
 
