@@ -12,13 +12,14 @@ use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
     DeferredForeignKeyTracker, ExecError, ExecutorContext, ExecutorTransactionState,
-    SessionReplicationRole, StatementResult, Value, cast_value, execute_planned_stmt,
+    SessionReplicationRole, StatementResult, Value, cast_value, exec_next, execute_planned_stmt,
     execute_readonly_statement_with_config, parse_bytea_text,
 };
 use crate::backend::parser::{
-    CatalogLookup, CopyFromStatement, CopySource, DetachPartitionMode, ParseError, ParseOptions,
-    PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared,
-    bind_update, pg_plan_query_with_config, plan_merge,
+    CatalogLookup, CopyFormat, CopyFromStatement, CopyOptions, CopySource, CopyTarget,
+    CopyToStatement, DetachPartitionMode, ParseError, ParseOptions, PreparedInsert,
+    SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared, bind_update,
+    pg_plan_query_with_config, plan_merge,
 };
 use crate::backend::rewrite::relation_has_row_security;
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
@@ -1002,6 +1003,7 @@ impl Session {
             Statement::Reset(ref reset_stmt) => self.apply_reset(db, reset_stmt),
             Statement::Checkpoint(_) => self.apply_checkpoint(db),
             Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
+            Statement::CopyTo(ref copy_stmt) => self.execute_copy_to_file(db, copy_stmt),
             Statement::CreateFunction(ref create_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -2898,6 +2900,7 @@ impl Session {
                 )
             }
             Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
+            Statement::CopyTo(ref copy_stmt) => self.execute_copy_to_file(db, copy_stmt),
             Statement::CreateDomain(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_create_domain_stmt_with_search_path(
@@ -5519,22 +5522,18 @@ impl Session {
         stmt: &CopyFromStatement,
     ) -> Result<StatementResult, ExecError> {
         let CopySource::File(path) = &stmt.source;
-        let text = std::fs::read_to_string(path).map_err(|err| {
+        let bytes = std::fs::read(path).map_err(|err| {
             ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "readable COPY source file",
                 actual: format!("{path}: {err}"),
             })
         })?;
-        let rows = text
-            .lines()
-            .map(|line| line.trim_end_matches('\r'))
-            .filter(|line| !line.is_empty() && *line != "\\.")
-            .map(|line| {
-                line.split('\t')
-                    .map(|part| part.to_string())
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
+        let text = decode_copy_file_bytes(
+            &bytes,
+            &copy_encoding_name(&stmt.options, self.gucs.get("client_encoding")),
+            &stmt.table_name,
+        )?;
+        let rows = parse_copy_rows(&text, stmt.options.format)?;
         let count = self.copy_from_rows_into_internal(
             db,
             &stmt.table_name,
@@ -5543,6 +5542,238 @@ impl Session {
             "\\N",
         )?;
         Ok(StatementResult::AffectedRows(count))
+    }
+
+    fn execute_copy_to_file(
+        &mut self,
+        db: &Database,
+        stmt: &CopyToStatement,
+    ) -> Result<StatementResult, ExecError> {
+        let CopyTarget::File(path) = &stmt.target;
+        let mut guard = self.execute_streaming(db, &stmt.query)?;
+        let mut rows = Vec::new();
+        while let Some(slot) = exec_next(&mut guard.state, &mut guard.ctx)? {
+            let mut values = slot.values()?.to_vec();
+            Value::materialize_all(&mut values);
+            rows.push(values);
+        }
+        let text = render_copy_rows(&rows, stmt.options.format)?;
+        let bytes = encode_copy_file_text(
+            &text,
+            &copy_encoding_name(&stmt.options, self.gucs.get("client_encoding")),
+        )?;
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "writable COPY target directory",
+                    actual: format!("{}: {err}", parent.display()),
+                })
+            })?;
+        }
+        std::fs::write(path, bytes).map_err(|err| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "writable COPY target file",
+                actual: format!("{path}: {err}"),
+            })
+        })?;
+        Ok(StatementResult::AffectedRows(rows.len()))
+    }
+}
+
+fn copy_encoding_name(options: &CopyOptions, client_encoding: Option<&String>) -> String {
+    options
+        .encoding
+        .as_deref()
+        .or(client_encoding.map(String::as_str))
+        .unwrap_or("UTF8")
+        .to_ascii_uppercase()
+}
+
+fn decode_copy_file_bytes(
+    bytes: &[u8],
+    encoding_name: &str,
+    table_name: &str,
+) -> Result<String, ExecError> {
+    if is_latin1_copy_encoding(encoding_name) {
+        return Ok(bytes.iter().map(|byte| char::from(*byte)).collect());
+    }
+    let encoding = lookup_copy_encoding(encoding_name)?;
+    let (decoded, _, had_errors) = encoding.decode(bytes);
+    if had_errors {
+        return Err(ExecError::WithContext {
+            source: Box::new(ExecError::DetailedError {
+                message: format!(
+                    "invalid byte sequence for encoding \"{}\": {}",
+                    encoding_name.to_ascii_uppercase(),
+                    format_invalid_copy_bytes(bytes)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "22021",
+            }),
+            context: format!("COPY {table_name}, line 1"),
+        });
+    }
+    Ok(decoded.into_owned())
+}
+
+fn encode_copy_file_text(text: &str, encoding_name: &str) -> Result<Vec<u8>, ExecError> {
+    if is_latin1_copy_encoding(encoding_name) {
+        let mut out = Vec::with_capacity(text.len());
+        for ch in text.chars() {
+            if (ch as u32) > 0xff {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "character is not representable in encoding \"{}\"",
+                        encoding_name.to_ascii_uppercase()
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22021",
+                });
+            }
+            out.push(ch as u8);
+        }
+        return Ok(out);
+    }
+    let encoding = lookup_copy_encoding(encoding_name)?;
+    let (encoded, _, had_errors) = encoding.encode(text);
+    if had_errors {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "character is not representable in encoding \"{}\"",
+                encoding_name.to_ascii_uppercase()
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "22021",
+        });
+    }
+    Ok(encoded.into_owned())
+}
+
+fn is_latin1_copy_encoding(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_uppercase().as_str(),
+        "LATIN1" | "ISO_8859_1" | "ISO-8859-1"
+    )
+}
+
+fn lookup_copy_encoding(name: &str) -> Result<&'static encoding_rs::Encoding, ExecError> {
+    let normalized = name.trim().to_ascii_uppercase();
+    let label = match normalized.as_str() {
+        "UTF8" | "UTF-8" | "UNICODE" => "utf-8",
+        "LATIN1" | "ISO_8859_1" | "ISO-8859-1" => "iso-8859-1",
+        "EUC_JP" | "EUCJP" | "EUC-JP" => "euc-jp",
+        _ => normalized.as_str(),
+    };
+    encoding_rs::Encoding::for_label(label.as_bytes()).ok_or_else(|| ExecError::DetailedError {
+        message: format!("invalid encoding name \"{name}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "22023",
+    })
+}
+
+fn format_invalid_copy_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .take(2)
+        .map(|byte| format!("0x{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parse_copy_rows(text: &str, format: CopyFormat) -> Result<Vec<Vec<String>>, ExecError> {
+    text.lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| !line.is_empty() && *line != "\\.")
+        .map(|line| match format {
+            CopyFormat::Text => Ok(line.split('\t').map(str::to_string).collect()),
+            CopyFormat::Csv => parse_copy_csv_line(line),
+        })
+        .collect()
+}
+
+fn parse_copy_csv_line(line: &str) -> Result<Vec<String>, ExecError> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut chars = line.chars().peekable();
+    let mut quoted = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                field.push('"');
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                fields.push(std::mem::take(&mut field));
+            }
+            _ => field.push(ch),
+        }
+    }
+    if quoted {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "terminated CSV quoted field",
+            actual: line.into(),
+        }));
+    }
+    fields.push(field);
+    Ok(fields)
+}
+
+fn render_copy_rows(rows: &[Vec<Value>], format: CopyFormat) -> Result<String, ExecError> {
+    let mut out = String::new();
+    for row in rows {
+        for (idx, value) in row.iter().enumerate() {
+            if idx > 0 {
+                out.push(match format {
+                    CopyFormat::Text => '\t',
+                    CopyFormat::Csv => ',',
+                });
+            }
+            let text = copy_value_text(value)?;
+            match format {
+                CopyFormat::Text => out.push_str(&text),
+                CopyFormat::Csv => append_csv_field(&mut out, &text),
+            }
+        }
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn copy_value_text(value: &Value) -> Result<String, ExecError> {
+    Ok(match value {
+        Value::Null => String::new(),
+        Value::Text(text) => text.to_string(),
+        Value::TextRef(_, _) => value.as_text().unwrap_or_default().to_string(),
+        Value::Int16(v) => v.to_string(),
+        Value::Int32(v) => v.to_string(),
+        Value::Int64(v) => v.to_string(),
+        Value::Bool(true) => "t".to_string(),
+        Value::Bool(false) => "f".to_string(),
+        other => {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                "COPY TO value {other:?}"
+            ))));
+        }
+    })
+}
+
+fn append_csv_field(out: &mut String, text: &str) {
+    if text.contains([',', '"', '\n', '\r']) {
+        out.push('"');
+        for ch in text.chars() {
+            if ch == '"' {
+                out.push('"');
+            }
+            out.push(ch);
+        }
+        out.push('"');
+    } else {
+        out.push_str(text);
     }
 }
 

@@ -489,6 +489,7 @@ fn run_statement(
         | Statement::Listen(_)
         | Statement::Unlisten(_)
         | Statement::CopyFrom(_)
+        | Statement::CopyTo(_)
         | Statement::CreatePublication(_)
         | Statement::AlterPublication(_)
         | Statement::DropPublication(_)

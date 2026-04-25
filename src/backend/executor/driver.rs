@@ -195,7 +195,7 @@ fn execute_statement_with_source(
         | Statement::DropPolicy(_)
         | Statement::CommentOnStatistics(_)
         | Statement::DropStatistics(_) => Ok(StatementResult::AffectedRows(0)),
-        Statement::CopyFrom(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+        Statement::CopyFrom(_) | Statement::CopyTo(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COPY handled by session layer",
             actual: "COPY".into(),
         })),
