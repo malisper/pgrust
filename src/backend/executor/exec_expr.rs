@@ -30,10 +30,11 @@ pub(crate) use super::expr_compile::{
 use super::expr_date::{
     eval_age_function, eval_date_bin_function, eval_date_part_function_with_config,
     eval_date_trunc_function, eval_datetime_add_function, eval_extract_function_with_config,
-    eval_isfinite_function, eval_make_date_function, eval_make_time_function,
-    eval_make_timestamp_function, eval_make_timestamptz_function,
-    eval_timezone_function as eval_timetz_timezone_function, eval_to_date_function,
-    eval_to_timestamp_function,
+    eval_extract_function, eval_isfinite_function, eval_justify_days_function,
+    eval_justify_hours_function, eval_justify_interval_function, eval_make_date_function,
+    eval_make_interval_function, eval_make_time_function, eval_make_timestamp_function,
+    eval_make_timestamptz_function, eval_timezone_function as eval_timetz_timezone_function,
+    eval_to_date_function, eval_to_timestamp_function,
 };
 use super::expr_datetime::{
     current_date_value, current_date_value_from_timestamp_with_config, current_time_value,
@@ -3856,6 +3857,29 @@ fn cast_record_value_for_target(
     ))
 }
 
+fn eval_interval_hash_function(values: &[Value]) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::DetailedError {
+            message: "malformed interval_hash call".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Interval(interval) => {
+            let span = interval.cmp_key() as i64;
+            Ok(Value::Int32((span ^ (span >> 32)) as i32))
+        }
+        other => Err(ExecError::TypeMismatch {
+            op: "interval_hash",
+            left: other.clone(),
+            right: Value::Interval(crate::include::nodes::datum::IntervalValue::zero()),
+        }),
+    }
+}
+
 fn eval_plpgsql_builtin_function(
     func: BuiltinScalarFunction,
     result_type: Option<SqlType>,
@@ -4165,6 +4189,12 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::BoolNe => eval_boolne(&values),
         BuiltinScalarFunction::BoolAndStateFunc => eval_booland_statefunc(&values),
         BuiltinScalarFunction::BoolOrStateFunc => eval_boolor_statefunc(&values),
+        BuiltinScalarFunction::Extract => eval_extract_function(&values),
+        BuiltinScalarFunction::JustifyDays => eval_justify_days_function(&values),
+        BuiltinScalarFunction::JustifyHours => eval_justify_hours_function(&values),
+        BuiltinScalarFunction::JustifyInterval => eval_justify_interval_function(&values),
+        BuiltinScalarFunction::MakeInterval => eval_make_interval_function(&values),
+        BuiltinScalarFunction::IntervalHash => eval_interval_hash_function(&values),
         BuiltinScalarFunction::XmlComment => eval_xml_comment_function(&values, None),
         BuiltinScalarFunction::XmlIsWellFormed => eval_xml_is_well_formed_function(
             &values,
@@ -5191,7 +5221,11 @@ fn eval_builtin_function(
         BuiltinScalarFunction::DateAdd => eval_datetime_add_function(&values, false),
         BuiltinScalarFunction::DateSubtract => eval_datetime_add_function(&values, true),
         BuiltinScalarFunction::Age => eval_age_function(&values, &ctx.datetime_config),
+        BuiltinScalarFunction::JustifyDays => eval_justify_days_function(&values),
+        BuiltinScalarFunction::JustifyHours => eval_justify_hours_function(&values),
+        BuiltinScalarFunction::JustifyInterval => eval_justify_interval_function(&values),
         BuiltinScalarFunction::IsFinite => eval_isfinite_function(&values),
+        BuiltinScalarFunction::MakeInterval => eval_make_interval_function(&values),
         BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
         BuiltinScalarFunction::MakeTime => eval_make_time_function(&values),
         BuiltinScalarFunction::MakeTimestamp => eval_make_timestamp_function(&values),
@@ -5199,6 +5233,7 @@ fn eval_builtin_function(
             eval_make_timestamptz_function(&values, &ctx.datetime_config)
         }
         BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(&values),
+        BuiltinScalarFunction::IntervalHash => eval_interval_hash_function(&values),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
         BuiltinScalarFunction::PgMyTempSchema => Ok(Value::Int64(i64::from(
             current_temp_namespace_oid(ctx).unwrap_or(0),

@@ -8672,8 +8672,8 @@ mod tests {
 
         assert!(
             output
-                .windows("{\"@ 0\",\"@ 1 hour 42 mins 20 secs\"}".len())
-                .any(|window| window == b"{\"@ 0\",\"@ 1 hour 42 mins 20 secs\"}")
+                .windows("{00:00:00,01:42:20}".len())
+                .any(|window| window == b"{00:00:00,01:42:20}")
         );
     }
 

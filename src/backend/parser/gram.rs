@@ -14530,7 +14530,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 .expect("interval precision");
             RawTypeName::Builtin(
                 precision
-                    .map(|precision| SqlType::new(SqlTypeKind::Interval).with_typmod(precision))
+                    .map(|precision| SqlType::with_interval_typmod(Some(precision), None))
                     .unwrap_or_else(|| SqlType::new(SqlTypeKind::Interval)),
             )
         }
@@ -14589,11 +14589,10 @@ fn build_cast_type_name(pair: Pair<'_, Rule>) -> Result<RawTypeName, ParseError>
     for part in inner {
         match part.as_rule() {
             Rule::interval_field_clause => {
-                if let Some(precision) = interval_field_clause_precision(part)? {
-                    ty = RawTypeName::Builtin(
-                        SqlType::new(SqlTypeKind::Interval).with_typmod(precision),
-                    );
-                }
+                let precision = interval_field_clause_precision(part.clone())?
+                    .or_else(|| ty.as_builtin().and_then(|ty| ty.interval_precision()));
+                let range = interval_field_clause_range(part.as_str());
+                ty = RawTypeName::Builtin(SqlType::with_interval_typmod(precision, range));
             }
             Rule::type_array_suffix | Rule::array_suffix | Rule::array_decl_suffix => {
                 ty = add_array_bounds(ty, type_array_suffix_bounds(part));
@@ -14609,6 +14608,50 @@ fn interval_field_clause_precision(pair: Pair<'_, Rule>) -> Result<Option<i32>, 
         .find(|inner| inner.as_rule() == Rule::integer)
         .map(build_type_len)
         .transpose()
+}
+
+fn interval_field_clause_range(field_clause: &str) -> Option<i32> {
+    let field_text = interval_field_clause_name(field_clause);
+    match field_text.as_str() {
+        "year" => Some(SqlType::INTERVAL_MASK_YEAR),
+        "month" => Some(SqlType::INTERVAL_MASK_MONTH),
+        "day" => Some(SqlType::INTERVAL_MASK_DAY),
+        "hour" => Some(SqlType::INTERVAL_MASK_HOUR),
+        "minute" => Some(SqlType::INTERVAL_MASK_MINUTE),
+        "second" => Some(SqlType::INTERVAL_MASK_SECOND),
+        "year to month" => Some(SqlType::INTERVAL_MASK_YEAR | SqlType::INTERVAL_MASK_MONTH),
+        "day to hour" => Some(SqlType::INTERVAL_MASK_DAY | SqlType::INTERVAL_MASK_HOUR),
+        "day to minute" => Some(
+            SqlType::INTERVAL_MASK_DAY
+                | SqlType::INTERVAL_MASK_HOUR
+                | SqlType::INTERVAL_MASK_MINUTE,
+        ),
+        "day to second" => Some(
+            SqlType::INTERVAL_MASK_DAY
+                | SqlType::INTERVAL_MASK_HOUR
+                | SqlType::INTERVAL_MASK_MINUTE
+                | SqlType::INTERVAL_MASK_SECOND,
+        ),
+        "hour to minute" => Some(SqlType::INTERVAL_MASK_HOUR | SqlType::INTERVAL_MASK_MINUTE),
+        "hour to second" => Some(
+            SqlType::INTERVAL_MASK_HOUR
+                | SqlType::INTERVAL_MASK_MINUTE
+                | SqlType::INTERVAL_MASK_SECOND,
+        ),
+        "minute to second" => Some(SqlType::INTERVAL_MASK_MINUTE | SqlType::INTERVAL_MASK_SECOND),
+        _ => None,
+    }
+}
+
+fn interval_field_clause_name(field_clause: &str) -> String {
+    field_clause
+        .split('(')
+        .next()
+        .unwrap_or(field_clause)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
 }
 
 fn build_numeric_typemod_component(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
@@ -15447,21 +15490,91 @@ fn build_interval_string_literal(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseE
             _ => {}
         }
     }
-    if let Some(precision) = trailing_precision {
-        ty = RawTypeName::Builtin(SqlType::new(SqlTypeKind::Interval).with_typmod(precision));
-    }
     let mut literal = literal.ok_or(ParseError::UnexpectedEof)?;
-    if let Some(field_clause) = trailing_field_clause
-        && !literal.contains(char::is_whitespace)
-        && !literal.contains(':')
-    {
-        literal.push(' ');
-        literal.push_str(&field_clause);
+    if let Some(field_clause) = trailing_field_clause {
+        let precision =
+            trailing_precision.or_else(|| ty.as_builtin().and_then(|ty| ty.interval_precision()));
+        let range = interval_field_clause_range(&field_clause);
+        ty = RawTypeName::Builtin(SqlType::with_interval_typmod(precision, range));
+        if !literal.contains(char::is_whitespace) && !literal.contains(':') {
+            literal.push(' ');
+            literal.push_str(&interval_literal_single_field_suffix(
+                &literal,
+                &field_clause,
+            ));
+        } else if interval_literal_needs_minute_second_padding(&literal, &field_clause) {
+            literal.insert_str(0, "0:");
+        } else if let Some(rewritten) =
+            interval_literal_rewrite_qualified_day_time(&literal, &field_clause)
+        {
+            literal = rewritten;
+        }
     }
     Ok(SqlExpr::Cast(
         Box::new(SqlExpr::Const(Value::Text(literal.into()))),
         ty,
     ))
+}
+
+fn interval_literal_single_field_suffix(literal: &str, field_clause: &str) -> String {
+    let field_text = interval_field_clause_name(field_clause);
+    if field_text == "year to month"
+        && literal
+            .strip_prefix(['+', '-'])
+            .unwrap_or(literal)
+            .contains('-')
+    {
+        return "year to month".into();
+    }
+    match field_text.rsplit_once(" to ") {
+        Some((_, end)) => match end.trim() {
+            "year" => "year".into(),
+            "month" => "month".into(),
+            "day" => "day".into(),
+            "hour" => "hour".into(),
+            "minute" => "minute".into(),
+            "second" => "second".into(),
+            _ => field_clause.into(),
+        },
+        None => match field_text.as_str() {
+            "year" => "year".into(),
+            "month" => "month".into(),
+            "day" => "day".into(),
+            "hour" => "hour".into(),
+            "minute" => "minute".into(),
+            "second" => "second".into(),
+            _ => field_clause.into(),
+        },
+    }
+}
+
+fn interval_literal_needs_minute_second_padding(literal: &str, field_clause: &str) -> bool {
+    let field_text = interval_field_clause_name(field_clause);
+    field_text == "minute to second"
+        && literal.matches(':').count() == 1
+        && !literal.contains(char::is_whitespace)
+}
+
+fn interval_literal_rewrite_qualified_day_time(
+    literal: &str,
+    field_clause: &str,
+) -> Option<String> {
+    let field_text = interval_field_clause_name(field_clause);
+    let split = literal.find(char::is_whitespace)?;
+    let day = literal[..split].trim();
+    let time = literal[split..].trim();
+    let parts = time.split(':').collect::<Vec<_>>();
+    match field_text.as_str() {
+        "day to hour" if !parts.is_empty() => Some(format!("{day} days {} hours", parts[0])),
+        "day to minute" | "hour to minute" if parts.len() == 3 => {
+            Some(format!("{day} {}:{}", parts[0], parts[1]))
+        }
+        "day to second" | "hour to second" if parts.len() == 2 && parts[1].contains('.') => {
+            Some(format!("{day} 0:{time}"))
+        }
+        "minute to second" if parts.len() == 2 => Some(format!("{day} 0:{time}")),
+        _ => None,
+    }
 }
 
 fn build_select_like_subquery(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {

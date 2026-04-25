@@ -30,6 +30,7 @@ use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLL
 use crate::include::nodes::datetime::{
     TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeTzADT, USECS_PER_DAY, USECS_PER_SEC,
 };
+use crate::include::nodes::datum::IntervalValue;
 use crate::pgrust::compact_string::CompactString;
 
 pub(crate) fn compare_order_by_keys(
@@ -212,7 +213,7 @@ pub(crate) fn compare_values(
         (Value::TimeTz(l), Value::TimeTz(r)) => Ok(Value::Bool(l == r)),
         (Value::Timestamp(l), Value::Timestamp(r)) => Ok(Value::Bool(l == r)),
         (Value::TimestampTz(l), Value::TimestampTz(r)) => Ok(Value::Bool(l == r)),
-        (Value::Interval(l), Value::Interval(r)) => Ok(Value::Bool(l == r)),
+        (Value::Interval(l), Value::Interval(r)) => Ok(Value::Bool(l.cmp_key() == r.cmp_key())),
         (Value::Bytea(l), Value::Bytea(r)) => Ok(Value::Bool(l == r)),
         (Value::Uuid(l), Value::Uuid(r)) => Ok(Value::Bool(l == r)),
         (Value::Inet(l), Value::Inet(r))
@@ -348,7 +349,7 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (Value::TimeTz(l), Value::TimeTz(r)) => l != r,
         (Value::Timestamp(l), Value::Timestamp(r)) => l != r,
         (Value::TimestampTz(l), Value::TimestampTz(r)) => l != r,
-        (Value::Interval(l), Value::Interval(r)) => l != r,
+        (Value::Interval(l), Value::Interval(r)) => l.cmp_key() != r.cmp_key(),
         (Value::Bytea(l), Value::Bytea(r)) => l != r,
         (Value::Uuid(l), Value::Uuid(r)) => l != r,
         (Value::Bit(l), Value::Bit(r)) => l != r,
@@ -616,6 +617,12 @@ pub(crate) fn mul_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Money(r)) => Ok(Value::Money(money_mul_int(*r, *l)?)),
         (Value::Money(l), Value::Float64(r)) => Ok(Value::Money(money_mul_float(*l, *r)?)),
         (Value::Float64(l), Value::Money(r)) => Ok(Value::Money(money_mul_float(*r, *l)?)),
+        (Value::Interval(l), Value::Float64(r)) => interval_mul_float(*l, *r)
+            .map(Value::Interval)
+            .ok_or_else(interval_out_of_range),
+        (Value::Float64(l), Value::Interval(r)) => interval_mul_float(*r, *l)
+            .map(Value::Interval)
+            .ok_or_else(interval_out_of_range),
         (Value::Float64(l), Value::Float64(r)) => {
             let product = l * r;
             if l.is_finite() && r.is_finite() && *l != 0.0 && *r != 0.0 && product.is_infinite() {
@@ -804,6 +811,9 @@ pub(crate) fn div_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Money(l), Value::Int32(r)) => Ok(Value::Money(money_div_int(*l, i64::from(*r))?)),
         (Value::Money(l), Value::Int64(r)) => Ok(Value::Money(money_div_int(*l, *r)?)),
         (Value::Money(l), Value::Float64(r)) => Ok(Value::Money(money_div_float(*l, *r)?)),
+        (Value::Interval(l), Value::Float64(r)) => interval_div_float(*l, *r)
+            .map(Value::Interval)
+            .ok_or_else(interval_out_of_range),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l / r)),
         _ => Err(ExecError::TypeMismatch {
             op: "/",
@@ -1179,6 +1189,115 @@ fn compare_ord<T: Ord>(left: T, right: T, op: &'static str) -> bool {
         ">=" => left >= right,
         _ => unreachable!(),
     }
+}
+
+fn interval_mul_float(span: IntervalValue, factor: f64) -> Option<IntervalValue> {
+    if factor.is_nan() {
+        return None;
+    }
+    if !span.is_finite() {
+        if factor == 0.0 {
+            return None;
+        }
+        return if factor < 0.0 {
+            span.checked_negate()
+        } else {
+            Some(span)
+        };
+    }
+    if factor.is_infinite() {
+        return match span.cmp_key().cmp(&0) {
+            Ordering::Equal => None,
+            Ordering::Less if factor.is_sign_positive() => Some(IntervalValue::neg_infinity()),
+            Ordering::Less => Some(IntervalValue::infinity()),
+            Ordering::Greater if factor.is_sign_positive() => Some(IntervalValue::infinity()),
+            Ordering::Greater => Some(IntervalValue::neg_infinity()),
+        };
+    }
+    scale_interval_by_float(span, factor, false)
+}
+
+pub(crate) fn interval_div_float(span: IntervalValue, factor: f64) -> Option<IntervalValue> {
+    if factor == 0.0 || factor.is_nan() {
+        return None;
+    }
+    if !span.is_finite() {
+        if factor.is_infinite() {
+            return None;
+        }
+        return if factor < 0.0 {
+            span.checked_negate()
+        } else {
+            Some(span)
+        };
+    }
+    scale_interval_by_float(span, factor, true)
+}
+
+fn scale_interval_by_float(
+    span: IntervalValue,
+    factor: f64,
+    divide: bool,
+) -> Option<IntervalValue> {
+    let orig_month = f64::from(span.months);
+    let orig_day = f64::from(span.days);
+    let scaled_month = if divide {
+        orig_month / factor
+    } else {
+        orig_month * factor
+    };
+    let scaled_day = if divide {
+        orig_day / factor
+    } else {
+        orig_day * factor
+    };
+    let months = float_trunc_to_i32(scaled_month)?;
+    let mut days = float_trunc_to_i32(scaled_day)?;
+
+    let month_remainder_days = ts_round((scaled_month - f64::from(months)) * 30.0);
+    let mut sec_remainder =
+        ts_round((scaled_day - f64::from(days) + month_remainder_days.fract()) * 86_400.0);
+    if sec_remainder.abs() >= 86_400.0 {
+        let whole_days = float_trunc_to_i32(sec_remainder / 86_400.0)?;
+        days = days.checked_add(whole_days)?;
+        sec_remainder -= f64::from(whole_days) * 86_400.0;
+    }
+
+    days = days.checked_add(float_trunc_to_i32(month_remainder_days)?)?;
+    let scaled_time = if divide {
+        span.time_micros as f64 / factor
+    } else {
+        span.time_micros as f64 * factor
+    };
+    let time_micros = float_round_to_i64(scaled_time + sec_remainder * 1_000_000.0)?;
+    let result = IntervalValue {
+        time_micros,
+        days,
+        months,
+    };
+    result.is_finite().then_some(result)
+}
+
+fn ts_round(value: f64) -> f64 {
+    (value * 1_000_000.0).round() / 1_000_000.0
+}
+
+fn float_trunc_to_i32(value: f64) -> Option<i32> {
+    if value.is_nan() || value < f64::from(i32::MIN) || value >= -(f64::from(i32::MIN)) {
+        return None;
+    }
+    Some(value as i32)
+}
+
+fn float_round_to_i64(value: f64) -> Option<i64> {
+    if value.is_nan() {
+        return None;
+    }
+    let rounded = value.round();
+    if rounded < i64::MIN as f64 || rounded >= 9_223_372_036_854_775_808.0 {
+        return None;
+    }
+    Some(rounded as i64)
 }
 
 fn interval_out_of_range() -> ExecError {

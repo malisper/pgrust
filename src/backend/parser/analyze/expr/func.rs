@@ -547,16 +547,6 @@ pub(super) fn bind_scalar_function_call(
                 )],
             ))
         }
-        BuiltinScalarFunction::UuidExtractVersion | BuiltinScalarFunction::UuidExtractTimestamp => {
-            Ok(build_func(
-                false,
-                vec![coerce_bound_expr(
-                    bound_args[0].clone(),
-                    arg_types[0],
-                    SqlType::new(SqlTypeKind::Uuid),
-                )],
-            ))
-        }
         BuiltinScalarFunction::DatePart | BuiltinScalarFunction::Extract => Ok(build_func(
             false,
             vec![
@@ -571,6 +561,7 @@ pub(super) fn bind_scalar_function_call(
         BuiltinScalarFunction::DateTrunc => {
             let target_type = match arg_types[1].kind {
                 SqlTypeKind::Date => SqlType::new(SqlTypeKind::Date),
+                SqlTypeKind::Interval => SqlType::new(SqlTypeKind::Interval),
                 SqlTypeKind::Timestamp => SqlType::new(SqlTypeKind::Timestamp),
                 SqlTypeKind::TimestampTz => SqlType::new(SqlTypeKind::TimestampTz),
                 _ => arg_types[1],
@@ -649,6 +640,16 @@ pub(super) fn bind_scalar_function_call(
                 SqlType::new(SqlTypeKind::Float8),
             )],
         )),
+        BuiltinScalarFunction::JustifyDays
+        | BuiltinScalarFunction::JustifyHours
+        | BuiltinScalarFunction::JustifyInterval => Ok(build_func(
+            false,
+            vec![coerce_bound_expr(
+                bound_args[0].clone(),
+                arg_types[0],
+                SqlType::new(SqlTypeKind::Interval),
+            )],
+        )),
         BuiltinScalarFunction::Timezone => {
             let source_index = if arg_types.len() == 1 { 0 } else { 1 };
             let source_type = arg_types[source_index];
@@ -697,6 +698,59 @@ pub(super) fn bind_scalar_function_call(
         BuiltinScalarFunction::IsFinite => Ok(build_func(false, bound_args)),
         BuiltinScalarFunction::PgColumnSize | BuiltinScalarFunction::PgRelationSize => {
             Ok(build_func(false, bound_args))
+        }
+        BuiltinScalarFunction::MakeInterval => {
+            let mut args = bound_args;
+            let mut types = arg_types;
+            let defaults = [
+                (
+                    Expr::Const(Value::Int32(0)),
+                    SqlType::new(SqlTypeKind::Int4),
+                ),
+                (
+                    Expr::Const(Value::Int32(0)),
+                    SqlType::new(SqlTypeKind::Int4),
+                ),
+                (
+                    Expr::Const(Value::Int32(0)),
+                    SqlType::new(SqlTypeKind::Int4),
+                ),
+                (
+                    Expr::Const(Value::Int32(0)),
+                    SqlType::new(SqlTypeKind::Int4),
+                ),
+                (
+                    Expr::Const(Value::Int32(0)),
+                    SqlType::new(SqlTypeKind::Int4),
+                ),
+                (
+                    Expr::Const(Value::Int32(0)),
+                    SqlType::new(SqlTypeKind::Int4),
+                ),
+                (
+                    Expr::Const(Value::Float64(0.0)),
+                    SqlType::new(SqlTypeKind::Float8),
+                ),
+            ];
+            for (default_expr, default_type) in defaults.iter().skip(args.len()) {
+                args.push(default_expr.clone());
+                types.push(*default_type);
+            }
+            Ok(build_func(
+                false,
+                args.into_iter()
+                    .zip(types)
+                    .enumerate()
+                    .map(|(idx, (arg, ty))| {
+                        let target = if idx == 6 {
+                            SqlType::new(SqlTypeKind::Float8)
+                        } else {
+                            SqlType::new(SqlTypeKind::Int4)
+                        };
+                        coerce_bound_expr(arg, ty, target)
+                    })
+                    .collect(),
+            ))
         }
         BuiltinScalarFunction::MakeDate | BuiltinScalarFunction::MakeTime => {
             let target_types = if func == BuiltinScalarFunction::MakeDate {
@@ -762,6 +816,14 @@ pub(super) fn bind_scalar_function_call(
             Ok(build_func(false, args))
         }
         BuiltinScalarFunction::Age => Ok(build_func(false, bound_args)),
+        BuiltinScalarFunction::IntervalHash => Ok(build_func(
+            false,
+            vec![coerce_bound_expr(
+                bound_args[0].clone(),
+                arg_types[0],
+                SqlType::new(SqlTypeKind::Interval),
+            )],
+        )),
         BuiltinScalarFunction::ToTsVector => Ok(build_func(
             false,
             args.iter()

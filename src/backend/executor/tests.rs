@@ -7128,6 +7128,39 @@ fn interval_text_cast_canonicalizes_interval_value() {
 }
 
 #[test]
+fn interval_multiply_and_divide_bind_to_float8_scaling() {
+    let base = temp_dir("interval_mul_div");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select interval '1 day' * 2.5, 2.5 * interval '1 hour', interval '3 hours' / 2.0",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Interval(IntervalValue {
+                time_micros: 43_200_000_000,
+                days: 2,
+                months: 0,
+            }),
+            Value::Interval(IntervalValue {
+                time_micros: 9_000_000_000,
+                days: 0,
+                months: 0,
+            }),
+            Value::Interval(IntervalValue {
+                time_micros: 5_400_000_000,
+                days: 0,
+                months: 0,
+            }),
+        ]],
+    );
+}
+
+#[test]
 fn interval_array_text_casts_render_postgres_interval_style() {
     let base = temp_dir("interval_array_text_casts");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -7141,8 +7174,8 @@ fn interval_array_text_casts_render_postgres_interval_style() {
         )
         .unwrap(),
         vec![vec![
-            Value::Text("{\"@ 0\",\"@ 1 hour 42 mins 20 secs\"}".into()),
-            Value::Text("@ 0".into()),
+            Value::Text("{00:00:00,01:42:20}".into()),
+            Value::Text("00:00:00".into()),
         ]],
     );
 }

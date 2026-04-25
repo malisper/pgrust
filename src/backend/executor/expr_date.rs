@@ -20,6 +20,12 @@ use crate::include::nodes::datetime::{
 use crate::include::nodes::datum::{IntervalValue, NumericValue};
 use num_traits::ToPrimitive;
 
+const MONTHS_PER_YEAR: i32 = 12;
+const DAYS_PER_MONTH: i32 = 30;
+const DAYS_PER_WEEK: i32 = 7;
+const SECS_PER_DAY: f64 = 86_400.0;
+const DAYS_PER_YEAR: f64 = 365.25;
+
 fn extract_year_number(astronomical_year: i32) -> i32 {
     if astronomical_year > 0 {
         astronomical_year
@@ -94,6 +100,149 @@ fn normalize_date_part_field(field: &str) -> &str {
         "timezone_hour" => "timezone_h",
         "timezone_minute" => "timezone_m",
         other => other,
+    }
+}
+
+fn unsupported_interval_part(field: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("unit \"{field}\" not supported for type interval"),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn unsupported_interval_trunc_part(field: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("unit \"{field}\" not supported for type interval"),
+        detail: (field == "week").then(|| "Months usually have fractional weeks.".into()),
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn unrecognized_interval_part(field: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("unit \"{field}\" not recognized for type interval"),
+        detail: None,
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IntervalParts {
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i64,
+    minute: i32,
+    second: i32,
+    usec: i32,
+}
+
+fn interval_to_parts(interval: IntervalValue) -> IntervalParts {
+    let mut time = interval.time_micros;
+    let hour = time / USECS_PER_HOUR;
+    time -= hour * USECS_PER_HOUR;
+    let minute = (time / USECS_PER_MINUTE) as i32;
+    time -= i64::from(minute) * USECS_PER_MINUTE;
+    let second = (time / USECS_PER_SEC) as i32;
+    time -= i64::from(second) * USECS_PER_SEC;
+    IntervalParts {
+        year: interval.months / MONTHS_PER_YEAR,
+        month: interval.months % MONTHS_PER_YEAR,
+        day: interval.days,
+        hour,
+        minute,
+        second,
+        usec: time as i32,
+    }
+}
+
+fn interval_from_parts(parts: IntervalParts) -> Result<IntervalValue, ExecError> {
+    let months = i64::from(parts.year)
+        .checked_mul(i64::from(MONTHS_PER_YEAR))
+        .and_then(|value| value.checked_add(i64::from(parts.month)))
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(interval_out_of_range_error)?;
+    let time_micros = parts
+        .hour
+        .checked_mul(USECS_PER_HOUR)
+        .and_then(|value| value.checked_add(i64::from(parts.minute) * USECS_PER_MINUTE))
+        .and_then(|value| value.checked_add(i64::from(parts.second) * USECS_PER_SEC))
+        .and_then(|value| value.checked_add(i64::from(parts.usec)))
+        .ok_or_else(interval_out_of_range_error)?;
+    let interval = IntervalValue {
+        time_micros,
+        days: parts.day,
+        months,
+    };
+    interval
+        .is_finite()
+        .then_some(interval)
+        .ok_or_else(interval_out_of_range_error)
+}
+
+fn finite_interval_part(field: &str, interval: IntervalValue) -> Result<Value, ExecError> {
+    let parts = interval_to_parts(interval);
+    let result = match field {
+        "microsecond" | "microseconds" => {
+            i64::from(parts.second) as f64 * 1_000_000.0 + f64::from(parts.usec)
+        }
+        "millisecond" | "milliseconds" => {
+            i64::from(parts.second) as f64 * 1_000.0 + f64::from(parts.usec) / 1_000.0
+        }
+        "second" | "seconds" => f64::from(parts.second) + f64::from(parts.usec) / 1_000_000.0,
+        "minute" | "minutes" => f64::from(parts.minute),
+        "hour" | "hours" => parts.hour as f64,
+        "day" | "days" => f64::from(parts.day),
+        "week" | "weeks" => f64::from(parts.day / 7),
+        "month" | "months" => f64::from(parts.month),
+        "quarter" | "quarters" => {
+            if interval.months >= 0 {
+                f64::from(parts.month / 3 + 1)
+            } else {
+                f64::from(-(((-interval.months % MONTHS_PER_YEAR) / 3) + 1))
+            }
+        }
+        "year" | "years" => f64::from(parts.year),
+        "decade" | "decades" => f64::from(parts.year / 10),
+        "century" | "centuries" => f64::from(parts.year / 100),
+        "millennium" | "millenniums" | "millennia" => f64::from(parts.year / 1000),
+        "epoch" => {
+            interval.time_micros as f64 / 1_000_000.0
+                + DAYS_PER_YEAR * SECS_PER_DAY * f64::from(interval.months / MONTHS_PER_YEAR)
+                + f64::from(DAYS_PER_MONTH)
+                    * SECS_PER_DAY
+                    * f64::from(interval.months % MONTHS_PER_YEAR)
+                + SECS_PER_DAY * f64::from(interval.days)
+        }
+        "timezone" | "timezone_h" | "timezone_m" => return Err(unsupported_interval_part(field)),
+        _ => return Err(unrecognized_interval_part(field)),
+    };
+    Ok(Value::Float64(result))
+}
+
+fn eval_interval_part(field: &str, interval: IntervalValue) -> Result<Value, ExecError> {
+    if interval.is_finite() {
+        return finite_interval_part(field, interval);
+    }
+    let sign = if interval.is_neg_infinity() {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
+    match field {
+        "microsecond" | "microseconds" | "millisecond" | "milliseconds" | "second" | "seconds"
+        | "minute" | "minutes" | "week" | "weeks" | "month" | "months" | "quarter"
+        | "quarters" => Ok(Value::Null),
+        "hour" | "hours" | "day" | "days" | "year" | "years" | "decade" | "decades"
+        | "century" | "centuries" | "millennium" | "millenniums" | "millennia" | "epoch" => {
+            Ok(Value::Float64(sign))
+        }
+        "timezone" | "timezone_h" | "timezone_m" => Err(unsupported_interval_part(field)),
+        _ => Err(unrecognized_interval_part(field)),
     }
 }
 
@@ -273,6 +422,7 @@ pub(crate) fn eval_date_part_function_with_config(
     let field = normalize_date_part_field(&field);
 
     match date_value {
+        Value::Interval(interval) => return eval_interval_part(field, *interval),
         Value::Time(time) => return eval_time_part(field, *time, false),
         Value::TimeTz(timetz) => return eval_timetz_part(field, *timetz),
         Value::Timestamp(timestamp) => {
@@ -403,6 +553,10 @@ pub(crate) fn eval_extract_function_with_config(
         ))),
         other => Ok(other),
     }
+}
+
+pub(crate) fn eval_extract_function(values: &[Value]) -> Result<Value, ExecError> {
+    eval_extract_function_with_config(values, &DateTimeConfig::default())
 }
 
 fn extract_numeric_scale(field: &str) -> u32 {
@@ -744,6 +898,274 @@ fn truncate_timestamp_usecs_local(
     }
 }
 
+fn truncate_interval(field: &str, interval: IntervalValue) -> Result<IntervalValue, ExecError> {
+    if !interval.is_finite() {
+        return match field {
+            "millennium" | "millenniums" | "millennia" | "century" | "centuries" | "decade"
+            | "decades" | "year" | "years" | "quarter" | "quarters" | "month" | "months"
+            | "day" | "days" | "hour" | "hours" | "minute" | "minutes" | "second" | "seconds"
+            | "millisecond" | "milliseconds" | "microsecond" | "microseconds" => Ok(interval),
+            "week" | "weeks" | "timezone" | "timezone_h" | "timezone_m" => {
+                Err(unsupported_interval_trunc_part(field))
+            }
+            _ => Err(unrecognized_interval_part(field)),
+        };
+    }
+
+    let mut parts = interval_to_parts(interval);
+    match field {
+        "millennium" | "millenniums" | "millennia" => {
+            parts.year = (parts.year / 1000) * 1000;
+            parts.month = 0;
+            parts.day = 0;
+            parts.hour = 0;
+            parts.minute = 0;
+            parts.second = 0;
+            parts.usec = 0;
+        }
+        "century" | "centuries" => {
+            parts.year = (parts.year / 100) * 100;
+            parts.month = 0;
+            parts.day = 0;
+            parts.hour = 0;
+            parts.minute = 0;
+            parts.second = 0;
+            parts.usec = 0;
+        }
+        "decade" | "decades" => {
+            parts.year = (parts.year / 10) * 10;
+            parts.month = 0;
+            parts.day = 0;
+            parts.hour = 0;
+            parts.minute = 0;
+            parts.second = 0;
+            parts.usec = 0;
+        }
+        "year" | "years" => {
+            parts.month = 0;
+            parts.day = 0;
+            parts.hour = 0;
+            parts.minute = 0;
+            parts.second = 0;
+            parts.usec = 0;
+        }
+        "quarter" | "quarters" => {
+            parts.month = 3 * (parts.month / 3);
+            parts.day = 0;
+            parts.hour = 0;
+            parts.minute = 0;
+            parts.second = 0;
+            parts.usec = 0;
+        }
+        "month" | "months" => {
+            parts.day = 0;
+            parts.hour = 0;
+            parts.minute = 0;
+            parts.second = 0;
+            parts.usec = 0;
+        }
+        "day" | "days" => {
+            parts.hour = 0;
+            parts.minute = 0;
+            parts.second = 0;
+            parts.usec = 0;
+        }
+        "hour" | "hours" => {
+            parts.minute = 0;
+            parts.second = 0;
+            parts.usec = 0;
+        }
+        "minute" | "minutes" => {
+            parts.second = 0;
+            parts.usec = 0;
+        }
+        "second" | "seconds" => {
+            parts.usec = 0;
+        }
+        "millisecond" | "milliseconds" => {
+            parts.usec = (parts.usec / 1_000) * 1_000;
+        }
+        "microsecond" | "microseconds" => {}
+        "week" | "weeks" | "timezone" | "timezone_h" | "timezone_m" => {
+            return Err(unsupported_interval_trunc_part(field));
+        }
+        _ => return Err(unrecognized_interval_part(field)),
+    }
+    interval_from_parts(parts)
+}
+
+fn checked_justify_result(value: IntervalValue) -> Result<IntervalValue, ExecError> {
+    value
+        .is_finite()
+        .then_some(value)
+        .ok_or_else(interval_out_of_range_error)
+}
+
+fn justify_hours_value(interval: IntervalValue) -> Result<IntervalValue, ExecError> {
+    if !interval.is_finite() {
+        return Ok(interval);
+    }
+    let mut time = interval.time_micros;
+    let mut days = interval.days;
+    let whole_days = time / USECS_PER_DAY;
+    time -= whole_days * USECS_PER_DAY;
+    days = days
+        .checked_add(i32::try_from(whole_days).map_err(|_| interval_out_of_range_error())?)
+        .ok_or_else(interval_out_of_range_error)?;
+
+    if days > 0 && time < 0 {
+        time += USECS_PER_DAY;
+        days -= 1;
+    } else if days < 0 && time > 0 {
+        time -= USECS_PER_DAY;
+        days += 1;
+    }
+
+    checked_justify_result(IntervalValue {
+        time_micros: time,
+        days,
+        months: interval.months,
+    })
+}
+
+fn justify_days_value(interval: IntervalValue) -> Result<IntervalValue, ExecError> {
+    if !interval.is_finite() {
+        return Ok(interval);
+    }
+    let mut months = interval.months;
+    let mut days = interval.days;
+    let whole_months = days / DAYS_PER_MONTH;
+    days -= whole_months * DAYS_PER_MONTH;
+    months = months
+        .checked_add(whole_months)
+        .ok_or_else(interval_out_of_range_error)?;
+
+    if months > 0 && days < 0 {
+        days += DAYS_PER_MONTH;
+        months -= 1;
+    } else if months < 0 && days > 0 {
+        days -= DAYS_PER_MONTH;
+        months += 1;
+    }
+
+    checked_justify_result(IntervalValue {
+        time_micros: interval.time_micros,
+        days,
+        months,
+    })
+}
+
+fn justify_interval_value(interval: IntervalValue) -> Result<IntervalValue, ExecError> {
+    if !interval.is_finite() {
+        return Ok(interval);
+    }
+    let mut months = interval.months;
+    let mut days = interval.days;
+    let mut time = interval.time_micros;
+
+    if (days > 0 && time > 0) || (days < 0 && time < 0) {
+        let whole_months = days / DAYS_PER_MONTH;
+        days -= whole_months * DAYS_PER_MONTH;
+        months = months
+            .checked_add(whole_months)
+            .ok_or_else(interval_out_of_range_error)?;
+    }
+
+    let whole_days = time / USECS_PER_DAY;
+    time -= whole_days * USECS_PER_DAY;
+    days = days
+        .checked_add(i32::try_from(whole_days).map_err(|_| interval_out_of_range_error())?)
+        .ok_or_else(interval_out_of_range_error)?;
+
+    let whole_months = days / DAYS_PER_MONTH;
+    days -= whole_months * DAYS_PER_MONTH;
+    months = months
+        .checked_add(whole_months)
+        .ok_or_else(interval_out_of_range_error)?;
+
+    if months > 0 && (days < 0 || (days == 0 && time < 0)) {
+        days += DAYS_PER_MONTH;
+        months -= 1;
+    } else if months < 0 && (days > 0 || (days == 0 && time > 0)) {
+        days -= DAYS_PER_MONTH;
+        months += 1;
+    }
+
+    if days > 0 && time < 0 {
+        time += USECS_PER_DAY;
+        days -= 1;
+    } else if days < 0 && time > 0 {
+        time -= USECS_PER_DAY;
+        days += 1;
+    }
+
+    checked_justify_result(IntervalValue {
+        time_micros: time,
+        days,
+        months,
+    })
+}
+
+pub(crate) fn eval_justify_days_function(values: &[Value]) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::DetailedError {
+            message: "malformed justify_days call".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Interval(interval) => justify_days_value(*interval).map(Value::Interval),
+        other => Err(ExecError::TypeMismatch {
+            op: "justify_days",
+            left: other.clone(),
+            right: Value::Interval(IntervalValue::zero()),
+        }),
+    }
+}
+
+pub(crate) fn eval_justify_hours_function(values: &[Value]) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::DetailedError {
+            message: "malformed justify_hours call".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Interval(interval) => justify_hours_value(*interval).map(Value::Interval),
+        other => Err(ExecError::TypeMismatch {
+            op: "justify_hours",
+            left: other.clone(),
+            right: Value::Interval(IntervalValue::zero()),
+        }),
+    }
+}
+
+pub(crate) fn eval_justify_interval_function(values: &[Value]) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::DetailedError {
+            message: "malformed justify_interval call".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Interval(interval) => justify_interval_value(*interval).map(Value::Interval),
+        other => Err(ExecError::TypeMismatch {
+            op: "justify_interval",
+            left: other.clone(),
+            right: Value::Interval(IntervalValue::zero()),
+        }),
+    }
+}
+
 pub(crate) fn eval_date_trunc_function(
     values: &[Value],
     config: &DateTimeConfig,
@@ -796,8 +1218,11 @@ pub(crate) fn eval_date_trunc_function(
             matches!(date_value, Value::TimestampTz(_)),
         ));
     }
-    validate_date_trunc_field(field, matches!(date_value, Value::TimestampTz(_)))?;
+    if !matches!(date_value, Value::Interval(_)) {
+        validate_date_trunc_field(field, matches!(date_value, Value::TimestampTz(_)))?;
+    }
     match date_value {
+        Value::Interval(interval) => truncate_interval(field, *interval).map(Value::Interval),
         Value::Date(date) => {
             if !date.is_finite() {
                 return Ok(Value::Timestamp(TimestampADT(match date.0 {
@@ -1466,6 +1891,90 @@ pub(crate) fn eval_make_timestamp_function(values: &[Value]) -> Result<Value, Ex
     Ok(Value::Timestamp(TimestampADT(
         i64::from(days) * USECS_PER_DAY + time,
     )))
+}
+
+pub(crate) fn eval_make_interval_function(values: &[Value]) -> Result<Value, ExecError> {
+    let [
+        years_value,
+        months_value,
+        weeks_value,
+        days_value,
+        hours_value,
+        mins_value,
+        secs_value,
+    ] = values
+    else {
+        return Err(ExecError::DetailedError {
+            message: "malformed make_interval call".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let (
+        Value::Int32(years),
+        Value::Int32(months),
+        Value::Int32(weeks),
+        Value::Int32(days),
+        Value::Int32(hours),
+        Value::Int32(mins),
+        Value::Float64(secs),
+    ) = (
+        years_value,
+        months_value,
+        weeks_value,
+        days_value,
+        hours_value,
+        mins_value,
+        secs_value,
+    )
+    else {
+        return Err(ExecError::TypeMismatch {
+            op: "make_interval",
+            left: values.first().cloned().unwrap_or(Value::Null),
+            right: Value::Null,
+        });
+    };
+    if !secs.is_finite() {
+        return Err(interval_out_of_range_error());
+    }
+
+    let months = years
+        .checked_mul(MONTHS_PER_YEAR)
+        .and_then(|value| value.checked_add(*months))
+        .ok_or_else(interval_out_of_range_error)?;
+    let days = weeks
+        .checked_mul(DAYS_PER_WEEK)
+        .and_then(|value| value.checked_add(*days))
+        .ok_or_else(interval_out_of_range_error)?;
+    let base_micros = i64::from(*hours)
+        .checked_mul(USECS_PER_HOUR)
+        .and_then(|value| value.checked_add(i64::from(*mins).checked_mul(USECS_PER_MINUTE)?))
+        .ok_or_else(interval_out_of_range_error)?;
+    let secs_micros_float = secs * USECS_PER_SEC as f64;
+    if !secs_micros_float.is_finite() {
+        return Err(ExecError::FloatOverflow);
+    }
+    let secs_micros = secs_micros_float
+        .round()
+        .to_i64()
+        .ok_or_else(interval_out_of_range_error)?;
+    let time_micros = base_micros
+        .checked_add(secs_micros)
+        .ok_or_else(interval_out_of_range_error)?;
+    let result = IntervalValue {
+        time_micros,
+        days,
+        months,
+    };
+    if result.is_finite() {
+        Ok(Value::Interval(result))
+    } else {
+        Err(interval_out_of_range_error())
+    }
 }
 
 fn make_timestamptz_numeric_timezone_error(zone: &str) -> Option<ExecError> {

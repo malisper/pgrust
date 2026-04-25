@@ -340,6 +340,114 @@ pub(super) fn bind_arithmetic_expr(
             ),
         ));
     }
+    if !left_type.is_array
+        && !right_type.is_array
+        && matches!(op, "*" | "/")
+        && (matches!(left_type.kind, SqlTypeKind::Interval)
+            || matches!(right_type.kind, SqlTypeKind::Interval))
+    {
+        let interval = SqlType::new(SqlTypeKind::Interval);
+        let float8 = SqlType::new(SqlTypeKind::Float8);
+        if op == "*"
+            && matches!(left_type.kind, SqlTypeKind::Interval)
+            && is_numeric_family(right_type)
+        {
+            return Ok(Expr::binary_op(
+                make,
+                interval,
+                coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_left_type,
+                    interval,
+                ),
+                coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_right_type,
+                    float8,
+                ),
+            ));
+        }
+        if op == "*"
+            && is_numeric_family(left_type)
+            && matches!(right_type.kind, SqlTypeKind::Interval)
+        {
+            return Ok(Expr::binary_op(
+                make,
+                interval,
+                coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_left_type,
+                    float8,
+                ),
+                coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_right_type,
+                    interval,
+                ),
+            ));
+        }
+        if op == "/"
+            && matches!(left_type.kind, SqlTypeKind::Interval)
+            && is_numeric_family(right_type)
+        {
+            return Ok(Expr::binary_op(
+                make,
+                interval,
+                coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_left_type,
+                    interval,
+                ),
+                coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_right_type,
+                    float8,
+                ),
+            ));
+        }
+    }
     let common = resolve_numeric_binary_type(op, left_type, right_type)?;
     let left = coerce_bound_expr(
         bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,

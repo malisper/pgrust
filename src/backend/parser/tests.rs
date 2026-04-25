@@ -5663,7 +5663,10 @@ fn parse_interval_typed_string_literals() {
         &stmt.targets[3].expr,
         SqlExpr::Cast(_, ty)
             if ty.as_builtin().is_some_and(|ty| {
-                ty.kind == SqlTypeKind::Interval && ty.typmod == 2
+                ty.kind == SqlTypeKind::Interval
+                    && ty.interval_precision() == Some(2)
+                    && ty.interval_range()
+                        == Some(SqlType::INTERVAL_MASK_MINUTE | SqlType::INTERVAL_MASK_SECOND)
             })
     ));
 }
@@ -5676,13 +5679,24 @@ fn parse_interval_field_qualified_casts() {
     .unwrap();
     assert!(matches!(
         &stmt.targets[0].expr,
-        SqlExpr::Cast(_, ty) if ty.as_builtin().is_some_and(|ty| ty.kind == SqlTypeKind::Interval)
+        SqlExpr::Cast(_, ty)
+            if ty.as_builtin().is_some_and(|ty| {
+                ty.kind == SqlTypeKind::Interval
+                    && ty.interval_range()
+                        == Some(
+                            SqlType::INTERVAL_MASK_DAY
+                                | SqlType::INTERVAL_MASK_HOUR
+                                | SqlType::INTERVAL_MASK_MINUTE
+                        )
+            })
     ));
     assert!(matches!(
         &stmt.targets[1].expr,
         SqlExpr::Cast(_, ty)
             if ty.as_builtin().is_some_and(|ty| {
-                ty.kind == SqlTypeKind::Interval && ty.typmod == 2
+                ty.kind == SqlTypeKind::Interval
+                    && ty.interval_precision() == Some(2)
+                    && ty.interval_range() == Some(SqlType::INTERVAL_MASK_SECOND)
             })
     ));
     assert!(matches!(
