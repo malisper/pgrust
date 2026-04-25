@@ -53,7 +53,7 @@ existing blocker. Add one finding row per distinct blocker.
 | SQLANCER-010 | fixed-in-branch | expression syntax | pgrust now rewrites `BETWEEN SYMMETRIC` into the equivalent pair of asymmetric bounds checks. Confirmation artifact: `/tmp/pgrust-sqlancer-triage-sqlancer010/seed-4`. |
 | SQLANCER-011 | common-unsupported / setup-noise | table DDL | Seed 5 generated `CREATE TEMP TABLE ... GENERATED ALWAYS AS ... CHECK ... NO INHERIT`. Split common table features from low-signal generated-column self-reference noise. Artifact: `/tmp/pgrust-sqlancer-triage-next/seed-5`. |
 | SQLANCER-012 | harness classification | scalar function typing | Seed 6 generated `to_hex(text)`, currently reported as a pgrust type mismatch during setup. Decide whether to narrow generator typing or add a compatibility ticket. |
-| SQLANCER-013 | harness classification | JOIN scope error | Generated invalid comma/explicit-JOIN scope references should be allowlisted in the pgrust SQLancer adapter because pgrust reports them as qualified missing-column errors. Confirmation artifact: `/tmp/pgrust-sqlancer-triage-sqlancer008/seed-3`. |
+| SQLANCER-013 | fixed-in-adapter | JOIN scope error | The pgrust SQLancer adapter now allowlists generated invalid comma/explicit-JOIN scope references when pgrust reports them as qualified missing-column errors. Confirmation artifact: `/tmp/pgrust-sqlancer-triage-sqlancer013/seed-3`. |
 
 ## Next triage pass
 
