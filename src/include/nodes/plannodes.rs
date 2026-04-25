@@ -278,6 +278,7 @@ pub enum Plan {
     FunctionScan {
         plan_info: PlanEstimate,
         call: SetReturningCall,
+        table_alias: Option<String>,
     },
     SubqueryScan {
         plan_info: PlanEstimate,
