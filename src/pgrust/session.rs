@@ -74,7 +74,9 @@ use crate::pgrust::portal::{
     CursorOptions, CursorViewRow, Portal, PortalFetchDirection, PortalFetchLimit, PortalManager,
     PortalRunResult,
 };
-use crate::pl::plpgsql::{execute_do_with_gucs, execute_user_defined_procedure_values};
+use crate::pl::plpgsql::{
+    execute_do_with_context, execute_do_with_gucs, execute_user_defined_procedure_values,
+};
 use crate::{ClientId, RelFileLocator};
 use parking_lot::RwLock;
 
@@ -1484,6 +1486,37 @@ impl Session {
             column_names,
             rows,
         })
+    }
+
+    fn execute_plpgsql_do(
+        &mut self,
+        db: &Database,
+        do_stmt: &crate::include::nodes::parsenodes::DoStatement,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.catalog_lookup_for_command(db, xid, cid);
+        let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+        let deferred_foreign_keys = self
+            .active_txn
+            .as_ref()
+            .map(|txn| txn.deferred_foreign_keys.clone());
+        let mut ctx = self.executor_context_for_catalog(
+            db,
+            snapshot,
+            cid,
+            &catalog,
+            deferred_foreign_keys,
+            None,
+        );
+        let result = execute_do_with_context(do_stmt, &catalog, &mut ctx);
+        if let Some(xid) = ctx.transaction_xid()
+            && let Some(txn) = self.active_txn.as_mut()
+        {
+            txn.xid = Some(xid);
+        }
+        self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+        result
     }
 
     fn evaluate_call_input_args(
@@ -4078,7 +4111,7 @@ impl Session {
         let client_id = self.client_id;
 
         let result = match stmt {
-            Statement::Do(ref do_stmt) => execute_do_with_gucs(do_stmt, &self.gucs),
+            Statement::Do(ref do_stmt) => self.execute_plpgsql_do(db, do_stmt, xid, cid),
             Statement::Show(ref show_stmt) => self.apply_show(db, show_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(db, set_stmt),
             Statement::SetConstraints(ref set_constraints_stmt) => {

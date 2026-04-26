@@ -5,8 +5,8 @@ mod gram;
 
 use std::collections::HashMap;
 
-use crate::backend::executor::{ExecError, StatementResult};
-use crate::backend::parser::{Catalog, DoStatement, ParseError};
+use crate::backend::executor::{ExecError, ExecutorContext, StatementResult};
+use crate::backend::parser::{Catalog, CatalogLookup, DoStatement, ParseError};
 
 pub use ast::*;
 pub use compile::{CompiledFunction, TriggerTransitionTable};
@@ -46,6 +46,30 @@ pub fn execute_do_with_gucs(
         let block = parse_block(&stmt.code)?;
         let compiled = compile::compile_do_block(&block, &Catalog::default())?;
         exec::execute_block_with_gucs(&compiled, gucs)
+    })
+}
+
+pub(crate) fn execute_do_with_context(
+    stmt: &DoStatement,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
+    stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
+        let language = stmt
+            .language
+            .as_deref()
+            .unwrap_or("plpgsql")
+            .to_ascii_lowercase();
+        if language != "plpgsql" {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "LANGUAGE plpgsql",
+                actual: format!("LANGUAGE {}", stmt.language.as_deref().unwrap_or("plpgsql")),
+            }));
+        }
+        exec::clear_notices();
+        let block = parse_block(&stmt.code)?;
+        let compiled = compile::compile_do_function(&block, catalog)?;
+        exec::execute_do_function(&compiled, ctx)
     })
 }
 
@@ -226,6 +250,49 @@ mod tests {
                     message: "handled".into(),
                 }]
             );
+        });
+    }
+
+    #[test]
+    fn execute_do_handles_condition_raise_using_message() {
+        run_plpgsql_test("execute_do_handles_condition_raise_using_message", || {
+            let stmt = DoStatement {
+                language: None,
+                code: r#"
+                    begin
+                        begin
+                            raise reading_sql_data_not_permitted using message = 'round and round again';
+                        exception when reading_sql_data_not_permitted then
+                            raise notice 'handled';
+                        end;
+                    end
+                "#
+                .into(),
+            };
+
+            assert_eq!(execute_do(&stmt).unwrap(), StatementResult::AffectedRows(0));
+            assert_eq!(
+                take_notices(),
+                vec![PlpgsqlNotice {
+                    level: RaiseLevel::Notice,
+                    message: "handled".into(),
+                }]
+            );
+        });
+    }
+
+    #[test]
+    fn execute_do_condition_raise_uses_condition_sqlstate() {
+        run_plpgsql_test("execute_do_condition_raise_uses_condition_sqlstate", || {
+            let stmt = DoStatement {
+                language: None,
+                code: "begin raise data_corrupted using message = 'bad rows'; end".into(),
+            };
+            let err = execute_do(&stmt).unwrap_err();
+            assert!(matches!(
+                err,
+                ExecError::DetailedError { message, sqlstate: "XX001", .. } if message == "bad rows"
+            ));
         });
     }
 
