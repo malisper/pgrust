@@ -13412,9 +13412,10 @@ fn create_brin_index_explain_uses_bitmap_scan_and_recheck() {
         "expected Bitmap Heap Scan in EXPLAIN, got {lines:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains(&format!("Bitmap Index Scan using rel {relfilenode} "))),
+        lines.iter().any(|line| {
+            line.contains(&format!("Bitmap Index Scan using rel {relfilenode} "))
+                || line.contains("Bitmap Index Scan on items_a_brin")
+        }),
         "expected Bitmap Index Scan on items_a_brin, got {lines:?}"
     );
     assert!(
@@ -13478,9 +13479,10 @@ fn create_gin_jsonb_index_uses_bitmap_scan_and_rechecks() {
         "expected Bitmap Heap Scan in EXPLAIN, got {lines:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains(&format!("Bitmap Index Scan using rel {relfilenode} "))),
+        lines.iter().any(|line| {
+            line.contains(&format!("Bitmap Index Scan using rel {relfilenode} "))
+                || line.contains("Bitmap Index Scan on docs_j_gin")
+        }),
         "expected Bitmap Index Scan on docs_j_gin, got {lines:?}"
     );
     assert!(
