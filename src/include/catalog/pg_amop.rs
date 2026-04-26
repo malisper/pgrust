@@ -26,10 +26,11 @@ use crate::include::catalog::{
     INTERVAL_TYPE_OID, JSONB_CONTAINS_OPERATOR_OID, JSONB_EXISTS_ALL_OPERATOR_OID,
     JSONB_EXISTS_ANY_OPERATOR_OID, JSONB_EXISTS_OPERATOR_OID, JSONB_TYPE_OID, MACADDR_TYPE_OID,
     MACADDR8_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID,
-    POINT_TYPE_OID, POLYGON_TYPE_OID, SPGIST_AM_OID, SPGIST_BOX_FAMILY_OID, SPGIST_POLY_FAMILY_OID,
-    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
-    TIMETZ_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, UUID_TYPE_OID, VARBIT_TYPE_OID,
-    VARCHAR_TYPE_OID, bootstrap_pg_operator_rows,
+    POINT_TYPE_OID, POLYGON_TYPE_OID, SPGIST_AM_OID, SPGIST_BOX_FAMILY_OID,
+    SPGIST_KD_POINT_FAMILY_OID, SPGIST_POLY_FAMILY_OID, SPGIST_QUAD_POINT_FAMILY_OID,
+    SPGIST_TEXT_FAMILY_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID,
+    TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, UUID_TYPE_OID,
+    VARBIT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_operator_rows,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +212,68 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
             amoppurpose: 's',
             amopopr: operator_oid(&operators, "<@", POINT_TYPE_OID, righttype),
             amopmethod: GIST_AM_OID,
+            amopsortfamily: 0,
+        });
+        oid = oid.saturating_add(1);
+    }
+    for family in [SPGIST_QUAD_POINT_FAMILY_OID, SPGIST_KD_POINT_FAMILY_OID] {
+        for (strategy, name, righttype) in [
+            (11_i16, "|>>", POINT_TYPE_OID),
+            (30, ">^", POINT_TYPE_OID),
+            (1, "<<", POINT_TYPE_OID),
+            (5, ">>", POINT_TYPE_OID),
+            (10, "<<|", POINT_TYPE_OID),
+            (29, "<^", POINT_TYPE_OID),
+            (6, "~=", POINT_TYPE_OID),
+            (8, "<@", BOX_TYPE_OID),
+        ] {
+            rows.push(PgAmopRow {
+                oid,
+                amopfamily: family,
+                amoplefttype: POINT_TYPE_OID,
+                amoprighttype: righttype,
+                amopstrategy: strategy,
+                amoppurpose: 's',
+                amopopr: operator_oid(&operators, name, POINT_TYPE_OID, righttype),
+                amopmethod: SPGIST_AM_OID,
+                amopsortfamily: 0,
+            });
+            oid = oid.saturating_add(1);
+        }
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: family,
+            amoplefttype: POINT_TYPE_OID,
+            amoprighttype: POINT_TYPE_OID,
+            amopstrategy: 15,
+            amoppurpose: 'o',
+            amopopr: operator_oid(&operators, "<->", POINT_TYPE_OID, POINT_TYPE_OID),
+            amopmethod: SPGIST_AM_OID,
+            amopsortfamily: BTREE_FLOAT_FAMILY_OID,
+        });
+        oid = oid.saturating_add(1);
+    }
+    for (strategy, name) in [
+        (1_i16, "~<~"),
+        (2, "~<=~"),
+        (3, "="),
+        (4, "~>=~"),
+        (5, "~>~"),
+        (11, "<"),
+        (12, "<="),
+        (14, ">="),
+        (15, ">"),
+        (28, "^@"),
+    ] {
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: SPGIST_TEXT_FAMILY_OID,
+            amoplefttype: TEXT_TYPE_OID,
+            amoprighttype: TEXT_TYPE_OID,
+            amopstrategy: strategy,
+            amoppurpose: 's',
+            amopopr: operator_oid(&operators, name, TEXT_TYPE_OID, TEXT_TYPE_OID),
+            amopmethod: SPGIST_AM_OID,
             amopsortfamily: 0,
         });
         oid = oid.saturating_add(1);

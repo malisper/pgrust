@@ -1562,6 +1562,29 @@ pub(super) fn eval_lower_function(values: &[Value]) -> Result<Value, ExecError> 
     Ok(Value::Text(CompactString::from_owned(text.to_lowercase())))
 }
 
+pub(super) fn eval_text_starts_with_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [left, right] => {
+            let left = left.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "starts_with",
+                left: left.clone(),
+                right: Value::Text("".into()),
+            })?;
+            let right = right.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "starts_with",
+                left: right.clone(),
+                right: Value::Text("".into()),
+            })?;
+            Ok(Value::Bool(left.starts_with(right)))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "starts_with(text, text)",
+            actual: format!("starts_with({} args)", values.len()),
+        })),
+    }
+}
+
 pub(super) fn eval_unistr_function(values: &[Value]) -> Result<Value, ExecError> {
     let Some(text_value) = values.first() else {
         return Ok(Value::Null);

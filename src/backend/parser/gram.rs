@@ -15737,6 +15737,31 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             left: Box::new(left),
                             right: Box::new(right),
                         },
+                        "~<~" => SqlExpr::BinaryOperator {
+                            op: "~<~".into(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "~<=~" => SqlExpr::BinaryOperator {
+                            op: "~<=~".into(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "~>=~" => SqlExpr::BinaryOperator {
+                            op: "~>=~".into(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "~>~" => SqlExpr::BinaryOperator {
+                            op: "~>~".into(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "^@" => SqlExpr::BinaryOperator {
+                            op: "^@".into(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
                         "<<=" => SqlExpr::BinaryOperator {
                             op: "<<=".into(),
                             left: Box::new(left),

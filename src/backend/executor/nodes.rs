@@ -1751,11 +1751,12 @@ fn render_index_scan_key(
         .and_then(|names| names.get(heap_attno))
         .cloned()
         .unwrap_or_else(|| column.name.clone());
-    if purpose == 's'
-        && key.strategy == 1
-        && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Null))
-    {
-        return Some(format!("{column_name} IS NOT NULL"));
+    if purpose == 's' && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Null)) {
+        match key.strategy {
+            0 => return Some(format!("{column_name} IS NULL")),
+            1 => return Some(format!("{column_name} IS NOT NULL")),
+            _ => {}
+        }
     }
     let display_type = index_key_argument_display_type(&key.argument, column.sql_type);
     let right_type_oid = display_type.map(crate::backend::utils::cache::catcache::sql_type_oid);
@@ -1974,10 +1975,7 @@ impl PlanNode for BitmapIndexScanState {
     }
 
     fn node_label(&self) -> String {
-        format!(
-            "Bitmap Index Scan using rel {} on rel {}",
-            self.index_rel.rel_number, self.rel.rel_number
-        )
+        format!("Bitmap Index Scan on {}", self.index_name)
     }
 
     fn explain_details(
@@ -1987,7 +1985,12 @@ impl PlanNode for BitmapIndexScanState {
         _show_costs: bool,
         lines: &mut Vec<String>,
     ) {
-        if !self.index_quals.is_empty() {
+        if let Some(detail) =
+            render_index_scan_condition(&self.keys, &self.heap_desc, &self.index_meta)
+        {
+            let prefix = explain_detail_prefix(indent);
+            lines.push(format!("{prefix}Index Cond: ({detail})"));
+        } else if !self.index_quals.is_empty() {
             let prefix = explain_detail_prefix(indent);
             lines.push(format!(
                 "{prefix}Index Cond: {}",
@@ -2140,6 +2143,16 @@ impl PlanNode for BitmapHeapScanState {
                     continue;
                 }
             }
+            if let Some(filter) = &self.compiled_filter {
+                let outer_values = materialize_slot_values(&mut self.slot)?;
+                let current_bindings = self.current_bindings.clone();
+                set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                clear_inner_expr_bindings(ctx);
+                if !filter(&mut self.slot, ctx)? {
+                    note_filtered_row(&mut self.stats);
+                    continue;
+                }
+            }
 
             {
                 let mut session_stats = ctx.session_stats.write();
@@ -2193,8 +2206,20 @@ impl PlanNode for BitmapHeapScanState {
                 render_explain_expr(recheck_qual, &self.column_names)
             ));
         }
+        if let Some(filter_qual) = &self.filter_qual {
+            let prefix = explain_detail_prefix(indent);
+            lines.push(format!(
+                "{prefix}Filter: {}",
+                render_explain_expr(filter_qual, &self.column_names)
+            ));
+        }
         let prefix = explain_detail_prefix(indent);
-        if analyze && self.stats.rows_removed_by_filter > 0 {
+        if analyze && self.stats.rows_removed_by_filter > 0 && self.filter_qual.is_some() {
+            lines.push(format!(
+                "{prefix}Rows Removed by Filter: {}",
+                self.stats.rows_removed_by_filter
+            ));
+        } else if analyze && self.stats.rows_removed_by_filter > 0 {
             lines.push(format!(
                 "{prefix}Rows Removed by Recheck: {}",
                 self.stats.rows_removed_by_filter
@@ -2238,6 +2263,19 @@ pub(crate) fn render_explain_expr_with_qualifier(
     qualifier: Option<&str>,
     column_names: &[String],
 ) -> String {
+    if matches!(
+        expr,
+        Expr::Func(func)
+            if matches!(
+                (&func.implementation, func.funcname.as_deref()),
+                (
+                    ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TextStartsWith),
+                    Some("starts_with")
+                )
+            )
+    ) {
+        return render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
+    }
     format!(
         "({})",
         render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
@@ -2337,16 +2375,7 @@ fn render_explain_expr_inner_with_qualifier(
                 let [left, right] = op.args.as_slice() else {
                     return format!("{expr:?}");
                 };
-                let op_text = match op.op {
-                    crate::include::nodes::primnodes::OpExprKind::Eq => "=",
-                    crate::include::nodes::primnodes::OpExprKind::NotEq => "<>",
-                    crate::include::nodes::primnodes::OpExprKind::Lt => "<",
-                    crate::include::nodes::primnodes::OpExprKind::LtEq => "<=",
-                    crate::include::nodes::primnodes::OpExprKind::Gt => ">",
-                    crate::include::nodes::primnodes::OpExprKind::GtEq => ">=",
-                    crate::include::nodes::primnodes::OpExprKind::RegexMatch => "~",
-                    _ => unreachable!(),
-                };
+                let op_text = infix_operator_text(op.opno, op.op).unwrap_or("~");
                 format!(
                     "{} {} {}",
                     render_explain_infix_operand(left, qualifier, column_names),
@@ -2454,7 +2483,16 @@ fn render_explain_func_expr(
     {
         return render_explain_expr_inner_with_qualifier(&func.args[0], qualifier, column_names);
     }
-    if let Some(operator) = builtin_scalar_function_infix_operator(func.implementation) {
+    let render_as_named_call = matches!(
+        (&func.implementation, func.funcname.as_deref()),
+        (
+            ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TextStartsWith),
+            Some("starts_with")
+        )
+    );
+    if !render_as_named_call
+        && let Some(operator) = builtin_scalar_function_infix_operator(func.implementation)
+    {
         if let [left, right] = func.args.as_slice() {
             return format!(
                 "{} {} {}",
@@ -2552,6 +2590,7 @@ fn builtin_scalar_function_name(func: BuiltinScalarFunction) -> String {
         BuiltinScalarFunction::ToJsonb => "to_jsonb".into(),
         BuiltinScalarFunction::DatePart => "date_part".into(),
         BuiltinScalarFunction::Extract => "extract".into(),
+        BuiltinScalarFunction::TextStartsWith => "starts_with".into(),
         other => format!("{other:?}"),
     }
 }
@@ -2578,6 +2617,41 @@ fn builtin_scalar_function_infix_operator(
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::NetworkSupernet) => Some(">>"),
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::NetworkSupernetEq) => Some(">>="),
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::NetworkOverlap) => Some("&&"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TextStartsWith) => Some("^@"),
+        _ => None,
+    }
+}
+
+fn infix_operator_text(
+    opno: u32,
+    op: crate::include::nodes::primnodes::OpExprKind,
+) -> Option<&'static str> {
+    match opno {
+        crate::include::catalog::TEXT_PATTERN_LT_OPERATOR_OID => return Some("~<~"),
+        crate::include::catalog::TEXT_PATTERN_LE_OPERATOR_OID => return Some("~<=~"),
+        crate::include::catalog::TEXT_PATTERN_GE_OPERATOR_OID => return Some("~>=~"),
+        crate::include::catalog::TEXT_PATTERN_GT_OPERATOR_OID => return Some("~>~"),
+        _ => {}
+    }
+    match op {
+        crate::include::nodes::primnodes::OpExprKind::Add => Some("+"),
+        crate::include::nodes::primnodes::OpExprKind::Sub => Some("-"),
+        crate::include::nodes::primnodes::OpExprKind::Mul => Some("*"),
+        crate::include::nodes::primnodes::OpExprKind::Div => Some("/"),
+        crate::include::nodes::primnodes::OpExprKind::Mod => Some("%"),
+        crate::include::nodes::primnodes::OpExprKind::BitAnd => Some("&"),
+        crate::include::nodes::primnodes::OpExprKind::BitOr => Some("|"),
+        crate::include::nodes::primnodes::OpExprKind::BitXor => Some("#"),
+        crate::include::nodes::primnodes::OpExprKind::Shl => Some("<<"),
+        crate::include::nodes::primnodes::OpExprKind::Shr => Some(">>"),
+        crate::include::nodes::primnodes::OpExprKind::Concat => Some("||"),
+        crate::include::nodes::primnodes::OpExprKind::Eq => Some("="),
+        crate::include::nodes::primnodes::OpExprKind::NotEq => Some("<>"),
+        crate::include::nodes::primnodes::OpExprKind::Lt => Some("<"),
+        crate::include::nodes::primnodes::OpExprKind::LtEq => Some("<="),
+        crate::include::nodes::primnodes::OpExprKind::Gt => Some(">"),
+        crate::include::nodes::primnodes::OpExprKind::GtEq => Some(">="),
+        crate::include::nodes::primnodes::OpExprKind::RegexMatch => Some("~"),
         _ => None,
     }
 }
@@ -3995,9 +4069,8 @@ fn projection_is_explain_passthrough(state: &ProjectionState) -> bool {
     if identity_projection {
         return true;
     }
-    let full_width_projection = state.targets.len() == input_names.len()
-        && state.targets.iter().all(|target| !target.resjunk);
-    if state.input.node_label() == "WindowAgg" && full_width_projection {
+    if state.input.node_label() == "WindowAgg" && state.targets.iter().all(|target| !target.resjunk)
+    {
         return true;
     }
     state

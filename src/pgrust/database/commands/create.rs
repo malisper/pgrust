@@ -2844,6 +2844,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        planner_config: crate::include::nodes::pathnodes::PlannerConfig,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
@@ -2868,7 +2869,11 @@ impl Database {
                 configured_search_path,
             )?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let planned_stmt = crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)?;
+        let planned_stmt = crate::backend::parser::pg_plan_query_with_config(
+            &create_stmt.query,
+            &catalog,
+            planner_config,
+        )?;
         let mut rels = std::collections::BTreeSet::new();
         collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
 
@@ -2918,10 +2923,11 @@ impl Database {
             deferred_foreign_keys: None,
             trigger_depth: 0,
         };
-        let query_result = execute_readonly_statement(
+        let query_result = crate::backend::executor::execute_readonly_statement_with_config(
             Statement::Select(create_stmt.query.clone()),
             &catalog,
             &mut ctx,
+            planner_config,
         );
         let StatementResult::Query {
             columns,
@@ -3039,6 +3045,8 @@ impl Database {
             return Ok(StatementResult::AffectedRows(0));
         }
 
+        let insert_catalog =
+            self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
         let mut insert_ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
@@ -3077,7 +3085,7 @@ impl Database {
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
-            catalog: catalog.materialize_visible_catalog(),
+            catalog: insert_catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
@@ -3110,6 +3118,7 @@ impl Database {
         xid: Option<TransactionId>,
         cid: u32,
         configured_search_path: Option<&[String]>,
+        planner_config: crate::include::nodes::pathnodes::PlannerConfig,
     ) -> Result<StatementResult, ExecError> {
         if let Some(xid) = xid {
             let mut catalog_effects = Vec::new();
@@ -3120,6 +3129,7 @@ impl Database {
                 xid,
                 cid,
                 configured_search_path,
+                planner_config,
                 &mut catalog_effects,
                 &mut temp_effects,
             );
@@ -3134,6 +3144,7 @@ impl Database {
             xid,
             cid,
             configured_search_path,
+            planner_config,
             &mut catalog_effects,
             &mut temp_effects,
         );

@@ -209,6 +209,7 @@ pub enum Plan {
         rel: RelFileLocator,
         relation_oid: u32,
         index_rel: RelFileLocator,
+        index_name: String,
         am_oid: u32,
         desc: RelationDesc,
         index_desc: RelationDesc,
@@ -226,6 +227,7 @@ pub enum Plan {
         desc: RelationDesc,
         bitmapqual: Box<Plan>,
         recheck_qual: Vec<Expr>,
+        filter_qual: Vec<Expr>,
     },
     Hash {
         plan_info: PlanEstimate,

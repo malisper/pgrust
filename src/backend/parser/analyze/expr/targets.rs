@@ -93,11 +93,21 @@ fn bind_select_item_once(
     )?;
     let input_resno = input_resno_for_scope_expr(scope, &typed.expr);
     Ok(vec![BoundScalarSelectTarget {
-        output_name: item.output_name.clone(),
+        output_name: select_item_output_name(item),
         expr: typed.expr,
         sql_type: typed.sql_type,
         input_resno,
     }])
+}
+
+fn select_item_output_name(item: &SelectItem) -> String {
+    if item.output_name == "?column?"
+        && let SqlExpr::ScalarSubquery(select) = &item.expr
+        && let Some(target) = select.targets.first()
+    {
+        return target.output_name.clone();
+    }
+    item.output_name.clone()
 }
 
 fn bound_scalar_items_from_target_entries(

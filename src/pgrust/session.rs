@@ -1331,6 +1331,21 @@ impl Session {
                 .get("enable_seqscan")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
+            enable_indexscan: self
+                .gucs
+                .get("enable_indexscan")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            enable_indexonlyscan: self
+                .gucs
+                .get("enable_indexonlyscan")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            enable_bitmapscan: self
+                .gucs
+                .get("enable_bitmapscan")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
         }
     }
 
@@ -5942,6 +5957,7 @@ impl Session {
             }
             Statement::CreateTableAs(ref create_stmt) => {
                 let search_path = self.configured_search_path();
+                let planner_config = self.planner_config();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_create_table_as_stmt_in_transaction_with_search_path(
                     client_id,
@@ -5949,6 +5965,7 @@ impl Session {
                     xid,
                     cid,
                     search_path.as_deref(),
+                    planner_config,
                     &mut txn.catalog_effects,
                     &mut txn.temp_effects,
                 )
@@ -6512,7 +6529,12 @@ impl Session {
                     .write()
                     .set_track_functions(track_functions);
             }
-            "row_security" | "enable_partitionwise_join" | "enable_seqscan" => {
+            "row_security"
+            | "enable_partitionwise_join"
+            | "enable_seqscan"
+            | "enable_indexscan"
+            | "enable_indexonlyscan"
+            | "enable_bitmapscan" => {
                 parse_bool_guc(value).ok_or_else(|| {
                     ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
                 })?;

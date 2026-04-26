@@ -8,7 +8,9 @@ use crate::RelFileLocator;
 use crate::backend::optimizer::{AccessCandidate, IndexPathSpec, RelationStats};
 use crate::backend::parser::BoundIndexRelation;
 use crate::backend::parser::CatalogLookup;
-use crate::include::nodes::pathnodes::{Path, PathKey, PlannerInfo, RelOptInfo, RestrictInfo};
+use crate::include::nodes::pathnodes::{
+    Path, PathKey, PlannerConfig, PlannerInfo, RelOptInfo, RestrictInfo,
+};
 use crate::include::nodes::primnodes::ToastRelationRef;
 use crate::include::nodes::primnodes::{Expr, JoinType, OrderByEntry, QueryColumn, RelationDesc};
 
@@ -26,6 +28,14 @@ pub(super) fn residual_where_qual(root: &PlannerInfo) -> Option<Expr> {
 
 pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
     costsize::optimize_path(plan, catalog)
+}
+
+pub(super) fn optimize_path_with_config(
+    plan: Path,
+    catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
+) -> Path {
+    costsize::optimize_path_with_config(plan, catalog, config)
 }
 
 pub(super) fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {
@@ -95,9 +105,38 @@ pub(super) fn estimate_index_candidate(
     stats: &RelationStats,
     spec: crate::backend::optimizer::IndexPathSpec,
     order_items: Option<Vec<OrderByEntry>>,
+    config: PlannerConfig,
     catalog: &dyn CatalogLookup,
 ) -> AccessCandidate {
     costsize::estimate_index_candidate(
+        source_id,
+        rel,
+        relation_name,
+        relation_oid,
+        toast,
+        desc,
+        stats,
+        spec,
+        order_items,
+        None,
+        config,
+        catalog,
+    )
+}
+
+pub(super) fn estimate_bitmap_candidate(
+    source_id: usize,
+    rel: RelFileLocator,
+    relation_name: String,
+    relation_oid: u32,
+    toast: Option<ToastRelationRef>,
+    desc: RelationDesc,
+    stats: &RelationStats,
+    spec: crate::backend::optimizer::IndexPathSpec,
+    order_items: Option<Vec<OrderByEntry>>,
+    catalog: &dyn CatalogLookup,
+) -> AccessCandidate {
+    costsize::estimate_bitmap_candidate(
         source_id,
         rel,
         relation_name,

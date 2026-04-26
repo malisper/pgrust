@@ -423,7 +423,13 @@ pub(super) fn bind_scalar_function_call(
         catalog,
     )?;
     let build_func = |funcvariadic: bool, args: Vec<Expr>| {
-        Expr::resolved_builtin_func(func, func_oid, result_type, funcvariadic, args)
+        let mut expr = Expr::resolved_builtin_func(func, func_oid, result_type, funcvariadic, args);
+        if matches!(func, BuiltinScalarFunction::TextStartsWith)
+            && let Expr::Func(func_expr) = &mut expr
+        {
+            func_expr.funcname = Some("starts_with".into());
+        }
+        expr
     };
     if matches!(
         func,
