@@ -206,11 +206,23 @@ fn update_explain_target_name(stmt: &UpdateStatement) -> String {
         .unwrap_or_else(|| stmt.table_name.clone())
 }
 
+fn assignment_navigation_sql_type(sql_type: SqlType, catalog: &dyn CatalogLookup) -> SqlType {
+    let Some(domain) = catalog.domain_by_type_oid(sql_type.type_oid) else {
+        return sql_type;
+    };
+    if sql_type.is_array && !domain.sql_type.is_array {
+        SqlType::array_of(domain.sql_type)
+    } else {
+        domain.sql_type
+    }
+}
+
 fn resolve_assignment_field_type(
     row_type: SqlType,
     field: &str,
     catalog: &dyn CatalogLookup,
 ) -> Result<SqlType, ParseError> {
+    let row_type = assignment_navigation_sql_type(row_type, catalog);
     if matches!(row_type.kind, SqlTypeKind::Composite) && row_type.typrelid != 0 {
         let relation = catalog
             .lookup_relation_by_oid(row_type.typrelid)
@@ -253,6 +265,7 @@ fn resolve_assignment_target_sql_type(
 ) -> Result<SqlType, ParseError> {
     let mut current = column_type;
     for subscript in subscripts {
+        current = assignment_navigation_sql_type(current, catalog);
         if current.kind == SqlTypeKind::Jsonb && !current.is_array {
             if subscript.is_slice {
                 return Err(ParseError::DetailedError {
@@ -295,6 +308,7 @@ fn resolve_assignment_target_sql_type(
     }
 
     for field in field_path {
+        current = assignment_navigation_sql_type(current, catalog);
         current = resolve_assignment_field_type(current, field, catalog)?;
     }
     Ok(current)
@@ -307,6 +321,7 @@ fn resolve_assignment_indirection_sql_type(
 ) -> Result<SqlType, ParseError> {
     let mut current = column_type;
     for step in indirection {
+        current = assignment_navigation_sql_type(current, catalog);
         match step {
             crate::include::nodes::parsenodes::AssignmentTargetIndirection::Subscript(
                 subscript,
@@ -1794,6 +1809,73 @@ fn visible_assignment_targets(desc: &RelationDesc) -> Vec<BoundAssignmentTarget>
         .collect()
 }
 
+fn bind_insert_assignment_expr(
+    expr: &SqlExpr,
+    target: &BoundAssignmentTarget,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    local_ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    if let SqlExpr::ArrayLiteral(elements) = expr {
+        let target_type = assignment_navigation_sql_type(target.target_sql_type, catalog);
+        if target_type.is_array {
+            return Ok(Expr::ArrayLiteral {
+                elements: elements
+                    .iter()
+                    .map(|element| {
+                        bind_expr_with_outer_and_ctes(
+                            element,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            None,
+                            local_ctes,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                array_type: target_type,
+            });
+        }
+    }
+
+    bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, None, local_ctes)
+}
+
+fn values_row_has_default(row: &[SqlExpr]) -> bool {
+    row.iter().any(|expr| matches!(expr, SqlExpr::Default))
+}
+
+fn select_for_values_srf_row(
+    row: &[SqlExpr],
+    target_columns: &[BoundAssignmentTarget],
+) -> SelectStatement {
+    SelectStatement {
+        with_recursive: false,
+        with: Vec::new(),
+        distinct: false,
+        distinct_on: Vec::new(),
+        from: None,
+        targets: row
+            .iter()
+            .zip(target_columns.iter())
+            .map(|(expr, target)| SelectItem {
+                output_name: format!("column{}", target.column_index + 1),
+                expr: expr.clone(),
+            })
+            .collect(),
+        where_clause: None,
+        group_by: Vec::new(),
+        having: None,
+        window_clauses: Vec::new(),
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        locking_clause: None,
+        set_operation: None,
+    }
+}
+
 pub(super) fn ensure_generated_assignment_allowed(
     desc: &RelationDesc,
     target: &BoundAssignmentTarget,
@@ -1961,6 +2043,7 @@ pub fn bind_insert_prepared(
                     column_index: *column_index,
                     subscripts: Vec::new(),
                     field_path: Vec::new(),
+                    indirection: Vec::new(),
                     target_sql_type: entry.desc.columns[*column_index].sql_type,
                 },
                 None,
@@ -1998,6 +2081,7 @@ pub fn bind_insert_prepared(
                 column_index: *column_index,
                 subscripts: Vec::new(),
                 field_path: Vec::new(),
+                indirection: Vec::new(),
                 target_sql_type: entry.desc.columns[*column_index].sql_type,
             },
             None,
@@ -2090,7 +2174,7 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
     )?;
     let visible_target_name = stmt.table_alias.as_deref().unwrap_or(&stmt.table_name);
     let target_scope =
-        scope_for_relation_with_generated(Some(visible_target_name), &entry.desc, catalog)?;
+        scope_for_base_relation_with_generated(visible_target_name, &entry.desc, catalog)?;
     let expr_scope = empty_scope();
     let returning = bind_returning_targets(
         &stmt.returning,
@@ -2148,12 +2232,12 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
                                 NormalizedInsertExpr::Default => {
                                     Ok(column_defaults[target.column_index].clone())
                                 }
-                                NormalizedInsertExpr::Expr(expr) => bind_expr_with_outer_and_ctes(
+                                NormalizedInsertExpr::Expr(expr) => bind_insert_assignment_expr(
                                     expr,
+                                    target,
                                     &expr_scope,
                                     catalog,
                                     outer_scopes,
-                                    None,
                                     &visible_ctes,
                                 ),
                             }
@@ -2161,7 +2245,32 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
                         .collect::<Result<Vec<_>, _>>()
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            (target_columns, BoundInsertSource::Values(bound_rows))
+            let values_have_srfs = bound_rows.iter().flatten().any(expr_contains_set_returning);
+            if values_have_srfs {
+                if rows.len() != 1 {
+                    return Err(ParseError::FeatureNotSupported(
+                        "set-returning functions in multi-row INSERT VALUES".into(),
+                    ));
+                }
+                if rows.iter().any(|row| values_row_has_default(row)) {
+                    return Err(ParseError::FeatureNotSupported(
+                        "DEFAULT with set-returning functions in INSERT VALUES".into(),
+                    ));
+                }
+                let select = select_for_values_srf_row(&rows[0], &target_columns);
+                let (query, _) = analyze_select_query_with_outer(
+                    &select,
+                    catalog,
+                    outer_scopes,
+                    None,
+                    None,
+                    &visible_ctes,
+                    &[],
+                )?;
+                (target_columns, BoundInsertSource::Select(Box::new(query)))
+            } else {
+                (target_columns, BoundInsertSource::Values(bound_rows))
+            }
         }
         InsertSource::DefaultValues => (
             visible_assignment_targets(&entry.desc),

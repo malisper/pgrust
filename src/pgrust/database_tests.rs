@@ -12145,7 +12145,7 @@ fn pg_rules_exposes_user_rules_but_not_return_rules() {
             "select definition from pg_rules where tablename = 'item_view' and rulename = 'item_view_ins'",
         ),
         vec![vec![Value::Text(
-            "CREATE RULE item_view_ins AS ON INSERT TO public.item_view DO INSTEAD insert into items values (new.id)"
+            "CREATE RULE item_view_ins AS ON INSERT TO public.item_view DO INSTEAD INSERT INTO items\n  VALUES (new.id)"
                 .into(),
         )]]
     );
@@ -12156,7 +12156,38 @@ fn pg_rules_exposes_user_rules_but_not_return_rules() {
             "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'item_view_ins'",
         ),
         vec![vec![Value::Text(
-            "CREATE RULE item_view_ins AS\n    ON INSERT TO item_view DO INSTEAD insert into items values (new.id)"
+            "CREATE RULE item_view_ins AS\n    ON INSERT TO item_view DO INSTEAD INSERT INTO items\n  VALUES (new.id)"
+                .into(),
+        )]]
+    );
+}
+
+#[test]
+fn pg_get_ruledef_formats_insert_rule_actions_with_casts() {
+    let base = temp_dir("rule_insert_display");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table rule_src (f1 int8, f2 text)")
+        .unwrap();
+    db.execute(1, "create type rule_type as (if1 int8, if2 text[])")
+        .unwrap();
+    db.execute(1, "create table rule_dst (f4 rule_type[])")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule rule_src_ins as on insert to rule_src do also \
+         insert into rule_dst (f4[1].if1, f4[1].if2[2]) values (1, 'fool'), (new.f1, new.f2)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'rule_src_ins'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE RULE rule_src_ins AS\n    ON INSERT TO rule_src DO  INSERT INTO rule_dst (f4[1].if1, f4[1].if2[2]) VALUES (1,'fool'::text), (new.f1,new.f2)"
                 .into(),
         )]]
     );

@@ -4076,6 +4076,7 @@ pub(crate) fn bound_cte_from_query_rows(
             jointree: plan.jointree,
             target_list: identity_target_list(&output_columns, &plan.output_exprs),
             distinct: false,
+            distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
             accumulators: Vec::new(),

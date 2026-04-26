@@ -124,7 +124,7 @@ use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
 };
-use crate::backend::rewrite::{format_stored_rule_definition, format_view_definition};
+use crate::backend::rewrite::{format_stored_rule_definition_with_catalog, format_view_definition};
 use crate::backend::statistics::{
     render_pg_dependencies_text, render_pg_mcv_list_text, render_pg_ndistinct_text,
 };
@@ -2918,7 +2918,7 @@ fn eval_pg_get_ruledef(values: &[Value], ctx: &ExecutorContext) -> Result<Value,
                 .map(|name| name.rsplit('.').next().unwrap_or(&name).to_string())
         })
         .unwrap_or_else(|| rule.ev_class.to_string());
-    let mut definition = format_stored_rule_definition(&rule, &relation_name);
+    let mut definition = format_stored_rule_definition_with_catalog(&rule, &relation_name, catalog);
     if pretty {
         definition = definition
             .replace(" AS ON ", " AS\n    ON ")
@@ -4033,7 +4033,11 @@ pub fn eval_expr(
                     sqlstate: "XX000",
                 })
             } else if var.varattno == TABLE_OID_ATTR_NO {
-                lookup_system_binding(&ctx.system_bindings, var.varno)
+                lookup_system_binding(&ctx.system_bindings, var.varno).or_else(|err| {
+                    slot.table_oid
+                        .map(|table_oid| Value::Int64(i64::from(table_oid)))
+                        .ok_or(err)
+                })
             } else if var.varattno == SELF_ITEM_POINTER_ATTR_NO {
                 lookup_ctid(slot)
             } else {

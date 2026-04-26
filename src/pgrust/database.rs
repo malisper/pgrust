@@ -415,6 +415,10 @@ fn domain_sql_type(domain: &DomainEntry) -> SqlType {
     domain.sql_type.with_identity(domain.oid, identity_arg)
 }
 
+fn domain_array_sql_type(domain: &DomainEntry) -> SqlType {
+    SqlType::array_of(domain_sql_type(domain))
+}
+
 fn dynamic_range_array_type_names(
     range_types: &BTreeMap<String, RangeTypeEntry>,
 ) -> BTreeMap<u32, String> {

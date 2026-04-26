@@ -564,6 +564,30 @@ fn cast_regnamespace_to_text(
         .unwrap_or_else(|| Value::Text(oid.to_string().into())))
 }
 
+fn cast_regclass_to_text(
+    value: &Value,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    let oid = match value {
+        Value::Int32(oid) if *oid >= 0 => *oid as u32,
+        Value::Int64(oid) if *oid >= 0 && *oid <= i64::from(u32::MAX) => *oid as u32,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "::text",
+                left: other.clone(),
+                right: Value::Text("".into()),
+            });
+        }
+    };
+    if oid == 0 {
+        return Ok(Value::Text("-".into()));
+    }
+    Ok(catalog
+        .and_then(|catalog| catalog.class_row_by_oid(oid))
+        .map(|row| Value::Text(expr_reg::quote_identifier_if_needed(&row.relname).into()))
+        .unwrap_or_else(|| Value::Text(oid.to_string().into())))
+}
+
 const NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL: i32 = 131072;
 
 fn numeric_typmod_overflow_error(precision: i32, scale: i32) -> ExecError {
@@ -3913,6 +3937,14 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         })
     {
         return cast_regnamespace_to_text(&value, catalog);
+    }
+    if matches!(ty.kind, SqlTypeKind::Text)
+        && !ty.is_array
+        && source_type.is_some_and(|source| {
+            matches!(source.element_type().kind, SqlTypeKind::RegClass) && !source.is_array
+        })
+    {
+        return cast_regclass_to_text(&value, catalog);
     }
 
     if let Some(result) = cast_geometry_value(value.clone(), ty) {

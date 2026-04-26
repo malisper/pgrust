@@ -842,15 +842,14 @@ impl Database {
                     )));
                 }
                 for column_name in &stmt.columns {
-                    let Some((column_index, column)) =
-                        relation
-                            .desc
-                            .columns
-                            .iter()
-                            .enumerate()
-                            .find(|(_, column)| {
-                                !column.dropped && column.name.eq_ignore_ascii_case(column_name)
-                            })
+                    let Some((column_index, column)) = relation
+                        .desc
+                        .columns
+                        .iter()
+                        .enumerate()
+                        .find(|(_, column)| {
+                            !column.dropped && column.name.eq_ignore_ascii_case(column_name)
+                        })
                     else {
                         return Err(ExecError::Parse(ParseError::UnknownColumn(
                             column_name.clone(),
@@ -1016,15 +1015,14 @@ impl Database {
                     )));
                 }
                 for column_name in &stmt.columns {
-                    let Some((column_index, column)) =
-                        relation
-                            .desc
-                            .columns
-                            .iter()
-                            .enumerate()
-                            .find(|(_, column)| {
-                                !column.dropped && column.name.eq_ignore_ascii_case(column_name)
-                            })
+                    let Some((column_index, column)) = relation
+                        .desc
+                        .columns
+                        .iter()
+                        .enumerate()
+                        .find(|(_, column)| {
+                            !column.dropped && column.name.eq_ignore_ascii_case(column_name)
+                        })
                     else {
                         return Err(ExecError::Parse(ParseError::UnknownColumn(
                             column_name.clone(),

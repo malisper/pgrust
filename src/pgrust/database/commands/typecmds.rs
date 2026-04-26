@@ -283,7 +283,7 @@ impl Database {
                                     expected: "composite type relation",
                                     actual: display_name.clone(),
                                 })
-                    })?;
+                            })?;
                     ensure_relation_owner(self, client_id, &relation, &display_name)?;
                     let mut next_cid = cid;
                     let dependent_domains = self.dependent_domains_for_type_oid(type_oid);
@@ -2592,7 +2592,7 @@ impl Database {
             .domains
             .read()
             .values()
-            .map(|domain| domain.oid.saturating_add(1))
+            .map(|domain| domain.array_oid.saturating_add(1))
             .chain(
                 existing_enum_types
                     .into_iter()

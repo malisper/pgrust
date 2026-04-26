@@ -4675,6 +4675,26 @@ fn parse_named_array_type_name() {
 }
 
 #[test]
+fn parse_create_table_preserves_named_array_column_type() {
+    let Statement::CreateTable(create) =
+        parse_statement("create table darray (f3 insert_test_domain, f4 insert_test_domain[])")
+            .unwrap()
+    else {
+        panic!("expected create table");
+    };
+    let CreateTableElement::Column(column) = &create.elements[1] else {
+        panic!("expected column");
+    };
+    assert_eq!(
+        column.ty,
+        RawTypeName::Named {
+            name: "insert_test_domain".into(),
+            array_bounds: 1,
+        }
+    );
+}
+
+#[test]
 fn parse_do_statement_defaults_to_plpgsql() {
     let stmt = parse_statement("do $$ begin null; end $$").unwrap();
     assert_eq!(
@@ -5997,6 +6017,29 @@ fn parse_insert_with_writable_insert_cte() {
 }
 
 #[test]
+fn parse_select_with_writable_insert_cte_returning_tableoid_and_star() {
+    let stmt = parse_statement(
+        "with ins (a, b, c) as \
+         (insert into mlparted (b, a) select s.a, 1 from generate_series(2, 39) s(a) returning tableoid::regclass, *) \
+         select a, b, min(c), max(c) from ins group by a, b order by 1",
+    )
+    .unwrap();
+    match stmt {
+        Statement::Select(select) => {
+            assert_eq!(select.with.len(), 1);
+            match &select.with[0].body {
+                CteBody::Insert(insert) => {
+                    assert_eq!(insert.returning.len(), 2);
+                    assert!(matches!(insert.source, InsertSource::Select(_)));
+                }
+                other => panic!("expected writable insert CTE, got {other:?}"),
+            }
+        }
+        other => panic!("expected select statement, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_top_level_values_with_order_limit_offset() {
     let stmt = parse_statement("values (2), (1) order by 1 desc limit 1 offset 0").unwrap();
     match stmt {
@@ -7273,6 +7316,19 @@ fn parse_array_subscript_expressions_and_targets() {
             assert_eq!(columns[0].field_path, vec!["if2".to_string()]);
             assert_eq!(columns[0].subscripts.len(), 2);
             assert_eq!(columns[0].indirection.len(), 3);
+            assert!(matches!(
+                columns[0].indirection[0],
+                crate::include::nodes::parsenodes::AssignmentTargetIndirection::Subscript(_)
+            ));
+            assert!(matches!(
+                columns[0].indirection[1],
+                crate::include::nodes::parsenodes::AssignmentTargetIndirection::Field(ref field)
+                    if field == "if2"
+            ));
+            assert!(matches!(
+                columns[0].indirection[2],
+                crate::include::nodes::parsenodes::AssignmentTargetIndirection::Subscript(_)
+            ));
         }
         other => panic!("expected insert, got {:?}", other),
     }

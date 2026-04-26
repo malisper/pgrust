@@ -3270,7 +3270,13 @@ fn execute_insert_rows_with_routing(
                 let projected_row =
                     remap_child_row_to_parent(leaf_row, &result_rel_info.relation.desc, desc)
                         .unwrap_or_else(|| parent_row.clone());
-                let row = project_returning_row(returning, &projected_row, ctx)?;
+                let row = project_returning_row_with_metadata(
+                    returning,
+                    &projected_row,
+                    None,
+                    Some(result_rel_info.relation.relation_oid),
+                    ctx,
+                )?;
                 capture_copy_to_dml_returning_row(row.clone());
                 inserted_rows.push(row);
             }
@@ -3897,6 +3903,25 @@ fn enforce_domain_constraint_for_value(
     if domain.not_null && matches!(value, Value::Null) {
         return Err(domain_constraint_violation(&domain.name));
     }
+    if matches!(value, Value::Null) {
+        return Ok(());
+    }
+    if ty.is_array && !domain.sql_type.is_array {
+        match value {
+            Value::PgArray(array) => {
+                for element in &array.elements {
+                    enforce_domain_constraint_for_value(element, ty.element_type(), ctx)?;
+                }
+            }
+            Value::Array(elements) => {
+                for element in elements {
+                    enforce_domain_constraint_for_value(element, ty.element_type(), ctx)?;
+                }
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
     let Some(check) = domain.check.as_deref() else {
         return Ok(());
     };
@@ -4036,6 +4061,7 @@ pub(crate) fn apply_assignment_target(
         coerce_assignment_value_with_config(&value, assignment_type, &ctx.datetime_config)
     }
     .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
+    let value = coerce_record_assignment_value(value, assignment_type, ctx)?;
     let resolved_indirection = if target.indirection.is_empty() {
         target
             .subscripts
@@ -4074,6 +4100,49 @@ pub(crate) fn apply_assignment_target(
     values[target.column_index] =
         assign_typed_value_ordered(current, column_type, &resolved_indirection, value, ctx)?;
     Ok(())
+}
+
+fn coerce_record_assignment_value(
+    value: Value,
+    target_type: SqlType,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    let Value::Record(record) = value else {
+        return Ok(value);
+    };
+    let target_type = assignment_navigation_sql_type(target_type, ctx);
+    if target_type.is_array
+        || !matches!(
+            target_type.kind,
+            SqlTypeKind::Composite | SqlTypeKind::Record
+        )
+    {
+        return Ok(Value::Record(record));
+    }
+    let descriptor = assignment_record_descriptor(target_type, ctx)?;
+    if descriptor.fields.len() != record.fields.len() {
+        return Err(ExecError::DetailedError {
+            message: "cannot cast record to target composite type".into(),
+            detail: Some(format!(
+                "Input has {} columns, target has {} columns.",
+                record.fields.len(),
+                descriptor.fields.len()
+            )),
+            hint: None,
+            sqlstate: "42846",
+        });
+    }
+    let mut fields = Vec::with_capacity(record.fields.len());
+    for (field, value) in descriptor.fields.iter().zip(record.fields.iter()) {
+        fields.push(coerce_assignment_value_with_config(
+            value,
+            field.sql_type,
+            &ctx.datetime_config,
+        )?);
+    }
+    Ok(Value::Record(RecordValue::from_descriptor(
+        descriptor, fields,
+    )))
 }
 
 fn rewrite_subscripted_assignment_error(
@@ -4219,6 +4288,21 @@ fn assignment_target_sql_type(desc: &RelationDesc, target: &BoundAssignmentTarge
     target.target_sql_type
 }
 
+fn assignment_navigation_sql_type(sql_type: SqlType, ctx: &ExecutorContext) -> SqlType {
+    let Some(domain) = ctx
+        .catalog
+        .as_ref()
+        .and_then(|catalog| catalog.domain_by_type_oid(sql_type.type_oid))
+    else {
+        return sql_type;
+    };
+    if sql_type.is_array && !domain.sql_type.is_array {
+        SqlType::array_of(domain.sql_type)
+    } else {
+        domain.sql_type
+    }
+}
+
 #[derive(Clone)]
 struct ResolvedAssignmentSubscript {
     is_slice: bool,
@@ -4325,6 +4409,7 @@ fn assign_typed_value_ordered(
     let Some((first, rest)) = indirection.split_first() else {
         return Ok(replacement);
     };
+    let sql_type = assignment_navigation_sql_type(sql_type, ctx);
     match first {
         ResolvedAssignmentIndirection::Field(field) => {
             assign_record_field_ordered(current, sql_type, field, rest, replacement, ctx)
@@ -4512,6 +4597,7 @@ fn assignment_record_descriptor(
     sql_type: SqlType,
     ctx: &ExecutorContext,
 ) -> Result<RecordDescriptor, ExecError> {
+    let sql_type = assignment_navigation_sql_type(sql_type, ctx);
     if matches!(sql_type.kind, SqlTypeKind::Composite) && sql_type.typrelid != 0 {
         let catalog = ctx
             .catalog
@@ -5368,7 +5454,13 @@ pub(crate) fn execute_insert_rows(
         maintain_indexes_for_row(rel, desc, indexes, &values, heap_tid, ctx)?;
         inserted_rows.push(values.clone());
         if let Some(returning) = returning {
-            let row = project_returning_row(returning, &values, ctx)?;
+            let row = project_returning_row_with_metadata(
+                returning,
+                &values,
+                Some(heap_tid),
+                Some(relation_oid),
+                ctx,
+            )?;
             capture_copy_to_dml_returning_row(row.clone());
             returned_rows.push(row);
         }

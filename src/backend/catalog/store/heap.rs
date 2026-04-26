@@ -9131,6 +9131,13 @@ fn resolved_sql_type_oid(
             return Ok(row.typarray);
         }
     }
+    if sql_type.is_array
+        && sql_type.type_oid != 0
+        && let Some(row) = type_lookup.type_by_oid(sql_type.type_oid)?
+        && row.typarray != 0
+    {
+        return Ok(row.typarray);
+    }
     Ok(sql_type_oid(sql_type))
 }
 

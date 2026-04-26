@@ -10921,6 +10921,190 @@ mod tests {
     }
 
     #[test]
+    fn domain_composite_array_insert_assignments_navigate_base_type() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "domain_composite_assign");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(
+                &db,
+                "create type insert_test_type as (if1 int4, if2 text[])",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create domain insert_test_domain as insert_test_type \
+                 check ((value).if2 is not null and (value).if2[1] is not null)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create table inserttestb (f3 insert_test_domain, f4 insert_test_domain[])",
+            )
+            .unwrap();
+
+        session
+            .execute(
+                &db,
+                "insert into inserttestb (f3.if1, f3.if2) values (1, array['foo'])",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "insert into inserttestb (f3.if2[1], f3.if2[2]) values ('bar', 'baz')",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "insert into inserttestb (f3, f4[1].if2[1], f4[1].if2[2]) \
+                 values (row(2, '{x}')::insert_test_domain, 'bear', 'beer')",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "insert into inserttestb (f3, f4[1].if2[1], f4[1].if2[2]) \
+                 values (row(3, '{z}'), 'foo', 'bar')",
+            )
+            .unwrap();
+
+        match session
+            .execute(
+                &db,
+                "select (f3).if1, (f3).if2[1] from inserttestb order by (f3).if1 nulls last",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Int32(1), Value::Text("foo".into())],
+                        vec![Value::Int32(2), Value::Text("x".into())],
+                        vec![Value::Int32(3), Value::Text("z".into())],
+                        vec![Value::Null, Value::Text("bar".into())],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+
+        let err = session
+            .execute(
+                &db,
+                "insert into inserttestb (f3.if1, f3.if2) values (1, array[null])",
+            )
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError { message, .. } => assert_eq!(
+                message,
+                "value for domain insert_test_domain violates check constraint \"insert_test_domain_check\""
+            ),
+            other => panic!("expected domain violation, got {other:?}"),
+        }
+
+        session
+            .execute(
+                &db,
+                "create domain insert_nnarray as int4[] \
+                 check (value[1] is not null and value[2] is not null)",
+            )
+            .unwrap();
+        session
+            .execute(&db, "create table inserttesta (f1 insert_nnarray)")
+            .unwrap();
+        let err = session
+            .execute(&db, "insert into inserttesta (f1[1]) values (1)")
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError { message, .. } => assert_eq!(
+                message,
+                "value for domain insert_nnarray violates check constraint \"insert_nnarray_check\""
+            ),
+            other => panic!("expected domain violation, got {other:?}"),
+        }
+        session
+            .execute(&db, "insert into inserttesta (f1[1], f1[2]) values (1, 2)")
+            .unwrap();
+        match session
+            .execute(&db, "select f1[1], f1[2] from inserttesta")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1), Value::Int32(2)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_values_srf_uses_project_set() {
+        let base = crate::pgrust::test_support::seeded_temp_dir("session", "insert_values_srf");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "create table srf_t (id int4)")
+            .unwrap();
+        session
+            .execute(&db, "insert into srf_t values (generate_series(1, 3))")
+            .unwrap();
+        match session
+            .execute(&db, "select id from srf_t order by id")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1)],
+                    vec![Value::Int32(2)],
+                    vec![Value::Int32(3)],
+                ]
+            ),
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writable_cte_returning_tableoid_regclass_and_star_materializes() {
+        let base = crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_tableoid");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "create table cte_tableoid_src (a int4, b int4)")
+            .unwrap();
+        match session
+            .execute(
+                &db,
+                "with ins(rel, a, b) as \
+                 (insert into cte_tableoid_src (a, b) \
+                  select s.a, 1 from generate_series(2, 4) s(a) returning tableoid::regclass, *) \
+                 select rel::text, min(a), max(a), min(b), max(b) from ins group by rel order by 1",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("cte_tableoid_src".into()),
+                    Value::Int32(2),
+                    Value::Int32(4),
+                    Value::Int32(1),
+                    Value::Int32(1),
+                ]]
+            ),
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn default_toast_compression_guc_accepts_pglz() {
         assert_eq!(
             parse_default_toast_compression_guc_value("pglz").unwrap(),

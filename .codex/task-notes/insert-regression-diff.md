@@ -69,3 +69,25 @@ Current regression result:
 - partition describe/deparse formatting is partial (`LIST ((lower(a)))`, missing/short partition bound text);
 - multi-level partition routing/attached-partition column layout is still incomplete in later `mlparted` cases;
 - later role/GRANT/detail and trigger sections cascade from earlier partition/table creation failures.
+
+Follow-up 2026-04-26 non-partition slice:
+Implemented the requested non-partition insert buckets:
+- Domain-over-composite/array assignment now unwraps domain base types while navigating fields/subscripts, preserves final domain validation, coerces anonymous row assignments to named composite descriptors, and stores array-of-domain values using the base element layout.
+- Rule display for supported INSERT rules is rendered from parsed actions with PostgreSQL-style keyword casing, comma spacing, and text casts instead of returning raw stored SQL.
+- Single-row `INSERT ... VALUES(generate_series(...))` lowers through the existing SELECT/ProjectSet path; multi-row SRF VALUES and DEFAULT-with-SRF return unsupported errors.
+- Writable CTE parsing/execution now handles `RETURNING tableoid::regclass, *`; INSERT RETURNING exposes `tableoid`, and regclass-to-text casts render relation names.
+
+Tests run:
+- `cargo fmt`
+- `scripts/cargo_isolated.sh test --lib --quiet parse_select_with_writable_insert_cte_returning_tableoid_and_star`
+- `scripts/cargo_isolated.sh test --lib --quiet parse_create_table_preserves_named_array_column_type`
+- `scripts/cargo_isolated.sh test --lib --quiet insert_values_srf_uses_project_set`
+- `scripts/cargo_isolated.sh test --lib --quiet writable_cte_returning_tableoid_regclass_and_star_materializes`
+- `scripts/cargo_isolated.sh test --lib --quiet pg_get_ruledef_formats_insert_rule_actions_with_casts`
+- `scripts/cargo_isolated.sh test --lib --quiet pg_rules_exposes_user_rules_but_not_return_rules`
+- `scripts/cargo_isolated.sh test --lib --quiet domain_composite_array_insert_assignments_navigate_base_type`
+- `scripts/cargo_isolated.sh check`
+- `scripts/run_regression.sh --test insert --timeout 300 --port 56668 --results-dir /tmp/diffs/insert-stuttgart-v2-nonpartition-3`
+
+Current regression result:
+`insert` is 264/390 matched with 618 diff lines. The requested non-partition signatures are gone from the diff: no domain subscript/record-field failures, no rule-display diff, no `VALUES(generate_series(...))` failure, and the upstream writable CTE parses. Remaining visible failures are partition describe/deparse, multi-level partition routing/layout, partition constraint rechecks/detail visibility, COPY FROM STDOUT, and cascading role/GRANT cleanup/catalog errors after failed partition DDL.
