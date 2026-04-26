@@ -1384,8 +1384,8 @@ impl Database {
                         &catalog,
                     )?)
                 } else if action.without_overlaps.is_some() {
-                    Some(self.temporal_constraint_operator_oids_for_relation(
-                        relation.relation_oid,
+                    Some(self.temporal_constraint_operator_oids_for_desc(
+                        &relation.desc,
                         &action.columns,
                         action.without_overlaps.as_deref(),
                         &catalog,
