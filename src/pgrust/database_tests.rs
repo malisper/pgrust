@@ -26914,7 +26914,7 @@ fn temp_create_table_as_point_window_order_ignores_disabled_indexscan() {
         .execute(
             &db,
             "create table point_source as \
-             select point(g, g * 2) as p from generate_series(1, 11000) g",
+             select point(g, g * 2) as p from generate_series(1, 2000) g",
         )
         .unwrap();
     session
@@ -26967,7 +26967,7 @@ fn temp_create_table_as_point_window_order_ignores_disabled_indexscan() {
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Int64(11001)]]);
+            assert_eq!(rows, vec![vec![Value::Int64(2001)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }

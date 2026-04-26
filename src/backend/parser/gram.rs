@@ -582,14 +582,52 @@ fn try_parse_alter_table_multi_action_statement(
         return Ok(None);
     }
     let mut statements = Vec::with_capacity(actions.len());
+    let mut parsed_statements = Vec::with_capacity(actions.len());
     for action in actions {
         let action = action.trim();
         if action.is_empty() {
             continue;
         }
         let sub_sql = format!("ALTER TABLE {target_sql} {action}");
-        parse_statement_with_options_inner(sub_sql.clone(), options)?;
+        let parsed = parse_statement_with_options_inner(sub_sql.clone(), options)?;
         statements.push(sub_sql);
+        parsed_statements.push(parsed);
+    }
+    if !parsed_statements.is_empty()
+        && parsed_statements
+            .iter()
+            .all(|stmt| matches!(stmt, Statement::AlterTableAddColumn(_)))
+    {
+        let mut if_exists = false;
+        let mut only = false;
+        let mut table_name = None;
+        let mut columns = Vec::with_capacity(parsed_statements.len());
+        for stmt in parsed_statements {
+            let Statement::AlterTableAddColumn(add_column) = stmt else {
+                unreachable!("all parsed statements are ADD COLUMN");
+            };
+            if let Some(table_name) = &table_name {
+                if add_column.if_exists != if_exists
+                    || add_column.only != only
+                    || add_column.table_name != *table_name
+                {
+                    return Ok(Some(Statement::AlterTableMulti(statements)));
+                }
+            } else {
+                if_exists = add_column.if_exists;
+                only = add_column.only;
+                table_name = Some(add_column.table_name.clone());
+            }
+            columns.push(add_column.column);
+        }
+        return Ok(Some(Statement::AlterTableAddColumns(
+            AlterTableAddColumnsStatement {
+                if_exists,
+                only,
+                table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+                columns,
+            },
+        )));
     }
     Ok(Some(Statement::AlterTableMulti(statements)))
 }

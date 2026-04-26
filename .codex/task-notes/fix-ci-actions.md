@@ -25,6 +25,30 @@ query_repl.rs still has the existing unreachable-pattern warning during check.
 ---
 
 Goal:
+Fix follow-up CI parser failure and CTAS test timeout.
+
+Key decisions:
+Return AlterTableAddColumns for multi-action ALTER TABLE statements where every action is ADD COLUMN.
+Keep mixed multi-action ALTER TABLE statements on the AlterTableMulti fallback path.
+Reduce the point CTAS window-order fixture size while preserving the disabled-indexscan behavior.
+
+Files touched:
+src/backend/parser/gram.rs
+src/pgrust/database_tests.rs
+
+Tests run:
+scripts/cargo_isolated.sh test --lib --quiet parse_alter_table_multi_add_column_statement
+scripts/cargo_isolated.sh test --lib --quiet temp_create_table_as_point_window_order_ignores_disabled_indexscan
+scripts/cargo_isolated.sh test --lib --quiet alter_table_multi_add_column_updates_partitioned_table
+scripts/cargo_isolated.sh test --lib --quiet parse_alter_table_constraint_statements
+scripts/cargo_isolated.sh check
+
+Remaining:
+query_repl.rs still has the existing unreachable-pattern warning during check.
+
+---
+
+Goal:
 Fix follow-up CI executor failures for ordered assignment indirection.
 
 Key decisions:
