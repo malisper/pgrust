@@ -4433,12 +4433,52 @@ fn try_parse_foreign_data_wrapper_statement(sql: &str) -> Result<Option<Statemen
             .map(|stmt| Some(Statement::CreateForeignServer(stmt)));
     }
     if lowered.starts_with("alter server ") {
-        return build_alter_foreign_server_rename_statement(trimmed)
-            .map(|stmt| Some(Statement::AlterForeignServerRename(stmt)));
+        return build_alter_foreign_server_statement(trimmed);
+    }
+    if lowered.starts_with("drop server ") {
+        return build_drop_foreign_server_statement(trimmed)
+            .map(|stmt| Some(Statement::DropForeignServer(stmt)));
+    }
+    if lowered.starts_with("create user mapping ") {
+        return build_create_user_mapping_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateUserMapping(stmt)));
+    }
+    if lowered.starts_with("alter user mapping ") {
+        return build_alter_user_mapping_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterUserMapping(stmt)));
+    }
+    if lowered.starts_with("drop user mapping ") {
+        return build_drop_user_mapping_statement(trimmed)
+            .map(|stmt| Some(Statement::DropUserMapping(stmt)));
     }
     if lowered.starts_with("create foreign table ") {
         return build_create_foreign_table_statement(trimmed)
             .map(|stmt| Some(Statement::CreateForeignTable(stmt)));
+    }
+    if lowered.starts_with("alter foreign table ") {
+        // :HACK: PostgreSQL routes ALTER FOREIGN TABLE through the ALTER TABLE
+        // machinery with relkind checks. Reuse the existing parser until
+        // foreign-table-specific parse nodes are needed.
+        let transformed = format!("alter table {}", &trimmed["alter foreign table ".len()..]);
+        return parse_statement(&transformed).map(Some);
+    }
+    if lowered.starts_with("drop foreign table ") {
+        // :HACK: DROP FOREIGN TABLE shares the DROP TABLE implementation for now.
+        let transformed = format!("drop table {}", &trimmed["drop foreign table ".len()..]);
+        let mut stmt = match parse_statement(&transformed)? {
+            Statement::DropTable(stmt) => stmt,
+            _ => unreachable!("DROP TABLE parser must produce DropTable"),
+        };
+        stmt.foreign_table = true;
+        return Ok(Some(Statement::DropTable(stmt)));
+    }
+    if lowered.starts_with("comment on foreign table ") {
+        // :HACK: COMMENT ON FOREIGN TABLE uses the same storage as table comments.
+        let transformed = format!(
+            "comment on table {}",
+            &trimmed["comment on foreign table ".len()..]
+        );
+        return parse_statement(&transformed).map(Some);
     }
     if lowered.starts_with("create foreign data wrapper ") {
         return build_create_foreign_data_wrapper_statement(trimmed)
@@ -4668,8 +4708,33 @@ fn build_create_foreign_server_statement(
     sql: &str,
 ) -> Result<CreateForeignServerStatement, ParseError> {
     let mut rest = sql["create server ".len()..].trim_start();
+    let if_not_exists = if keyword_at_start(rest, "if not exists") {
+        rest = consume_keyword(rest, "if not exists").trim_start();
+        true
+    } else {
+        false
+    };
     let (server_name, next) = parse_sql_identifier(rest)?;
     rest = next.trim_start();
+    let mut server_type = None;
+    let mut version = None;
+    loop {
+        if keyword_at_start(rest, "type") {
+            let next = consume_keyword(rest, "type").trim_start();
+            let (value, tail) = parse_copy_string_literal(next)?;
+            server_type = Some(value);
+            rest = tail.trim_start();
+            continue;
+        }
+        if keyword_at_start(rest, "version") {
+            let next = consume_keyword(rest, "version").trim_start();
+            let (value, tail) = parse_foreign_server_version(next)?;
+            version = value;
+            rest = tail.trim_start();
+            continue;
+        }
+        break;
+    }
     if !keyword_at_start(rest, "foreign data wrapper") {
         return Err(ParseError::UnexpectedToken {
             expected: "FOREIGN DATA WRAPPER",
@@ -4677,16 +4742,285 @@ fn build_create_foreign_server_statement(
         });
     }
     rest = consume_keyword(rest, "foreign data wrapper").trim_start();
-    let (fdw_name, rest) = parse_sql_identifier(rest)?;
-    if !rest.trim().is_empty() {
+    let (fdw_name, tail) = parse_sql_identifier(rest)?;
+    rest = tail.trim_start();
+    let options = if rest.is_empty() {
+        Vec::new()
+    } else if keyword_at_start(rest, "options") {
+        parse_create_generic_options(rest)?
+    } else {
         return Err(ParseError::UnexpectedToken {
-            expected: "end of statement",
-            actual: rest.trim().into(),
+            expected: "OPTIONS or end of statement",
+            actual: rest.into(),
         });
-    }
+    };
     Ok(CreateForeignServerStatement {
+        if_not_exists,
         server_name,
         fdw_name,
+        server_type,
+        version,
+        options,
+    })
+}
+
+fn parse_foreign_server_version(input: &str) -> Result<(Option<String>, &str), ParseError> {
+    let input = input.trim_start();
+    if keyword_at_start(input, "null") {
+        let tail = consume_keyword(input, "null");
+        return Ok((None, tail));
+    }
+    let (value, tail) = parse_copy_string_literal(input)?;
+    Ok((Some(value), tail))
+}
+
+fn build_alter_foreign_server_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let mut rest = sql["alter server ".len()..].trim_start();
+    let (server_name, next) = parse_sql_identifier(rest)?;
+    rest = next.trim_start();
+    if keyword_at_start(rest, "owner to") {
+        let next = consume_keyword(rest, "owner to").trim_start();
+        let (new_owner, tail) = parse_sql_identifier(next)?;
+        if !tail.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: tail.trim().into(),
+            });
+        }
+        return Ok(Some(Statement::AlterForeignServerOwner(
+            AlterForeignServerOwnerStatement {
+                server_name,
+                new_owner,
+            },
+        )));
+    }
+    if keyword_at_start(rest, "rename to") {
+        let next = consume_keyword(rest, "rename to").trim_start();
+        let (new_name, tail) = parse_sql_identifier(next)?;
+        if !tail.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: tail.trim().into(),
+            });
+        }
+        return Ok(Some(Statement::AlterForeignServerRename(
+            AlterForeignServerRenameStatement {
+                server_name,
+                new_name,
+            },
+        )));
+    }
+
+    let mut version = None;
+    if keyword_at_start(rest, "version") {
+        let next = consume_keyword(rest, "version").trim_start();
+        let (value, tail) = parse_foreign_server_version(next)?;
+        version = Some(value);
+        rest = tail.trim_start();
+    }
+    let options = if rest.is_empty() {
+        Vec::new()
+    } else if keyword_at_start(rest, "options") {
+        parse_alter_generic_options(rest)?
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "VERSION, OPTIONS, OWNER TO, RENAME TO, or end of statement",
+            actual: rest.into(),
+        });
+    };
+    Ok(Some(Statement::AlterForeignServer(
+        AlterForeignServerStatement {
+            server_name,
+            version,
+            options,
+        },
+    )))
+}
+
+fn build_drop_foreign_server_statement(
+    sql: &str,
+) -> Result<DropForeignServerStatement, ParseError> {
+    let tokens = sql.split_whitespace().collect::<Vec<_>>();
+    let mut index = 2usize;
+    let mut if_exists = false;
+    if tokens
+        .get(index)
+        .is_some_and(|token| token.eq_ignore_ascii_case("if"))
+    {
+        if !tokens
+            .get(index + 1)
+            .is_some_and(|token| token.eq_ignore_ascii_case("exists"))
+        {
+            return Err(ParseError::UnexpectedToken {
+                expected: "EXISTS",
+                actual: tokens.get(index + 1).unwrap_or(&"").to_string(),
+            });
+        }
+        if_exists = true;
+        index += 2;
+    }
+    let Some(server_name) = tokens.get(index) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "foreign server name",
+            actual: sql.into(),
+        });
+    };
+    let cascade = tokens
+        .get(index + 1)
+        .is_some_and(|token| token.eq_ignore_ascii_case("cascade"));
+    if tokens.len() > index + 1 && !cascade && !tokens[index + 1].eq_ignore_ascii_case("restrict") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CASCADE, RESTRICT, or end of statement",
+            actual: tokens[index + 1].into(),
+        });
+    }
+    if tokens.len() > index + 2 {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: sql.into(),
+        });
+    }
+    Ok(DropForeignServerStatement {
+        if_exists,
+        server_name: (*server_name).to_string(),
+        cascade,
+    })
+}
+
+fn parse_user_mapping_user(input: &str) -> Result<(UserMappingUser, &str), ParseError> {
+    let input = input.trim_start();
+    if keyword_at_start(input, "current_user") {
+        return Ok((
+            UserMappingUser::CurrentUser,
+            consume_keyword(input, "current_user"),
+        ));
+    }
+    if keyword_at_start(input, "user") {
+        return Ok((UserMappingUser::User, consume_keyword(input, "user")));
+    }
+    if keyword_at_start(input, "public") {
+        return Ok((UserMappingUser::Public, consume_keyword(input, "public")));
+    }
+    let (role_name, tail) = parse_sql_identifier(input)?;
+    Ok((UserMappingUser::Role(role_name), tail))
+}
+
+fn build_create_user_mapping_statement(
+    sql: &str,
+) -> Result<CreateUserMappingStatement, ParseError> {
+    let mut rest = sql["create user mapping ".len()..].trim_start();
+    let if_not_exists = if keyword_at_start(rest, "if not exists") {
+        rest = consume_keyword(rest, "if not exists").trim_start();
+        true
+    } else {
+        false
+    };
+    if !keyword_at_start(rest, "for") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "FOR",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "for").trim_start();
+    let (user, next) = parse_user_mapping_user(rest)?;
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "server") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "SERVER",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "server").trim_start();
+    let (server_name, tail) = parse_sql_identifier(rest)?;
+    let tail = tail.trim_start();
+    let options = if tail.is_empty() {
+        Vec::new()
+    } else if keyword_at_start(tail, "options") {
+        parse_create_generic_options(tail)?
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "OPTIONS or end of statement",
+            actual: tail.into(),
+        });
+    };
+    Ok(CreateUserMappingStatement {
+        if_not_exists,
+        user,
+        server_name,
+        options,
+    })
+}
+
+fn build_alter_user_mapping_statement(sql: &str) -> Result<AlterUserMappingStatement, ParseError> {
+    let mut rest = sql["alter user mapping ".len()..].trim_start();
+    if !keyword_at_start(rest, "for") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "FOR",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "for").trim_start();
+    let (user, next) = parse_user_mapping_user(rest)?;
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "server") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "SERVER",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "server").trim_start();
+    let (server_name, tail) = parse_sql_identifier(rest)?;
+    let tail = tail.trim_start();
+    let options = if keyword_at_start(tail, "options") {
+        parse_alter_generic_options(tail)?
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "OPTIONS",
+            actual: tail.into(),
+        });
+    };
+    Ok(AlterUserMappingStatement {
+        user,
+        server_name,
+        options,
+    })
+}
+
+fn build_drop_user_mapping_statement(sql: &str) -> Result<DropUserMappingStatement, ParseError> {
+    let mut rest = sql["drop user mapping ".len()..].trim_start();
+    let if_exists = if keyword_at_start(rest, "if exists") {
+        rest = consume_keyword(rest, "if exists").trim_start();
+        true
+    } else {
+        false
+    };
+    if !keyword_at_start(rest, "for") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "FOR",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "for").trim_start();
+    let (user, next) = parse_user_mapping_user(rest)?;
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "server") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "SERVER",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "server").trim_start();
+    let (server_name, tail) = parse_sql_identifier(rest)?;
+    if !tail.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: tail.trim().into(),
+        });
+    }
+    Ok(DropUserMappingStatement {
+        if_exists,
+        user,
+        server_name,
     })
 }
 
@@ -4871,12 +5205,17 @@ fn build_create_foreign_table_statement(
     }
     rest = consume_keyword(rest, "server").trim_start();
     let (server_name, tail) = parse_sql_identifier(rest)?;
-    if !tail.trim().is_empty() {
+    let tail = tail.trim_start();
+    let options = if tail.is_empty() {
+        Vec::new()
+    } else if keyword_at_start(tail, "options") {
+        parse_create_generic_options(tail)?
+    } else {
         return Err(ParseError::UnexpectedToken {
-            expected: "end of statement",
-            actual: tail.trim().into(),
+            expected: "OPTIONS or end of statement",
+            actual: tail.into(),
         });
-    }
+    };
 
     let qualified_name = schema_name
         .as_ref()
@@ -4894,6 +5233,7 @@ fn build_create_foreign_table_statement(
     Ok(CreateForeignTableStatement {
         create_table,
         server_name,
+        options,
     })
 }
 
@@ -18251,6 +18591,7 @@ fn build_drop_table(pair: Pair<'_, Rule>) -> Result<DropTableStatement, ParseErr
         if_exists,
         table_names,
         cascade,
+        foreign_table: false,
     })
 }
 

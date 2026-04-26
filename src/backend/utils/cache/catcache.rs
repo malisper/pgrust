@@ -19,6 +19,7 @@ use crate::backend::catalog::pg_database::sort_pg_database_rows;
 use crate::backend::catalog::pg_depend::sort_pg_depend_rows;
 use crate::backend::catalog::pg_foreign_data_wrapper::sort_pg_foreign_data_wrapper_rows;
 use crate::backend::catalog::pg_foreign_server::sort_pg_foreign_server_rows;
+use crate::backend::catalog::pg_foreign_table::sort_pg_foreign_table_rows;
 use crate::backend::catalog::pg_index::sort_pg_index_rows;
 use crate::backend::catalog::pg_inherits::sort_pg_inherits_rows;
 use crate::backend::catalog::pg_language::sort_pg_language_rows;
@@ -40,6 +41,7 @@ use crate::backend::catalog::pg_ts_config_map::sort_pg_ts_config_map_rows;
 use crate::backend::catalog::pg_ts_dict::sort_pg_ts_dict_rows;
 use crate::backend::catalog::pg_ts_parser::sort_pg_ts_parser_rows;
 use crate::backend::catalog::pg_ts_template::sort_pg_ts_template_rows;
+use crate::backend::catalog::pg_user_mapping::sort_pg_user_mapping_rows;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     ANYARRAYOID, BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
@@ -54,12 +56,12 @@ use crate::include::catalog::{
     POLYGON_TYPE_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
     PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow, PgForeignDataWrapperRow,
-    PgForeignServerRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
+    PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
+    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow,
+    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
     PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
     PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
+    PgUserMappingRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
     REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID,
     TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID,
     TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, UUID_ARRAY_TYPE_OID, UUID_TYPE_OID,
@@ -69,12 +71,12 @@ use crate::include::catalog::{
     bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
     bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows,
     bootstrap_pg_foreign_data_wrapper_rows, bootstrap_pg_foreign_server_rows,
-    bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
-    bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows, bootstrap_pg_proc_rows,
-    bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
-    bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows, builtin_type_rows,
-    composite_array_type_row, composite_type_row, range_type_ref_for_sql_type,
-    sort_pg_conversion_rows, sort_pg_rewrite_rows,
+    bootstrap_pg_foreign_table_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows,
+    bootstrap_pg_proc_rows, bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows,
+    bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows,
+    bootstrap_pg_user_mapping_rows, builtin_type_rows, composite_array_type_row,
+    composite_type_row, range_type_ref_for_sql_type, sort_pg_conversion_rows, sort_pg_rewrite_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -88,6 +90,8 @@ pub struct CatCache {
     depend_rows: Vec<PgDependRow>,
     foreign_data_wrapper_rows: Vec<PgForeignDataWrapperRow>,
     foreign_server_rows: Vec<PgForeignServerRow>,
+    foreign_table_rows: Vec<PgForeignTableRow>,
+    user_mapping_rows: Vec<PgUserMappingRow>,
     inherit_rows: Vec<PgInheritsRow>,
     partitioned_tables_by_relid: BTreeMap<u32, PgPartitionedTableRow>,
     index_rows: Vec<PgIndexRow>,
@@ -242,6 +246,14 @@ impl CatCache {
             .foreign_server_rows
             .extend(bootstrap_pg_foreign_server_rows());
         sort_pg_foreign_server_rows(&mut cache.foreign_server_rows);
+        cache
+            .foreign_table_rows
+            .extend(bootstrap_pg_foreign_table_rows());
+        sort_pg_foreign_table_rows(&mut cache.foreign_table_rows);
+        cache
+            .user_mapping_rows
+            .extend(bootstrap_pg_user_mapping_rows());
+        sort_pg_user_mapping_rows(&mut cache.user_mapping_rows);
         cache
             .database_rows
             .extend(catalog.database_rows().iter().cloned());
@@ -537,6 +549,8 @@ impl CatCache {
             rows.collations,
             rows.foreign_data_wrappers,
             rows.foreign_servers,
+            rows.foreign_tables,
+            rows.user_mappings,
             rows.databases,
             rows.tablespaces,
             rows.statistics,
@@ -583,6 +597,8 @@ impl CatCache {
         collation_rows: Vec<PgCollationRow>,
         foreign_data_wrapper_rows: Vec<PgForeignDataWrapperRow>,
         foreign_server_rows: Vec<PgForeignServerRow>,
+        foreign_table_rows: Vec<PgForeignTableRow>,
+        user_mapping_rows: Vec<PgUserMappingRow>,
         database_rows: Vec<PgDatabaseRow>,
         tablespace_rows: Vec<PgTablespaceRow>,
         statistic_rows: Vec<PgStatisticRow>,
@@ -690,6 +706,10 @@ impl CatCache {
         sort_pg_foreign_data_wrapper_rows(&mut cache.foreign_data_wrapper_rows);
         cache.foreign_server_rows = foreign_server_rows;
         sort_pg_foreign_server_rows(&mut cache.foreign_server_rows);
+        cache.foreign_table_rows = foreign_table_rows;
+        sort_pg_foreign_table_rows(&mut cache.foreign_table_rows);
+        cache.user_mapping_rows = user_mapping_rows;
+        sort_pg_user_mapping_rows(&mut cache.user_mapping_rows);
         cache.database_rows = database_rows;
         sort_pg_database_rows(&mut cache.database_rows);
         cache.tablespace_rows = tablespace_rows;
@@ -1069,6 +1089,46 @@ impl CatCache {
 
     pub fn foreign_server_rows(&self) -> Vec<PgForeignServerRow> {
         self.foreign_server_rows.clone()
+    }
+
+    pub fn foreign_server_row_by_oid(&self, oid: u32) -> Option<PgForeignServerRow> {
+        self.foreign_server_rows
+            .iter()
+            .find(|row| row.oid == oid)
+            .cloned()
+    }
+
+    pub fn foreign_server_row_by_name(&self, name: &str) -> Option<PgForeignServerRow> {
+        self.foreign_server_rows
+            .iter()
+            .find(|row| row.srvname.eq_ignore_ascii_case(name))
+            .cloned()
+    }
+
+    pub fn foreign_table_rows(&self) -> Vec<PgForeignTableRow> {
+        self.foreign_table_rows.clone()
+    }
+
+    pub fn foreign_table_row_by_relid(&self, relid: u32) -> Option<PgForeignTableRow> {
+        self.foreign_table_rows
+            .iter()
+            .find(|row| row.ftrelid == relid)
+            .cloned()
+    }
+
+    pub fn user_mapping_rows(&self) -> Vec<PgUserMappingRow> {
+        self.user_mapping_rows.clone()
+    }
+
+    pub fn user_mapping_row_by_user_server(
+        &self,
+        user_oid: u32,
+        server_oid: u32,
+    ) -> Option<PgUserMappingRow> {
+        self.user_mapping_rows
+            .iter()
+            .find(|row| row.umuser == user_oid && row.umserver == server_oid)
+            .cloned()
     }
 
     pub fn database_rows(&self) -> Vec<PgDatabaseRow> {

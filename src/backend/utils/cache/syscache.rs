@@ -744,6 +744,8 @@ fn merge_catcaches(shared: CatCache, local: CatCache) -> CatCache {
         local.collation_rows(),
         local.foreign_data_wrapper_rows(),
         local.foreign_server_rows(),
+        local.foreign_table_rows(),
+        local.user_mapping_rows(),
         shared.database_rows(),
         shared.tablespace_rows(),
         local.statistic_rows(),

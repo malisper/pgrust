@@ -363,9 +363,16 @@ fn execute_statement_with_source(
         | Statement::AlterLanguage(_)
         | Statement::DropLanguage(_)
         | Statement::CreateForeignTable(_)
+        | Statement::CreateUserMapping(_)
         | Statement::AlterForeignDataWrapper(_)
         | Statement::AlterForeignDataWrapperOwner(_)
         | Statement::AlterForeignDataWrapperRename(_)
+        | Statement::AlterForeignServer(_)
+        | Statement::AlterForeignServerOwner(_)
+        | Statement::AlterForeignServerRename(_)
+        | Statement::AlterUserMapping(_)
+        | Statement::DropForeignServer(_)
+        | Statement::DropUserMapping(_)
         | Statement::DropForeignDataWrapper(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "FOREIGN DATA WRAPPER handled by database/session layer",

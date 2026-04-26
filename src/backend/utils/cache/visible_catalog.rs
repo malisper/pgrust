@@ -997,6 +997,8 @@ mod tests {
             base.collation_rows(),
             base.foreign_data_wrapper_rows(),
             base.foreign_server_rows(),
+            base.foreign_table_rows(),
+            base.user_mapping_rows(),
             base.database_rows(),
             base.tablespace_rows(),
             base.statistic_rows(),

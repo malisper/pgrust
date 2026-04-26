@@ -31734,6 +31734,129 @@ fn copy_from_validates_overlong_defaults() {
 }
 
 #[test]
+fn foreign_data_catalogs_track_servers_mappings_and_tables() {
+    let base = temp_dir("foreign_data_catalogs");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create foreign data wrapper fdwtest")
+        .unwrap();
+    db.execute(
+        1,
+        "create server fdw_srv type 'postgres' version '17' foreign data wrapper fdwtest options (host 'localhost', dbname 'regression')",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select srvname, srvtype, srvversion, srvoptions from pg_foreign_server where srvname = 'fdw_srv'",
+        ),
+        vec![vec![
+            Value::Text("fdw_srv".into()),
+            Value::Text("postgres".into()),
+            Value::Text("17".into()),
+            typed_text_array_value(
+                &["host=localhost", "dbname=regression"],
+                crate::include::catalog::TEXT_TYPE_OID,
+            ),
+        ]]
+    );
+
+    db.execute(
+        1,
+        "alter server fdw_srv version '18' options (set dbname 'updated', add port '5432', drop host)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select srvversion, srvoptions from pg_foreign_server where srvname = 'fdw_srv'",
+        ),
+        vec![vec![
+            Value::Text("18".into()),
+            typed_text_array_value(
+                &["dbname=updated", "port=5432"],
+                crate::include::catalog::TEXT_TYPE_OID,
+            ),
+        ]]
+    );
+
+    db.execute(
+        1,
+        "create user mapping for current_user server fdw_srv options (user 'alice')",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select u.umoptions from pg_user_mapping u join pg_foreign_server s on s.oid = u.umserver where s.srvname = 'fdw_srv'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["user=alice"],
+            crate::include::catalog::TEXT_TYPE_OID,
+        )]]
+    );
+
+    db.execute(
+        1,
+        "alter user mapping for current_user server fdw_srv options (set user 'bob')",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select u.umoptions from pg_user_mapping u join pg_foreign_server s on s.oid = u.umserver where s.srvname = 'fdw_srv'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["user=bob"],
+            crate::include::catalog::TEXT_TYPE_OID,
+        )]]
+    );
+
+    db.execute(
+        1,
+        "create foreign table fdw_ft (a int4) server fdw_srv options (table_name 'remote_table')",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relkind::text, ft.ftoptions from pg_class c join pg_foreign_table ft on ft.ftrelid = c.oid where c.relname = 'fdw_ft'",
+        ),
+        vec![vec![
+            Value::Text("f".into()),
+            typed_text_array_value(
+                &["table_name=remote_table"],
+                crate::include::catalog::TEXT_TYPE_OID,
+            ),
+        ]]
+    );
+
+    db.execute(1, "drop foreign table fdw_ft").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from pg_foreign_table"),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    db.execute(1, "drop user mapping for current_user server fdw_srv")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from pg_user_mapping"),
+        vec![vec![Value::Int64(0)]]
+    );
+    db.execute(1, "drop server fdw_srv").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from pg_foreign_server"),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
 fn copy_freeze_rejects_foreign_tables() {
     let base = temp_dir("copy_freeze_foreign_table");
     let db = Database::open(&base, 16).unwrap();

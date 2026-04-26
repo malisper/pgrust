@@ -61,6 +61,12 @@ const PG_DEPEND_DEPENDER_INDEX_KEYS: [i16; 3] = [1, 2, 3];
 const PG_DEPEND_REFERENCE_INDEX_KEYS: [i16; 3] = [4, 5, 6];
 const PG_DESCRIPTION_O_C_O_INDEX_KEYS: [i16; 3] = [1, 2, 3];
 const PG_FOREIGN_DATA_WRAPPER_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_FOREIGN_DATA_WRAPPER_NAME_INDEX_KEYS: [i16; 1] = [2];
+const PG_FOREIGN_SERVER_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_FOREIGN_SERVER_NAME_INDEX_KEYS: [i16; 1] = [2];
+const PG_USER_MAPPING_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_USER_MAPPING_USER_SERVER_INDEX_KEYS: [i16; 2] = [2, 3];
+const PG_FOREIGN_TABLE_RELID_INDEX_KEYS: [i16; 1] = [1];
 const PG_INDEX_INDRELID_INDEX_KEYS: [i16; 1] = [2];
 const PG_INDEX_INDEXRELID_INDEX_KEYS: [i16; 1] = [1];
 const PG_INHERITS_RELID_SEQNO_INDEX_KEYS: [i16; 2] = [1, 3];
@@ -178,7 +184,7 @@ const OID_INT2_BOOL_OPCLASS_3: [u32; 3] = [
     BOOL_BTREE_OPCLASS_OID,
 ];
 
-pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 89] = [
+pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 95] = [
     CatalogIndexDescriptor {
         relation_oid: 2684,
         relation_name: "pg_namespace_nspname_index",
@@ -556,6 +562,54 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 89] = [
         opclass_oids: &OID_OPCLASS_1,
     },
     CatalogIndexDescriptor {
+        relation_oid: 548,
+        relation_name: "pg_foreign_data_wrapper_name_index",
+        heap_kind: BootstrapCatalogKind::PgForeignDataWrapper,
+        unique: true,
+        key_attnums: &PG_FOREIGN_DATA_WRAPPER_NAME_INDEX_KEYS,
+        opclass_oids: &NAME_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 113,
+        relation_name: "pg_foreign_server_oid_index",
+        heap_kind: BootstrapCatalogKind::PgForeignServer,
+        unique: true,
+        key_attnums: &PG_FOREIGN_SERVER_OID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 549,
+        relation_name: "pg_foreign_server_name_index",
+        heap_kind: BootstrapCatalogKind::PgForeignServer,
+        unique: true,
+        key_attnums: &PG_FOREIGN_SERVER_NAME_INDEX_KEYS,
+        opclass_oids: &NAME_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 174,
+        relation_name: "pg_user_mapping_oid_index",
+        heap_kind: BootstrapCatalogKind::PgUserMapping,
+        unique: true,
+        key_attnums: &PG_USER_MAPPING_OID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 175,
+        relation_name: "pg_user_mapping_user_server_index",
+        heap_kind: BootstrapCatalogKind::PgUserMapping,
+        unique: true,
+        key_attnums: &PG_USER_MAPPING_USER_SERVER_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_2,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3119,
+        relation_name: "pg_foreign_table_relid_index",
+        heap_kind: BootstrapCatalogKind::PgForeignTable,
+        unique: true,
+        key_attnums: &PG_FOREIGN_TABLE_RELID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
         relation_oid: 2678,
         relation_name: "pg_index_indrelid_index",
         heap_kind: BootstrapCatalogKind::PgIndex,
@@ -930,6 +984,8 @@ pub fn system_catalog_index_is_primary(descriptor: &CatalogIndexDescriptor) -> b
             | "pg_database_oid_index"
             | "pg_description_o_c_o_index"
             | "pg_foreign_data_wrapper_oid_index"
+            | "pg_foreign_server_oid_index"
+            | "pg_foreign_table_relid_index"
             | "pg_index_indexrelid_index"
             | "pg_inherits_relid_seqno_index"
             | "pg_largeobject_loid_pn_index"
@@ -958,6 +1014,7 @@ pub fn system_catalog_index_is_primary(descriptor: &CatalogIndexDescriptor) -> b
             | "pg_ts_parser_oid_index"
             | "pg_ts_template_oid_index"
             | "pg_type_oid_index"
+            | "pg_user_mapping_oid_index"
     )
 }
 

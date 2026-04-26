@@ -12,21 +12,21 @@ use crate::include::catalog::{
 use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
     AliasColumnDef, AliasColumnSpec, AlterAggregateRenameStatement, AlterColumnExpressionAction,
-    AlterColumnIdentityAction, AlterTableTriggerMode, AlterTableTriggerStateStatement,
-    AlterTableTriggerTarget, AlterTriggerRenameStatement, AlterTypeSetOptionsStatement,
-    CastContext, ColumnConstraint, ColumnGeneratedKind, ColumnIdentityKind,
-    CommentOnAggregateStatement, CommentOnColumnStatement, CommentOnFunctionStatement,
-    CommentOnOperatorStatement, CommentOnTypeStatement, CommentOnViewStatement,
-    CompositeTypeAttributeDef, CreateAggregateStatement, CreateBaseTypeOption,
-    CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement, CreateCompositeTypeStatement,
-    CreateShellTypeStatement, CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement,
-    DropCastStatement, DropTriggerStatement, DropTypeStatement, ForeignKeyAction,
-    ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef, InsertSource, InsertStatement,
-    JoinTreeNode, OverridingKind, PartitionStrategy, PublicationObjectSpec, PublicationOption,
-    PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
-    RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
-    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
-    TriggerReferencingSpec, TriggerTiming, ViewCheckOption,
+    AlterColumnIdentityAction, AlterGenericOptionAction, AlterTableTriggerMode,
+    AlterTableTriggerStateStatement, AlterTableTriggerTarget, AlterTriggerRenameStatement,
+    AlterTypeSetOptionsStatement, CastContext, ColumnConstraint, ColumnGeneratedKind,
+    ColumnIdentityKind, CommentOnAggregateStatement, CommentOnColumnStatement,
+    CommentOnFunctionStatement, CommentOnOperatorStatement, CommentOnTypeStatement,
+    CommentOnViewStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
+    CreateBaseTypeOption, CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement,
+    CreateCompositeTypeStatement, CreateShellTypeStatement, CreateTriggerStatement,
+    CreateTypeStatement, DropAggregateStatement, DropCastStatement, DropTriggerStatement,
+    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef,
+    InsertSource, InsertStatement, JoinTreeNode, OverridingKind, PartitionStrategy,
+    PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
+    RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
+    SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec,
+    TriggerLevel, TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -1625,6 +1625,8 @@ fn visible_catalog_without_text_input_cast(
         base.collation_rows(),
         base.foreign_data_wrapper_rows(),
         base.foreign_server_rows(),
+        base.foreign_table_rows(),
+        base.user_mapping_rows(),
         base.database_rows(),
         base.tablespace_rows(),
         base.statistic_rows(),
@@ -1685,6 +1687,8 @@ fn visible_catalog_without_operator(
         base.collation_rows(),
         base.foreign_data_wrapper_rows(),
         base.foreign_server_rows(),
+        base.foreign_table_rows(),
+        base.user_mapping_rows(),
         base.database_rows(),
         base.tablespace_rows(),
         base.statistic_rows(),
@@ -1759,6 +1763,8 @@ fn visible_catalog_with_extra_opclasses(
         base.collation_rows(),
         base.foreign_data_wrapper_rows(),
         base.foreign_server_rows(),
+        base.foreign_table_rows(),
+        base.user_mapping_rows(),
         base.database_rows(),
         base.tablespace_rows(),
         base.statistic_rows(),
@@ -13171,6 +13177,72 @@ fn parse_foreign_data_wrapper_statements() {
     };
     assert_eq!(comment.fdw_name, "foo");
     assert_eq!(comment.comment.as_deref(), Some("hello"));
+
+    let Statement::CreateForeignServer(create_server) = parse_statement(
+        "create server if not exists srv type 'postgres' version '17' foreign data wrapper foo options (host 'localhost', dbname 'regression')",
+    )
+    .unwrap() else {
+        panic!("expected create server");
+    };
+    assert!(create_server.if_not_exists);
+    assert_eq!(create_server.server_name, "srv");
+    assert_eq!(create_server.fdw_name, "foo");
+    assert_eq!(create_server.server_type.as_deref(), Some("postgres"));
+    assert_eq!(create_server.version.as_deref(), Some("17"));
+    assert_eq!(
+        create_server.options,
+        vec![
+            RelOption {
+                name: "host".into(),
+                value: "localhost".into(),
+            },
+            RelOption {
+                name: "dbname".into(),
+                value: "regression".into(),
+            },
+        ]
+    );
+
+    let Statement::AlterForeignServer(alter_server) =
+        parse_statement("alter server srv version null options (set host '127.0.0.1')").unwrap()
+    else {
+        panic!("expected alter server");
+    };
+    assert_eq!(alter_server.server_name, "srv");
+    assert_eq!(alter_server.version, Some(None));
+    assert_eq!(alter_server.options.len(), 1);
+    assert_eq!(
+        alter_server.options[0].action,
+        AlterGenericOptionAction::Set
+    );
+    assert_eq!(alter_server.options[0].name, "host");
+    assert_eq!(alter_server.options[0].value.as_deref(), Some("127.0.0.1"));
+
+    let Statement::CreateUserMapping(create_mapping) = parse_statement(
+        "create user mapping if not exists for current_user server srv options (user 'alice')",
+    )
+    .unwrap() else {
+        panic!("expected create user mapping");
+    };
+    assert!(create_mapping.if_not_exists);
+    assert_eq!(create_mapping.user, UserMappingUser::CurrentUser);
+    assert_eq!(create_mapping.server_name, "srv");
+    assert_eq!(
+        create_mapping.options,
+        vec![RelOption {
+            name: "user".into(),
+            value: "alice".into(),
+        }]
+    );
+
+    let Statement::DropUserMapping(drop_mapping) =
+        parse_statement("drop user mapping if exists for public server srv").unwrap()
+    else {
+        panic!("expected drop user mapping");
+    };
+    assert!(drop_mapping.if_exists);
+    assert_eq!(drop_mapping.user, UserMappingUser::Public);
+    assert_eq!(drop_mapping.server_name, "srv");
 }
 
 #[test]

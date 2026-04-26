@@ -5596,9 +5596,6 @@ impl Session {
             Statement::CreateForeignServer(ref create_stmt) => {
                 db.execute_create_foreign_server_stmt(client_id, create_stmt)
             }
-            Statement::AlterForeignServerRename(ref alter_stmt) => {
-                db.execute_alter_foreign_server_rename_stmt(client_id, alter_stmt)
-            }
             Statement::CreateLanguage(ref create_stmt) => {
                 db.execute_create_language_stmt(client_id, create_stmt)
             }
@@ -5607,6 +5604,9 @@ impl Session {
             }
             Statement::DropLanguage(ref drop_stmt) => {
                 db.execute_drop_language_stmt(client_id, drop_stmt)
+            }
+            Statement::CreateUserMapping(ref create_stmt) => {
+                db.execute_create_user_mapping_stmt(client_id, create_stmt)
             }
             Statement::CreateForeignTable(ref create_stmt) => {
                 let search_path = self.configured_search_path();
@@ -5634,8 +5634,26 @@ impl Session {
             Statement::AlterForeignDataWrapperRename(ref alter_stmt) => {
                 db.execute_alter_foreign_data_wrapper_rename_stmt(client_id, alter_stmt)
             }
+            Statement::AlterForeignServer(ref alter_stmt) => {
+                db.execute_alter_foreign_server_stmt(client_id, alter_stmt)
+            }
+            Statement::AlterForeignServerOwner(ref alter_stmt) => {
+                db.execute_alter_foreign_server_owner_stmt(client_id, alter_stmt)
+            }
+            Statement::AlterForeignServerRename(ref alter_stmt) => {
+                db.execute_alter_foreign_server_rename_stmt(client_id, alter_stmt)
+            }
+            Statement::AlterUserMapping(ref alter_stmt) => {
+                db.execute_alter_user_mapping_stmt(client_id, alter_stmt)
+            }
             Statement::DropForeignDataWrapper(ref drop_stmt) => {
                 db.execute_drop_foreign_data_wrapper_stmt(client_id, drop_stmt)
+            }
+            Statement::DropForeignServer(ref drop_stmt) => {
+                db.execute_drop_foreign_server_stmt(client_id, drop_stmt)
+            }
+            Statement::DropUserMapping(ref drop_stmt) => {
+                db.execute_drop_user_mapping_stmt(client_id, drop_stmt)
             }
             Statement::CreatePublication(ref create_stmt) => {
                 let search_path = self.configured_search_path();

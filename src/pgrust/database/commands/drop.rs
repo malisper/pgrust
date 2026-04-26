@@ -315,9 +315,14 @@ fn is_drop_table_relkind(relkind: char) -> bool {
     matches!(relkind, 'r' | 'p')
 }
 
+fn is_drop_foreign_table_relkind(relkind: char) -> bool {
+    relkind == 'f'
+}
+
 fn drop_table_relation_kind_name(relkind: char) -> &'static str {
     match relkind {
         'c' => "type",
+        'f' => "foreign table",
         'm' => "materialized view",
         'p' => "table",
         'S' => "sequence",
@@ -1662,11 +1667,23 @@ impl Database {
 
         for relation_name in &drop_stmt.table_names {
             let relation = match catalog.lookup_any_relation(relation_name) {
-                Some(relation) if is_drop_table_relkind(relation.relkind) => relation,
+                Some(relation)
+                    if if drop_stmt.foreign_table {
+                        is_drop_foreign_table_relkind(relation.relkind)
+                    } else {
+                        is_drop_table_relkind(relation.relkind)
+                    } =>
+                {
+                    relation
+                }
                 Some(_) => {
                     return Err(ExecError::Parse(ParseError::WrongObjectType {
                         name: relation_name.clone(),
-                        expected: "table",
+                        expected: if drop_stmt.foreign_table {
+                            "foreign table"
+                        } else {
+                            "table"
+                        },
                     }));
                 }
                 None if drop_stmt.if_exists => continue,

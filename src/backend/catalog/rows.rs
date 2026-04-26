@@ -7,13 +7,13 @@ use crate::include::catalog::{
     BootstrapCatalogKind, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID, PgAggregateRow, PgAmRow,
     PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
     PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow,
-    PgDescriptionRow, PgForeignDataWrapperRow, PgForeignServerRow, PgIndexRow, PgInheritsRow,
+    PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow,
     PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
     PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
     PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
     PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_row_by_oid,
-    composite_array_type_row, composite_type_row,
+    PgTsTemplateRow, PgTypeRow, PgUserMappingRow, bootstrap_composite_type_rows,
+    builtin_type_row_by_oid, composite_array_type_row, composite_type_row,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -28,6 +28,8 @@ pub(crate) struct PhysicalCatalogRows {
     pub descriptions: Vec<PgDescriptionRow>,
     pub foreign_data_wrappers: Vec<PgForeignDataWrapperRow>,
     pub foreign_servers: Vec<PgForeignServerRow>,
+    pub foreign_tables: Vec<PgForeignTableRow>,
+    pub user_mappings: Vec<PgUserMappingRow>,
     pub indexes: Vec<PgIndexRow>,
     pub rewrites: Vec<PgRewriteRow>,
     pub triggers: Vec<PgTriggerRow>,
@@ -131,6 +133,7 @@ pub(crate) fn drop_relation_sync_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgDepend,
         BootstrapCatalogKind::PgInherits,
         BootstrapCatalogKind::PgPartitionedTable,
+        BootstrapCatalogKind::PgForeignTable,
         BootstrapCatalogKind::PgDescription,
         BootstrapCatalogKind::PgIndex,
         BootstrapCatalogKind::PgRewrite,
@@ -155,6 +158,7 @@ pub(crate) fn drop_relation_delete_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgClass,
         BootstrapCatalogKind::PgDepend,
         BootstrapCatalogKind::PgInherits,
+        BootstrapCatalogKind::PgForeignTable,
         BootstrapCatalogKind::PgDescription,
         BootstrapCatalogKind::PgRewrite,
         BootstrapCatalogKind::PgTrigger,
@@ -183,6 +187,8 @@ pub(crate) fn extend_physical_catalog_rows(
         .foreign_data_wrappers
         .extend(source.foreign_data_wrappers);
     target.foreign_servers.extend(source.foreign_servers);
+    target.foreign_tables.extend(source.foreign_tables);
+    target.user_mappings.extend(source.user_mappings);
     target.indexes.extend(source.indexes);
     target.rewrites.extend(source.rewrites);
     target.triggers.extend(source.triggers);
@@ -235,6 +241,8 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         descriptions,
         foreign_data_wrappers: catcache.foreign_data_wrapper_rows(),
         foreign_servers: catcache.foreign_server_rows(),
+        foreign_tables: catcache.foreign_table_rows(),
+        user_mappings: catcache.user_mapping_rows(),
         indexes: catcache.index_rows(),
         rewrites: catcache.rewrite_rows(),
         triggers: catcache.trigger_rows(),

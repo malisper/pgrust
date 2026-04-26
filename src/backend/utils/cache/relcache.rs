@@ -1361,6 +1361,8 @@ mod tests {
             rows.collations,
             rows.foreign_data_wrappers,
             rows.foreign_servers,
+            rows.foreign_tables,
+            rows.user_mappings,
             rows.databases,
             rows.tablespaces,
             rows.statistics,
