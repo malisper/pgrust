@@ -9735,7 +9735,8 @@ fn create_index_and_alter_table_set_are_noops() {
             if name == "num_exp_add_idx"
                 && (expected == "table"
                     || expected == "table, view, or sequence"
-                    || expected == "table, view, materialized view, or sequence") => {}
+                    || expected == "table, view, materialized view, or sequence"
+                    || expected == "table, view, materialized view, sequence, or TOAST table") => {}
         other => panic!("expected missing-table or wrong-object-type error, got {other:?}"),
     }
 
