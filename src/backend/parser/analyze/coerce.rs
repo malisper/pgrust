@@ -76,6 +76,28 @@ fn lower_special_cast(expr: &Expr, from: SqlType, to: SqlType) -> Option<Expr> {
             vec![expr.clone()],
         ));
     }
+    if matches!(from.element_type().kind, SqlTypeKind::Char)
+        && matches!(to.element_type().kind, SqlTypeKind::Varchar)
+        && !from.is_array
+        && !to.is_array
+    {
+        let trimmed = Expr::builtin_func(
+            BuiltinScalarFunction::BpcharToText,
+            Some(SqlType::new(SqlTypeKind::Text)),
+            false,
+            vec![expr.clone()],
+        );
+        return Some(if text_typmod_coercion_is_required(from, to) {
+            Expr::Cast(Box::new(trimmed), to)
+        } else {
+            Expr::builtin_func(
+                BuiltinScalarFunction::BpcharToText,
+                Some(to),
+                false,
+                vec![expr.clone()],
+            )
+        });
+    }
     if matches!(
         from.element_type().kind,
         SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar

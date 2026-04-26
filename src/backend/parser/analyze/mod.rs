@@ -4933,6 +4933,29 @@ fn set_operation_target_is_unknown_string_literal(stmt: &SelectStatement, index:
     })
 }
 
+fn set_operation_order_by_error_with_input_detail(err: ParseError, inputs: &[Query]) -> ParseError {
+    let ParseError::UnknownColumn(name) = err else {
+        return err;
+    };
+    let Some((input_index, _)) = inputs.iter().enumerate().skip(1).find(|(_, query)| {
+        query
+            .target_list
+            .iter()
+            .any(|target| target.name.eq_ignore_ascii_case(&name))
+    }) else {
+        return ParseError::UnknownColumn(name);
+    };
+    ParseError::DetailedError {
+        message: format!("column \"{name}\" does not exist"),
+        detail: Some(format!(
+            "There is a column named \"{name}\" in table \"*SELECT* {}\", but it cannot be referenced from this part of the query.",
+            input_index + 1
+        )),
+        hint: None,
+        sqlstate: "42703",
+    }
+}
+
 fn bind_set_operation_query_with_outer(
     stmt: &SelectStatement,
     catalog: &dyn CatalogLookup,
@@ -4987,39 +5010,53 @@ fn bind_set_operation_query_with_outer(
 
     let mut output_types = Vec::with_capacity(width);
     for index in 0..width {
-        let mut common = None;
-        let mut common_is_unknown = false;
-        for (input_stmt, query) in set_operation.inputs.iter().zip(inputs.iter()) {
-            let target = &query.target_list[index];
-            if matches!(target.expr, Expr::Const(Value::Null)) {
+        let mut column_types = inputs
+            .iter()
+            .map(|query| query.target_list[index].sql_type)
+            .collect::<Vec<_>>();
+        for input_index in 0..column_types.len() {
+            let Some(raw_expr) = set_operation.inputs[input_index]
+                .targets
+                .get(index)
+                .map(|target| &target.expr)
+            else {
                 continue;
-            }
-            let next = target.sql_type;
-            let next_is_unknown = set_operation_target_is_unknown_string_literal(input_stmt, index);
-            common = Some(match common {
-                None => {
-                    common_is_unknown = next_is_unknown;
-                    next
-                }
-                Some(_) if next_is_unknown => continue,
-                Some(_) if common_is_unknown => {
-                    common_is_unknown = false;
-                    next
-                }
-                Some(current) => resolve_common_scalar_type(current, next).ok_or_else(|| {
-                    ParseError::UnexpectedToken {
-                        expected: "set-operation column types with a common type",
-                        actual: format!(
-                            "set-operation column {} has types {} and {}",
-                            index + 1,
-                            sql_type_name(current),
-                            sql_type_name(next)
-                        ),
-                    }
-                })?,
-            });
+            };
+            let Some(peer_type) = column_types
+                .iter()
+                .enumerate()
+                .find(|(peer_index, peer_type)| {
+                    *peer_index != input_index && !is_text_like_type(**peer_type)
+                })
+                .or_else(|| {
+                    column_types
+                        .iter()
+                        .enumerate()
+                        .find(|(peer_index, _)| *peer_index != input_index)
+                })
+                .map(|(_, peer_type)| *peer_type)
+            else {
+                continue;
+            };
+            column_types[input_index] =
+                coerce_unknown_string_literal_type(raw_expr, column_types[input_index], peer_type);
         }
-        output_types.push(common.unwrap_or_else(|| SqlType::new(SqlTypeKind::Text)));
+
+        let mut common = column_types[0];
+        for next in column_types.iter().copied().skip(1) {
+            common = resolve_common_scalar_type(common, next).ok_or_else(|| {
+                ParseError::UnexpectedToken {
+                    expected: "set-operation column types with a common type",
+                    actual: format!(
+                        "set-operation column {} has types {} and {}",
+                        index + 1,
+                        sql_type_name(common),
+                        sql_type_name(next)
+                    ),
+                }
+            })?;
+        }
+        output_types.push(common);
     }
 
     for query in &mut inputs {
@@ -5076,6 +5113,7 @@ fn bind_set_operation_query_with_outer(
                 grouped_outer.as_ref(),
                 visible_ctes,
             )
+            .map_err(|err| set_operation_order_by_error_with_input_detail(err, &inputs))
         })?
     };
     let sort_clause = build_sort_clause(sort_inputs, &target_list);

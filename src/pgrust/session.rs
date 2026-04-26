@@ -1065,6 +1065,12 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         "track_functions" => Some("none"),
         "stats_fetch_consistency" => Some("cache"),
         "restrict_nonsystem_relation_kind" => Some(""),
+        "enable_seqscan"
+        | "enable_indexscan"
+        | "enable_indexonlyscan"
+        | "enable_bitmapscan"
+        | "enable_hashagg"
+        | "enable_sort" => Some("on"),
         _ => None,
     }
 }
@@ -1455,6 +1461,16 @@ impl Session {
             enable_bitmapscan: self
                 .gucs
                 .get("enable_bitmapscan")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            enable_hashagg: self
+                .gucs
+                .get("enable_hashagg")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            enable_sort: self
+                .gucs
+                .get("enable_sort")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
         }
@@ -7228,6 +7244,8 @@ impl Session {
                 | "enable_indexscan"
                 | "enable_indexonlyscan"
                 | "enable_bitmapscan"
+                | "enable_hashagg"
+                | "enable_sort"
         ) {
             db.plan_cache.invalidate_all();
         }
@@ -7478,7 +7496,9 @@ impl Session {
             | "enable_seqscan"
             | "enable_indexscan"
             | "enable_indexonlyscan"
-            | "enable_bitmapscan" => {
+            | "enable_bitmapscan"
+            | "enable_hashagg"
+            | "enable_sort" => {
                 parse_bool_guc(value).ok_or_else(|| {
                     ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
                 })?;
