@@ -190,6 +190,7 @@ fn analyze_executor_context(
         lock_status_provider: Some(Arc::new(db.clone())),
         sequences: Some(db.sequences.clone()),
         large_objects: Some(db.large_objects.clone()),
+        stats_import_runtime: None,
         async_notify_runtime: Some(db.async_notify_runtime.clone()),
         advisory_locks: Arc::clone(&db.advisory_locks),
         row_locks: Arc::clone(&db.row_locks),
@@ -220,6 +221,8 @@ fn analyze_executor_context(
         system_bindings: Vec::new(),
         subplans: Vec::new(),
         pending_async_notifications: Vec::new(),
+        pending_catalog_effects: Vec::new(),
+        pending_table_locks: Vec::new(),
         catalog: visible_catalog,
         compiled_functions: HashMap::new(),
         cte_tables: HashMap::new(),
@@ -1454,6 +1457,64 @@ fn query_rows(db: &Database, client_id: u32, sql: &str) -> Vec<Vec<Value>> {
         StatementResult::Query { rows, .. } => rows,
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn stats_import_restores_and_clears_relation_stats() {
+    let db = Database::open_ephemeral(64).expect("open ephemeral database");
+    db.execute(1, "create schema stats_import").unwrap();
+    db.execute(
+        1,
+        "create table stats_import.test(id integer primary key, name text)",
+    )
+    .unwrap();
+
+    let restore_rows = query_rows(
+        &db,
+        1,
+        "select pg_catalog.pg_restore_relation_stats(
+                'schemaname', 'stats_import',
+                'relname', 'test',
+                'relpages', 18::integer,
+                'reltuples', 21::real,
+                'relallvisible', 24::integer,
+                'relallfrozen', 27::integer)",
+    );
+    let notices = take_backend_notices();
+    assert_eq!(restore_rows, vec![vec![Value::Bool(true)]], "{notices:?}");
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relpages, reltuples, relallvisible, relallfrozen
+             from pg_class
+             where oid = 'stats_import.test'::regclass",
+        ),
+        vec![vec![
+            Value::Int32(18),
+            Value::Float64(21.0),
+            Value::Int32(24),
+            Value::Int32(27),
+        ]]
+    );
+
+    db.execute(1, "select pg_clear_relation_stats('stats_import', 'test')")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relpages, reltuples, relallvisible, relallfrozen
+             from pg_class
+             where oid = 'stats_import.test'::regclass",
+        ),
+        vec![vec![
+            Value::Int32(0),
+            Value::Float64(-1.0),
+            Value::Int32(0),
+            Value::Int32(0),
+        ]]
+    );
 }
 
 #[test]
@@ -12274,7 +12335,7 @@ fn alter_index_alter_column_set_statistics_updates_expression_column_and_resets(
             1,
             "select attstattarget from pg_attribute \
              where attrelid = (select oid from pg_class where relname = 'attmp_idx') \
-               and attname = 'expr2'",
+               and attname = 'expr'",
         ),
         vec![vec![Value::Int16(1000)]]
     );
@@ -12287,7 +12348,7 @@ fn alter_index_alter_column_set_statistics_updates_expression_column_and_resets(
             1,
             "select attstattarget from pg_attribute \
              where attrelid = (select oid from pg_class where relname = 'attmp_idx') \
-               and attname = 'expr2'",
+               and attname = 'expr'",
         ),
         vec![vec![Value::Int16(-1)]]
     );
@@ -12402,7 +12463,7 @@ fn alter_index_and_table_set_statistics_clamp_and_emit_warning() {
             1,
             "select attstattarget from pg_attribute \
              where attrelid = (select oid from pg_class where relname = 'attmp_idx') \
-               and attname = 'expr2'",
+               and attname = 'expr'",
         ),
         vec![vec![Value::Int16(10000)]]
     );

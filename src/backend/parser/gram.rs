@@ -15152,7 +15152,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::SessionUser => "session_user".to_string(),
         SqlExpr::CurrentRole => "current_role".to_string(),
         SqlExpr::AtTimeZone { .. } => "timezone".to_string(),
-        SqlExpr::FuncCall { name, .. } => name.clone(),
+        SqlExpr::FuncCall { name, .. } => name.rsplit('.').next().unwrap_or(name).to_string(),
         _ => "?column?".to_string(),
     }
 }

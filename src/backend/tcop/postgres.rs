@@ -5381,7 +5381,10 @@ fn select_sql_requires_command_end_xid_handling(sql: &str) -> bool {
     // through Session::execute until SelectGuard owns that finalization.
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        regex::Regex::new(r"(?i)\b(txid_current|pg_current_xact_id)\s*\(").unwrap()
+        regex::Regex::new(
+            r"(?i)\b(txid_current|pg_current_xact_id|pg_restore_relation_stats|pg_clear_relation_stats|pg_restore_attribute_stats|pg_clear_attribute_stats)\s*\(",
+        )
+        .unwrap()
     });
     re.is_match(sql)
 }

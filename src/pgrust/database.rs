@@ -13,6 +13,7 @@ pub(crate) mod foreign_keys;
 mod large_objects;
 mod relation_refs;
 mod sequences;
+mod stats_import;
 mod temp;
 mod toast;
 mod txn;

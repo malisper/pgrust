@@ -226,6 +226,7 @@ fn is_drop_table_relkind(relkind: char) -> bool {
 
 fn drop_table_relation_kind_name(relkind: char) -> &'static str {
     match relkind {
+        'c' => "type",
         'm' => "materialized view",
         'p' => "table",
         'S' => "sequence",
@@ -1062,7 +1063,23 @@ impl Database {
             .collect::<Vec<_>>();
         let mut next_cid = cid;
 
-        for relation in relation_rows {
+        let mut relation_rows_by_drop_order = relation_rows
+            .iter()
+            .filter(|row| row.relkind != 'c')
+            .cloned()
+            .collect::<Vec<_>>();
+        relation_rows_by_drop_order.extend(
+            relation_rows
+                .iter()
+                .filter(|row| row.relkind == 'c')
+                .cloned(),
+        );
+
+        let mut dropped_relation_oids = BTreeSet::new();
+        for relation in relation_rows_by_drop_order {
+            if dropped_relation_oids.contains(&relation.oid) {
+                continue;
+            }
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),
@@ -1073,6 +1090,11 @@ impl Database {
                 interrupts: Arc::clone(&interrupts),
             };
             let drop_result = match relation.relkind {
+                'c' => self
+                    .catalog
+                    .write()
+                    .drop_composite_type_by_oid_mvcc(relation.oid, &ctx)
+                    .map(|(entry, effect)| (vec![entry], effect)),
                 'v' => self
                     .catalog
                     .write()
@@ -1089,6 +1111,7 @@ impl Database {
                     .drop_relation_by_oid_mvcc(relation.oid, &ctx),
             };
             let (dropped_relations, effect) = drop_result.map_err(map_catalog_error)?;
+            dropped_relation_oids.extend(dropped_relations.iter().map(|entry| entry.relation_oid));
             if relation.relkind != 'v' {
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
             }
@@ -1708,11 +1731,12 @@ impl Database {
                     .role_by_oid(auth.current_user_oid())
                     .map(|row| row.rolname.as_str())
                     .unwrap_or("");
+                let mut notices = Vec::new();
                 for relation in relation_rows
                     .iter()
-                    .filter(|row| matches!(row.relkind, 'r' | 'p' | 'm' | 'S' | 'v'))
+                    .filter(|row| matches!(row.relkind, 'c' | 'r' | 'p' | 'm' | 'S' | 'v'))
                 {
-                    push_notice(format!(
+                    notices.push(format!(
                         "drop cascades to {} {}",
                         drop_table_relation_kind_name(relation.relkind),
                         drop_schema_display_relation_name(
@@ -1721,6 +1745,14 @@ impl Database {
                             current_role_name
                         )
                     ));
+                }
+                match notices.as_slice() {
+                    [] => {}
+                    [notice] => push_notice(notice.clone()),
+                    notices => push_notice_with_detail(
+                        format!("drop cascades to {} other objects", notices.len()),
+                        notices.join("\n"),
+                    ),
                 }
             }
             if has_relations || has_procs {

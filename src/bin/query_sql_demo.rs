@@ -192,6 +192,7 @@ fn main() -> Result<(), ExecError> {
         lock_status_provider: None,
         sequences: None,
         large_objects: None,
+        stats_import_runtime: None,
         async_notify_runtime: None,
         checkpoint_stats:
             pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -218,6 +219,8 @@ fn main() -> Result<(), ExecError> {
         timed: false,
         allow_side_effects: false,
         pending_async_notifications: Vec::new(),
+        pending_catalog_effects: Vec::new(),
+        pending_table_locks: Vec::new(),
         catalog: relcache.materialize_visible_catalog(),
         compiled_functions: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
