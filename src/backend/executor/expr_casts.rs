@@ -21,6 +21,10 @@ use super::expr_multirange::{
 use super::expr_network::{parse_cidr_text, parse_inet_text};
 use super::expr_range::{parse_range_text, render_range_text_with_config};
 use super::expr_reg;
+use super::expr_string::{
+    eval_pg_rust_test_int44in, eval_pg_rust_test_int44out, eval_pg_rust_test_widget_in,
+    eval_pg_rust_test_widget_out,
+};
 use super::expr_txid::{cast_text_to_txid_snapshot, is_txid_snapshot_type_oid};
 use super::node_types::*;
 use crate::backend::executor::jsonb::{
@@ -30,6 +34,7 @@ use crate::backend::executor::jsonb::{
 use crate::backend::libpq::pqformat::{FloatFormatOptions, format_float4_text, format_float8_text};
 use crate::backend::parser::{
     CatalogLookup, ParseError, RawTypeName, SqlType, SqlTypeKind, parse_type_name,
+    resolve_raw_type_name,
 };
 use crate::backend::utils::misc::guc_datetime::{DateTimeConfig, IntervalStyle};
 use crate::backend::utils::time::date::{
@@ -2694,6 +2699,14 @@ impl<'a> ArrayTextParser<'a> {
         if matches!(self.element_type.kind, SqlTypeKind::Enum) {
             return cast_text_to_enum(text, self.element_type, self.catalog);
         }
+        if let Some(result) = eval_user_defined_type_input(
+            text,
+            self.element_type,
+            self.catalog,
+            &DateTimeConfig::default(),
+        )? {
+            return Ok(result);
+        }
         cast_text_value(text, self.element_type, self.explicit)
     }
 
@@ -2770,6 +2783,11 @@ fn parse_input_type_name(
         Ok(ty) => ty,
         Err(_) => return Ok(None),
     };
+    if let Some(catalog) = catalog
+        && let Ok(ty) = resolve_raw_type_name(&parsed, catalog)
+    {
+        return Ok(Some(ty).filter(|ty| input_type_name_supported(*ty, Some(catalog))));
+    }
     let resolved = match parsed {
         RawTypeName::Builtin(ty) => Some(ty),
         RawTypeName::Named { name, array_bounds } => {
@@ -2804,10 +2822,16 @@ fn parse_input_type_name(
         }
         RawTypeName::Serial(_) | RawTypeName::Record => None,
     };
-    Ok(resolved.filter(|ty| input_type_name_supported(*ty)))
+    Ok(resolved.filter(|ty| input_type_name_supported(*ty, catalog)))
 }
 
-fn input_type_name_supported(parsed: SqlType) -> bool {
+fn input_type_name_supported(parsed: SqlType, catalog: Option<&dyn CatalogLookup>) -> bool {
+    if uses_user_defined_input_function(parsed, catalog) {
+        return true;
+    }
+    if !parsed.is_array && matches!(parsed.kind, SqlTypeKind::Composite) && parsed.typrelid != 0 {
+        return true;
+    }
     if !parsed.is_array
         && matches!(
             parsed.kind,
@@ -2826,6 +2850,187 @@ fn input_type_name_supported(parsed: SqlType) -> bool {
         return false;
     };
     explicit_text_input_target_oids().contains(&type_oid)
+}
+
+fn uses_user_defined_input_function(ty: SqlType, catalog: Option<&dyn CatalogLookup>) -> bool {
+    if ty.is_array {
+        return uses_user_defined_input_function(ty.element_type(), catalog);
+    }
+    user_defined_base_type_row(ty, catalog).is_some()
+}
+
+fn user_defined_base_type_row(
+    ty: SqlType,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Option<crate::include::catalog::PgTypeRow> {
+    let catalog = catalog?;
+    if ty.type_oid == 0 || matches!(ty.kind, SqlTypeKind::Shell) {
+        return None;
+    }
+    let row = catalog.type_by_oid(ty.type_oid)?;
+    if row.typinput == 0 || row.typrelid != 0 || row.sql_type.is_array {
+        return None;
+    }
+    if builtin_type_rows()
+        .into_iter()
+        .any(|builtin| builtin.oid == row.oid)
+    {
+        return None;
+    }
+    Some(row)
+}
+
+fn eval_user_defined_type_input(
+    text: &str,
+    ty: SqlType,
+    catalog: Option<&dyn CatalogLookup>,
+    _config: &DateTimeConfig,
+) -> Result<Option<Value>, ExecError> {
+    let Some(row) = user_defined_base_type_row(ty, catalog) else {
+        return Ok(None);
+    };
+    let Some(proc_row) = catalog.and_then(|catalog| catalog.proc_row_by_oid(row.typinput)) else {
+        return Ok(Some(Value::Text(CompactString::new(text))));
+    };
+    let names = [proc_row.prosrc.as_str(), proc_row.proname.as_str()];
+    if proc_name_matches(&names, &["widget_in", "pg_rust_test_widget_in"]) {
+        return eval_pg_rust_test_widget_in(&[Value::Text(text.into())]).map(Some);
+    }
+    if proc_name_matches(&names, &["widget_out", "pg_rust_test_widget_out"]) {
+        return eval_pg_rust_test_widget_out(&[Value::Text(text.into())]).map(Some);
+    }
+    if proc_name_matches(&names, &["int44in", "pg_rust_test_int44in"]) {
+        return eval_pg_rust_test_int44in(&[Value::Text(text.into())]).map(Some);
+    }
+    if proc_name_matches(&names, &["int44out", "pg_rust_test_int44out"]) {
+        return eval_pg_rust_test_int44out(&[Value::Text(text.into())]).map(Some);
+    }
+    if proc_name_matches(&names, &["int4in"]) {
+        let value = cast_text_to_int4(text)?;
+        let Value::Int32(value) = value else {
+            unreachable!("int4 input must produce int4 datum");
+        };
+        return Ok(Some(Value::Text(CompactString::from_owned(
+            value.to_string(),
+        ))));
+    }
+    if proc_name_matches(&names, &["textin", "textout"]) {
+        return Ok(Some(Value::Text(CompactString::new(text))));
+    }
+    if proc_name_matches(&names, &["varcharin", "varcharout"]) {
+        return Ok(Some(Value::Text(CompactString::from_owned(
+            coerce_character_string(
+                text,
+                SqlType::new(SqlTypeKind::Varchar).with_typmod(ty.typmod),
+                false,
+            )?,
+        ))));
+    }
+    if proc_name_matches(&names, &["boolin"]) {
+        let value = parse_pg_bool_text(text)?;
+        return Ok(Some(Value::Text(CompactString::new(if value {
+            "t"
+        } else {
+            "f"
+        }))));
+    }
+    Ok(Some(Value::Text(CompactString::new(text))))
+}
+
+fn proc_name_matches(names: &[&str], candidates: &[&str]) -> bool {
+    names.iter().any(|name| {
+        candidates
+            .iter()
+            .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    })
+}
+
+fn validate_composite_text_input(
+    text: &str,
+    ty: SqlType,
+    catalog: Option<&dyn CatalogLookup>,
+    config: &DateTimeConfig,
+) -> Result<(), ExecError> {
+    let Some(catalog) = catalog else {
+        return Err(unsupported_record_input());
+    };
+    let relation = catalog
+        .relation_by_oid(ty.typrelid)
+        .or_else(|| catalog.lookup_relation_by_oid(ty.typrelid))
+        .ok_or_else(unsupported_record_input)?;
+    let fields = parse_composite_literal_fields(text)?;
+    let columns = relation
+        .desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .collect::<Vec<_>>();
+    if fields.len() != columns.len() {
+        return Err(ExecError::DetailedError {
+            message: "malformed record literal".into(),
+            detail: Some(format!(
+                "record literal has {} fields but type expects {}",
+                fields.len(),
+                columns.len()
+            )),
+            hint: None,
+            sqlstate: "22P02",
+        });
+    }
+    for (column, raw) in columns.into_iter().zip(fields) {
+        if let Some(raw) = raw {
+            cast_value_with_source_type_catalog_and_config(
+                Value::Text(raw.into()),
+                Some(SqlType::new(SqlTypeKind::Text)),
+                column.sql_type,
+                Some(catalog),
+                config,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn parse_composite_literal_fields(text: &str) -> Result<Vec<Option<String>>, ExecError> {
+    let body = text
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "malformed record literal".into(),
+            detail: Some(format!("missing left parenthesis in \"{text}\"")),
+            hint: None,
+            sqlstate: "22P02",
+        })?;
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    for ch in body.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                fields.push((!current.is_empty()).then(|| current.clone()));
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if quoted {
+        return Err(ExecError::DetailedError {
+            message: "malformed record literal".into(),
+            detail: Some(format!("unterminated quoted string in \"{text}\"")),
+            hint: None,
+            sqlstate: "22P02",
+        });
+    }
+    fields.push((!current.is_empty()).then_some(current));
+    Ok(fields)
 }
 
 pub(crate) fn render_pg_lsn_text(value: u64) -> String {
@@ -3201,6 +3406,20 @@ pub(crate) fn soft_input_error_info_with_catalog_and_config(
             details: format!("unsupported type: {type_name}"),
         }
     })?;
+    if uses_user_defined_input_function(ty, catalog) {
+        cast_value_with_source_type_catalog_and_config(
+            Value::Text(text.into()),
+            Some(SqlType::new(SqlTypeKind::Text)),
+            ty,
+            catalog,
+            config,
+        )?;
+        return Ok(None);
+    }
+    if !ty.is_array && matches!(ty.kind, SqlTypeKind::Composite) && ty.typrelid != 0 {
+        validate_composite_text_input(text, ty, catalog, config)?;
+        return Ok(None);
+    }
     if !ty.is_array
         && matches!(
             ty.kind,
@@ -3487,6 +3706,11 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         if let Some(text) = value.as_text() {
             return cast_text_to_enum(text, ty, catalog);
         }
+    }
+    if let Some(text) = value.as_text()
+        && let Some(result) = eval_user_defined_type_input(text, ty, catalog, config)?
+    {
+        return Ok(result);
     }
     if matches!(ty.kind, SqlTypeKind::Text)
         && !ty.is_array

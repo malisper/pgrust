@@ -2402,22 +2402,27 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_rust_test_widget_in",
             BuiltinScalarFunction::PgRustTestWidgetIn,
         ),
+        ("widget_in", BuiltinScalarFunction::PgRustTestWidgetIn),
         (
             "pg_rust_test_widget_out",
             BuiltinScalarFunction::PgRustTestWidgetOut,
         ),
+        ("widget_out", BuiltinScalarFunction::PgRustTestWidgetOut),
         (
             "pg_rust_test_int44in",
             BuiltinScalarFunction::PgRustTestInt44In,
         ),
+        ("int44in", BuiltinScalarFunction::PgRustTestInt44In),
         (
             "pg_rust_test_int44out",
             BuiltinScalarFunction::PgRustTestInt44Out,
         ),
+        ("int44out", BuiltinScalarFunction::PgRustTestInt44Out),
         (
             "pg_rust_test_pt_in_widget",
             BuiltinScalarFunction::PgRustTestPtInWidget,
         ),
+        ("pt_in_widget", BuiltinScalarFunction::PgRustTestPtInWidget),
         ("amvalidate", BuiltinScalarFunction::AmValidate),
         ("btequalimage", BuiltinScalarFunction::BtEqualImage),
         ("pg_notify", BuiltinScalarFunction::PgNotify),

@@ -330,6 +330,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if is_create_type_missing_subtype_diff_function(sql, message) {
                 return None;
             }
+            if message == "invalid NUMERIC type modifier" {
+                return find_type_name_before_typmod_position(sql);
+            }
             if let Some(position) = find_routine_error_position(sql, message) {
                 return Some(position);
             }
@@ -450,6 +453,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             }
             if is_create_type_missing_subtype_diff_function(sql, message) {
                 return None;
+            }
+            if message == "invalid NUMERIC type modifier" {
+                return find_type_name_before_typmod_position(sql);
             }
             if let Some(position) = find_routine_error_position(sql, message) {
                 return Some(position);
@@ -1119,6 +1125,96 @@ fn find_last_case_insensitive_token_position(sql: &str, token: &str) -> Option<u
         .map(|index| index + 1)
 }
 
+fn find_type_name_before_typmod_position(sql: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] != b'(' {
+            index += 1;
+            continue;
+        }
+
+        let mut after_open = index + 1;
+        while after_open < bytes.len() && bytes[after_open].is_ascii_whitespace() {
+            after_open += 1;
+        }
+        if after_open >= bytes.len()
+            || !(bytes[after_open].is_ascii_digit() || matches!(bytes[after_open], b'+' | b'-'))
+        {
+            index += 1;
+            continue;
+        }
+        let Some(close_offset) = sql[index + 1..].find(')') else {
+            return None;
+        };
+        let inside = &sql[index + 1..index + 1 + close_offset];
+        if !inside.contains(',') {
+            index += 1;
+            continue;
+        }
+
+        let mut end = index;
+        while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+            end -= 1;
+        }
+        let mut start = end;
+        while start > 0 && is_sql_identifier_byte(bytes[start - 1]) {
+            start -= 1;
+        }
+        if start < end {
+            return Some(start + 1);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_sql_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'.'
+}
+
+fn find_sql_identifier_token_position(sql: &str, token: &str) -> Option<usize> {
+    if token.is_empty() {
+        return None;
+    }
+    let sql_lower = sql.to_ascii_lowercase();
+    let token_lower = token.to_ascii_lowercase();
+    let mut search_from = 0usize;
+    while let Some(relative) = sql_lower[search_from..].find(&token_lower) {
+        let start = search_from + relative;
+        let end = start + token_lower.len();
+        let before = start.checked_sub(1).and_then(|idx| sql.as_bytes().get(idx));
+        let after = sql.as_bytes().get(end);
+        if !before.is_some_and(|byte| is_sql_identifier_byte(*byte))
+            && !after.is_some_and(|byte| is_sql_identifier_byte(*byte))
+        {
+            return Some(start + 1);
+        }
+        search_from = end;
+    }
+    None
+}
+
+fn infer_backend_notice_position(sql: &str, message: &str) -> Option<usize> {
+    if let Some(ty) = message
+        .strip_prefix("argument type ")
+        .and_then(|rest| rest.strip_suffix(" is only a shell"))
+    {
+        return find_sql_identifier_token_position(sql, ty);
+    }
+    if let Some(attribute) = message
+        .strip_prefix("type attribute \"")
+        .and_then(|rest| rest.strip_suffix("\" not recognized"))
+    {
+        let quoted = format!("\"{attribute}\"");
+        return sql
+            .find(&quoted)
+            .map(|index| index + 1)
+            .or_else(|| find_sql_identifier_token_position(sql, attribute));
+    }
+    None
+}
+
 struct ExecErrorResponse {
     message: String,
     detail: Option<String>,
@@ -1154,6 +1250,13 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
         context: exec_error_context(e),
         position: exec_error_position(sql, e),
     };
+    if sql.to_ascii_lowercase().contains("pg_input_is_valid(")
+        && response
+            .message
+            .starts_with("invalid input syntax for type ")
+    {
+        response.position = None;
+    }
 
     match response.message.as_str() {
         "unsafe use of string constant with Unicode escapes" => {
@@ -2176,7 +2279,7 @@ fn execute_query_statement(
             let namespace_names = namespace_name_map(&catalog);
             let enum_labels = enum_label_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
-            flush_pending_backend_messages(stream, db, &state.session)?;
+            flush_pending_backend_messages_with_sql(stream, db, &state.session, &sql)?;
             send_query_result(
                 stream,
                 &columns,
@@ -2196,13 +2299,13 @@ fn execute_query_statement(
             Ok(QueryStatementFlow::Continue)
         }
         Ok(StatementResult::AffectedRows(n)) => {
-            flush_pending_backend_messages(stream, db, &state.session)?;
+            flush_pending_backend_messages_with_sql(stream, db, &state.session, &sql)?;
             send_changed_parameter_status(stream, &sql, &state.session)?;
             send_command_complete(stream, &infer_command_tag(&sql, n))?;
             Ok(QueryStatementFlow::Continue)
         }
         Err(e) => {
-            send_queued_notices(stream)?;
+            send_queued_notices_with_sql(stream, Some(&sql))?;
             send_exec_error(stream, &sql, &e)?;
             Ok(QueryStatementFlow::Stop)
         }
@@ -2375,12 +2478,12 @@ fn execute_copy_to_statement(
     clear_notices();
     match execute_copy_to_payload(stream, db, state, copy_stmt) {
         Ok(row_count) => {
-            flush_pending_backend_messages(stream, db, &state.session)?;
+            flush_pending_backend_messages_with_sql(stream, db, &state.session, sql)?;
             send_command_complete(stream, &format!("COPY {row_count}"))?;
             Ok(QueryStatementFlow::Continue)
         }
         Err(e) => {
-            send_queued_notices(stream)?;
+            send_queued_notices_with_sql(stream, Some(sql))?;
             send_exec_error(stream, sql, &e)?;
             Ok(QueryStatementFlow::Stop)
         }
@@ -2468,12 +2571,12 @@ fn execute_streaming_select_statement(
             drop(guard);
 
             if let Some(e) = err {
-                send_queued_notices(stream)?;
+                send_queued_notices_with_sql(stream, Some(sql))?;
                 send_exec_error(stream, sql, &e)?;
                 return Ok(QueryStatementFlow::Stop);
             }
 
-            flush_pending_backend_messages(stream, db, &state.session)?;
+            flush_pending_backend_messages_with_sql(stream, db, &state.session, sql)?;
             if !header_sent {
                 send_row_description(stream, &columns)?;
             }
@@ -2481,7 +2584,7 @@ fn execute_streaming_select_statement(
             Ok(QueryStatementFlow::Continue)
         }
         Err(e) => {
-            send_queued_notices(stream)?;
+            send_queued_notices_with_sql(stream, Some(sql))?;
             send_exec_error(stream, sql, &e)?;
             Ok(QueryStatementFlow::Stop)
         }
@@ -5189,14 +5292,21 @@ fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> i
 }
 
 fn send_queued_notices(stream: &mut impl Write) -> io::Result<()> {
+    send_queued_notices_with_sql(stream, None)
+}
+
+fn send_queued_notices_with_sql(stream: &mut impl Write, sql: Option<&str>) -> io::Result<()> {
     for notice in take_backend_notices() {
+        let position = notice
+            .position
+            .or_else(|| sql.and_then(|sql| infer_backend_notice_position(sql, &notice.message)));
         send_notice_with_severity(
             stream,
             notice.severity,
             notice.sqlstate,
             &notice.message,
             notice.detail.as_deref(),
-            notice.position,
+            position,
         )?;
     }
     send_plpgsql_notices(stream, &take_notices())
@@ -5224,6 +5334,16 @@ fn flush_pending_backend_messages(
     session: &Session,
 ) -> io::Result<()> {
     send_queued_notices(stream)?;
+    send_queued_notifications(stream, db, session)
+}
+
+fn flush_pending_backend_messages_with_sql(
+    stream: &mut impl Write,
+    db: &Database,
+    session: &Session,
+    sql: &str,
+) -> io::Result<()> {
+    send_queued_notices_with_sql(stream, Some(sql))?;
     send_queued_notifications(stream, db, session)
 }
 

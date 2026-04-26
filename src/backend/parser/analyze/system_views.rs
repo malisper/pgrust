@@ -143,7 +143,21 @@ pub(super) fn bind_builtin_system_view(
                     Value::Int64(i64::from(row.typarray)),
                     Value::Int64(i64::from(row.typinput)),
                     Value::Int64(i64::from(row.typoutput)),
+                    Value::Int64(i64::from(row.typreceive)),
+                    Value::Int64(i64::from(row.typsend)),
+                    Value::Int64(i64::from(row.typmodin)),
                     Value::Int64(i64::from(row.typmodout)),
+                    Value::Int64(i64::from(row.typanalyze)),
+                    Value::Int64(i64::from(row.typsubscript)),
+                    match row.typacl {
+                        Some(values) => Value::Array(
+                            values
+                                .into_iter()
+                                .map(|value| Value::Text(value.into()))
+                                .collect(),
+                        ),
+                        None => Value::Null,
+                    },
                 ]
             })
             .collect(),
