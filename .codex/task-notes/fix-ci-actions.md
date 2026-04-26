@@ -21,3 +21,26 @@ scripts/cargo_isolated.sh check
 
 Remaining:
 query_repl.rs still has the existing unreachable-pattern warning during check.
+
+---
+
+Goal:
+Fix follow-up CI executor failures for ordered assignment indirection.
+
+Key decisions:
+Collapse contiguous subscript-only paths back through existing array/jsonb assignment helpers.
+Keep ordered field/subscript recursion for paths that still contain later fields.
+
+Files touched:
+src/backend/commands/tablecmds.rs
+
+Tests run:
+scripts/cargo_isolated.sh test --lib --quiet array_slice_assignment_uses_existing_bounds_for_omitted_limits
+scripts/cargo_isolated.sh test --lib --quiet array_slice_assignment_three_dimensional_serial_updates_match_postgres
+scripts/cargo_isolated.sh test --lib --quiet jsonb_subscript_assignment_updates_objects_arrays_and_nulls
+scripts/cargo_isolated.sh test --lib --quiet domain_composite_array_insert_assignments_navigate_base_type
+scripts/cargo_isolated.sh test --lib --quiet composite_field_array_assignment_uses_ordered_indirection
+scripts/cargo_isolated.sh check
+
+Remaining:
+query_repl.rs still has the existing unreachable-pattern warning during check.

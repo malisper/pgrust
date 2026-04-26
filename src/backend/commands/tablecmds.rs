@@ -4468,6 +4468,26 @@ enum ResolvedAssignmentIndirection {
     Field(String),
 }
 
+fn leading_assignment_subscripts(
+    indirection: &[ResolvedAssignmentIndirection],
+) -> (
+    Vec<ResolvedAssignmentSubscript>,
+    &[ResolvedAssignmentIndirection],
+) {
+    let split = indirection
+        .iter()
+        .position(|step| matches!(step, ResolvedAssignmentIndirection::Field(_)))
+        .unwrap_or(indirection.len());
+    let subscripts = indirection[..split]
+        .iter()
+        .filter_map(|step| match step {
+            ResolvedAssignmentIndirection::Subscript(subscript) => Some(subscript.clone()),
+            ResolvedAssignmentIndirection::Field(_) => None,
+        })
+        .collect();
+    (subscripts, &indirection[split..])
+}
+
 fn resolve_assignment_indirection(
     indirection: &[BoundAssignmentTargetIndirection],
     slot: &mut TupleSlot,
@@ -4567,8 +4587,9 @@ fn assign_typed_value_ordered(
             assign_record_field_ordered(current, sql_type, field, rest, replacement, ctx)
         }
         ResolvedAssignmentIndirection::Subscript(subscript) => {
+            let (leading_subscripts, after_subscripts) = leading_assignment_subscripts(indirection);
             if sql_type.kind == SqlTypeKind::Point && !sql_type.is_array {
-                if !rest.is_empty() {
+                if !after_subscripts.is_empty() || leading_subscripts.len() != 1 {
                     return Err(ExecError::DetailedError {
                         message: "cannot assign through a subscripted point value".into(),
                         detail: None,
@@ -4576,10 +4597,10 @@ fn assign_typed_value_ordered(
                         sqlstate: "42804",
                     });
                 }
-                return assign_point_value(current, std::slice::from_ref(subscript), replacement);
+                return assign_point_value(current, &leading_subscripts, replacement);
             }
             if sql_type.kind == SqlTypeKind::Jsonb && !sql_type.is_array {
-                if !rest.is_empty() {
+                if !after_subscripts.is_empty() {
                     return Err(ExecError::DetailedError {
                         message: "cannot assign through a subscripted jsonb value".into(),
                         detail: None,
@@ -4587,7 +4608,10 @@ fn assign_typed_value_ordered(
                         sqlstate: "42804",
                     });
                 }
-                return assign_jsonb_value(current, std::slice::from_ref(subscript), replacement);
+                return assign_jsonb_value(current, &leading_subscripts, replacement);
+            }
+            if after_subscripts.is_empty() {
+                return assign_array_value(current, &leading_subscripts, replacement);
             }
             assign_array_value_ordered(current, sql_type, subscript, rest, replacement, ctx)
         }
