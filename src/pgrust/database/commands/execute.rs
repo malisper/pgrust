@@ -595,6 +595,18 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableOf(ref alter_stmt) => self
+                .execute_alter_table_of_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTableNotOf(ref alter_stmt) => self
+                .execute_alter_table_not_of_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableAttachPartition(ref alter_stmt) => self
                 .execute_alter_table_attach_partition_stmt_with_search_path(
                     client_id,
@@ -721,6 +733,12 @@ impl Database {
                     rename_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateCast(ref create_stmt) => self
+                .execute_create_cast_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateOperator(ref create_stmt) => self
                 .execute_create_operator_stmt_with_search_path(
                     client_id,
@@ -789,6 +807,7 @@ impl Database {
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    stats_import_runtime: Some(std::sync::Arc::new(self.clone())),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     row_locks: std::sync::Arc::clone(&self.row_locks),
@@ -819,6 +838,8 @@ impl Database {
                     timed: false,
                     allow_side_effects: true,
                     pending_async_notifications: Vec::new(),
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1034,6 +1055,7 @@ impl Database {
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    stats_import_runtime: Some(std::sync::Arc::new(self.clone())),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     row_locks: std::sync::Arc::clone(&self.row_locks),
@@ -1064,6 +1086,8 @@ impl Database {
                     timed: false,
                     allow_side_effects: true,
                     pending_async_notifications: Vec::new(),
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: visible_catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1083,6 +1107,8 @@ impl Database {
                 };
                 let pending_async_notifications =
                     std::mem::take(&mut ctx.pending_async_notifications);
+                let pending_catalog_effects = std::mem::take(&mut ctx.pending_catalog_effects);
+                let pending_table_locks = std::mem::take(&mut ctx.pending_table_locks);
                 drop(ctx);
                 let xid = transaction_state.lock().xid;
                 let result = if let Some(xid) = xid {
@@ -1105,7 +1131,7 @@ impl Database {
                         client_id,
                         xid,
                         result,
-                        &[],
+                        &pending_catalog_effects,
                         &[],
                         &[],
                         pending_async_notifications,
@@ -1118,6 +1144,7 @@ impl Database {
                     result
                 };
 
+                unlock_relations(&self.table_locks, client_id, &pending_table_locks);
                 unlock_relations(&self.table_locks, client_id, &rels);
                 result
             }
@@ -1150,6 +1177,7 @@ impl Database {
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    stats_import_runtime: Some(std::sync::Arc::new(self.clone())),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     row_locks: std::sync::Arc::clone(&self.row_locks),
@@ -1180,6 +1208,8 @@ impl Database {
                     timed: false,
                     allow_side_effects: true,
                     pending_async_notifications: Vec::new(),
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1255,6 +1285,7 @@ impl Database {
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    stats_import_runtime: Some(std::sync::Arc::new(self.clone())),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     row_locks: std::sync::Arc::clone(&self.row_locks),
@@ -1285,6 +1316,8 @@ impl Database {
                     timed: false,
                     allow_side_effects: true,
                     pending_async_notifications: Vec::new(),
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1361,6 +1394,7 @@ impl Database {
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    stats_import_runtime: Some(std::sync::Arc::new(self.clone())),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     row_locks: std::sync::Arc::clone(&self.row_locks),
@@ -1391,6 +1425,8 @@ impl Database {
                     timed: false,
                     allow_side_effects: true,
                     pending_async_notifications: Vec::new(),
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1491,6 +1527,11 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::DropCast(ref drop_stmt) => self.execute_drop_cast_stmt_with_search_path(
+                client_id,
+                drop_stmt,
+                configured_search_path,
+            ),
             Statement::AlterType(ref alter_stmt) => self.execute_alter_type_stmt_with_search_path(
                 client_id,
                 alter_stmt,
@@ -1757,6 +1798,7 @@ impl Database {
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    stats_import_runtime: Some(std::sync::Arc::new(self.clone())),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     row_locks: std::sync::Arc::clone(&self.row_locks),
@@ -1787,6 +1829,8 @@ impl Database {
                     timed: false,
                     allow_side_effects: true,
                     pending_async_notifications: Vec::new(),
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1932,6 +1976,7 @@ impl Database {
             lock_status_provider: Some(std::sync::Arc::new(self.clone())),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            stats_import_runtime: Some(std::sync::Arc::new(self.clone())),
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
             row_locks: std::sync::Arc::clone(&self.row_locks),
@@ -1961,6 +2006,8 @@ impl Database {
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             catalog: visible_catalog_snapshot,
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),

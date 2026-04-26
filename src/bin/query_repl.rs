@@ -533,6 +533,8 @@ fn run_statement(
         | Statement::AlterTableValidateConstraint(_)
         | Statement::AlterTableInherit(_)
         | Statement::AlterTableNoInherit(_)
+        | Statement::AlterTableOf(_)
+        | Statement::AlterTableNotOf(_)
         | Statement::AlterTableAttachPartition(_)
         | Statement::AlterTableDetachPartition(_)
         | Statement::AlterIndexRename(_)
@@ -739,6 +741,7 @@ fn run_statement(
                 lock_status_provider: None,
                 sequences: None,
                 large_objects: None,
+                stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -766,6 +769,8 @@ fn run_statement(
                 timed: false,
                 allow_side_effects: false,
                 pending_async_notifications: Vec::new(),
+                pending_catalog_effects: Vec::new(),
+                pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -791,6 +796,7 @@ fn run_statement(
                 lock_status_provider: None,
                 sequences: None,
                 large_objects: None,
+                stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -818,6 +824,8 @@ fn run_statement(
                 timed: false,
                 allow_side_effects: false,
                 pending_async_notifications: Vec::new(),
+                pending_catalog_effects: Vec::new(),
+                pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -843,6 +851,7 @@ fn run_statement(
                 lock_status_provider: None,
                 sequences: None,
                 large_objects: None,
+                stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -870,6 +879,8 @@ fn run_statement(
                 timed: false,
                 allow_side_effects: false,
                 pending_async_notifications: Vec::new(),
+                pending_catalog_effects: Vec::new(),
+                pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -895,6 +906,7 @@ fn run_statement(
                 lock_status_provider: None,
                 sequences: None,
                 large_objects: None,
+                stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -922,6 +934,8 @@ fn run_statement(
                 timed: false,
                 allow_side_effects: false,
                 pending_async_notifications: Vec::new(),
+                pending_catalog_effects: Vec::new(),
+                pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -951,6 +965,7 @@ fn run_statement(
         | Statement::Call(_)
         | Statement::CreateFunction(_)
         | Statement::CreateProcedure(_)
+        | Statement::CreateCast(_)
         | Statement::CreateOperator(_)
         | Statement::CreateOperatorClass(_)
         | Statement::CreateRule(_)
@@ -964,6 +979,7 @@ fn run_statement(
         | Statement::DropFunction(_)
         | Statement::DropProcedure(_)
         | Statement::DropRoutine(_)
+        | Statement::DropCast(_)
         | Statement::DropOperator(_)
         | Statement::DropDomain(_)
         | Statement::DropConversion(_)
@@ -1050,6 +1066,7 @@ fn run_statement(
                 lock_status_provider: None,
                 sequences: None,
                 large_objects: None,
+                stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -1077,6 +1094,8 @@ fn run_statement(
                 timed: false,
                 allow_side_effects: true,
                 pending_async_notifications: Vec::new(),
+                pending_catalog_effects: Vec::new(),
+                pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -1102,6 +1121,7 @@ fn run_statement(
                 lock_status_provider: None,
                 sequences: None,
                 large_objects: None,
+                stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -1129,6 +1149,8 @@ fn run_statement(
                 timed: false,
                 allow_side_effects: false,
                 pending_async_notifications: Vec::new(),
+                pending_catalog_effects: Vec::new(),
+                pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -1157,6 +1179,7 @@ fn run_statement(
                     lock_status_provider: None,
                     sequences: None,
                     large_objects: None,
+                    stats_import_runtime: None,
                     async_notify_runtime: None,
                     checkpoint_stats:
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -1184,6 +1207,8 @@ fn run_statement(
                     timed: false,
                     allow_side_effects: true,
                     pending_async_notifications: Vec::new(),
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: relcache.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1223,6 +1248,7 @@ fn run_statement(
                     lock_status_provider: None,
                     sequences: None,
                     large_objects: None,
+                    stats_import_runtime: None,
                     async_notify_runtime: None,
                     checkpoint_stats:
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -1250,6 +1276,8 @@ fn run_statement(
                     timed: false,
                     allow_side_effects: true,
                     pending_async_notifications: Vec::new(),
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: relcache.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1289,6 +1317,7 @@ fn run_statement(
                     lock_status_provider: None,
                     sequences: None,
                     large_objects: None,
+                    stats_import_runtime: None,
                     async_notify_runtime: None,
                     checkpoint_stats:
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -1316,6 +1345,8 @@ fn run_statement(
                     timed: false,
                     allow_side_effects: true,
                     pending_async_notifications: Vec::new(),
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: relcache.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),

@@ -768,6 +768,10 @@ pub trait CatalogLookup {
             .find(|row| row.castsource == source_type_oid && row.casttarget == target_type_oid)
     }
 
+    fn cast_rows(&self) -> Vec<PgCastRow> {
+        bootstrap_pg_cast_rows()
+    }
+
     fn type_rows(&self) -> Vec<PgTypeRow> {
         builtin_type_rows()
     }
@@ -1118,6 +1122,14 @@ impl CatalogLookup for IndexExpressionCatalogLookup<'_> {
         None
     }
 
+    fn lookup_relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        self.inner.lookup_relation_by_oid(relation_oid)
+    }
+
+    fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        self.inner.relation_by_oid(relation_oid)
+    }
+
     fn current_user_oid(&self) -> u32 {
         self.inner.current_user_oid()
     }
@@ -1203,6 +1215,10 @@ impl CatalogLookup for IndexExpressionCatalogLookup<'_> {
     ) -> Option<PgCastRow> {
         self.inner
             .cast_by_source_target(source_type_oid, target_type_oid)
+    }
+
+    fn cast_rows(&self) -> Vec<PgCastRow> {
+        self.inner.cast_rows()
     }
 
     fn type_rows(&self) -> Vec<PgTypeRow> {
@@ -1845,6 +1861,7 @@ impl CatalogLookup for RelCache {
             toast: toast_relation_from_cache(self, entry),
             namespace_oid: entry.namespace_oid,
             owner_oid: entry.owner_oid,
+            of_type_oid: entry.of_type_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
             relispopulated: entry.relispopulated,
@@ -1962,6 +1979,7 @@ fn bound_relation_from_relcache_entry(
         toast: toast_relation_from_cache(relcache, entry),
         namespace_oid: entry.namespace_oid,
         owner_oid: entry.owner_oid,
+        of_type_oid: entry.of_type_oid,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         relispopulated: entry.relispopulated,
@@ -3175,6 +3193,7 @@ impl<'a> RecursiveReferenceChecker<'a> {
             | SqlExpr::Or(left, right)
             | SqlExpr::IsDistinctFrom(left, right)
             | SqlExpr::IsNotDistinctFrom(left, right)
+            | SqlExpr::Overlaps(left, right)
             | SqlExpr::ArrayOverlap(left, right)
             | SqlExpr::ArrayContains(left, right)
             | SqlExpr::ArrayContained(left, right)
@@ -3472,6 +3491,7 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
         | SqlExpr::Or(left, right)
         | SqlExpr::IsDistinctFrom(left, right)
         | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::Overlaps(left, right)
         | SqlExpr::ArrayOverlap(left, right)
         | SqlExpr::ArrayContains(left, right)
         | SqlExpr::ArrayContained(left, right)
@@ -4747,22 +4767,29 @@ fn bind_set_operation_query_with_outer(
 
     let mut output_types = Vec::with_capacity(width);
     for index in 0..width {
-        let mut common = inputs[0].target_list[index].sql_type;
-        for query in &inputs[1..] {
-            let next = query.target_list[index].sql_type;
-            common = resolve_common_scalar_type(common, next).ok_or_else(|| {
-                ParseError::UnexpectedToken {
-                    expected: "set-operation column types with a common type",
-                    actual: format!(
-                        "set-operation column {} has types {} and {}",
-                        index + 1,
-                        sql_type_name(common),
-                        sql_type_name(next)
-                    ),
-                }
-            })?;
+        let mut common = None;
+        for query in &inputs {
+            let target = &query.target_list[index];
+            if matches!(target.expr, Expr::Const(Value::Null)) {
+                continue;
+            }
+            let next = target.sql_type;
+            common = Some(match common {
+                None => next,
+                Some(current) => resolve_common_scalar_type(current, next).ok_or_else(|| {
+                    ParseError::UnexpectedToken {
+                        expected: "set-operation column types with a common type",
+                        actual: format!(
+                            "set-operation column {} has types {} and {}",
+                            index + 1,
+                            sql_type_name(current),
+                            sql_type_name(next)
+                        ),
+                    }
+                })?,
+            });
         }
-        output_types.push(common);
+        output_types.push(common.unwrap_or_else(|| SqlType::new(SqlTypeKind::Text)));
     }
 
     for query in &mut inputs {

@@ -381,6 +381,7 @@ pub struct RelCacheEntry {
     pub relation_oid: u32,
     pub namespace_oid: u32,
     pub owner_oid: u32,
+    pub of_type_oid: u32,
     pub row_type_oid: u32,
     pub array_type_oid: u32,
     pub reltoastrelid: u32,
@@ -558,6 +559,7 @@ impl RelCache {
                 relation_oid: class.oid,
                 namespace_oid: class.relnamespace,
                 owner_oid: class.relowner,
+                of_type_oid: class.reloftype,
                 row_type_oid: class.reltype,
                 array_type_oid: catcache
                     .type_by_oid(class.reltype)
@@ -785,6 +787,7 @@ fn from_catalog_entry(entry: &CatalogEntry, support_lookup: &IndexSupportLookup)
         relation_oid: entry.relation_oid,
         namespace_oid: entry.namespace_oid,
         owner_oid: entry.owner_oid,
+        of_type_oid: entry.of_type_oid,
         row_type_oid: entry.row_type_oid,
         array_type_oid: entry.array_type_oid,
         reltoastrelid: entry.reltoastrelid,

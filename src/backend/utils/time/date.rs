@@ -1,10 +1,10 @@
 use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, DateTimeConfig};
 use crate::backend::utils::time::datetime::{
-    DateTimeKeyword, DateTimeParseError, TimeZoneSpec, days_from_ymd, format_offset,
-    format_time_usecs, month_number, named_timezone_offset_seconds_for_date,
-    parse_date_token_with_config, parse_fraction_to_usecs, parse_keyword, parse_time_components,
-    parse_timezone_spec, postgres_date_from_ymd_i64, split_time_and_offset,
-    timezone_offset_seconds, today_pg_days, ymd_from_days,
+    DateTimeKeyword, DateTimeParseError, TimeZoneSpec, current_timezone_name, days_from_ymd,
+    format_offset, format_time_usecs, month_number, named_timezone_offset_seconds,
+    named_timezone_offset_seconds_for_date, parse_date_token_with_config, parse_fraction_to_usecs,
+    parse_keyword, parse_time_components, parse_timezone_spec, postgres_date_from_ymd_i64,
+    split_time_and_offset, timezone_offset_seconds, today_pg_days, ymd_from_days,
 };
 use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, POSTGRES_EPOCH_JDATE, TimeADT, TimeTzADT,
@@ -298,6 +298,7 @@ fn parse_julian_date(text: &str) -> Result<Option<DateADT>, DateParseError> {
 pub fn parse_date_text(text: &str, config: &DateTimeConfig) -> Result<DateADT, DateParseError> {
     if let Some(keyword) = parse_keyword(text) {
         return match keyword {
+            DateTimeKeyword::Allballs => Err(DateParseError::Invalid),
             DateTimeKeyword::Today => Ok(DateADT(today_pg_days(config))),
             DateTimeKeyword::Tomorrow => Ok(DateADT(today_pg_days(config) + 1)),
             DateTimeKeyword::Yesterday => Ok(DateADT(today_pg_days(config) - 1)),
@@ -412,9 +413,36 @@ fn tokenize_time_input<'a>(text: &'a str, config: &DateTimeConfig) -> Vec<&'a st
                 continue;
             }
         }
+        if let Some((date, time)) = token.split_once('T') {
+            if !date.is_empty() && !time.is_empty() && parse_julian_date_token(date).is_some() {
+                tokens.push(date);
+                tokens.push(time);
+                continue;
+            }
+        }
+        if let Some(time) = token
+            .strip_prefix('T')
+            .or_else(|| token.strip_prefix('t'))
+            .filter(|time| {
+                time.as_bytes()
+                    .first()
+                    .is_some_and(|first| first.is_ascii_digit() || *first == b':')
+            })
+        {
+            tokens.push(time);
+            continue;
+        }
         tokens.push(token);
     }
     tokens
+}
+
+fn parse_julian_date_token(text: &str) -> Option<i32> {
+    let rest = text.strip_prefix('J').or_else(|| text.strip_prefix('j'))?;
+    if rest.is_empty() || !rest.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    Some(rest.parse::<i32>().ok()? - POSTGRES_EPOCH_JDATE)
 }
 
 fn split_meridiem_suffix(text: &str) -> (&str, Option<&str>) {
@@ -516,7 +544,12 @@ fn timezone_spec_offset_seconds(
                 DateTimeParseError::UnknownTimeZone(name.to_ascii_lowercase()),
             )
         }
-        None => Ok(timezone_offset_seconds(config)),
+        None => Ok(named_timezone_offset_seconds_for_date(
+            current_timezone_name(config),
+            today_pg_days(config),
+        )
+        .or_else(|| named_timezone_offset_seconds(current_timezone_name(config)))
+        .unwrap_or_else(|| timezone_offset_seconds(config))),
     }
 }
 
@@ -585,6 +618,9 @@ fn parse_time_token(text: &str) -> Result<Option<(i64, Option<TimeZoneSpec>)>, D
 }
 
 pub fn parse_time_text(text: &str, config: &DateTimeConfig) -> Result<TimeADT, DateTimeParseError> {
+    if matches!(parse_keyword(text), Some(DateTimeKeyword::Allballs)) {
+        return Ok(TimeADT(0));
+    }
     let (time_usecs, _, _) = parse_time_input(text, config)?;
     Ok(TimeADT(time_usecs))
 }
@@ -619,15 +655,13 @@ fn parse_time_input(
             trimmed.contains(':') || split_meridiem_suffix(trimmed).1.is_some()
         })
         .or_else(|| {
-            (tokens.len() >= 2).then(|| {
-                tokens.iter().enumerate().rev().find_map(|(index, token)| {
-                    token
-                        .trim()
-                        .chars()
-                        .all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '+' | '-'))
-                        .then_some(index)
-                })
-            })?
+            tokens.iter().enumerate().rev().find_map(|(index, token)| {
+                token
+                    .trim()
+                    .chars()
+                    .all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '+' | '-'))
+                    .then_some(index)
+            })
         });
     let Some(mut time_index) = time_index else {
         return Err(DateTimeParseError::Invalid);
@@ -659,9 +693,13 @@ fn parse_time_input(
     let date = if remaining.is_empty() {
         None
     } else if remaining.len() == 1 {
-        let (year, month, day) = parse_date_token_with_config(remaining[0], config)?
-            .ok_or(DateTimeParseError::Invalid)?;
-        Some(days_from_ymd(year, month, day).ok_or(DateTimeParseError::FieldOutOfRange)?)
+        if let Some(days) = parse_julian_date_token(remaining[0]) {
+            Some(days)
+        } else {
+            let (year, month, day) = parse_date_token_with_config(remaining[0], config)?
+                .ok_or(DateTimeParseError::Invalid)?;
+            Some(days_from_ymd(year, month, day).ok_or(DateTimeParseError::FieldOutOfRange)?)
+        }
     } else {
         let (year, month, day) = parse_date_token_with_config(&remaining.join("-"), config)?
             .ok_or(DateTimeParseError::Invalid)?;
@@ -679,6 +717,12 @@ pub fn parse_timetz_text(
     text: &str,
     config: &DateTimeConfig,
 ) -> Result<TimeTzADT, DateTimeParseError> {
+    if matches!(parse_keyword(text), Some(DateTimeKeyword::Allballs)) {
+        return Ok(TimeTzADT {
+            time: TimeADT(0),
+            offset_seconds: timezone_offset_seconds(config),
+        });
+    }
     let (time_usecs, zone, date) = parse_time_input(text, config)?;
     let offset_seconds = timezone_spec_offset_seconds(zone, date, config)?;
     Ok(TimeTzADT {
@@ -1163,6 +1207,22 @@ mod tests {
                 15 * 60 * 60 * 1_000_000 + 36 * 60 * 1_000_000 + 39 * 1_000_000
             ))
         );
+        assert_eq!(
+            parse_time_text("040506.07", &config),
+            Ok(TimeADT(
+                4 * 60 * 60 * 1_000_000 + 5 * 60 * 1_000_000 + 6 * 1_000_000 + 70_000
+            ))
+        );
+        assert_eq!(
+            parse_time_text("T0405", &config),
+            Ok(TimeADT(14700_000_000))
+        );
+        assert_eq!(
+            parse_time_text("040506.789+08", &config),
+            Ok(TimeADT(
+                4 * 60 * 60 * 1_000_000 + 5 * 60 * 1_000_000 + 6 * 1_000_000 + 789_000
+            ))
+        );
     }
 
     #[test]
@@ -1200,6 +1260,15 @@ mod tests {
                 offset_seconds: 60 * 60,
             })
         );
+        assert_eq!(
+            parse_timetz_text("T040506.789+08", &config),
+            Ok(TimeTzADT {
+                time: TimeADT(
+                    4 * 60 * 60 * 1_000_000 + 5 * 60 * 1_000_000 + 6 * 1_000_000 + 789_000
+                ),
+                offset_seconds: 8 * 60 * 60,
+            })
+        );
     }
 
     #[test]
@@ -1222,6 +1291,26 @@ mod tests {
         assert_eq!(
             parse_timetz_text("15:36:39 America/New_York", &config),
             Err(DateTimeParseError::Invalid)
+        );
+    }
+
+    #[test]
+    fn parse_timetz_without_zone_uses_session_timezone_date_offset() {
+        let config = DateTimeConfig {
+            time_zone: "America/Los_Angeles".into(),
+            transaction_timestamp_usecs: Some(
+                i64::from(days_from_ymd(2003, 7, 7).unwrap())
+                    * crate::include::nodes::datetime::USECS_PER_DAY,
+            ),
+            ..DateTimeConfig::default()
+        };
+
+        assert_eq!(
+            parse_timetz_text("05:30", &config),
+            Ok(TimeTzADT {
+                time: TimeADT((5 * 60 * 60 + 30 * 60) * 1_000_000),
+                offset_seconds: -7 * 60 * 60,
+            })
         );
     }
 }

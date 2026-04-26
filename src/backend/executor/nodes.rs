@@ -3776,7 +3776,7 @@ fn render_explain_const(value: &Value) -> String {
         },
         Value::Date(date) => format!(
             "'{}'::date",
-            format_date_text(*date, &DateTimeConfig::default())
+            format_date_text(*date, &postgres_explain_datetime_config())
         ),
         Value::Inet(_) | Value::Cidr(_) => match value.sql_type_hint() {
             Some(sql_type) => format!(

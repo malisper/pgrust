@@ -70,6 +70,7 @@ pub struct BoundRelation {
     pub toast: Option<ToastRelationRef>,
     pub namespace_oid: u32,
     pub owner_oid: u32,
+    pub of_type_oid: u32,
     pub relpersistence: char,
     pub relkind: char,
     pub relispopulated: bool,

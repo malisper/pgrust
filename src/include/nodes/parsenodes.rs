@@ -324,6 +324,7 @@ pub enum Statement {
     CreateFunction(CreateFunctionStatement),
     CreateProcedure(CreateProcedureStatement),
     CreateAggregate(CreateAggregateStatement),
+    CreateCast(CreateCastStatement),
     CreateTrigger(CreateTriggerStatement),
     CreateType(CreateTypeStatement),
     AlterType(AlterTypeStatement),
@@ -383,6 +384,8 @@ pub enum Statement {
     AlterTableValidateConstraint(AlterTableValidateConstraintStatement),
     AlterTableInherit(AlterTableInheritStatement),
     AlterTableNoInherit(AlterTableNoInheritStatement),
+    AlterTableOf(AlterTableOfStatement),
+    AlterTableNotOf(AlterTableNotOfStatement),
     AlterTableAttachPartition(AlterTableAttachPartitionStatement),
     AlterTableDetachPartition(AlterTableDetachPartitionStatement),
     AlterTableTriggerState(AlterTableTriggerStateStatement),
@@ -420,6 +423,7 @@ pub enum Statement {
     DropDatabase(DropDatabaseStatement),
     DropPublication(DropPublicationStatement),
     DropStatistics(DropStatisticsStatement),
+    DropCast(DropCastStatement),
     DropFunction(DropFunctionStatement),
     DropProcedure(DropProcedureStatement),
     DropRoutine(DropProcedureStatement),
@@ -657,6 +661,7 @@ pub struct CreateFunctionArg {
     pub mode: FunctionArgMode,
     pub name: Option<String>,
     pub ty: RawTypeName,
+    pub type_position: Option<usize>,
     pub default_expr: Option<String>,
     pub variadic: bool,
 }
@@ -724,6 +729,40 @@ pub struct RoutineSignature {
     pub schema_name: Option<String>,
     pub routine_name: String,
     pub arg_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastContext {
+    Explicit,
+    Assignment,
+    Implicit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateCastMethod {
+    Function {
+        schema_name: Option<String>,
+        function_name: String,
+        arg_types: Vec<RawTypeName>,
+    },
+    WithoutFunction,
+    InOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateCastStatement {
+    pub source_type: RawTypeName,
+    pub target_type: RawTypeName,
+    pub method: CreateCastMethod,
+    pub context: CastContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropCastStatement {
+    pub if_exists: bool,
+    pub source_type: RawTypeName,
+    pub target_type: RawTypeName,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -911,6 +950,7 @@ pub enum AlterTypeStatement {
     AddEnumValue(AlterTypeAddEnumValueStatement),
     RenameEnumValue(AlterTypeRenameEnumValueStatement),
     RenameType(AlterTypeRenameTypeStatement),
+    AlterComposite(AlterCompositeTypeStatement),
     SetOptions(AlterTypeSetOptionsStatement),
 }
 
@@ -942,6 +982,36 @@ pub struct AlterTypeRenameTypeStatement {
     pub schema_name: Option<String>,
     pub type_name: String,
     pub new_type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterCompositeTypeStatement {
+    pub schema_name: Option<String>,
+    pub type_name: String,
+    pub actions: Vec<AlterCompositeTypeAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterCompositeTypeAction {
+    AddAttribute {
+        attribute: CompositeTypeAttributeDef,
+        cascade: bool,
+    },
+    DropAttribute {
+        name: String,
+        if_exists: bool,
+        cascade: bool,
+    },
+    AlterAttributeType {
+        name: String,
+        ty: RawTypeName,
+        cascade: bool,
+    },
+    RenameAttribute {
+        old_name: String,
+        new_name: String,
+        cascade: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1590,6 +1660,7 @@ pub struct OnConflictInferenceElem {
 pub struct CreateTableStatement {
     pub schema_name: Option<String>,
     pub table_name: String,
+    pub of_type_name: Option<String>,
     pub persistence: TablePersistence,
     pub on_commit: OnCommitAction,
     pub elements: Vec<CreateTableElement>,
@@ -1604,7 +1675,8 @@ impl CreateTableStatement {
     pub fn columns(&self) -> impl Iterator<Item = &ColumnDef> {
         self.elements.iter().filter_map(|element| match element {
             CreateTableElement::Column(column) => Some(column),
-            CreateTableElement::PartitionColumnOverride(_)
+            CreateTableElement::TypedColumnOptions(_)
+            | CreateTableElement::PartitionColumnOverride(_)
             | CreateTableElement::Constraint(_)
             | CreateTableElement::Like(_) => None,
         })
@@ -1613,6 +1685,7 @@ impl CreateTableStatement {
     pub fn constraints(&self) -> impl Iterator<Item = &TableConstraint> {
         self.elements.iter().filter_map(|element| match element {
             CreateTableElement::Column(_)
+            | CreateTableElement::TypedColumnOptions(_)
             | CreateTableElement::PartitionColumnOverride(_)
             | CreateTableElement::Like(_) => None,
             CreateTableElement::Constraint(constraint) => Some(constraint),
@@ -1623,6 +1696,7 @@ impl CreateTableStatement {
         self.elements.iter().filter_map(|element| match element {
             CreateTableElement::PartitionColumnOverride(override_) => Some(override_),
             CreateTableElement::Column(_)
+            | CreateTableElement::TypedColumnOptions(_)
             | CreateTableElement::Constraint(_)
             | CreateTableElement::Like(_) => None,
         })
@@ -2247,6 +2321,21 @@ pub struct AlterTableInheritStatement {
     pub only: bool,
     pub table_name: String,
     pub parent_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableOfStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableNotOfStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3028,8 +3117,21 @@ pub struct PartitionColumnOverride {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedColumnOptions {
+    pub name: String,
+    pub collation: Option<String>,
+    pub default_expr: Option<String>,
+    pub generated: Option<ColumnGeneratedDef>,
+    pub identity: Option<ColumnIdentityKind>,
+    pub storage: Option<crate::include::access::htup::AttributeStorage>,
+    pub compression: Option<crate::include::access::htup::AttributeCompression>,
+    pub constraints: Vec<ColumnConstraint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateTableElement {
     Column(ColumnDef),
+    TypedColumnOptions(TypedColumnOptions),
     PartitionColumnOverride(PartitionColumnOverride),
     Constraint(TableConstraint),
     Like(CreateTableLikeClause),
@@ -3841,6 +3943,7 @@ pub enum SqlExpr {
     IsNotNull(Box<SqlExpr>),
     IsDistinctFrom(Box<SqlExpr>, Box<SqlExpr>),
     IsNotDistinctFrom(Box<SqlExpr>, Box<SqlExpr>),
+    Overlaps(Box<SqlExpr>, Box<SqlExpr>),
     ArrayLiteral(Vec<SqlExpr>),
     Row(Vec<SqlExpr>),
     ArrayOverlap(Box<SqlExpr>, Box<SqlExpr>),

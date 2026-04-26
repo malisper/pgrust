@@ -4,7 +4,7 @@ use crate::include::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
     ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
     TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_hypothetical_aggregate_function_for_proc_oid,
-    builtin_type_rows, builtin_window_function_for_proc_oid,
+    builtin_type_name_for_oid, builtin_type_rows, builtin_window_function_for_proc_oid,
 };
 use crate::include::catalog::{
     multirange_type_ref_for_sql_type, range_type_ref_for_multirange_sql_type,
@@ -363,6 +363,11 @@ fn normalize_builtin_function_name(name: &str) -> &str {
 }
 
 fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
+    if row.proname.eq_ignore_ascii_case("timestamptz")
+        && matches!(row.proargtypes.trim(), "1082 1083" | "1082 1266")
+    {
+        return Some(BuiltinScalarFunction::TimestampTzConstructor);
+    }
     builtin_scalar_function_for_proc_src(&row.prosrc)
         .or_else(|| builtin_scalar_function_for_proc_src(&row.proname))
 }
@@ -645,6 +650,9 @@ fn match_proc_arg_type(
     let declared_type = catalog.type_by_oid(declared_oid)?.sql_type;
     if let Some(cost) = arg_type_match_cost(actual_type, declared_type) {
         return Some((cost, declared_type));
+    }
+    if catalog_implicit_cast_exists(catalog, actual_type, declared_oid) {
+        return Some((3, declared_type));
     }
     if is_text_like_type(actual_type) && catalog_text_input_cast_exists(catalog, declared_oid) {
         return Some((3, declared_type));
@@ -1089,6 +1097,28 @@ fn can_coerce_to_compatible_anchor(value: SqlType, anchor: SqlType) -> bool {
             ))
 }
 
+fn catalog_implicit_cast_exists(
+    catalog: &dyn CatalogLookup,
+    actual_type: SqlType,
+    declared_oid: u32,
+) -> bool {
+    let Some(source_oid) = catalog.type_oid_for_sql_type(actual_type) else {
+        return false;
+    };
+    catalog
+        .cast_by_source_target(source_oid, declared_oid)
+        .is_some_and(|row| row.castcontext == 'i')
+}
+
+fn is_builtin_text_like_type(ty: SqlType) -> bool {
+    !ty.is_array
+        && matches!(
+            ty.kind,
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
+        )
+        && (ty.type_oid == 0 || builtin_type_name_for_oid(ty.type_oid).is_some())
+}
+
 fn canonical_polymorphic_type(mut ty: SqlType) -> SqlType {
     if !ty.is_array && !ty.is_range() && !ty.is_multirange() && ty.typrelid == 0 {
         ty.type_oid = 0;
@@ -1156,7 +1186,7 @@ fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usi
     if is_numeric_family(actual_type) && is_numeric_family(target_type) {
         return Some(1);
     }
-    if is_text_like_type(actual_type) && is_text_like_type(target_type) {
+    if is_builtin_text_like_type(actual_type) && is_builtin_text_like_type(target_type) {
         return Some(1);
     }
     if is_bit_string_type(actual_type) && is_bit_string_type(target_type) {
@@ -1283,7 +1313,8 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::MakeDate | BuiltinScalarFunction::MakeTime => args.len() == 3,
             BuiltinScalarFunction::MakeTimestamp => args.len() == 6,
             BuiltinScalarFunction::MakeTimestampTz => matches!(args.len(), 6 | 7),
-            BuiltinScalarFunction::ToTimestamp => args.len() == 1,
+            BuiltinScalarFunction::TimestampTzConstructor => args.len() == 2,
+            BuiltinScalarFunction::ToTimestamp => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::IntervalHash => args.len() == 1,
             BuiltinScalarFunction::HashValue(_) => args.len() == 1,
             BuiltinScalarFunction::HashValueExtended(_) => args.len() == 2,
@@ -1390,6 +1421,10 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgStatGetXactFunctionCalls
             | BuiltinScalarFunction::PgStatGetXactFunctionTotalTime
             | BuiltinScalarFunction::PgStatGetXactFunctionSelfTime => args.len() == 1,
+            BuiltinScalarFunction::PgRestoreRelationStats
+            | BuiltinScalarFunction::PgRestoreAttributeStats => true,
+            BuiltinScalarFunction::PgClearRelationStats => args.len() == 2,
+            BuiltinScalarFunction::PgClearAttributeStats => args.len() == 4,
             BuiltinScalarFunction::ParseIdent => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
             BuiltinScalarFunction::ArrayLength
@@ -2128,6 +2163,16 @@ fn scalar_named_arg_signature(func: BuiltinScalarFunction) -> Option<NamedArgSig
                 Some(NamedArgDefault::Text("use_json_null")),
             ],
         }),
+        BuiltinScalarFunction::PgClearRelationStats => Some(NamedArgSignature {
+            params: &["schemaname", "relname"],
+            required: 2,
+            defaults: &[None, None],
+        }),
+        BuiltinScalarFunction::PgClearAttributeStats => Some(NamedArgSignature {
+            params: &["schemaname", "relname", "attname", "inherited"],
+            required: 4,
+            defaults: &[None, None, None, None],
+        }),
         _ => None,
     }
 }
@@ -2834,6 +2879,22 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_stat_get_xact_function_self_time",
             BuiltinScalarFunction::PgStatGetXactFunctionSelfTime,
+        ),
+        (
+            "pg_restore_relation_stats",
+            BuiltinScalarFunction::PgRestoreRelationStats,
+        ),
+        (
+            "pg_clear_relation_stats",
+            BuiltinScalarFunction::PgClearRelationStats,
+        ),
+        (
+            "pg_restore_attribute_stats",
+            BuiltinScalarFunction::PgRestoreAttributeStats,
+        ),
+        (
+            "pg_clear_attribute_stats",
+            BuiltinScalarFunction::PgClearAttributeStats,
         ),
         ("to_json", BuiltinScalarFunction::ToJson),
         ("to_jsonb", BuiltinScalarFunction::ToJsonb),
@@ -3842,6 +3903,10 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgStatGetCheckpointerWriteTime
             | BuiltinScalarFunction::PgStatGetCheckpointerSyncTime
             | BuiltinScalarFunction::PgStatGetCheckpointerStatResetTime
+            | BuiltinScalarFunction::PgRestoreRelationStats
+            | BuiltinScalarFunction::PgClearRelationStats
+            | BuiltinScalarFunction::PgRestoreAttributeStats
+            | BuiltinScalarFunction::PgClearAttributeStats
             | BuiltinScalarFunction::ToJson
             | BuiltinScalarFunction::ToJsonb
             | BuiltinScalarFunction::ArrayToJson
@@ -3913,6 +3978,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ToChar
             | BuiltinScalarFunction::ToDate
             | BuiltinScalarFunction::ToNumber
+            | BuiltinScalarFunction::TimestampTzConstructor
             | BuiltinScalarFunction::ToTimestamp
             | BuiltinScalarFunction::Age
             | BuiltinScalarFunction::RegexpMatch
@@ -4087,10 +4153,7 @@ fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) 
         if matches!(row.sql_type.kind, SqlTypeKind::Enum) {
             return true;
         }
-        if matches!(
-            row.sql_type.kind,
-            SqlTypeKind::Text | SqlTypeKind::Char | SqlTypeKind::Varchar
-        ) {
+        if is_builtin_text_like_type(row.sql_type) {
             return true;
         }
         if matches!(
@@ -4213,9 +4276,70 @@ mod tests {
             resolve_scalar_function("trunc"),
             Some(BuiltinScalarFunction::Trunc)
         );
+        assert_eq!(
+            resolve_scalar_function("pg_catalog.pg_restore_relation_stats"),
+            Some(BuiltinScalarFunction::PgRestoreRelationStats)
+        );
+        assert_eq!(
+            resolve_scalar_function("pg_clear_attribute_stats"),
+            Some(BuiltinScalarFunction::PgClearAttributeStats)
+        );
         assert_eq!(resolve_scalar_function("count"), None);
         assert_eq!(resolve_scalar_function("json_array_elements"), None);
         assert_eq!(resolve_scalar_function("int4"), None);
+    }
+
+    #[test]
+    fn resolve_stats_import_calls_as_builtin_proc_rows() {
+        let catalog = Catalog::default();
+        let text = SqlType::new(SqlTypeKind::Text);
+        let int4 = SqlType::new(SqlTypeKind::Int4);
+        let bool_ty = SqlType::new(SqlTypeKind::Bool);
+        let float4 = SqlType::new(SqlTypeKind::Float4);
+
+        let restore = resolve_function_call(
+            &catalog,
+            "pg_catalog.pg_restore_relation_stats",
+            &[text, text, text, text, text, int4, text, float4],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            restore.scalar_impl,
+            Some(BuiltinScalarFunction::PgRestoreRelationStats)
+        );
+
+        let clear = resolve_function_call(
+            &catalog,
+            "pg_clear_attribute_stats",
+            &[text, text, text, bool_ty],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            clear.scalar_impl,
+            Some(BuiltinScalarFunction::PgClearAttributeStats)
+        );
+
+        let stmt = crate::backend::parser::parse_select(
+            "select pg_catalog.pg_restore_relation_stats(
+                'schemaname', 'stats_import',
+                'relname', 'test',
+                'relpages', 18::integer,
+                'reltuples', 21::real)",
+        )
+        .unwrap();
+        let planned = pg_plan_query(&stmt, &catalog).unwrap();
+        let Plan::Projection { targets, .. } = planned.plan_tree else {
+            panic!("expected projection plan");
+        };
+        let Expr::Func(func) = &targets[0].expr else {
+            panic!("expected function target");
+        };
+        assert_eq!(
+            crate::include::nodes::primnodes::expr_sql_type_hint(&func.args[7]).map(|ty| ty.kind),
+            Some(SqlTypeKind::Float4)
+        );
     }
 
     #[test]

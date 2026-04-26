@@ -408,6 +408,7 @@ pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow,
         relpartbound: nullable_text(&values[23])?,
         reloptions: nullable_text_array(&values[24])?,
         relacl: nullable_text_array(&values[25])?,
+        reloftype: values.get(26).map(expect_oid).transpose()?.unwrap_or(0),
     })
 }
 
@@ -1298,6 +1299,7 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
                     .collect(),
             ))
         }),
+        Value::Int32(row.reloftype as i32),
     ]
 }
 

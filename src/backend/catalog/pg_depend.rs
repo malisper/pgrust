@@ -30,6 +30,7 @@ pub fn derived_pg_depend_rows(entry: &CatalogEntry) -> Vec<PgDependRow> {
     let mut rows = derived_relation_depend_rows(
         entry.relation_oid,
         entry.namespace_oid,
+        entry.of_type_oid,
         entry.row_type_oid,
         &entry.desc,
     );
@@ -168,6 +169,7 @@ pub fn primary_key_owned_not_null_depend_rows(
 pub fn derived_relation_depend_rows(
     relation_oid: u32,
     namespace_oid: u32,
+    of_type_oid: u32,
     row_type_oid: u32,
     desc: &RelationDesc,
 ) -> Vec<PgDependRow> {
@@ -190,6 +192,17 @@ pub fn derived_relation_depend_rows(
             refobjid: relation_oid,
             refobjsubid: 0,
             deptype: DEPENDENCY_INTERNAL,
+        });
+    }
+    if of_type_oid != 0 {
+        rows.push(PgDependRow {
+            classid: PG_CLASS_RELATION_OID,
+            objid: relation_oid,
+            objsubid: 0,
+            refclassid: PG_TYPE_RELATION_OID,
+            refobjid: of_type_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
         });
     }
 

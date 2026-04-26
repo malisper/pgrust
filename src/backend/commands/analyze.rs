@@ -1,5 +1,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use super::tablecmds::{
+    collect_matching_rows_heap, index_key_values_for_row, row_matches_index_predicate,
+};
 use crate::backend::executor::value_io::decode_value_with_toast;
 use crate::backend::executor::{
     ExecError, ExecutorContext, Value, format_array_value_text, render_datetime_value_text,
@@ -227,6 +230,9 @@ fn collect_analyze_stats_for_relation(
         reltuples: root_stats.reltuples,
         statistics,
     });
+    if selected.len() == relation.desc.columns.len() {
+        out.extend(sample_expression_indexes(relation, catalog, ctx)?);
+    }
     Ok(())
 }
 
@@ -374,6 +380,71 @@ fn sample_relation(
         reltuples,
         statistics,
     })
+}
+
+fn sample_expression_indexes(
+    relation: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<AnalyzeRelationStats>, ExecError> {
+    let expression_indexes = catalog
+        .index_relations_for_heap(relation.relation_oid)
+        .into_iter()
+        .filter(|index| index.index_meta.indkey.iter().any(|attnum| *attnum == 0))
+        .collect::<Vec<_>>();
+    if expression_indexes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let heap_rows =
+        collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, ctx)?;
+    let mut out = Vec::with_capacity(expression_indexes.len());
+    for index in expression_indexes {
+        let nblocks = ctx
+            .pool
+            .with_storage_mut(|s| s.smgr.nblocks(index.rel, ForkNumber::Main))
+            .map_err(crate::backend::access::heap::heapam::HeapError::Storage)?;
+        let mut sample_rows = Vec::new();
+        for (physical_ordinal, (heap_tid, values)) in heap_rows.iter().enumerate() {
+            if !row_matches_index_predicate(
+                &index,
+                values,
+                Some(*heap_tid),
+                relation.relation_oid,
+                ctx,
+            )? {
+                continue;
+            }
+            let key_values = index_key_values_for_row(&index, &relation.desc, values, ctx)?;
+            let widths = key_values
+                .iter()
+                .map(|value| value_stats_text(value).len())
+                .collect::<Vec<_>>();
+            sample_rows.push(SampledRow {
+                physical_ordinal,
+                values: key_values,
+                widths,
+            });
+        }
+        let selected_columns = (0..index.desc.columns.len()).collect::<Vec<_>>();
+        let reltuples = sample_rows.len() as f64;
+        let statistics = build_statistics_rows(
+            index.relation_oid,
+            &index.desc,
+            &selected_columns,
+            &sample_rows,
+            reltuples,
+            catalog,
+            false,
+        )?;
+        out.push(AnalyzeRelationStats {
+            relation_oid: index.relation_oid,
+            relpages: nblocks as i32,
+            reltuples,
+            statistics,
+        });
+    }
+    Ok(out)
 }
 
 fn sample_inheritance_tree(
@@ -571,9 +642,10 @@ fn build_statistics_rows(
         let target = column.attstattarget.max(1) as usize;
         let mut stakind = [0; 5];
         let mut staop = [0; 5];
-        let stacoll = [0; 5];
+        let mut stacoll = [0; 5];
         let mut stanumbers: [Option<ArrayValue>; 5] = Default::default();
         let mut stavalues: [Option<ArrayValue>; 5] = Default::default();
+        let mut slot_idx = 0usize;
 
         let mut ranked = freq.into_iter().collect::<Vec<_>>();
         ranked.sort_by(|left, right| right.1.0.cmp(&left.1.0).then_with(|| left.0.cmp(&right.0)));
@@ -585,14 +657,15 @@ fn build_statistics_rows(
             .cloned()
             .collect::<Vec<_>>();
         if !mcv.is_empty() {
-            stakind[0] = STATISTIC_KIND_MCV;
-            staop[0] = eq_op;
-            stanumbers[0] = Some(ArrayValue::from_1d(
+            stakind[slot_idx] = STATISTIC_KIND_MCV;
+            staop[slot_idx] = eq_op;
+            stacoll[slot_idx] = column.collation_oid;
+            stanumbers[slot_idx] = Some(ArrayValue::from_1d(
                 mcv.iter()
                     .map(|(_, (count, _))| Value::Float64(*count as f64 / sample_total))
                     .collect(),
             ));
-            stavalues[0] = Some(
+            stavalues[slot_idx] = Some(
                 ArrayValue::from_1d(
                     mcv.iter()
                         .map(|(_, (_, value))| value.to_owned_value())
@@ -600,6 +673,7 @@ fn build_statistics_rows(
                 )
                 .with_element_type_oid(type_oid),
             );
+            slot_idx += 1;
         }
 
         if lt_op != 0 {
@@ -617,9 +691,10 @@ fn build_statistics_rows(
             histogram_values.sort_by(|left, right| left.0.cmp(&right.0));
             histogram_values.dedup_by(|left, right| left.0 == right.0);
             if histogram_values.len() >= 2 {
-                stakind[1] = STATISTIC_KIND_HISTOGRAM;
-                staop[1] = lt_op;
-                stavalues[1] = Some(
+                stakind[slot_idx] = STATISTIC_KIND_HISTOGRAM;
+                staop[slot_idx] = lt_op;
+                stacoll[slot_idx] = column.collation_oid;
+                stavalues[slot_idx] = Some(
                     ArrayValue::from_1d(
                         histogram_values
                             .into_iter()
@@ -629,12 +704,14 @@ fn build_statistics_rows(
                     )
                     .with_element_type_oid(type_oid),
                 );
+                slot_idx += 1;
             }
 
             let correlation = sample_correlation(&rendered_values);
-            stakind[2] = STATISTIC_KIND_CORRELATION;
-            staop[2] = lt_op;
-            stanumbers[2] = Some(ArrayValue::from_1d(vec![Value::Float64(correlation)]));
+            stakind[slot_idx] = STATISTIC_KIND_CORRELATION;
+            staop[slot_idx] = lt_op;
+            stacoll[slot_idx] = column.collation_oid;
+            stanumbers[slot_idx] = Some(ArrayValue::from_1d(vec![Value::Float64(correlation)]));
         }
 
         out.push(PgStatisticRow {

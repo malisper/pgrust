@@ -190,6 +190,7 @@ fn analyze_executor_context(
         lock_status_provider: Some(Arc::new(db.clone())),
         sequences: Some(db.sequences.clone()),
         large_objects: Some(db.large_objects.clone()),
+        stats_import_runtime: None,
         async_notify_runtime: Some(db.async_notify_runtime.clone()),
         advisory_locks: Arc::clone(&db.advisory_locks),
         row_locks: Arc::clone(&db.row_locks),
@@ -220,6 +221,8 @@ fn analyze_executor_context(
         system_bindings: Vec::new(),
         subplans: Vec::new(),
         pending_async_notifications: Vec::new(),
+        pending_catalog_effects: Vec::new(),
+        pending_table_locks: Vec::new(),
         catalog: visible_catalog,
         compiled_functions: HashMap::new(),
         cte_tables: HashMap::new(),
@@ -1454,6 +1457,131 @@ fn query_rows(db: &Database, client_id: u32, sql: &str) -> Vec<Vec<Value>> {
         StatementResult::Query { rows, .. } => rows,
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn stats_import_restores_and_clears_relation_stats() {
+    let db = Database::open_ephemeral(64).expect("open ephemeral database");
+    db.execute(1, "create schema stats_import").unwrap();
+    db.execute(
+        1,
+        "create table stats_import.test(id integer primary key, name text)",
+    )
+    .unwrap();
+
+    let restore_rows = query_rows(
+        &db,
+        1,
+        "select pg_catalog.pg_restore_relation_stats(
+                'schemaname', 'stats_import',
+                'relname', 'test',
+                'relpages', 18::integer,
+                'reltuples', 21::real,
+                'relallvisible', 24::integer,
+                'relallfrozen', 27::integer)",
+    );
+    let notices = take_backend_notices();
+    assert_eq!(restore_rows, vec![vec![Value::Bool(true)]], "{notices:?}");
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relpages, reltuples, relallvisible, relallfrozen
+             from pg_class
+             where oid = 'stats_import.test'::regclass",
+        ),
+        vec![vec![
+            Value::Int32(18),
+            Value::Float64(21.0),
+            Value::Int32(24),
+            Value::Int32(27),
+        ]]
+    );
+
+    db.execute(1, "select pg_clear_relation_stats('stats_import', 'test')")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relpages, reltuples, relallvisible, relallfrozen
+             from pg_class
+             where oid = 'stats_import.test'::regclass",
+        ),
+        vec![vec![
+            Value::Int32(0),
+            Value::Float64(-1.0),
+            Value::Int32(0),
+            Value::Int32(0),
+        ]]
+    );
+}
+
+#[test]
+fn stats_import_locks_partitioned_index_and_parent() {
+    let db = Database::open_ephemeral(64).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema stats_import").unwrap();
+    session
+        .execute(
+            &db,
+            "create table stats_import.part_parent (i int4) partition by range (i)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table stats_import.part_child_1
+             partition of stats_import.part_parent
+             for values from (0) to (10)
+             with (autovacuum_enabled = false)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create index part_parent_i on stats_import.part_parent(i)",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select pg_catalog.pg_restore_relation_stats(
+                'schemaname', 'stats_import',
+                'relname', 'part_parent_i',
+                'relpages', 2::integer)",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_locks
+             where relation = 'stats_import.part_parent'::regclass
+               and pid = pg_backend_pid()
+               and mode = 'ShareUpdateExclusiveLock'
+               and granted",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_locks
+             where relation = 'stats_import.part_parent_i'::regclass
+               and pid = pg_backend_pid()
+               and mode = 'ShareUpdateExclusiveLock'
+               and granted",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+    session.execute(&db, "commit").unwrap();
 }
 
 #[test]
@@ -5746,9 +5874,9 @@ fn new_indexes_report_never_analyzed_reltuples() {
         query_rows(
             &db,
             1,
-            "select reltuples from pg_class where relname = 'fresh_items_id_idx'",
+            "select relpages, reltuples from pg_class where relname = 'fresh_items_id_idx'",
         ),
-        vec![vec![Value::Float64(-1.0)]]
+        vec![vec![Value::Int32(1), Value::Float64(0.0)]]
     );
 }
 
@@ -12274,7 +12402,7 @@ fn alter_index_alter_column_set_statistics_updates_expression_column_and_resets(
             1,
             "select attstattarget from pg_attribute \
              where attrelid = (select oid from pg_class where relname = 'attmp_idx') \
-               and attname = 'expr2'",
+               and attname = 'expr'",
         ),
         vec![vec![Value::Int16(1000)]]
     );
@@ -12287,7 +12415,7 @@ fn alter_index_alter_column_set_statistics_updates_expression_column_and_resets(
             1,
             "select attstattarget from pg_attribute \
              where attrelid = (select oid from pg_class where relname = 'attmp_idx') \
-               and attname = 'expr2'",
+               and attname = 'expr'",
         ),
         vec![vec![Value::Int16(-1)]]
     );
@@ -12402,7 +12530,7 @@ fn alter_index_and_table_set_statistics_clamp_and_emit_warning() {
             1,
             "select attstattarget from pg_attribute \
              where attrelid = (select oid from pg_class where relname = 'attmp_idx') \
-               and attname = 'expr2'",
+               and attname = 'expr'",
         ),
         vec![vec![Value::Int16(10000)]]
     );
@@ -31867,6 +31995,109 @@ fn create_type_exposes_catalog_rows_and_function_row_expansion() {
 }
 
 #[test]
+fn typed_table_create_alter_of_and_composite_attribute_cascade() {
+    let dir = temp_dir("typed_table_catalog_rows");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type person_t as (id int4, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table persons of person_t (id with options primary key, name not null default 'unknown')",
+    )
+    .unwrap();
+    db.execute(1, "insert into persons(id) values (1)").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from persons"),
+        vec![vec![Value::Int32(1), Value::Text("unknown".into())]]
+    );
+
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    let person_type = visible.type_by_name("person_t").unwrap();
+    let persons = visible.lookup_any_relation("persons").unwrap();
+    assert_eq!(persons.of_type_oid, person_type.oid);
+    assert!(
+        db.backend_catcache(1, None)
+            .unwrap()
+            .depend_rows()
+            .iter()
+            .any(|row| {
+                row.classid == PG_CLASS_RELATION_OID
+                    && row.objid == persons.relation_oid
+                    && row.refclassid == PG_TYPE_RELATION_OID
+                    && row.refobjid == person_type.oid
+            })
+    );
+    drop(visible);
+
+    db.execute(1, "alter table persons not of").unwrap();
+    assert_eq!(
+        db.lazy_catalog_lookup(1, None, None)
+            .lookup_any_relation("persons")
+            .unwrap()
+            .of_type_oid,
+        0
+    );
+
+    db.execute(1, "alter table persons of person_t").unwrap();
+    let err = db
+        .execute(1, "alter type person_t drop attribute name restrict")
+        .unwrap_err();
+    match err {
+        ExecError::DetailedError { hint, .. } => {
+            assert_eq!(
+                hint.as_deref(),
+                Some("Use ALTER ... CASCADE to alter the typed tables too.")
+            );
+        }
+        other => panic!("expected dependent typed table error, got {other:?}"),
+    }
+
+    db.execute(1, "alter type person_t add attribute age int4 cascade")
+        .unwrap();
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    let persons = visible.lookup_any_relation("persons").unwrap();
+    assert_eq!(
+        persons
+            .desc
+            .columns
+            .iter()
+            .filter(|column| !column.dropped)
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id", "name", "age"]
+    );
+}
+
+#[test]
+fn typed_table_rows_coerce_to_composite_type_and_drop_type_cascades() {
+    let dir = temp_dir("typed_table_row_function_drop_cascade");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type person_type as (id int4, name text)")
+        .unwrap();
+    db.execute(1, "create table persons of person_type")
+        .unwrap();
+    db.execute(1, "insert into persons values (1, 'test')")
+        .unwrap();
+    db.execute(
+        1,
+        "create function namelen(person_type) returns int4 language sql as $$ select length($1.name) $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, namelen(persons) from persons"),
+        vec![vec![Value::Int32(1), Value::Int32(4)]]
+    );
+
+    db.execute(1, "drop type person_type cascade").unwrap();
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    assert!(visible.type_by_name("person_type").is_none());
+    assert!(visible.lookup_any_relation("persons").is_none());
+}
+
+#[test]
 fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
     let dir = temp_dir("create_enum_type_catalog_rows");
     let db = Database::open(&dir, 64).unwrap();
@@ -33091,7 +33322,7 @@ fn drop_type_enforces_restrict_and_if_exists() {
             assert!(
                 detail
                     .unwrap_or_default()
-                    .contains("function widget_rows depends on type widget")
+                    .contains("function widget_rows() depends on type widget")
             );
         }
         other => panic!("expected dependent-function drop restriction, got {other:?}"),

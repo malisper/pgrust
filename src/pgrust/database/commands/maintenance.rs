@@ -7,6 +7,7 @@ use super::operator::{
     lookup_operator_row, operator_signature_display, resolve_operator_type_oid,
     unsupported_postfix_operator_error,
 };
+use super::typed_table::reject_typed_table_ddl;
 use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_indexes_for_row};
 use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
@@ -616,6 +617,7 @@ impl Database {
             lock_status_provider: Some(Arc::new(self.clone())),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            stats_import_runtime: None,
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&self.advisory_locks),
             row_locks: Arc::clone(&self.row_locks),
@@ -646,6 +648,8 @@ impl Database {
             system_bindings: Vec::new(),
             subplans: Vec::new(),
             pending_async_notifications: Vec::new(),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -1475,6 +1479,7 @@ impl Database {
             lock_status_provider: Some(Arc::new(self.clone())),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            stats_import_runtime: None,
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&self.advisory_locks),
             row_locks: Arc::clone(&self.row_locks),
@@ -1505,6 +1510,8 @@ impl Database {
             system_bindings: Vec::new(),
             subplans: Vec::new(),
             pending_async_notifications: Vec::new(),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -1582,6 +1589,7 @@ impl Database {
             lock_status_provider: Some(Arc::new(self.clone())),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            stats_import_runtime: None,
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&self.advisory_locks),
             row_locks: Arc::clone(&self.row_locks),
@@ -1612,6 +1620,8 @@ impl Database {
             system_bindings: Vec::new(),
             subplans: Vec::new(),
             pending_async_notifications: Vec::new(),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -2000,6 +2010,7 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
+        reject_typed_table_ddl(&relation, "add column to")?;
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
         let _ = dependent_view_rewrites_for_relation(
             self,
@@ -2066,6 +2077,7 @@ impl Database {
                 lock_status_provider: Some(Arc::new(self.clone())),
                 sequences: Some(self.sequences.clone()),
                 large_objects: Some(self.large_objects.clone()),
+                stats_import_runtime: None,
                 async_notify_runtime: Some(self.async_notify_runtime.clone()),
                 advisory_locks: Arc::clone(&self.advisory_locks),
                 row_locks: Arc::clone(&self.row_locks),
@@ -2097,6 +2109,8 @@ impl Database {
                 system_bindings: Vec::new(),
                 subplans: Vec::new(),
                 pending_async_notifications: Vec::new(),
+                pending_catalog_effects: Vec::new(),
+                pending_table_locks: Vec::new(),
                 catalog: catalog.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),

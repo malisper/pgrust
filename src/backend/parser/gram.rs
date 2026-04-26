@@ -99,6 +99,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_create_function_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_cast_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_drop_function_statement(&sql)? {
         return Ok(stmt);
     }
@@ -1188,12 +1191,30 @@ fn parse_partition_of_clause(
     rest = next.trim_start();
     let partition_spec = if rest.is_empty() {
         None
-    } else {
+    } else if keyword_at_start(rest, "partition") {
         let (partition_spec, next) = parse_partition_spec_clause(rest)?;
         rest = next.trim_start();
         Some(partition_spec)
+    } else {
+        None
     };
+    if !rest.is_empty() && (keyword_at_start(rest, "with") || keyword_at_start(rest, "without")) {
+        rest = parse_partition_of_table_storage_clause(rest)?;
+    }
     Ok((parts.join("."), elements, bound, partition_spec, rest))
+}
+
+fn parse_partition_of_table_storage_clause(
+    input: &str,
+) -> Result<&str, PartitionStatementParseError> {
+    let trimmed = input.trim_start();
+    let mut pairs = SqlParser::parse(Rule::table_storage_clause, trimmed)
+        .map_err(|_| PartitionStatementParseError::Unsupported)?;
+    let pair = pairs
+        .next()
+        .ok_or(PartitionStatementParseError::Unsupported)?;
+    validate_table_storage_clause(pair)?;
+    Ok("")
 }
 
 fn parse_partition_of_elements(
@@ -4381,6 +4402,18 @@ fn try_parse_comment_on_type_or_column_statement(
     Ok(None)
 }
 
+fn try_parse_cast_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create cast ") {
+        return build_create_cast_statement(trimmed).map(|stmt| Some(Statement::CreateCast(stmt)));
+    }
+    if lowered.starts_with("drop cast ") {
+        return build_drop_cast_statement(trimmed).map(|stmt| Some(Statement::DropCast(stmt)));
+    }
+    Ok(None)
+}
+
 fn try_parse_create_operator_class_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -5679,8 +5712,9 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     };
     let rest = rest.trim_start();
     let ((schema_name, function_name), rest) = parse_qualified_sql_name(rest)?;
+    let arg_list_position = parenthesized_inner_position(sql, rest);
     let (arg_list, mut rest) = take_parenthesized_segment(rest)?;
-    let args = parse_create_function_args(&arg_list)?;
+    let args = parse_create_function_args_with_base(&arg_list, arg_list_position)?;
 
     let mut return_spec = None;
     let mut language = None;
@@ -6557,6 +6591,7 @@ fn parse_create_procedure_arg(input: &str) -> Result<CreateFunctionArg, ParseErr
                 mode,
                 name: Some(name),
                 ty: parse_type_name(type_sql.trim())?,
+                type_position: None,
                 default_expr: default_expr.map(str::to_string),
                 variadic,
             });
@@ -8240,6 +8275,134 @@ fn build_create_type_statement(sql: &str) -> Result<CreateTypeStatement, ParseEr
     ))
 }
 
+fn build_create_cast_statement(sql: &str) -> Result<CreateCastStatement, ParseError> {
+    let prefix = "create cast";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CREATE CAST (source AS target)",
+            actual: sql.into(),
+        });
+    };
+    let (type_pair, rest) = take_parenthesized_segment(rest.trim_start())?;
+    let (source_type, target_type) = parse_cast_type_pair(&type_pair)?;
+    let rest = rest.trim_start();
+    let (method, rest) = if keyword_at_start(rest, "with") {
+        let rest = consume_keyword(rest, "with").trim_start();
+        if keyword_at_start(rest, "function") {
+            let rest = consume_keyword(rest, "function").trim_start();
+            let ((schema_name, function_name), rest) = parse_qualified_sql_name(rest)?;
+            let (args_sql, rest) = take_parenthesized_segment(rest.trim_start())?;
+            let arg_types = parse_cast_function_arg_types(&args_sql)?;
+            (
+                CreateCastMethod::Function {
+                    schema_name,
+                    function_name,
+                    arg_types,
+                },
+                rest,
+            )
+        } else if keyword_at_start(rest, "inout") {
+            (CreateCastMethod::InOut, consume_keyword(rest, "inout"))
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "FUNCTION or INOUT",
+                actual: rest.into(),
+            });
+        }
+    } else if let Some(rest) = consume_keywords(rest, &["without", "function"]) {
+        (CreateCastMethod::WithoutFunction, rest)
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "WITH FUNCTION, WITHOUT FUNCTION, or WITH INOUT",
+            actual: rest.into(),
+        });
+    };
+    let (context, rest) = parse_cast_context(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of CREATE CAST statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CreateCastStatement {
+        source_type,
+        target_type,
+        method,
+        context,
+    })
+}
+
+fn build_drop_cast_statement(sql: &str) -> Result<DropCastStatement, ParseError> {
+    let prefix = "drop cast";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "DROP CAST (source AS target)",
+            actual: sql.into(),
+        });
+    };
+    let mut rest = rest.trim_start();
+    let mut if_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        if_exists = true;
+        rest = next.trim_start();
+    }
+    let (type_pair, rest) = take_parenthesized_segment(rest)?;
+    let (source_type, target_type) = parse_cast_type_pair(&type_pair)?;
+    let suffix = rest.trim();
+    let cascade = if suffix.is_empty() || keyword_at_start(suffix, "restrict") {
+        false
+    } else if keyword_at_start(suffix, "cascade") {
+        true
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CASCADE, RESTRICT, or end of statement",
+            actual: suffix.into(),
+        });
+    };
+    Ok(DropCastStatement {
+        if_exists,
+        source_type,
+        target_type,
+        cascade,
+    })
+}
+
+fn parse_cast_type_pair(input: &str) -> Result<(RawTypeName, RawTypeName), ParseError> {
+    let as_index =
+        find_next_top_level_keyword(input, &["as"]).ok_or(ParseError::UnexpectedToken {
+            expected: "source type AS target type",
+            actual: input.into(),
+        })?;
+    let source_sql = input[..as_index].trim();
+    let target_sql = input[as_index + "as".len()..].trim();
+    if source_sql.is_empty() || target_sql.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "source type AS target type",
+            actual: input.into(),
+        });
+    }
+    Ok((parse_type_name(source_sql)?, parse_type_name(target_sql)?))
+}
+
+fn parse_cast_function_arg_types(input: &str) -> Result<Vec<RawTypeName>, ParseError> {
+    split_top_level_items(input, ',')?
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .map(|item| parse_type_name(item.trim()))
+        .collect()
+}
+
+fn parse_cast_context(input: &str) -> Result<(CastContext, &str), ParseError> {
+    let rest = input.trim_start();
+    if let Some(rest) = consume_keywords(rest, &["as", "implicit"]) {
+        return Ok((CastContext::Implicit, rest));
+    }
+    if let Some(rest) = consume_keywords(rest, &["as", "assignment"]) {
+        return Ok((CastContext::Assignment, rest));
+    }
+    Ok((CastContext::Explicit, rest))
+}
+
 fn build_create_operator_class_statement(
     sql: &str,
 ) -> Result<CreateOperatorClassStatement, ParseError> {
@@ -8935,6 +9098,11 @@ fn build_alter_type_statement(sql: &str) -> Result<AlterTypeStatement, ParseErro
     };
     let ((schema_name, type_name), rest) = parse_qualified_sql_name(rest.trim_start())?;
     let mut rest = rest.trim_start();
+    if starts_composite_type_action(rest) {
+        return Ok(AlterTypeStatement::AlterComposite(
+            parse_alter_composite_type_statement(schema_name, type_name, rest)?,
+        ));
+    }
     if keyword_at_start(rest, "add") {
         rest = consume_keyword(rest, "add").trim_start();
         if !keyword_at_start(rest, "value") {
@@ -9079,6 +9247,153 @@ fn build_alter_type_statement(sql: &str) -> Result<AlterTypeStatement, ParseErro
     Err(ParseError::FeatureNotSupported(
         "unsupported ALTER TYPE form".into(),
     ))
+}
+
+fn starts_composite_type_action(rest: &str) -> bool {
+    (keyword_at_start(rest, "add")
+        && keyword_at_start(consume_keyword(rest, "add").trim_start(), "attribute"))
+        || (keyword_at_start(rest, "drop")
+            && keyword_at_start(consume_keyword(rest, "drop").trim_start(), "attribute"))
+        || (keyword_at_start(rest, "alter")
+            && keyword_at_start(consume_keyword(rest, "alter").trim_start(), "attribute"))
+        || (keyword_at_start(rest, "rename")
+            && keyword_at_start(consume_keyword(rest, "rename").trim_start(), "attribute"))
+}
+
+fn parse_alter_composite_type_statement(
+    schema_name: Option<String>,
+    type_name: String,
+    rest: &str,
+) -> Result<AlterCompositeTypeStatement, ParseError> {
+    let actions = split_top_level_items(rest, ',')?
+        .into_iter()
+        .map(|item| parse_alter_composite_type_action(item.trim()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AlterCompositeTypeStatement {
+        schema_name,
+        type_name,
+        actions,
+    })
+}
+
+fn parse_alter_composite_type_action(input: &str) -> Result<AlterCompositeTypeAction, ParseError> {
+    if keyword_at_start(input, "add") {
+        let rest = consume_keyword(input, "add").trim_start();
+        if !keyword_at_start(rest, "attribute") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "ATTRIBUTE",
+                actual: rest.into(),
+            });
+        }
+        let (body, cascade) =
+            split_optional_cascade_restrict_clause(consume_keyword(rest, "attribute"))?;
+        return Ok(AlterCompositeTypeAction::AddAttribute {
+            attribute: parse_create_type_attribute(body)?,
+            cascade,
+        });
+    }
+    if keyword_at_start(input, "drop") {
+        let rest = consume_keyword(input, "drop").trim_start();
+        if !keyword_at_start(rest, "attribute") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "ATTRIBUTE",
+                actual: rest.into(),
+            });
+        }
+        let (body, cascade) =
+            split_optional_cascade_restrict_clause(consume_keyword(rest, "attribute"))?;
+        let mut body = body.trim_start();
+        let if_exists = if keyword_at_start(body, "if") {
+            body = consume_keyword(body, "if").trim_start();
+            if !keyword_at_start(body, "exists") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "EXISTS",
+                    actual: body.into(),
+                });
+            }
+            body = consume_keyword(body, "exists").trim_start();
+            true
+        } else {
+            false
+        };
+        let (name, trailing) = parse_sql_identifier(body)?;
+        if !trailing.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER TYPE DROP ATTRIBUTE",
+                actual: trailing.trim().into(),
+            });
+        }
+        return Ok(AlterCompositeTypeAction::DropAttribute {
+            name,
+            if_exists,
+            cascade,
+        });
+    }
+    if keyword_at_start(input, "alter") {
+        let rest = consume_keyword(input, "alter").trim_start();
+        if !keyword_at_start(rest, "attribute") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "ATTRIBUTE",
+                actual: rest.into(),
+            });
+        }
+        let (body, cascade) =
+            split_optional_cascade_restrict_clause(consume_keyword(rest, "attribute"))?;
+        let (name, mut rest) = parse_sql_identifier(body.trim_start())?;
+        rest = rest.trim_start();
+        if keyword_at_start(rest, "set") {
+            rest = consume_keyword(rest, "set").trim_start();
+        }
+        if keyword_at_start(rest, "data") {
+            rest = consume_keyword(rest, "data").trim_start();
+        }
+        if !keyword_at_start(rest, "type") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "TYPE",
+                actual: rest.into(),
+            });
+        }
+        return Ok(AlterCompositeTypeAction::AlterAttributeType {
+            name,
+            ty: parse_type_name(consume_keyword(rest, "type").trim())?,
+            cascade,
+        });
+    }
+    if keyword_at_start(input, "rename") {
+        let rest = consume_keyword(input, "rename").trim_start();
+        if !keyword_at_start(rest, "attribute") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "ATTRIBUTE",
+                actual: rest.into(),
+            });
+        }
+        let (body, cascade) =
+            split_optional_cascade_restrict_clause(consume_keyword(rest, "attribute"))?;
+        let (old_name, rest) = parse_sql_identifier(body.trim_start())?;
+        let rest = rest.trim_start();
+        if !keyword_at_start(rest, "to") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "TO",
+                actual: rest.into(),
+            });
+        }
+        let (new_name, trailing) = parse_sql_identifier(consume_keyword(rest, "to").trim_start())?;
+        if !trailing.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER TYPE RENAME ATTRIBUTE",
+                actual: trailing.trim().into(),
+            });
+        }
+        return Ok(AlterCompositeTypeAction::RenameAttribute {
+            old_name,
+            new_name,
+            cascade,
+        });
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "ALTER TYPE composite action",
+        actual: input.into(),
+    })
 }
 
 fn parse_create_range_type_statement(
@@ -9355,18 +9670,34 @@ fn build_drop_type_statement(sql: &str) -> Result<DropTypeStatement, ParseError>
 }
 
 fn parse_create_function_args(input: &str) -> Result<Vec<CreateFunctionArg>, ParseError> {
-    let items = split_top_level_items(input, ',')?;
-    if items.len() == 1 && items[0].trim().is_empty() {
+    parse_create_function_args_with_base(input, None)
+}
+
+fn parse_create_function_args_with_base(
+    input: &str,
+    base_offset: Option<usize>,
+) -> Result<Vec<CreateFunctionArg>, ParseError> {
+    let items = split_top_level_items_with_spans(input, ',')?;
+    if items.len() == 1 && items[0].0.trim().is_empty() {
         return Ok(Vec::new());
     }
     items
         .into_iter()
-        .filter(|item| !item.trim().is_empty())
-        .map(|item| parse_create_function_arg(&item))
+        .filter(|(item, _)| !item.trim().is_empty())
+        .map(|(item, item_offset)| {
+            parse_create_function_arg_with_base(item, base_offset.map(|base| base + item_offset))
+        })
         .collect()
 }
 
 fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseError> {
+    parse_create_function_arg_with_base(input, None)
+}
+
+fn parse_create_function_arg_with_base(
+    input: &str,
+    arg_base_offset: Option<usize>,
+) -> Result<CreateFunctionArg, ParseError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(ParseError::UnexpectedToken {
@@ -9399,18 +9730,21 @@ fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseErro
     if !rest.chars().any(char::is_whitespace)
         && let Ok(ty) = parse_type_name(rest)
     {
+        let type_position = named_type_position(&ty, input, rest, arg_base_offset);
         return Ok(CreateFunctionArg {
             mode,
             name: None,
             ty,
+            type_position,
             default_expr: None,
             variadic,
         });
     }
-    let (name, mut type_sql) = match parse_sql_identifier(rest) {
-        Ok((name, rest)) if !rest.trim().is_empty() => (Some(name), rest.trim()),
+    let (name, type_sql) = match parse_sql_identifier(rest) {
+        Ok((name, rest)) if !rest.trim().is_empty() => (Some(name), rest.trim_start()),
         _ => (None, rest),
     };
+    let mut type_sql = type_sql;
     if keyword_at_start(type_sql, "variadic") {
         variadic = true;
         type_sql = consume_keyword(type_sql, "variadic").trim_start();
@@ -9421,10 +9755,13 @@ fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseErro
             actual: input.into(),
         });
     }
+    let ty = parse_type_name(type_sql.trim())?;
+    let type_position = named_type_position(&ty, input, type_sql, arg_base_offset);
     Ok(CreateFunctionArg {
         mode,
         name,
-        ty: parse_type_name(type_sql.trim())?,
+        ty,
+        type_position,
         default_expr: None,
         variadic,
     })
@@ -9678,6 +10015,15 @@ fn take_parenthesized_segment(input: &str) -> Result<(String, &str), ParseError>
     Err(ParseError::UnexpectedEof)
 }
 
+fn parenthesized_inner_position(sql: &str, input: &str) -> Option<usize> {
+    let input_offset = sql.len().checked_sub(input.len())?;
+    let leading = input.len().checked_sub(input.trim_start().len())?;
+    input
+        .trim_start()
+        .starts_with('(')
+        .then_some(input_offset + leading + 1)
+}
+
 fn split_top_level_items(input: &str, separator: char) -> Result<Vec<String>, ParseError> {
     let mut items = Vec::new();
     let mut start = 0usize;
@@ -9713,6 +10059,75 @@ fn split_top_level_items(input: &str, separator: char) -> Result<Vec<String>, Pa
     }
     items.push(input[start..].trim().to_string());
     Ok(items)
+}
+
+fn split_top_level_items_with_spans(
+    input: &str,
+    separator: char,
+) -> Result<Vec<(&str, usize)>, ParseError> {
+    let mut items = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let bytes = input.as_bytes();
+    let sep = separator as u8;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = parse_delimited_token_end(bytes, i, b'\'');
+                continue;
+            }
+            b'"' => {
+                i = parse_delimited_token_end(bytes, i, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            byte if byte == sep && depth == 0 => {
+                items.push(trim_ascii_span(input, start, i));
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    items.push(trim_ascii_span(input, start, input.len()));
+    Ok(items)
+}
+
+fn trim_ascii_span(input: &str, mut start: usize, mut end: usize) -> (&str, usize) {
+    let bytes = input.as_bytes();
+    while start < end && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    (&input[start..end], start)
+}
+
+fn type_position(parent: &str, child: &str, base_offset: Option<usize>) -> Option<usize> {
+    let base = base_offset?;
+    let child = child.trim_start();
+    parent
+        .len()
+        .checked_sub(child.len())
+        .map(|relative| base + relative + 1)
+}
+
+fn named_type_position(
+    ty: &RawTypeName,
+    parent: &str,
+    child: &str,
+    base_offset: Option<usize>,
+) -> Option<usize> {
+    matches!(ty, RawTypeName::Named { .. }).then(|| type_position(parent, child, base_offset))?
 }
 
 fn split_top_level_once(input: &str, separator: char) -> Result<Option<(&str, &str)>, ParseError> {
@@ -10888,6 +11303,10 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_no_inherit_stmt => Ok(Statement::AlterTableNoInherit(
             build_alter_table_no_inherit(inner)?,
         )),
+        Rule::alter_table_of_stmt => Ok(Statement::AlterTableOf(build_alter_table_of(inner)?)),
+        Rule::alter_table_not_of_stmt => {
+            Ok(Statement::AlterTableNotOf(build_alter_table_not_of(inner)?))
+        }
         Rule::comment_on_role_stmt => Ok(Statement::CommentOnRole(build_comment_on_role(inner)?)),
         Rule::comment_on_table_stmt => {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
@@ -11138,8 +11557,10 @@ fn build_set_guc_name(pair: Pair<'_, Rule>) -> String {
 fn build_show(pair: Pair<'_, Rule>) -> Result<ShowStatement, ParseError> {
     let mut name = None;
     for part in pair.into_inner() {
-        if part.as_rule() == Rule::identifier {
-            name = Some(build_identifier(part));
+        match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::time_zone_guc_name => name = Some("timezone".to_string()),
+            _ => {}
         }
     }
     let name = name.ok_or(ParseError::UnexpectedEof)?;
@@ -11387,8 +11808,10 @@ fn build_reset_role(_pair: Pair<'_, Rule>) -> Result<ResetRoleStatement, ParseEr
 fn build_reset(pair: Pair<'_, Rule>) -> Result<ResetStatement, ParseError> {
     let mut name = None;
     for part in pair.into_inner() {
-        if part.as_rule() == Rule::identifier {
-            name = Some(build_identifier(part));
+        match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::time_zone_guc_name => name = Some("timezone".to_string()),
+            _ => {}
         }
     }
     Ok(ResetStatement { name })
@@ -13266,6 +13689,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     let mut persistence = TablePersistence::Permanent;
     let mut on_commit = OnCommitAction::PreserveRows;
     let mut elements = Vec::new();
+    let mut of_type_name = None;
     let mut inherits = Vec::new();
     let mut ctas_columns = Vec::new();
     let mut query = None;
@@ -13289,6 +13713,22 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                     match inner.as_rule() {
                         Rule::create_table_element => {
                             elements.push(build_create_table_element(inner)?)
+                        }
+                        Rule::on_commit_clause => on_commit = build_on_commit_action(inner)?,
+                        _ => {}
+                    }
+                }
+            }
+            Rule::create_table_of_form => {
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::identifier => of_type_name = Some(build_identifier(inner)),
+                        Rule::typed_table_column_form => {
+                            for element in inner.into_inner() {
+                                if element.as_rule() == Rule::typed_table_element {
+                                    elements.push(build_typed_table_element(element)?);
+                                }
+                            }
                         }
                         Rule::on_commit_clause => on_commit = build_on_commit_action(inner)?,
                         _ => {}
@@ -13349,6 +13789,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Ok(Statement::CreateTable(CreateTableStatement {
             schema_name,
             table_name,
+            of_type_name,
             persistence,
             on_commit,
             elements,
@@ -13716,6 +14157,111 @@ fn build_create_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement
             actual: inner.as_str().to_string(),
         }),
     }
+}
+
+fn build_typed_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match inner.as_rule() {
+        Rule::typed_column_options => Ok(CreateTableElement::TypedColumnOptions(
+            build_typed_column_options(inner)?,
+        )),
+        Rule::table_constraint => Ok(CreateTableElement::Constraint(build_table_constraint(
+            inner,
+        )?)),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "typed column options or table constraint",
+            actual: inner.as_str().to_string(),
+        }),
+    }
+}
+
+fn build_typed_column_options(pair: Pair<'_, Rule>) -> Result<TypedColumnOptions, ParseError> {
+    let mut inner = pair.into_inner();
+    let name = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
+    let mut default_expr = None;
+    let mut collation = None;
+    let mut generated = None;
+    let mut identity = None;
+    let storage = None;
+    let mut compression = None;
+    let mut constraints = Vec::new();
+    for flag in inner {
+        let Some(flag) = (match flag.as_rule() {
+            Rule::column_modifier => flag.into_inner().next(),
+            Rule::kw_with | Rule::kw_options => None,
+            _ => Some(flag),
+        }) else {
+            continue;
+        };
+        match flag.as_rule() {
+            Rule::column_collation => {
+                collation = Some(build_collation_name(
+                    flag.into_inner()
+                        .find(|part| part.as_rule() == Rule::collation_name)
+                        .ok_or(ParseError::UnexpectedEof)?,
+                )?);
+            }
+            Rule::column_default => {
+                default_expr = flag
+                    .into_inner()
+                    .find(|part| matches!(part.as_rule(), Rule::expr | Rule::b_expr))
+                    .map(|expr| expr.as_str().trim().to_string());
+            }
+            Rule::column_generated => {
+                set_column_generated(&mut generated, build_column_generated(flag)?, &name)?;
+            }
+            Rule::column_identity => {
+                set_column_identity(&mut identity, build_column_identity(flag)?, &name)?;
+            }
+            Rule::column_compression => {
+                compression = Some(build_column_compression(flag)?);
+            }
+            Rule::nullable => {}
+            Rule::named_column_constraint => {
+                let generated_part = flag
+                    .clone()
+                    .into_inner()
+                    .find(|part| part.as_rule() == Rule::column_generated);
+                if let Some(generated_part) = generated_part {
+                    set_column_generated(
+                        &mut generated,
+                        build_column_generated(generated_part)?,
+                        &name,
+                    )?;
+                } else if let Some(identity_part) = flag
+                    .clone()
+                    .into_inner()
+                    .find(|part| part.as_rule() == Rule::column_identity)
+                {
+                    set_column_identity(
+                        &mut identity,
+                        build_column_identity(identity_part)?,
+                        &name,
+                    )?;
+                } else {
+                    constraints.push(build_column_constraint(flag)?)
+                }
+            }
+            Rule::not_null_column_constraint
+            | Rule::check_column_constraint
+            | Rule::primary_key_column_constraint
+            | Rule::unique_column_constraint
+            | Rule::references_column_constraint => {
+                constraints.push(build_column_constraint(flag)?)
+            }
+            _ => {}
+        }
+    }
+    Ok(TypedColumnOptions {
+        name,
+        collation,
+        default_expr,
+        generated,
+        identity,
+        storage,
+        compression,
+        constraints,
+    })
 }
 
 fn build_create_table_like_clause(
@@ -15452,7 +15998,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::SessionUser => "session_user".to_string(),
         SqlExpr::CurrentRole => "current_role".to_string(),
         SqlExpr::AtTimeZone { .. } => "timezone".to_string(),
-        SqlExpr::FuncCall { name, .. } => name.clone(),
+        SqlExpr::FuncCall { name, .. } => name.rsplit('.').next().unwrap_or(name).to_string(),
         _ => "?column?".to_string(),
     }
 }
@@ -15724,7 +16270,7 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
                 default_expr = flag
                     .into_inner()
                     .find(|part| matches!(part.as_rule(), Rule::expr | Rule::b_expr))
-                    .map(|expr| expr.as_str().to_string());
+                    .map(|expr| expr.as_str().trim().to_string());
             }
             Rule::column_generated => {
                 set_column_generated(&mut generated, build_column_generated(flag)?, &name)?;
@@ -16633,6 +17179,53 @@ fn build_alter_table_inherit(
         parent_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
 }
+
+fn build_alter_table_of(pair: Pair<'_, Rule>) -> Result<AlterTableOfStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut parts = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                parts.push(parsed_table_name);
+            }
+            Rule::identifier => parts.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    let mut parts = parts.into_iter();
+    Ok(AlterTableOfStatement {
+        if_exists,
+        only,
+        table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        type_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_not_of(pair: Pair<'_, Rule>) -> Result<AlterTableNotOfStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    for part in pair.into_inner() {
+        if part.as_rule() == Rule::alter_table_target {
+            let (parsed_if_exists, parsed_only, parsed_table_name) =
+                build_alter_table_target(part)?;
+            if_exists = parsed_if_exists;
+            only = parsed_only;
+            table_name = Some(parsed_table_name);
+        }
+    }
+    Ok(AlterTableNotOfStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
 fn build_alter_relation_owner(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterRelationOwnerStatement, ParseError> {
@@ -17429,25 +18022,72 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 }
                 Rule::between_suffix => {
                     let mut negated = false;
+                    let mut symmetric = false;
                     let mut bounds = Vec::new();
                     for part in next.into_inner() {
                         match part.as_rule() {
                             Rule::kw_not => negated = true,
+                            Rule::kw_symmetric => symmetric = true,
                             Rule::concat_expr => bounds.push(build_expr(part)?),
                             _ => {}
                         }
                     }
                     let low = bounds.first().cloned().ok_or(ParseError::UnexpectedEof)?;
                     let high = bounds.get(1).cloned().ok_or(ParseError::UnexpectedEof)?;
-                    let between = SqlExpr::And(
-                        Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(low))),
-                        Box::new(SqlExpr::LtEq(Box::new(left), Box::new(high))),
-                    );
-                    Ok(if negated {
-                        SqlExpr::Not(Box::new(between))
+                    let between = if symmetric && negated {
+                        SqlExpr::And(
+                            Box::new(SqlExpr::Or(
+                                Box::new(SqlExpr::Lt(
+                                    Box::new(left.clone()),
+                                    Box::new(low.clone()),
+                                )),
+                                Box::new(SqlExpr::Gt(
+                                    Box::new(left.clone()),
+                                    Box::new(high.clone()),
+                                )),
+                            )),
+                            Box::new(SqlExpr::Or(
+                                Box::new(SqlExpr::Lt(Box::new(left.clone()), Box::new(high))),
+                                Box::new(SqlExpr::Gt(Box::new(left), Box::new(low))),
+                            )),
+                        )
+                    } else if symmetric {
+                        SqlExpr::Or(
+                            Box::new(SqlExpr::And(
+                                Box::new(SqlExpr::GtEq(
+                                    Box::new(left.clone()),
+                                    Box::new(low.clone()),
+                                )),
+                                Box::new(SqlExpr::LtEq(
+                                    Box::new(left.clone()),
+                                    Box::new(high.clone()),
+                                )),
+                            )),
+                            Box::new(SqlExpr::And(
+                                Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(high))),
+                                Box::new(SqlExpr::LtEq(Box::new(left), Box::new(low))),
+                            )),
+                        )
+                    } else if negated {
+                        SqlExpr::Or(
+                            Box::new(SqlExpr::Lt(Box::new(left.clone()), Box::new(low))),
+                            Box::new(SqlExpr::Gt(Box::new(left), Box::new(high))),
+                        )
                     } else {
-                        between
-                    })
+                        SqlExpr::And(
+                            Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(low))),
+                            Box::new(SqlExpr::LtEq(Box::new(left), Box::new(high))),
+                        )
+                    };
+                    Ok(between)
+                }
+                Rule::overlaps_suffix => {
+                    let right = next
+                        .into_inner()
+                        .find(|part| part.as_rule() == Rule::implicit_row_expr)
+                        .ok_or(ParseError::UnexpectedEof)
+                        .and_then(build_expr)?;
+                    Ok(SqlExpr::Overlaps(Box::new(left), Box::new(right)))
                 }
                 Rule::in_expr_list_suffix => {
                     let mut negated = false;

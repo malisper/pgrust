@@ -36,9 +36,9 @@ use super::expr_date::{
     eval_extract_function_with_config, eval_isfinite_function, eval_justify_days_function,
     eval_justify_hours_function, eval_justify_interval_function, eval_make_date_function,
     eval_make_interval_function, eval_make_time_function, eval_make_timestamp_function,
-    eval_make_timestamptz_function, eval_timezone_function as eval_timetz_timezone_function,
-    eval_to_date_function, eval_to_timestamp_function, timezone_interval_seconds,
-    timezone_target_offset_seconds,
+    eval_make_timestamptz_function, eval_timestamptz_constructor_function,
+    eval_timezone_function as eval_timetz_timezone_function, eval_to_date_function,
+    eval_to_timestamp_function, timezone_interval_seconds, timezone_target_offset_seconds,
 };
 use super::expr_datetime::{
     current_date_value, current_date_value_from_timestamp_with_config, current_time_value,
@@ -70,10 +70,11 @@ use super::expr_numeric::{
 };
 use super::expr_ops::compare_order_values;
 use super::expr_ops::{
-    add_values, bitwise_and_values, bitwise_not_value, bitwise_or_values, bitwise_xor_values,
-    compare_values, compare_values_with_type, concat_values, concat_values_with_cast_context,
-    div_values, eval_and, eval_or, mod_values, mul_values, negate_value, not_equal_values,
-    not_equal_values_with_type, order_values, shift_left_values, shift_right_values, sub_values,
+    add_values, add_values_with_config, bitwise_and_values, bitwise_not_value, bitwise_or_values,
+    bitwise_xor_values, compare_values, compare_values_with_type, concat_values,
+    concat_values_with_cast_context, div_values, eval_and, eval_or, mixed_date_timestamp_ordering,
+    mod_values, mul_values, negate_value, not_equal_values, not_equal_values_with_type,
+    order_values, shift_left_values, shift_right_values, sub_values, sub_values_with_config,
     values_are_distinct,
 };
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
@@ -110,7 +111,7 @@ use super::pg_regex::{
     eval_similar, eval_similar_substring, eval_sql_regex_substring,
 };
 pub(crate) use super::value_io::{format_array_text, format_array_value_text};
-use super::{ExecError, ExecutorContext, exec_next, executor_start};
+use super::{ExecError, ExecutorContext, TypedFunctionArg, exec_next, executor_start};
 use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
 use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
 use crate::backend::catalog::rowcodec::pg_description_row_from_values;
@@ -1957,6 +1958,10 @@ fn ensure_builtin_side_effects_allowed(
             | BuiltinScalarFunction::PgAdvisoryUnlock
             | BuiltinScalarFunction::PgAdvisoryUnlockShared
             | BuiltinScalarFunction::PgAdvisoryUnlockAll
+            | BuiltinScalarFunction::PgRestoreRelationStats
+            | BuiltinScalarFunction::PgClearRelationStats
+            | BuiltinScalarFunction::PgRestoreAttributeStats
+            | BuiltinScalarFunction::PgClearAttributeStats
     ) && !ctx.allow_side_effects
     {
         return Err(ExecError::DetailedError {
@@ -1989,6 +1994,10 @@ fn ensure_builtin_side_effects_allowed(
                         "pg_advisory_unlock_shared"
                     }
                     BuiltinScalarFunction::PgAdvisoryUnlockAll => "pg_advisory_unlock_all",
+                    BuiltinScalarFunction::PgRestoreRelationStats => "pg_restore_relation_stats",
+                    BuiltinScalarFunction::PgClearRelationStats => "pg_clear_relation_stats",
+                    BuiltinScalarFunction::PgRestoreAttributeStats => "pg_restore_attribute_stats",
+                    BuiltinScalarFunction::PgClearAttributeStats => "pg_clear_attribute_stats",
                     _ => unreachable!(),
                 }
             ),
@@ -2244,9 +2253,26 @@ fn eval_pg_describe_object(values: &[Value], ctx: &ExecutorContext) -> Result<Va
                 "pg_namespace" => catalog
                     .namespace_row_by_oid(objid)
                     .map(|row| format!("schema {}", row.nspname)),
+                "pg_type" => catalog.type_by_oid(objid).map(|row| {
+                    format!(
+                        "type {}",
+                        expr_reg::format_type_text(row.oid, None, catalog)
+                    )
+                }),
                 "pg_proc" => catalog
                     .proc_row_by_oid(objid)
                     .map(|row| function_identity_text(&row, catalog)),
+                "pg_cast" => catalog
+                    .cast_rows()
+                    .into_iter()
+                    .find(|row| row.oid == objid)
+                    .map(|row| {
+                        format!(
+                            "cast from {} to {}",
+                            expr_reg::format_type_text(row.castsource, None, catalog),
+                            expr_reg::format_type_text(row.casttarget, None, catalog)
+                        )
+                    }),
                 "pg_operator" => catalog
                     .operator_by_oid(objid)
                     .map(|row| operator_identity_text(&row, catalog)),
@@ -3363,12 +3389,16 @@ fn eval_op_expr(
         (OpExprKind::UnaryPlus, [inner]) => eval_expr(inner, slot, ctx),
         (OpExprKind::Negate, [inner]) => negate_value(eval_expr(inner, slot, ctx)?),
         (OpExprKind::BitNot, [inner]) => bitwise_not_value(eval_expr(inner, slot, ctx)?),
-        (OpExprKind::Add, [left, right]) => {
-            add_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        (OpExprKind::Sub, [left, right]) => {
-            sub_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
+        (OpExprKind::Add, [left, right]) => add_values_with_config(
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
+            &ctx.datetime_config,
+        ),
+        (OpExprKind::Sub, [left, right]) => sub_values_with_config(
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
+            &ctx.datetime_config,
+        ),
         (OpExprKind::BitAnd, [left, right]) => {
             bitwise_and_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
         }
@@ -3410,6 +3440,7 @@ fn eval_op_expr(
             eval_expr(right, slot, ctx)?,
             expr_sql_type_hint(right),
             op.collation_oid,
+            Some(&ctx.datetime_config),
         ),
         (OpExprKind::NotEq, [left, right]) => not_equal_values_with_type(
             eval_expr(left, slot, ctx)?,
@@ -3417,6 +3448,7 @@ fn eval_op_expr(
             eval_expr(right, slot, ctx)?,
             expr_sql_type_hint(right),
             op.collation_oid,
+            Some(&ctx.datetime_config),
         ),
         (OpExprKind::Lt, [left, right]) => order_values_with_type(
             "<",
@@ -3508,6 +3540,16 @@ fn order_values_with_type(
 ) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
+    }
+    if let Some(ordering) = mixed_date_timestamp_ordering(&left, &right, Some(&ctx.datetime_config))
+    {
+        return Ok(Value::Bool(match op {
+            "<" => ordering == Ordering::Less,
+            "<=" => ordering != Ordering::Greater,
+            ">" => ordering == Ordering::Greater,
+            ">=" => ordering != Ordering::Less,
+            _ => unreachable!("comparison op not supported by order_values_with_type"),
+        }));
     }
     if let (
         Value::EnumOid(left_oid),
@@ -4205,6 +4247,7 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 eval_plpgsql_expr(right, slot)?,
                 expr_sql_type_hint(right),
                 op.collation_oid,
+                None,
             ),
             (OpExprKind::NotEq, [left, right]) => not_equal_values_with_type(
                 eval_plpgsql_expr(left, slot)?,
@@ -4212,6 +4255,7 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 eval_plpgsql_expr(right, slot)?,
                 expr_sql_type_hint(right),
                 op.collation_oid,
+                None,
             ),
             (OpExprKind::Lt, [left, right]) => order_values(
                 "<",
@@ -4478,6 +4522,9 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
 }
 
 fn eval_record_field(value: Value, field: &str) -> Result<Value, ExecError> {
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
     let Value::Record(record) = value else {
         return Err(ExecError::DetailedError {
             message: format!("cannot select field \"{field}\" from non-record value"),
@@ -4959,7 +5006,14 @@ fn eval_plpgsql_builtin_function(
         ),
         BuiltinScalarFunction::ToDate => eval_to_date_function(&values),
         BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
-        BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(&values),
+        BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(
+            &values,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        ),
+        BuiltinScalarFunction::TimestampTzConstructor => eval_timestamptz_constructor_function(
+            &values,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        ),
         BuiltinScalarFunction::Abs => eval_abs_function(&values),
         BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
@@ -6159,6 +6213,69 @@ fn eval_builtin_function(
     if let Some(result) = eval_json_record_builtin_function(func, result_type, args, slot, ctx) {
         return result;
     }
+    if matches!(
+        func,
+        BuiltinScalarFunction::PgRestoreRelationStats
+            | BuiltinScalarFunction::PgClearRelationStats
+            | BuiltinScalarFunction::PgRestoreAttributeStats
+            | BuiltinScalarFunction::PgClearAttributeStats
+    ) {
+        let runtime = ctx
+            .stats_import_runtime
+            .clone()
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("{func:?} requires database executor context"),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            })?;
+        let typed_args = args
+            .iter()
+            .map(|arg| {
+                Ok(TypedFunctionArg {
+                    value: eval_expr(arg, slot, ctx)?,
+                    sql_type: expr_sql_type_hint(arg),
+                })
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?;
+        return match func {
+            BuiltinScalarFunction::PgRestoreRelationStats => {
+                runtime.pg_restore_relation_stats(ctx, typed_args)
+            }
+            BuiltinScalarFunction::PgClearRelationStats => {
+                if typed_args.len() != 2 {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "pg_clear_relation_stats(schemaname, relname)",
+                        actual: format!("{} args", typed_args.len()),
+                    }));
+                }
+                runtime.pg_clear_relation_stats(
+                    ctx,
+                    typed_args[0].value.clone(),
+                    typed_args[1].value.clone(),
+                )
+            }
+            BuiltinScalarFunction::PgRestoreAttributeStats => {
+                runtime.pg_restore_attribute_stats(ctx, typed_args)
+            }
+            BuiltinScalarFunction::PgClearAttributeStats => {
+                if typed_args.len() != 4 {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "pg_clear_attribute_stats(schemaname, relname, attname, inherited)",
+                        actual: format!("{} args", typed_args.len()),
+                    }));
+                }
+                runtime.pg_clear_attribute_stats(
+                    ctx,
+                    typed_args[0].value.clone(),
+                    typed_args[1].value.clone(),
+                    typed_args[2].value.clone(),
+                    typed_args[3].value.clone(),
+                )
+            }
+            _ => unreachable!(),
+        };
+    }
     if matches!(func, BuiltinScalarFunction::PgColumnCompression)
         && let [Expr::Var(var)] = args
         && var.varlevelsup == 0
@@ -6451,7 +6568,12 @@ fn eval_builtin_function(
         BuiltinScalarFunction::MakeTimestampTz => {
             eval_make_timestamptz_function(&values, &ctx.datetime_config)
         }
-        BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(&values),
+        BuiltinScalarFunction::TimestampTzConstructor => {
+            eval_timestamptz_constructor_function(&values, &ctx.datetime_config)
+        }
+        BuiltinScalarFunction::ToTimestamp => {
+            eval_to_timestamp_function(&values, &ctx.datetime_config)
+        }
         BuiltinScalarFunction::IntervalHash => {
             eval_hash_builtin_function(HashFunctionKind::Interval, false, &values)
         }

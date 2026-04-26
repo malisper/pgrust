@@ -41,10 +41,13 @@ use crate::backend::utils::time::date::{
     DateParseError, parse_date_text, parse_time_text, parse_timetz_text,
 };
 use crate::backend::utils::time::datetime::{
-    DateTimeParseError, timestamp_parts_from_usecs, timezone_offset_seconds,
+    DateTimeParseError, current_timezone_name, named_timezone_offset_seconds,
+    named_timezone_offset_seconds_for_local, timestamp_parts_from_usecs, timezone_offset_seconds,
     timezone_offset_seconds_at_utc,
 };
-use crate::backend::utils::time::timestamp::{parse_timestamp_text, parse_timestamptz_text};
+use crate::backend::utils::time::timestamp::{
+    is_valid_finite_timestamp_usecs, parse_timestamp_text, parse_timestamptz_text,
+};
 use crate::include::catalog::{
     INT2_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID, XID8_TYPE_OID, bootstrap_pg_cast_rows,
     builtin_type_rows, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
@@ -122,6 +125,15 @@ fn unsupported_trigger_input() -> ExecError {
     }
 }
 
+fn cannot_cast_type_error(source: &'static str, target: &'static str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("cannot cast type {source} to {target}"),
+        detail: None,
+        hint: None,
+        sqlstate: "42846",
+    }
+}
+
 fn timestamp_date_part(value: TimestampADT) -> DateADT {
     if !value.is_finite() {
         return DateADT(match value.0 {
@@ -132,6 +144,50 @@ fn timestamp_date_part(value: TimestampADT) -> DateADT {
     }
     let (days, _) = timestamp_parts_from_usecs(value.0);
     DateADT(days)
+}
+
+fn date_out_of_range_for_timestamp_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "date out of range for timestamp".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    }
+}
+
+fn date_timestamp_cast(value: DateADT) -> Result<TimestampADT, ExecError> {
+    match value.0 {
+        DATEVAL_NOBEGIN => Ok(TimestampADT(
+            crate::include::nodes::datetime::TIMESTAMP_NOBEGIN,
+        )),
+        DATEVAL_NOEND => Ok(TimestampADT(
+            crate::include::nodes::datetime::TIMESTAMP_NOEND,
+        )),
+        days => {
+            let usecs = i128::from(days) * i128::from(USECS_PER_DAY);
+            let usecs =
+                i64::try_from(usecs).map_err(|_| date_out_of_range_for_timestamp_error())?;
+            if !is_valid_finite_timestamp_usecs(usecs) {
+                return Err(date_out_of_range_for_timestamp_error());
+            }
+            Ok(TimestampADT(usecs))
+        }
+    }
+}
+
+fn date_timestamptz_cast(
+    value: DateADT,
+    config: &DateTimeConfig,
+) -> Result<TimestampTzADT, ExecError> {
+    let timestamp = date_timestamp_cast(value)?;
+    if !timestamp.is_finite() {
+        return Ok(TimestampTzADT(timestamp.0));
+    }
+    let timestamptz = timestamp_to_timestamptz(timestamp, config);
+    if !is_valid_finite_timestamp_usecs(timestamptz.0) {
+        return Err(date_out_of_range_for_timestamp_error());
+    }
+    Ok(timestamptz)
 }
 
 fn timestamp_time_part(value: TimestampADT) -> Option<TimeADT> {
@@ -145,7 +201,10 @@ fn timestamp_to_timestamptz(value: TimestampADT, config: &DateTimeConfig) -> Tim
     if !value.is_finite() {
         return TimestampTzADT(value.0);
     }
-    TimestampTzADT(value.0 - i64::from(timezone_offset_seconds(config)) * USECS_PER_SEC)
+    let offset = named_timezone_offset_seconds_for_local(current_timezone_name(config), value.0)
+        .or_else(|| named_timezone_offset_seconds(current_timezone_name(config)))
+        .unwrap_or_else(|| timezone_offset_seconds(config));
+    TimestampTzADT(value.0 - i64::from(offset) * USECS_PER_SEC)
 }
 
 fn timestamptz_local_timestamp(value: TimestampTzADT, config: &DateTimeConfig) -> TimestampADT {
@@ -1485,7 +1544,8 @@ pub(crate) fn parse_interval_text_value_with_style(
 }
 
 fn expand_interval_tokens(text: &str) -> Vec<String> {
-    text.split_whitespace()
+    let tokens = text
+        .split_whitespace()
         .flat_map(|token| {
             if token.contains(':') {
                 return vec![token.to_string()];
@@ -1494,7 +1554,24 @@ fn expand_interval_tokens(text: &str) -> Vec<String> {
                 .map(|(value, unit)| vec![value, unit])
                 .unwrap_or_else(|| vec![token.to_string()])
         })
-        .collect()
+        .collect::<Vec<_>>();
+    merge_interval_sign_tokens(tokens)
+}
+
+fn merge_interval_sign_tokens(tokens: Vec<String>) -> Vec<String> {
+    let mut merged = Vec::with_capacity(tokens.len());
+    let mut idx = 0;
+    while idx < tokens.len() {
+        let token = &tokens[idx];
+        if matches!(token.as_str(), "+" | "-") && idx + 1 < tokens.len() {
+            merged.push(format!("{token}{}", tokens[idx + 1]));
+            idx += 2;
+        } else {
+            merged.push(token.clone());
+            idx += 1;
+        }
+    }
+    merged
 }
 
 fn interval_sql_standard_force_negative(tokens: &[String], style: IntervalStyle) -> bool {
@@ -3312,6 +3389,26 @@ pub(crate) fn datetime_parse_error_details(
     }
 }
 
+fn timestamp_parse_error(
+    column: &'static str,
+    ty: &'static str,
+    text: &str,
+    err: DateTimeParseError,
+) -> ExecError {
+    if matches!(err, DateTimeParseError::FieldOutOfRange) {
+        return ExecError::DetailedError {
+            message: datetime_parse_error_details(ty, text, err),
+            detail: None,
+            hint: Some("Perhaps you need a different \"DateStyle\" setting.".into()),
+            sqlstate: "22008",
+        };
+    }
+    ExecError::InvalidStorageValue {
+        column: column.into(),
+        details: datetime_parse_error_details(ty, text, err),
+    }
+}
+
 fn date_parse_error(text: &str, err: DateParseError) -> ExecError {
     match err {
         DateParseError::Invalid => ExecError::DetailedError {
@@ -4210,6 +4307,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         },
         Value::Date(v) => match ty.kind {
             SqlTypeKind::Date => Ok(Value::Date(v)),
+            SqlTypeKind::Timestamp => date_timestamp_cast(v).map(Value::Timestamp),
+            SqlTypeKind::TimestampTz => date_timestamptz_cast(v, config).map(Value::TimestampTz),
             SqlTypeKind::Text
             | SqlTypeKind::Name
             | SqlTypeKind::Char
@@ -4218,9 +4317,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             | SqlTypeKind::Jsonb
             | SqlTypeKind::JsonPath
             | SqlTypeKind::Time
-            | SqlTypeKind::TimeTz
-            | SqlTypeKind::Timestamp
-            | SqlTypeKind::TimestampTz => cast_text_value_with_config(
+            | SqlTypeKind::TimeTz => cast_text_value_with_config(
                 &render_datetime_value_text_with_config(&Value::Date(v), config)
                     .expect("datetime values render"),
                 ty,
@@ -4235,6 +4332,11 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         },
         Value::Time(v) => match ty.kind {
             SqlTypeKind::Time => Ok(apply_time_precision(Value::Time(v), ty.time_precision())),
+            SqlTypeKind::Interval => Ok(Value::Interval(IntervalValue {
+                months: 0,
+                days: 0,
+                time_micros: v.0,
+            })),
             SqlTypeKind::Text
             | SqlTypeKind::Name
             | SqlTypeKind::Char
@@ -4260,6 +4362,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         Value::TimeTz(v) => match ty.kind {
             SqlTypeKind::TimeTz => Ok(apply_time_precision(Value::TimeTz(v), ty.time_precision())),
             SqlTypeKind::Time => Ok(Value::Time(v.time)),
+            SqlTypeKind::Interval => Err(cannot_cast_type_error("time with time zone", "interval")),
             SqlTypeKind::Text
             | SqlTypeKind::Name
             | SqlTypeKind::Char
@@ -4367,6 +4470,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     i128::from(v.time_micros).rem_euclid(i128::from(USECS_PER_DAY)) as i64,
                 )))
             }
+            SqlTypeKind::TimeTz => Err(cannot_cast_type_error("interval", "time with time zone")),
             SqlTypeKind::Text
             | SqlTypeKind::Name
             | SqlTypeKind::Char
@@ -5381,16 +5485,12 @@ pub(crate) fn cast_text_value_with_config(
         SqlTypeKind::Timestamp => parse_timestamp_text(text, config)
             .map(Value::Timestamp)
             .map(|value| apply_time_precision(value, ty.time_precision()))
-            .map_err(|err| ExecError::InvalidStorageValue {
-                column: "timestamp".into(),
-                details: datetime_parse_error_details("timestamp", text, err),
-            }),
+            .map_err(|err| timestamp_parse_error("timestamp", "timestamp", text, err)),
         SqlTypeKind::TimestampTz => parse_timestamptz_text(text, config)
             .map(Value::TimestampTz)
             .map(|value| apply_time_precision(value, ty.time_precision()))
-            .map_err(|err| ExecError::InvalidStorageValue {
-                column: "timestamptz".into(),
-                details: datetime_parse_error_details("timestamp with time zone", text, err),
+            .map_err(|err| {
+                timestamp_parse_error("timestamptz", "timestamp with time zone", text, err)
             }),
         SqlTypeKind::InternalChar => Ok(Value::InternalChar(parse_internal_char_text(text))),
         SqlTypeKind::Bit | SqlTypeKind::VarBit => Ok(Value::Bit(coerce_bit_string(
@@ -6040,9 +6140,10 @@ fn has_nonzero_digit(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cast_float_to_int, cast_value, cast_value_with_source_type_and_config,
-        parse_input_type_name, parse_interval_text_value, parse_pg_float, parse_text_array_literal,
-        render_interval_text_with_style, soft_input_error_info,
+        cast_float_to_int, cast_text_value_with_config, cast_value,
+        cast_value_with_source_type_and_config, parse_input_type_name, parse_interval_text_value,
+        parse_pg_float, parse_text_array_literal, render_interval_text_with_style,
+        soft_input_error_info,
     };
     use crate::backend::executor::exec_expr::parse_numeric_text;
     use crate::backend::executor::{ExecError, Value};
@@ -6269,6 +6370,69 @@ mod tests {
     }
 
     #[test]
+    fn date_timestamp_cast_reports_postgres_range_error() {
+        let date = DateADT(
+            crate::backend::utils::time::datetime::days_from_ymd(2_202_020, 10, 5).unwrap(),
+        );
+
+        assert!(matches!(
+            cast_value(Value::Date(date), SqlType::new(SqlTypeKind::Timestamp)),
+            Err(ExecError::DetailedError {
+                message,
+                sqlstate: "22008",
+                ..
+            }) if message == "date out of range for timestamp"
+        ));
+    }
+
+    #[test]
+    fn time_interval_casts_match_postgres_support() {
+        assert_eq!(
+            cast_value(
+                Value::Time(TimeADT((1 * 3600 + 2 * 60) * USECS_PER_SEC)),
+                SqlType::new(SqlTypeKind::Interval)
+            )
+            .unwrap(),
+            Value::Interval(IntervalValue {
+                months: 0,
+                days: 0,
+                time_micros: (1 * 3600 + 2 * 60) * USECS_PER_SEC,
+            })
+        );
+
+        assert!(matches!(
+            cast_value(
+                Value::TimeTz(TimeTzADT {
+                    time: TimeADT((1 * 3600 + 2 * 60) * USECS_PER_SEC),
+                    offset_seconds: -8 * 3600,
+                }),
+                SqlType::new(SqlTypeKind::Interval)
+            ),
+            Err(ExecError::DetailedError {
+                message,
+                sqlstate: "42846",
+                ..
+            }) if message == "cannot cast type time with time zone to interval"
+        ));
+
+        assert!(matches!(
+            cast_value(
+                Value::Interval(IntervalValue {
+                    months: 0,
+                    days: 0,
+                    time_micros: (2 * 3600 + 3 * 60) * USECS_PER_SEC,
+                }),
+                SqlType::new(SqlTypeKind::TimeTz)
+            ),
+            Err(ExecError::DetailedError {
+                message,
+                sqlstate: "42846",
+                ..
+            }) if message == "cannot cast type interval to time with time zone"
+        ));
+    }
+
+    #[test]
     fn bpchar_without_typmod_preserves_text_width() {
         assert_eq!(
             cast_value(
@@ -6328,6 +6492,27 @@ mod tests {
     }
 
     #[test]
+    fn timestamp_field_out_of_range_input_uses_datestyle_hint() {
+        let err = cast_text_value_with_config(
+            "13/01/2000",
+            SqlType::new(SqlTypeKind::Timestamp),
+            true,
+            &DateTimeConfig::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::DetailedError {
+                message,
+                hint: Some(hint),
+                sqlstate: "22008",
+                ..
+            } if message == "date/time field value out of range: \"13/01/2000\""
+                && hint == "Perhaps you need a different \"DateStyle\" setting."
+        ));
+    }
+
+    #[test]
     fn interval_input_keeps_i64_microsecond_edge_values() {
         assert_eq!(
             parse_interval_text_value("-9223372036854775807 us").unwrap(),
@@ -6343,6 +6528,26 @@ mod tests {
                 time_micros: i64::MIN,
                 days: 0,
                 months: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn interval_input_accepts_postgres_mixed_signed_fields() {
+        assert_eq!(
+            parse_interval_text_value("1 month - 1 second").unwrap(),
+            IntervalValue {
+                months: 1,
+                days: 0,
+                time_micros: -1_000_000,
+            }
+        );
+        assert_eq!(
+            parse_interval_text_value("2 days - 12:34:56").unwrap(),
+            IntervalValue {
+                months: 0,
+                days: 2,
+                time_micros: -45_296_000_000,
             }
         );
     }

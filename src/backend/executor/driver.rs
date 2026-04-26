@@ -250,6 +250,8 @@ fn execute_statement_with_source(
         | Statement::AlterTableValidateConstraint(_)
         | Statement::AlterTableInherit(_)
         | Statement::AlterTableNoInherit(_)
+        | Statement::AlterTableOf(_)
+        | Statement::AlterTableNotOf(_)
         | Statement::AlterTableAttachPartition(_)
         | Statement::AlterTableDetachPartition(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -378,6 +380,10 @@ fn execute_statement_with_source(
             expected: "ALTER AGGREGATE handled by database/session layer",
             actual: "ALTER AGGREGATE".into(),
         })),
+        Statement::CreateCast(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE CAST handled by database/session layer",
+            actual: "CREATE CAST".into(),
+        })),
         Statement::CreateOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE OPERATOR handled by database/session layer",
             actual: "CREATE OPERATOR".into(),
@@ -397,6 +403,10 @@ fn execute_statement_with_source(
         Statement::DropAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP AGGREGATE handled by database/session layer",
             actual: "DROP AGGREGATE".into(),
+        })),
+        Statement::DropCast(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP CAST handled by database/session layer",
+            actual: "DROP CAST".into(),
         })),
         Statement::DropOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP OPERATOR handled by database/session layer",
@@ -609,6 +619,8 @@ pub fn execute_readonly_statement_with_config(
         | Statement::AlterTableAlterColumnStorage(_)
         | Statement::AlterTableAlterColumnDefault(_)
         | Statement::AlterTableAlterColumnExpression(_)
+        | Statement::AlterTableOf(_)
+        | Statement::AlterTableNotOf(_)
         | Statement::AlterTableAttachPartition(_)
         | Statement::AlterTableDetachPartition(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableRename(_) | Statement::AlterViewRename(_) => {
@@ -701,6 +713,10 @@ pub fn execute_readonly_statement_with_config(
             expected: "read-only statement",
             actual: "ALTER AGGREGATE".into(),
         })),
+        Statement::CreateCast(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE CAST".into(),
+        })),
         Statement::CreateOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE OPERATOR".into(),
@@ -720,6 +736,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::DropAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "DROP AGGREGATE".into(),
+        })),
+        Statement::DropCast(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP CAST".into(),
         })),
         Statement::DropOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

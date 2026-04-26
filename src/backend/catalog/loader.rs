@@ -415,6 +415,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 owner_oid: row.relowner,
                 relacl: row.relacl.clone(),
                 reloptions: row.reloptions.clone(),
+                of_type_oid: row.reloftype,
                 row_type_oid: row.reltype,
                 array_type_oid: type_rows_by_oid
                     .get(&row.reltype)

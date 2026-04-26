@@ -419,6 +419,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         | SqlExpr::IsNotNull(_)
         | SqlExpr::IsDistinctFrom(_, _)
         | SqlExpr::IsNotDistinctFrom(_, _)
+        | SqlExpr::Overlaps(_, _)
         | SqlExpr::ArrayOverlap(_, _)
         | SqlExpr::ArrayContains(_, _)
         | SqlExpr::ArrayContained(_, _)

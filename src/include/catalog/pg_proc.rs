@@ -2929,6 +2929,22 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             'v',
         ),
+        stats_import_variadic_proc_row(6362, "pg_restore_relation_stats"),
+        stats_import_clear_proc_row(
+            6397,
+            "pg_clear_relation_stats",
+            VOID_TYPE_OID,
+            &[TEXT_TYPE_OID, TEXT_TYPE_OID],
+            &["schemaname", "relname"],
+        ),
+        stats_import_variadic_proc_row(6363, "pg_restore_attribute_stats"),
+        stats_import_clear_proc_row(
+            6398,
+            "pg_clear_attribute_stats",
+            VOID_TYPE_OID,
+            &[TEXT_TYPE_OID, TEXT_TYPE_OID, TEXT_TYPE_OID, BOOL_TYPE_OID],
+            &["schemaname", "relname", "attname", "inherited"],
+        ),
         proc_row(
             6410,
             "pg_stat_have_stats",
@@ -5758,6 +5774,54 @@ fn pg_proc_alias_pair_rows() -> Vec<PgProcRow> {
             's',
         ),
         proc_row(
+            1176,
+            "timestamptz",
+            TIMESTAMPTZ_TYPE_OID,
+            &oid_argtypes(&[DATE_TYPE_OID, TIME_TYPE_OID]),
+            "see system_functions.sql",
+            2,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            1359,
+            "timestamptz",
+            TIMESTAMPTZ_TYPE_OID,
+            &oid_argtypes(&[DATE_TYPE_OID, TIMETZ_TYPE_OID]),
+            "datetimetz_timestamptz",
+            2,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            1158,
+            "to_timestamp",
+            TIMESTAMPTZ_TYPE_OID,
+            &oid_argtypes(&[FLOAT8_TYPE_OID]),
+            "float8_timestamptz",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1778,
+            "to_timestamp",
+            TIMESTAMPTZ_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID]),
+            "to_timestamp",
+            2,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
             2041,
             "overlaps",
             BOOL_TYPE_OID,
@@ -7756,6 +7820,11 @@ pub fn proc_oid_for_builtin_window_function(func: BuiltinWindowFunction) -> Opti
 }
 
 fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
+    if row.proname.eq_ignore_ascii_case("timestamptz")
+        && matches!(row.proargtypes.trim(), "1082 1083" | "1082 1266")
+    {
+        return Some(BuiltinScalarFunction::TimestampTzConstructor);
+    }
     builtin_scalar_function_for_proc_src(&row.prosrc)
         .or_else(|| builtin_scalar_function_for_proc_src(&row.proname))
 }
@@ -8464,6 +8533,22 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_stat_get_xact_function_self_time",
             BuiltinScalarFunction::PgStatGetXactFunctionSelfTime,
+        ),
+        (
+            "pg_restore_relation_stats",
+            BuiltinScalarFunction::PgRestoreRelationStats,
+        ),
+        (
+            "pg_clear_relation_stats",
+            BuiltinScalarFunction::PgClearRelationStats,
+        ),
+        (
+            "pg_restore_attribute_stats",
+            BuiltinScalarFunction::PgRestoreAttributeStats,
+        ),
+        (
+            "pg_clear_attribute_stats",
+            BuiltinScalarFunction::PgClearAttributeStats,
         ),
         ("to_json", BuiltinScalarFunction::ToJson),
         ("to_jsonb", BuiltinScalarFunction::ToJsonb),
@@ -13881,6 +13966,51 @@ fn variadic_proc_row(
         }
         row.proargmodes = Some(proargmodes);
     }
+    row
+}
+
+fn stats_import_variadic_proc_row(oid: u32, proname: &str) -> PgProcRow {
+    let mut row = variadic_proc_row(
+        oid,
+        proname,
+        BOOL_TYPE_OID,
+        &oid_argtypes(&[ANYOID]),
+        ANYOID,
+        proname,
+        1,
+        false,
+        false,
+        'f',
+        'v',
+    );
+    row.proparallel = 'u';
+    row.proallargtypes = Some(vec![ANYOID]);
+    row.proargmodes = Some(vec![b'v']);
+    row.proargnames = Some(vec!["kwargs".into()]);
+    row
+}
+
+fn stats_import_clear_proc_row(
+    oid: u32,
+    proname: &str,
+    prorettype: u32,
+    argtypes: &[u32],
+    argnames: &[&str],
+) -> PgProcRow {
+    let mut row = proc_row_with_parallel(
+        oid,
+        proname,
+        prorettype,
+        &oid_argtypes(argtypes),
+        proname,
+        argtypes.len() as i16,
+        false,
+        false,
+        'f',
+        'v',
+        'u',
+    );
+    row.proargnames = Some(argnames.iter().map(|name| (*name).into()).collect());
     row
 }
 
