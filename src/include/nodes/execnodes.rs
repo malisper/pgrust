@@ -675,6 +675,7 @@ pub struct LockRowsState {
 pub struct AggregateState {
     pub(crate) input: PlanState,
     pub(crate) strategy: AggregateStrategy,
+    pub(crate) disabled: bool,
     pub(crate) group_by: Vec<Expr>,
     pub(crate) passthrough_exprs: Vec<Expr>,
     pub(crate) accumulators: Vec<AggAccum>,
@@ -792,6 +793,7 @@ pub struct RecursiveUnionState {
 #[derive(Debug)]
 pub struct SetOpState {
     pub(crate) op: SetOperator,
+    pub(crate) strategy: crate::include::nodes::plannodes::SetOpStrategy,
     pub(crate) children: Vec<PlanState>,
     pub(crate) output_columns: Vec<String>,
     pub(crate) result_rows: Option<Vec<MaterializedRow>>,

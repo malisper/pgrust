@@ -1,0 +1,16 @@
+Goal:
+Fix the user-provided union.out regression failures from .context/attachments/pasted_text_2026-04-26_10-38-40.txt.
+Key decisions:
+Implemented behavioral fixes first: bpchar-to-varchar/text padding trim, recursive parenthesized SELECTs, VALUES set-op operands, empty SELECT set-op inputs, CTE materialization markers, string-literal set-op coercion, SRF output aliases, and indexed SetOp bucket lookup to remove tenk1 timeouts.
+Added reusable set-op planning strategy selection: UNION ALL lowers to Append, UNION DISTINCT chooses hash aggregate or sorted unique, INTERSECT/EXCEPT choose hashed or sorted SetOp from enable_hashagg/enable_sort and type capabilities.
+Fixed the explain/error-formatting pass next: PostgreSQL-style child indentation, nonverbose sort/group key qualification from child plan sources, generated aliases for repeated VALUES/function/relation scans, no debug `Var(...)` leakage in Sort Key lines, and the set-op ORDER BY missing-column DETAIL plus caret position.
+Files touched:
+src/backend/parser/gram.pest, src/backend/parser/gram.rs, src/backend/parser/tests.rs, src/backend/parser/analyze/coerce.rs, src/backend/parser/analyze/mod.rs, src/backend/executor/expr_casts.rs, src/backend/executor/nodes.rs, src/backend/executor/startup.rs, src/backend/executor/tests.rs, src/backend/optimizer/path/allpaths.rs, src/backend/optimizer/path/costsize.rs, src/backend/optimizer/plan/planner.rs, src/backend/optimizer/plan/subselect.rs, src/backend/optimizer/setrefs.rs, src/backend/optimizer/partitionwise.rs, src/backend/optimizer/tests.rs, src/backend/commands/explain.rs, src/include/nodes/execnodes.rs, src/include/nodes/pathnodes.rs, src/include/nodes/plannodes.rs, src/pgrust/session.rs.
+Tests run:
+scripts/cargo_isolated.sh check
+scripts/cargo_isolated.sh build --bin pgrust_server
+Focused lib tests: bpchar_to_varchar_and_text_trims_padding; parse_parenthesized_select_statement; parse_parenthesized_set_operation_operand_with_order_limit; parse_empty_select_set_operations; parse_parenthesized_values_set_operation_operand; parse_cte_materialization_markers; planner_lowers_union_all_append_children_with_their_own_roots; union_deduplicates_bpchar_cast_to_varchar_padding; setop_join_branch_executes_with_child_local_vars; empty_select_set_operations_execute; set_operation_accepts_parenthesized_values_operand; cte_materialization_markers_are_accepted_for_zero_column_setops; set_operation_string_literal_follows_numeric_peer_type; select_list_generate_series_preserves_output_alias.
+Regression: CARGO_TARGET_DIR=$(scripts/cargo_isolated.sh --print-target-dir) scripts/run_regression.sh --test union --jobs 1 --timeout 180 --port 56444 --skip-build --results-dir /tmp/pgrust-union-macau-v4
+Regression: CARGO_TARGET_DIR=$(scripts/cargo_isolated.sh --print-target-dir) scripts/run_regression.sh --test union --jobs 1 --timeout 180 --port 56448 --skip-build --results-dir /tmp/pgrust-union-explainfmt4
+Remaining:
+union regression still fails, now 171/197 matched, 26 mismatched, 0 timed out. The requested error formatting difference is fixed. Remaining diff is mainly planner path parity: index/merge-append path selection, qual pushdown through UNION ALL, sorted/hash SetOp choice in a few places, one xid EXPLAIN const/disabled marker, and plan-shape-driven group key differences.

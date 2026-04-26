@@ -65,6 +65,7 @@ pub(super) fn generate_partitionwise_join_path(
             relids: relids_union(&left_rel.relids, &right_rel.relids),
             source_id: next_synthetic_slot_id(),
             desc,
+            child_roots: Vec::new(),
             children,
         },
         catalog,

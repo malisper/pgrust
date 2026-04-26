@@ -407,6 +407,7 @@ pub enum Path {
         relids: Vec<usize>,
         source_id: usize,
         desc: RelationDesc,
+        child_roots: Vec<Option<PlannerSubroot>>,
         children: Vec<Path>,
     },
     MergeAppend {
@@ -582,6 +583,7 @@ pub enum Path {
         pathtarget: PathTarget,
         slot_id: usize,
         strategy: AggregateStrategy,
+        disabled: bool,
         pathkeys: Vec<PathKey>,
         input: Box<Path>,
         group_by: Vec<Expr>,
@@ -659,6 +661,7 @@ pub enum Path {
         pathtarget: PathTarget,
         slot_id: usize,
         op: SetOperator,
+        strategy: crate::include::nodes::plannodes::SetOpStrategy,
         output_columns: Vec<QueryColumn>,
         child_roots: Vec<Option<PlannerSubroot>>,
         children: Vec<Path>,

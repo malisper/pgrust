@@ -74,6 +74,12 @@ pub enum AggregateStrategy {
     Hashed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetOpStrategy {
+    Sorted,
+    Hashed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexScanKey {
     pub attribute_number: i16,
@@ -310,6 +316,7 @@ pub enum Plan {
     Aggregate {
         plan_info: PlanEstimate,
         strategy: AggregateStrategy,
+        disabled: bool,
         input: Box<Plan>,
         group_by: Vec<Expr>,
         passthrough_exprs: Vec<Expr>,
@@ -357,6 +364,7 @@ pub enum Plan {
     SetOp {
         plan_info: PlanEstimate,
         op: SetOperator,
+        strategy: SetOpStrategy,
         output_columns: Vec<QueryColumn>,
         children: Vec<Plan>,
     },

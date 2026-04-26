@@ -614,6 +614,13 @@ impl CatalogLookup for VisibleCatalog {
             .unwrap_or_default()
     }
 
+    fn rewrite_rows(&self) -> Vec<PgRewriteRow> {
+        self.catcache
+            .as_ref()
+            .map(CatCache::rewrite_rows)
+            .unwrap_or_default()
+    }
+
     fn trigger_rows_for_relation(&self, relation_oid: u32) -> Vec<PgTriggerRow> {
         VisibleCatalog::trigger_rows_for_relation(self, relation_oid)
     }

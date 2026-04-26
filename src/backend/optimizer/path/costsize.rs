@@ -103,6 +103,7 @@ pub(super) fn optimize_path_with_config(
                 relids,
                 source_id,
                 desc,
+                child_roots,
                 children,
                 ..
             } => {
@@ -135,6 +136,7 @@ pub(super) fn optimize_path_with_config(
                     relids,
                     source_id,
                     desc,
+                    child_roots,
                     children,
                 }
             }
@@ -182,6 +184,7 @@ pub(super) fn optimize_path_with_config(
                 pathtarget,
                 slot_id,
                 op,
+                strategy,
                 output_columns,
                 child_roots,
                 children,
@@ -214,6 +217,7 @@ pub(super) fn optimize_path_with_config(
                     pathtarget,
                     slot_id,
                     op,
+                    strategy,
                     output_columns,
                     child_roots,
                     children,
@@ -610,6 +614,7 @@ pub(super) fn optimize_path_with_config(
                 output_columns,
                 slot_id,
                 strategy,
+                disabled,
                 pathkeys,
                 ..
             } => {
@@ -633,6 +638,7 @@ pub(super) fn optimize_path_with_config(
                     pathtarget,
                     slot_id,
                     strategy,
+                    disabled,
                     pathkeys,
                     input: Box::new(input),
                     group_by,
@@ -1176,6 +1182,7 @@ fn try_optimize_access_subtree(
             spec,
             order_items.clone(),
             order_display_items.clone(),
+            false,
             config,
             catalog,
         );
@@ -1755,6 +1762,7 @@ pub(super) fn estimate_index_candidate(
     spec: IndexPathSpec,
     order_items: Option<Vec<OrderByEntry>>,
     order_display_items: Option<Vec<String>>,
+    target_index_only: bool,
     config: PlannerConfig,
     catalog: &dyn CatalogLookup,
 ) -> AccessCandidate {
@@ -1805,6 +1813,16 @@ pub(super) fn estimate_index_candidate(
     if spec.row_prefix && unordered_probe {
         base_cost += stats.relpages * RANDOM_PAGE_COST + stats.reltuples * CPU_TUPLE_COST;
     }
+    let full_index_only =
+        config.enable_indexonlyscan && index_supports_index_only_scan(&desc, &spec.index);
+    let index_only = full_index_only || (config.enable_indexonlyscan && target_index_only);
+    if index_only {
+        if spec.keys.is_empty() {
+            base_cost = index_pages * SEQ_PAGE_COST + index_rows * CPU_INDEX_TUPLE_COST;
+        } else {
+            base_cost -= index_rows * CPU_TUPLE_COST;
+        }
+    }
     let scan_info = PlanEstimate::new(startup_cost, base_cost, index_rows, stats.width);
     let mut total_cost = scan_info.total_cost.as_f64();
     let mut current_rows = scan_info.plan_rows.as_f64();
@@ -1827,9 +1845,7 @@ pub(super) fn estimate_index_candidate(
     } else {
         Vec::new()
     };
-    let index_only =
-        config.enable_indexonlyscan && index_supports_index_only_scan(&desc, &spec.index);
-    let mut plan = if index_only {
+    let mut plan = if full_index_only {
         Path::IndexOnlyScan {
             plan_info: scan_info,
             pathtarget: slot_output_target(source_id, &desc.columns, |column| column.sql_type),
@@ -1867,7 +1883,7 @@ pub(super) fn estimate_index_candidate(
             keys: spec.keys,
             order_by_keys: spec.order_by_keys,
             direction: spec.direction,
-            index_only: false,
+            index_only,
             pathkeys: native_pathkeys,
         }
     };
@@ -3752,6 +3768,24 @@ fn index_supports_index_only_scan(desc: &RelationDesc, index: &BoundIndexRelatio
     })
 }
 
+pub(super) fn index_supports_index_only_attrs(
+    index: &BoundIndexRelation,
+    required_attrs: &[usize],
+) -> bool {
+    !required_attrs.is_empty()
+        && required_attrs.iter().all(|column_index| {
+            index
+                .index_meta
+                .indkey
+                .iter()
+                .enumerate()
+                .any(|(index_pos, _)| {
+                    simple_index_column(index, index_pos) == Some(*column_index)
+                        && index_column_can_return(index, index_pos)
+                })
+        })
+}
+
 fn index_column_can_return(index: &BoundIndexRelation, index_pos: usize) -> bool {
     match index.index_meta.am_oid {
         BTREE_AM_OID => true,
@@ -3813,7 +3847,37 @@ fn index_key_matches_qual(
     index
         .index_exprs
         .get(expr_pos)
-        .is_some_and(|index_expr| strip_casts(index_expr) == strip_casts(&qual.key_expr))
+        .is_some_and(|index_expr| index_expression_matches_qual(index_expr, &qual.key_expr))
+}
+
+fn index_expression_matches_qual(index_expr: &Expr, qual_expr: &Expr) -> bool {
+    let index_expr = strip_casts(index_expr);
+    let qual_expr = strip_casts(qual_expr);
+    if index_expr == qual_expr {
+        return true;
+    }
+    match (index_expr, qual_expr) {
+        (Expr::Op(left), Expr::Op(right)) => {
+            left.op == right.op
+                && left.args.len() == right.args.len()
+                && left
+                    .args
+                    .iter()
+                    .zip(&right.args)
+                    .all(|(left, right)| index_expression_matches_qual(left, right))
+        }
+        (Expr::Func(left), Expr::Func(right)) => {
+            left.funcid == right.funcid
+                && left.implementation == right.implementation
+                && left.args.len() == right.args.len()
+                && left
+                    .args
+                    .iter()
+                    .zip(&right.args)
+                    .all(|(left, right)| index_expression_matches_qual(left, right))
+        }
+        _ => false,
+    }
 }
 
 fn operator_commutator_oid(operator_oid: u32) -> Option<u32> {
@@ -4123,6 +4187,27 @@ fn build_btree_index_keys(
 
     for index_pos in 0..index_key_count(index) {
         let Some(column) = simple_index_column(index, index_pos) else {
+            if let Some((qual_idx, strategy, argument)) =
+                parsed_quals.iter().enumerate().find_map(|(idx, qual)| {
+                    if used[idx] || !index_key_matches_qual(index, index_pos, qual) {
+                        return None;
+                    }
+                    let strategy = qual_strategy(index, index_pos, qual)?;
+                    (strategy == 3).then_some((idx, strategy, qual.argument.clone()))
+                })
+            {
+                used[qual_idx] = true;
+                used_qual_indexes.push(qual_idx);
+                equality_prefix += 1;
+                keys.push(btree_index_scan_key_for_qual(
+                    index,
+                    index_pos,
+                    strategy,
+                    argument,
+                    &parsed_quals[qual_idx],
+                ));
+                continue;
+            }
             break;
         };
         if let Some((qual_idx, strategy, argument)) =
@@ -4707,13 +4792,17 @@ fn index_order_match(
         if index_pos >= index_key_count(index) {
             break;
         }
-        let Some(column) = expr_column_index(&item.expr) else {
-            break;
+        let matches_index_key = if let Some(index_column) = simple_index_column(index, index_pos) {
+            expr_column_index(&item.expr) == Some(index_column)
+        } else if let Some(expr_pos) = index_expression_position(index, index_pos) {
+            index
+                .index_exprs
+                .get(expr_pos)
+                .is_some_and(|index_expr| index_expression_matches_qual(index_expr, &item.expr))
+        } else {
+            false
         };
-        let Some(index_column) = simple_index_column(index, index_pos) else {
-            break;
-        };
-        if index_column != column {
+        if !matches_index_key {
             break;
         }
         let index_desc = index

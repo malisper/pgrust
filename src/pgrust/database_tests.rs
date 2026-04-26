@@ -7627,7 +7627,7 @@ fn create_view_selects_and_persists_rewrite_rule() {
         ),
         vec![vec![
             Value::Text("_RETURN".into()),
-            Value::Text("select id, name from items".into()),
+            Value::Text("select id,\n    name\n   from items".into()),
         ]]
     );
 }
@@ -7884,13 +7884,13 @@ fn nested_views_and_pg_views_work() {
                 Value::Text("public".into()),
                 Value::Text("first_view".into()),
                 Value::Text("postgres".into()),
-                Value::Text("select id from base_items".into()),
+                Value::Text("select id\n   from base_items".into()),
             ],
             vec![
                 Value::Text("public".into()),
                 Value::Text("second_view".into()),
                 Value::Text("postgres".into()),
-                Value::Text("select id from first_view".into()),
+                Value::Text("select id\n   from first_view".into()),
             ],
         ]
     );
@@ -31754,7 +31754,7 @@ fn pg_get_viewdef_returns_canonical_view_query() {
     assert_eq!(
         query_rows(&db, 1, "select pg_get_viewdef('v1'::regclass)"),
         vec![vec![Value::Text(
-            " SELECT (f1)::integer AS f1\n   FROM (t1\n      LEFT JOIN t2 USING (f1))\n  GROUP BY f1;"
+            " SELECT (f1)::integer AS f1\n   FROM t1\n      LEFT JOIN t2 USING (f1)\n  GROUP BY f1;"
                 .into()
         )]]
     );

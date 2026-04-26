@@ -3686,15 +3686,30 @@ fn set_append_references(
     plan_info: PlanEstimate,
     source_id: usize,
     desc: crate::include::nodes::primnodes::RelationDesc,
+    child_roots: Vec<Option<PlannerSubroot>>,
     children: Vec<Path>,
 ) -> Plan {
+    assert!(
+        child_roots.is_empty() || child_roots.len() == children.len(),
+        "append child root count {} did not match child count {}",
+        child_roots.len(),
+        children.len()
+    );
     Plan::Append {
         plan_info,
         source_id,
         desc,
         children: children
             .into_iter()
-            .map(|child| set_plan_refs(ctx, child))
+            .enumerate()
+            .map(|(index, child)| {
+                let child_root = child_roots
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .map(PlannerSubroot::as_ref)
+                    .or(ctx.root);
+                recurse_with_root(ctx, child_root, child)
+            })
             .collect(),
     }
 }
@@ -3794,6 +3809,7 @@ fn set_set_op_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
     op: crate::include::nodes::parsenodes::SetOperator,
+    strategy: crate::include::nodes::plannodes::SetOpStrategy,
     output_columns: Vec<QueryColumn>,
     child_roots: Vec<Option<PlannerSubroot>>,
     children: Vec<Path>,
@@ -3807,6 +3823,7 @@ fn set_set_op_references(
     Plan::SetOp {
         plan_info,
         op,
+        strategy,
         output_columns,
         children: children
             .into_iter()
@@ -3865,8 +3882,10 @@ fn set_index_scan_references(
     keys: Vec<IndexScanKey>,
     order_by_keys: Vec<IndexScanKey>,
     direction: crate::include::access::relscan::ScanDirection,
+    path_index_only: bool,
 ) -> Plan {
-    let index_only = index_scan_can_use_index_only(ctx, source_id, am_oid, &index_meta);
+    let index_only =
+        path_index_only || index_scan_can_use_index_only(ctx, source_id, am_oid, &index_meta);
     let keys = lower_index_scan_keys(ctx, keys, LowerMode::Scalar);
     let order_by_keys = lower_index_scan_keys(ctx, order_by_keys, LowerMode::Scalar);
     Plan::IndexScan {
@@ -4454,6 +4473,7 @@ fn set_aggregate_references(
     plan_info: PlanEstimate,
     slot_id: usize,
     strategy: crate::include::nodes::plannodes::AggregateStrategy,
+    disabled: bool,
     input: Box<Path>,
     group_by: Vec<Expr>,
     passthrough_exprs: Vec<Expr>,
@@ -4535,6 +4555,7 @@ fn set_aggregate_references(
     Plan::Aggregate {
         plan_info,
         strategy,
+        disabled,
         input: Box::new(set_plan_refs(ctx, *input)),
         group_by,
         passthrough_exprs,
@@ -4848,9 +4869,10 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             source_id,
             desc,
+            child_roots,
             children,
             ..
-        } => set_append_references(ctx, plan_info, source_id, desc, children),
+        } => set_append_references(ctx, plan_info, source_id, desc, child_roots, children),
         Path::MergeAppend {
             plan_info,
             source_id,
@@ -4868,11 +4890,20 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
         Path::SetOp {
             plan_info,
             op,
+            strategy,
             output_columns,
             child_roots,
             children,
             ..
-        } => set_set_op_references(ctx, plan_info, op, output_columns, child_roots, children),
+        } => set_set_op_references(
+            ctx,
+            plan_info,
+            op,
+            strategy,
+            output_columns,
+            child_roots,
+            children,
+        ),
         Path::SeqScan {
             plan_info,
             source_id,
@@ -4933,6 +4964,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
         ),
         Path::IndexScan {
             plan_info,
+            pathtarget: _,
             source_id,
             rel,
             relation_name,
@@ -4947,8 +4979,8 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             keys,
             order_by_keys,
             direction,
+            index_only,
             pathkeys: _,
-            ..
         } => set_index_scan_references(
             ctx,
             plan_info,
@@ -4966,6 +4998,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             keys,
             order_by_keys,
             direction,
+            index_only,
         ),
         Path::BitmapIndexScan {
             plan_info,
@@ -5124,6 +5157,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             slot_id,
             strategy,
+            disabled,
             input,
             group_by,
             passthrough_exprs,
@@ -5136,6 +5170,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             slot_id,
             strategy,
+            disabled,
             input,
             group_by,
             passthrough_exprs,
