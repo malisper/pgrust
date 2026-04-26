@@ -388,6 +388,7 @@ pub enum Statement {
     AlterTableTriggerState(AlterTableTriggerStateStatement),
     AlterPublication(AlterPublicationStatement),
     AlterOperator(AlterOperatorStatement),
+    AlterAggregateRename(AlterAggregateRenameStatement),
     AlterTriggerRename(AlterTriggerRenameStatement),
     CommentOnTable(CommentOnTableStatement),
     CommentOnView(CommentOnViewStatement),
@@ -633,9 +634,22 @@ pub enum AggregateArgType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateSignatureArg {
+    pub name: Option<String>,
+    pub arg_type: AggregateArgType,
+    pub variadic: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateSignature {
+    pub args: Vec<AggregateSignatureArg>,
+    pub order_by: Vec<AggregateSignatureArg>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AggregateSignatureKind {
     Star,
-    Args(Vec<AggregateArgType>),
+    Args(AggregateSignature),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -791,6 +805,7 @@ pub struct CreateAggregateStatement {
     pub mtransspace: i32,
     pub mfinalfunc_extra: bool,
     pub mfinalfunc_modify: char,
+    pub hypothetical: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2602,6 +2617,14 @@ pub struct DropAggregateStatement {
     pub aggregate_name: String,
     pub signature: AggregateSignatureKind,
     pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterAggregateRenameStatement {
+    pub schema_name: Option<String>,
+    pub aggregate_name: String,
+    pub signature: AggregateSignatureKind,
+    pub new_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

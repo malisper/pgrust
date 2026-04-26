@@ -1,6 +1,8 @@
 use super::super::*;
 use super::constraint::{find_constraint_row, validate_check_rows, validate_not_null_rows};
-use super::create::{aggregate_signature_arg_oids, resolve_aggregate_proc_rows};
+use super::create::{
+    aggregate_signature_arg_oids, format_aggregate_signature, resolve_aggregate_proc_rows,
+};
 use super::operator::{
     lookup_operator_row, operator_signature_display, resolve_operator_type_oid,
     unsupported_postfix_operator_error,
@@ -971,7 +973,14 @@ impl Database {
             [(row, _agg)] => row.clone(),
             [] => {
                 return Err(ExecError::DetailedError {
-                    message: format!("aggregate {} does not exist", comment_stmt.aggregate_name),
+                    message: format!(
+                        "aggregate {} does not exist",
+                        format_aggregate_signature(
+                            &comment_stmt.aggregate_name,
+                            &comment_stmt.signature,
+                            &catalog
+                        )?
+                    ),
                     detail: None,
                     hint: None,
                     sqlstate: "42883",

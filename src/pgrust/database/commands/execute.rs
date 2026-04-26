@@ -715,6 +715,12 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterAggregateRename(ref rename_stmt) => self
+                .execute_alter_aggregate_rename_stmt_with_search_path(
+                    client_id,
+                    rename_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateOperator(ref create_stmt) => self
                 .execute_create_operator_stmt_with_search_path(
                     client_id,

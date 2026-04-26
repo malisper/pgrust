@@ -507,6 +507,7 @@ fn run_statement(
         | Statement::AlterTableTriggerState(_)
         | Statement::AlterTriggerRename(_)
         | Statement::CreateAggregate(_)
+        | Statement::AlterAggregateRename(_)
         | Statement::DropAggregate(_)
         | Statement::AlterTableSet(_)
         | Statement::CreateStatistics(_)

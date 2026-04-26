@@ -10,10 +10,11 @@ use crate::include::catalog::{
     sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
-    AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec,
-    AlterColumnExpressionAction, AlterTableTriggerMode, AlterTableTriggerStateStatement,
-    AlterTableTriggerTarget, AlterTriggerRenameStatement, AlterTypeSetOptionsStatement,
-    ColumnConstraint, ColumnGeneratedKind, CommentOnAggregateStatement, CommentOnColumnStatement,
+    AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
+    AliasColumnDef, AliasColumnSpec, AlterAggregateRenameStatement, AlterColumnExpressionAction,
+    AlterTableTriggerMode, AlterTableTriggerStateStatement, AlterTableTriggerTarget,
+    AlterTriggerRenameStatement, AlterTypeSetOptionsStatement, ColumnConstraint,
+    ColumnGeneratedKind, CommentOnAggregateStatement, CommentOnColumnStatement,
     CommentOnFunctionStatement, CommentOnOperatorStatement, CommentOnTypeStatement,
     CommentOnViewStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
     CreateBaseTypeOption, CreateBaseTypeStatement, CreateCompositeTypeStatement,
@@ -40,6 +41,21 @@ fn desc() -> RelationDesc {
 
 fn builtin_type(ty: SqlType) -> RawTypeName {
     RawTypeName::Builtin(ty)
+}
+
+fn aggregate_signature_arg(arg_type: AggregateArgType) -> AggregateSignatureArg {
+    AggregateSignatureArg {
+        name: None,
+        arg_type,
+        variadic: false,
+    }
+}
+
+fn aggregate_signature(args: Vec<AggregateSignatureArg>) -> AggregateSignatureKind {
+    AggregateSignatureKind::Args(AggregateSignature {
+        args,
+        order_by: Vec::new(),
+    })
 }
 
 fn attrs() -> ConstraintAttributes {
@@ -4814,6 +4830,47 @@ fn parse_create_function_statement_with_unnamed_args() {
 }
 
 #[test]
+fn parse_create_function_statement_with_variadic_arg() {
+    let stmt = parse_statement(
+        "create function least_accum(variadic items anyarray) returns anyelement language sql as $$ select $1[1] $$",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateFunction(CreateFunctionStatement {
+            schema_name: None,
+            function_name: "least_accum".into(),
+            replace_existing: false,
+            cost: None,
+            args: vec![CreateFunctionArg {
+                mode: FunctionArgMode::In,
+                name: Some("items".into()),
+                ty: RawTypeName::Named {
+                    name: "anyarray".into(),
+                    array_bounds: 0,
+                },
+                default_expr: None,
+                variadic: true,
+            }],
+            return_spec: CreateFunctionReturnSpec::Type {
+                ty: RawTypeName::Named {
+                    name: "anyelement".into(),
+                    array_bounds: 0,
+                },
+                setof: false,
+            },
+            strict: false,
+            leakproof: false,
+            volatility: FunctionVolatility::Volatile,
+            parallel: FunctionParallel::Unsafe,
+            language: "sql".into(),
+            body: " select $1[1] ".into(),
+            link_symbol: None,
+        })
+    );
+}
+
+#[test]
 fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
     let stmt = parse_statement(
         "create function binary_coercible(oid, oid) returns bool as 'regress', 'binary_coercible' language c strict stable parallel safe",
@@ -5067,9 +5124,10 @@ fn parse_create_aggregate_statement_with_plain_signature() {
             schema_name: None,
             aggregate_name: "newavg".into(),
             replace_existing: false,
-            signature: AggregateSignatureKind::Args(vec![AggregateArgType::Type(
+            signature: aggregate_signature(vec![aggregate_signature_arg(AggregateArgType::Type(
                 RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
-            )]),
+            ))]),
+            hypothetical: false,
             sfunc_name: "int4_avg_accum".into(),
             stype: RawTypeName::Named {
                 name: "_int8".into(),
@@ -5109,6 +5167,7 @@ fn parse_create_aggregate_statement_with_old_style_basetype() {
             aggregate_name: "oldcnt".into(),
             replace_existing: false,
             signature: AggregateSignatureKind::Star,
+            hypothetical: false,
             sfunc_name: "int8inc".into(),
             stype: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int8)),
             finalfunc_name: None,
@@ -5145,6 +5204,7 @@ fn parse_create_or_replace_aggregate_star_signature() {
             aggregate_name: "newcnt".into(),
             replace_existing: true,
             signature: AggregateSignatureKind::Star,
+            hypothetical: false,
             sfunc_name: "int8inc".into(),
             stype: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int8)),
             finalfunc_name: None,
@@ -5177,7 +5237,9 @@ fn parse_drop_and_comment_on_aggregate_statements() {
             if_exists: true,
             schema_name: Some("public".into()),
             aggregate_name: "newcnt".into(),
-            signature: AggregateSignatureKind::Args(vec![AggregateArgType::AnyPseudo]),
+            signature: aggregate_signature(vec![aggregate_signature_arg(
+                AggregateArgType::AnyPseudo,
+            )]),
             cascade: true,
         })
     );
@@ -5195,26 +5257,62 @@ fn parse_drop_and_comment_on_aggregate_statements() {
 }
 
 #[test]
-fn parse_create_aggregate_rejects_unsupported_forms() {
-    let err = parse_statement(
+fn parse_create_aggregate_supports_ordered_variadic_and_hypothetical_forms() {
+    let stmt = parse_statement(
         "create aggregate my_percentile_disc(float8 order by anyelement) (sfunc = int8inc, stype = int8)",
     )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ParseError::FeatureNotSupported(message)
-            if message.contains("ordered-set aggregate signatures")
-    ));
+    .unwrap();
+    match stmt {
+        Statement::CreateAggregate(stmt) => {
+            assert_eq!(
+                stmt.signature,
+                AggregateSignatureKind::Args(AggregateSignature {
+                    args: vec![aggregate_signature_arg(AggregateArgType::Type(
+                        RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float8)),
+                    ))],
+                    order_by: vec![aggregate_signature_arg(AggregateArgType::Type(
+                        RawTypeName::Named {
+                            name: "anyelement".into(),
+                            array_bounds: 0,
+                        },
+                    ))],
+                })
+            );
+            assert!(!stmt.hypothetical);
+        }
+        other => panic!("expected CREATE AGGREGATE, got {other:?}"),
+    }
 
-    let err = parse_statement(
+    let stmt = parse_statement(
         "create aggregate least_agg(variadic items anyarray) (sfunc = int8inc, stype = int8)",
     )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ParseError::FeatureNotSupported(message)
-            if message.contains("VARIADIC aggregate signatures")
-    ));
+    .unwrap();
+    match stmt {
+        Statement::CreateAggregate(stmt) => {
+            assert_eq!(
+                stmt.signature,
+                aggregate_signature(vec![AggregateSignatureArg {
+                    name: Some("items".into()),
+                    arg_type: AggregateArgType::Type(RawTypeName::Named {
+                        name: "anyarray".into(),
+                        array_bounds: 0,
+                    }),
+                    variadic: true,
+                }])
+            );
+            assert!(!stmt.hypothetical);
+        }
+        other => panic!("expected CREATE AGGREGATE, got {other:?}"),
+    }
+
+    let stmt = parse_statement(
+        "create aggregate hypothetical_rank(float8 order by anyelement) (sfunc = int8inc, stype = int8, hypothetical)",
+    )
+    .unwrap();
+    match stmt {
+        Statement::CreateAggregate(stmt) => assert!(stmt.hypothetical),
+        other => panic!("expected CREATE AGGREGATE, got {other:?}"),
+    }
 
     let stmt = parse_statement(
         "create aggregate badagg(int4) (sfunc = int4pl, stype = int4, combinefunc = int4pl)",
@@ -5226,6 +5324,33 @@ fn parse_create_aggregate_rejects_unsupported_forms() {
         }
         other => panic!("expected CREATE AGGREGATE, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_alter_aggregate_rename_statement() {
+    let stmt = parse_statement(
+        "alter aggregate public.my_percentile_disc(float8 order by anyelement) rename to my_percentile_disc2",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterAggregateRename(AlterAggregateRenameStatement {
+            schema_name: Some("public".into()),
+            aggregate_name: "my_percentile_disc".into(),
+            signature: AggregateSignatureKind::Args(AggregateSignature {
+                args: vec![aggregate_signature_arg(AggregateArgType::Type(
+                    RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float8)),
+                ))],
+                order_by: vec![aggregate_signature_arg(AggregateArgType::Type(
+                    RawTypeName::Named {
+                        name: "anyelement".into(),
+                        array_bounds: 0,
+                    },
+                ))],
+            }),
+            new_name: "my_percentile_disc2".into(),
+        })
+    );
 }
 
 #[test]

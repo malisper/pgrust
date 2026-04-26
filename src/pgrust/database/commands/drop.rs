@@ -1,13 +1,15 @@
 use super::super::*;
-use super::create::{aggregate_signature_arg_oids, resolve_aggregate_proc_rows};
+use super::create::{
+    aggregate_signature_arg_oids, format_aggregate_signature, resolve_aggregate_proc_rows,
+};
 use super::dependency_drop::{CatalogDependencyGraph, DropBehavior, ObjectAddress};
-use crate::backend::executor::expr_reg::format_type_text;
+use crate::backend::executor::expr_reg::{format_regprocedure_oid_optional, format_type_text};
 use crate::backend::parser::{parse_type_name, resolve_raw_type_name};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
-    PG_REWRITE_RELATION_OID, PgConstraintRow, PgProcRow, PgRewriteRow,
+    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PgConstraintRow, PgProcRow, PgRewriteRow,
 };
 use crate::include::nodes::parsenodes::{
     DropAggregateStatement, DropFunctionStatement, DropIndexStatement, DropProcedureStatement,
@@ -746,7 +748,11 @@ impl Database {
             [] if drop_stmt.if_exists => {
                 push_notice(format!(
                     "aggregate {} does not exist, skipping",
-                    drop_stmt.aggregate_name
+                    format_aggregate_signature(
+                        &drop_stmt.aggregate_name,
+                        &drop_stmt.signature,
+                        &catalog
+                    )?
                 ));
                 return Ok(StatementResult::AffectedRows(0));
             }
@@ -1065,6 +1071,47 @@ impl Database {
                 });
             }
         };
+        let catcache = self
+            .backend_catcache(client_id, txn_ctx)
+            .map_err(map_catalog_error)?;
+        let dependency_graph = CatalogDependencyGraph::new(&catcache);
+        let dependent_aggregate_oids = dependency_graph
+            .dependents(ObjectAddress::new(PG_PROC_RELATION_OID, proc_row.oid, 0))
+            .iter()
+            .filter(|row| {
+                row.classid == PG_PROC_RELATION_OID
+                    && row.objsubid == 0
+                    && row.deptype == DEPENDENCY_NORMAL
+                    && row.objid != proc_row.oid
+            })
+            .filter_map(|row| {
+                catcache
+                    .proc_by_oid(row.objid)
+                    .filter(|dependent| dependent.prokind == 'a')
+                    .map(|dependent| dependent.oid)
+            })
+            .collect::<BTreeSet<_>>();
+        if !dependent_aggregate_oids.is_empty() && !drop_stmt.cascade {
+            let target_name = format_regprocedure_oid_optional(proc_row.oid, Some(&catalog))
+                .unwrap_or_else(|| {
+                    format!("{}({})", proc_row.proname, drop_stmt.arg_types.join(","))
+                });
+            let dependent_name = dependent_aggregate_oids
+                .iter()
+                .next()
+                .and_then(|oid| format_regprocedure_oid_optional(*oid, Some(&catalog)))
+                .unwrap_or_else(|| "unknown".into());
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot drop {object_kind} {target_name} because other objects depend on it"
+                ),
+                detail: Some(format!(
+                    "function {dependent_name} depends on {object_kind} {target_name}"
+                )),
+                hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+                sqlstate: "2BP01",
+            });
+        }
         if !drop_stmt.cascade
             && let Some(err) = self.drop_function_dependency_error(
                 client_id,
@@ -1085,10 +1132,39 @@ impl Database {
             waiter: Some(self.txn_waiter.clone()),
             interrupts: self.interrupt_state(client_id),
         };
+        let mut next_cid = cid;
+        for dependent_aggregate_oid in dependent_aggregate_oids {
+            if let Some(dependent_name) =
+                format_regprocedure_oid_optional(dependent_aggregate_oid, Some(&catalog))
+            {
+                push_notice(format!("drop cascades to function {dependent_name}"));
+            }
+            let dependent_ctx = CatalogWriteContext {
+                pool: ctx.pool.clone(),
+                txns: ctx.txns.clone(),
+                xid: ctx.xid,
+                cid: next_cid,
+                client_id: ctx.client_id,
+                waiter: ctx.waiter.clone(),
+                interrupts: ctx.interrupts.clone(),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .drop_proc_by_oid_mvcc(dependent_aggregate_oid, &dependent_ctx)
+                .map(|(_, effect)| effect)
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+            next_cid = next_cid.saturating_add(1);
+        }
+        let target_ctx = CatalogWriteContext {
+            cid: next_cid,
+            ..ctx
+        };
         let effect = self
             .catalog
             .write()
-            .drop_proc_by_oid_mvcc(proc_row.oid, &ctx)
+            .drop_proc_by_oid_mvcc(proc_row.oid, &target_ctx)
             .map(|(_, effect)| effect)
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);

@@ -374,6 +374,10 @@ fn execute_statement_with_source(
             expected: "CREATE AGGREGATE handled by database/session layer",
             actual: "CREATE AGGREGATE".into(),
         })),
+        Statement::AlterAggregateRename(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER AGGREGATE handled by database/session layer",
+            actual: "ALTER AGGREGATE".into(),
+        })),
         Statement::CreateOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE OPERATOR handled by database/session layer",
             actual: "CREATE OPERATOR".into(),
@@ -692,6 +696,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::CreateAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE AGGREGATE".into(),
+        })),
+        Statement::AlterAggregateRename(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER AGGREGATE".into(),
         })),
         Statement::CreateOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
