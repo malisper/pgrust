@@ -2421,6 +2421,48 @@ fn holdable_cursor_survives_commit_but_normal_cursor_does_not() {
 }
 
 #[test]
+fn holdable_cursor_can_be_declared_outside_explicit_transaction() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "create table hold_cursor_autocommit_items (id int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into hold_cursor_autocommit_items values (1), (2)",
+        )
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "declare hold_auto cursor with hold for select id from hold_cursor_autocommit_items order by id",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch all from hold_auto"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+}
+
+#[test]
+fn text_literal_cast_to_date_domain_uses_base_type_input() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "create domain testdatexmldomain as date")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select '2013-02-21'::testdatexmldomain"),
+        vec![vec![Value::Date(crate::include::nodes::datetime::DateADT(
+            crate::backend::utils::time::datetime::days_from_ymd(2013, 2, 21).unwrap()
+        ))]]
+    );
+}
+
+#[test]
 fn standalone_listen_and_unlisten_update_subscriptions_immediately() {
     let db = Database::open_ephemeral(32).unwrap();
 

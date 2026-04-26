@@ -477,6 +477,7 @@ pub enum BuiltinScalarFunction {
     CashLarger,
     CashSmaller,
     CashWords,
+    UnsupportedXmlFeature,
     XmlComment,
     XmlIsWellFormed,
     XmlIsWellFormedDocument,

@@ -2176,7 +2176,14 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 return Ok(bound_row);
             }
             if !matches!(inner.as_ref(), SqlExpr::Const(Value::Null)) {
-                validate_catalog_backed_explicit_cast(source_type, target_type, catalog)?;
+                validate_catalog_backed_explicit_cast(
+                    source_type,
+                    domain
+                        .as_ref()
+                        .map(|domain| domain.sql_type)
+                        .unwrap_or(target_type),
+                    catalog,
+                )?;
             }
             let cast_expr =
                 bind_explicit_cast_expr(bound_inner, source_type, target_type, catalog)?;
@@ -4478,7 +4485,11 @@ pub(super) fn catalog_backed_explicit_cast_allowed(
         return true;
     }
     let source_oid = catalog.type_oid_for_sql_type(source_type);
-    let target_oid = catalog.type_oid_for_sql_type(target_type);
+    let target_oid = if target_type.type_oid != 0 {
+        Some(target_type.type_oid)
+    } else {
+        catalog.type_oid_for_sql_type(target_type)
+    };
     if let (Some(source_oid), Some(target_oid)) = (source_oid, target_oid) {
         if source_oid == target_oid
             || catalog
@@ -4486,6 +4497,24 @@ pub(super) fn catalog_backed_explicit_cast_allowed(
                 .is_some()
         {
             return true;
+        }
+        if let Some(base_type) = domain_base_sql_type(target_oid, catalog) {
+            if source_type.element_type() == base_type.element_type() {
+                return true;
+            }
+            if let Some(base_oid) = catalog.type_oid_for_sql_type(base_type)
+                && catalog
+                    .cast_by_source_target(source_oid, base_oid)
+                    .is_some()
+            {
+                return true;
+            }
+            if !source_type.is_array
+                && is_text_like_type(source_type)
+                && explicit_text_input_cast_exists(catalog, base_type)
+            {
+                return true;
+            }
         }
         if is_user_defined_base_type_oid(source_oid, catalog)
             || is_user_defined_base_type_oid(target_oid, catalog)
@@ -4509,6 +4538,16 @@ pub(super) fn catalog_backed_explicit_cast_allowed(
         return true;
     }
     false
+}
+
+fn domain_base_sql_type(type_oid: u32, catalog: &dyn CatalogLookup) -> Option<SqlType> {
+    let row = catalog.type_by_oid(type_oid)?;
+    if row.typtype != 'd' || row.typbasetype == 0 {
+        return None;
+    }
+    catalog
+        .type_by_oid(row.typbasetype)
+        .map(|base| base.sql_type.with_typmod(row.sql_type.typmod))
 }
 
 fn is_user_defined_base_type_oid(type_oid: u32, catalog: &dyn CatalogLookup) -> bool {

@@ -10006,6 +10006,38 @@ fn xml_input_errors_format_primary_message() {
 }
 
 #[test]
+fn xml_mapping_functions_report_unsupported_xml_feature() {
+    let base = temp_dir("xml_mapping_unsupported");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select query_to_xml('select 1', false, false, '')",
+    )
+    .unwrap_err();
+
+    assert_eq!(format_exec_error(&err), "unsupported XML feature");
+}
+
+#[test]
+fn xmlforest_reports_unsupported_xml_feature() {
+    let base = temp_dir("xmlforest_unsupported");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select xmlforest(1 as a)",
+    )
+    .unwrap_err();
+
+    assert_eq!(format_exec_error(&err), "unsupported XML feature");
+}
+
+#[test]
 fn oidvector_text_values_support_array_functions() {
     let base = temp_dir("oidvector_array_functions");
     let txns = TransactionManager::new_durable(&base).unwrap();
