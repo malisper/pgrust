@@ -331,7 +331,8 @@ pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow,
         relispartition: expect_bool(&values[21])?,
         relfrozenxid: expect_oid(&values[22])?,
         relpartbound: nullable_text(&values[23])?,
-        relacl: nullable_text_array(&values[24])?,
+        reloptions: nullable_text_array(&values[24])?,
+        relacl: nullable_text_array(&values[25])?,
     })
 }
 
@@ -1072,6 +1073,14 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
         Value::Int32(row.relfrozenxid as i32),
         row.relpartbound
             .map_or(Value::Null, |value| Value::Text(value.into())),
+        row.reloptions.map_or(Value::Null, |values| {
+            Value::PgArray(ArrayValue::from_1d(
+                values
+                    .into_iter()
+                    .map(|value| Value::Text(value.into()))
+                    .collect(),
+            ))
+        }),
         row.relacl.map_or(Value::Null, |values| {
             Value::PgArray(ArrayValue::from_1d(
                 values

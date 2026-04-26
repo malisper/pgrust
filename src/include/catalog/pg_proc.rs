@@ -4731,7 +4731,15 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgRustInternalBinaryCoercible,
         ),
         (
+            "binary_coercible",
+            BuiltinScalarFunction::PgRustInternalBinaryCoercible,
+        ),
+        (
             "pg_rust_test_fdw_handler",
+            BuiltinScalarFunction::PgRustTestFdwHandler,
+        ),
+        (
+            "test_fdw_handler",
             BuiltinScalarFunction::PgRustTestFdwHandler,
         ),
         (
@@ -5337,6 +5345,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("distance", BuiltinScalarFunction::GeoDistance),
         ("close_pt", BuiltinScalarFunction::GeoClosestPoint),
         ("interpt", BuiltinScalarFunction::GeoIntersection),
+        ("interpt_pp", BuiltinScalarFunction::GeoIntersection),
         ("intersects", BuiltinScalarFunction::GeoIntersects),
         ("parallel", BuiltinScalarFunction::GeoParallel),
         ("perpendicular", BuiltinScalarFunction::GeoPerpendicular),

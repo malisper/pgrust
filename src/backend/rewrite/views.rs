@@ -1,5 +1,7 @@
 use crate::backend::parser::analyze::analyze_select_query_with_outer;
-use crate::backend::parser::{CatalogLookup, ParseError, SqlType, SqlTypeKind, Statement};
+use crate::backend::parser::{
+    CatalogLookup, ParseError, SqlType, SqlTypeKind, Statement, SubqueryComparisonOp,
+};
 use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, DateTimeConfig};
 use crate::backend::utils::time::timestamp::{
     format_timestamp_text, format_timestamptz_text, parse_timestamp_text, parse_timestamptz_text,
@@ -10,7 +12,8 @@ use crate::include::nodes::parsenodes::{
 };
 use crate::include::nodes::primnodes::{
     Aggref, BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, JoinType, OpExprKind,
-    RelationDesc, ScalarFunctionImpl, TargetEntry, Var, attrno_index,
+    RelationDesc, ScalarArrayOpExpr, ScalarFunctionImpl, SubLink, SubLinkType, TargetEntry, Var,
+    attrno_index,
 };
 
 const RETURN_RULE_NAME: &str = "_RETURN";
@@ -67,6 +70,39 @@ pub(crate) fn format_view_definition(
 ) -> Result<String, ParseError> {
     let query = load_view_return_query(relation_oid, relation_desc, None, catalog, &[])?;
     Ok(render_view_query(&query, catalog))
+}
+
+pub(crate) fn render_view_query_sql(query: &Query, catalog: &dyn CatalogLookup) -> String {
+    render_view_query(query, catalog)
+}
+
+pub(crate) fn refresh_query_relation_descriptors(query: &mut Query, catalog: &dyn CatalogLookup) {
+    for rte in &mut query.rtable {
+        match &mut rte.kind {
+            RangeTblEntryKind::Relation { relation_oid, .. } => {
+                if let Some(relation) = catalog.lookup_relation_by_oid(*relation_oid) {
+                    rte.desc = relation.desc;
+                }
+            }
+            RangeTblEntryKind::Subquery { query: subquery } => {
+                refresh_query_relation_descriptors(subquery, catalog);
+            }
+            _ => {}
+        }
+    }
+    if let Some(jointree) = &mut query.jointree {
+        refresh_join_tree_descriptors(jointree, catalog);
+    }
+}
+
+fn refresh_join_tree_descriptors(node: &mut JoinTreeNode, catalog: &dyn CatalogLookup) {
+    match node {
+        JoinTreeNode::RangeTblRef(_) => {}
+        JoinTreeNode::JoinExpr { left, right, .. } => {
+            refresh_join_tree_descriptors(left, catalog);
+            refresh_join_tree_descriptors(right, catalog);
+        }
+    }
 }
 
 fn validate_view_shape(
@@ -359,6 +395,8 @@ fn render_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> Strin
                 .join(" OR "),
         },
         Expr::Op(op) => render_op(op.op, &op.args, query, catalog),
+        Expr::SubLink(sublink) => render_sublink(sublink, query, catalog),
+        Expr::ScalarArrayOp(saop) => render_scalar_array_op(saop, query, catalog),
         Expr::Func(func) => render_function(func, query, catalog),
         Expr::IsNull(inner) => format!("{} IS NULL", render_wrapped_expr(inner, query, catalog)),
         Expr::IsNotNull(inner) => {
@@ -378,6 +416,14 @@ fn render_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> Strin
             "COALESCE({}, {})",
             render_expr(left, query, catalog),
             render_expr(right, query, catalog)
+        ),
+        Expr::ArrayLiteral { elements, .. } => format!(
+            "ARRAY[{}]",
+            elements
+                .iter()
+                .map(|element| render_expr(element, query, catalog))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         _ => format!("{expr:?}"),
     }
@@ -416,7 +462,70 @@ fn postgres_utc_datetime_config() -> DateTimeConfig {
 
 fn render_wrapped_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> String {
     match expr {
-        Expr::Op(_) | Expr::Bool(_) => format!("({})", render_expr(expr, query, catalog)),
+        Expr::Op(_) | Expr::Bool(_) | Expr::ScalarArrayOp(_) => {
+            format!("({})", render_expr(expr, query, catalog))
+        }
+        _ => render_expr(expr, query, catalog),
+    }
+}
+
+fn render_sublink(sublink: &SubLink, query: &Query, catalog: &dyn CatalogLookup) -> String {
+    let subquery = render_subquery_expr(&sublink.subselect, catalog);
+    match sublink.sublink_type {
+        SubLinkType::ExistsSubLink => format!("(EXISTS ({subquery}))"),
+        SubLinkType::ExprSubLink => format!("({subquery})"),
+        SubLinkType::ArraySubLink => format!("ARRAY({subquery})"),
+        SubLinkType::AnySubLink(op) => {
+            let Some(testexpr) = &sublink.testexpr else {
+                return format!("ANY ({subquery})");
+            };
+            let left = render_wrapped_expr(testexpr, query, catalog);
+            if op == SubqueryComparisonOp::Eq {
+                format!("({left} IN ({subquery}))")
+            } else {
+                format!("({left} {} ANY ({subquery}))", render_subquery_op(op))
+            }
+        }
+        SubLinkType::AllSubLink(op) => {
+            let Some(testexpr) = &sublink.testexpr else {
+                return format!("ALL ({subquery})");
+            };
+            format!(
+                "({} {} ALL ({subquery}))",
+                render_wrapped_expr(testexpr, query, catalog),
+                render_subquery_op(op)
+            )
+        }
+    }
+}
+
+fn render_subquery_expr(query: &Query, catalog: &dyn CatalogLookup) -> String {
+    render_view_query(query, catalog)
+        .trim_end_matches(';')
+        .to_string()
+}
+
+fn render_scalar_array_op(
+    saop: &ScalarArrayOpExpr,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let left = render_wrapped_expr(&saop.left, query, catalog);
+    let right = render_scalar_array_rhs(&saop.right, query, catalog);
+    let quantifier = if saop.use_or { "ANY" } else { "ALL" };
+    if saop.use_or && saop.op == SubqueryComparisonOp::Eq {
+        format!("{left} = {quantifier} ({right})")
+    } else {
+        format!(
+            "{left} {} {quantifier} ({right})",
+            render_subquery_op(saop.op)
+        )
+    }
+}
+
+fn render_scalar_array_rhs(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> String {
+    match expr {
+        Expr::SubLink(sublink) => render_sublink(sublink, query, catalog),
         _ => render_expr(expr, query, catalog),
     }
 }
@@ -552,6 +661,24 @@ fn render_binary_operator(op: OpExprKind) -> &'static str {
     }
 }
 
+fn render_subquery_op(op: SubqueryComparisonOp) -> &'static str {
+    match op {
+        SubqueryComparisonOp::Eq => "=",
+        SubqueryComparisonOp::NotEq => "<>",
+        SubqueryComparisonOp::Lt => "<",
+        SubqueryComparisonOp::LtEq => "<=",
+        SubqueryComparisonOp::Gt => ">",
+        SubqueryComparisonOp::GtEq => ">=",
+        SubqueryComparisonOp::Match => "@@",
+        SubqueryComparisonOp::Like => "LIKE",
+        SubqueryComparisonOp::NotLike => "NOT LIKE",
+        SubqueryComparisonOp::ILike => "ILIKE",
+        SubqueryComparisonOp::NotILike => "NOT ILIKE",
+        SubqueryComparisonOp::Similar => "SIMILAR TO",
+        SubqueryComparisonOp::NotSimilar => "NOT SIMILAR TO",
+    }
+}
+
 fn render_join_type(kind: JoinType) -> &'static str {
     match kind {
         JoinType::Inner => "INNER",
@@ -636,9 +763,16 @@ fn var_name(var: &Var, query: &Query) -> Option<String> {
 }
 
 fn relation_sql_name(relation_oid: u32, catalog: &dyn CatalogLookup) -> Option<String> {
-    catalog
-        .class_row_by_oid(relation_oid)
-        .map(|class| quote_identifier_if_needed(&class.relname))
+    let class = catalog.class_row_by_oid(relation_oid)?;
+    let relname = quote_identifier_if_needed(&class.relname);
+    let schema_name = catalog
+        .namespace_row_by_oid(class.relnamespace)
+        .map(|row| row.nspname)
+        .unwrap_or_else(|| "public".into());
+    Some(match schema_name.as_str() {
+        "public" | "pg_catalog" => relname,
+        _ => format!("{}.{}", quote_identifier_if_needed(&schema_name), relname),
+    })
 }
 
 fn join_using_var_needs_cast(var: &Var, sql_type: SqlType, query: &Query) -> bool {

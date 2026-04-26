@@ -2000,6 +2000,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgRustInternalBinaryCoercible,
         ),
         (
+            "binary_coercible",
+            BuiltinScalarFunction::PgRustInternalBinaryCoercible,
+        ),
+        (
             "pg_rust_test_opclass_options_func",
             BuiltinScalarFunction::PgRustTestOpclassOptionsFunc,
         ),
@@ -2007,6 +2011,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_rust_test_fdw_handler",
             BuiltinScalarFunction::PgRustTestFdwHandler,
         ),
+        (
+            "test_fdw_handler",
+            BuiltinScalarFunction::PgRustTestFdwHandler,
+        ),
+        ("interpt_pp", BuiltinScalarFunction::GeoIntersection),
         (
             "pg_rust_test_enc_setup",
             BuiltinScalarFunction::PgRustTestEncSetup,

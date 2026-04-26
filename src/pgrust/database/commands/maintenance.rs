@@ -15,13 +15,14 @@ use crate::include::catalog::{
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     CommentOnAggregateStatement, CommentOnFunctionStatement, CommentOnIndexStatement,
-    MaintenanceTarget, VacuumStatement,
+    CommentOnViewStatement, MaintenanceTarget, VacuumStatement,
 };
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::autovacuum::{AutovacuumRelationInput, relation_needs_vacanalyze};
 use crate::pgrust::database::ddl::{
-    lookup_analyzable_relation_for_ddl, lookup_heap_relation_for_alter_table,
-    lookup_heap_relation_for_ddl, lookup_index_relation_for_alter_index,
+    dependent_view_rewrites_for_relation, lookup_analyzable_relation_for_ddl,
+    lookup_heap_relation_for_alter_table, lookup_heap_relation_for_ddl,
+    lookup_index_relation_for_alter_index,
 };
 use crate::{ClientId, RelFileLocator};
 use parking_lot::RwLock;
@@ -1060,6 +1061,54 @@ impl Database {
         result
     }
 
+    pub(crate) fn execute_comment_on_view_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnViewStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let relation = match catalog.lookup_any_relation(&comment_stmt.view_name) {
+            Some(entry) if entry.relkind == 'v' => entry,
+            Some(_) => {
+                return Err(ExecError::Parse(ParseError::WrongObjectType {
+                    name: comment_stmt.view_name.clone(),
+                    expected: "view",
+                }));
+            }
+            None => {
+                return Err(ExecError::DetailedError {
+                    message: format!("relation \"{}\" does not exist", comment_stmt.view_name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P01",
+                });
+            }
+        };
+        self.table_locks.lock_table_interruptible(
+            relation.rel,
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_comment_on_view_stmt_in_transaction_with_search_path(
+            client_id,
+            comment_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        self.table_locks.unlock_table(relation.rel, client_id);
+        result
+    }
+
     pub(crate) fn execute_comment_on_constraint_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -1563,6 +1612,60 @@ impl Database {
         Ok(StatementResult::AffectedRows(0))
     }
 
+    pub(crate) fn execute_comment_on_view_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnViewStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation = match catalog.lookup_any_relation(&comment_stmt.view_name) {
+            Some(entry) if entry.relkind == 'v' => entry,
+            Some(_) => {
+                return Err(ExecError::Parse(ParseError::WrongObjectType {
+                    name: comment_stmt.view_name.clone(),
+                    expected: "view",
+                }));
+            }
+            None => {
+                return Err(ExecError::DetailedError {
+                    message: format!("relation \"{}\" does not exist", comment_stmt.view_name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P01",
+                });
+            }
+        };
+        if relation.relpersistence == 't' {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "permanent view for COMMENT ON VIEW",
+                actual: "temporary view".into(),
+            }));
+        }
+        ensure_relation_owner(self, client_id, &relation, &comment_stmt.view_name)?;
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: Arc::clone(&interrupts),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .comment_relation_mvcc(relation.relation_oid, comment_stmt.comment.as_deref(), &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_comment_on_constraint_stmt_in_transaction_with_search_path(
         &self,
         client_id: ClientId,
@@ -1640,12 +1743,18 @@ impl Database {
             return Ok(StatementResult::AffectedRows(0));
         };
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
-        reject_relation_with_dependent_views(
+        if relation.relpersistence != 't' {
+            reject_inheritance_tree_ddl(
+                &catalog,
+                relation.relation_oid,
+                "ALTER TABLE ADD COLUMN on inheritance tree members is not supported yet",
+            )?;
+        }
+        let _ = dependent_view_rewrites_for_relation(
             self,
             client_id,
             Some((xid, cid)),
             relation.relation_oid,
-            "ALTER TABLE on relation without dependent views",
         )?;
         let table_name = relation_basename(&alter_stmt.table_name).to_string();
         let existing_constraints = catalog.constraint_rows_for_relation(relation.relation_oid);

@@ -203,6 +203,7 @@ impl Database {
                     'p',
                     'S',
                     self.auth_state(client_id).current_user_oid(),
+                    None,
                     &ctx,
                 );
                 match result {
@@ -231,6 +232,7 @@ impl Database {
                     xid,
                     cid,
                     'S',
+                    None,
                     catalog_effects,
                     temp_effects,
                 )?;

@@ -13,15 +13,15 @@ use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec,
     AlterColumnExpressionAction, AlterTableTriggerMode, AlterTableTriggerStateStatement,
     AlterTableTriggerTarget, AlterTriggerRenameStatement, ColumnConstraint, ColumnGeneratedKind,
-    CommentOnAggregateStatement, CommentOnFunctionStatement, CompositeTypeAttributeDef,
-    CreateAggregateStatement, CreateCompositeTypeStatement, CreateTriggerStatement,
-    CreateTypeStatement, DropAggregateStatement, DropTriggerStatement, DropTypeStatement,
-    ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef, InsertSource,
-    InsertStatement, JoinTreeNode, PartitionStrategy, PublicationObjectSpec, PublicationOption,
-    PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
-    RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
-    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
-    TriggerReferencingSpec, TriggerTiming, ViewCheckOption,
+    CommentOnAggregateStatement, CommentOnFunctionStatement, CommentOnViewStatement,
+    CompositeTypeAttributeDef, CreateAggregateStatement, CreateCompositeTypeStatement,
+    CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement, DropTriggerStatement,
+    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef,
+    InsertSource, InsertStatement, JoinTreeNode, PartitionStrategy, PublicationObjectSpec,
+    PublicationOption, PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec,
+    RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
+    SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec,
+    TriggerLevel, TriggerReferencingSpec, TriggerTiming, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -326,6 +326,7 @@ fn publication_describe_tokens_inside_quoted_identifiers_remain_identifiers() {
 #[test]
 fn parse_select_with_collate_expression() {
     let stmt = parse_select("select name collate \"C\" from people").unwrap();
+    assert_eq!(stmt.targets[0].output_name, "name");
     assert_eq!(
         stmt.targets[0].expr,
         SqlExpr::Collate {
@@ -463,6 +464,7 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         namespace_oid: 11,
         owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         relacl: None,
+        reloptions: None,
         row_type_oid: 60_000u32.saturating_add(rel_number),
         array_type_oid: 61_000u32.saturating_add(rel_number),
         reltoastrelid: 0,
@@ -523,6 +525,7 @@ fn people_view_entry() -> CatalogEntry {
         namespace_oid: 11,
         owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         relacl: None,
+        reloptions: None,
         row_type_oid: 60020,
         array_type_oid: 60021,
         reltoastrelid: 0,
@@ -715,6 +718,7 @@ fn catalog_with_people_id_index() -> Catalog {
             namespace_oid: 11,
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
+            reloptions: None,
             row_type_oid: 60010,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -780,6 +784,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
             namespace_oid: 11,
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
+            reloptions: None,
             row_type_oid: 60011,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -874,6 +879,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             namespace_oid: 11,
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
+            reloptions: None,
             row_type_oid: 60013,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -936,6 +942,7 @@ fn catalog_with_people_ctid_partial_unique_index() -> Catalog {
             namespace_oid: 11,
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
+            reloptions: None,
             row_type_oid: 60015,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -998,6 +1005,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
             namespace_oid: 11,
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
+            reloptions: None,
             row_type_oid: 60014,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1175,6 +1183,7 @@ fn bind_expression_index_metadata_does_not_discover_heap_indexes() {
             namespace_oid: 11,
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
+            reloptions: None,
             row_type_oid: 60041,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1245,6 +1254,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
             namespace_oid: 11,
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
+            reloptions: None,
             row_type_oid: 60015,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1315,6 +1325,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             namespace_oid: 11,
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
+            reloptions: None,
             row_type_oid: 60031,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -2036,6 +2047,31 @@ fn parse_comment_on_table_null_statement() {
             comment: None,
         })
     );
+}
+
+#[test]
+fn parse_comment_on_view_statement() {
+    assert_eq!(
+        parse_statement("comment on view toyemp is 'is a view'").unwrap(),
+        Statement::CommentOnView(CommentOnViewStatement {
+            view_name: "toyemp".into(),
+            comment: Some("is a view".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_create_view_options() {
+    assert!(matches!(
+        parse_statement("create view secure_names with (security_barrier, security_invoker=false) as select id from people").unwrap(),
+        Statement::CreateView(CreateViewStatement { view_name, options, .. })
+            if view_name == "secure_names"
+                && options.len() == 2
+                && options[0].name == "security_barrier"
+                && options[0].value == "true"
+                && options[1].name == "security_invoker"
+                && options[1].value == "false"
+    ));
 }
 
 #[test]
@@ -3185,6 +3221,48 @@ fn parse_alter_view_rename_statement() {
             only: false,
             table_name: "items_view".into(),
             new_table_name: "items_view_new".into(),
+        })
+    );
+}
+
+#[test]
+fn parse_alter_view_rename_column_statement() {
+    let stmt =
+        parse_statement("alter view if exists items_view rename column note to body").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterViewRenameColumn(AlterTableRenameColumnStatement {
+            if_exists: true,
+            only: false,
+            table_name: "items_view".into(),
+            column_name: "note".into(),
+            new_column_name: "body".into(),
+        })
+    );
+}
+
+#[test]
+fn parse_alter_table_set_schema_statement() {
+    let stmt = parse_statement("alter table if exists items set schema archive").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableSetSchema(AlterRelationSetSchemaStatement {
+            if_exists: true,
+            relation_name: "items".into(),
+            schema_name: "archive".into(),
+        })
+    );
+}
+
+#[test]
+fn parse_alter_view_set_schema_statement() {
+    let stmt = parse_statement("alter view if exists items_view set schema archive").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterViewSetSchema(AlterRelationSetSchemaStatement {
+            if_exists: true,
+            relation_name: "items_view".into(),
+            schema_name: "archive".into(),
         })
     );
 }
@@ -7463,6 +7541,18 @@ fn parse_insert_update_delete() {
     );
     assert!(
         matches!(
+            parse_statement("create view secure_names with (security_barrier, security_invoker=false) as select id from people").unwrap(),
+            Statement::CreateView(CreateViewStatement { view_name, options, .. })
+                if view_name == "secure_names"
+                    && options.len() == 2
+                    && options[0].name == "security_barrier"
+                    && options[0].value == "true"
+                    && options[1].name == "security_invoker"
+                    && options[1].value == "false"
+        )
+    );
+    assert!(
+        matches!(
             parse_statement("create or replace view item_names as select id from people with local check option").unwrap(),
             Statement::CreateView(CreateViewStatement {
                 schema_name: None,
@@ -7543,6 +7633,13 @@ fn parse_insert_update_delete() {
             ..
         }) if object_names == &vec!["tab".to_string()]
     ));
+    assert!(
+        matches!(
+            parse_statement("create schema tenant create view v as select 1").unwrap(),
+            Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), elements, .. })
+                if schema_name == "tenant" && matches!(elements.first().map(|stmt| stmt.as_ref()), Some(Statement::CreateView(_)))
+        )
+    );
     assert!(
         matches!(parse_statement("drop view if exists item_names, recent_items").unwrap(), Statement::DropView(DropViewStatement { if_exists: true, view_names }) if view_names == vec!["item_names", "recent_items"])
     );

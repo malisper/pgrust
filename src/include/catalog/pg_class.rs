@@ -32,6 +32,7 @@ pub struct PgClassRow {
     pub relispartition: bool,
     pub relfrozenxid: u32,
     pub relpartbound: Option<String>,
+    pub reloptions: Option<Vec<String>>,
     pub relacl: Option<Vec<String>>,
 }
 
@@ -70,6 +71,11 @@ pub fn pg_class_desc() -> RelationDesc {
             column_desc("relispartition", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("relfrozenxid", SqlType::new(SqlTypeKind::Xid), false),
             column_desc("relpartbound", SqlType::new(SqlTypeKind::PgNodeTree), true),
+            column_desc(
+                "reloptions",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                true,
+            ),
             column_desc(
                 "relacl",
                 SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
@@ -157,6 +163,7 @@ fn bootstrap_pg_class_row(kind: BootstrapCatalogKind) -> PgClassRow {
         relispartition: false,
         relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
         relpartbound: None,
+        reloptions: None,
         relacl: None,
     }
 }

@@ -297,6 +297,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
         relispartition: entry.relispartition,
         relfrozenxid: entry.relfrozenxid,
         relpartbound: entry.relpartbound.clone(),
+        reloptions: entry.reloptions.clone(),
         relacl: entry.relacl.clone(),
     });
 

@@ -24,7 +24,11 @@ use crate::include::catalog::{
     PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID, builtin_range_name_for_sql_type,
     builtin_type_name_for_oid, relkind_is_analyzable,
 };
+use crate::include::nodes::parsenodes::{Query, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{Var, user_attrno};
+use crate::pgrust::database::{
+    CatalogMutationEffect, CatalogWriteContext, CommandId, TransactionId,
+};
 
 pub(super) fn is_system_column_name(name: &str) -> bool {
     matches!(
@@ -316,6 +320,91 @@ fn dependent_view_names_for_relation(
     names
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct DependentViewRewrite {
+    pub(crate) relation_oid: u32,
+    pub(crate) relation_desc: RelationDesc,
+    pub(crate) query: Query,
+    pub(crate) check_option: crate::include::nodes::parsenodes::ViewCheckOption,
+}
+
+pub(crate) fn dependent_view_rewrites_for_relation(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    relation_oid: u32,
+) -> Result<Vec<DependentViewRewrite>, ExecError> {
+    let catalog = db.lazy_catalog_lookup(client_id, txn_ctx, None);
+    let mut rewrites = Vec::new();
+    for dependent_oid in direct_dependent_view_oids(db, client_id, txn_ctx, relation_oid) {
+        let Some(relation) = catalog.lookup_relation_by_oid(dependent_oid) else {
+            continue;
+        };
+        let (_, check_option) = crate::backend::rewrite::split_stored_view_definition_sql(
+            &rewrite_return_rule_sql(&catalog, dependent_oid)?,
+        );
+        let query = crate::backend::rewrite::load_view_return_query(
+            dependent_oid,
+            &relation.desc,
+            None,
+            &catalog,
+            &[],
+        )
+        .map_err(ExecError::Parse)?;
+        rewrites.push(DependentViewRewrite {
+            relation_oid: dependent_oid,
+            relation_desc: relation.desc,
+            query,
+            check_option,
+        });
+    }
+    Ok(rewrites)
+}
+
+fn direct_dependent_view_oids(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    relation_oid: u32,
+) -> Vec<u32> {
+    let rewrites = ensure_rewrite_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+    let mut oids = ensure_depend_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .filter(|row| {
+            row.classid == PG_REWRITE_RELATION_OID
+                && row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjid == relation_oid
+                && row.deptype == DEPENDENCY_NORMAL
+        })
+        .filter_map(|row| rewrites.get(&row.objid).map(|rewrite| rewrite.ev_class))
+        .collect::<Vec<_>>();
+    oids.sort_unstable();
+    oids.dedup();
+    oids
+}
+
+fn rewrite_return_rule_sql(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+) -> Result<String, ExecError> {
+    let mut rows = catalog.rewrite_rows_for_relation(relation_oid);
+    rows.retain(|row| row.rulename == "_RETURN");
+    match rows.as_slice() {
+        [row] => Ok(row.ev_action.clone()),
+        [] => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "view _RETURN rule",
+            actual: format!("missing rewrite rule for view {relation_oid}"),
+        })),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "single view _RETURN rule",
+            actual: format!("multiple rewrite rules for view {relation_oid}"),
+        })),
+    }
+}
+
 pub(super) fn reject_relation_with_dependent_views(
     db: &Database,
     client_id: ClientId,
@@ -334,6 +423,295 @@ pub(super) fn reject_relation_with_dependent_views(
             dependent_views.join(", ")
         ),
     }))
+}
+
+pub(crate) fn rewrite_dependent_views(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    dependent_views: &[DependentViewRewrite],
+    xid: TransactionId,
+    cid: CommandId,
+    catalog_effects: &mut Vec<CatalogMutationEffect>,
+) -> Result<(), ExecError> {
+    let catalog = db.lazy_catalog_lookup(client_id, txn_ctx, None);
+    for (index, dependent_view) in dependent_views.iter().enumerate() {
+        let mut query = dependent_view.query.clone();
+        crate::backend::rewrite::refresh_query_relation_descriptors(&mut query, &catalog);
+        let mut sql = crate::backend::rewrite::render_view_query_sql(&query, &catalog);
+        sql = append_view_check_option(sql, dependent_view.check_option);
+        let rule_ctx = CatalogWriteContext {
+            pool: db.pool.clone(),
+            txns: db.txns.clone(),
+            xid,
+            cid: cid.saturating_add(index as u32),
+            client_id,
+            waiter: None,
+            interrupts: db.interrupt_state(client_id),
+        };
+        let rewrite_oid = catalog
+            .rewrite_rows_for_relation(dependent_view.relation_oid)
+            .into_iter()
+            .find(|row| row.rulename == "_RETURN")
+            .map(|row| row.oid)
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "view _RETURN rule",
+                    actual: format!(
+                        "missing rewrite rule for view {}",
+                        dependent_view.relation_oid
+                    ),
+                })
+            })?;
+        let drop_effect = db
+            .catalog
+            .write()
+            .drop_rule_mvcc(rewrite_oid, &rule_ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(drop_effect);
+        let create_ctx = CatalogWriteContext {
+            cid: rule_ctx.cid.saturating_add(1),
+            ..rule_ctx
+        };
+        let referenced = direct_relation_oids_in_query(&query);
+        let create_effect = db
+            .catalog
+            .write()
+            .create_rule_mvcc_with_owner_dependency(
+                dependent_view.relation_oid,
+                "_RETURN",
+                '1',
+                true,
+                String::new(),
+                sql,
+                &referenced,
+                crate::backend::catalog::store::RuleOwnerDependency::Internal,
+                &create_ctx,
+            )
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(create_effect);
+    }
+    Ok(())
+}
+
+fn append_view_check_option(
+    sql: String,
+    check_option: crate::include::nodes::parsenodes::ViewCheckOption,
+) -> String {
+    match check_option {
+        crate::include::nodes::parsenodes::ViewCheckOption::None => sql,
+        crate::include::nodes::parsenodes::ViewCheckOption::Local => {
+            format!("{sql} WITH LOCAL CHECK OPTION")
+        }
+        crate::include::nodes::parsenodes::ViewCheckOption::Cascaded => {
+            format!("{sql} WITH CASCADED CHECK OPTION")
+        }
+    }
+}
+
+fn direct_relation_oids_in_query(query: &Query) -> Vec<u32> {
+    let mut oids = Vec::new();
+    for rte in &query.rtable {
+        match &rte.kind {
+            RangeTblEntryKind::Relation { relation_oid, .. } => oids.push(*relation_oid),
+            RangeTblEntryKind::Subquery { query } => {
+                oids.extend(direct_relation_oids_in_query(query))
+            }
+            _ => {}
+        }
+    }
+    oids.sort_unstable();
+    oids.dedup();
+    oids
+}
+
+pub(crate) fn any_dependent_view_references_column(
+    dependent_views: &[DependentViewRewrite],
+    relation_oid: u32,
+    attnum: i16,
+) -> bool {
+    dependent_views
+        .iter()
+        .any(|view| query_references_relation_column(&view.query, relation_oid, attnum))
+}
+
+fn query_references_relation_column(query: &Query, relation_oid: u32, attnum: i16) -> bool {
+    query
+        .target_list
+        .iter()
+        .any(|target| expr_references_relation_column(&target.expr, query, relation_oid, attnum))
+        || query
+            .where_qual
+            .as_ref()
+            .is_some_and(|expr| expr_references_relation_column(expr, query, relation_oid, attnum))
+        || query
+            .group_by
+            .iter()
+            .any(|expr| expr_references_relation_column(expr, query, relation_oid, attnum))
+        || query
+            .having_qual
+            .as_ref()
+            .is_some_and(|expr| expr_references_relation_column(expr, query, relation_oid, attnum))
+        || query
+            .sort_clause
+            .iter()
+            .any(|sort| expr_references_relation_column(&sort.expr, query, relation_oid, attnum))
+        || query.rtable.iter().any(|rte| match &rte.kind {
+            RangeTblEntryKind::Subquery { query } => {
+                query_references_relation_column(query, relation_oid, attnum)
+            }
+            _ => false,
+        })
+}
+
+fn expr_references_relation_column(
+    expr: &Expr,
+    query: &Query,
+    relation_oid: u32,
+    attnum: i16,
+) -> bool {
+    match expr {
+        Expr::Var(var) => var_references_relation_column(var, query, relation_oid, attnum),
+        Expr::Aggref(aggref) => {
+            aggref
+                .direct_args
+                .iter()
+                .any(|arg| expr_references_relation_column(arg, query, relation_oid, attnum))
+                || aggref
+                    .args
+                    .iter()
+                    .any(|arg| expr_references_relation_column(arg, query, relation_oid, attnum))
+                || aggref.aggfilter.as_ref().is_some_and(|expr| {
+                    expr_references_relation_column(expr, query, relation_oid, attnum)
+                })
+        }
+        Expr::WindowFunc(window_func) => window_func
+            .args
+            .iter()
+            .any(|arg| expr_references_relation_column(arg, query, relation_oid, attnum)),
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(|arg| expr_references_relation_column(arg, query, relation_oid, attnum)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|arg| expr_references_relation_column(arg, query, relation_oid, attnum)),
+        Expr::Case(case_expr) => {
+            case_expr.arg.as_ref().is_some_and(|arg| {
+                expr_references_relation_column(arg, query, relation_oid, attnum)
+            }) || case_expr.args.iter().any(|when| {
+                expr_references_relation_column(&when.expr, query, relation_oid, attnum)
+                    || expr_references_relation_column(&when.result, query, relation_oid, attnum)
+            }) || expr_references_relation_column(&case_expr.defresult, query, relation_oid, attnum)
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(|arg| expr_references_relation_column(arg, query, relation_oid, attnum)),
+        Expr::SetReturning(_) => false,
+        Expr::SubLink(sublink) => {
+            sublink.testexpr.as_ref().is_some_and(|expr| {
+                expr_references_relation_column(expr, query, relation_oid, attnum)
+            }) || query_references_relation_column(&sublink.subselect, relation_oid, attnum)
+        }
+        Expr::SubPlan(subplan) => subplan
+            .args
+            .iter()
+            .any(|arg| expr_references_relation_column(arg, query, relation_oid, attnum)),
+        Expr::ScalarArrayOp(saop) => {
+            expr_references_relation_column(&saop.left, query, relation_oid, attnum)
+                || expr_references_relation_column(&saop.right, query, relation_oid, attnum)
+        }
+        Expr::Xml(xml) => xml
+            .args
+            .iter()
+            .any(|arg| expr_references_relation_column(arg, query, relation_oid, attnum)),
+        Expr::Cast(inner, _) => expr_references_relation_column(inner, query, relation_oid, attnum),
+        Expr::Collate { expr, .. }
+        | Expr::IsNull(expr)
+        | Expr::IsNotNull(expr)
+        | Expr::FieldSelect { expr, .. } => {
+            expr_references_relation_column(expr, query, relation_oid, attnum)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_references_relation_column(expr, query, relation_oid, attnum)
+                || expr_references_relation_column(pattern, query, relation_oid, attnum)
+                || escape.as_ref().is_some_and(|expr| {
+                    expr_references_relation_column(expr, query, relation_oid, attnum)
+                })
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_references_relation_column(left, query, relation_oid, attnum)
+                || expr_references_relation_column(right, query, relation_oid, attnum)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|expr| expr_references_relation_column(expr, query, relation_oid, attnum)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_references_relation_column(expr, query, relation_oid, attnum)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_references_relation_column(array, query, relation_oid, attnum)
+                || subscripts.iter().any(|subscript| {
+                    subscript.lower.as_ref().is_some_and(|expr| {
+                        expr_references_relation_column(expr, query, relation_oid, attnum)
+                    }) || subscript.upper.as_ref().is_some_and(|expr| {
+                        expr_references_relation_column(expr, query, relation_oid, attnum)
+                    })
+                })
+        }
+        Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+fn var_references_relation_column(
+    var: &Var,
+    query: &Query,
+    relation_oid: u32,
+    attnum: i16,
+) -> bool {
+    query
+        .rtable
+        .get(var.varno.saturating_sub(1))
+        .is_some_and(|rte| match &rte.kind {
+            RangeTblEntryKind::Relation {
+                relation_oid: rte_relation_oid,
+                ..
+            } => {
+                *rte_relation_oid == relation_oid
+                    && usize::try_from(attnum)
+                        .ok()
+                        .is_some_and(|index| var.varattno == user_attrno(index.saturating_sub(1)))
+            }
+            _ => false,
+        })
 }
 
 fn relation_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
