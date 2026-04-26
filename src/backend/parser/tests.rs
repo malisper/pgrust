@@ -2032,7 +2032,7 @@ fn parse_is_document_expression() {
 fn parse_transaction_alias_statements() {
     assert_eq!(
         parse_statement("begin transaction").unwrap(),
-        Statement::Begin
+        Statement::Begin(TransactionOptions::default())
     );
     assert_eq!(
         parse_statement("commit transaction").unwrap(),
@@ -4816,10 +4816,52 @@ fn parse_enable_replica_trigger_requires_name() {
 fn parse_set_transaction_isolation_level_serializable() {
     assert_eq!(
         parse_statement("set transaction isolation level serializable").unwrap(),
-        Statement::Set(SetStatement {
+        Statement::SetTransaction(SetTransactionStatement {
+            scope: SetTransactionScope::Transaction,
+            options: TransactionOptions {
+                isolation_level: Some(TransactionIsolationLevel::Serializable),
+                ..TransactionOptions::default()
+            },
+        })
+    );
+}
+
+#[test]
+fn parse_set_session_transaction_characteristics() {
+    assert_eq!(
+        parse_statement(
+            "set session characteristics as transaction isolation level repeatable read",
+        )
+        .unwrap(),
+        Statement::SetTransaction(SetTransactionStatement {
+            scope: SetTransactionScope::SessionCharacteristics,
+            options: TransactionOptions {
+                isolation_level: Some(TransactionIsolationLevel::RepeatableRead),
+                ..TransactionOptions::default()
+            },
+        })
+    );
+}
+
+#[test]
+fn parse_transaction_mode_options() {
+    assert_eq!(
+        parse_statement("begin isolation level repeatable read, read only, not deferrable")
+            .unwrap(),
+        Statement::Begin(TransactionOptions {
+            isolation_level: Some(TransactionIsolationLevel::RepeatableRead),
+            read_only: Some(true),
+            deferrable: Some(false),
+        })
+    );
+}
+
+#[test]
+fn parse_show_transaction_isolation_level() {
+    assert_eq!(
+        parse_statement("show transaction isolation level").unwrap(),
+        Statement::Show(ShowStatement {
             name: "transaction_isolation".into(),
-            value: Some("serializable".into()),
-            is_local: true,
         })
     );
 }
@@ -14339,7 +14381,10 @@ fn parse_insert_alias_and_begin_isolation_level() {
 
     assert!(matches!(
         parse_statement("begin transaction isolation level repeatable read").unwrap(),
-        Statement::Begin
+        Statement::Begin(TransactionOptions {
+            isolation_level: Some(TransactionIsolationLevel::RepeatableRead),
+            ..
+        })
     ));
 }
 

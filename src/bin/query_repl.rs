@@ -1378,7 +1378,8 @@ fn run_statement(
         | Statement::Fetch(_)
         | Statement::Move(_)
         | Statement::ClosePortal(_)
-        | Statement::Begin
+        | Statement::SetTransaction(_)
+        | Statement::Begin(_)
         | Statement::Commit
         | Statement::Rollback
         | Statement::Savepoint(_)

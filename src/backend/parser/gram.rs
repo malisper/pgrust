@@ -129,9 +129,6 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_set_constraints_statement(&sql)? {
         return Ok(stmt);
     }
-    if let Some(stmt) = try_parse_set_transaction_statement(&sql)? {
-        return Ok(stmt);
-    }
     if let Some(stmt) = try_parse_publication_statement(&sql)? {
         return Ok(stmt);
     }
@@ -1693,30 +1690,6 @@ fn try_parse_alter_table_trigger_state_statement(
     }
     build_alter_table_trigger_state_statement(trimmed)
         .map(|stmt| Some(Statement::AlterTableTriggerState(stmt)))
-}
-
-fn try_parse_set_transaction_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
-    let trimmed = sql.trim().trim_end_matches(';').trim();
-    let lowered = trimmed.to_ascii_lowercase();
-    let prefix = "set transaction isolation level ";
-    if !lowered.starts_with(prefix) {
-        return Ok(None);
-    }
-    let Some(level) = trimmed.get(prefix.len()..) else {
-        return Err(ParseError::UnexpectedEof);
-    };
-    let level = level.trim();
-    if level.is_empty() {
-        return Err(ParseError::UnexpectedEof);
-    }
-    // :HACK: This only accepts the transaction-local spelling exercised by the
-    // regression tests. pgrust still executes at a single effective isolation
-    // level and stores the setting only as compatibility metadata.
-    Ok(Some(Statement::Set(SetStatement {
-        name: "transaction_isolation".into(),
-        value: Some(level.to_ascii_lowercase()),
-        is_local: true,
-    })))
 }
 
 fn try_parse_set_constraints_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -11057,6 +11030,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         )),
         Rule::set_role_stmt => Ok(Statement::SetRole(build_set_role(inner)?)),
         Rule::reset_role_stmt => Ok(Statement::ResetRole(build_reset_role(inner)?)),
+        Rule::set_transaction_stmt => Ok(Statement::SetTransaction(build_set_transaction(inner)?)),
         Rule::set_stmt => Ok(Statement::Set(build_set(inner)?)),
         Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
         Rule::create_role_stmt => Ok(Statement::CreateRole(build_create_role(inner)?)),
@@ -11206,7 +11180,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::merge_stmt => Ok(Statement::Merge(build_merge(inner)?)),
         Rule::update_stmt => Ok(Statement::Update(build_update(inner)?)),
         Rule::delete_stmt => Ok(Statement::Delete(build_delete(inner)?)),
-        Rule::begin_stmt => Ok(Statement::Begin),
+        Rule::begin_stmt => Ok(Statement::Begin(build_begin(inner)?)),
         Rule::commit_stmt => Ok(Statement::Commit),
         Rule::savepoint_stmt => Ok(Statement::Savepoint(build_transaction_marker_name(inner)?)),
         Rule::rollback_to_stmt => Ok(Statement::RollbackTo(build_transaction_marker_name(inner)?)),
@@ -11412,6 +11386,9 @@ fn build_show(pair: Pair<'_, Rule>) -> Result<ShowStatement, ParseError> {
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::identifier => name = Some(build_identifier(part)),
+            Rule::show_transaction_isolation_clause => {
+                name = Some("transaction_isolation".to_string())
+            }
             Rule::time_zone_guc_name => name = Some("timezone".to_string()),
             _ => {}
         }
@@ -12237,6 +12214,147 @@ fn build_simple_set_value_atom(pair: Pair<'_, Rule>) -> String {
         Rule::identifier | Rule::numeric_literal | Rule::integer => pair.as_str().to_string(),
         _ => pair.as_str().to_string(),
     }
+}
+
+fn normalized_transaction_mode_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn parse_transaction_isolation_level_text(
+    value: &str,
+) -> Result<TransactionIsolationLevel, ParseError> {
+    TransactionIsolationLevel::parse(value).ok_or_else(|| ParseError::UnexpectedToken {
+        expected: "transaction isolation level",
+        actual: value.to_string(),
+    })
+}
+
+fn apply_transaction_mode(
+    options: &mut TransactionOptions,
+    mode: Pair<'_, Rule>,
+) -> Result<(), ParseError> {
+    let text = normalized_transaction_mode_text(mode.as_str());
+    if let Some(level) = text.strip_prefix("isolation level ") {
+        if options.isolation_level.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one isolation level",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.isolation_level = Some(parse_transaction_isolation_level_text(level)?);
+    } else if text == "read only" {
+        if options.read_only.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one transaction read mode",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.read_only = Some(true);
+    } else if text == "read write" {
+        if options.read_only.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one transaction read mode",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.read_only = Some(false);
+    } else if text == "deferrable" {
+        if options.deferrable.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one transaction deferrable mode",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.deferrable = Some(true);
+    } else if text == "not deferrable" {
+        if options.deferrable.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one transaction deferrable mode",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.deferrable = Some(false);
+    }
+    Ok(())
+}
+
+fn merge_transaction_options(
+    options: &mut TransactionOptions,
+    nested: TransactionOptions,
+) -> Result<(), ParseError> {
+    if let Some(level) = nested.isolation_level
+        && options.isolation_level.replace(level).is_some()
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "one isolation level",
+            actual: "duplicate isolation level".into(),
+        });
+    }
+    if let Some(read_only) = nested.read_only
+        && options.read_only.replace(read_only).is_some()
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "one transaction read mode",
+            actual: "duplicate transaction read mode".into(),
+        });
+    }
+    if let Some(deferrable) = nested.deferrable
+        && options.deferrable.replace(deferrable).is_some()
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "one transaction deferrable mode",
+            actual: "duplicate transaction deferrable mode".into(),
+        });
+    }
+    Ok(())
+}
+
+fn build_transaction_options(pair: Pair<'_, Rule>) -> Result<TransactionOptions, ParseError> {
+    let mut options = TransactionOptions::default();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::transaction_mode_item => apply_transaction_mode(&mut options, part)?,
+            Rule::transaction_mode_list => {
+                let nested = build_transaction_options(part)?;
+                merge_transaction_options(&mut options, nested)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(options)
+}
+
+fn build_begin(pair: Pair<'_, Rule>) -> Result<TransactionOptions, ParseError> {
+    for part in pair.into_inner() {
+        if part.as_rule() == Rule::transaction_mode_list {
+            return build_transaction_options(part);
+        }
+    }
+    Ok(TransactionOptions::default())
+}
+
+fn build_set_transaction(pair: Pair<'_, Rule>) -> Result<SetTransactionStatement, ParseError> {
+    let scope = if pair
+        .as_str()
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("set session characteristics")
+    {
+        SetTransactionScope::SessionCharacteristics
+    } else {
+        SetTransactionScope::Transaction
+    };
+    let options = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::transaction_mode_list)
+        .map(build_transaction_options)
+        .transpose()?
+        .unwrap_or_default();
+    Ok(SetTransactionStatement { scope, options })
 }
 
 fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {

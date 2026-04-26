@@ -437,6 +437,238 @@ fn txid_current_assigns_xid_in_autocommit_select() {
 }
 
 #[test]
+fn repeatable_read_reuses_first_snapshot() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+
+    db.execute(10, "create table rr_items (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rr_items values (1)").unwrap();
+
+    reader
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rr_items"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    db.execute(20, "insert into rr_items values (2)").unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rr_items"),
+        vec![vec![Value::Int64(1)]]
+    );
+    reader.execute(&db, "commit").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 30, "select count(*) from rr_items"),
+        vec![vec![Value::Int64(2)]]
+    );
+}
+
+#[test]
+fn repeatable_read_streaming_uses_transaction_snapshot() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+
+    db.execute(10, "create table rr_streaming (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rr_streaming values (1)")
+        .unwrap();
+
+    reader
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rr_streaming"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    db.execute(20, "insert into rr_streaming values (2)")
+        .unwrap();
+
+    let stmt = crate::backend::parser::parse_select("select count(*) from rr_streaming").unwrap();
+    let mut guard = reader.execute_streaming(&db, &stmt).unwrap();
+    let slot = crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx)
+        .unwrap()
+        .expect("streaming count row");
+    let values = slot.values().unwrap();
+    assert_eq!(values[0].to_owned_value(), Value::Int64(1));
+    assert!(
+        crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx)
+            .unwrap()
+            .is_none()
+    );
+    drop(guard);
+
+    reader.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn read_committed_uses_fresh_statement_snapshots() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+
+    db.execute(10, "create table rc_items (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rc_items values (1)").unwrap();
+
+    reader.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rc_items"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    db.execute(20, "insert into rc_items values (2)").unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rc_items"),
+        vec![vec![Value::Int64(2)]]
+    );
+    reader.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn repeatable_read_sees_own_writes_after_snapshot() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    db.execute(10, "create table rr_own_writes (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rr_own_writes values (1)")
+        .unwrap();
+
+    session
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from rr_own_writes"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    session
+        .execute(&db, "insert into rr_own_writes values (2)")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from rr_own_writes"),
+        vec![vec![Value::Int64(2)]]
+    );
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn set_transaction_isolation_after_query_errors() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session_query_rows(&mut session, &db, "select 1");
+
+    let err = session
+        .execute(&db, "set transaction isolation level repeatable read")
+        .unwrap_err();
+    assert_sqlstate(err, "25001", "must be called before any query");
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn set_session_characteristics_sets_default_transaction_isolation() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "set session characteristics as transaction isolation level repeatable read",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show default_transaction_isolation"),
+        vec![vec![Value::Text("repeatable read".into())]]
+    );
+
+    session.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show transaction isolation level"),
+        vec![vec![Value::Text("repeatable read".into())]]
+    );
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn repeatable_read_update_conflict_errors() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+    let mut writer = Session::new(2);
+
+    db.execute(
+        10,
+        "create table rr_update_conflict (id int4 not null, v int4 not null)",
+    )
+    .unwrap();
+    db.execute(10, "insert into rr_update_conflict values (1, 10)")
+        .unwrap();
+
+    reader
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut reader,
+            &db,
+            "select v from rr_update_conflict where id = 1"
+        ),
+        vec![vec![Value::Int32(10)]]
+    );
+
+    writer.execute(&db, "begin").unwrap();
+    writer
+        .execute(&db, "update rr_update_conflict set v = 20 where id = 1")
+        .unwrap();
+    writer.execute(&db, "commit").unwrap();
+
+    let err = reader
+        .execute(&db, "update rr_update_conflict set v = 30 where id = 1")
+        .unwrap_err();
+    assert_sqlstate(err, "40001", "concurrent update");
+    reader.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn repeatable_read_delete_conflict_errors() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+    let mut writer = Session::new(2);
+
+    db.execute(10, "create table rr_delete_conflict (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rr_delete_conflict values (1)")
+        .unwrap();
+
+    reader
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rr_delete_conflict"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    writer.execute(&db, "begin").unwrap();
+    writer
+        .execute(&db, "delete from rr_delete_conflict where id = 1")
+        .unwrap();
+    writer.execute(&db, "commit").unwrap();
+
+    let err = reader
+        .execute(&db, "delete from rr_delete_conflict where id = 1")
+        .unwrap_err();
+    assert_sqlstate(err, "40001", "concurrent delete");
+    reader.execute(&db, "rollback").unwrap();
+}
+
+#[test]
 fn txid_status_reports_recent_transaction_states() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -1627,6 +1859,24 @@ fn session_query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Ve
     match session.execute(db, sql).unwrap() {
         StatementResult::Query { rows, .. } => rows,
         other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+fn assert_sqlstate(err: ExecError, expected_sqlstate: &str, expected_message_part: &str) {
+    match err {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        }
+        | ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, expected_sqlstate);
+            assert!(
+                message.contains(expected_message_part),
+                "expected message to contain {expected_message_part:?}, got {message:?}"
+            );
+        }
+        other => panic!("expected SQLSTATE {expected_sqlstate}, got {other:?}"),
     }
 }
 
