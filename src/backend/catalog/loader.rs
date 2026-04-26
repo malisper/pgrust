@@ -422,6 +422,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                     .map(|type_row| type_row.typarray)
                     .unwrap_or(0),
                 reltoastrelid: row.reltoastrelid,
+                relhasindex: row.relhasindex,
                 relpersistence: row.relpersistence,
                 relkind: row.relkind,
                 am_oid: row.relam,

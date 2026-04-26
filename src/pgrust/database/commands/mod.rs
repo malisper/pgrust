@@ -41,3 +41,4 @@ mod tablespace;
 mod trigger;
 mod typecmds;
 mod typed_table;
+mod vacuum_full;

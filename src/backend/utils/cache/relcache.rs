@@ -385,6 +385,7 @@ pub struct RelCacheEntry {
     pub row_type_oid: u32,
     pub array_type_oid: u32,
     pub reltoastrelid: u32,
+    pub relhasindex: bool,
     pub relpersistence: char,
     pub relkind: char,
     pub relispartition: bool,
@@ -566,6 +567,7 @@ impl RelCache {
                     .map(|row| row.typarray)
                     .unwrap_or(0),
                 reltoastrelid: class.reltoastrelid,
+                relhasindex: class.relhasindex,
                 relpersistence: class.relpersistence,
                 relkind: class.relkind,
                 relispartition: class.relispartition,
@@ -791,6 +793,7 @@ fn from_catalog_entry(entry: &CatalogEntry, support_lookup: &IndexSupportLookup)
         row_type_oid: entry.row_type_oid,
         array_type_oid: entry.array_type_oid,
         reltoastrelid: entry.reltoastrelid,
+        relhasindex: entry.relhasindex,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         relispartition: entry.relispartition,

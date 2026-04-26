@@ -325,6 +325,7 @@ mod tests {
                 index_cleanup: None,
                 truncate: None,
                 parallel: None,
+                parallel_specified: false,
                 process_main: None,
                 process_toast: None,
                 skip_database_stats: false,

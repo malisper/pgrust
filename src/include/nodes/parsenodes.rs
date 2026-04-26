@@ -3128,6 +3128,7 @@ pub struct VacuumStatement {
     pub index_cleanup: Option<String>,
     pub truncate: Option<bool>,
     pub parallel: Option<String>,
+    pub parallel_specified: bool,
     pub process_main: Option<bool>,
     pub process_toast: Option<bool>,
     pub skip_database_stats: bool,

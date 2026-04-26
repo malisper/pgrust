@@ -182,6 +182,7 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         row_type_oid: 60_000u32.saturating_add(rel.rel_number),
         array_type_oid: 61_000u32.saturating_add(rel.rel_number),
         reltoastrelid: 0,
+        relhasindex: false,
         relpersistence: 'p',
         relkind: 'r',
         relispopulated: true,
@@ -3144,6 +3145,70 @@ fn insert_sql_inserts_multiple_rows() {
                 ]
             );
         }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn insert_values_generate_series_expands_rows() {
+    let mut harness = SeededSqlHarness::new("insert_values_generate_series", catalog());
+    let xid = harness.txns.begin();
+    assert_eq!(
+        harness
+            .execute(
+                xid,
+                "insert into people (id, name) values (generate_series(1, 3), repeat('x', 2))",
+            )
+            .unwrap(),
+        StatementResult::AffectedRows(3)
+    );
+    harness.txns.commit(xid).unwrap();
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select id, name from people order by id",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => assert_eq!(
+            rows,
+            vec![
+                vec![Value::Int32(1), Value::Text("xx".into())],
+                vec![Value::Int32(2), Value::Text("xx".into())],
+                vec![Value::Int32(3), Value::Text("xx".into())],
+            ]
+        ),
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn insert_values_mixed_project_set_rows_preserve_order() {
+    let mut harness = SeededSqlHarness::new("insert_values_mixed_project_set", catalog());
+    let xid = harness.txns.begin();
+    assert_eq!(
+        harness
+            .execute(
+                xid,
+                "insert into people (id, name) values (1, 'a'), (generate_series(2, 3), 'b'), (4, 'c')",
+            )
+            .unwrap(),
+        StatementResult::AffectedRows(4)
+    );
+    harness.txns.commit(xid).unwrap();
+    match harness
+        .execute(INVALID_TRANSACTION_ID, "select id, name from people")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => assert_eq!(
+            rows,
+            vec![
+                vec![Value::Int32(1), Value::Text("a".into())],
+                vec![Value::Int32(2), Value::Text("b".into())],
+                vec![Value::Int32(3), Value::Text("b".into())],
+                vec![Value::Int32(4), Value::Text("c".into())],
+            ]
+        ),
         other => panic!("expected query result, got {:?}", other),
     }
 }

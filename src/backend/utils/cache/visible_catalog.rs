@@ -5,9 +5,9 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
-    build_pg_rules_rows, build_pg_stat_io_rows, build_pg_stat_user_functions_rows,
-    build_pg_stat_user_tables_rows, build_pg_statio_user_tables_rows, build_pg_stats_rows,
-    build_pg_views_rows,
+    build_pg_rules_rows, build_pg_stat_all_tables_rows, build_pg_stat_io_rows,
+    build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
+    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_views_rows,
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
@@ -763,6 +763,19 @@ impl CatalogLookup for VisibleCatalog {
 
     fn pg_stat_activity_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
         Vec::new()
+    }
+
+    fn pg_stat_all_tables_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        let Some(catcache) = &self.catcache else {
+            return Vec::new();
+        };
+        let stats = DatabaseStatsStore::with_default_io_rows();
+        build_pg_stat_all_tables_rows(
+            catcache.namespace_rows(),
+            catcache.class_rows(),
+            catcache.index_rows(),
+            &stats,
+        )
     }
 
     fn pg_stat_user_tables_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {

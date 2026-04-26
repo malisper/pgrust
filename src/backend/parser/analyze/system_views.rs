@@ -200,6 +200,7 @@ pub(super) fn bind_builtin_system_view(
         SyntheticSystemViewKind::PgRules => catalog.pg_rules_rows(),
         SyntheticSystemViewKind::PgStats => catalog.pg_stats_rows(),
         SyntheticSystemViewKind::PgStatActivity => catalog.pg_stat_activity_rows(),
+        SyntheticSystemViewKind::PgStatAllTables => catalog.pg_stat_all_tables_rows(),
         SyntheticSystemViewKind::PgStatUserTables => catalog.pg_stat_user_tables_rows(),
         SyntheticSystemViewKind::PgStatioUserTables => catalog.pg_statio_user_tables_rows(),
         SyntheticSystemViewKind::PgStatUserFunctions => catalog.pg_stat_user_functions_rows(),

@@ -4324,6 +4324,212 @@ fn vacuum_analyze_updates_visibility_and_analyze_stats() {
     assert_eq!(statistic_count, vec![vec![Value::Int64(2)]]);
 }
 
+#[test]
+fn vacuum_full_rewrites_storage_and_preserves_rows() {
+    let dir = temp_dir("vacuum_full_rewrites_storage");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table vf_items(id int4 not null, note text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into vf_items values (1, 'a'), (2, 'b'), (3, 'c')",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index vf_items_id_idx on vf_items(id)")
+        .unwrap();
+
+    let before = session_query_rows(
+        &mut session,
+        &db,
+        "select relname, relfilenode from pg_class
+         where relname in ('vf_items', 'vf_items_id_idx')
+         order by relname",
+    );
+    assert_eq!(before.len(), 2);
+
+    session.execute(&db, "vacuum full vf_items").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id, note from vf_items order by id"
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Text("a".into())],
+            vec![Value::Int32(2), Value::Text("b".into())],
+            vec![Value::Int32(3), Value::Text("c".into())],
+        ]
+    );
+    let after = session_query_rows(
+        &mut session,
+        &db,
+        "select relname, relfilenode from pg_class
+         where relname in ('vf_items', 'vf_items_id_idx')
+         order by relname",
+    );
+    assert_eq!(after.len(), 2);
+    assert_ne!(int_value(&before[0][1]), int_value(&after[0][1]));
+    assert_ne!(int_value(&before[1][1]), int_value(&after[1][1]));
+}
+
+#[test]
+fn vacuum_full_preserves_empty_table() {
+    let dir = temp_dir("vacuum_full_preserves_empty_table");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table vf_empty(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into vf_empty values (1)")
+        .unwrap();
+    session.execute(&db, "delete from vf_empty").unwrap();
+    session
+        .execute(&db, "vacuum (full, freeze) vf_empty")
+        .unwrap();
+    session
+        .execute(&db, "vacuum (analyze, full) vf_empty")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from vf_empty"),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn pg_class_relhasindex_tracks_create_and_drop_index() {
+    let dir = temp_dir("pg_class_relhasindex");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table hasidx_t(id int4)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relhasindex from pg_class where relname = 'hasidx_t'"
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+    session
+        .execute(&db, "create index hasidx_t_id_idx on hasidx_t(id)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relhasindex from pg_class where relname = 'hasidx_t'"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    session.execute(&db, "drop index hasidx_t_id_idx").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relhasindex from pg_class where relname = 'hasidx_t'"
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+}
+
+#[test]
+fn pg_stat_all_tables_includes_catalog_relations() {
+    let dir = temp_dir("pg_stat_all_tables");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relname from pg_stat_all_tables
+             where schemaname = 'pg_catalog' and relname = 'pg_class'"
+        ),
+        vec![vec![Value::Text("pg_class".into())]]
+    );
+    assert!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relname from pg_stat_user_tables
+             where schemaname = 'pg_catalog' and relname = 'pg_class'"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn vacuum_option_validation_and_permission_warnings() {
+    let dir = temp_dir("vacuum_option_permission");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut bootstrap = Session::new(1);
+    let mut owner = Session::new(2);
+    let mut outsider = Session::new(3);
+
+    bootstrap
+        .execute(&db, "create role vac_owner login")
+        .unwrap();
+    bootstrap
+        .execute(&db, "create role vac_outsider login")
+        .unwrap();
+    owner
+        .execute(&db, "set session authorization vac_owner")
+        .unwrap();
+    owner
+        .execute(&db, "create table vacowned(id int4)")
+        .unwrap();
+
+    match bootstrap.execute(&db, "vacuum (parallel) vacowned") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "parallel option requires a value between 0 and 1024"
+            )
+        }
+        other => panic!("expected parallel option error, got {other:?}"),
+    }
+    match bootstrap.execute(&db, "vacuum (parallel -1) vacowned") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "parallel workers for vacuum must be between 0 and 1024"
+            )
+        }
+        other => panic!("expected parallel worker error, got {other:?}"),
+    }
+    match bootstrap.execute(&db, "vacuum (buffer_usage_limit 120) vacowned") {
+        Err(ExecError::DetailedError { message, .. }) => assert_eq!(
+            message,
+            "BUFFER_USAGE_LIMIT option must be 0 or between 128 kB and 16777216 kB"
+        ),
+        other => panic!("expected buffer usage error, got {other:?}"),
+    }
+
+    outsider
+        .execute(&db, "set session authorization vac_outsider")
+        .unwrap();
+    clear_backend_notices();
+    outsider.execute(&db, "vacuum analyze vacowned").unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![
+            "permission denied to vacuum \"vacowned\", skipping it".to_string(),
+            "permission denied to analyze \"vacowned\", skipping it".to_string(),
+        ]
+    );
+}
+
 fn autovacuum_test_config() -> AutovacuumConfig {
     AutovacuumConfig {
         enabled: false,
