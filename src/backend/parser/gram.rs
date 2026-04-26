@@ -12511,7 +12511,7 @@ fn build_simple_select_statement(
                         Rule::having_clause => having = Some(build_having_clause(inner)?),
                         Rule::window_clause => window_clauses = build_window_clause(inner)?,
                         Rule::order_by_clause => order_by = build_order_by_clause(inner)?,
-                        Rule::limit_clause => limit = Some(build_limit_clause(inner)?),
+                        Rule::limit_clause => limit = build_limit_clause(inner)?,
                         Rule::offset_clause => offset = Some(build_offset_clause(inner)?),
                         Rule::locking_clause => locking_clause = Some(build_locking_clause(inner)?),
                         _ => {}
@@ -12525,7 +12525,7 @@ fn build_simple_select_statement(
             Rule::having_clause => having = Some(build_having_clause(part)?),
             Rule::window_clause => window_clauses = build_window_clause(part)?,
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
-            Rule::limit_clause => limit = Some(build_limit_clause(part)?),
+            Rule::limit_clause => limit = build_limit_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
             Rule::locking_clause => locking_clause = Some(build_locking_clause(part)?),
             _ => {}
@@ -12621,11 +12621,14 @@ fn build_set_operation_term(pair: Pair<'_, Rule>) -> Result<SelectStatement, Par
         Rule::set_operation_term => {
             build_set_operation_term(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
         }
-        Rule::parenthesized_set_operation_term => build_select(
-            pair.into_inner()
-                .find(|part| matches!(part.as_rule(), Rule::select_stmt))
-                .ok_or(ParseError::UnexpectedEof)?,
-        ),
+        Rule::parenthesized_set_operation_term => {
+            let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            if matches!(inner.as_rule(), Rule::parenthesized_set_operation_term) {
+                build_set_operation_term(inner)
+            } else {
+                build_select(inner)
+            }
+        }
         Rule::simple_select_core
         | Rule::simple_select_stmt
         | Rule::set_operation_stmt
@@ -12671,7 +12674,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
             }
             Rule::window_clause => window_clauses = build_window_clause(part)?,
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
-            Rule::limit_clause => limit = Some(build_limit_clause(part)?),
+            Rule::limit_clause => limit = build_limit_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
             Rule::locking_clause => locking_clause = Some(build_locking_clause(part)?),
             _ => {}
@@ -12787,7 +12790,7 @@ fn build_values_statement(pair: Pair<'_, Rule>) -> Result<ValuesStatement, Parse
             }
             Rule::values_row => rows.push(build_values_row(part)?),
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
-            Rule::limit_clause => limit = Some(build_limit_clause(part)?),
+            Rule::limit_clause => limit = build_limit_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
             _ => {}
         }
@@ -12940,7 +12943,15 @@ fn build_order_by_clause(pair: Pair<'_, Rule>) -> Result<Vec<OrderByItem>, Parse
 }
 
 fn build_locking_clause(pair: Pair<'_, Rule>) -> Result<SelectLockingClause, ParseError> {
-    match pair.as_str().trim().to_ascii_lowercase().as_str() {
+    let raw = pair.as_str().trim().to_ascii_lowercase();
+    let strength = raw
+        .split_once(" of ")
+        .map(|(strength, _)| strength)
+        .unwrap_or(&raw);
+    // :HACK: Parse FOR UPDATE/SHARE OF relation lists so view definitions and
+    // regression inputs bind, but keep using the existing all-relation row-mark
+    // model until SelectLockingClause carries the relation-name list.
+    match strength {
         "for no key update" => Ok(SelectLockingClause::ForNoKeyUpdate),
         "for update" => Ok(SelectLockingClause::ForUpdate),
         "for key share" => Ok(SelectLockingClause::ForKeyShare),
@@ -12995,8 +13006,15 @@ fn order_by_using_operator_direction(operator: &str) -> Option<bool> {
     }
 }
 
-fn build_limit_clause(pair: Pair<'_, Rule>) -> Result<usize, ParseError> {
-    build_usize_clause(pair, "LIMIT")
+fn build_limit_clause(pair: Pair<'_, Rule>) -> Result<Option<usize>, ParseError> {
+    if pair
+        .clone()
+        .into_inner()
+        .any(|part| part.as_rule() == Rule::kw_null)
+    {
+        return Ok(None);
+    }
+    build_usize_clause(pair, "LIMIT").map(Some)
 }
 
 fn build_offset_clause(pair: Pair<'_, Rule>) -> Result<usize, ParseError> {

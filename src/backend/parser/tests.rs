@@ -10376,6 +10376,18 @@ fn parse_select_for_update_clause() {
 }
 
 #[test]
+fn parse_select_for_update_of_clause() {
+    match parse_statement("select * from people for update of people").unwrap() {
+        Statement::Select(SelectStatement {
+            from: Some(FromItem::Table { name, only: false }),
+            locking_clause: Some(SelectLockingClause::ForUpdate),
+            ..
+        }) => assert_eq!(name, "people"),
+        other => panic!("expected Select with FOR UPDATE OF, got {:?}", other),
+    }
+}
+
+#[test]
 fn parse_select_for_no_key_update_clause() {
     match parse_statement("select * from people for no key update").unwrap() {
         Statement::Select(SelectStatement {
@@ -10408,6 +10420,40 @@ fn parse_select_for_key_share_clause() {
             ..
         }) => assert_eq!(name, "people"),
         other => panic!("expected Select with FOR KEY SHARE, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_limit_null_as_unbounded_limit() {
+    match parse_statement("select * from people limit null").unwrap() {
+        Statement::Select(SelectStatement { limit: None, .. }) => {}
+        other => panic!("expected SELECT with unbounded LIMIT NULL, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_distinct_on_as_distinct_select() {
+    match parse_statement("select distinct on (id) id, name from people").unwrap() {
+        Statement::Select(SelectStatement { distinct: true, .. }) => {}
+        other => panic!("expected SELECT DISTINCT ON, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_view_with_for_update_of_clause() {
+    match parse_statement("create view locked_people as select * from people for update of people")
+        .unwrap()
+    {
+        Statement::CreateView(CreateViewStatement {
+            view_name,
+            query:
+                SelectStatement {
+                    locking_clause: Some(SelectLockingClause::ForUpdate),
+                    ..
+                },
+            ..
+        }) => assert_eq!(view_name, "locked_people"),
+        other => panic!("expected CREATE VIEW with FOR UPDATE OF, got {:?}", other),
     }
 }
 
@@ -10475,6 +10521,26 @@ fn parse_union_all_select_chain() {
     assert_eq!(set_operation.inputs.len(), 2);
     assert!(stmt.targets.is_empty());
     assert!(stmt.from.is_none());
+}
+
+#[test]
+fn parse_parenthesized_union_input_with_extra_parens() {
+    let stmt = parse_select("((select 2)) union select 2").unwrap();
+    let set_operation = stmt.set_operation.expect("set operation");
+    assert!(matches!(
+        set_operation.op,
+        SetOperator::Union { all: false }
+    ));
+    assert_eq!(set_operation.inputs.len(), 2);
+}
+
+#[test]
+fn parse_scalar_subquery_with_parenthesized_union_input() {
+    let stmt = parse_select("select (((select 2)) union select 2)").unwrap();
+    let SqlExpr::ScalarSubquery(subquery) = &stmt.targets[0].expr else {
+        panic!("expected scalar subquery, got {:?}", stmt.targets[0].expr);
+    };
+    assert!(subquery.set_operation.is_some());
 }
 
 #[test]

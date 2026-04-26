@@ -4862,6 +4862,18 @@ fn apply_select_distinct(query: Query, distinct: bool, distinct_on: Vec<SortGrou
     }
 }
 
+fn set_operation_target_is_unknown_string_literal(stmt: &SelectStatement, index: usize) -> bool {
+    if stmt.set_operation.is_some() {
+        return false;
+    }
+    stmt.targets.get(index).is_some_and(|target| {
+        matches!(
+            target.expr,
+            SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+        )
+    })
+}
+
 fn bind_set_operation_query_with_outer(
     stmt: &SelectStatement,
     catalog: &dyn CatalogLookup,
@@ -4917,14 +4929,24 @@ fn bind_set_operation_query_with_outer(
     let mut output_types = Vec::with_capacity(width);
     for index in 0..width {
         let mut common = None;
-        for query in &inputs {
+        let mut common_is_unknown = false;
+        for (input_stmt, query) in set_operation.inputs.iter().zip(inputs.iter()) {
             let target = &query.target_list[index];
             if matches!(target.expr, Expr::Const(Value::Null)) {
                 continue;
             }
             let next = target.sql_type;
+            let next_is_unknown = set_operation_target_is_unknown_string_literal(input_stmt, index);
             common = Some(match common {
-                None => next,
+                None => {
+                    common_is_unknown = next_is_unknown;
+                    next
+                }
+                Some(_) if next_is_unknown => continue,
+                Some(_) if common_is_unknown => {
+                    common_is_unknown = false;
+                    next
+                }
                 Some(current) => resolve_common_scalar_type(current, next).ok_or_else(|| {
                     ParseError::UnexpectedToken {
                         expected: "set-operation column types with a common type",

@@ -47,7 +47,7 @@ set_operation_stmt = {
   | cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause? ~ order_by_clause? ~ locking_clause ~ limit_clause? ~ offset_clause?
 }
 set_operation_term = { parenthesized_set_operation_term | simple_select_core }
-parenthesized_set_operation_term = { "(" ~ select_stmt ~ ")" }
+parenthesized_set_operation_term = { "(" ~ (select_stmt | parenthesized_set_operation_term) ~ ")" }
 set_operation_clause = { (kw_union | kw_intersect | kw_except) ~ kw_all? }
 values_stmt = { cte_clause? ~ kw_values ~ values_row ~ ("," ~ values_row)* ~ order_by_clause? ~ limit_clause? ~ offset_clause? }
 copy_stmt = { ^"copy" ~ identifier ~ ("(" ~ ident_list ~ ")")? ~ kw_from ~ quoted_string_literal }
@@ -63,9 +63,10 @@ order_by_clause = { kw_order ~ kw_by ~ order_by_item ~ ("," ~ order_by_item)* }
 operator_token = @{ ("!" | "#" | "%" | "&" | "*" | "+" | "-" | "/" | "<" | "=" | ">" | "?" | "@" | "^" | "|" | "~")+ }
 order_by_item = { expr ~ ((kw_using ~ operator_token) | (kw_asc | kw_desc))? ~ nulls_ordering? }
 nulls_ordering = { kw_nulls ~ (kw_first | kw_last) }
-limit_clause = { kw_limit ~ integer }
+limit_clause = { kw_limit ~ (integer | kw_null) }
 offset_clause = { kw_offset ~ integer }
-locking_clause = { kw_for ~ ((kw_no ~ kw_key ~ kw_update) | (kw_key ~ kw_share) | kw_update | kw_share) }
+locking_clause = { kw_for ~ ((kw_no ~ kw_key ~ kw_update) | (kw_key ~ kw_share) | kw_update | kw_share) ~ locking_of_clause? }
+locking_of_clause = { kw_of ~ identifier ~ ("," ~ identifier)* }
 set_stmt = { kw_set ~ set_scope? ~ (set_time_zone_clause | set_xml_option_clause | set_standard_clause) }
 set_transaction_stmt = { kw_set ~ ((kw_transaction ~ transaction_mode_list) | (kw_session ~ kw_characteristics ~ kw_as ~ kw_transaction ~ transaction_mode_list)) }
 reset_stmt = { kw_reset ~ (kw_all | time_zone_guc_name | identifier) }
