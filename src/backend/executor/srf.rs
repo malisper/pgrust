@@ -559,7 +559,12 @@ fn eval_timestamptz_generate_series(
     let stop = generate_series_timestamptz_arg(stop_val, "generate_series stop")?;
     let step = generate_series_interval_arg(step_val)?;
     if step.is_infinity() || step.is_neg_infinity() {
-        return Err(ExecError::GenerateSeriesInvalidArg("step size", "infinity"));
+        return Err(ExecError::DetailedError {
+            message: "step size cannot be infinite".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
     }
     let step_cmp = step.cmp_key().cmp(&0);
     if step_cmp.is_eq() {
