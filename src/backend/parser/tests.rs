@@ -5191,6 +5191,7 @@ fn parse_create_function_statement_with_variadic_arg() {
             function_name: "least_accum".into(),
             replace_existing: false,
             cost: None,
+            support: None,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: Some("items".into()),
