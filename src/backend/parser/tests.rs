@@ -4939,7 +4939,7 @@ fn parse_create_function_statement_with_variadic_arg() {
                     name: "anyarray".into(),
                     array_bounds: 0,
                 },
-                type_position: None,
+                type_position: Some(44),
                 default_expr: None,
                 variadic: true,
             }],
