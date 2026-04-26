@@ -993,7 +993,7 @@ fn catalog_with_inherited_indexed_items()
             if column.descending {
                 option |= 0x0001;
             }
-            if column.nulls_first.unwrap_or(false) {
+            if column.nulls_first.unwrap_or(column.descending) {
                 option |= 0x0002;
             }
             indoption.push(option);

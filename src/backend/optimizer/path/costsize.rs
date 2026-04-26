@@ -3208,6 +3208,11 @@ pub(super) fn build_index_path_spec(
             indexable_qual
         })
         .collect::<Vec<_>>();
+    let non_null_columns = parsed_quals
+        .iter()
+        .filter(|qual| qual.is_not_null)
+        .filter_map(|qual| qual.column)
+        .collect::<Vec<_>>();
     let (keys, used_indexes, equality_prefix) = match index.index_meta.am_oid {
         BTREE_AM_OID => build_btree_index_keys(index, &parsed_quals),
         BRIN_AM_OID => {
@@ -3274,7 +3279,9 @@ pub(super) fn build_index_path_spec(
     let (order_by_keys, order_match) = if index.index_meta.am_oid == BTREE_AM_OID {
         (
             Vec::new(),
-            order_items.and_then(|items| index_order_match(items, index, equality_prefix)),
+            order_items.and_then(|items| {
+                index_order_match(items, index, equality_prefix, &non_null_columns)
+            }),
         )
     } else if is_gist_like_am(index.index_meta.am_oid) {
         gist_order_match(order_items.unwrap_or(&[]), index)
@@ -4759,6 +4766,7 @@ fn index_order_match(
     items: &[OrderByEntry],
     index: &BoundIndexRelation,
     equality_prefix: usize,
+    non_null_columns: &[usize],
 ) -> Option<(usize, crate::include::access::relscan::ScanDirection)> {
     const BT_DESC_FLAG: i16 = 0x0001;
     const BT_NULLS_FIRST_FLAG: i16 = 0x0002;
@@ -4782,6 +4790,7 @@ fn index_order_match(
         if index_column != column {
             break;
         }
+        let null_order_irrelevant = non_null_columns.contains(&column);
         let index_desc = index
             .index_meta
             .indoption
@@ -4793,10 +4802,10 @@ fn index_order_match(
             .get(index_pos)
             .is_some_and(|option| option & BT_NULLS_FIRST_FLAG != 0);
         let item_nulls_first = item.nulls_first.unwrap_or(item.descending);
-        let forward_matches =
-            item.descending == index_desc && item_nulls_first == index_nulls_first;
-        let backward_matches =
-            item.descending != index_desc && item_nulls_first != index_nulls_first;
+        let forward_matches = item.descending == index_desc
+            && (null_order_irrelevant || item_nulls_first == index_nulls_first);
+        let backward_matches = item.descending != index_desc
+            && (null_order_irrelevant || item_nulls_first != index_nulls_first);
         let item_direction = match (forward_matches, backward_matches) {
             (true, _) => crate::include::access::relscan::ScanDirection::Forward,
             (false, true) => crate::include::access::relscan::ScanDirection::Backward,

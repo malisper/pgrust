@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
@@ -440,6 +441,13 @@ fn bitmap_or_arm_recheck(spec: &IndexPathSpec) -> Option<Expr> {
     })
 }
 
+fn bitmap_or_child_index_rel(child: &Path) -> Option<RelFileLocator> {
+    match child {
+        Path::BitmapIndexScan { index_rel, .. } => Some(*index_rel),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_bitmap_or_paths(
     rtindex: usize,
@@ -529,6 +537,13 @@ fn collect_bitmap_or_paths(
         };
         children.push(child);
         recheck_arms.push(recheck);
+    }
+    let distinct_indexes = children
+        .iter()
+        .filter_map(bitmap_or_child_index_rel)
+        .collect::<BTreeSet<_>>();
+    if distinct_indexes.len() < 2 {
+        return Vec::new();
     }
 
     let Some(recheck_expr) = or_exprs(recheck_arms) else {

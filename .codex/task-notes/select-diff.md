@@ -24,3 +24,17 @@ CARGO_TARGET_DIR=/tmp/pgrust-target-pool/pgrust/spokane-v2-regress scripts/run_r
 
 Remaining:
 select regression passes: 87/87 queries matched.
+
+CI follow-up:
+Fixed two cargo-test CI failures after merging perf-optimization. BitmapOr now
+requires OR arms to use at least two distinct indexes so same-index equality ORs
+fall back to the existing seqscan plan. Ordered LIMIT planning no longer injects
+a parent-only direct index path for inherited parents, and btree order matching
+ignores NULLS FIRST/LAST differences for columns proven IS NOT NULL so inherited
+min/max can use MergeAppend over child index scans.
+
+CI tests run:
+PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet index_matrix_or_predicate_falls_back_to_seqscan
+PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet inherited_minmax_explain_uses_desc_and_partial_child_indexes
+PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet planner_rewrites_inherited_minmax_with_directional_index_only_subplans
+PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh check
