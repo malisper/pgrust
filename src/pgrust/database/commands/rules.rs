@@ -1416,6 +1416,7 @@ fn materialize_view_rows(
         with_recursive: false,
         with: Vec::new(),
         distinct: false,
+        distinct_on: Vec::new(),
         from: Some(FromItem::Table {
             name: relation_name.to_string(),
             only: false,

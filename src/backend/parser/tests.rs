@@ -13124,6 +13124,28 @@ fn parse_count_distinct() {
 }
 
 #[test]
+fn parse_select_distinct_on() {
+    let stmt = parse_select("select distinct on (name, note) name from people order by name, note")
+        .unwrap();
+    assert!(stmt.distinct);
+    assert_eq!(stmt.distinct_on.len(), 2);
+    assert!(matches!(&stmt.distinct_on[0], SqlExpr::Column(name) if name == "name"));
+    assert!(matches!(&stmt.distinct_on[1], SqlExpr::Column(name) if name == "note"));
+}
+
+#[test]
+fn select_distinct_on_rejects_non_prefix_order_by() {
+    let stmt =
+        parse_select("select distinct on (name, note) name from people order by name, id, note")
+            .unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::FeatureNotSupportedMessage(message))
+            if message == "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"
+    ));
+}
+
+#[test]
 fn parse_generate_series() {
     let stmt = parse_select("select * from generate_series(1, 10)").unwrap();
     assert!(

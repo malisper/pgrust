@@ -319,6 +319,7 @@ pub struct MergeAppendState {
 #[derive(Debug)]
 pub struct UniqueState {
     pub(crate) input: PlanState,
+    pub(crate) key_indices: Vec<usize>,
     pub(crate) previous_values: Option<Vec<Value>>,
     pub(crate) slot: TupleSlot,
     pub(crate) current_bindings: Vec<SystemVarBinding>,

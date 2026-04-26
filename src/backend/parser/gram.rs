@@ -11193,6 +11193,7 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
         with: Vec::new(),
         with_recursive: false,
         distinct: false,
+        distinct_on: Vec::new(),
         from: Some(FromItem::Table { name, only: false }),
         targets: vec![SelectItem {
             expr: SqlExpr::Column("*".into()),
@@ -12307,6 +12308,7 @@ fn build_simple_select_statement(
     let mut with_recursive = false;
     let mut with = Vec::new();
     let mut distinct = false;
+    let mut distinct_on = Vec::new();
     let mut targets = None;
     let mut from = None;
     let mut where_clause = None;
@@ -12324,11 +12326,17 @@ fn build_simple_select_statement(
                 with_recursive = recursive;
                 with = ctes;
             }
-            Rule::select_distinct_clause => distinct = true,
+            Rule::select_distinct_clause => {
+                distinct = true;
+                distinct_on = build_select_distinct_clause(part)?;
+            }
             Rule::simple_select_core => {
                 for inner in part.into_inner() {
                     match inner.as_rule() {
-                        Rule::select_distinct_clause => distinct = true,
+                        Rule::select_distinct_clause => {
+                            distinct = true;
+                            distinct_on = build_select_distinct_clause(inner)?;
+                        }
                         Rule::select_list => targets = Some(build_select_list(inner)?),
                         Rule::from_item => from = Some(build_from_item(inner)?),
                         Rule::expr => where_clause = Some(build_expr(inner)?),
@@ -12360,6 +12368,7 @@ fn build_simple_select_statement(
         with_recursive,
         with,
         distinct,
+        distinct_on,
         from,
         targets: targets.unwrap_or_default(),
         where_clause,
@@ -12372,6 +12381,13 @@ fn build_simple_select_statement(
         locking_clause,
         set_operation: None,
     })
+}
+
+fn build_select_distinct_clause(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::expr)
+        .map(build_expr)
+        .collect()
 }
 
 fn build_select_into(pair: Pair<'_, Rule>) -> Result<CreateTableAsStatement, ParseError> {
@@ -12508,6 +12524,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
         with_recursive,
         with,
         distinct: false,
+        distinct_on: Vec::new(),
         from: None,
         targets: Vec::new(),
         where_clause: None,
@@ -12569,6 +12586,7 @@ fn select_statement_for_set_operation(
         with_recursive: false,
         with: Vec::new(),
         distinct: false,
+        distinct_on: Vec::new(),
         from: None,
         targets: Vec::new(),
         where_clause: None,
@@ -12622,6 +12640,7 @@ fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
         with_recursive: stmt.with_recursive,
         with: stmt.with,
         distinct: false,
+        distinct_on: Vec::new(),
         from: Some(FromItem::Values { rows: stmt.rows }),
         targets: vec![SelectItem {
             output_name: "*".into(),

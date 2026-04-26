@@ -97,6 +97,13 @@ fn rewrite_query(
                 rewrite_sort_group_clause(clause, catalog, expanded_views, active_policy_relations)
             })
             .collect::<Result<Vec<_>, _>>()?,
+        distinct_on: query
+            .distinct_on
+            .into_iter()
+            .map(|clause| {
+                rewrite_sort_group_clause(clause, catalog, expanded_views, active_policy_relations)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         has_target_srfs: query.has_target_srfs,
         recursive_union: query
             .recursive_union
