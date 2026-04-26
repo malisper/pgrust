@@ -2194,7 +2194,7 @@ fn parse_comment_on_type_and_column_statements() {
     assert_eq!(
         parse_statement("comment on column default_test_row.f1 is null").unwrap(),
         Statement::CommentOnColumn(CommentOnColumnStatement {
-            relation_name: "default_test_row".into(),
+            table_name: "default_test_row".into(),
             column_name: "f1".into(),
             comment: None,
         })

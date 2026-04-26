@@ -1408,7 +1408,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgGetAcl => args.len() == 3,
             BuiltinScalarFunction::MakeAclItem => args.len() == 4,
             BuiltinScalarFunction::PgGetUserById => args.len() == 1,
-            BuiltinScalarFunction::ObjDescription => args.len() == 2,
+            BuiltinScalarFunction::ObjDescription => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgDescribeObject => args.len() == 3,
             BuiltinScalarFunction::PgGetFunctionArguments
             | BuiltinScalarFunction::PgGetFunctionDef
@@ -4283,6 +4283,7 @@ fn supports_exact_proc_arity(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::Overlay
             | BuiltinScalarFunction::LPad
             | BuiltinScalarFunction::RPad
+            | BuiltinScalarFunction::ObjDescription
             | BuiltinScalarFunction::BTrim
             | BuiltinScalarFunction::LTrim
             | BuiltinScalarFunction::RTrim

@@ -3899,6 +3899,24 @@ impl Session {
                     )
                 }
             }
+            Statement::CommentOnColumn(ref comment_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_comment_on_column_stmt_with_search_path(
+                        self.client_id,
+                        comment_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::CommentOnView(ref comment_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -3947,24 +3965,6 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_comment_on_type_stmt_with_search_path(
-                        self.client_id,
-                        comment_stmt,
-                        search_path.as_deref(),
-                    )
-                }
-            }
-            Statement::CommentOnColumn(ref comment_stmt) => {
-                if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
-                    if result.is_err() {
-                        if let Some(ref mut txn) = self.active_txn {
-                            txn.failed = true;
-                        }
-                    }
-                    result
-                } else {
-                    let search_path = self.configured_search_path();
-                    db.execute_comment_on_column_stmt_with_search_path(
                         self.client_id,
                         comment_stmt,
                         search_path.as_deref(),
@@ -5134,18 +5134,6 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_comment_on_type_stmt_in_transaction_with_search_path(
-                    client_id,
-                    comment_stmt,
-                    xid,
-                    cid,
-                    search_path.as_deref(),
-                    &mut txn.catalog_effects,
-                )
-            }
-            Statement::CommentOnColumn(ref comment_stmt) => {
-                let search_path = self.configured_search_path();
-                let txn = self.active_txn.as_mut().unwrap();
-                db.execute_comment_on_column_stmt_in_transaction_with_search_path(
                     client_id,
                     comment_stmt,
                     xid,
@@ -6580,7 +6568,8 @@ impl Session {
             Statement::CommentOnTable(ref comment_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relation = catalog
-                    .lookup_relation(&comment_stmt.table_name)
+                    .lookup_any_relation(&comment_stmt.table_name)
+                    .filter(|relation| matches!(relation.relkind, 'r' | 'p'))
                     .ok_or_else(|| ExecError::DetailedError {
                         message: format!("relation \"{}\" does not exist", comment_stmt.table_name),
                         detail: None,
@@ -6591,6 +6580,29 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_comment_on_table_stmt_in_transaction_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::CommentOnColumn(ref comment_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&comment_stmt.table_name)
+                    .filter(|relation| matches!(relation.relkind, 'r' | 'p'))
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("relation \"{}\" does not exist", comment_stmt.table_name),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P01",
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_comment_on_column_stmt_in_transaction_with_search_path(
                     client_id,
                     comment_stmt,
                     xid,

@@ -6025,6 +6025,96 @@ fn partition_bound_validation_and_catalog_describe_helpers() {
     session
         .execute(
             &db,
+            "create table volatile_bound_parted (a timestamp) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table volatile_bound_parted_1 partition of volatile_bound_parted for values from (minvalue) to (current_timestamp)",
+        )
+        .unwrap();
+
+    match session.execute(
+        &db,
+        "create table storage_parted (a int) partition by list (a) with (fillfactor=100)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError { message, hint, .. }))
+            if message == "cannot specify storage parameters for a partitioned table"
+                && hint.as_deref()
+                    == Some("Specify storage parameters for its leaf partitions instead.") => {}
+        other => panic!("expected partitioned-table reloptions rejection, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create table commented_parted (a int, b text) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "comment on table commented_parted is 'partitioned table'",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "comment on column commented_parted.a is 'partition key'",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select obj_description('commented_parted'::regclass)"
+        ),
+        vec![vec![Value::Text("partitioned table".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select description from pg_description where objoid = 'commented_parted'::regclass and objsubid = 1"
+        ),
+        vec![vec![Value::Text("partition key".into())]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table array_parted (a int[]) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table array_parted_12 partition of array_parted for values in ('{1}', '{2}')",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(c.relpartbound, c.oid) from pg_class c where c.relname = 'array_parted_12'",
+        ),
+        vec![vec![Value::Text("FOR VALUES IN ('{1}', '{2}')".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_partition_constraintdef('array_parted_12'::regclass)",
+        ),
+        vec![vec![Value::Text(
+            "((a IS NOT NULL) AND ((a = '{1}'::integer[]) OR (a = '{2}'::integer[])))".into()
+        )]]
+    );
+
+    session
+        .execute(
+            &db,
             "create table text_parted (a text) partition by list (a)",
         )
         .unwrap();
@@ -6075,6 +6165,29 @@ fn partition_bound_validation_and_catalog_describe_helpers() {
         ),
         vec![vec![Value::Text(
             "FOR VALUES FROM ('-1', 'aaaaa') TO (100, 'ccccc')".into()
+        )]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table range_parted_abs (a int, b int, c int) partition by range (abs(a), abs(b), c)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table range_parted_abs_1 partition of range_parted_abs for values from (3, 4, 5) to (6, 7, maxvalue)",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(c.relpartbound, c.oid) from pg_class c where c.relname = 'range_parted_abs_1'",
+        ),
+        vec![vec![Value::Text(
+            "FOR VALUES FROM (3, 4, 5) TO (6, 7, MAXVALUE)".into()
         )]]
     );
 }

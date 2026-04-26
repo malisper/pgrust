@@ -15,11 +15,14 @@ use crate::include::catalog::{
     ANYARRAYOID, ANYMULTIRANGEOID, ARRAY_BTREE_OPCLASS_OID, BPCHAR_TYPE_OID, BTREE_AM_OID,
     HASH_AM_OID, INT4_TYPE_OID, OID_TYPE_OID, PgPartitionedTableRow, TEXT_TYPE_OID,
     VARCHAR_TYPE_OID, builtin_range_spec_by_multirange_oid, builtin_range_spec_by_oid,
-    default_btree_opclass_oid, default_hash_opclass_oid,
+    builtin_type_row_by_oid, default_btree_opclass_oid, default_hash_opclass_oid,
 };
-use crate::include::nodes::datum::{MultirangeTypeRef, MultirangeValue, RangeBound, RangeValue};
+use crate::include::nodes::datum::{
+    ArrayDimension, ArrayValue, MultirangeTypeRef, MultirangeValue, RangeBound, RangeValue,
+};
 use crate::include::nodes::primnodes::{
-    Expr, FuncExpr, RelationDesc, ScalarFunctionImpl, Var, attrno_index, user_attrno,
+    Expr, FuncExpr, RelationDesc, ScalarFunctionImpl, Var, attrno_index, expr_sql_type_hint,
+    user_attrno,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +66,7 @@ pub enum SerializedPartitionValue {
     TimeTz { time: i64, offset_seconds: i32 },
     Timestamp(i64),
     TimestampTz(i64),
+    Array(Box<SerializedPartitionArrayValue>),
     Range(Box<SerializedPartitionRangeValue>),
     Multirange(Box<SerializedPartitionMultirangeValue>),
 }
@@ -85,6 +89,14 @@ pub struct SerializedPartitionRangeValue {
 pub struct SerializedPartitionMultirangeValue {
     pub multirange_type_oid: u32,
     pub ranges: Vec<SerializedPartitionRangeValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerializedPartitionArrayValue {
+    pub element_type_oid: Option<u32>,
+    pub type_name: String,
+    pub dimensions: Vec<(i32, usize)>,
+    pub elements: Vec<SerializedPartitionValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,8 +332,9 @@ pub(crate) fn relation_partition_spec(
             };
             let raw = parse_expr(expr_sql)?;
             let bound = bind_expr_with_outer_and_ctes(&raw, &scope, &catalog, &[], None, &[])?;
-            let key_type = infer_sql_expr_type(&raw, &scope, &catalog, &[], None);
+            let inferred_key_type = infer_sql_expr_type(&raw, &scope, &catalog, &[], None);
             let (bound, _) = strip_explicit_collation(bound);
+            let key_type = expr_sql_type_hint(&bound).unwrap_or(inferred_key_type);
             key_exprs.push(bound);
             key_types.push(key_type);
             key_sqls.push(expr_sql.to_string());
@@ -481,6 +494,7 @@ pub(crate) fn partition_value_to_value(value: &SerializedPartitionValue) -> Valu
         SerializedPartitionValue::TimestampTz(v) => {
             Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(*v))
         }
+        SerializedPartitionValue::Array(array) => deserialize_partition_array_value(array),
         SerializedPartitionValue::Range(range) => deserialize_partition_range_value(range),
         SerializedPartitionValue::Multirange(multirange) => {
             deserialize_partition_multirange_value(multirange)
@@ -518,6 +532,13 @@ pub(crate) fn value_to_partition_value(
         },
         Value::Timestamp(v) => SerializedPartitionValue::Timestamp(v.0),
         Value::TimestampTz(v) => SerializedPartitionValue::TimestampTz(v.0),
+        Value::PgArray(array) => {
+            SerializedPartitionValue::Array(Box::new(serialize_partition_array_value(array)?))
+        }
+        Value::Array(values) => {
+            let array = ArrayValue::from_1d(values.clone());
+            SerializedPartitionValue::Array(Box::new(serialize_partition_array_value(&array)?))
+        }
         Value::Range(range) => {
             SerializedPartitionValue::Range(Box::new(serialize_partition_range_value(range)?))
         }
@@ -533,6 +554,52 @@ pub(crate) fn value_to_partition_value(
             )));
         }
     })
+}
+
+fn serialize_partition_array_value(
+    array: &ArrayValue,
+) -> Result<SerializedPartitionArrayValue, ParseError> {
+    let elements = array
+        .elements
+        .iter()
+        .map(value_to_partition_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SerializedPartitionArrayValue {
+        element_type_oid: array.element_type_oid,
+        type_name: partition_array_type_name(array.element_type_oid),
+        dimensions: array
+            .dimensions
+            .iter()
+            .map(|dimension| (dimension.lower_bound, dimension.length))
+            .collect(),
+        elements,
+    })
+}
+
+fn deserialize_partition_array_value(array: &SerializedPartitionArrayValue) -> Value {
+    Value::PgArray(ArrayValue {
+        element_type_oid: array.element_type_oid,
+        dimensions: array
+            .dimensions
+            .iter()
+            .map(|(lower_bound, length)| ArrayDimension {
+                lower_bound: *lower_bound,
+                length: *length,
+            })
+            .collect(),
+        elements: array
+            .elements
+            .iter()
+            .map(partition_value_to_value)
+            .collect(),
+    })
+}
+
+fn partition_array_type_name(element_type_oid: Option<u32>) -> String {
+    element_type_oid
+        .and_then(builtin_type_row_by_oid)
+        .map(|row| sql_type_name(SqlType::array_of(row.sql_type)))
+        .unwrap_or_else(|| "text[]".into())
 }
 
 fn serialize_partition_range_bound(
@@ -691,8 +758,9 @@ fn lower_partition_spec(
                 "set-returning functions are not allowed in partition key expressions",
             ));
         }
-        let key_type = infer_sql_expr_type(&key.expr, &scope, catalog, &[], None);
+        let inferred_key_type = infer_sql_expr_type(&key.expr, &scope, catalog, &[], None);
         let (bound, explicit_collation_oid) = strip_explicit_collation(bound);
+        let key_type = expr_sql_type_hint(&bound).unwrap_or(inferred_key_type);
         let simple_column_index = match &bound {
             Expr::Var(var) if var.varlevelsup == 0 && var.varno == 1 && var.varattno > 0 => {
                 attrno_index(var.varattno)
@@ -1001,6 +1069,7 @@ fn raw_expr_any(expr: &SqlExpr, predicate: &impl Fn(&SqlExpr) -> bool) -> bool {
                 })
         }
         SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::Overlaps(left, right)
         | SqlExpr::ArrayContains(left, right)
         | SqlExpr::ArrayContained(left, right)
         | SqlExpr::QuantifiedArray {
@@ -1545,10 +1614,19 @@ fn evaluate_partition_bound_expr(
         ));
     }
     let folded = crate::backend::optimizer::fold_expr_constants(bound)?;
-    let Expr::Const(value) = folded else {
-        return Err(partition_bound_error(
-            "partition bound values must be constant",
-        ));
+    let value = match folded {
+        Expr::Const(value) => value,
+        Expr::CurrentTimestamp { precision } => {
+            crate::backend::executor::current_timestamp_value(precision, true)
+        }
+        Expr::LocalTimestamp { precision } => {
+            crate::backend::executor::current_timestamp_value(precision, false)
+        }
+        _ => {
+            return Err(partition_bound_error(
+                "partition bound values must be constant",
+            ));
+        }
     };
     if matches!(target.kind, SqlTypeKind::Bool)
         && matches!(

@@ -2170,6 +2170,11 @@ fn acl_privilege_abbrev(privileges: &str) -> String {
 
 fn eval_obj_description(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
     match values {
+        [Value::Null] => Ok(Value::Null),
+        [objoid] => {
+            let objoid = oid_arg_to_u32(objoid, "obj_description")?;
+            eval_obj_description_for_classoid(objoid, PG_CLASS_RELATION_OID, ctx)
+        }
         [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
         [objoid, class_name] => {
             let objoid = oid_arg_to_u32(objoid, "obj_description")?;
@@ -2187,54 +2192,61 @@ fn eval_obj_description(values: &[Value], ctx: &ExecutorContext) -> Result<Value
             else {
                 return Ok(Value::Null);
             };
-            let rows = probe_system_catalog_rows_visible_in_db(
-                &ctx.pool,
-                &ctx.txns,
-                &ctx.snapshot,
-                ctx.client_id,
-                CURRENT_DATABASE_OID,
-                PG_DESCRIPTION_O_C_O_INDEX_OID,
-                vec![
-                    crate::include::access::scankey::ScanKeyData {
-                        attribute_number: 1,
-                        strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
-                        argument: Value::Int64(i64::from(objoid)),
-                    },
-                    crate::include::access::scankey::ScanKeyData {
-                        attribute_number: 2,
-                        strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
-                        argument: Value::Int64(i64::from(classoid)),
-                    },
-                    crate::include::access::scankey::ScanKeyData {
-                        attribute_number: 3,
-                        strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
-                        argument: Value::Int32(0),
-                    },
-                ],
-            )
-            .map_err(|err| ExecError::DetailedError {
-                message: format!("pg_description lookup failed: {err:?}"),
-                detail: None,
-                hint: None,
-                sqlstate: "XX000",
-            })?;
-            let Some(row) = rows.into_iter().next() else {
-                return Ok(Value::Null);
-            };
-            let row =
-                pg_description_row_from_values(row).map_err(|err| ExecError::DetailedError {
-                    message: format!("invalid pg_description row: {err:?}"),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "XX000",
-                })?;
-            Ok(Value::Text(row.description.into()))
+            eval_obj_description_for_classoid(objoid, classoid, ctx)
         }
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "obj_description(oid, catalog_name)",
             actual: format!("ObjDescription({} args)", values.len()),
         })),
     }
+}
+
+fn eval_obj_description_for_classoid(
+    objoid: u32,
+    classoid: u32,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    let rows = probe_system_catalog_rows_visible_in_db(
+        &ctx.pool,
+        &ctx.txns,
+        &ctx.snapshot,
+        ctx.client_id,
+        CURRENT_DATABASE_OID,
+        PG_DESCRIPTION_O_C_O_INDEX_OID,
+        vec![
+            crate::include::access::scankey::ScanKeyData {
+                attribute_number: 1,
+                strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                argument: Value::Int64(i64::from(objoid)),
+            },
+            crate::include::access::scankey::ScanKeyData {
+                attribute_number: 2,
+                strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                argument: Value::Int64(i64::from(classoid)),
+            },
+            crate::include::access::scankey::ScanKeyData {
+                attribute_number: 3,
+                strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                argument: Value::Int32(0),
+            },
+        ],
+    )
+    .map_err(|err| ExecError::DetailedError {
+        message: format!("pg_description lookup failed: {err:?}"),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(Value::Null);
+    };
+    let row = pg_description_row_from_values(row).map_err(|err| ExecError::DetailedError {
+        message: format!("invalid pg_description row: {err:?}"),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    Ok(Value::Text(row.description.into()))
 }
 
 fn eval_pg_describe_object(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -2674,6 +2686,7 @@ fn partition_value_bound_literal(value: &SerializedPartitionValue) -> String {
         | SerializedPartitionValue::TimeTz { .. }
         | SerializedPartitionValue::Timestamp(_)
         | SerializedPartitionValue::TimestampTz(_)
+        | SerializedPartitionValue::Array(_)
         | SerializedPartitionValue::Range(_)
         | SerializedPartitionValue::Multirange(_) => {
             quote_sql_literal(&partition_value_text(value))
@@ -2869,6 +2882,11 @@ fn partition_key_constraint_names_for_catalog(
 
 fn partition_value_constraint_literal(value: &SerializedPartitionValue) -> String {
     match value {
+        SerializedPartitionValue::Array(array) => format!(
+            "{}::{}",
+            quote_sql_literal(&partition_value_text(value)),
+            array.type_name
+        ),
         SerializedPartitionValue::Text(_)
         | SerializedPartitionValue::Date(_)
         | SerializedPartitionValue::Time(_)
@@ -2917,6 +2935,7 @@ fn partition_value_type_name(value: &SerializedPartitionValue) -> &'static str {
         SerializedPartitionValue::TimeTz { .. } => "time with time zone",
         SerializedPartitionValue::Timestamp(_) => "timestamp without time zone",
         SerializedPartitionValue::TimestampTz(_) => "timestamp with time zone",
+        SerializedPartitionValue::Array(_) => "text[]",
         SerializedPartitionValue::Range(_) => "text",
         SerializedPartitionValue::Multirange(_) => "text",
     }
@@ -2945,6 +2964,8 @@ fn partition_value_text(value: &SerializedPartitionValue) -> String {
         Value::Numeric(value) => value.render(),
         Value::Json(value) => value.to_string(),
         Value::JsonPath(value) | Value::Xml(value) => value.to_string(),
+        Value::Array(values) => crate::backend::executor::value_io::format_array_text(values),
+        Value::PgArray(array) => crate::backend::executor::value_io::format_array_value_text(array),
         Value::Bytea(bytes) => {
             let mut out = String::from("\\x");
             for byte in bytes {

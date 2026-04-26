@@ -82,6 +82,7 @@ pub(crate) use expr_casts::render_interval_text;
 pub(crate) use expr_casts::render_interval_text_with_config;
 pub(crate) use expr_casts::render_pg_lsn_text;
 pub(crate) use expr_casts::{cast_value, cast_value_with_config};
+pub(crate) use expr_datetime::current_timestamp_value;
 pub use expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 pub(crate) use expr_geometry::eval_geometry_function;
 pub(crate) use expr_geometry::geometry_input_error_message;

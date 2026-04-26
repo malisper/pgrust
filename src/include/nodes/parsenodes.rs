@@ -407,10 +407,10 @@ pub enum Statement {
     AlterAggregateRename(AlterAggregateRenameStatement),
     AlterTriggerRename(AlterTriggerRenameStatement),
     CommentOnTable(CommentOnTableStatement),
+    CommentOnColumn(CommentOnColumnStatement),
     CommentOnView(CommentOnViewStatement),
     CommentOnIndex(CommentOnIndexStatement),
     CommentOnType(CommentOnTypeStatement),
-    CommentOnColumn(CommentOnColumnStatement),
     CommentOnConstraint(CommentOnConstraintStatement),
     CommentOnRule(CommentOnRuleStatement),
     CommentOnTrigger(CommentOnTriggerStatement),
@@ -2583,6 +2583,13 @@ pub struct CommentOnTableStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnColumnStatement {
+    pub table_name: String,
+    pub column_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnViewStatement {
     pub view_name: String,
     pub comment: Option<String>,
@@ -2597,13 +2604,6 @@ pub struct CommentOnIndexStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnTypeStatement {
     pub type_name: String,
-    pub comment: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommentOnColumnStatement {
-    pub relation_name: String,
-    pub column_name: String,
     pub comment: Option<String>,
 }
 

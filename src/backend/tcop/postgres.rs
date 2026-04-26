@@ -44,7 +44,7 @@ use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value,
 };
 use crate::include::nodes::parsenodes::{CopyFormat, CopyToStatement};
-use crate::include::nodes::primnodes::RelationDesc;
+use crate::include::nodes::primnodes::{RelationDesc, user_attrno};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices};
@@ -4070,6 +4070,7 @@ fn psql_partition_value_text(value: &SerializedPartitionValue) -> String {
         | SerializedPartitionValue::TimeTz { .. }
         | SerializedPartitionValue::Timestamp(_)
         | SerializedPartitionValue::TimestampTz(_)
+        | SerializedPartitionValue::Array(_)
         | SerializedPartitionValue::Range(_)
         | SerializedPartitionValue::Multirange(_) => {
             let value = partition_value_to_value(value);
@@ -4099,6 +4100,8 @@ fn render_value_for_describe_bound(value: &Value) -> String {
         | Value::TimestampTz(_) => {
             crate::backend::executor::render_datetime_value_text(value).unwrap_or_default()
         }
+        Value::Array(values) => crate::backend::executor::value_io::format_array_text(values),
+        Value::PgArray(array) => crate::backend::executor::value_io::format_array_value_text(array),
         _ => value.as_text().unwrap_or_default().to_string(),
     }
 }
@@ -4683,7 +4686,13 @@ fn psql_describe_columns_query(
                 });
             }
             if include_attdescr {
-                row.push(Value::Null);
+                row.push(catalog_description_value(
+                    db,
+                    session,
+                    oid,
+                    crate::include::catalog::PG_CLASS_RELATION_OID,
+                    i32::from(user_attrno(index)),
+                ));
             }
             row
         })

@@ -816,6 +816,7 @@ fn raw_expr_any(expr: &SqlExpr, predicate: &impl Fn(&SqlExpr) -> bool) -> bool {
                 })
         }
         SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::Overlaps(left, right)
         | SqlExpr::ArrayContains(left, right)
         | SqlExpr::ArrayContained(left, right)
         | SqlExpr::QuantifiedArray {
@@ -1029,6 +1030,7 @@ mod tests {
         let stmt = CreateTableStatement {
             schema_name: None,
             table_name: "bad_unknown".into(),
+            of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![CreateTableElement::Column(ColumnDef {
@@ -1072,6 +1074,7 @@ mod tests {
             CreateTableStatement {
                 schema_name: None,
                 table_name: "bad_default".into(),
+                of_type_name: None,
                 persistence: TablePersistence::Permanent,
                 on_commit: OnCommitAction::PreserveRows,
                 elements: vec![CreateTableElement::Column(ColumnDef {

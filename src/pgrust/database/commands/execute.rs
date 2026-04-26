@@ -1153,6 +1153,12 @@ impl Database {
                     comment_stmt,
                     configured_search_path,
                 ),
+            Statement::CommentOnColumn(ref comment_stmt) => self
+                .execute_comment_on_column_stmt_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    configured_search_path,
+                ),
             Statement::CommentOnView(ref comment_stmt) => self
                 .execute_comment_on_view_stmt_with_search_path(
                     client_id,
@@ -1167,12 +1173,6 @@ impl Database {
                 ),
             Statement::CommentOnType(ref comment_stmt) => self
                 .execute_comment_on_type_stmt_with_search_path(
-                    client_id,
-                    comment_stmt,
-                    configured_search_path,
-                ),
-            Statement::CommentOnColumn(ref comment_stmt) => self
-                .execute_comment_on_column_stmt_with_search_path(
                     client_id,
                     comment_stmt,
                     configured_search_path,

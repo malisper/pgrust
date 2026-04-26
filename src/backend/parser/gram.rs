@@ -1349,7 +1349,13 @@ fn build_partition_create_table_statement(
             return Err(PartitionStatementParseError::Unsupported);
         };
         let (partition_spec, rest) = parse_partition_spec_clause(partition_clause)?;
-        if !rest.trim().is_empty() {
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            if partitioned_table_storage_clause_is_unsupported(rest)? {
+                return Err(PartitionStatementParseError::Parse(
+                    partitioned_table_storage_parameter_error(),
+                ));
+            }
             return Err(PartitionStatementParseError::Unsupported);
         }
         create_stmt.partition_spec = Some(partition_spec);
@@ -1432,6 +1438,26 @@ fn parse_partition_of_table_storage_clause(
         .ok_or(PartitionStatementParseError::Unsupported)?;
     build_table_storage_options(pair).map_err(|_| PartitionStatementParseError::Unsupported)?;
     Ok("")
+}
+
+fn partitioned_table_storage_clause_is_unsupported(rest: &str) -> Result<bool, ParseError> {
+    if !keyword_at_start(rest, "with") {
+        return Ok(false);
+    }
+    let after_with = consume_keyword(rest, "with").trim_start();
+    if keyword_at_start(after_with, "oids") {
+        return Err(ParseError::TablesDeclaredWithOidsNotSupported);
+    }
+    Ok(after_with.starts_with('('))
+}
+
+fn partitioned_table_storage_parameter_error() -> ParseError {
+    ParseError::DetailedError {
+        message: "cannot specify storage parameters for a partitioned table".into(),
+        detail: None,
+        hint: Some("Specify storage parameters for its leaf partitions instead.".into()),
+        sqlstate: "0A000",
+    }
 }
 
 fn parse_partition_of_elements(
@@ -7729,14 +7755,14 @@ fn build_comment_on_column_statement(sql: &str) -> Result<CommentOnColumnStateme
         });
     };
     let target = rest[..is_index].trim();
-    let Some((relation_name, column_name)) = target.rsplit_once('.') else {
+    let Some((table_name, column_name)) = target.rsplit_once('.') else {
         return Err(ParseError::UnexpectedToken {
             expected: "relation.column",
             actual: target.into(),
         });
     };
     Ok(CommentOnColumnStatement {
-        relation_name: relation_name.trim().to_string(),
+        table_name: table_name.trim().to_string(),
         column_name: column_name.trim().to_string(),
         comment: parse_comment_value(&rest[is_index..], "end of COMMENT ON COLUMN")?,
     })

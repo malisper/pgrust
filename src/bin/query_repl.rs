@@ -720,6 +720,77 @@ fn run_statement(
                 }
             }
         }
+        Statement::CommentOnColumn(stmt) => {
+            let xid = txns.write().begin();
+            let result = {
+                let ctx = pgrust::backend::catalog::store::CatalogWriteContext {
+                    pool: std::sync::Arc::clone(pool),
+                    txns: txns.clone(),
+                    xid,
+                    cid: 0,
+                    client_id: 21,
+                    waiter: None,
+                    interrupts: Arc::clone(&interrupts),
+                };
+                let relcache = catalog_store.relcache().map_err(|err| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "physical relcache",
+                        actual: format!("{err:?}"),
+                    })
+                })?;
+                let relation =
+                    relcache
+                        .get_by_name(&stmt.table_name)
+                        .cloned()
+                        .ok_or_else(|| {
+                            ExecError::Parse(ParseError::TableDoesNotExist(stmt.table_name.clone()))
+                        })?;
+                let column_index = relation
+                    .desc
+                    .columns
+                    .iter()
+                    .position(|column| {
+                        !column.dropped && column.name.eq_ignore_ascii_case(&stmt.column_name)
+                    })
+                    .ok_or_else(|| {
+                        ExecError::DetailedError {
+                            message: format!(
+                                "column \"{}\" of relation \"{}\" does not exist",
+                                stmt.column_name, stmt.table_name
+                            ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42703",
+                        }
+                    })?;
+                catalog_store
+                    .comment_column_mvcc(
+                        relation.relation_oid,
+                        i32::from(pgrust::include::nodes::primnodes::user_attrno(
+                            column_index,
+                        )),
+                        stmt.comment.as_deref(),
+                        &ctx,
+                    )
+                    .map_err(|other| {
+                        ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "column comment update",
+                            actual: format!("{other:?}"),
+                        })
+                    })?;
+                Ok(StatementResult::AffectedRows(0))
+            };
+            match result {
+                Ok(ok) => {
+                    txns.write().commit(xid)?;
+                    Ok(ok)
+                }
+                Err(err) => {
+                    let _ = txns.write().abort(xid);
+                    Err(err)
+                }
+            }
+        }
         Statement::CreateIndex(stmt) => Ok(catalog_store
             .create_index(
                 stmt.index_name,
@@ -976,7 +1047,6 @@ fn run_statement(
             execute_readonly_statement(Statement::Analyze(stmt), &relcache, &mut ctx)
         }
         Statement::CommentOnConstraint(_)
-        | Statement::CommentOnColumn(_)
         | Statement::CommentOnDomain(_)
         | Statement::CommentOnType(_)
         | Statement::CommentOnTrigger(_)
