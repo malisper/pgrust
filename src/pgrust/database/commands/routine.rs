@@ -32,12 +32,59 @@ fn routine_arg_type_oid(
             break;
         }
     }
+    match routine_arg_type_oid_inner(catalog, text) {
+        Ok(type_oid) => return Ok((mode, type_oid)),
+        Err(first_err) => {
+            if let Some(type_text) = strip_routine_arg_name(text)
+                && let Ok(type_oid) = routine_arg_type_oid_inner(catalog, type_text)
+            {
+                return Ok((mode, type_oid));
+            }
+            Err(first_err)
+        }
+    }
+}
+
+fn routine_arg_type_oid_inner(catalog: &dyn CatalogLookup, text: &str) -> Result<u32, ExecError> {
     let raw_type = parse_type_name(text).map_err(ExecError::Parse)?;
     let sql_type = resolve_raw_type_name(&raw_type, catalog).map_err(ExecError::Parse)?;
-    let type_oid = catalog
+    catalog
         .type_oid_for_sql_type(sql_type)
-        .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(text.to_string())))?;
-    Ok((mode, type_oid))
+        .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(text.to_string())))
+}
+
+fn strip_routine_arg_name(text: &str) -> Option<&str> {
+    let text = text.trim_start();
+    let rest = if let Some(rest) = text.strip_prefix('"') {
+        let mut escaped = false;
+        let mut end = None;
+        for (index, ch) in rest.char_indices() {
+            if ch != '"' {
+                escaped = false;
+                continue;
+            }
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if rest[index + ch.len_utf8()..].starts_with('"') {
+                escaped = true;
+                continue;
+            }
+            end = Some(index + ch.len_utf8());
+            break;
+        }
+        rest.get(end?..)?
+    } else {
+        let end = text
+            .char_indices()
+            .take_while(|(_, ch)| ch.is_ascii_alphanumeric() || *ch == '_')
+            .map(|(index, ch)| index + ch.len_utf8())
+            .last()?;
+        text.get(end..)?
+    };
+    let rest = rest.trim_start();
+    (!rest.is_empty()).then_some(rest)
 }
 
 fn parse_proc_argtype_oids(argtypes: &str) -> Vec<u32> {

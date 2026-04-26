@@ -10,22 +10,23 @@ use crate::include::catalog::{
     sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
-    AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec,
-    AlterColumnExpressionAction, AlterColumnIdentityAction, AlterTableTriggerMode,
-    AlterTableTriggerStateStatement, AlterTableTriggerTarget, AlterTriggerRenameStatement,
-    AlterTypeSetOptionsStatement, CastContext, ColumnConstraint, ColumnGeneratedKind,
-    ColumnIdentityKind, CommentOnAggregateStatement, CommentOnColumnStatement,
-    CommentOnFunctionStatement, CommentOnOperatorStatement, CommentOnTypeStatement,
-    CommentOnViewStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
-    CreateBaseTypeOption, CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement,
-    CreateCompositeTypeStatement, CreateShellTypeStatement, CreateTriggerStatement,
-    CreateTypeStatement, DropAggregateStatement, DropCastStatement, DropTriggerStatement,
-    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef,
-    InsertSource, InsertStatement, JoinTreeNode, OverridingKind, PartitionStrategy,
-    PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
-    RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
-    SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec,
-    TriggerLevel, TriggerReferencingSpec, TriggerTiming, ViewCheckOption,
+    AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
+    AliasColumnDef, AliasColumnSpec, AlterAggregateRenameStatement, AlterColumnExpressionAction,
+    AlterColumnIdentityAction, AlterTableTriggerMode, AlterTableTriggerStateStatement,
+    AlterTableTriggerTarget, AlterTriggerRenameStatement, AlterTypeSetOptionsStatement,
+    CastContext, ColumnConstraint, ColumnGeneratedKind, ColumnIdentityKind,
+    CommentOnAggregateStatement, CommentOnColumnStatement, CommentOnFunctionStatement,
+    CommentOnOperatorStatement, CommentOnTypeStatement, CommentOnViewStatement,
+    CompositeTypeAttributeDef, CreateAggregateStatement, CreateBaseTypeOption,
+    CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement, CreateCompositeTypeStatement,
+    CreateShellTypeStatement, CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement,
+    DropCastStatement, DropTriggerStatement, DropTypeStatement, ForeignKeyAction,
+    ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef, InsertSource, InsertStatement,
+    JoinTreeNode, OverridingKind, PartitionStrategy, PublicationObjectSpec, PublicationOption,
+    PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
+    RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
+    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
+    TriggerReferencingSpec, TriggerTiming, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -41,6 +42,21 @@ fn desc() -> RelationDesc {
 
 fn builtin_type(ty: SqlType) -> RawTypeName {
     RawTypeName::Builtin(ty)
+}
+
+fn aggregate_signature_arg(arg_type: AggregateArgType) -> AggregateSignatureArg {
+    AggregateSignatureArg {
+        name: None,
+        arg_type,
+        variadic: false,
+    }
+}
+
+fn aggregate_signature(args: Vec<AggregateSignatureArg>) -> AggregateSignatureKind {
+    AggregateSignatureKind::Args(AggregateSignature {
+        args,
+        order_by: Vec::new(),
+    })
 }
 
 fn attrs() -> ConstraintAttributes {
@@ -2032,7 +2048,7 @@ fn parse_is_document_expression() {
 fn parse_transaction_alias_statements() {
     assert_eq!(
         parse_statement("begin transaction").unwrap(),
-        Statement::Begin
+        Statement::Begin(TransactionOptions::default())
     );
     assert_eq!(
         parse_statement("commit transaction").unwrap(),
@@ -3378,6 +3394,22 @@ fn parse_policy_statements() {
             with_check_sql: None,
         })
     );
+
+    let sql = "CREATE POLICY p4 ON items AS UGLY USING (a > 0)";
+    let err = parse_statement(sql).unwrap_err();
+    assert_eq!(err.to_string(), "unrecognized row security option \"ugly\"");
+    assert_eq!(err.position(), sql.find("UGLY").map(|index| index + 1));
+    match err.unpositioned() {
+        ParseError::DetailedError {
+            hint: Some(hint),
+            sqlstate: "42601",
+            ..
+        } => assert_eq!(
+            hint,
+            "Only PERMISSIVE or RESTRICTIVE policies are supported currently."
+        ),
+        other => panic!("expected detailed policy option error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -4870,10 +4902,52 @@ fn parse_enable_replica_trigger_requires_name() {
 fn parse_set_transaction_isolation_level_serializable() {
     assert_eq!(
         parse_statement("set transaction isolation level serializable").unwrap(),
-        Statement::Set(SetStatement {
+        Statement::SetTransaction(SetTransactionStatement {
+            scope: SetTransactionScope::Transaction,
+            options: TransactionOptions {
+                isolation_level: Some(TransactionIsolationLevel::Serializable),
+                ..TransactionOptions::default()
+            },
+        })
+    );
+}
+
+#[test]
+fn parse_set_session_transaction_characteristics() {
+    assert_eq!(
+        parse_statement(
+            "set session characteristics as transaction isolation level repeatable read",
+        )
+        .unwrap(),
+        Statement::SetTransaction(SetTransactionStatement {
+            scope: SetTransactionScope::SessionCharacteristics,
+            options: TransactionOptions {
+                isolation_level: Some(TransactionIsolationLevel::RepeatableRead),
+                ..TransactionOptions::default()
+            },
+        })
+    );
+}
+
+#[test]
+fn parse_transaction_mode_options() {
+    assert_eq!(
+        parse_statement("begin isolation level repeatable read, read only, not deferrable")
+            .unwrap(),
+        Statement::Begin(TransactionOptions {
+            isolation_level: Some(TransactionIsolationLevel::RepeatableRead),
+            read_only: Some(true),
+            deferrable: Some(false),
+        })
+    );
+}
+
+#[test]
+fn parse_show_transaction_isolation_level() {
+    assert_eq!(
+        parse_statement("show transaction isolation level").unwrap(),
+        Statement::Show(ShowStatement {
             name: "transaction_isolation".into(),
-            value: Some("serializable".into()),
-            is_local: true,
         })
     );
 }
@@ -4996,6 +5070,48 @@ fn parse_create_function_statement_with_unnamed_args() {
             parallel: FunctionParallel::Unsafe,
             language: "plpgsql".into(),
             body: " begin return true; end ".into(),
+            link_symbol: None,
+        })
+    );
+}
+
+#[test]
+fn parse_create_function_statement_with_variadic_arg() {
+    let stmt = parse_statement(
+        "create function least_accum(variadic items anyarray) returns anyelement language sql as $$ select $1[1] $$",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateFunction(CreateFunctionStatement {
+            schema_name: None,
+            function_name: "least_accum".into(),
+            replace_existing: false,
+            cost: None,
+            args: vec![CreateFunctionArg {
+                mode: FunctionArgMode::In,
+                name: Some("items".into()),
+                ty: RawTypeName::Named {
+                    name: "anyarray".into(),
+                    array_bounds: 0,
+                },
+                type_position: Some(44),
+                default_expr: None,
+                variadic: true,
+            }],
+            return_spec: CreateFunctionReturnSpec::Type {
+                ty: RawTypeName::Named {
+                    name: "anyelement".into(),
+                    array_bounds: 0,
+                },
+                setof: false,
+            },
+            strict: false,
+            leakproof: false,
+            volatility: FunctionVolatility::Volatile,
+            parallel: FunctionParallel::Unsafe,
+            language: "sql".into(),
+            body: " select $1[1] ".into(),
             link_symbol: None,
         })
     );
@@ -5261,9 +5377,10 @@ fn parse_create_aggregate_statement_with_plain_signature() {
             schema_name: None,
             aggregate_name: "newavg".into(),
             replace_existing: false,
-            signature: AggregateSignatureKind::Args(vec![AggregateArgType::Type(
+            signature: aggregate_signature(vec![aggregate_signature_arg(AggregateArgType::Type(
                 RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
-            )]),
+            ))]),
+            hypothetical: false,
             sfunc_name: "int4_avg_accum".into(),
             stype: RawTypeName::Named {
                 name: "_int8".into(),
@@ -5303,6 +5420,7 @@ fn parse_create_aggregate_statement_with_old_style_basetype() {
             aggregate_name: "oldcnt".into(),
             replace_existing: false,
             signature: AggregateSignatureKind::Star,
+            hypothetical: false,
             sfunc_name: "int8inc".into(),
             stype: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int8)),
             finalfunc_name: None,
@@ -5339,6 +5457,7 @@ fn parse_create_or_replace_aggregate_star_signature() {
             aggregate_name: "newcnt".into(),
             replace_existing: true,
             signature: AggregateSignatureKind::Star,
+            hypothetical: false,
             sfunc_name: "int8inc".into(),
             stype: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int8)),
             finalfunc_name: None,
@@ -5371,7 +5490,9 @@ fn parse_drop_and_comment_on_aggregate_statements() {
             if_exists: true,
             schema_name: Some("public".into()),
             aggregate_name: "newcnt".into(),
-            signature: AggregateSignatureKind::Args(vec![AggregateArgType::AnyPseudo]),
+            signature: aggregate_signature(vec![aggregate_signature_arg(
+                AggregateArgType::AnyPseudo,
+            )]),
             cascade: true,
         })
     );
@@ -5389,26 +5510,62 @@ fn parse_drop_and_comment_on_aggregate_statements() {
 }
 
 #[test]
-fn parse_create_aggregate_rejects_unsupported_forms() {
-    let err = parse_statement(
+fn parse_create_aggregate_supports_ordered_variadic_and_hypothetical_forms() {
+    let stmt = parse_statement(
         "create aggregate my_percentile_disc(float8 order by anyelement) (sfunc = int8inc, stype = int8)",
     )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ParseError::FeatureNotSupported(message)
-            if message.contains("ordered-set aggregate signatures")
-    ));
+    .unwrap();
+    match stmt {
+        Statement::CreateAggregate(stmt) => {
+            assert_eq!(
+                stmt.signature,
+                AggregateSignatureKind::Args(AggregateSignature {
+                    args: vec![aggregate_signature_arg(AggregateArgType::Type(
+                        RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float8)),
+                    ))],
+                    order_by: vec![aggregate_signature_arg(AggregateArgType::Type(
+                        RawTypeName::Named {
+                            name: "anyelement".into(),
+                            array_bounds: 0,
+                        },
+                    ))],
+                })
+            );
+            assert!(!stmt.hypothetical);
+        }
+        other => panic!("expected CREATE AGGREGATE, got {other:?}"),
+    }
 
-    let err = parse_statement(
+    let stmt = parse_statement(
         "create aggregate least_agg(variadic items anyarray) (sfunc = int8inc, stype = int8)",
     )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ParseError::FeatureNotSupported(message)
-            if message.contains("VARIADIC aggregate signatures")
-    ));
+    .unwrap();
+    match stmt {
+        Statement::CreateAggregate(stmt) => {
+            assert_eq!(
+                stmt.signature,
+                aggregate_signature(vec![AggregateSignatureArg {
+                    name: Some("items".into()),
+                    arg_type: AggregateArgType::Type(RawTypeName::Named {
+                        name: "anyarray".into(),
+                        array_bounds: 0,
+                    }),
+                    variadic: true,
+                }])
+            );
+            assert!(!stmt.hypothetical);
+        }
+        other => panic!("expected CREATE AGGREGATE, got {other:?}"),
+    }
+
+    let stmt = parse_statement(
+        "create aggregate hypothetical_rank(float8 order by anyelement) (sfunc = int8inc, stype = int8, hypothetical)",
+    )
+    .unwrap();
+    match stmt {
+        Statement::CreateAggregate(stmt) => assert!(stmt.hypothetical),
+        other => panic!("expected CREATE AGGREGATE, got {other:?}"),
+    }
 
     let stmt = parse_statement(
         "create aggregate badagg(int4) (sfunc = int4pl, stype = int4, combinefunc = int4pl)",
@@ -5420,6 +5577,33 @@ fn parse_create_aggregate_rejects_unsupported_forms() {
         }
         other => panic!("expected CREATE AGGREGATE, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_alter_aggregate_rename_statement() {
+    let stmt = parse_statement(
+        "alter aggregate public.my_percentile_disc(float8 order by anyelement) rename to my_percentile_disc2",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterAggregateRename(AlterAggregateRenameStatement {
+            schema_name: Some("public".into()),
+            aggregate_name: "my_percentile_disc".into(),
+            signature: AggregateSignatureKind::Args(AggregateSignature {
+                args: vec![aggregate_signature_arg(AggregateArgType::Type(
+                    RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float8)),
+                ))],
+                order_by: vec![aggregate_signature_arg(AggregateArgType::Type(
+                    RawTypeName::Named {
+                        name: "anyelement".into(),
+                        array_bounds: 0,
+                    },
+                ))],
+            }),
+            new_name: "my_percentile_disc2".into(),
+        })
+    );
 }
 
 #[test]
@@ -10374,6 +10558,18 @@ fn parse_select_for_update_clause() {
 }
 
 #[test]
+fn parse_select_for_update_of_clause() {
+    match parse_statement("select * from people for update of people").unwrap() {
+        Statement::Select(SelectStatement {
+            from: Some(FromItem::Table { name, only: false }),
+            locking_clause: Some(SelectLockingClause::ForUpdate),
+            ..
+        }) => assert_eq!(name, "people"),
+        other => panic!("expected Select with FOR UPDATE OF, got {:?}", other),
+    }
+}
+
+#[test]
 fn parse_select_for_no_key_update_clause() {
     match parse_statement("select * from people for no key update").unwrap() {
         Statement::Select(SelectStatement {
@@ -10406,6 +10602,40 @@ fn parse_select_for_key_share_clause() {
             ..
         }) => assert_eq!(name, "people"),
         other => panic!("expected Select with FOR KEY SHARE, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_limit_null_as_unbounded_limit() {
+    match parse_statement("select * from people limit null").unwrap() {
+        Statement::Select(SelectStatement { limit: None, .. }) => {}
+        other => panic!("expected SELECT with unbounded LIMIT NULL, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_distinct_on_as_distinct_select() {
+    match parse_statement("select distinct on (id) id, name from people").unwrap() {
+        Statement::Select(SelectStatement { distinct: true, .. }) => {}
+        other => panic!("expected SELECT DISTINCT ON, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_view_with_for_update_of_clause() {
+    match parse_statement("create view locked_people as select * from people for update of people")
+        .unwrap()
+    {
+        Statement::CreateView(CreateViewStatement {
+            view_name,
+            query:
+                SelectStatement {
+                    locking_clause: Some(SelectLockingClause::ForUpdate),
+                    ..
+                },
+            ..
+        }) => assert_eq!(view_name, "locked_people"),
+        other => panic!("expected CREATE VIEW with FOR UPDATE OF, got {:?}", other),
     }
 }
 
@@ -10473,6 +10703,26 @@ fn parse_union_all_select_chain() {
     assert_eq!(set_operation.inputs.len(), 2);
     assert!(stmt.targets.is_empty());
     assert!(stmt.from.is_none());
+}
+
+#[test]
+fn parse_parenthesized_union_input_with_extra_parens() {
+    let stmt = parse_select("((select 2)) union select 2").unwrap();
+    let set_operation = stmt.set_operation.expect("set operation");
+    assert!(matches!(
+        set_operation.op,
+        SetOperator::Union { all: false }
+    ));
+    assert_eq!(set_operation.inputs.len(), 2);
+}
+
+#[test]
+fn parse_scalar_subquery_with_parenthesized_union_input() {
+    let stmt = parse_select("select (((select 2)) union select 2)").unwrap();
+    let SqlExpr::ScalarSubquery(subquery) = &stmt.targets[0].expr else {
+        panic!("expected scalar subquery, got {:?}", stmt.targets[0].expr);
+    };
+    assert!(subquery.set_operation.is_some());
 }
 
 #[test]
@@ -13223,6 +13473,28 @@ fn parse_count_distinct() {
 }
 
 #[test]
+fn parse_select_distinct_on() {
+    let stmt = parse_select("select distinct on (name, note) name from people order by name, note")
+        .unwrap();
+    assert!(stmt.distinct);
+    assert_eq!(stmt.distinct_on.len(), 2);
+    assert!(matches!(&stmt.distinct_on[0], SqlExpr::Column(name) if name == "name"));
+    assert!(matches!(&stmt.distinct_on[1], SqlExpr::Column(name) if name == "note"));
+}
+
+#[test]
+fn select_distinct_on_rejects_non_prefix_order_by() {
+    let stmt =
+        parse_select("select distinct on (name, note) name from people order by name, id, note")
+            .unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::FeatureNotSupportedMessage(message))
+            if message == "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"
+    ));
+}
+
+#[test]
 fn parse_generate_series() {
     let stmt = parse_select("select * from generate_series(1, 10)").unwrap();
     assert!(
@@ -14395,7 +14667,10 @@ fn parse_insert_alias_and_begin_isolation_level() {
 
     assert!(matches!(
         parse_statement("begin transaction isolation level repeatable read").unwrap(),
-        Statement::Begin
+        Statement::Begin(TransactionOptions {
+            isolation_level: Some(TransactionIsolationLevel::RepeatableRead),
+            ..
+        })
     ));
 }
 

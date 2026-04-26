@@ -437,6 +437,238 @@ fn txid_current_assigns_xid_in_autocommit_select() {
 }
 
 #[test]
+fn repeatable_read_reuses_first_snapshot() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+
+    db.execute(10, "create table rr_items (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rr_items values (1)").unwrap();
+
+    reader
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rr_items"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    db.execute(20, "insert into rr_items values (2)").unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rr_items"),
+        vec![vec![Value::Int64(1)]]
+    );
+    reader.execute(&db, "commit").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 30, "select count(*) from rr_items"),
+        vec![vec![Value::Int64(2)]]
+    );
+}
+
+#[test]
+fn repeatable_read_streaming_uses_transaction_snapshot() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+
+    db.execute(10, "create table rr_streaming (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rr_streaming values (1)")
+        .unwrap();
+
+    reader
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rr_streaming"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    db.execute(20, "insert into rr_streaming values (2)")
+        .unwrap();
+
+    let stmt = crate::backend::parser::parse_select("select count(*) from rr_streaming").unwrap();
+    let mut guard = reader.execute_streaming(&db, &stmt).unwrap();
+    let slot = crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx)
+        .unwrap()
+        .expect("streaming count row");
+    let values = slot.values().unwrap();
+    assert_eq!(values[0].to_owned_value(), Value::Int64(1));
+    assert!(
+        crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx)
+            .unwrap()
+            .is_none()
+    );
+    drop(guard);
+
+    reader.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn read_committed_uses_fresh_statement_snapshots() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+
+    db.execute(10, "create table rc_items (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rc_items values (1)").unwrap();
+
+    reader.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rc_items"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    db.execute(20, "insert into rc_items values (2)").unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rc_items"),
+        vec![vec![Value::Int64(2)]]
+    );
+    reader.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn repeatable_read_sees_own_writes_after_snapshot() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    db.execute(10, "create table rr_own_writes (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rr_own_writes values (1)")
+        .unwrap();
+
+    session
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from rr_own_writes"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    session
+        .execute(&db, "insert into rr_own_writes values (2)")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from rr_own_writes"),
+        vec![vec![Value::Int64(2)]]
+    );
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn set_transaction_isolation_after_query_errors() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session_query_rows(&mut session, &db, "select 1");
+
+    let err = session
+        .execute(&db, "set transaction isolation level repeatable read")
+        .unwrap_err();
+    assert_sqlstate(err, "25001", "must be called before any query");
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn set_session_characteristics_sets_default_transaction_isolation() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "set session characteristics as transaction isolation level repeatable read",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show default_transaction_isolation"),
+        vec![vec![Value::Text("repeatable read".into())]]
+    );
+
+    session.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show transaction isolation level"),
+        vec![vec![Value::Text("repeatable read".into())]]
+    );
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn repeatable_read_update_conflict_errors() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+    let mut writer = Session::new(2);
+
+    db.execute(
+        10,
+        "create table rr_update_conflict (id int4 not null, v int4 not null)",
+    )
+    .unwrap();
+    db.execute(10, "insert into rr_update_conflict values (1, 10)")
+        .unwrap();
+
+    reader
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut reader,
+            &db,
+            "select v from rr_update_conflict where id = 1"
+        ),
+        vec![vec![Value::Int32(10)]]
+    );
+
+    writer.execute(&db, "begin").unwrap();
+    writer
+        .execute(&db, "update rr_update_conflict set v = 20 where id = 1")
+        .unwrap();
+    writer.execute(&db, "commit").unwrap();
+
+    let err = reader
+        .execute(&db, "update rr_update_conflict set v = 30 where id = 1")
+        .unwrap_err();
+    assert_sqlstate(err, "40001", "concurrent update");
+    reader.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn repeatable_read_delete_conflict_errors() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+    let mut writer = Session::new(2);
+
+    db.execute(10, "create table rr_delete_conflict (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rr_delete_conflict values (1)")
+        .unwrap();
+
+    reader
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rr_delete_conflict"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    writer.execute(&db, "begin").unwrap();
+    writer
+        .execute(&db, "delete from rr_delete_conflict where id = 1")
+        .unwrap();
+    writer.execute(&db, "commit").unwrap();
+
+    let err = reader
+        .execute(&db, "delete from rr_delete_conflict where id = 1")
+        .unwrap_err();
+    assert_sqlstate(err, "40001", "concurrent delete");
+    reader.execute(&db, "rollback").unwrap();
+}
+
+#[test]
 fn txid_status_reports_recent_transaction_states() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -1627,6 +1859,24 @@ fn session_query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Ve
     match session.execute(db, sql).unwrap() {
         StatementResult::Query { rows, .. } => rows,
         other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+fn assert_sqlstate(err: ExecError, expected_sqlstate: &str, expected_message_part: &str) {
+    match err {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        }
+        | ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, expected_sqlstate);
+            assert!(
+                message.contains(expected_message_part),
+                "expected message to contain {expected_message_part:?}, got {message:?}"
+            );
+        }
+        other => panic!("expected SQLSTATE {expected_sqlstate}, got {other:?}"),
     }
 }
 
@@ -12114,6 +12364,51 @@ fn regoperator_literal_cast_resolves_operator_signature() {
             "select oprleft, oprright from pg_operator where oid = '===(boolean,boolean)'::regoperator"
         ),
         vec![vec![Value::Int64(16), Value::Int64(16)]]
+    );
+}
+
+#[test]
+fn case_and_nullif_preserve_array_domain_function_results() {
+    let base = temp_dir("case_array_domain_function_result");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create domain arrdomain as int[]").unwrap();
+    db.execute(
+        1,
+        "create function make_ad(int,int) returns arrdomain as \
+         'declare x arrdomain; begin x := array[$1,$2]; return x; end' \
+         language plpgsql volatile",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function ad_eq(arrdomain, arrdomain) returns boolean as \
+         'begin return array_eq($1, $2); end' language plpgsql",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create operator = (procedure = ad_eq, leftarg = arrdomain, rightarg = arrdomain)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select make_ad(1,2)"),
+        vec![vec![Value::Array(vec![Value::Int32(1), Value::Int32(2)])]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select case make_ad(1,2) \
+             when array[2,4]::arrdomain then 'wrong' \
+             when array[1,2]::arrdomain then 'right' end",
+        ),
+        vec![vec![Value::Text("right".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select nullif(make_ad(1,2), array[2,3]::arrdomain)"),
+        vec![vec![Value::Array(vec![Value::Int32(1), Value::Int32(2)])]]
     );
 }
 
@@ -29744,6 +30039,121 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
         ),
         vec![vec![Value::Int64(0)]]
     );
+}
+
+#[test]
+fn drop_policy_non_owner_uses_relation_wording() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut other = Session::new(2);
+
+    owner
+        .execute(&db, "create role policy_owner nologin")
+        .unwrap();
+    owner
+        .execute(&db, "create role policy_other nologin")
+        .unwrap();
+    owner
+        .execute(&db, "set session authorization policy_owner")
+        .unwrap();
+    owner.execute(&db, "create table items (a int4)").unwrap();
+    owner
+        .execute(&db, "create policy p1 on items using (true)")
+        .unwrap();
+
+    other
+        .execute(&db, "set session authorization policy_other")
+        .unwrap();
+    let err = other.execute(&db, "drop policy p1 on items").unwrap_err();
+    assert_eq!(
+        crate::backend::libpq::pqformat::format_exec_error(&err),
+        "must be owner of relation items"
+    );
+}
+
+#[test]
+fn rls_key_errors_hide_values_when_relation_rows_are_not_visible() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut bob = Session::new(2);
+
+    owner.execute(&db, "create role rls_owner nologin").unwrap();
+    owner.execute(&db, "create role rls_bob nologin").unwrap();
+    owner
+        .execute(&db, "set session authorization rls_owner")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table category (cid int4 primary key, cname text)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table document (did int4 primary key, cid int4 references category(cid), dauthor name)",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "grant all on category to public")
+        .unwrap();
+    owner
+        .execute(&db, "grant all on document to public")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "insert into category values (33, 'technology'), (44, 'manga')",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "insert into document values (7, 33, 'rls_carol'), (8, 44, 'rls_carol')",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "alter table category enable row level security")
+        .unwrap();
+    owner
+        .execute(&db, "alter table document enable row level security")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy category_bob on category to rls_bob using (cid = 33)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy document_bob_select on document for select to rls_bob using (dauthor = current_user)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy document_bob_insert on document for insert to rls_bob with check (true)",
+        )
+        .unwrap();
+
+    bob.execute(&db, "set session authorization rls_bob")
+        .unwrap();
+    match bob.execute(&db, "delete from category where cid = 33") {
+        Err(ExecError::ForeignKeyViolation { detail, .. }) => {
+            assert_eq!(
+                detail.as_deref(),
+                Some("Key is still referenced from table \"document\".")
+            );
+        }
+        other => panic!("expected redacted foreign key violation, got {other:?}"),
+    }
+    match bob.execute(&db, "insert into document values (8, 44, current_user)") {
+        Err(ExecError::UniqueViolation { detail, .. }) => {
+            assert_eq!(detail, None);
+        }
+        other => panic!("expected redacted unique violation, got {other:?}"),
+    }
 }
 
 #[test]

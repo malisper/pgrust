@@ -4254,6 +4254,73 @@ fn explain_expr_parenthesizes_boolean_clause_args() {
 }
 
 #[test]
+fn explain_expr_matches_postgres_filter_formatting() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::{OpExprKind, ScalarFunctionImpl};
+
+    let int4 = SqlType::new(SqlTypeKind::Int4);
+    let text = SqlType::new(SqlTypeKind::Text);
+    let bool_ty = SqlType::new(SqlTypeKind::Bool);
+    let a = Expr::Var(Var {
+        varno: 1,
+        varattno: user_attrno(0),
+        varlevelsup: 0,
+        vartype: int4,
+    });
+    let b = Expr::Var(Var {
+        varno: 1,
+        varattno: user_attrno(1),
+        varlevelsup: 0,
+        vartype: text,
+    });
+    let modulo = Expr::binary_op(
+        OpExprKind::Mod,
+        int4,
+        a.clone(),
+        Expr::Const(Value::Int32(2)),
+    );
+    let equality = Expr::binary_op(
+        OpExprKind::Eq,
+        bool_ty,
+        modulo,
+        Expr::Const(Value::Int32(0)),
+    );
+
+    assert_eq!(
+        render_explain_expr(&equality, &["a".into(), "b".into()]),
+        "((a % 2) = 0)"
+    );
+
+    let mut leak = Expr::func_with_impl(
+        16506,
+        Some(bool_ty),
+        false,
+        ScalarFunctionImpl::UserDefined { proc_oid: 16506 },
+        vec![b.clone()],
+    );
+    if let Expr::Func(func) = &mut leak {
+        func.funcname = Some("f_leak".into());
+    }
+    assert_eq!(
+        render_explain_expr(&leak, &["a".into(), "b".into()]),
+        "f_leak(b)"
+    );
+
+    let like = Expr::Like {
+        expr: Box::new(b),
+        pattern: Box::new(Expr::Const(Value::Text("%2f%".into()))),
+        escape: None,
+        case_insensitive: false,
+        negated: false,
+        collation_oid: Some(100),
+    };
+    assert_eq!(
+        render_explain_expr(&like, &["a".into(), "b".into()]),
+        "(b ~~ '%2f%'::text)"
+    );
+}
+
+#[test]
 fn explain_expr_renders_scalar_array_op_with_typed_array_literal() {
     use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
     use crate::include::nodes::datum::NumericValue;
@@ -5986,6 +6053,65 @@ fn count_distinct_counts_unique_values() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn select_distinct_on_keeps_first_ordered_row_per_key() {
+    let base = temp_dir("select_distinct_on");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'x'), (2, 'bob', 'x'), (3, 'carol', 'y'), (4, 'dave', 'y')").unwrap();
+    txns.commit(xid).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select distinct on (note) note, name from people order by note, id desc",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Text("x".into()), Value::Text("bob".into())],
+                    vec![Value::Text("y".into()), Value::Text("dave".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn select_distinct_on_key_can_be_hidden_from_output() {
+    let base = temp_dir("select_distinct_on_hidden");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'x'), (2, 'bob', 'x'), (3, 'carol', 'y')").unwrap();
+    txns.commit(xid).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select distinct on (note) name from people order by note, id desc",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { columns, rows, .. } => {
+            assert_eq!(columns.len(), 1);
+            assert_eq!(columns[0].name, "name");
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Text("bob".into())],
+                    vec![Value::Text("carol".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn count_distinct_skips_nulls() {
     let base = temp_dir("count_distinct_nulls");
@@ -20432,6 +20558,87 @@ fn scalar_subquery_can_cast_outer_whole_row_to_text() {
 }
 
 #[test]
+fn bare_relation_reference_binds_as_whole_row() {
+    let db = Database::open(temp_dir("bare_relation_whole_row"), 16).unwrap();
+    db.execute(1, "create table table_a(id integer)").unwrap();
+    db.execute(1, "insert into table_a values (42)").unwrap();
+    db.execute(1, "create view view_a as select * from table_a")
+        .unwrap();
+
+    let expected = Value::Record(crate::include::nodes::datum::RecordValue::anonymous(vec![
+        ("id".into(), Value::Int32(42)),
+    ]));
+    for sql in [
+        "select view_a from view_a",
+        "select (select view_a) from view_a",
+        "select (select (select view_a)) from view_a",
+    ] {
+        assert_query_rows(db.execute(1, sql).unwrap(), vec![vec![expected.clone()]]);
+    }
+}
+
+#[test]
+fn limit_null_is_unbounded() {
+    let mut harness = seed_people_and_pets("limit_null_unbounded");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select id from people order by id limit null",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)],
+        ],
+    );
+}
+
+#[test]
+fn distinct_on_subquery_in_predicate_is_accepted() {
+    let db = Database::open(temp_dir("distinct_on_subquery_in"), 16).unwrap();
+    db.execute(1, "create temp table foo (id integer)").unwrap();
+    db.execute(1, "create temp table bar (id1 integer, id2 integer)")
+        .unwrap();
+    db.execute(1, "insert into foo values (1)").unwrap();
+    db.execute(1, "insert into bar values (1, 1), (2, 2), (3, 1)")
+        .unwrap();
+
+    assert_query_rows(
+        db.execute(
+            1,
+            "select * from foo where id in \
+             (select id2 from (select distinct on (id2) id1, id2 from bar) as s)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(1)]],
+    );
+}
+
+#[test]
+fn alter_function_signature_accepts_argument_names() {
+    let db = Database::open(temp_dir("alter_function_named_args"), 16).unwrap();
+    db.execute(
+        1,
+        "create function tattle(x int, y int) returns bool \
+         language sql as $$ select true $$",
+    )
+    .unwrap();
+    db.execute(1, "alter function tattle(x int, y int) stable")
+        .unwrap();
+
+    assert_query_rows(
+        db.execute(
+            1,
+            "select provolatile from pg_proc where proname = 'tattle'",
+        )
+        .unwrap(),
+        vec![vec![Value::Text("s".into())]],
+    );
+}
+
+#[test]
 fn range_constructor_semantics() {
     let base = temp_dir("range_constructor_accessors");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -21078,6 +21285,112 @@ fn in_subquery_where_qual_uses_semi_join() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn row_valued_in_subquery_matches_all_columns() {
+    let mut harness = seed_people_and_pets("row_valued_in_subquery");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select p.id
+                 from people p
+                 where (p.id, p.name) in (select q.owner_id, 'alice' from pets q)
+                 order by p.id",
+            )
+            .unwrap(),
+        vec![vec![Value::Int32(1)]],
+    );
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select p.id
+                 from people p
+                 where (p.id, p.name) not in (
+                     select q.owner_id, 'alice' from pets q where q.owner_id is not null
+                 )
+                 order by p.id",
+            )
+            .unwrap(),
+        vec![vec![Value::Int32(2)], vec![Value::Int32(3)]],
+    );
+}
+
+#[test]
+fn row_compare_scalar_subquery_uses_scalar_cardinality() {
+    let mut harness = seed_people_and_pets("row_compare_scalar_subquery");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select row(1, 2) = (select 1, 2),
+                        row(1, 2) = (select 3, 4),
+                        row(1, 2) = (select 1, null),
+                        row(1, 2) = (select 1, 2 where false)",
+            )
+            .unwrap(),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Null,
+            Value::Null,
+        ]],
+    );
+    let err = harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select row(1, 2) = (select id, owner_id from pets)",
+        )
+        .unwrap_err();
+    assert!(format_exec_error(&err).contains("more than one row returned by a subquery"));
+}
+
+#[test]
+fn set_operations_coerce_unknown_literals_from_peer_type() {
+    let mut harness = seed_people_and_pets("set_operation_unknown_literals");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select '42' union all select 43 order by 1",
+            )
+            .unwrap(),
+        vec![vec![Value::Int32(42)], vec![Value::Int32(43)]],
+    );
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select '42' union all select '43' order by 1",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Text("42".into())],
+            vec![Value::Text("43".into())],
+        ],
+    );
+}
+
+#[test]
+fn grouped_type_name_cast_and_mixed_numeric_comparison_work() {
+    let mut harness = seed_people_and_pets("grouped_cast_mixed_numeric");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select float8(count(*)) from people",
+            )
+            .unwrap(),
+        vec![vec![Value::Float64(3.0)]],
+    );
+    assert_query_rows(
+        harness
+            .execute(INVALID_TRANSACTION_ID, "select 1 where 3.0 = 3")
+            .unwrap(),
+        vec![vec![Value::Int32(1)]],
+    );
 }
 
 #[test]

@@ -318,6 +318,7 @@ pub enum Statement {
     Analyze(AnalyzeStatement),
     Checkpoint(CheckpointStatement),
     Set(SetStatement),
+    SetTransaction(SetTransactionStatement),
     SetConstraints(SetConstraintsStatement),
     Reset(ResetStatement),
     Call(CallStatement),
@@ -392,6 +393,7 @@ pub enum Statement {
     AlterTableTriggerState(AlterTableTriggerStateStatement),
     AlterPublication(AlterPublicationStatement),
     AlterOperator(AlterOperatorStatement),
+    AlterAggregateRename(AlterAggregateRenameStatement),
     AlterTriggerRename(AlterTriggerRenameStatement),
     CommentOnTable(CommentOnTableStatement),
     CommentOnView(CommentOnViewStatement),
@@ -468,7 +470,7 @@ pub enum Statement {
     Update(UpdateStatement),
     Delete(DeleteStatement),
     Unsupported(UnsupportedStatement),
-    Begin,
+    Begin(TransactionOptions),
     Commit,
     Rollback,
     Savepoint(String),
@@ -489,6 +491,7 @@ pub struct Query {
     pub jointree: Option<JoinTreeNode>,
     pub target_list: Vec<TargetEntry>,
     pub distinct: bool,
+    pub distinct_on: Vec<SortGroupClause>,
     pub where_qual: Option<Expr>,
     pub group_by: Vec<Expr>,
     pub accumulators: Vec<AggAccum>,
@@ -638,9 +641,22 @@ pub enum AggregateArgType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateSignatureArg {
+    pub name: Option<String>,
+    pub arg_type: AggregateArgType,
+    pub variadic: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateSignature {
+    pub args: Vec<AggregateSignatureArg>,
+    pub order_by: Vec<AggregateSignatureArg>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AggregateSignatureKind {
     Star,
-    Args(Vec<AggregateArgType>),
+    Args(AggregateSignature),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -831,6 +847,7 @@ pub struct CreateAggregateStatement {
     pub mtransspace: i32,
     pub mfinalfunc_extra: bool,
     pub mfinalfunc_modify: char,
+    pub hypothetical: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1036,6 +1053,67 @@ pub struct SetStatement {
     pub name: String,
     pub value: Option<String>,
     pub is_local: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionIsolationLevel {
+    ReadUncommitted,
+    ReadCommitted,
+    RepeatableRead,
+    Serializable,
+}
+
+impl TransactionIsolationLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TransactionIsolationLevel::ReadUncommitted => "read uncommitted",
+            TransactionIsolationLevel::ReadCommitted => "read committed",
+            TransactionIsolationLevel::RepeatableRead => "repeatable read",
+            TransactionIsolationLevel::Serializable => "serializable",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "read uncommitted" => Some(TransactionIsolationLevel::ReadUncommitted),
+            "read committed" => Some(TransactionIsolationLevel::ReadCommitted),
+            "repeatable read" => Some(TransactionIsolationLevel::RepeatableRead),
+            "serializable" => Some(TransactionIsolationLevel::Serializable),
+            _ => None,
+        }
+    }
+
+    pub fn uses_transaction_snapshot(self) -> bool {
+        matches!(
+            self,
+            TransactionIsolationLevel::RepeatableRead | TransactionIsolationLevel::Serializable
+        )
+    }
+}
+
+impl Default for TransactionIsolationLevel {
+    fn default() -> Self {
+        TransactionIsolationLevel::ReadCommitted
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TransactionOptions {
+    pub isolation_level: Option<TransactionIsolationLevel>,
+    pub read_only: Option<bool>,
+    pub deferrable: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetTransactionScope {
+    Transaction,
+    SessionCharacteristics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetTransactionStatement {
+    pub scope: SetTransactionScope,
+    pub options: TransactionOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1282,6 +1360,7 @@ pub struct SelectStatement {
     pub with_recursive: bool,
     pub with: Vec<CommonTableExpr>,
     pub distinct: bool,
+    pub distinct_on: Vec<SqlExpr>,
     pub from: Option<FromItem>,
     pub targets: Vec<SelectItem>,
     pub where_clause: Option<SqlExpr>,
@@ -2720,6 +2799,14 @@ pub struct DropAggregateStatement {
     pub aggregate_name: String,
     pub signature: AggregateSignatureKind,
     pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterAggregateRenameStatement {
+    pub schema_name: Option<String>,
+    pub aggregate_name: String,
+    pub signature: AggregateSignatureKind,
+    pub new_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

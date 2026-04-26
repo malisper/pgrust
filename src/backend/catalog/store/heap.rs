@@ -1371,19 +1371,19 @@ impl CatalogStore {
             BootstrapCatalogKind::PgAggregate,
             BootstrapCatalogKind::PgDepend,
         ];
+        let aggregate_row = PgAggregateRow {
+            aggfnoid: proc_row.oid,
+            ..aggregate_row
+        };
         let rows = PhysicalCatalogRows {
             procs: vec![proc_row.clone()],
-            aggregates: vec![PgAggregateRow {
-                aggfnoid: proc_row.oid,
-                ..aggregate_row
-            }],
+            aggregates: vec![aggregate_row.clone()],
             depends: aggregate_depend_rows(
                 proc_row.oid,
                 proc_row.pronamespace,
                 proc_row.prorettype,
                 &arg_type_oids,
-                aggregate_row.aggtransfn,
-                aggregate_row.aggfinalfn,
+                &aggregate_row,
             ),
             ..PhysicalCatalogRows::default()
         };
@@ -1411,8 +1411,7 @@ impl CatalogStore {
                 old_proc_row.pronamespace,
                 old_proc_row.prorettype,
                 &old_arg_type_oids,
-                old_aggregate_row.aggtransfn,
-                old_aggregate_row.aggfinalfn,
+                old_aggregate_row,
             ),
             ..PhysicalCatalogRows::default()
         };
@@ -1425,19 +1424,19 @@ impl CatalogStore {
 
         proc_row.oid = old_proc_row.oid;
         let arg_type_oids = parse_proc_argtype_oids(&proc_row.proargtypes);
+        let aggregate_row = PgAggregateRow {
+            aggfnoid: proc_row.oid,
+            ..aggregate_row
+        };
         let new_rows = PhysicalCatalogRows {
             procs: vec![proc_row.clone()],
-            aggregates: vec![PgAggregateRow {
-                aggfnoid: proc_row.oid,
-                ..aggregate_row
-            }],
+            aggregates: vec![aggregate_row.clone()],
             depends: aggregate_depend_rows(
                 proc_row.oid,
                 proc_row.pronamespace,
                 proc_row.prorettype,
                 &arg_type_oids,
-                aggregate_row.aggtransfn,
-                aggregate_row.aggfinalfn,
+                &aggregate_row,
             ),
             ..PhysicalCatalogRows::default()
         };
@@ -1482,8 +1481,7 @@ impl CatalogStore {
                             proc_row.pronamespace,
                             proc_row.prorettype,
                             &referenced_type_oids,
-                            agg.aggtransfn,
-                            agg.aggfinalfn,
+                            agg,
                         )
                     })
                     .unwrap_or_else(|| {

@@ -313,21 +313,7 @@ pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, Pa
         !column.hidden && !column.qualified_only && column.output_name.eq_ignore_ascii_case(name)
     });
     let Some(first) = matches.next() else {
-        let mut relation_matches = scope.columns.iter().enumerate().filter(|(_, column)| {
-            !column.hidden
-                && !column.qualified_only
-                && column
-                    .relation_names
-                    .iter()
-                    .any(|relation| relation.eq_ignore_ascii_case(name))
-        });
-        let Some((index, _)) = relation_matches.next() else {
-            return Err(ParseError::UnknownColumn(name.to_string()));
-        };
-        if relation_matches.next().is_some() || scope.columns.len() != 1 {
-            return Err(ParseError::UnknownColumn(name.to_string()));
-        }
-        return Ok(index);
+        return Err(ParseError::UnknownColumn(name.to_string()));
     };
     if matches.next().is_some() {
         return Err(ParseError::AmbiguousColumn(name.to_string()));

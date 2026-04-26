@@ -764,6 +764,7 @@ mod tests {
                 1,
             )],
             distinct: false,
+            distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
             accumulators: Vec::new(),

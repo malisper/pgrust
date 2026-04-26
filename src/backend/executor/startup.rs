@@ -391,8 +391,13 @@ pub fn executor_start(plan: Plan) -> PlanState {
             plan_info,
             stats: NodeExecStats::default(),
         }),
-        Plan::Unique { plan_info, input } => Box::new(UniqueState {
+        Plan::Unique {
+            plan_info,
+            key_indices,
+            input,
+        } => Box::new(UniqueState {
             input: executor_start(*input),
+            key_indices,
             previous_values: None,
             slot: TupleSlot::empty(0),
             current_bindings: Vec::new(),

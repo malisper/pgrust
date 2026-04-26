@@ -129,9 +129,6 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_set_constraints_statement(&sql)? {
         return Ok(stmt);
     }
-    if let Some(stmt) = try_parse_set_transaction_statement(&sql)? {
-        return Ok(stmt);
-    }
     if let Some(stmt) = try_parse_publication_statement(&sql)? {
         return Ok(stmt);
     }
@@ -862,6 +859,10 @@ fn try_parse_aggregate_statement(sql: &str) -> Result<Option<Statement>, ParseEr
     if lowered.starts_with("drop aggregate ") {
         return build_drop_aggregate_statement(trimmed)
             .map(|stmt| Some(Statement::DropAggregate(stmt)));
+    }
+    if lowered.starts_with("alter aggregate ") {
+        return build_alter_aggregate_rename_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterAggregateRename(stmt)));
     }
     if lowered.starts_with("comment on aggregate ") {
         return build_comment_on_aggregate_statement(trimmed)
@@ -1696,30 +1697,6 @@ fn try_parse_alter_table_trigger_state_statement(
     }
     build_alter_table_trigger_state_statement(trimmed)
         .map(|stmt| Some(Statement::AlterTableTriggerState(stmt)))
-}
-
-fn try_parse_set_transaction_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
-    let trimmed = sql.trim().trim_end_matches(';').trim();
-    let lowered = trimmed.to_ascii_lowercase();
-    let prefix = "set transaction isolation level ";
-    if !lowered.starts_with(prefix) {
-        return Ok(None);
-    }
-    let Some(level) = trimmed.get(prefix.len()..) else {
-        return Err(ParseError::UnexpectedEof);
-    };
-    let level = level.trim();
-    if level.is_empty() {
-        return Err(ParseError::UnexpectedEof);
-    }
-    // :HACK: This only accepts the transaction-local spelling exercised by the
-    // regression tests. pgrust still executes at a single effective isolation
-    // level and stores the setting only as compatibility metadata.
-    Ok(Some(Statement::Set(SetStatement {
-        name: "transaction_isolation".into(),
-        value: Some(level.to_ascii_lowercase()),
-        is_local: true,
-    })))
 }
 
 fn try_parse_set_constraints_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -2946,13 +2923,27 @@ where
     // Keep executor/runtime checks tied to the GUC, but give parser-only work a
     // floor until those recursive builders are flattened.
     let max_stack_depth_kb = max_stack_depth_kb.max(PARSER_STACK_DEPTH_FLOOR_KB);
-    std::thread::Builder::new()
+    let (result, notices) = std::thread::Builder::new()
         .name("pgrust-parser".into())
         .stack_size(PARSER_THREAD_STACK_BYTES)
-        .spawn(move || StackDepthGuard::enter(max_stack_depth_kb).run(f))
+        .spawn(move || {
+            let result = StackDepthGuard::enter(max_stack_depth_kb).run(f);
+            let notices = crate::backend::utils::misc::notices::take_notices();
+            (result, notices)
+        })
         .expect("spawn parser thread")
         .join()
-        .expect("parser thread panicked")
+        .expect("parser thread panicked");
+    for notice in notices {
+        crate::backend::utils::misc::notices::push_backend_notice(
+            notice.severity,
+            notice.sqlstate,
+            notice.message,
+            notice.detail,
+            notice.position,
+        );
+    }
+    result
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -6917,6 +6908,7 @@ struct ParsedCreateAggregateOptions {
     mtransspace: i32,
     mfinalfunc_extra: bool,
     mfinalfunc_modify: char,
+    hypothetical: bool,
 }
 
 fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatement, ParseError> {
@@ -6952,6 +6944,14 @@ fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatemen
     }
 
     let parsed_options = parse_create_aggregate_options(&options_sql)?;
+    if signature.is_none() && parsed_options.basetype.is_none() && parsed_options.stype.is_some() {
+        return Err(ParseError::DetailedError {
+            message: "aggregate input type must be specified".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
     let signature = match signature {
         Some(signature) => {
             if parsed_options.basetype.is_some() {
@@ -6965,32 +6965,29 @@ fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatemen
         None => parsed_options
             .basetype
             .clone()
-            .ok_or_else(|| ParseError::DetailedError {
-                message: "aggregate input type must be specified".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "42601",
-            })?,
+            .unwrap_or(AggregateSignatureKind::Star),
     };
 
     let missing_actual = aggregate_name.clone();
+    let stype = parsed_options
+        .stype
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "STYPE or STYPE1 option",
+            actual: "aggregate stype must be specified".into(),
+        })?;
+    let sfunc_name = parsed_options
+        .sfunc_name
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "SFUNC or SFUNC1 option",
+            actual: missing_actual.clone(),
+        })?;
     Ok(CreateAggregateStatement {
         schema_name,
         aggregate_name,
         replace_existing,
         signature,
-        sfunc_name: parsed_options
-            .sfunc_name
-            .ok_or_else(|| ParseError::UnexpectedToken {
-                expected: "SFUNC or SFUNC1 option",
-                actual: missing_actual.clone(),
-            })?,
-        stype: parsed_options
-            .stype
-            .ok_or_else(|| ParseError::UnexpectedToken {
-                expected: "STYPE or STYPE1 option",
-                actual: missing_actual.clone(),
-            })?,
+        sfunc_name,
+        stype,
         finalfunc_name: parsed_options.finalfunc_name,
         initcond: parsed_options.initcond,
         parallel: parsed_options.parallel,
@@ -7008,6 +7005,7 @@ fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatemen
         mtransspace: parsed_options.mtransspace,
         mfinalfunc_extra: parsed_options.mfinalfunc_extra,
         mfinalfunc_modify: parsed_options.mfinalfunc_modify,
+        hypothetical: parsed_options.hypothetical,
     })
 }
 
@@ -7054,6 +7052,49 @@ fn build_drop_aggregate_statement(sql: &str) -> Result<DropAggregateStatement, P
         aggregate_name,
         signature: parse_aggregate_signature_kind(&signature_sql)?,
         cascade,
+    })
+}
+
+fn build_alter_aggregate_rename_statement(
+    sql: &str,
+) -> Result<AlterAggregateRenameStatement, ParseError> {
+    let prefix = "alter aggregate";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER AGGREGATE name(signature) RENAME TO new_name",
+            actual: sql.into(),
+        });
+    };
+    let rest = rest.trim_start();
+    let ((schema_name, aggregate_name), rest_after_name) = parse_schema_qualified_name(rest)?;
+    let (signature_sql, rest) = take_parenthesized_segment(rest_after_name.trim_start())?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "rename") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "RENAME TO",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "rename").trim_start();
+    if !keyword_at_start(rest, "to") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "TO",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "to").trim_start();
+    let (new_name, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER AGGREGATE RENAME statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(AlterAggregateRenameStatement {
+        schema_name,
+        aggregate_name,
+        signature: parse_aggregate_signature_kind(&signature_sql)?,
+        new_name,
     })
 }
 
@@ -7287,6 +7328,7 @@ fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOp
     for item in split_top_level_items(input, ',')? {
         let Some(eq_idx) = item.find('=') else {
             if item.trim().eq_ignore_ascii_case("hypothetical") {
+                parsed.hypothetical = true;
                 continue;
             }
             return Err(ParseError::UnexpectedToken {
@@ -7294,7 +7336,17 @@ fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOp
                 actual: item,
             });
         };
-        let key = item[..eq_idx].trim().to_ascii_lowercase();
+        let raw_key = item[..eq_idx].trim();
+        if raw_key.starts_with('"') {
+            let attr = parse_sql_identifier(raw_key)
+                .map(|(ident, _)| ident)
+                .unwrap_or_else(|_| raw_key.trim_matches('"').to_string());
+            crate::backend::utils::misc::notices::push_warning(format!(
+                "aggregate attribute \"{attr}\" not recognized"
+            ));
+            continue;
+        }
+        let key = raw_key.to_ascii_lowercase();
         let value = item[eq_idx + 1..].trim();
         match key.as_str() {
             "sfunc" | "sfunc1" => parsed.sfunc_name = Some(parse_aggregate_proc_name(value)?),
@@ -7317,7 +7369,7 @@ fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOp
             "msspace" => parsed.mtransspace = parse_aggregate_i32(value)?,
             "mfinalfunc_extra" => parsed.mfinalfunc_extra = parse_aggregate_bool(value)?,
             "mfinalfunc_modify" => parsed.mfinalfunc_modify = parse_aggregate_final_modify(value)?,
-            "sortop" | "hypothetical" => {
+            "sortop" => {
                 return Err(ParseError::FeatureNotSupported(format!(
                     "{key} aggregate option is not supported"
                 )));
@@ -7343,19 +7395,38 @@ fn parse_aggregate_signature_kind(input: &str) -> Result<AggregateSignatureKind,
             actual: "()".into(),
         });
     }
-    if keyword_boundary(trimmed, "order by").is_some() {
-        return Err(ParseError::FeatureNotSupported(
-            "ordered-set aggregate signatures are not supported".into(),
-        ));
-    }
-    let args = split_top_level_items(trimmed, ',')?
-        .into_iter()
-        .map(|item| parse_aggregate_signature_arg(&item))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(AggregateSignatureKind::Args(args))
+    let (arg_sql, order_by_sql) =
+        if let Some(order_by_idx) = find_next_top_level_keyword(trimmed, &["order by"]) {
+            (
+                trimmed[..order_by_idx].trim(),
+                Some(consume_keyword(&trimmed[order_by_idx..], "order by").trim()),
+            )
+        } else {
+            (trimmed, None)
+        };
+    let args = if arg_sql.is_empty() {
+        Vec::new()
+    } else {
+        split_top_level_items(arg_sql, ',')?
+            .into_iter()
+            .map(|item| parse_aggregate_signature_arg(&item))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let order_by = if let Some(order_by_sql) = order_by_sql {
+        split_top_level_items(order_by_sql, ',')?
+            .into_iter()
+            .map(|item| parse_aggregate_signature_arg(&item))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    Ok(AggregateSignatureKind::Args(AggregateSignature {
+        args,
+        order_by,
+    }))
 }
 
-fn parse_aggregate_signature_arg(input: &str) -> Result<AggregateArgType, ParseError> {
+fn parse_aggregate_signature_arg(input: &str) -> Result<AggregateSignatureArg, ParseError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(ParseError::UnexpectedToken {
@@ -7363,22 +7434,102 @@ fn parse_aggregate_signature_arg(input: &str) -> Result<AggregateArgType, ParseE
             actual: input.into(),
         });
     }
-    if keyword_at_start(trimmed, "variadic") {
-        return Err(ParseError::FeatureNotSupported(
-            "VARIADIC aggregate signatures are not supported".into(),
-        ));
+    let variadic = keyword_at_start(trimmed, "variadic");
+    let type_or_named = if variadic {
+        consume_keyword(trimmed, "variadic").trim_start()
+    } else {
+        trimmed
+    };
+    let named_candidate = parse_sql_identifier(type_or_named)
+        .ok()
+        .and_then(|(name, rest)| {
+            let rest = rest.trim();
+            (!rest.is_empty()
+                && !aggregate_type_phrase_starts_with_identifier(type_or_named)
+                && parse_aggregate_arg_type(rest).is_ok())
+            .then_some((name, rest))
+        });
+    let (name, type_sql) = if let Some((name, rest)) = named_candidate {
+        (Some(name), rest)
+    } else if let Ok(arg_type) = parse_aggregate_arg_type(type_or_named)
+        && aggregate_arg_type_consumes_all(type_or_named, &arg_type)
+    {
+        (None, type_or_named)
+    } else if let Ok((name, rest)) = parse_sql_identifier(type_or_named)
+        && !rest.trim().is_empty()
+    {
+        (Some(name), rest.trim())
+    } else {
+        (None, type_or_named)
+    };
+    Ok(AggregateSignatureArg {
+        name,
+        arg_type: parse_aggregate_arg_type(type_sql)?,
+        variadic,
+    })
+}
+
+fn aggregate_type_phrase_starts_with_identifier(input: &str) -> bool {
+    let lower = input.trim_start().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "double precision"
+            | "character varying"
+            | "bit varying"
+            | "time with time zone"
+            | "time without time zone"
+            | "timestamp with time zone"
+            | "timestamp without time zone"
+    ) || lower.starts_with("time(")
+        || lower.starts_with("time ")
+        || lower.starts_with("timestamp(")
+        || lower.starts_with("timestamp ")
+        || lower.starts_with("character(")
+        || lower.starts_with("character ")
+        || lower.starts_with("interval ")
+        || lower.starts_with("interval(")
+}
+
+fn aggregate_arg_type_consumes_all(input: &str, arg_type: &AggregateArgType) -> bool {
+    match arg_type {
+        AggregateArgType::AnyPseudo => parse_sql_identifier(input)
+            .is_ok_and(|(ident, rest)| ident.eq_ignore_ascii_case("any") && rest.trim().is_empty()),
+        AggregateArgType::Type(_) => parse_type_name(input).is_ok(),
     }
+}
+
+fn parse_aggregate_arg_type(input: &str) -> Result<AggregateArgType, ParseError> {
+    let trimmed = input.trim();
     if let Ok((ident, rest)) = parse_sql_identifier(trimmed)
         && rest.trim().is_empty()
         && ident.eq_ignore_ascii_case("any")
     {
         return Ok(AggregateArgType::AnyPseudo);
     }
-    parse_type_name(trimmed)
-        .map(AggregateArgType::Type)
-        .map_err(|_| {
-            ParseError::FeatureNotSupported("named aggregate parameters are not supported".into())
-        })
+    parse_type_name(trimmed).map(AggregateArgType::Type)
+}
+
+fn parse_aggregate_signature_type_only_arg(
+    input: &str,
+) -> Result<AggregateSignatureArg, ParseError> {
+    let arg = parse_aggregate_signature_arg(input)?;
+    if arg.name.is_some() {
+        return Err(ParseError::FeatureNotSupported(
+            "named aggregate parameters are not supported in BASETYPE".into(),
+        ));
+    }
+    Ok(arg)
+}
+
+fn parse_aggregate_signature_type_only(input: &str) -> Result<AggregateSignatureKind, ParseError> {
+    let args = split_top_level_items(input, ',')?
+        .into_iter()
+        .map(|item| parse_aggregate_signature_type_only_arg(&item))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AggregateSignatureKind::Args(AggregateSignature {
+        args,
+        order_by: Vec::new(),
+    }))
 }
 
 fn parse_legacy_aggregate_basetype(input: &str) -> Result<AggregateSignatureKind, ParseError> {
@@ -7397,9 +7548,7 @@ fn parse_legacy_aggregate_basetype(input: &str) -> Result<AggregateSignatureKind
     {
         return Ok(AggregateSignatureKind::Star);
     }
-    Ok(AggregateSignatureKind::Args(vec![
-        parse_aggregate_signature_arg(trimmed)?,
-    ]))
+    parse_aggregate_signature_type_only(trimmed)
 }
 
 fn parse_aggregate_proc_name(input: &str) -> Result<String, ParseError> {
@@ -7481,7 +7630,7 @@ fn parse_aggregate_parallel(input: &str) -> Result<FunctionParallel, ParseError>
         "unsafe" => Ok(FunctionParallel::Unsafe),
         _ => Err(ParseError::UnexpectedToken {
             expected: "SAFE, RESTRICTED, or UNSAFE",
-            actual: value,
+            actual: "parameter \"parallel\" must be SAFE, RESTRICTED, or UNSAFE".into(),
         }),
     }
 }
@@ -8038,6 +8187,20 @@ fn build_create_policy_statement(sql: &str) -> Result<CreatePolicyStatement, Par
                 permissive = false;
                 rest = consume_keyword(rest, "restrictive").trim_start();
                 continue;
+            }
+            if let Ok((policy_option, _)) = parse_sql_identifier(rest) {
+                return Err(ParseError::DetailedError {
+                    message: format!("unrecognized row security option \"{policy_option}\""),
+                    detail: None,
+                    hint: Some(
+                        "Only PERMISSIVE or RESTRICTIVE policies are supported currently.".into(),
+                    ),
+                    sqlstate: "42601",
+                }
+                .with_position(sql_position_from_byte_offset(
+                    sql,
+                    slice_byte_offset(sql, rest),
+                )));
             }
             return Err(ParseError::UnexpectedToken {
                 expected: "PERMISSIVE or RESTRICTIVE",
@@ -9830,13 +9993,9 @@ fn parse_create_function_arg_with_base(
         });
     }
     let lowered = trimmed.to_ascii_lowercase();
-    if lowered.contains(" default ")
-        || lowered.contains(":=")
-        || lowered.starts_with("variadic ")
-        || lowered.contains(" variadic ")
-    {
+    if lowered.contains(" default ") || lowered.contains(":=") {
         return Err(ParseError::FeatureNotSupported(
-            "default arguments and VARIADIC are not supported in CREATE FUNCTION".into(),
+            "default arguments are not supported in CREATE FUNCTION".into(),
         ));
     }
 
@@ -9849,7 +10008,12 @@ fn parse_create_function_arg_with_base(
     } else {
         (FunctionArgMode::In, trimmed)
     };
-    let rest = rest.trim_start();
+    let mut variadic = false;
+    let mut rest = rest.trim_start();
+    if keyword_at_start(rest, "variadic") {
+        variadic = true;
+        rest = consume_keyword(rest, "variadic").trim_start();
+    }
     if !rest.chars().any(char::is_whitespace)
         && let Ok(ty) = parse_type_name(rest)
     {
@@ -9860,13 +10024,18 @@ fn parse_create_function_arg_with_base(
             ty,
             type_position,
             default_expr: None,
-            variadic: false,
+            variadic,
         });
     }
     let (name, type_sql) = match parse_sql_identifier(rest) {
         Ok((name, rest)) if !rest.trim().is_empty() => (Some(name), rest.trim_start()),
         _ => (None, rest),
     };
+    let mut type_sql = type_sql;
+    if keyword_at_start(type_sql, "variadic") {
+        variadic = true;
+        type_sql = consume_keyword(type_sql, "variadic").trim_start();
+    }
     if type_sql.trim().is_empty() {
         return Err(ParseError::UnexpectedToken {
             expected: "argument type name",
@@ -9881,7 +10050,7 @@ fn parse_create_function_arg_with_base(
         ty,
         type_position,
         default_expr: None,
-        variadic: false,
+        variadic,
     })
 }
 
@@ -11322,6 +11491,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         )),
         Rule::set_role_stmt => Ok(Statement::SetRole(build_set_role(inner)?)),
         Rule::reset_role_stmt => Ok(Statement::ResetRole(build_reset_role(inner)?)),
+        Rule::set_transaction_stmt => Ok(Statement::SetTransaction(build_set_transaction(inner)?)),
         Rule::set_stmt => Ok(Statement::Set(build_set(inner)?)),
         Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
         Rule::create_role_stmt => Ok(Statement::CreateRole(build_create_role(inner)?)),
@@ -11471,7 +11641,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::merge_stmt => Ok(Statement::Merge(build_merge(inner)?)),
         Rule::update_stmt => Ok(Statement::Update(build_update(inner)?)),
         Rule::delete_stmt => Ok(Statement::Delete(build_delete(inner)?)),
-        Rule::begin_stmt => Ok(Statement::Begin),
+        Rule::begin_stmt => Ok(Statement::Begin(build_begin(inner)?)),
         Rule::commit_stmt => Ok(Statement::Commit),
         Rule::savepoint_stmt => Ok(Statement::Savepoint(build_transaction_marker_name(inner)?)),
         Rule::rollback_to_stmt => Ok(Statement::RollbackTo(build_transaction_marker_name(inner)?)),
@@ -11493,6 +11663,7 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
         with: Vec::new(),
         with_recursive: false,
         distinct: false,
+        distinct_on: Vec::new(),
         from: Some(FromItem::Table { name, only: false }),
         targets: vec![SelectItem {
             expr: SqlExpr::Column("*".into()),
@@ -11677,6 +11848,9 @@ fn build_show(pair: Pair<'_, Rule>) -> Result<ShowStatement, ParseError> {
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::identifier => name = Some(build_identifier(part)),
+            Rule::show_transaction_isolation_clause => {
+                name = Some("transaction_isolation".to_string())
+            }
             Rule::time_zone_guc_name => name = Some("timezone".to_string()),
             _ => {}
         }
@@ -12504,6 +12678,147 @@ fn build_simple_set_value_atom(pair: Pair<'_, Rule>) -> String {
     }
 }
 
+fn normalized_transaction_mode_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn parse_transaction_isolation_level_text(
+    value: &str,
+) -> Result<TransactionIsolationLevel, ParseError> {
+    TransactionIsolationLevel::parse(value).ok_or_else(|| ParseError::UnexpectedToken {
+        expected: "transaction isolation level",
+        actual: value.to_string(),
+    })
+}
+
+fn apply_transaction_mode(
+    options: &mut TransactionOptions,
+    mode: Pair<'_, Rule>,
+) -> Result<(), ParseError> {
+    let text = normalized_transaction_mode_text(mode.as_str());
+    if let Some(level) = text.strip_prefix("isolation level ") {
+        if options.isolation_level.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one isolation level",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.isolation_level = Some(parse_transaction_isolation_level_text(level)?);
+    } else if text == "read only" {
+        if options.read_only.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one transaction read mode",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.read_only = Some(true);
+    } else if text == "read write" {
+        if options.read_only.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one transaction read mode",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.read_only = Some(false);
+    } else if text == "deferrable" {
+        if options.deferrable.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one transaction deferrable mode",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.deferrable = Some(true);
+    } else if text == "not deferrable" {
+        if options.deferrable.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one transaction deferrable mode",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.deferrable = Some(false);
+    }
+    Ok(())
+}
+
+fn merge_transaction_options(
+    options: &mut TransactionOptions,
+    nested: TransactionOptions,
+) -> Result<(), ParseError> {
+    if let Some(level) = nested.isolation_level
+        && options.isolation_level.replace(level).is_some()
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "one isolation level",
+            actual: "duplicate isolation level".into(),
+        });
+    }
+    if let Some(read_only) = nested.read_only
+        && options.read_only.replace(read_only).is_some()
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "one transaction read mode",
+            actual: "duplicate transaction read mode".into(),
+        });
+    }
+    if let Some(deferrable) = nested.deferrable
+        && options.deferrable.replace(deferrable).is_some()
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "one transaction deferrable mode",
+            actual: "duplicate transaction deferrable mode".into(),
+        });
+    }
+    Ok(())
+}
+
+fn build_transaction_options(pair: Pair<'_, Rule>) -> Result<TransactionOptions, ParseError> {
+    let mut options = TransactionOptions::default();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::transaction_mode_item => apply_transaction_mode(&mut options, part)?,
+            Rule::transaction_mode_list => {
+                let nested = build_transaction_options(part)?;
+                merge_transaction_options(&mut options, nested)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(options)
+}
+
+fn build_begin(pair: Pair<'_, Rule>) -> Result<TransactionOptions, ParseError> {
+    for part in pair.into_inner() {
+        if part.as_rule() == Rule::transaction_mode_list {
+            return build_transaction_options(part);
+        }
+    }
+    Ok(TransactionOptions::default())
+}
+
+fn build_set_transaction(pair: Pair<'_, Rule>) -> Result<SetTransactionStatement, ParseError> {
+    let scope = if pair
+        .as_str()
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("set session characteristics")
+    {
+        SetTransactionScope::SessionCharacteristics
+    } else {
+        SetTransactionScope::Transaction
+    };
+    let options = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::transaction_mode_list)
+        .map(build_transaction_options)
+        .transpose()?
+        .unwrap_or_default();
+    Ok(SetTransactionStatement { scope, options })
+}
+
 fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
     let mut analyze = false;
     let mut buffers = false;
@@ -12607,6 +12922,7 @@ fn build_simple_select_statement(
     let mut with_recursive = false;
     let mut with = Vec::new();
     let mut distinct = false;
+    let mut distinct_on = Vec::new();
     let mut targets = None;
     let mut from = None;
     let mut where_clause = None;
@@ -12624,11 +12940,17 @@ fn build_simple_select_statement(
                 with_recursive = recursive;
                 with = ctes;
             }
-            Rule::select_distinct_clause => distinct = true,
+            Rule::select_distinct_clause => {
+                distinct = true;
+                distinct_on = build_select_distinct_clause(part)?;
+            }
             Rule::simple_select_core => {
                 for inner in part.into_inner() {
                     match inner.as_rule() {
-                        Rule::select_distinct_clause => distinct = true,
+                        Rule::select_distinct_clause => {
+                            distinct = true;
+                            distinct_on = build_select_distinct_clause(inner)?;
+                        }
                         Rule::select_list => targets = Some(build_select_list(inner)?),
                         Rule::from_item => from = Some(build_from_item(inner)?),
                         Rule::expr => where_clause = Some(build_expr(inner)?),
@@ -12636,7 +12958,7 @@ fn build_simple_select_statement(
                         Rule::having_clause => having = Some(build_having_clause(inner)?),
                         Rule::window_clause => window_clauses = build_window_clause(inner)?,
                         Rule::order_by_clause => order_by = build_order_by_clause(inner)?,
-                        Rule::limit_clause => limit = Some(build_limit_clause(inner)?),
+                        Rule::limit_clause => limit = build_limit_clause(inner)?,
                         Rule::offset_clause => offset = Some(build_offset_clause(inner)?),
                         Rule::locking_clause => locking_clause = Some(build_locking_clause(inner)?),
                         _ => {}
@@ -12650,7 +12972,7 @@ fn build_simple_select_statement(
             Rule::having_clause => having = Some(build_having_clause(part)?),
             Rule::window_clause => window_clauses = build_window_clause(part)?,
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
-            Rule::limit_clause => limit = Some(build_limit_clause(part)?),
+            Rule::limit_clause => limit = build_limit_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
             Rule::locking_clause => locking_clause = Some(build_locking_clause(part)?),
             _ => {}
@@ -12660,6 +12982,7 @@ fn build_simple_select_statement(
         with_recursive,
         with,
         distinct,
+        distinct_on,
         from,
         targets: targets.unwrap_or_default(),
         where_clause,
@@ -12672,6 +12995,13 @@ fn build_simple_select_statement(
         locking_clause,
         set_operation: None,
     })
+}
+
+fn build_select_distinct_clause(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::expr)
+        .map(build_expr)
+        .collect()
 }
 
 fn build_select_into(pair: Pair<'_, Rule>) -> Result<CreateTableAsStatement, ParseError> {
@@ -12738,11 +13068,14 @@ fn build_set_operation_term(pair: Pair<'_, Rule>) -> Result<SelectStatement, Par
         Rule::set_operation_term => {
             build_set_operation_term(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
         }
-        Rule::parenthesized_set_operation_term => build_select(
-            pair.into_inner()
-                .find(|part| matches!(part.as_rule(), Rule::select_stmt))
-                .ok_or(ParseError::UnexpectedEof)?,
-        ),
+        Rule::parenthesized_set_operation_term => {
+            let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            if matches!(inner.as_rule(), Rule::parenthesized_set_operation_term) {
+                build_set_operation_term(inner)
+            } else {
+                build_select(inner)
+            }
+        }
         Rule::simple_select_core
         | Rule::simple_select_stmt
         | Rule::set_operation_stmt
@@ -12788,7 +13121,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
             }
             Rule::window_clause => window_clauses = build_window_clause(part)?,
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
-            Rule::limit_clause => limit = Some(build_limit_clause(part)?),
+            Rule::limit_clause => limit = build_limit_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
             Rule::locking_clause => locking_clause = Some(build_locking_clause(part)?),
             _ => {}
@@ -12808,6 +13141,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
         with_recursive,
         with,
         distinct: false,
+        distinct_on: Vec::new(),
         from: None,
         targets: Vec::new(),
         where_clause: None,
@@ -12869,6 +13203,7 @@ fn select_statement_for_set_operation(
         with_recursive: false,
         with: Vec::new(),
         distinct: false,
+        distinct_on: Vec::new(),
         from: None,
         targets: Vec::new(),
         where_clause: None,
@@ -12902,7 +13237,7 @@ fn build_values_statement(pair: Pair<'_, Rule>) -> Result<ValuesStatement, Parse
             }
             Rule::values_row => rows.push(build_values_row(part)?),
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
-            Rule::limit_clause => limit = Some(build_limit_clause(part)?),
+            Rule::limit_clause => limit = build_limit_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
             _ => {}
         }
@@ -12922,6 +13257,7 @@ fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
         with_recursive: stmt.with_recursive,
         with: stmt.with,
         distinct: false,
+        distinct_on: Vec::new(),
         from: Some(FromItem::Values { rows: stmt.rows }),
         targets: vec![SelectItem {
             output_name: "*".into(),
@@ -13054,7 +13390,15 @@ fn build_order_by_clause(pair: Pair<'_, Rule>) -> Result<Vec<OrderByItem>, Parse
 }
 
 fn build_locking_clause(pair: Pair<'_, Rule>) -> Result<SelectLockingClause, ParseError> {
-    match pair.as_str().trim().to_ascii_lowercase().as_str() {
+    let raw = pair.as_str().trim().to_ascii_lowercase();
+    let strength = raw
+        .split_once(" of ")
+        .map(|(strength, _)| strength)
+        .unwrap_or(&raw);
+    // :HACK: Parse FOR UPDATE/SHARE OF relation lists so view definitions and
+    // regression inputs bind, but keep using the existing all-relation row-mark
+    // model until SelectLockingClause carries the relation-name list.
+    match strength {
         "for no key update" => Ok(SelectLockingClause::ForNoKeyUpdate),
         "for update" => Ok(SelectLockingClause::ForUpdate),
         "for key share" => Ok(SelectLockingClause::ForKeyShare),
@@ -13109,8 +13453,15 @@ fn order_by_using_operator_direction(operator: &str) -> Option<bool> {
     }
 }
 
-fn build_limit_clause(pair: Pair<'_, Rule>) -> Result<usize, ParseError> {
-    build_usize_clause(pair, "LIMIT")
+fn build_limit_clause(pair: Pair<'_, Rule>) -> Result<Option<usize>, ParseError> {
+    if pair
+        .clone()
+        .into_inner()
+        .any(|part| part.as_rule() == Rule::kw_null)
+    {
+        return Ok(None);
+    }
+    build_usize_clause(pair, "LIMIT").map(Some)
 }
 
 fn build_offset_clause(pair: Pair<'_, Rule>) -> Result<usize, ParseError> {
@@ -16124,7 +16475,11 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
             _ => raw_type_output_name(ty).to_string(),
         },
         SqlExpr::Collate { expr, .. } => select_item_name(expr, index),
-        SqlExpr::Case { .. } => "case".to_string(),
+        SqlExpr::Case { defresult, .. } => defresult
+            .as_deref()
+            .map(|expr| select_item_name(expr, index))
+            .filter(|name| name != "?column?" && name != "case")
+            .unwrap_or_else(|| "case".to_string()),
         SqlExpr::Row(_) => "row".to_string(),
         SqlExpr::Random => "random".to_string(),
         SqlExpr::CurrentCatalog => "current_catalog".to_string(),

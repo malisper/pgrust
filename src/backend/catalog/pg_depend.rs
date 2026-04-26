@@ -8,7 +8,7 @@ use crate::include::catalog::{
     PG_NAMESPACE_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID,
     PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
     PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_RELATION_OID,
-    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgDependRow, PgStatisticExtRow,
+    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow, PgDependRow, PgStatisticExtRow,
 };
 use std::collections::BTreeSet;
 
@@ -302,31 +302,30 @@ pub fn aggregate_depend_rows(
     namespace_oid: u32,
     result_type_oid: u32,
     arg_type_oids: &[u32],
-    transfn_oid: u32,
-    finalfn_oid: u32,
+    aggregate_row: &PgAggregateRow,
 ) -> Vec<PgDependRow> {
     let mut rows = proc_depend_rows(proc_oid, namespace_oid, result_type_oid, arg_type_oids);
-    if transfn_oid != 0 {
-        rows.push(PgDependRow {
-            classid: PG_PROC_RELATION_OID,
-            objid: proc_oid,
-            objsubid: 0,
-            refclassid: PG_PROC_RELATION_OID,
-            refobjid: transfn_oid,
-            refobjsubid: 0,
-            deptype: DEPENDENCY_NORMAL,
-        });
-    }
-    if finalfn_oid != 0 {
-        rows.push(PgDependRow {
-            classid: PG_PROC_RELATION_OID,
-            objid: proc_oid,
-            objsubid: 0,
-            refclassid: PG_PROC_RELATION_OID,
-            refobjid: finalfn_oid,
-            refobjsubid: 0,
-            deptype: DEPENDENCY_NORMAL,
-        });
+    for support_fn_oid in [
+        aggregate_row.aggtransfn,
+        aggregate_row.aggfinalfn,
+        aggregate_row.aggcombinefn,
+        aggregate_row.aggserialfn,
+        aggregate_row.aggdeserialfn,
+        aggregate_row.aggmtransfn,
+        aggregate_row.aggminvtransfn,
+        aggregate_row.aggmfinalfn,
+    ] {
+        if support_fn_oid != 0 {
+            rows.push(PgDependRow {
+                classid: PG_PROC_RELATION_OID,
+                objid: proc_oid,
+                objsubid: 0,
+                refclassid: PG_PROC_RELATION_OID,
+                refobjid: support_fn_oid,
+                refobjsubid: 0,
+                deptype: DEPENDENCY_NORMAL,
+            });
+        }
     }
     sort_pg_depend_rows(&mut rows);
     rows

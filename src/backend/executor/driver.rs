@@ -173,6 +173,7 @@ fn execute_statement_with_source(
         Statement::Show(_)
         | Statement::Checkpoint(_)
         | Statement::Set(_)
+        | Statement::SetTransaction(_)
         | Statement::SetConstraints(_)
         | Statement::Reset(_)
         | Statement::SetRole(_)
@@ -377,6 +378,10 @@ fn execute_statement_with_source(
             expected: "CREATE AGGREGATE handled by database/session layer",
             actual: "CREATE AGGREGATE".into(),
         })),
+        Statement::AlterAggregateRename(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER AGGREGATE handled by database/session layer",
+            actual: "ALTER AGGREGATE".into(),
+        })),
         Statement::CreateCast(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE CAST handled by database/session layer",
             actual: "CREATE CAST".into(),
@@ -547,7 +552,7 @@ fn execute_statement_with_source(
         }
         Statement::Delete(stmt) => execute_delete(bind_delete(&stmt, catalog)?, catalog, ctx, xid),
         Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
-        Statement::Begin
+        Statement::Begin(_)
         | Statement::Commit
         | Statement::Rollback
         | Statement::Savepoint(_)
@@ -706,6 +711,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::CreateAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE AGGREGATE".into(),
+        })),
+        Statement::AlterAggregateRename(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER AGGREGATE".into(),
         })),
         Statement::CreateCast(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
