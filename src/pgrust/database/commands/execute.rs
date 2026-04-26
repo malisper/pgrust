@@ -377,6 +377,12 @@ impl Database {
                     configured_search_path,
                     65_536,
                 ),
+            Statement::ReindexIndex(ref reindex_stmt) => self
+                .execute_reindex_index_stmt_with_search_path(
+                    client_id,
+                    reindex_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateStatistics(ref create_stmt) => self
                 .execute_create_statistics_stmt_with_search_path(
                     client_id,

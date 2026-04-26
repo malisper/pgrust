@@ -767,9 +767,13 @@ impl Database {
                 &[IndexBackedConstraintAction {
                     constraint_name: Some(index_name.to_string()),
                     columns: key_columns,
+                    include_columns: Vec::new(),
                     primary: false,
                     nulls_not_distinct,
                     without_overlaps: None,
+                    exclusion: false,
+                    access_method: None,
+                    exclusion_operators: Vec::new(),
                     deferrable: false,
                     initially_deferred: false,
                 }],

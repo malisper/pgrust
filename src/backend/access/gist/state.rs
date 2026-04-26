@@ -43,8 +43,9 @@ impl GistState {
         desc: &RelationDesc,
         index_meta: &IndexRelCacheEntry,
     ) -> Result<Self, CatalogError> {
-        let mut columns = Vec::with_capacity(desc.columns.len());
-        for column_index in 0..desc.columns.len() {
+        let key_count = usize::try_from(index_meta.indnkeyatts.max(0)).unwrap_or_default();
+        let mut columns = Vec::with_capacity(key_count);
+        for column_index in 0..key_count.min(desc.columns.len()) {
             columns.push(GistColumnState {
                 consistent_proc: index_meta
                     .amproc_oid(desc, column_index, GIST_CONSISTENT_PROC)

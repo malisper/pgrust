@@ -693,26 +693,44 @@ impl Database {
                     .cloned()
                     .map(crate::backend::parser::IndexColumnDef::from)
                     .collect::<Vec<_>>();
-                let (access_method_oid, access_method_handler, build_options) =
-                    if action.without_overlaps.is_some() {
-                        self.resolve_temporal_index_build_options(
-                            client_id,
-                            Some((xid, action_cid)),
-                            relation,
-                            &index_columns,
-                        )?
-                    } else {
-                        self.resolve_simple_index_build_options(
-                            client_id,
-                            Some((xid, action_cid)),
-                            "btree",
-                            relation,
-                            &index_columns,
-                            &[],
-                        )?
-                    };
+                let mut storage_columns = index_columns.clone();
+                storage_columns.extend(
+                    action
+                        .include_columns
+                        .iter()
+                        .cloned()
+                        .map(crate::backend::parser::IndexColumnDef::from),
+                );
+                let (access_method_oid, access_method_handler, build_options) = if action.exclusion
+                {
+                    self.resolve_simple_index_build_options(
+                        client_id,
+                        Some((xid, action_cid)),
+                        action.access_method.as_deref().unwrap_or("gist"),
+                        relation,
+                        &index_columns,
+                        &[],
+                    )?
+                } else if action.without_overlaps.is_some() {
+                    self.resolve_temporal_index_build_options(
+                        client_id,
+                        Some((xid, action_cid)),
+                        relation,
+                        &index_columns,
+                    )?
+                } else {
+                    self.resolve_simple_index_build_options(
+                        client_id,
+                        Some((xid, action_cid)),
+                        "btree",
+                        relation,
+                        &index_columns,
+                        &[],
+                    )?
+                };
                 let build_options = crate::backend::catalog::CatalogIndexBuildOptions {
                     indimmediate: !action.deferrable,
+                    indisexclusion: action.exclusion || build_options.indisexclusion,
                     ..build_options
                 };
                 let index_entry = self.build_simple_index_in_transaction(
@@ -720,9 +738,9 @@ impl Database {
                     relation,
                     &index_name,
                     catalog.materialize_visible_catalog(),
-                    &index_columns,
+                    &storage_columns,
                     None,
-                    true,
+                    !action.exclusion,
                     action.primary,
                     action.nulls_not_distinct,
                     xid,
@@ -758,7 +776,14 @@ impl Database {
                 } else {
                     Vec::new()
                 };
-                let conexclop = if action.without_overlaps.is_some() {
+                let conexclop = if action.exclusion {
+                    Some(self.exclusion_constraint_operator_oids_for_desc(
+                        &relation.desc,
+                        &action.columns,
+                        &action.exclusion_operators,
+                        &catalog,
+                    )?)
+                } else if action.without_overlaps.is_some() {
                     Some(self.temporal_constraint_operator_oids_for_relation(
                         relation.relation_oid,
                         &action.columns,
@@ -778,6 +803,8 @@ impl Database {
                         constraint_name,
                         if action.primary {
                             crate::include::catalog::CONSTRAINT_PRIMARY
+                        } else if action.exclusion {
+                            crate::include::catalog::CONSTRAINT_EXCLUSION
                         } else {
                             crate::include::catalog::CONSTRAINT_UNIQUE
                         },

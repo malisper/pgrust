@@ -53,10 +53,26 @@ impl GistSearchItem {
     fn is_heap(&self) -> bool {
         matches!(self.kind, GistSearchItemKind::Heap { .. })
     }
+
+    fn heap_tid(&self) -> Option<ItemPointerData> {
+        match &self.kind {
+            GistSearchItemKind::Heap { tid, .. } => Some(*tid),
+            GistSearchItemKind::Page { .. } => None,
+        }
+    }
 }
 
 impl Ord for GistSearchItem {
     fn cmp(&self, other: &Self) -> Ordering {
+        if self.distances.is_empty() && other.distances.is_empty() {
+            return match (self.heap_tid(), other.heap_tid()) {
+                (Some(left), Some(right)) => right.cmp(&left),
+                (None, Some(_)) => Ordering::Greater,
+                (Some(_), None) => Ordering::Less,
+                (None, None) => self.ordinal.cmp(&other.ordinal),
+            };
+        }
+
         for (left, right) in self.distances.iter().zip(other.distances.iter()) {
             let cmp = match (left.is_null, right.is_null) {
                 (true, true) => Ordering::Equal,
