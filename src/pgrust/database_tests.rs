@@ -9772,6 +9772,22 @@ fn comment_on_missing_index_reports_relation_does_not_exist() {
 }
 
 #[test]
+fn drop_missing_index_reports_index_does_not_exist() {
+    let base = temp_dir("drop_missing_index");
+    let db = Database::open(&base, 16).unwrap();
+
+    match db.execute(1, "drop index missing_idx") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "index \"missing_idx\" does not exist");
+            assert_eq!(sqlstate, "42704");
+        }
+        other => panic!("expected missing index error, got {other:?}"),
+    }
+}
+
+#[test]
 fn comment_on_aggregate_uses_pg_proc_description_rows() {
     let base = temp_dir("comment_on_aggregate");
     let db = Database::open(&base, 16).unwrap();
@@ -13508,6 +13524,51 @@ fn alter_table_rename_column_updates_lookup_and_rolls_back() {
 }
 
 #[test]
+fn alter_table_rename_column_reports_postgres_errors() {
+    let base = temp_dir("alter_table_rename_column_pg_errors");
+    let db = Database::open(&base, 16).unwrap();
+
+    match db.execute(
+        1,
+        "alter table nonesuchrel rename column nonesuchatt to newnonesuchatt",
+    ) {
+        Err(ExecError::Parse(ParseError::UnknownTable(name))) if name == "nonesuchrel" => {}
+        other => panic!("expected missing relation error, got {other:?}"),
+    }
+
+    db.execute(1, "create table emp (name text, salary int4)")
+        .unwrap();
+    db.execute(1, "create table stud_emp (manager int4) inherits (emp)")
+        .unwrap();
+
+    match db.execute(1, "alter table emp rename column salary to manager") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "column \"manager\" of relation \"stud_emp\" already exists"
+            );
+            assert_eq!(sqlstate, "42701");
+        }
+        other => panic!("expected duplicate inherited column error, got {other:?}"),
+    }
+
+    match db.execute(1, "alter table emp rename column salary to ctid") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "column name \"ctid\" conflicts with a system column name"
+            );
+            assert_eq!(sqlstate, "42701");
+        }
+        other => panic!("expected system column conflict error, got {other:?}"),
+    }
+}
+
+#[test]
 fn alter_table_rename_column_persists_after_reopen() {
     let base = temp_dir("alter_table_rename_column_reopen");
     let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
@@ -14830,6 +14891,96 @@ fn spgist_box_window_knn_avoids_sort_when_index_can_supply_order() {
             .iter()
             .any(|line| line.contains("Sort")),
         "expected filtered ordered window query to avoid Sort, got {filtered_window_lines:?}"
+    );
+}
+
+#[test]
+fn create_gist_polygon_and_circle_indexes_use_default_box_key_opclasses() {
+    let base = temp_dir("gist_polygon_circle_default_opclasses");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table geom_gist (id int4 not null, p polygon, c circle)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into geom_gist values \
+         (1, '((0,0),(2,0),(1,2))'::polygon, '<(0,0),2>'::circle), \
+         (2, '((5,5),(7,5),(6,7))'::polygon, '<(5,5),1>'::circle), \
+         (3, '((0,0))'::polygon, '<(NaN,NaN),NaN>'::circle), \
+         (4, '((0,1),(0,1))'::polygon, '<(3,5),0>'::circle)",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "create index geom_gist_p_idx on geom_gist using gist (p)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index geom_gist_c_idx on geom_gist using gist (c)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, i.indclass \
+             from pg_class c join pg_index i on i.indexrelid = c.oid \
+             where c.relname in ('geom_gist_p_idx', 'geom_gist_c_idx') \
+             order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("geom_gist_c_idx".into()),
+                Value::Text(
+                    crate::include::catalog::CIRCLE_GIST_OPCLASS_OID
+                        .to_string()
+                        .into()
+                ),
+            ],
+            vec![
+                Value::Text("geom_gist_p_idx".into()),
+                Value::Text(
+                    crate::include::catalog::POLY_GIST_OPCLASS_OID
+                        .to_string()
+                        .into()
+                ),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn explain_geometry_sort_keys_render_sql_function_names() {
+    let base = temp_dir("explain_geometry_sort_keys");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table poly_sort (f1 polygon)")
+        .unwrap();
+
+    let area_lines = explain_lines(&db, 1, "select * from poly_sort order by area(f1)");
+    assert!(
+        area_lines
+            .iter()
+            .any(|line| line.contains("Sort Key: (area(f1))")),
+        "expected SQL area sort key, got {area_lines:?}"
+    );
+
+    let center_x_lines = explain_lines(
+        &db,
+        1,
+        "select * from poly_sort order by (poly_center(f1))[0]",
+    );
+    assert!(
+        center_x_lines
+            .iter()
+            .any(|line| line.contains("Sort Key: ((poly_center(f1))[0])")),
+        "expected SQL poly_center subscript sort key, got {center_x_lines:?}"
     );
 }
 
@@ -20125,6 +20276,25 @@ fn set_constraints_outside_transaction_emits_warning() {
         notices[0].message,
         "SET CONSTRAINTS can only be used in transaction blocks"
     );
+}
+
+#[test]
+fn abort_outside_transaction_emits_warning() {
+    let base = temp_dir("abort_outside_transaction_warning");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    clear_backend_notices();
+    assert_eq!(
+        session.execute(&db, "abort").unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].severity, "WARNING");
+    assert_eq!(notices[0].sqlstate, "01000");
+    assert_eq!(notices[0].message, "there is no transaction in progress");
 }
 
 #[test]

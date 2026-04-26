@@ -223,7 +223,7 @@ impl Database {
         } else if drop_stmt.if_exists {
             Ok(StatementResult::AffectedRows(0))
         } else {
-            Err(ExecError::Parse(ParseError::TableDoesNotExist(
+            Err(ExecError::Parse(ParseError::UnknownTable(
                 drop_stmt.relation_name.clone(),
             )))
         }
@@ -242,6 +242,11 @@ impl Database {
         let relation = match lookup_rule_relation_for_ddl(&catalog, &drop_stmt.relation_name) {
             Ok(relation) => relation,
             Err(_err) if drop_stmt.if_exists => return Ok(StatementResult::AffectedRows(0)),
+            Err(ExecError::Parse(ParseError::TableDoesNotExist(_))) => {
+                return Err(ExecError::Parse(ParseError::UnknownTable(
+                    drop_stmt.relation_name.clone(),
+                )));
+            }
             Err(err) => return Err(err),
         };
         ensure_relation_owner(self, client_id, &relation, &drop_stmt.relation_name)?;

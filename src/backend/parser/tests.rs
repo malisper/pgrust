@@ -6372,6 +6372,33 @@ fn parse_postgres_operator_edge_cases() {
 }
 
 #[test]
+fn parse_syntax_errors_carry_postgres_positions() {
+    for (sql, token) in [
+        ("select distinct from from tenk1", "from"),
+        ("select distinct from tenk1", "from"),
+        ("drop function 314159()", "314159"),
+        ("drop aggregate 314159(integer)", "314159"),
+        ("drop operator (integer, integer)", "("),
+    ] {
+        let err = parse_statement(sql).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("syntax error at or near \"{token}\"")
+        );
+        assert_eq!(err.position(), sql.find(token).map(|index| index + 1));
+    }
+}
+
+#[test]
+fn parse_end_of_input_syntax_errors_carry_position() {
+    let sql = "CREATE TABLE";
+    let err = parse_statement(sql).unwrap_err();
+
+    assert!(err.to_string().contains("end of input"));
+    assert_eq!(err.position(), Some(sql.len() + 1));
+}
+
+#[test]
 fn parse_power_operator_and_in_list() {
     let stmt = parse_select("select x ^ '2.0', x in (0, 1, 2) from metrics").unwrap();
     assert!(matches!(
@@ -7487,6 +7514,20 @@ fn build_plan_dispatches_geometry_and_range_position_operators_independently() {
                 == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
                     crate::include::nodes::primnodes::BuiltinScalarFunction::RangeOverLeft
                 )
+    ));
+}
+
+#[test]
+fn build_plan_rejects_lseg_point_intersection_operator() {
+    let err = build_plan(
+        &parse_select("select '[(0,0),(1,1)]'::lseg # '(0,0)'::point").unwrap(),
+        &catalog(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UndefinedOperator { op, left_type, right_type }
+            if op == "#" && left_type == "lseg" && right_type == "point"
     ));
 }
 

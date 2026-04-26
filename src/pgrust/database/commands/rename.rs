@@ -36,9 +36,15 @@ fn collect_rename_column_targets(
     } else {
         catalog.find_all_inheritors(relation.relation_oid)
     };
-    let relation_oids = relation_oids
+    let mut relation_oids = relation_oids
         .into_iter()
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if !only {
+        relation_oids
+            .sort_by_key(|relation_oid| (*relation_oid == relation.relation_oid, *relation_oid));
+    }
     let mut targets = Vec::with_capacity(relation_oids.len());
 
     for relation_oid in relation_oids {
@@ -51,11 +57,38 @@ fn collect_rename_column_targets(
                     ExecError::Parse(ParseError::UnknownTable(relation_oid.to_string()))
                 })?
         };
-        validate_alter_table_rename_column(&target.desc, column_name, new_column_name)?;
+        let relation_name = relation_name_for_error(catalog, &target);
+        validate_alter_table_rename_column(
+            &target.desc,
+            &relation_name,
+            column_name,
+            new_column_name,
+        )?;
         targets.push(target);
     }
 
     Ok(targets)
+}
+
+fn relation_name_for_error(catalog: &dyn CatalogLookup, relation: &BoundRelation) -> String {
+    catalog
+        .class_row_by_oid(relation.relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation.relation_oid.to_string())
+}
+
+fn map_relation_rename_error(err: crate::backend::catalog::catalog::CatalogError) -> ExecError {
+    match err {
+        crate::backend::catalog::catalog::CatalogError::TableAlreadyExists(name) => {
+            ExecError::DetailedError {
+                message: format!("relation \"{name}\" already exists"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P07",
+            }
+        }
+        other => map_catalog_error(other),
+    }
 }
 
 fn lookup_relation_for_rename(
@@ -323,6 +356,15 @@ impl Database {
             return Ok(StatementResult::AffectedRows(0));
         };
         let new_table_name = normalize_rename_target_name(&rename_stmt.new_table_name)?;
+        let current_relation_name = relation_name_for_error(&catalog, &relation);
+        if current_relation_name.eq_ignore_ascii_case(&new_table_name) {
+            return Err(ExecError::DetailedError {
+                message: format!("relation \"{current_relation_name}\" already exists"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P07",
+            });
+        }
         let visible_type_rows = catalog.type_rows();
         ensure_relation_owner(self, client_id, &relation, &rename_stmt.table_name)?;
         let dependent_views = dependent_view_rewrites_for_relation(
@@ -351,7 +393,7 @@ impl Database {
                     &visible_type_rows,
                     &ctx,
                 )
-                .map_err(map_catalog_error)?;
+                .map_err(map_relation_rename_error)?;
             catalog_effects.push(effect);
             rewrite_dependent_views(
                 self,
@@ -449,11 +491,7 @@ impl Database {
         }
         reject_typed_table_ddl(&relation, "rename column of")?;
         ensure_relation_owner(self, client_id, &relation, &rename_stmt.table_name)?;
-        let new_column_name = validate_alter_table_rename_column(
-            &relation.desc,
-            &rename_stmt.column_name,
-            &rename_stmt.new_column_name,
-        )?;
+        let new_column_name = normalize_rename_target_name(&rename_stmt.new_column_name)?;
         let targets = collect_rename_column_targets(
             &catalog,
             &relation,
@@ -560,6 +598,7 @@ impl Database {
         ensure_relation_owner(self, client_id, &relation, &rename_stmt.table_name)?;
         let new_column_name = validate_alter_table_rename_column(
             &relation.desc,
+            &relation_name_for_error(&catalog, &relation),
             &rename_stmt.column_name,
             &rename_stmt.new_column_name,
         )?;

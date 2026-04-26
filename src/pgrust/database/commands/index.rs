@@ -1081,7 +1081,7 @@ impl Database {
                     CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
                     _ => ExecError::Parse(ParseError::UnexpectedToken {
                         expected: "index access method build",
-                        actual: "index build failed".into(),
+                        actual: format!("index build failed: {err:?}"),
                     }),
                 })?;
         }

@@ -16,11 +16,11 @@ use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
 use crate::include::access::spgist::SPGIST_CONFIG_PROC;
 use crate::include::catalog::{
     ANYARRAYOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID,
-    GIST_AM_OID, GIST_MULTIRANGE_FAMILY_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID,
-    PG_LARGEOBJECT_METADATA_RELATION_OID, PgStatisticRow, SPG_BOX_QUAD_CONFIG_PROC_OID,
-    SPG_KD_CONFIG_PROC_OID, SPG_NETWORK_CONFIG_PROC_OID, SPG_QUAD_CONFIG_PROC_OID,
-    SPG_RANGE_CONFIG_PROC_OID, SPG_TEXT_CONFIG_PROC_OID, SPGIST_AM_OID, SPGIST_TEXT_FAMILY_OID,
-    bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
+    GIST_AM_OID, GIST_CIRCLE_FAMILY_OID, GIST_MULTIRANGE_FAMILY_OID, GIST_POLY_FAMILY_OID,
+    GIST_RANGE_FAMILY_OID, HASH_AM_OID, PG_LARGEOBJECT_METADATA_RELATION_OID, PgStatisticRow,
+    SPG_BOX_QUAD_CONFIG_PROC_OID, SPG_KD_CONFIG_PROC_OID, SPG_NETWORK_CONFIG_PROC_OID,
+    SPG_QUAD_CONFIG_PROC_OID, SPG_RANGE_CONFIG_PROC_OID, SPG_TEXT_CONFIG_PROC_OID, SPGIST_AM_OID,
+    SPGIST_TEXT_FAMILY_OID, bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
     proc_oid_for_builtin_scalar_function, range_type_ref_for_sql_type, relkind_has_storage,
 };
 use crate::include::nodes::datum::ArrayValue;
@@ -48,6 +48,14 @@ use super::regex_prefix::{RegexFixedPrefix, regex_fixed_prefix, regex_prefix_upp
 
 fn is_gist_like_am(am_oid: u32) -> bool {
     am_oid == GIST_AM_OID || am_oid == SPGIST_AM_OID
+}
+
+fn gist_polygon_circle_family(index: &BoundIndexRelation, index_pos: usize) -> bool {
+    index.index_meta.am_oid == GIST_AM_OID
+        && matches!(
+            index.index_meta.opfamily_oids.get(index_pos).copied(),
+            Some(GIST_POLY_FAMILY_OID | GIST_CIRCLE_FAMILY_OID)
+        )
 }
 
 pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
@@ -3994,6 +4002,9 @@ fn qual_strategy(
     index_pos: usize,
     qual: &IndexableQual,
 ) -> Option<u16> {
+    if gist_polygon_circle_family(index, index_pos) {
+        return None;
+    }
     if is_gist_like_am(index.index_meta.am_oid)
         && !matches!(qual.argument, IndexScanKeyArgument::Const(_))
     {
@@ -4695,6 +4706,9 @@ fn gist_order_match(
             return (Vec::new(), None);
         };
         let Some((index_pos, strategy)) = (0..index_key_count(index)).find_map(|index_pos| {
+            if gist_polygon_circle_family(index, index_pos) {
+                return None;
+            }
             if simple_index_column(index, index_pos) != Some(column) {
                 return None;
             }

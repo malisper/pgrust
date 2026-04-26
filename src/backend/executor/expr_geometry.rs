@@ -900,7 +900,7 @@ fn eval_geo_bound_box(values: &[Value]) -> Result<Value, ExecError> {
 fn eval_geo_diagonal(values: &[Value]) -> Result<Value, ExecError> {
     unary_geometry(values, "diagonal", |value| match value {
         Value::Box(geo_box) => Ok(Value::Lseg(GeoLseg {
-            p: [geo_box.low.clone(), geo_box.high.clone()],
+            p: [geo_box.high.clone(), geo_box.low.clone()],
         })),
         other => type_mismatch_unary("diagonal", other),
     })
@@ -1060,11 +1060,26 @@ fn eval_geo_eq(values: &[Value]) -> Result<Value, ExecError> {
 }
 
 fn eval_geo_ne(values: &[Value]) -> Result<Value, ExecError> {
-    compare_binary(values, "<>", |left, right| {
-        let Value::Bool(eq) = eval_geo_eq(&[left.clone(), right.clone()])? else {
-            unreachable!()
-        };
-        Ok(Value::Bool(!eq))
+    compare_binary(values, "<>", |left, right| match (left, right) {
+        (Value::Line(left), Value::Line(right)) => Ok(Value::Bool(!line_same(left, right))),
+        (Value::Box(left), Value::Box(right)) => {
+            Ok(Value::Bool(fp_ne(box_area(left), box_area(right))))
+        }
+        (Value::Lseg(left), Value::Lseg(right)) => Ok(Value::Bool(
+            !point_same(&left.p[0], &right.p[0]) || !point_same(&left.p[1], &right.p[1]),
+        )),
+        (Value::Path(left), Value::Path(right)) => {
+            Ok(Value::Bool(left.points.len() != right.points.len()))
+        }
+        (Value::Circle(left), Value::Circle(right)) => {
+            Ok(Value::Bool(fp_ne(circle_area(left), circle_area(right))))
+        }
+        (Value::Point(left), Value::Point(right)) => Ok(Value::Bool(!point_same(left, right))),
+        _ => Err(ExecError::TypeMismatch {
+            op: "<>",
+            left: left.clone(),
+            right: right.clone(),
+        }),
     })
 }
 
@@ -1204,22 +1219,30 @@ fn eval_geo_distance(values: &[Value]) -> Result<Value, ExecError> {
 fn eval_geo_closest_point(values: &[Value]) -> Result<Value, ExecError> {
     compare_binary(values, "##", |left, right| match (left, right) {
         (Value::Point(point), Value::Line(line)) => {
-            Ok(Value::Point(point_to_line_closest(line, point)))
+            Ok(closest_point_value(line_closept_point(line, point)))
         }
         (Value::Point(point), Value::Lseg(lseg)) => {
-            Ok(Value::Point(point_to_lseg_closest(lseg, point)))
+            Ok(closest_point_value(lseg_closept_point(lseg, point)))
         }
         (Value::Point(point), Value::Box(geo_box)) => {
-            Ok(Value::Point(point_to_box_closest(geo_box, point)))
+            Ok(closest_point_value(box_closept_point(geo_box, point)))
         }
         (Value::Line(line), Value::Lseg(lseg)) => {
-            Ok(Value::Point(line_to_lseg_closest(line, lseg)))
+            if lseg_slope(lseg) == line_slope(line) {
+                Ok(Value::Null)
+            } else {
+                Ok(closest_point_value(lseg_closept_line(lseg, line)))
+            }
         }
         (Value::Lseg(left), Value::Lseg(right)) => {
-            Ok(Value::Point(lseg_to_lseg_closest(left, right)))
+            if lseg_slope(left) == lseg_slope(right) {
+                Ok(Value::Null)
+            } else {
+                Ok(closest_point_value(lseg_closept_lseg(right, left)))
+            }
         }
         (Value::Lseg(lseg), Value::Box(geo_box)) => {
-            Ok(Value::Point(lseg_to_box_closest(lseg, geo_box)))
+            Ok(closest_point_value(box_closept_lseg(geo_box, lseg)))
         }
         _ => Err(ExecError::TypeMismatch {
             op: "##",
@@ -1237,13 +1260,6 @@ fn eval_geo_intersection(values: &[Value]) -> Result<Value, ExecError> {
         (Value::Lseg(left), Value::Lseg(right)) => Ok(lseg_intersection(left, right)
             .map(Value::Point)
             .unwrap_or(Value::Null)),
-        (Value::Lseg(lseg), Value::Point(point)) | (Value::Point(point), Value::Lseg(lseg)) => {
-            Ok(if lseg_contains_point(lseg, point) {
-                Value::Point(point.clone())
-            } else {
-                Value::Null
-            })
-        }
         (Value::Box(left), Value::Box(right)) => Ok(box_intersection(left, right)
             .map(Value::Box)
             .unwrap_or(Value::Null)),
@@ -1418,12 +1434,20 @@ fn eval_geo_over_right(values: &[Value]) -> Result<Value, ExecError> {
 }
 
 fn eval_geo_below(values: &[Value]) -> Result<Value, ExecError> {
-    bbox_relation(
-        values,
-        "<<|",
-        |left, right| fp_lt(left.max_y, right.min_y),
-        point_below_relation,
-    )
+    compare_binary(values, "<<|", |left, right| match (left, right) {
+        (Value::Point(left), Value::Point(right)) => {
+            Ok(Value::Bool(point_below_relation(left, right)))
+        }
+        (Value::Box(left), Value::Box(right)) => Ok(Value::Bool(fp_le(left.high.y, right.low.y))),
+        _ => match (value_bounds(left), value_bounds(right)) {
+            (Some(left), Some(right)) => Ok(Value::Bool(fp_lt(left.max_y, right.min_y))),
+            _ => Err(ExecError::TypeMismatch {
+                op: "<<|",
+                left: left.clone(),
+                right: right.clone(),
+            }),
+        },
+    })
 }
 
 fn eval_geo_over_below(values: &[Value]) -> Result<Value, ExecError> {
@@ -1436,12 +1460,20 @@ fn eval_geo_over_below(values: &[Value]) -> Result<Value, ExecError> {
 }
 
 fn eval_geo_above(values: &[Value]) -> Result<Value, ExecError> {
-    bbox_relation(
-        values,
-        "|>>",
-        |left, right| fp_gt(left.min_y, right.max_y),
-        point_above_relation,
-    )
+    compare_binary(values, "|>>", |left, right| match (left, right) {
+        (Value::Point(left), Value::Point(right)) => {
+            Ok(Value::Bool(point_above_relation(left, right)))
+        }
+        (Value::Box(left), Value::Box(right)) => Ok(Value::Bool(fp_ge(left.low.y, right.high.y))),
+        _ => match (value_bounds(left), value_bounds(right)) {
+            (Some(left), Some(right)) => Ok(Value::Bool(fp_gt(left.min_y, right.max_y))),
+            _ => Err(ExecError::TypeMismatch {
+                op: "|>>",
+                left: left.clone(),
+                right: right.clone(),
+            }),
+        },
+    })
 }
 
 fn eval_geo_over_above(values: &[Value]) -> Result<Value, ExecError> {
@@ -1733,12 +1765,12 @@ fn point_div(left: &GeoPoint, right: &GeoPoint) -> Result<GeoPoint, ExecError> {
 fn canonical_box(first: GeoPoint, second: GeoPoint) -> GeoBox {
     GeoBox {
         high: GeoPoint {
-            x: first.x.max(second.x),
-            y: first.y.max(second.y),
+            x: pg_float8_max(first.x, second.x),
+            y: pg_float8_max(first.y, second.y),
         },
         low: GeoPoint {
-            x: first.x.min(second.x),
-            y: first.y.min(second.y),
+            x: pg_float8_min(first.x, second.x),
+            y: pg_float8_min(first.y, second.y),
         },
     }
 }
@@ -1764,12 +1796,12 @@ pub(crate) fn box_area(geo_box: &GeoBox) -> f64 {
 pub(crate) fn bound_box(left: &GeoBox, right: &GeoBox) -> GeoBox {
     GeoBox {
         high: GeoPoint {
-            x: left.high.x.max(right.high.x),
-            y: left.high.y.max(right.high.y),
+            x: pg_float8_max(left.high.x, right.high.x),
+            y: pg_float8_max(left.high.y, right.high.y),
         },
         low: GeoPoint {
-            x: left.low.x.min(right.low.x),
-            y: left.low.y.min(right.low.y),
+            x: pg_float8_min(left.low.x, right.low.x),
+            y: pg_float8_min(left.low.y, right.low.y),
         },
     }
 }
@@ -1858,6 +1890,19 @@ fn circle_to_box(circle: &GeoCircle) -> GeoBox {
     }
 }
 
+pub(crate) fn circle_bound_box(circle: &GeoCircle) -> GeoBox {
+    GeoBox {
+        high: GeoPoint {
+            x: circle.center.x + circle.radius,
+            y: circle.center.y + circle.radius,
+        },
+        low: GeoPoint {
+            x: circle.center.x - circle.radius,
+            y: circle.center.y - circle.radius,
+        },
+    }
+}
+
 fn make_circle(center: GeoPoint, radius: f64) -> Result<GeoCircle, ExecError> {
     if radius < 0.0 {
         return Err(invalid_geometry_input(
@@ -1892,7 +1937,7 @@ fn circle_contains_circle(outer: &GeoCircle, inner: &GeoCircle) -> bool {
 }
 
 fn circle_circle_distance(left: &GeoCircle, right: &GeoCircle) -> f64 {
-    (point_distance(&left.center, &right.center) - (left.radius + right.radius)).max(0.0)
+    clamp_nonnegative(point_distance(&left.center, &right.center) - (left.radius + right.radius))
 }
 
 fn circle_to_polygon(npts: i32, circle: &GeoCircle) -> Result<GeoPolygon, ExecError> {
@@ -1926,10 +1971,10 @@ fn make_polygon(points: Vec<GeoPoint>) -> GeoPolygon {
     let mut min_y = f64::INFINITY;
     let mut max_y = f64::NEG_INFINITY;
     for point in &points {
-        min_x = min_x.min(point.x);
-        max_x = max_x.max(point.x);
-        min_y = min_y.min(point.y);
-        max_y = max_y.max(point.y);
+        min_x = pg_float8_min(point.x, min_x);
+        max_x = pg_float8_max(point.x, max_x);
+        min_y = pg_float8_min(point.y, min_y);
+        max_y = pg_float8_max(point.y, max_y);
     }
     GeoPolygon {
         bound_box: GeoBox {
@@ -2369,15 +2414,106 @@ fn line_distance(left: &GeoLine, right: &GeoLine) -> f64 {
     (left.c - ratio * right.c).abs() / (left.a * left.a + left.b * left.b).sqrt()
 }
 
-fn point_line_distance(point: &GeoPoint, line: &GeoLine) -> f64 {
-    normalized_line_eval(line, point).abs() / (line.a * line.a + line.b * line.b).sqrt()
+fn clean_float_zero(value: f64) -> f64 {
+    if value == 0.0 { 0.0 } else { value }
 }
 
-fn point_to_line_closest(line: &GeoLine, point: &GeoPoint) -> GeoPoint {
-    let denom = line.a * line.a + line.b * line.b;
+fn clean_point_zero(point: GeoPoint) -> GeoPoint {
     GeoPoint {
-        x: (line.b * (line.b * point.x - line.a * point.y) - line.a * line.c) / denom,
-        y: (line.a * (-line.b * point.x + line.a * point.y) - line.b * line.c) / denom,
+        x: clean_float_zero(point.x),
+        y: clean_float_zero(point.y),
+    }
+}
+
+fn clamp_nonnegative(value: f64) -> f64 {
+    if value < 0.0 { 0.0 } else { value }
+}
+
+fn closest_point_value((distance, point): (f64, Option<GeoPoint>)) -> Value {
+    if distance.is_nan() {
+        return Value::Null;
+    }
+    point
+        .map(clean_point_zero)
+        .map(Value::Point)
+        .unwrap_or(Value::Null)
+}
+
+fn line_from_point_slope(point: &GeoPoint, slope: f64) -> GeoLine {
+    if slope.is_infinite() {
+        GeoLine {
+            a: -1.0,
+            b: 0.0,
+            c: point.x,
+        }
+    } else if slope == 0.0 {
+        GeoLine {
+            a: 0.0,
+            b: -1.0,
+            c: point.y,
+        }
+    } else {
+        let c = point.y - slope * point.x;
+        GeoLine {
+            a: slope,
+            b: -1.0,
+            c: clean_float_zero(c),
+        }
+    }
+}
+
+fn line_slope(line: &GeoLine) -> f64 {
+    if fp_zero(line.a) {
+        0.0
+    } else if fp_zero(line.b) {
+        f64::INFINITY
+    } else {
+        line.a / -line.b
+    }
+}
+
+fn line_inverse_slope(line: &GeoLine) -> f64 {
+    if fp_zero(line.a) {
+        f64::INFINITY
+    } else if fp_zero(line.b) {
+        0.0
+    } else {
+        line.b / line.a
+    }
+}
+
+fn lseg_slope(lseg: &GeoLseg) -> f64 {
+    point_slope(&lseg.p[0], &lseg.p[1])
+}
+
+fn point_line_distance(point: &GeoPoint, line: &GeoLine) -> f64 {
+    line_closept_point(line, point).0
+}
+
+fn line_closept_point(line: &GeoLine, point: &GeoPoint) -> (f64, Option<GeoPoint>) {
+    let tmp = line_from_point_slope(point, line_inverse_slope(line));
+    let Some(closept) = line_intersection(&tmp, line) else {
+        return (f64::NAN, Some(point.clone()));
+    };
+    (point_distance(&closept, point), Some(closept))
+}
+
+fn lseg_line(lseg: &GeoLseg) -> GeoLine {
+    line_from_point_slope(&lseg.p[0], lseg_slope(lseg))
+}
+
+fn lseg_intersection_line(lseg: &GeoLseg, line: &GeoLine) -> Option<GeoPoint> {
+    let tmp = lseg_line(lseg);
+    let interpt = line_intersection(&tmp, line)?;
+    if !lseg_contains_point(lseg, &interpt) {
+        return None;
+    }
+    if point_same(&lseg.p[0], &interpt) {
+        Some(lseg.p[0].clone())
+    } else if point_same(&lseg.p[1], &interpt) {
+        Some(lseg.p[1].clone())
+    } else {
+        Some(interpt)
     }
 }
 
@@ -2392,107 +2528,91 @@ fn lseg_contains_point(lseg: &GeoLseg, point: &GeoPoint) -> bool {
     point_on_segment(point, &lseg.p[0], &lseg.p[1])
 }
 
-fn point_to_lseg_closest(lseg: &GeoLseg, point: &GeoPoint) -> GeoPoint {
-    let dx = lseg.p[1].x - lseg.p[0].x;
-    let dy = lseg.p[1].y - lseg.p[0].y;
-    let denom = dx * dx + dy * dy;
-    if denom == 0.0 {
-        return lseg.p[0].clone();
+fn lseg_closept_line(lseg: &GeoLseg, line: &GeoLine) -> (f64, Option<GeoPoint>) {
+    if let Some(point) = lseg_intersection_line(lseg, line) {
+        return (0.0, Some(point));
     }
-    let t = (((point.x - lseg.p[0].x) * dx) + ((point.y - lseg.p[0].y) * dy)) / denom;
-    let t = t.clamp(0.0, 1.0);
-    GeoPoint {
-        x: lseg.p[0].x + t * dx,
-        y: lseg.p[0].y + t * dy,
+    let dist1 = line_closept_point(line, &lseg.p[0]).0;
+    let dist2 = line_closept_point(line, &lseg.p[1]).0;
+    if dist1 < dist2 {
+        (dist1, Some(lseg.p[0].clone()))
+    } else {
+        (dist2, Some(lseg.p[1].clone()))
     }
+}
+
+fn lseg_closept_point(lseg: &GeoLseg, point: &GeoPoint) -> (f64, Option<GeoPoint>) {
+    let tmp = line_from_point_slope(point, inverse_slope(&lseg.p[0], &lseg.p[1]));
+    let (_, closept) = lseg_closept_line(lseg, &tmp);
+    let Some(closept) = closept else {
+        return (f64::NAN, None);
+    };
+    (point_distance(&closept, point), Some(closept))
 }
 
 fn point_lseg_distance(point: &GeoPoint, lseg: &GeoLseg) -> f64 {
-    point_distance(point, &point_to_lseg_closest(lseg, point))
+    lseg_closept_point(lseg, point).0
 }
 
-fn point_to_box_closest(geo_box: &GeoBox, point: &GeoPoint) -> GeoPoint {
-    GeoPoint {
-        x: point.x.clamp(geo_box.low.x, geo_box.high.x),
-        y: point.y.clamp(geo_box.low.y, geo_box.high.y),
+fn box_closept_point(geo_box: &GeoBox, point: &GeoPoint) -> (f64, Option<GeoPoint>) {
+    if box_contains_point(geo_box, point) {
+        return (0.0, Some(point.clone()));
     }
+    let mut best_distance = 0.0;
+    let mut best_point = None;
+    let mut have_min = false;
+    for edge in box_edges_pg(geo_box) {
+        let (distance, closept) = lseg_closept_point(&edge, point);
+        if !have_min || distance < best_distance {
+            best_distance = distance;
+            best_point = closept;
+            have_min = true;
+        }
+    }
+    (best_distance, best_point)
 }
 
 fn point_box_distance(point: &GeoPoint, geo_box: &GeoBox) -> f64 {
-    point_distance(point, &point_to_box_closest(geo_box, point))
+    box_closept_point(geo_box, point).0
 }
 
 fn point_circle_distance(point: &GeoPoint, circle: &GeoCircle) -> f64 {
-    (point_distance(point, &circle.center) - circle.radius).max(0.0)
+    clamp_nonnegative(point_distance(point, &circle.center) - circle.radius)
 }
 
 fn point_path_distance(point: &GeoPoint, path: &GeoPath) -> f64 {
-    if path.closed && point_in_path(point, path) {
-        return 0.0;
-    }
-    let mut best = f64::INFINITY;
+    let mut best = 0.0;
+    let mut have_min = false;
     for segment in path_segments(path) {
-        best = best.min(point_lseg_distance(point, &segment));
+        let distance = point_lseg_distance(point, &segment);
+        if !have_min || distance < best {
+            best = distance;
+            have_min = true;
+        }
     }
-    if best.is_infinite() { 0.0 } else { best }
+    best
 }
 
 pub(crate) fn point_polygon_distance(point: &GeoPoint, poly: &GeoPolygon) -> f64 {
     if point_in_polygon(point, poly) != 0 {
         return 0.0;
     }
-    let mut best = f64::INFINITY;
+    let mut best = 0.0;
+    let mut have_min = false;
     for segment in closed_segments(&poly.points) {
-        best = best.min(point_lseg_distance(point, &segment));
+        let distance = point_lseg_distance(point, &segment);
+        if !have_min || distance < best {
+            best = distance;
+            have_min = true;
+        }
     }
     best
 }
 
 fn lseg_intersection(left: &GeoLseg, right: &GeoLseg) -> Option<GeoPoint> {
-    let p = &left.p[0];
-    let p2 = &left.p[1];
-    let q = &right.p[0];
-    let q2 = &right.p[1];
-    let r = GeoPoint {
-        x: p2.x - p.x,
-        y: p2.y - p.y,
-    };
-    let s = GeoPoint {
-        x: q2.x - q.x,
-        y: q2.y - q.y,
-    };
-    let denom = r.x * s.y - r.y * s.x;
-    let qp = GeoPoint {
-        x: q.x - p.x,
-        y: q.y - p.y,
-    };
-    if fp_zero(denom) {
-        if lseg_contains_point(left, q) {
-            return Some(q.clone());
-        }
-        if lseg_contains_point(left, q2) {
-            return Some(q2.clone());
-        }
-        if lseg_contains_point(right, p) {
-            return Some(p.clone());
-        }
-        if lseg_contains_point(right, p2) {
-            return Some(p2.clone());
-        }
-        return None;
-    }
-    let t = (qp.x * s.y - qp.y * s.x) / denom;
-    let u = (qp.x * r.y - qp.y * r.x) / denom;
-    if (-GEOMETRY_EPSILON..=1.0 + GEOMETRY_EPSILON).contains(&t)
-        && (-GEOMETRY_EPSILON..=1.0 + GEOMETRY_EPSILON).contains(&u)
-    {
-        Some(GeoPoint {
-            x: p.x + t * r.x,
-            y: p.y + t * r.y,
-        })
-    } else {
-        None
-    }
+    let tmp = lseg_line(right);
+    let interpt = lseg_intersection_line(left, &tmp)?;
+    lseg_contains_point(right, &interpt).then_some(interpt)
 }
 
 fn lseg_parallel(left: &GeoLseg, right: &GeoLseg) -> bool {
@@ -2520,67 +2640,36 @@ fn inverse_slope(left: &GeoPoint, right: &GeoPoint) -> f64 {
 }
 
 fn lseg_line_distance(lseg: &GeoLseg, line: &GeoLine) -> f64 {
-    if lseg_intersects_line(lseg, line) {
-        0.0
-    } else {
-        point_line_distance(&lseg.p[0], line).min(point_line_distance(&lseg.p[1], line))
-    }
+    lseg_closept_line(lseg, line).0
 }
 
 fn lseg_lseg_distance(left: &GeoLseg, right: &GeoLseg) -> f64 {
-    if lseg_intersection(left, right).is_some() {
-        return 0.0;
-    }
-    point_lseg_distance(&left.p[0], right)
-        .min(point_lseg_distance(&left.p[1], right))
-        .min(point_lseg_distance(&right.p[0], left))
-        .min(point_lseg_distance(&right.p[1], left))
+    lseg_closept_lseg(left, right).0
 }
 
 fn lseg_box_distance(lseg: &GeoLseg, geo_box: &GeoBox) -> f64 {
-    if lseg_intersects_box(lseg, geo_box) {
-        return 0.0;
-    }
-    let edges = box_edges(geo_box);
-    let mut best =
-        point_box_distance(&lseg.p[0], geo_box).min(point_box_distance(&lseg.p[1], geo_box));
-    for edge in &edges {
-        best = best.min(lseg_lseg_distance(lseg, edge));
-    }
-    best
+    box_closept_lseg(geo_box, lseg).0
 }
 
 pub(crate) fn box_box_distance(left: &GeoBox, right: &GeoBox) -> f64 {
-    if box_overlap(left, right) {
-        return 0.0;
-    }
-    let dx = if right.low.x > left.high.x {
-        right.low.x - left.high.x
-    } else if left.low.x > right.high.x {
-        left.low.x - right.high.x
-    } else {
-        0.0
-    };
-    let dy = if right.low.y > left.high.y {
-        right.low.y - left.high.y
-    } else if left.low.y > right.high.y {
-        left.low.y - right.high.y
-    } else {
-        0.0
-    };
-    dx.hypot(dy)
+    point_distance(&box_center(left), &box_center(right))
 }
 
 fn path_path_distance(left: &GeoPath, right: &GeoPath) -> f64 {
     let left_segments = path_segments(left);
     let right_segments = path_segments(right);
-    let mut best = f64::INFINITY;
+    let mut best = 0.0;
+    let mut have_min = false;
     for left in &left_segments {
         for right in &right_segments {
-            best = best.min(lseg_lseg_distance(left, right));
+            let distance = lseg_lseg_distance(left, right);
+            if !have_min || distance < best {
+                best = distance;
+                have_min = true;
+            }
         }
     }
-    if best.is_infinite() { 0.0 } else { best }
+    best
 }
 
 fn polygon_polygon_distance(left: &GeoPolygon, right: &GeoPolygon) -> f64 {
@@ -2590,17 +2679,22 @@ fn polygon_polygon_distance(left: &GeoPolygon, right: &GeoPolygon) -> f64 {
     {
         return 0.0;
     }
-    let mut best = f64::INFINITY;
+    let mut best = 0.0;
+    let mut have_min = false;
     for left in closed_segments(&left.points) {
         for right in closed_segments(&right.points) {
-            best = best.min(lseg_lseg_distance(&left, &right));
+            let distance = lseg_lseg_distance(&left, &right);
+            if !have_min || distance < best {
+                best = distance;
+                have_min = true;
+            }
         }
     }
     best
 }
 
 fn circle_polygon_distance(circle: &GeoCircle, poly: &GeoPolygon) -> f64 {
-    (point_polygon_distance(&circle.center, poly) - circle.radius).max(0.0)
+    clamp_nonnegative(point_polygon_distance(&circle.center, poly) - circle.radius)
 }
 
 fn line_intersects_box(line: &GeoLine, geo_box: &GeoBox) -> bool {
@@ -2610,88 +2704,79 @@ fn line_intersects_box(line: &GeoLine, geo_box: &GeoBox) -> bool {
 }
 
 fn lseg_intersects_line(lseg: &GeoLseg, line: &GeoLine) -> bool {
-    let line2 = match line_from_points(lseg.p[0].clone(), lseg.p[1].clone()) {
-        Ok(line2) => line2,
-        Err(_) => return line_contains_point(line, &lseg.p[0]),
-    };
-    let Some(point) = line_intersection(&line2, line) else {
-        return line_contains_point(line, &lseg.p[0]) && line_contains_point(line, &lseg.p[1]);
-    };
-    lseg_contains_point(lseg, &point)
+    lseg_intersection_line(lseg, line).is_some()
 }
 
 fn lseg_intersects_box(lseg: &GeoLseg, geo_box: &GeoBox) -> bool {
-    box_contains_point(geo_box, &lseg.p[0])
-        || box_contains_point(geo_box, &lseg.p[1])
-        || box_edges(geo_box)
-            .iter()
-            .any(|edge| lseg_intersection(lseg, edge).is_some())
+    box_interpt_lseg(geo_box, lseg).0
 }
 
-fn line_to_lseg_closest(line: &GeoLine, lseg: &GeoLseg) -> GeoPoint {
-    if let Some(point) = line_intersection(
-        line,
-        &line_from_points(lseg.p[0].clone(), lseg.p[1].clone()).unwrap_or(GeoLine {
-            a: 0.0,
-            b: -1.0,
-            c: lseg.p[0].y,
-        }),
-    ) && lseg_contains_point(lseg, &point)
-    {
-        return point;
+fn lseg_closept_lseg(on_lseg: &GeoLseg, to_lseg: &GeoLseg) -> (f64, Option<GeoPoint>) {
+    if let Some(point) = lseg_intersection(on_lseg, to_lseg) {
+        return (0.0, Some(point));
     }
-    let left = point_line_distance(&lseg.p[0], line);
-    let right = point_line_distance(&lseg.p[1], line);
-    if left <= right {
-        point_to_line_closest(line, &lseg.p[0])
-    } else {
-        point_to_line_closest(line, &lseg.p[1])
+
+    let (mut dist, mut result) = lseg_closept_point(on_lseg, &to_lseg.p[0]);
+    let (d, point) = lseg_closept_point(on_lseg, &to_lseg.p[1]);
+    if d < dist {
+        dist = d;
+        result = point;
     }
+
+    let d = lseg_closept_point(to_lseg, &on_lseg.p[0]).0;
+    if d < dist {
+        dist = d;
+        result = Some(on_lseg.p[0].clone());
+    }
+    let d = lseg_closept_point(to_lseg, &on_lseg.p[1]).0;
+    if d < dist {
+        dist = d;
+        result = Some(on_lseg.p[1].clone());
+    }
+
+    (dist, result)
 }
 
-fn lseg_to_lseg_closest(left: &GeoLseg, right: &GeoLseg) -> GeoPoint {
-    if let Some(point) = lseg_intersection(left, right) {
-        return point;
+fn box_interpt_lseg(geo_box: &GeoBox, lseg: &GeoLseg) -> (bool, Option<GeoPoint>) {
+    let lbox = canonical_box(lseg.p[0].clone(), lseg.p[1].clone());
+    if !box_overlap(&lbox, geo_box) {
+        return (false, None);
     }
-    let candidates = [
-        point_to_lseg_closest(left, &right.p[0]),
-        point_to_lseg_closest(left, &right.p[1]),
-        left.p[0].clone(),
-        left.p[1].clone(),
-    ];
-    let mut best = candidates[0].clone();
-    let mut best_distance = point_lseg_distance(&best, right);
-    for candidate in candidates.into_iter().skip(1) {
-        let distance = point_lseg_distance(&candidate, right);
-        if distance < best_distance {
-            best = candidate;
-            best_distance = distance;
+
+    let center = box_center(geo_box);
+    let result = lseg_closept_point(lseg, &center).1;
+
+    if box_contains_point(geo_box, &lseg.p[0]) || box_contains_point(geo_box, &lseg.p[1]) {
+        return (true, result);
+    }
+
+    for edge in box_edges_pg(geo_box) {
+        if lseg_intersection(&edge, lseg).is_some() {
+            return (true, result);
         }
     }
-    best
+
+    (false, None)
 }
 
-fn lseg_to_box_closest(lseg: &GeoLseg, geo_box: &GeoBox) -> GeoPoint {
-    if box_contains_point(geo_box, &lseg.p[0]) {
-        return lseg.p[0].clone();
+fn box_closept_lseg(geo_box: &GeoBox, lseg: &GeoLseg) -> (f64, Option<GeoPoint>) {
+    let (intersects, point) = box_interpt_lseg(geo_box, lseg);
+    if intersects {
+        return (0.0, point);
     }
-    if box_contains_point(geo_box, &lseg.p[1]) {
-        return lseg.p[1].clone();
-    }
-    let mut best = lseg.p[0].clone();
-    let mut best_distance = point_box_distance(&best, geo_box);
-    for point in [
-        &lseg.p[1],
-        &point_to_box_closest(geo_box, &lseg.p[0]),
-        &point_to_box_closest(geo_box, &lseg.p[1]),
-    ] {
-        let distance = point_box_distance(point, geo_box);
-        if distance < best_distance {
-            best = point.clone();
+
+    let mut best_distance = 0.0;
+    let mut best_point = None;
+    let mut have_min = false;
+    for edge in box_edges_pg(geo_box) {
+        let (distance, closept) = lseg_closept_lseg(&edge, lseg);
+        if !have_min || distance < best_distance {
             best_distance = distance;
+            best_point = closept;
+            have_min = true;
         }
     }
-    best
+    (best_distance, best_point)
 }
 
 fn path_segments(path: &GeoPath) -> Vec<GeoLseg> {
@@ -2704,9 +2789,6 @@ fn path_segments(path: &GeoPath) -> Vec<GeoLseg> {
         } else {
             continue;
         };
-        if prev == idx {
-            continue;
-        }
         segments.push(GeoLseg {
             p: [path.points[prev].clone(), path.points[idx].clone()],
         });
@@ -2744,6 +2826,31 @@ fn box_edges(geo_box: &GeoBox) -> [GeoLseg; 4] {
             p: [p3, p4.clone()],
         },
         GeoLseg { p: [p4, p1] },
+    ]
+}
+
+fn box_edges_pg(geo_box: &GeoBox) -> [GeoLseg; 4] {
+    let upper_left = GeoPoint {
+        x: geo_box.low.x,
+        y: geo_box.high.y,
+    };
+    let lower_right = GeoPoint {
+        x: geo_box.high.x,
+        y: geo_box.low.y,
+    };
+    [
+        GeoLseg {
+            p: [geo_box.low.clone(), upper_left.clone()],
+        },
+        GeoLseg {
+            p: [geo_box.high.clone(), upper_left],
+        },
+        GeoLseg {
+            p: [geo_box.low.clone(), lower_right.clone()],
+        },
+        GeoLseg {
+            p: [geo_box.high.clone(), lower_right],
+        },
     ]
 }
 
@@ -2890,6 +2997,10 @@ fn fp_eq(left: f64, right: f64) -> bool {
     left == right || (left - right).abs() <= GEOMETRY_EPSILON
 }
 
+fn fp_ne(left: f64, right: f64) -> bool {
+    left != right && (left - right).abs() > GEOMETRY_EPSILON
+}
+
 fn fp_lt(left: f64, right: f64) -> bool {
     left + GEOMETRY_EPSILON < right
 }
@@ -2904,6 +3015,30 @@ fn fp_gt(left: f64, right: f64) -> bool {
 
 fn fp_ge(left: f64, right: f64) -> bool {
     left + GEOMETRY_EPSILON >= right
+}
+
+fn pg_float8_lt(left: f64, right: f64) -> bool {
+    !left.is_nan() && (right.is_nan() || left < right)
+}
+
+fn pg_float8_gt(left: f64, right: f64) -> bool {
+    !right.is_nan() && (left.is_nan() || left > right)
+}
+
+fn pg_float8_min(left: f64, right: f64) -> f64 {
+    if pg_float8_lt(left, right) {
+        left
+    } else {
+        right
+    }
+}
+
+fn pg_float8_max(left: f64, right: f64) -> f64 {
+    if pg_float8_gt(left, right) {
+        left
+    } else {
+        right
+    }
 }
 
 fn checked_mul(left: f64, right: f64) -> Result<f64, ExecError> {
@@ -3119,8 +3254,14 @@ impl<'a> GeometryParser<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{circle_to_polygon, make_polygon, parse_lseg_text, polygon_contains_polygon};
-    use crate::include::nodes::datum::{GeoCircle, GeoPoint};
+    use super::{
+        circle_to_polygon, eval_geo_closest_point, eval_geo_diagonal, eval_geo_distance,
+        eval_geo_intersection, eval_geo_intersects, eval_geo_ne, make_polygon, parse_lseg_text,
+        point_path_distance, point_polygon_distance, polygon_contains_polygon,
+    };
+    use crate::include::nodes::datum::{
+        GeoBox, GeoCircle, GeoLine, GeoLseg, GeoPath, GeoPoint, Value,
+    };
 
     #[test]
     fn parse_lseg_accepts_flat_text_input() {
@@ -3156,5 +3297,87 @@ mod tests {
             let inner = circle_to_polygon(12, &GeoCircle { center, radius }).unwrap();
             assert!(polygon_contains_polygon(&outer, &inner));
         }
+    }
+
+    #[test]
+    fn closed_one_point_path_and_polygon_have_zero_length_segment_distance() {
+        let point = GeoPoint { x: 13.0, y: 24.0 };
+        let only = GeoPoint { x: 10.0, y: 20.0 };
+        let path = GeoPath {
+            closed: true,
+            points: vec![only.clone()],
+        };
+        let polygon = make_polygon(vec![only]);
+
+        assert_eq!(point_path_distance(&point, &path), 5.0);
+        assert_eq!(point_polygon_distance(&point, &polygon), 5.0);
+    }
+
+    #[test]
+    fn coincident_lsegs_match_postgres_intersection_and_closest_semantics() {
+        let lseg = Value::Lseg(GeoLseg {
+            p: [GeoPoint { x: 0.0, y: 0.0 }, GeoPoint { x: 10.0, y: 10.0 }],
+        });
+
+        assert_eq!(
+            eval_geo_intersection(&[lseg.clone(), lseg.clone()]).unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            eval_geo_intersects(&[lseg.clone(), lseg.clone()]).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval_geo_distance(&[lseg.clone(), lseg.clone()]).unwrap(),
+            Value::Float64(0.0)
+        );
+        assert_eq!(
+            eval_geo_closest_point(&[lseg.clone(), lseg]).unwrap(),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn nan_closest_point_returns_sql_null() {
+        let result = eval_geo_closest_point(&[
+            Value::Point(GeoPoint { x: 1.0, y: 2.0 }),
+            Value::Line(GeoLine {
+                a: f64::NAN,
+                b: -1.0,
+                c: 0.0,
+            }),
+        ])
+        .unwrap();
+
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn circle_nan_not_equal_uses_fpne_semantics() {
+        let circle = Value::Circle(GeoCircle {
+            center: GeoPoint { x: 0.0, y: 0.0 },
+            radius: f64::NAN,
+        });
+
+        assert_eq!(
+            eval_geo_ne(&[circle.clone(), circle]).unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn box_diagonal_renders_high_to_low() {
+        let diagonal = eval_geo_diagonal(&[Value::Box(GeoBox {
+            high: GeoPoint { x: 3.0, y: 4.0 },
+            low: GeoPoint { x: 1.0, y: 2.0 },
+        })])
+        .unwrap();
+
+        assert_eq!(
+            diagonal,
+            Value::Lseg(GeoLseg {
+                p: [GeoPoint { x: 3.0, y: 4.0 }, GeoPoint { x: 1.0, y: 2.0 },],
+            })
+        );
     }
 }
