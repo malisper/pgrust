@@ -432,6 +432,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             {
                 return Some(position);
             }
+            if is_reg_object_lookup_input_error(message)
+                && let Some(position) = find_reg_object_literal_position(sql)
+            {
+                return Some(position);
+            }
             if message == "interval out of range" {
                 return find_interval_input_position(sql);
             }
@@ -501,6 +506,15 @@ fn is_reg_object_direct_input_error(message: &str) -> bool {
         || message.starts_with("missing argument, got")
         || message.starts_with("too many arguments, got")
         || message.starts_with("invalid name syntax")
+}
+
+fn is_reg_object_lookup_input_error(message: &str) -> bool {
+    message.starts_with("operator does not exist: ")
+        || (message.starts_with("function \"") && message.ends_with("\" does not exist"))
+        || (message.starts_with("relation \"") && message.ends_with("\" does not exist"))
+        || (message.starts_with("type \"") && message.ends_with("\" does not exist"))
+        || (message.starts_with("schema \"") && message.ends_with("\" does not exist"))
+        || (message.starts_with("role \"") && message.ends_with("\" does not exist"))
 }
 
 fn find_reg_object_literal_position(sql: &str) -> Option<usize> {
@@ -8569,6 +8583,50 @@ mod tests {
         };
 
         assert_eq!(exec_error_position(sql, &err), Some(8));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_reg_object_lookup_argument() {
+        for (sql, message) in [
+            ("SELECT regoper('||//');", "operator does not exist: ||//"),
+            (
+                "SELECT regoperator('++(int4,int4)');",
+                "operator does not exist: ++(int4,int4)",
+            ),
+            (
+                "SELECT regproc('know');",
+                "function \"know\" does not exist",
+            ),
+            (
+                "SELECT regprocedure('absinthe(numeric)');",
+                "function \"absinthe(numeric)\" does not exist",
+            ),
+            (
+                "SELECT regclass('pg_classes');",
+                "relation \"pg_classes\" does not exist",
+            ),
+            ("SELECT regtype('int3');", "type \"int3\" does not exist"),
+            (
+                "SELECT regrole('Nonexistent');",
+                "role \"nonexistent\" does not exist",
+            ),
+            (
+                "SELECT regnamespace('Nonexistent');",
+                "schema \"nonexistent\" does not exist",
+            ),
+        ] {
+            let err = ExecError::DetailedError {
+                message: message.into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            };
+
+            assert_eq!(
+                exec_error_position(sql, &err),
+                find_reg_object_literal_position(sql)
+            );
+        }
     }
 
     #[test]
