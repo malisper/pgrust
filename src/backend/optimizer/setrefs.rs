@@ -3617,6 +3617,15 @@ pub(super) fn validate_executable_plan_for_tests(plan: &Plan) {
 }
 
 #[cfg(test)]
+pub(super) fn validate_executable_plan_for_tests_with_params(
+    plan: &Plan,
+    params: &[ExecParamSource],
+) {
+    let allowed_params = exec_param_sources(params);
+    validate_executable_plan_with_params(plan, &allowed_params);
+}
+
+#[cfg(test)]
 pub(super) fn validate_planner_path_for_tests(path: &Path) {
     validate_planner_path(path);
 }
