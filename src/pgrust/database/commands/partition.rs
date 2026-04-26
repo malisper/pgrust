@@ -4,6 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use super::super::*;
+use super::typed_table::reject_typed_table_ddl;
 use crate::backend::commands::partition::{
     validate_default_partition_rows_for_new_bound, validate_new_partition_bound,
     validate_partition_relation_compatibility, validate_relation_rows_for_partition_bound,
@@ -281,6 +282,8 @@ impl Database {
         let child = lookup_partition_alter_child(&catalog, &stmt.partition_table)?;
         ensure_relation_owner(self, client_id, &parent, &stmt.parent_table)?;
         ensure_relation_owner(self, client_id, &child, &stmt.partition_table)?;
+        reject_typed_table_ddl(&parent, "attach partition to")?;
+        reject_typed_table_ddl(&child, "attach a typed table as partition of")?;
         validate_partition_relation_compatibility(
             &catalog,
             &parent,

@@ -467,6 +467,7 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         relacl: None,
         reloptions: None,
+        of_type_oid: 0,
         row_type_oid: 60_000u32.saturating_add(rel_number),
         array_type_oid: 61_000u32.saturating_add(rel_number),
         reltoastrelid: 0,
@@ -528,6 +529,7 @@ fn people_view_entry() -> CatalogEntry {
         owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         relacl: None,
         reloptions: None,
+        of_type_oid: 0,
         row_type_oid: 60020,
         array_type_oid: 60021,
         reltoastrelid: 0,
@@ -742,6 +744,7 @@ fn catalog_with_people_id_index() -> Catalog {
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60010,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -808,6 +811,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60011,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -903,6 +907,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60013,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -966,6 +971,7 @@ fn catalog_with_people_ctid_partial_unique_index() -> Catalog {
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60015,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1029,6 +1035,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60014,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1207,6 +1214,7 @@ fn bind_expression_index_metadata_does_not_discover_heap_indexes() {
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60041,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1278,6 +1286,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60015,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1349,6 +1358,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60031,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -9394,6 +9404,7 @@ fn create_table_temp_name_validation() {
         crate::backend::parser::normalize_create_table_name(&CreateTableStatement {
             schema_name: Some("public".into()),
             table_name: "t".into(),
+            of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![],
@@ -9410,6 +9421,7 @@ fn create_table_temp_name_validation() {
     let err = crate::backend::parser::normalize_create_table_name(&CreateTableStatement {
         schema_name: Some("public".into()),
         table_name: "t".into(),
+        of_type_name: None,
         persistence: TablePersistence::Temporary,
         on_commit: OnCommitAction::PreserveRows,
         elements: vec![],
@@ -9425,6 +9437,7 @@ fn create_table_temp_name_validation() {
     let err = crate::backend::parser::normalize_create_table_name(&CreateTableStatement {
         schema_name: None,
         table_name: "t".into(),
+        of_type_name: None,
         persistence: TablePersistence::Permanent,
         on_commit: OnCommitAction::DeleteRows,
         elements: vec![],
@@ -9466,6 +9479,60 @@ fn parse_create_table_inherits_clause() {
         }
         other => panic!("expected CreateTable, got {:?}", other),
     }
+}
+
+#[test]
+fn parse_create_table_of_with_typed_column_options() {
+    let Statement::CreateTable(ct) = parse_statement(
+        "create table persons of person_type (id with options primary key, name not null default 'x')",
+    )
+    .unwrap()
+    else {
+        panic!("expected CreateTable");
+    };
+    assert_eq!(ct.table_name, "persons");
+    assert_eq!(ct.of_type_name.as_deref(), Some("person_type"));
+    assert_eq!(ct.elements.len(), 2);
+    let CreateTableElement::TypedColumnOptions(id_options) = &ct.elements[0] else {
+        panic!("expected typed column options");
+    };
+    assert_eq!(id_options.name, "id");
+    assert!(
+        id_options
+            .constraints
+            .iter()
+            .any(|constraint| matches!(constraint, ColumnConstraint::PrimaryKey { .. }))
+    );
+    let CreateTableElement::TypedColumnOptions(name_options) = &ct.elements[1] else {
+        panic!("expected typed column options");
+    };
+    assert_eq!(name_options.name, "name");
+    assert_eq!(name_options.default_expr.as_deref(), Some("'x'"));
+    assert!(
+        name_options
+            .constraints
+            .iter()
+            .any(|constraint| matches!(constraint, ColumnConstraint::NotNull { .. }))
+    );
+}
+
+#[test]
+fn parse_alter_table_of_and_not_of() {
+    let Statement::AlterTableOf(alter_of) =
+        parse_statement("alter table persons of person_type").unwrap()
+    else {
+        panic!("expected AlterTableOf");
+    };
+    assert_eq!(alter_of.table_name, "persons");
+    assert_eq!(alter_of.type_name, "person_type");
+
+    let Statement::AlterTableNotOf(not_of) =
+        parse_statement("alter table if exists persons not of").unwrap()
+    else {
+        panic!("expected AlterTableNotOf");
+    };
+    assert_eq!(not_of.table_name, "persons");
+    assert!(not_of.if_exists);
 }
 
 #[test]
@@ -10986,6 +11053,39 @@ fn parse_alter_type_rename_to_statement() {
     assert_eq!(rename.schema_name, None);
     assert_eq!(rename.type_name, "bogus");
     assert_eq!(rename.new_type_name, "bogon");
+}
+
+#[test]
+fn parse_alter_type_composite_attribute_actions() {
+    let Statement::AlterType(AlterTypeStatement::AlterComposite(stmt)) = parse_statement(
+        "alter type person add attribute age int4 cascade, rename attribute name to full_name restrict",
+    )
+    .unwrap()
+    else {
+        panic!("expected alter type composite");
+    };
+    assert_eq!(stmt.type_name, "person");
+    assert_eq!(stmt.actions.len(), 2);
+    match &stmt.actions[0] {
+        AlterCompositeTypeAction::AddAttribute { attribute, cascade } => {
+            assert_eq!(attribute.name, "age");
+            assert_eq!(attribute.ty, RawTypeName::builtin(SqlTypeKind::Int4));
+            assert!(*cascade);
+        }
+        other => panic!("expected add attribute, got {other:?}"),
+    }
+    match &stmt.actions[1] {
+        AlterCompositeTypeAction::RenameAttribute {
+            old_name,
+            new_name,
+            cascade,
+        } => {
+            assert_eq!(old_name, "name");
+            assert_eq!(new_name, "full_name");
+            assert!(!*cascade);
+        }
+        other => panic!("expected rename attribute, got {other:?}"),
+    }
 }
 
 #[test]

@@ -5,6 +5,7 @@ use super::operator::{
     lookup_operator_row, operator_signature_display, resolve_operator_type_oid,
     unsupported_postfix_operator_error,
 };
+use super::typed_table::reject_typed_table_ddl;
 use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_indexes_for_row};
 use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
@@ -1850,6 +1851,7 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
+        reject_typed_table_ddl(&relation, "add column to")?;
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
         let _ = dependent_view_rewrites_for_relation(
             self,

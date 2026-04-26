@@ -1,4 +1,5 @@
 use super::super::*;
+use super::typed_table::reject_typed_table_ddl;
 use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{
     collect_matching_rows_heap, insert_index_entry_for_row, reinitialize_index_relation,
@@ -229,6 +230,7 @@ fn collect_alter_column_type_targets(
                 actual: "system catalog".into(),
             }));
         }
+        reject_typed_table_ddl(&target_relation, "alter column type of")?;
         reject_relation_with_dependent_views(
             db,
             client_id,
@@ -341,6 +343,7 @@ impl Database {
                 actual: "system catalog".into(),
             }));
         }
+        reject_typed_table_ddl(&relation, "alter column type of")?;
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
         let targets = collect_alter_column_type_targets(
             self, &catalog, client_id, xid, cid, &relation, alter_stmt,

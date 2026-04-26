@@ -1,4 +1,5 @@
 use super::super::*;
+use super::typed_table::reject_typed_table_ddl;
 use crate::backend::parser::{BoundRelation, CatalogLookup};
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
@@ -446,6 +447,7 @@ impl Database {
                 actual: "temporary table".into(),
             }));
         }
+        reject_typed_table_ddl(&relation, "rename column of")?;
         ensure_relation_owner(self, client_id, &relation, &rename_stmt.table_name)?;
         let new_column_name = validate_alter_table_rename_column(
             &relation.desc,

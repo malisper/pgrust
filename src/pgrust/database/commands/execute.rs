@@ -595,6 +595,18 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableOf(ref alter_stmt) => self
+                .execute_alter_table_of_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTableNotOf(ref alter_stmt) => self
+                .execute_alter_table_not_of_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableAttachPartition(ref alter_stmt) => self
                 .execute_alter_table_attach_partition_stmt_with_search_path(
                     client_id,

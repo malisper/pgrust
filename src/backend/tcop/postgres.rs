@@ -277,6 +277,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             return extract_at_or_near_token(actual)
                 .and_then(|value| find_error_value_position(sql, value));
         }
+        ExecError::Parse(crate::backend::parser::ParseError::UnsupportedType(name)) => {
+            return find_case_insensitive_token_position(sql, name);
+        }
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. })
             if message == "duplicate trigger events specified at or near \"ON\"" =>
         {
@@ -315,6 +318,10 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             return find_without_overlaps_constraint_position(sql);
         }
         ExecError::Parse(crate::backend::parser::ParseError::UnknownColumn(name)) => {
+            let lower = sql.to_ascii_lowercase();
+            if lower.starts_with("create table ") && lower.contains(" of ") {
+                return None;
+            }
             return find_error_value_position(sql, name);
         }
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. }) => {
@@ -472,6 +479,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             }
             if message == "interval out of range" {
                 return find_interval_input_position(sql);
+            }
+            if message == "cannot alter column type of typed table" {
+                return find_token_after_case_insensitive_phrase(sql, "ALTER COLUMN");
             }
             if message == "range lower bound must be less than or equal to range upper bound" {
                 return find_range_literal_position(sql);
@@ -1110,6 +1120,16 @@ fn find_case_insensitive_token_position(sql: &str, token: &str) -> Option<usize>
     sql.to_ascii_lowercase()
         .find(&token_lower)
         .map(|index| index + 1)
+}
+
+fn find_token_after_case_insensitive_phrase(sql: &str, phrase: &str) -> Option<usize> {
+    let phrase_position = find_case_insensitive_token_position(sql, phrase)?;
+    let mut index = phrase_position - 1 + phrase.len();
+    let bytes = sql.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    (index < bytes.len()).then_some(index + 1)
 }
 
 fn find_last_case_insensitive_token_position(sql: &str, token: &str) -> Option<usize> {
@@ -3243,6 +3263,15 @@ fn psql_describe_tableinfo_query(
     let entry = db.describe_relation_by_oid(session.client_id, txn_ctx, oid)?;
     let relhasindex = db.has_index_on_relation(session.client_id, txn_ctx, oid);
     let amname = db.access_method_name_for_relation(session.client_id, txn_ctx, oid);
+    let reloftype = if entry.of_type_oid == 0 {
+        String::new()
+    } else {
+        session
+            .catalog_lookup(db)
+            .type_by_oid(entry.of_type_oid)
+            .map(|row| row.typname)
+            .unwrap_or_default()
+    };
     let visible_amname = match entry.relkind {
         // :HACK: psql's verbose \d+ footer only renders a table access method
         // when pg_class.relam points at a non-default AM. pgrust stores the
@@ -3329,7 +3358,7 @@ fn psql_describe_tableinfo_query(
             Value::Bool(false),
             Value::Text("".into()),
             Value::Int32(0),
-            Value::Text("".into()),
+            Value::Text(reloftype.into()),
             Value::InternalChar(entry.relpersistence as u8),
             Value::InternalChar(b'd'),
             visible_amname
@@ -4547,12 +4576,21 @@ fn format_psql_default(
     sql_type: SqlType,
     expr_sql: &str,
 ) -> String {
+    let expr_sql = expr_sql.trim();
     if let Some(rendered) = format_regclass_nextval_default(db, session, sql_type, expr_sql) {
         return rendered;
     }
     if let Ok(expr) = parse_expr(expr_sql) {
-        if let crate::backend::parser::SqlExpr::Const(Value::Bit(bits)) = expr {
-            return format!("'{}'::\"bit\"", bits.render());
+        match expr {
+            crate::backend::parser::SqlExpr::Const(Value::Bit(bits)) => {
+                return format!("'{}'::\"bit\"", bits.render());
+            }
+            crate::backend::parser::SqlExpr::Const(Value::Text(_))
+                if matches!(sql_type.kind, SqlTypeKind::Text) =>
+            {
+                return format!("{expr_sql}::text");
+            }
+            _ => {}
         }
     }
     match sql_type.kind {

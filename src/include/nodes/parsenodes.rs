@@ -349,6 +349,8 @@ pub enum Statement {
     AlterTableValidateConstraint(AlterTableValidateConstraintStatement),
     AlterTableInherit(AlterTableInheritStatement),
     AlterTableNoInherit(AlterTableNoInheritStatement),
+    AlterTableOf(AlterTableOfStatement),
+    AlterTableNotOf(AlterTableNotOfStatement),
     AlterTableAttachPartition(AlterTableAttachPartitionStatement),
     AlterTableDetachPartition(AlterTableDetachPartitionStatement),
     AlterTableTriggerState(AlterTableTriggerStateStatement),
@@ -860,6 +862,7 @@ pub enum AlterTypeStatement {
     AddEnumValue(AlterTypeAddEnumValueStatement),
     RenameEnumValue(AlterTypeRenameEnumValueStatement),
     RenameType(AlterTypeRenameTypeStatement),
+    AlterComposite(AlterCompositeTypeStatement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -890,6 +893,36 @@ pub struct AlterTypeRenameTypeStatement {
     pub schema_name: Option<String>,
     pub type_name: String,
     pub new_type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterCompositeTypeStatement {
+    pub schema_name: Option<String>,
+    pub type_name: String,
+    pub actions: Vec<AlterCompositeTypeAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterCompositeTypeAction {
+    AddAttribute {
+        attribute: CompositeTypeAttributeDef,
+        cascade: bool,
+    },
+    DropAttribute {
+        name: String,
+        if_exists: bool,
+        cascade: bool,
+    },
+    AlterAttributeType {
+        name: String,
+        ty: RawTypeName,
+        cascade: bool,
+    },
+    RenameAttribute {
+        old_name: String,
+        new_name: String,
+        cascade: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1531,6 +1564,7 @@ pub struct OnConflictInferenceElem {
 pub struct CreateTableStatement {
     pub schema_name: Option<String>,
     pub table_name: String,
+    pub of_type_name: Option<String>,
     pub persistence: TablePersistence,
     pub on_commit: OnCommitAction,
     pub elements: Vec<CreateTableElement>,
@@ -1545,7 +1579,8 @@ impl CreateTableStatement {
     pub fn columns(&self) -> impl Iterator<Item = &ColumnDef> {
         self.elements.iter().filter_map(|element| match element {
             CreateTableElement::Column(column) => Some(column),
-            CreateTableElement::PartitionColumnOverride(_)
+            CreateTableElement::TypedColumnOptions(_)
+            | CreateTableElement::PartitionColumnOverride(_)
             | CreateTableElement::Constraint(_)
             | CreateTableElement::Like(_) => None,
         })
@@ -1554,6 +1589,7 @@ impl CreateTableStatement {
     pub fn constraints(&self) -> impl Iterator<Item = &TableConstraint> {
         self.elements.iter().filter_map(|element| match element {
             CreateTableElement::Column(_)
+            | CreateTableElement::TypedColumnOptions(_)
             | CreateTableElement::PartitionColumnOverride(_)
             | CreateTableElement::Like(_) => None,
             CreateTableElement::Constraint(constraint) => Some(constraint),
@@ -1564,6 +1600,7 @@ impl CreateTableStatement {
         self.elements.iter().filter_map(|element| match element {
             CreateTableElement::PartitionColumnOverride(override_) => Some(override_),
             CreateTableElement::Column(_)
+            | CreateTableElement::TypedColumnOptions(_)
             | CreateTableElement::Constraint(_)
             | CreateTableElement::Like(_) => None,
         })
@@ -2188,6 +2225,21 @@ pub struct AlterTableInheritStatement {
     pub only: bool,
     pub table_name: String,
     pub parent_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableOfStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableNotOfStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2948,8 +3000,21 @@ pub struct PartitionColumnOverride {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedColumnOptions {
+    pub name: String,
+    pub collation: Option<String>,
+    pub default_expr: Option<String>,
+    pub generated: Option<ColumnGeneratedDef>,
+    pub identity: Option<ColumnIdentityKind>,
+    pub storage: Option<crate::include::access::htup::AttributeStorage>,
+    pub compression: Option<crate::include::access::htup::AttributeCompression>,
+    pub constraints: Vec<ColumnConstraint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateTableElement {
     Column(ColumnDef),
+    TypedColumnOptions(TypedColumnOptions),
     PartitionColumnOverride(PartitionColumnOverride),
     Constraint(TableConstraint),
     Like(CreateTableLikeClause),

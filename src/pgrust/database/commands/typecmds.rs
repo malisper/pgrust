@@ -1,19 +1,23 @@
 use super::super::*;
+use super::typed_table::resolve_standalone_composite_type;
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::executor::{ColumnDesc, RelationDesc, StatementResult};
 use crate::backend::parser::{
-    AlterEnumValuePosition, AlterTypeAddEnumValueStatement, AlterTypeOwnerStatement,
-    AlterTypeRenameEnumValueStatement, AlterTypeRenameTypeStatement, AlterTypeStatement,
-    CatalogLookup, CreateBaseTypeOption, CreateBaseTypeStatement, CreateCompositeTypeStatement,
-    CreateEnumTypeStatement, CreateRangeTypeStatement, CreateShellTypeStatement,
-    CreateTypeStatement, DropTypeStatement, ParseError, SqlTypeKind, parse_type_name,
-    resolve_raw_type_name,
+    AlterCompositeTypeAction, AlterCompositeTypeStatement, AlterEnumValuePosition,
+    AlterTypeAddEnumValueStatement, AlterTypeOwnerStatement, AlterTypeRenameEnumValueStatement,
+    AlterTypeRenameTypeStatement, AlterTypeStatement, CatalogLookup, CreateBaseTypeOption,
+    CreateBaseTypeStatement, CreateCompositeTypeStatement, CreateEnumTypeStatement,
+    CreateRangeTypeStatement, CreateShellTypeStatement, CreateTypeStatement, DropTypeStatement,
+    ParseError, SqlType, SqlTypeKind, parse_type_name, resolve_raw_type_name,
 };
-use crate::backend::utils::misc::notices::{push_notice, push_warning};
+use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail, push_warning};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
-use crate::include::catalog::{CSTRING_TYPE_OID, FLOAT8_TYPE_OID, PgProcRow, builtin_range_specs};
+use crate::include::catalog::{
+    CSTRING_TYPE_OID, DEPENDENCY_INTERNAL, FLOAT8_TYPE_OID, PG_CLASS_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgProcRow, builtin_range_specs,
+};
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, format_sql_type_name, is_system_column_name, map_catalog_error,
     reject_type_with_dependents,
@@ -43,6 +47,19 @@ enum ResolvedDropTypeTarget {
         display_name: String,
     },
     Other,
+}
+
+#[derive(Debug, Clone)]
+enum TypeDropDependentObject {
+    Relation { oid: u32, relkind: char },
+    Proc { oid: u32 },
+}
+
+#[derive(Debug, Clone)]
+struct TypeDropDependent {
+    sort_oid: u32,
+    notice: String,
+    object: TypeDropDependentObject,
 }
 
 impl Database {
@@ -253,7 +270,12 @@ impl Database {
                                 })
                             })?;
                     ensure_relation_owner(self, client_id, &relation, &display_name)?;
+                    let mut next_cid = cid;
                     if drop_stmt.cascade {
+                        let catcache = self
+                            .backend_catcache(client_id, Some((xid, cid)))
+                            .map_err(map_catalog_error)?;
+                        let dependents = type_drop_dependents_for_type(&catcache, type_oid);
                         let dependent_ranges = self
                             .range_types
                             .read()
@@ -261,10 +283,61 @@ impl Database {
                             .filter(|(_, entry)| entry.subtype.type_oid == type_oid)
                             .map(|(key, entry)| (key.clone(), entry.name.clone()))
                             .collect::<Vec<_>>();
+                        let mut notice_text = dependents
+                            .iter()
+                            .map(|dependent| dependent.notice.clone())
+                            .collect::<Vec<_>>();
+                        notice_text.extend(
+                            dependent_ranges
+                                .iter()
+                                .map(|(_, name)| format!("drop cascades to type {name}")),
+                        );
+                        match notice_text.as_slice() {
+                            [] => {}
+                            [notice] => push_notice(notice.clone()),
+                            notices => push_notice_with_detail(
+                                format!("drop cascades to {} other objects", notices.len()),
+                                notices.join("\n"),
+                            ),
+                        }
+
+                        for dependent in dependents {
+                            let ctx = CatalogWriteContext {
+                                pool: self.pool.clone(),
+                                txns: self.txns.clone(),
+                                xid,
+                                cid: next_cid,
+                                client_id,
+                                waiter: Some(self.txn_waiter.clone()),
+                                interrupts: Arc::clone(&interrupts),
+                            };
+                            let effect = match dependent.object {
+                                TypeDropDependentObject::Relation { oid, relkind } => {
+                                    if relkind == 'v' {
+                                        self.catalog
+                                            .write()
+                                            .drop_view_by_oid_mvcc(oid, &ctx)
+                                            .map(|(_, effect)| effect)
+                                    } else {
+                                        self.catalog
+                                            .write()
+                                            .drop_relation_by_oid_mvcc(oid, &ctx)
+                                            .map(|(_, effect)| effect)
+                                    }
+                                }
+                                TypeDropDependentObject::Proc { oid } => self
+                                    .catalog
+                                    .write()
+                                    .drop_proc_by_oid_mvcc(oid, &ctx)
+                                    .map(|(_, effect)| effect),
+                            }
+                            .map_err(map_catalog_error)?;
+                            catalog_effects.push(effect);
+                            next_cid = next_cid.saturating_add(1);
+                        }
                         if !dependent_ranges.is_empty() {
                             let mut range_types = self.range_types.write();
-                            for (key, name) in dependent_ranges {
-                                push_notice(format!("drop cascades to type {name}"));
+                            for (key, _name) in dependent_ranges {
                                 range_types.remove(&key);
                             }
                         }
@@ -281,7 +354,7 @@ impl Database {
                         pool: self.pool.clone(),
                         txns: self.txns.clone(),
                         xid,
-                        cid,
+                        cid: next_cid,
                         client_id,
                         waiter: Some(self.txn_waiter.clone()),
                         interrupts: Arc::clone(&interrupts),
@@ -486,14 +559,16 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
         let result = self.execute_alter_type_stmt_in_transaction_with_search_path(
             client_id,
             alter_stmt,
             xid,
             0,
             configured_search_path,
+            &mut catalog_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &[], &[], &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         result
     }
@@ -505,6 +580,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         match alter_stmt {
             AlterTypeStatement::AddEnumValue(stmt) => self.execute_alter_type_add_enum_value_stmt(
@@ -529,7 +605,113 @@ impl Database {
                 cid,
                 configured_search_path,
             ),
+            AlterTypeStatement::AlterComposite(stmt) => self.execute_alter_composite_type_stmt(
+                client_id,
+                stmt,
+                xid,
+                cid,
+                configured_search_path,
+                catalog_effects,
+            ),
         }
+    }
+
+    fn execute_alter_composite_type_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &AlterCompositeTypeStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let lookup_name = qualified_type_lookup_name(stmt.schema_name.as_deref(), &stmt.type_name);
+        let (type_row, type_relation) = resolve_standalone_composite_type(&catalog, &lookup_name)?;
+        ensure_relation_owner(self, client_id, &type_relation, &lookup_name)?;
+
+        let typed_table_oids = typed_table_relation_oids_for_type(
+            self,
+            client_id,
+            Some((xid, cid)),
+            &catalog,
+            type_row.oid,
+        )?;
+        for action in &stmt.actions {
+            if !alter_composite_action_cascade(action) && !typed_table_oids.is_empty() {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "cannot alter type \"{}\" because it is the type of a typed table",
+                        stmt.type_name
+                    ),
+                    detail: None,
+                    hint: Some("Use ALTER ... CASCADE to alter the typed tables too.".into()),
+                    sqlstate: "2BP01",
+                });
+            }
+        }
+
+        let mut type_desc = type_relation.desc.clone();
+        for action in &stmt.actions {
+            apply_composite_attribute_action(
+                &mut type_desc,
+                action,
+                &catalog,
+                type_row.oid,
+                &type_row.typname,
+            )?;
+        }
+
+        let mut table_updates = Vec::new();
+        for relation_oid in typed_table_oids {
+            let relation = catalog
+                .lookup_relation_by_oid(relation_oid)
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string()))
+                })?;
+            let mut desc = relation.desc.clone();
+            for action in &stmt.actions {
+                apply_composite_attribute_action(
+                    &mut desc,
+                    action,
+                    &catalog,
+                    type_row.oid,
+                    &type_row.typname,
+                )?;
+            }
+            table_updates.push((relation, desc));
+        }
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts,
+        };
+        let effect = self
+            .catalog
+            .write()
+            .alter_relation_desc_mvcc(type_relation.relation_oid, type_desc, &['c'], &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+
+        for (relation, desc) in table_updates {
+            let effect = self
+                .catalog
+                .write()
+                .alter_relation_desc_mvcc(relation.relation_oid, desc.clone(), &['r'], &ctx)
+                .map_err(map_catalog_error)?;
+            if relation.relpersistence == 't' {
+                self.replace_temp_entry_desc(client_id, relation.relation_oid, desc)?;
+            }
+            catalog_effects.push(effect);
+        }
+
+        Ok(StatementResult::AffectedRows(0))
     }
 
     fn resolve_drop_type_target(
@@ -687,6 +869,282 @@ impl Database {
             display_name: format_name(type_row.typnamespace, &type_row.typname),
         }))
     }
+}
+
+fn qualified_type_lookup_name(schema_name: Option<&str>, type_name: &str) -> String {
+    match schema_name {
+        Some(schema_name) => format!("{schema_name}.{type_name}"),
+        None => type_name.to_string(),
+    }
+}
+
+fn type_drop_dependents_for_type(
+    catcache: &crate::backend::utils::cache::catcache::CatCache,
+    type_oid: u32,
+) -> Vec<TypeDropDependent> {
+    let mut dependents = catcache
+        .depend_rows()
+        .into_iter()
+        .filter(|row| {
+            row.refclassid == PG_TYPE_RELATION_OID
+                && row.refobjid == type_oid
+                && row.deptype != DEPENDENCY_INTERNAL
+        })
+        .filter_map(|row| match row.classid {
+            PG_CLASS_RELATION_OID => {
+                let class = catcache.class_by_oid(row.objid)?;
+                Some(TypeDropDependent {
+                    sort_oid: row.objid,
+                    notice: format!(
+                        "drop cascades to {} {}",
+                        type_drop_relation_kind_name(class.relkind),
+                        type_drop_display_name(catcache, class.relnamespace, &class.relname)
+                    ),
+                    object: TypeDropDependentObject::Relation {
+                        oid: row.objid,
+                        relkind: class.relkind,
+                    },
+                })
+            }
+            PG_PROC_RELATION_OID => {
+                let proc_row = catcache.proc_by_oid(row.objid)?;
+                Some(TypeDropDependent {
+                    sort_oid: row.objid,
+                    notice: format!(
+                        "drop cascades to function {}()",
+                        type_drop_display_name(catcache, proc_row.pronamespace, &proc_row.proname)
+                    ),
+                    object: TypeDropDependentObject::Proc { oid: row.objid },
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    dependents.sort_by_key(|dependent| dependent.sort_oid);
+    dependents.dedup_by_key(|dependent| dependent.sort_oid);
+    dependents
+}
+
+fn type_drop_display_name(
+    catcache: &crate::backend::utils::cache::catcache::CatCache,
+    namespace_oid: u32,
+    object_name: &str,
+) -> String {
+    let schema_name = catcache
+        .namespace_by_oid(namespace_oid)
+        .map(|row| row.nspname.clone())
+        .unwrap_or_else(|| "public".to_string());
+    match schema_name.as_str() {
+        "public" | "pg_catalog" => object_name.to_string(),
+        _ => format!("{schema_name}.{object_name}"),
+    }
+}
+
+fn type_drop_relation_kind_name(relkind: char) -> &'static str {
+    match relkind {
+        'm' => "materialized view",
+        'p' => "table",
+        'S' => "sequence",
+        'v' => "view",
+        _ => "table",
+    }
+}
+
+fn alter_composite_action_cascade(action: &AlterCompositeTypeAction) -> bool {
+    match action {
+        AlterCompositeTypeAction::AddAttribute { cascade, .. }
+        | AlterCompositeTypeAction::DropAttribute { cascade, .. }
+        | AlterCompositeTypeAction::AlterAttributeType { cascade, .. }
+        | AlterCompositeTypeAction::RenameAttribute { cascade, .. } => *cascade,
+    }
+}
+
+fn typed_table_relation_oids_for_type(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    catalog: &dyn CatalogLookup,
+    type_oid: u32,
+) -> Result<Vec<u32>, ExecError> {
+    let catcache = db.backend_catcache(client_id, txn_ctx).map_err(|err| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "catalog lookup",
+            actual: format!("{err:?}"),
+        })
+    })?;
+    let mut out = Vec::new();
+    for class_row in catcache
+        .class_rows()
+        .into_iter()
+        .filter(|row| row.reloftype == type_oid)
+    {
+        out.extend(catalog.find_all_inheritors(class_row.oid));
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+fn apply_composite_attribute_action(
+    desc: &mut RelationDesc,
+    action: &AlterCompositeTypeAction,
+    catalog: &dyn CatalogLookup,
+    composite_type_oid: u32,
+    composite_type_name: &str,
+) -> Result<(), ExecError> {
+    match action {
+        AlterCompositeTypeAction::AddAttribute { attribute, .. } => {
+            if is_system_column_name(&attribute.name) {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "column name \"{}\" conflicts with a system column name",
+                        attribute.name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42701",
+                });
+            }
+            if desc
+                .columns
+                .iter()
+                .any(|column| !column.dropped && column.name.eq_ignore_ascii_case(&attribute.name))
+            {
+                return Err(ExecError::DetailedError {
+                    message: format!("column \"{}\" of relation already exists", attribute.name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42701",
+                });
+            }
+            let sql_type =
+                resolve_raw_type_name(&attribute.ty, catalog).map_err(ExecError::Parse)?;
+            reject_composite_self_reference(composite_type_name, composite_type_oid, sql_type)?;
+            desc.columns
+                .push(column_desc(attribute.name.clone(), sql_type, true));
+        }
+        AlterCompositeTypeAction::DropAttribute {
+            name, if_exists, ..
+        } => {
+            let Some(index) = visible_column_index(desc, name) else {
+                if *if_exists {
+                    return Ok(());
+                }
+                return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
+            };
+            drop_relation_desc_column(desc, index);
+        }
+        AlterCompositeTypeAction::AlterAttributeType { name, ty, .. } => {
+            let index = visible_column_index(desc, name)
+                .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(name.clone())))?;
+            let sql_type = resolve_raw_type_name(ty, catalog).map_err(ExecError::Parse)?;
+            reject_composite_self_reference(composite_type_name, composite_type_oid, sql_type)?;
+            retarget_relation_desc_column_type(desc, index, sql_type);
+        }
+        AlterCompositeTypeAction::RenameAttribute {
+            old_name, new_name, ..
+        } => {
+            let index = visible_column_index(desc, old_name)
+                .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(old_name.clone())))?;
+            if desc.columns.iter().any(|column| {
+                !column.dropped
+                    && !column.name.eq_ignore_ascii_case(old_name)
+                    && column.name.eq_ignore_ascii_case(new_name)
+            }) {
+                return Err(ExecError::DetailedError {
+                    message: format!("column \"{new_name}\" of relation already exists"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42701",
+                });
+            }
+            desc.columns[index].name = new_name.clone();
+            desc.columns[index].storage.name = new_name.clone();
+        }
+    }
+    Ok(())
+}
+
+fn visible_column_index(desc: &RelationDesc, name: &str) -> Option<usize> {
+    desc.columns.iter().enumerate().find_map(|(index, column)| {
+        (!column.dropped && column.name.eq_ignore_ascii_case(name)).then_some(index)
+    })
+}
+
+fn reject_composite_self_reference(
+    composite_type_name: &str,
+    composite_type_oid: u32,
+    sql_type: SqlType,
+) -> Result<(), ExecError> {
+    if !sql_type_references_composite_type(sql_type, composite_type_oid) {
+        return Ok(());
+    }
+    Err(ExecError::Parse(ParseError::DetailedError {
+        message: format!("composite type {composite_type_name} cannot be made a member of itself"),
+        detail: None,
+        hint: None,
+        sqlstate: "42P16",
+    }))
+}
+
+fn sql_type_references_composite_type(sql_type: SqlType, composite_type_oid: u32) -> bool {
+    let base = if sql_type.is_array {
+        sql_type.element_type()
+    } else {
+        sql_type
+    };
+    if matches!(base.kind, SqlTypeKind::Composite | SqlTypeKind::Record)
+        && base.type_oid == composite_type_oid
+    {
+        return true;
+    }
+    matches!(base.kind, SqlTypeKind::Range | SqlTypeKind::Multirange)
+        && base.range_subtype_oid == composite_type_oid
+}
+
+fn drop_relation_desc_column(desc: &mut RelationDesc, index: usize) {
+    let attnum = index + 1;
+    let dropped_name = format!("........pg.dropped.{attnum}........");
+    let column = &mut desc.columns[index];
+    column.name = dropped_name.clone();
+    column.storage.name = dropped_name;
+    column.storage.nullable = true;
+    column.dropped = true;
+    column.attstattarget = -1;
+    column.not_null_constraint_oid = None;
+    column.not_null_constraint_name = None;
+    column.not_null_constraint_validated = false;
+    column.not_null_primary_key_owned = false;
+    column.attrdef_oid = None;
+    column.default_expr = None;
+    column.default_sequence_oid = None;
+    column.generated = None;
+    column.identity = None;
+    column.missing_default_value = None;
+}
+
+fn retarget_relation_desc_column_type(desc: &mut RelationDesc, index: usize, sql_type: SqlType) {
+    let old = desc.columns[index].clone();
+    let mut new_column = column_desc(old.name.clone(), sql_type, old.storage.nullable);
+    new_column.dropped = old.dropped;
+    new_column.attstattarget = old.attstattarget;
+    new_column.attinhcount = old.attinhcount;
+    new_column.attislocal = old.attislocal;
+    new_column.collation_oid = old.collation_oid;
+    new_column.not_null_constraint_oid = old.not_null_constraint_oid;
+    new_column.not_null_constraint_name = old.not_null_constraint_name;
+    new_column.not_null_constraint_validated = old.not_null_constraint_validated;
+    new_column.not_null_constraint_is_local = old.not_null_constraint_is_local;
+    new_column.not_null_constraint_inhcount = old.not_null_constraint_inhcount;
+    new_column.not_null_constraint_no_inherit = old.not_null_constraint_no_inherit;
+    new_column.not_null_primary_key_owned = old.not_null_primary_key_owned;
+    new_column.attrdef_oid = old.attrdef_oid;
+    new_column.default_expr = old.default_expr;
+    new_column.default_sequence_oid = old.default_sequence_oid;
+    new_column.generated = old.generated;
+    new_column.identity = old.identity;
+    new_column.missing_default_value = None;
+    desc.columns[index] = new_column;
 }
 
 fn type_has_range_dependents_error(type_name: &str, dependent_name: &str) -> ExecError {

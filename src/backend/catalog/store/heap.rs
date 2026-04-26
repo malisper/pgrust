@@ -94,6 +94,7 @@ impl CatalogStore {
             relpersistence,
             relkind,
             owner_oid,
+            0,
             &mut control,
         )?;
         entry.reloptions = reloptions;
@@ -361,6 +362,7 @@ impl CatalogStore {
                 'p',
                 'r',
                 crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                0,
                 &mut control,
             )?;
             let toast = build_toast_catalog_changes(
@@ -831,6 +833,35 @@ impl CatalogStore {
             toast_namespace_oid,
             toast_namespace_name,
             owner_oid,
+            0,
+            ctx,
+        )
+    }
+
+    pub fn create_typed_table_mvcc_with_options(
+        &mut self,
+        name: impl Into<String>,
+        desc: RelationDesc,
+        namespace_oid: u32,
+        db_oid: u32,
+        relpersistence: char,
+        toast_namespace_oid: u32,
+        toast_namespace_name: &str,
+        owner_oid: u32,
+        of_type_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(CreateTableResult, CatalogMutationEffect), CatalogError> {
+        self.create_storage_relation_mvcc_with_options(
+            name,
+            desc,
+            namespace_oid,
+            db_oid,
+            relpersistence,
+            'r',
+            toast_namespace_oid,
+            toast_namespace_name,
+            owner_oid,
+            of_type_oid,
             ctx,
         )
     }
@@ -857,6 +888,7 @@ impl CatalogStore {
             toast_namespace_oid,
             toast_namespace_name,
             owner_oid,
+            0,
             ctx,
         )
     }
@@ -872,6 +904,7 @@ impl CatalogStore {
         toast_namespace_oid: u32,
         toast_namespace_name: &str,
         owner_oid: u32,
+        of_type_oid: u32,
         ctx: &CatalogWriteContext,
     ) -> Result<(CreateTableResult, CatalogMutationEffect), CatalogError> {
         let name = name.into();
@@ -892,6 +925,7 @@ impl CatalogStore {
             relpersistence,
             relkind,
             owner_oid,
+            of_type_oid,
             &mut control,
         )?;
         let toast = build_toast_catalog_changes(
@@ -2845,6 +2879,7 @@ impl CatalogStore {
             'p',
             'v',
             owner_oid,
+            0,
             &mut control,
         )?;
         entry.reloptions = reloptions;
@@ -2972,6 +3007,7 @@ impl CatalogStore {
             'p',
             'c',
             owner_oid,
+            0,
             &mut control,
         )?;
 
@@ -5276,6 +5312,76 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_relation_of_type_mvcc(
+        &mut self,
+        relation_oid: u32,
+        of_type_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                if entry.relkind != 'r' {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                entry.of_type_oid = of_type_oid;
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgClass,
+                        BootstrapCatalogKind::PgDepend,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        if old_entry.of_type_oid != 0 {
+            effect_record_oid(&mut effect.type_oids, old_entry.of_type_oid);
+        }
+        if new_entry.of_type_oid != 0 {
+            effect_record_oid(&mut effect.type_oids, new_entry.of_type_oid);
+        }
+        Ok(effect)
+    }
+
+    pub fn alter_relation_desc_mvcc(
+        &mut self,
+        relation_oid: u32,
+        desc: RelationDesc,
+        allowed_relkinds: &[char],
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, control| {
+                if !allowed_relkinds.contains(&entry.relkind) {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                entry.desc = desc;
+                if matches!(entry.relkind, 'r' | 'p') {
+                    allocate_relation_object_oids(&mut entry.desc, &mut control.next_oid);
+                }
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgAttribute,
+                        BootstrapCatalogKind::PgType,
+                        BootstrapCatalogKind::PgConstraint,
+                        BootstrapCatalogKind::PgDepend,
+                        BootstrapCatalogKind::PgAttrdef,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        if old_entry.row_type_oid != 0 || new_entry.row_type_oid != 0 {
+            effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        }
+        Ok(effect)
+    }
+
     pub fn rename_relation_mvcc(
         &mut self,
         relation_oid: u32,
@@ -6233,6 +6339,7 @@ fn build_relation_entry(
     relpersistence: char,
     relkind: char,
     owner_oid: u32,
+    of_type_oid: u32,
     control: &mut CatalogControl,
 ) -> Result<CatalogEntry, CatalogError> {
     validate_builtin_type_rows(&desc)?;
@@ -6272,6 +6379,7 @@ fn build_relation_entry(
         owner_oid,
         relacl: None,
         reloptions: None,
+        of_type_oid,
         row_type_oid,
         array_type_oid,
         reltoastrelid: 0,
@@ -6454,6 +6562,7 @@ fn build_index_entry_with_relkind(
         owner_oid: table.owner_oid,
         relacl: None,
         reloptions: None,
+        of_type_oid: 0,
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,
@@ -6558,6 +6667,7 @@ fn build_toast_catalog_changes(
         parent.relpersistence,
         't',
         parent.owner_oid,
+        0,
         control,
     )?;
     new_parent.reltoastrelid = toast_entry.relation_oid;
@@ -7372,6 +7482,7 @@ fn class_row_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> PgC
         relpartbound: entry.relpartbound.clone(),
         reloptions: entry.reloptions.clone(),
         relacl: entry.relacl.clone(),
+        reloftype: entry.of_type_oid,
     }
 }
 
@@ -8068,6 +8179,7 @@ fn catalog_entry_from_relation_row(
         owner_oid: relation.owner_oid,
         relacl: class_row.relacl.clone(),
         reloptions: class_row.reloptions.clone(),
+        of_type_oid: class_row.reloftype,
         row_type_oid: relation.row_type_oid,
         array_type_oid: relation.array_type_oid,
         reltoastrelid: relation.reltoastrelid,
@@ -8446,6 +8558,7 @@ fn catalog_entry_from_visible_relation(
         owner_oid: relation.owner_oid,
         relacl: class_row.relacl.clone(),
         reloptions: class_row.reloptions.clone(),
+        of_type_oid: class_row.reloftype,
         row_type_oid: relation.row_type_oid,
         array_type_oid: relation.array_type_oid,
         reltoastrelid: relation.reltoastrelid,
@@ -8497,6 +8610,7 @@ fn catalog_entry_from_relation(relation: &RelCacheEntry) -> CatalogEntry {
         owner_oid: relation.owner_oid,
         relacl: None,
         reloptions: None,
+        of_type_oid: relation.of_type_oid,
         row_type_oid: relation.row_type_oid,
         array_type_oid: relation.array_type_oid,
         reltoastrelid: relation.reltoastrelid,

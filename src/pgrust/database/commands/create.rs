@@ -1288,6 +1288,7 @@ impl Database {
                     xid,
                     cid,
                     'S',
+                    0,
                     None,
                     catalog_effects,
                     temp_effects,
@@ -2393,6 +2394,9 @@ impl Database {
         if create_stmt.if_not_exists
             && relation_exists_in_namespace(&catalog, &table_name, namespace_oid)
         {
+            push_notice(format!(
+                "relation \"{table_name}\" already exists, skipping"
+            ));
             return Ok(StatementResult::AffectedRows(0));
         }
         validate_partitioned_table_ddl(&table_name, &lowered)?;
@@ -2451,7 +2455,7 @@ impl Database {
                     interrupts: Arc::clone(&interrupts),
                 };
                 let result = if relation_relkind == 'r' {
-                    catalog_guard.create_table_mvcc_with_options(
+                    catalog_guard.create_typed_table_mvcc_with_options(
                         table_name.clone(),
                         desc.clone(),
                         namespace_oid,
@@ -2460,6 +2464,7 @@ impl Database {
                         crate::include::catalog::PG_TOAST_NAMESPACE_OID,
                         crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                         self.auth_state(client_id).current_user_oid(),
+                        lowered.of_type_oid,
                         &ctx,
                     )
                 } else {
@@ -2569,6 +2574,7 @@ impl Database {
                                 }),
                                 namespace_oid: created.entry.namespace_oid,
                                 owner_oid: created.entry.owner_oid,
+                                of_type_oid: created.entry.of_type_oid,
                                 relpersistence: created.entry.relpersistence,
                                 relkind: created.entry.relkind,
                                 relispopulated: created.entry.relispopulated,
@@ -2649,6 +2655,7 @@ impl Database {
                     xid,
                     table_cid,
                     relation_relkind,
+                    lowered.of_type_oid,
                     None,
                     catalog_effects,
                     temp_effects,
@@ -2727,6 +2734,7 @@ impl Database {
                             }),
                             namespace_oid: created.entry.namespace_oid,
                             owner_oid: created.entry.owner_oid,
+                            of_type_oid: created.entry.of_type_oid,
                             relpersistence: created.entry.relpersistence,
                             relkind: created.entry.relkind,
                             relispopulated: created.entry.relispopulated,
@@ -2955,6 +2963,7 @@ impl Database {
                         xid,
                         cid,
                         'v',
+                        0,
                         reloptions.clone(),
                         catalog_effects,
                         temp_effects,
@@ -3138,6 +3147,7 @@ impl Database {
                 let stmt = CreateTableStatement {
                     schema_name: None,
                     table_name: table_name.clone(),
+                    of_type_name: None,
                     persistence,
                     on_commit: create_stmt.on_commit,
                     elements: desc

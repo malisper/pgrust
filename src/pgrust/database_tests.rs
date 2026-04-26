@@ -31697,6 +31697,109 @@ fn create_type_exposes_catalog_rows_and_function_row_expansion() {
 }
 
 #[test]
+fn typed_table_create_alter_of_and_composite_attribute_cascade() {
+    let dir = temp_dir("typed_table_catalog_rows");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type person_t as (id int4, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table persons of person_t (id with options primary key, name not null default 'unknown')",
+    )
+    .unwrap();
+    db.execute(1, "insert into persons(id) values (1)").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from persons"),
+        vec![vec![Value::Int32(1), Value::Text("unknown".into())]]
+    );
+
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    let person_type = visible.type_by_name("person_t").unwrap();
+    let persons = visible.lookup_any_relation("persons").unwrap();
+    assert_eq!(persons.of_type_oid, person_type.oid);
+    assert!(
+        db.backend_catcache(1, None)
+            .unwrap()
+            .depend_rows()
+            .iter()
+            .any(|row| {
+                row.classid == PG_CLASS_RELATION_OID
+                    && row.objid == persons.relation_oid
+                    && row.refclassid == PG_TYPE_RELATION_OID
+                    && row.refobjid == person_type.oid
+            })
+    );
+    drop(visible);
+
+    db.execute(1, "alter table persons not of").unwrap();
+    assert_eq!(
+        db.lazy_catalog_lookup(1, None, None)
+            .lookup_any_relation("persons")
+            .unwrap()
+            .of_type_oid,
+        0
+    );
+
+    db.execute(1, "alter table persons of person_t").unwrap();
+    let err = db
+        .execute(1, "alter type person_t drop attribute name restrict")
+        .unwrap_err();
+    match err {
+        ExecError::DetailedError { hint, .. } => {
+            assert_eq!(
+                hint.as_deref(),
+                Some("Use ALTER ... CASCADE to alter the typed tables too.")
+            );
+        }
+        other => panic!("expected dependent typed table error, got {other:?}"),
+    }
+
+    db.execute(1, "alter type person_t add attribute age int4 cascade")
+        .unwrap();
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    let persons = visible.lookup_any_relation("persons").unwrap();
+    assert_eq!(
+        persons
+            .desc
+            .columns
+            .iter()
+            .filter(|column| !column.dropped)
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id", "name", "age"]
+    );
+}
+
+#[test]
+fn typed_table_rows_coerce_to_composite_type_and_drop_type_cascades() {
+    let dir = temp_dir("typed_table_row_function_drop_cascade");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type person_type as (id int4, name text)")
+        .unwrap();
+    db.execute(1, "create table persons of person_type")
+        .unwrap();
+    db.execute(1, "insert into persons values (1, 'test')")
+        .unwrap();
+    db.execute(
+        1,
+        "create function namelen(person_type) returns int4 language sql as $$ select length($1.name) $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, namelen(persons) from persons"),
+        vec![vec![Value::Int32(1), Value::Int32(4)]]
+    );
+
+    db.execute(1, "drop type person_type cascade").unwrap();
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    assert!(visible.type_by_name("person_type").is_none());
+    assert!(visible.lookup_any_relation("persons").is_none());
+}
+
+#[test]
 fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
     let dir = temp_dir("create_enum_type_catalog_rows");
     let db = Database::open(&dir, 64).unwrap();
@@ -32921,7 +33024,7 @@ fn drop_type_enforces_restrict_and_if_exists() {
             assert!(
                 detail
                     .unwrap_or_default()
-                    .contains("function widget_rows depends on type widget")
+                    .contains("function widget_rows() depends on type widget")
             );
         }
         other => panic!("expected dependent-function drop restriction, got {other:?}"),
