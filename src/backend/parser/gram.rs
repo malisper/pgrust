@@ -7774,6 +7774,20 @@ fn build_create_policy_statement(sql: &str) -> Result<CreatePolicyStatement, Par
                 rest = consume_keyword(rest, "restrictive").trim_start();
                 continue;
             }
+            if let Ok((policy_option, _)) = parse_sql_identifier(rest) {
+                return Err(ParseError::DetailedError {
+                    message: format!("unrecognized row security option \"{policy_option}\""),
+                    detail: None,
+                    hint: Some(
+                        "Only PERMISSIVE or RESTRICTIVE policies are supported currently.".into(),
+                    ),
+                    sqlstate: "42601",
+                }
+                .with_position(sql_position_from_byte_offset(
+                    sql,
+                    slice_byte_offset(sql, rest),
+                )));
+            }
             return Err(ParseError::UnexpectedToken {
                 expected: "PERMISSIVE or RESTRICTIVE",
                 actual: rest.into(),

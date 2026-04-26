@@ -3324,6 +3324,22 @@ fn parse_policy_statements() {
             with_check_sql: None,
         })
     );
+
+    let sql = "CREATE POLICY p4 ON items AS UGLY USING (a > 0)";
+    let err = parse_statement(sql).unwrap_err();
+    assert_eq!(err.to_string(), "unrecognized row security option \"ugly\"");
+    assert_eq!(err.position(), sql.find("UGLY").map(|index| index + 1));
+    match err.unpositioned() {
+        ParseError::DetailedError {
+            hint: Some(hint),
+            sqlstate: "42601",
+            ..
+        } => assert_eq!(
+            hint,
+            "Only PERMISSIVE or RESTRICTIVE policies are supported currently."
+        ),
+        other => panic!("expected detailed policy option error, got {other:?}"),
+    }
 }
 
 #[test]
