@@ -2229,6 +2229,7 @@ fn parameterized_inner_index_path(
             spec,
             None,
             None,
+            false,
             root.config,
             catalog,
         );
