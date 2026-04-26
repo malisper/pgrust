@@ -3660,6 +3660,10 @@ fn try_parse_index_statement(sql: &str) -> Result<Option<Statement>, ParseError>
         return build_alter_index_alter_column_statistics_statement(trimmed)
             .map(|stmt| Some(Statement::AlterIndexAlterColumnStatistics(stmt)));
     }
+    if lowered.contains(" set ") {
+        return build_alter_index_set_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterIndexSet(stmt)));
+    }
     Ok(None)
 }
 
@@ -5550,6 +5554,74 @@ fn build_alter_index_attach_partition_statement(
         parent_index_name,
         child_index_name,
     })
+}
+
+fn build_alter_index_set_statement(sql: &str) -> Result<AlterIndexSetStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "index").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(after_if, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF EXISTS",
+                actual: sql.into(),
+            });
+        }
+        if_exists = true;
+        rest = consume_keyword(after_if, "exists").trim_start();
+    }
+    let (parts, rest_after_index) = parse_qualified_identifier_parts(rest)?;
+    let index_name = parts.join(".");
+    let mut rest = rest_after_index.trim_start();
+    if !keyword_at_start(rest, "set") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER INDEX SET",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "set").trim_start();
+    let (options_sql, tail) = take_parenthesized_segment(rest)?;
+    if !tail.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER INDEX SET statement",
+            actual: tail.trim().into(),
+        });
+    }
+    let options = parse_reloption_assignments(&options_sql)?;
+    Ok(AlterIndexSetStatement {
+        if_exists,
+        index_name,
+        options,
+    })
+}
+
+fn parse_reloption_assignments(input: &str) -> Result<Vec<RelOption>, ParseError> {
+    split_comma_separated_sql(input)?
+        .into_iter()
+        .map(|part| {
+            let (name_sql, value_sql) =
+                part.split_once('=')
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "reloption assignment",
+                        actual: part.trim().into(),
+                    })?;
+            let (name, tail) = parse_sql_identifier(name_sql)?;
+            if !tail.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "reloption name",
+                    actual: tail.trim().into(),
+                });
+            }
+            let value_sql = value_sql.trim();
+            let value = scan_string_literal_token_len(value_sql)
+                .filter(|len| value_sql[*len..].trim().is_empty())
+                .map(|len| decode_string_literal(&value_sql[..len]))
+                .transpose()?
+                .unwrap_or_else(|| value_sql.to_string());
+            Ok(RelOption { name, value })
+        })
+        .collect()
 }
 
 fn build_alter_view_rename_statement(sql: &str) -> Result<AlterTableRenameStatement, ParseError> {

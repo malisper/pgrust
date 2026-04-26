@@ -634,7 +634,8 @@ impl Database {
             Statement::Show(_)
             | Statement::Set(_)
             | Statement::Reset(_)
-            | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+            | Statement::AlterTableSet(_)
+            | Statement::AlterIndexSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CreateRole(ref create_stmt) => {
                 self.execute_create_role_stmt(client_id, create_stmt, None)
             }

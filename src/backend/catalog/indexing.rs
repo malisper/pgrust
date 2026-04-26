@@ -421,6 +421,7 @@ pub fn maintain_catalog_indexes_for_insert_in_db(
             index_meta: system_catalog_index_relcache(*descriptor),
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             heap_tid,
+            old_heap_tid: None,
             values: values.to_vec(),
             unique_check: if descriptor.unique {
                 IndexUniqueCheck::Yes

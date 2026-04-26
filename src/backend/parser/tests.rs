@@ -3417,6 +3417,22 @@ fn parse_alter_index_rename_statement() {
 }
 
 #[test]
+fn parse_alter_index_set_statement() {
+    let stmt = parse_statement("alter index if exists items_idx set (fillfactor = 10)").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterIndexSet(AlterIndexSetStatement {
+            if_exists: true,
+            index_name: "items_idx".into(),
+            options: vec![RelOption {
+                name: "fillfactor".into(),
+                value: "10".into(),
+            }],
+        })
+    );
+}
+
+#[test]
 fn parse_alter_view_rename_statement() {
     let stmt = parse_statement("alter view if exists items_view rename to items_view_new").unwrap();
     assert_eq!(

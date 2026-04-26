@@ -1248,7 +1248,8 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::TsMatch
             | BuiltinScalarFunction::TsQueryAnd
             | BuiltinScalarFunction::TsQueryOr
-            | BuiltinScalarFunction::TsVectorConcat => args.len() == 2,
+            | BuiltinScalarFunction::TsVectorConcat
+            | BuiltinScalarFunction::TextCat => args.len() == 2,
             BuiltinScalarFunction::CashLarger | BuiltinScalarFunction::CashSmaller => {
                 args.len() == 2
             }
@@ -3026,6 +3027,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::JsonbPathQueryFirst,
         ),
         ("initcap", BuiltinScalarFunction::Initcap),
+        ("textcat", BuiltinScalarFunction::TextCat),
         ("concat", BuiltinScalarFunction::Concat),
         ("concat_ws", BuiltinScalarFunction::ConcatWs),
         ("format", BuiltinScalarFunction::Format),

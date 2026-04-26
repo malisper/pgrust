@@ -510,6 +510,7 @@ fn run_statement(
         | Statement::AlterAggregateRename(_)
         | Statement::DropAggregate(_)
         | Statement::AlterTableSet(_)
+        | Statement::AlterIndexSet(_)
         | Statement::CreateStatistics(_)
         | Statement::AlterStatistics(_)
         | Statement::DropStatistics(_)

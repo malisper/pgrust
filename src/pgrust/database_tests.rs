@@ -8528,6 +8528,28 @@ fn hash_index_build_sizes_initial_buckets_for_low_fillfactor() {
 }
 
 #[test]
+fn hash_index_fillfactor_out_of_range_uses_postgres_error_shape() {
+    let base = temp_dir("hash_index_fillfactor_range");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    match db.execute(
+        1,
+        "create index items_id_hash on items using hash (id) with (fillfactor = 9)",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        }) if message == "value 9 out of bounds for option \"fillfactor\""
+            && detail == "Valid values are between \"10\" and \"100\"."
+            && sqlstate == "22023" => {}
+        other => panic!("expected fillfactor range error, got {other:?}"),
+    }
+}
+
+#[test]
 fn hash_expression_partial_index_matches_equality_quals() {
     let base = temp_dir("hash_expression_partial_index");
     let db = Database::open(&base, 16).unwrap();
@@ -16969,6 +16991,109 @@ fn create_index_supports_expression_keys() {
             Value::Text("[\"d + e\"]".into()),
         ]]
     );
+}
+
+#[test]
+fn unique_expression_index_build_accepts_distinct_existing_rows() {
+    let base = temp_dir("unique_expression_index_build_distinct");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (value float8)").unwrap();
+    db.execute(
+        1,
+        "insert into items values (1935401906), (1345971420), (656473370)",
+    )
+    .unwrap();
+    db.execute(1, "create unique index items_abs_key on items (abs(value))")
+        .unwrap();
+}
+
+#[test]
+fn functional_textcat_index_builds_and_enforces_uniqueness() {
+    let base = temp_dir("functional_textcat_index");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table func_index_heap (f1 text, f2 text)")
+        .unwrap();
+    db.execute(1, "insert into func_index_heap values ('ABC', 'DEF')")
+        .unwrap();
+    db.execute(1, "insert into func_index_heap values ('AB', 'CDEFG')")
+        .unwrap();
+    db.execute(
+        1,
+        "create unique index func_index_index on func_index_heap (textcat(f1,f2))",
+    )
+    .unwrap();
+
+    match db.execute(1, "insert into func_index_heap values ('ABCD', 'EF')") {
+        Err(ExecError::UniqueViolation { constraint, .. }) if constraint == "func_index_index" => {}
+        other => panic!("expected textcat index unique violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn unique_expression_index_update_allows_unchanged_key() {
+    let base = temp_dir("unique_expression_index_update_unchanged_key");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, value float8)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 1234.1234), (2, 488912369)")
+        .unwrap();
+    db.execute(1, "create unique index items_abs_key on items (abs(value))")
+        .unwrap();
+
+    db.execute(1, "update items set value = -1234.1234 where id = 1")
+        .unwrap();
+    db.execute(1, "update items set id = 20 where value = 488912369")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id, value from items order by abs(value), id"
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Float64(-1234.1234)],
+            vec![Value::Int32(20), Value::Float64(488912369.0)],
+        ]
+    );
+}
+
+#[test]
+fn unique_abs_float_index_update_allows_new_distinct_key() {
+    let base = temp_dir("unique_abs_float_index_update_distinct_key");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table hash_f8_heap (seqno int4, random float8)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into hash_f8_heap values (8906, 1615625451), (8932, 488912369)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create unique index hash_f8_index_1 on hash_f8_heap(abs(random))",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select atttypid from pg_attribute where attrelid = 'hash_f8_index_1'::regclass and attnum = 1",
+        ),
+        vec![vec![Value::Int64(
+            crate::include::catalog::FLOAT8_TYPE_OID as i64
+        )]]
+    );
+
+    db.execute(
+        1,
+        "update hash_f8_heap set random = '-1234.1234'::float8 where seqno = 8906",
+    )
+    .unwrap();
 }
 
 #[test]
