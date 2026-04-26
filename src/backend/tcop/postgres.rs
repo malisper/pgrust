@@ -13,8 +13,8 @@ use crate::backend::libpq::pqcomm::{
 };
 use crate::backend::libpq::pqformat::{
     FloatFormatOptions, format_bytea_text, format_exec_error, format_exec_error_hint,
-    infer_command_tag, send_auth_ok, send_backend_key_data, send_bind_complete,
-    send_close_complete, send_command_complete, send_copy_data, send_copy_done,
+    infer_command_tag, infer_dml_returning_command_tag, send_auth_ok, send_backend_key_data,
+    send_bind_complete, send_close_complete, send_command_complete, send_copy_data, send_copy_done,
     send_copy_in_response, send_copy_out_response, send_empty_query, send_error,
     send_error_with_fields, send_error_with_hint, send_no_data, send_notice, send_notice_with_hint,
     send_notice_with_severity, send_notification_response, send_parameter_description,
@@ -2506,11 +2506,13 @@ fn execute_query_statement(
             let enum_labels = enum_label_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             flush_pending_backend_messages_with_sql(stream, db, &state.session, &sql)?;
+            let command_tag = infer_dml_returning_command_tag(&sql, rows.len())
+                .unwrap_or_else(|| format!("SELECT {}", rows.len()));
             send_query_result(
                 stream,
                 &columns,
                 &rows,
-                &format!("SELECT {}", rows.len()),
+                &command_tag,
                 FloatFormatOptions {
                     extra_float_digits: state.session.extra_float_digits(),
                     bytea_output: state.session.bytea_output(),
@@ -5632,7 +5634,10 @@ fn handle_execute(
                     )?;
                 }
                 if result.completed {
-                    send_command_complete(stream, &format!("SELECT {}", result.processed))
+                    let tag = result
+                        .command_tag
+                        .unwrap_or_else(|| format!("SELECT {}", result.processed));
+                    send_command_complete(stream, &tag)
                 } else {
                     send_portal_suspended(stream)
                 }

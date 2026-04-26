@@ -33,7 +33,7 @@ for_stmt = { kw_for ~ for_target_list ~ kw_in ~ expr_until_loop ~ kw_loop ~ stmt
 for_target_list = { assign_target ~ (comma ~ assign_target)* }
 raise_stmt = { kw_raise ~ raise_level? ~ (raise_message_clause | raise_condition_clause) ~ semi }
 raise_message_clause = { sql_string ~ (comma ~ expr_until_comma_or_semi)* }
-raise_condition_clause = { ident ~ raise_using_clause? }
+raise_condition_clause = { (sqlstate_condition | ident) ~ raise_using_clause? }
 raise_using_clause = { kw_using ~ raise_using_item ~ (comma ~ raise_using_item)* }
 raise_using_item = { ident ~ assign_op ~ expr_until_comma_or_semi }
 assert_stmt = { kw_assert ~ expr_until_comma_or_semi ~ (comma ~ expr_until_semi)? ~ semi }
@@ -109,8 +109,6 @@ type_name_chunk = _{
 expr_chunk = _{
     sql_string
     | quoted_ident
-    | "(" ~ expr_until_semi? ~ ")"
-    | "[" ~ expr_until_semi? ~ "]"
     | !semi ~ ANY
 }
 

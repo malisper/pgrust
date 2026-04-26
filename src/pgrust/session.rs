@@ -83,7 +83,8 @@ use crate::pgrust::portal::{
     PortalRunResult,
 };
 use crate::pl::plpgsql::{
-    execute_do_with_context, execute_do_with_gucs, execute_user_defined_procedure_values,
+    PlpgsqlFunctionCache, execute_do_with_context, execute_do_with_gucs,
+    execute_user_defined_procedure_values,
 };
 use crate::{ClientId, RelFileLocator};
 use parking_lot::RwLock;
@@ -502,7 +503,9 @@ pub struct Session {
     interrupts: Arc<InterruptState>,
     auth: AuthState,
     stats_state: Arc<RwLock<SessionStatsState>>,
+    random_state: Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
     portals: PortalManager,
+    plpgsql_function_cache: Arc<RwLock<PlpgsqlFunctionCache>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1217,12 +1220,19 @@ impl Session {
             interrupts: Arc::new(InterruptState::new()),
             auth: AuthState::default(),
             stats_state: Arc::new(RwLock::new(SessionStatsState::default())),
+            random_state: crate::backend::executor::PgPrngState::shared(),
             portals: PortalManager::default(),
+            plpgsql_function_cache: Arc::new(RwLock::new(PlpgsqlFunctionCache::default())),
         }
     }
 
     pub fn in_transaction(&self) -> bool {
         self.active_txn.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn plpgsql_function_cache_len(&self) -> usize {
+        self.plpgsql_function_cache.read().len()
     }
 
     pub fn transaction_failed(&self) -> bool {
@@ -1653,6 +1663,15 @@ impl Session {
         stmt: Statement,
         statement_lock_scope_id: Option<u64>,
     ) -> Result<StatementResult, ExecError> {
+        self.execute_statement_autocommit(db, stmt, statement_lock_scope_id)
+    }
+
+    fn execute_statement_autocommit(
+        &mut self,
+        db: &Database,
+        stmt: Statement,
+        statement_lock_scope_id: Option<u64>,
+    ) -> Result<StatementResult, ExecError> {
         self.active_txn = Some(self.active_transaction_without_xid(db));
         self.stats_state.write().begin_top_level_xact();
         let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -1738,6 +1757,7 @@ impl Session {
             transaction_lock_scope_id: self.active_advisory_scope_id(),
             next_command_id: cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            random_state: Arc::clone(&self.random_state),
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
@@ -1748,7 +1768,8 @@ impl Session {
             system_bindings: Vec::new(),
             subplans: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
-            compiled_functions: std::collections::HashMap::new(),
+            plpgsql_function_cache: Arc::clone(&self.plpgsql_function_cache),
+            pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
@@ -2230,6 +2251,7 @@ impl Session {
         db.install_session_replication_role(self.client_id, self.session_replication_role());
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_stats_state(self.client_id, Arc::clone(&self.stats_state));
+        db.install_plpgsql_function_cache(self.client_id, Arc::clone(&self.plpgsql_function_cache));
         let result = stacker::grow(32 * 1024 * 1024, || {
             StackDepthGuard::enter(self.datetime_config.max_stack_depth_kb)
                 .run(|| self.execute_internal(db, sql, statement_lock_scope.scope_id()))
@@ -3973,7 +3995,15 @@ impl Session {
             Statement::Merge(ref merge_stmt) => {
                 let _ = merge_stmt;
                 let search_path = self.configured_search_path();
-                db.execute_statement_with_search_path(self.client_id, stmt, search_path.as_deref())
+                db.execute_statement_with_search_path_datetime_config_gucs_planner_config_and_random_state(
+                    self.client_id,
+                    stmt,
+                    search_path.as_deref(),
+                    &self.datetime_config,
+                    &self.gucs,
+                    self.planner_config(),
+                    Arc::clone(&self.random_state),
+                )
             }
             Statement::DeclareCursor(ref declare_stmt) => {
                 let options = cursor_options_from_declare(declare_stmt);
@@ -4143,13 +4173,14 @@ impl Session {
                     result
                 } else {
                     let search_path = self.configured_search_path();
-                    db.execute_statement_with_search_path_datetime_config_gucs_and_planner_config(
+                    db.execute_statement_with_search_path_datetime_config_gucs_planner_config_and_random_state(
                         self.client_id,
                         stmt,
                         search_path.as_deref(),
                         &self.datetime_config,
                         &self.gucs,
                         self.planner_config(),
+                        Arc::clone(&self.random_state),
                     )
                 }
             }
@@ -4329,7 +4360,7 @@ impl Session {
         let mut datetime_config = self.datetime_config.clone();
         datetime_config.transaction_timestamp_usecs = Some(transaction_timestamp_usecs);
         datetime_config.statement_timestamp_usecs = Some(statement_timestamp_usecs);
-        let mut guard = db.execute_streaming_with_config(
+        let mut guard = db.execute_streaming_with_config_and_random_state(
             self.client_id,
             select_stmt,
             txn_ctx,
@@ -4339,6 +4370,7 @@ impl Session {
             &datetime_config,
             snapshot_override,
             self.planner_config(),
+            Arc::clone(&self.random_state),
         )?;
         guard.interrupt_guard = Some(self.statement_interrupt_guard()?);
         Ok(guard)
@@ -4412,6 +4444,14 @@ impl Session {
                     column_names,
                     rows,
                 } => {
+                    if let Some(tag) =
+                        crate::backend::libpq::pqformat::infer_dml_returning_command_tag(
+                            &sql,
+                            rows.len(),
+                        )
+                    {
+                        portal.command_tag = tag;
+                    }
                     portal.execution = crate::pgrust::portal::PortalExecution::Materialized {
                         columns,
                         column_names,

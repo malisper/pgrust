@@ -74,6 +74,97 @@ fn infer_arg_type(
     infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
 }
 
+fn scalar_function_may_return_geometry(func: BuiltinScalarFunction) -> bool {
+    matches!(
+        func,
+        BuiltinScalarFunction::GeoPoint
+            | BuiltinScalarFunction::GeoBox
+            | BuiltinScalarFunction::GeoLine
+            | BuiltinScalarFunction::GeoLseg
+            | BuiltinScalarFunction::GeoPath
+            | BuiltinScalarFunction::GeoPolygon
+            | BuiltinScalarFunction::GeoCircle
+            | BuiltinScalarFunction::GeoCenter
+            | BuiltinScalarFunction::GeoPolyCenter
+            | BuiltinScalarFunction::GeoBoundBox
+            | BuiltinScalarFunction::GeoDiagonal
+            | BuiltinScalarFunction::GeoClosestPoint
+            | BuiltinScalarFunction::GeoIntersection
+            | BuiltinScalarFunction::GeoAdd
+            | BuiltinScalarFunction::GeoSub
+            | BuiltinScalarFunction::GeoMul
+            | BuiltinScalarFunction::GeoDiv
+    )
+}
+
+fn expr_may_resolve_to_geometry(
+    expr: &SqlExpr,
+    scope: &BoundScope,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> bool {
+    match expr {
+        SqlExpr::Const(
+            Value::Point(_)
+            | Value::Lseg(_)
+            | Value::Path(_)
+            | Value::Line(_)
+            | Value::Box(_)
+            | Value::Polygon(_)
+            | Value::Circle(_),
+        ) => true,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _)) => true,
+        SqlExpr::Const(_)
+        | SqlExpr::IntegerLiteral(_)
+        | SqlExpr::NumericLiteral(_)
+        | SqlExpr::Random => false,
+        SqlExpr::Column(name) => {
+            match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {
+                Ok(ResolvedColumn::Local(index)) => scope
+                    .desc
+                    .columns
+                    .get(index)
+                    .is_some_and(|column| is_geometry_type(column.sql_type)),
+                Ok(ResolvedColumn::Outer { depth, index }) => outer_scopes
+                    .get(depth)
+                    .and_then(|scope| scope.desc.columns.get(index))
+                    .is_some_and(|column| is_geometry_type(column.sql_type)),
+                Err(_) => true,
+            }
+        }
+        SqlExpr::Cast(_, ty) => is_geometry_type(raw_type_name_hint(ty)),
+        SqlExpr::FuncCall { name, .. } => resolve_scalar_function(name)
+            .map(scalar_function_may_return_geometry)
+            .unwrap_or(true),
+        SqlExpr::GeometryUnaryOp { .. } | SqlExpr::GeometryBinaryOp { .. } => true,
+        SqlExpr::UnaryPlus(inner) | SqlExpr::Negate(inner) | SqlExpr::BitNot(inner) => {
+            expr_may_resolve_to_geometry(inner, scope, outer_scopes, grouped_outer)
+        }
+        SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::BitXor(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
+        | SqlExpr::Eq(left, right)
+        | SqlExpr::NotEq(left, right)
+        | SqlExpr::Lt(left, right)
+        | SqlExpr::LtEq(left, right)
+        | SqlExpr::Gt(left, right)
+        | SqlExpr::GtEq(left, right)
+        | SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
+        | SqlExpr::JsonbContains(left, right)
+        | SqlExpr::JsonbContained(left, right) => {
+            expr_may_resolve_to_geometry(left, scope, outer_scopes, grouped_outer)
+                || expr_may_resolve_to_geometry(right, scope, outer_scopes, grouped_outer)
+        }
+        _ => false,
+    }
+}
+
 fn geometry_arithmetic_result_type(left: SqlType, right: SqlType) -> Option<SqlType> {
     match (left.element_type().kind, right.element_type().kind) {
         (SqlTypeKind::Point, SqlTypeKind::Point) => Some(SqlType::new(SqlTypeKind::Point)),
@@ -400,6 +491,11 @@ pub(super) fn infer_geometry_special_expr_type_with_ctes(
         | SqlExpr::Sub(left, right)
         | SqlExpr::Mul(left, right)
         | SqlExpr::Div(left, right) => {
+            if !expr_may_resolve_to_geometry(left, scope, outer_scopes, grouped_outer)
+                && !expr_may_resolve_to_geometry(right, scope, outer_scopes, grouped_outer)
+            {
+                return None;
+            }
             let left_type = infer_arg_type(left, scope, catalog, outer_scopes, grouped_outer, ctes);
             let right_type =
                 infer_arg_type(right, scope, catalog, outer_scopes, grouped_outer, ctes);
@@ -410,6 +506,11 @@ pub(super) fn infer_geometry_special_expr_type_with_ctes(
             }
         }
         SqlExpr::BitXor(left, right) => {
+            if !expr_may_resolve_to_geometry(left, scope, outer_scopes, grouped_outer)
+                && !expr_may_resolve_to_geometry(right, scope, outer_scopes, grouped_outer)
+            {
+                return None;
+            }
             let left_type = infer_arg_type(left, scope, catalog, outer_scopes, grouped_outer, ctes);
             let right_type =
                 infer_arg_type(right, scope, catalog, outer_scopes, grouped_outer, ctes);
@@ -420,6 +521,11 @@ pub(super) fn infer_geometry_special_expr_type_with_ctes(
             }
         }
         SqlExpr::Shl(left, right) | SqlExpr::Shr(left, right) => {
+            if !expr_may_resolve_to_geometry(left, scope, outer_scopes, grouped_outer)
+                && !expr_may_resolve_to_geometry(right, scope, outer_scopes, grouped_outer)
+            {
+                return None;
+            }
             let left_type = infer_arg_type(left, scope, catalog, outer_scopes, grouped_outer, ctes);
             let right_type =
                 infer_arg_type(right, scope, catalog, outer_scopes, grouped_outer, ctes);
@@ -440,6 +546,11 @@ pub(super) fn infer_geometry_special_expr_type_with_ctes(
         | SqlExpr::ArrayContained(left, right)
         | SqlExpr::JsonbContains(left, right)
         | SqlExpr::JsonbContained(left, right) => {
+            if !expr_may_resolve_to_geometry(left, scope, outer_scopes, grouped_outer)
+                && !expr_may_resolve_to_geometry(right, scope, outer_scopes, grouped_outer)
+            {
+                return None;
+            }
             let left_type = infer_arg_type(left, scope, catalog, outer_scopes, grouped_outer, ctes);
             let right_type =
                 infer_arg_type(right, scope, catalog, outer_scopes, grouped_outer, ctes);

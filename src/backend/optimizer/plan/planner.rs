@@ -1727,6 +1727,23 @@ pub(super) fn grouping_planner(
             root,
             &sort_group_pathkeys(&root.parse.distinct_on, &root.processed_tlist),
         );
+    if !has_grouping
+        && !has_windowing(root)
+        && !has_target_srfs
+        && !root.query_pathkeys.is_empty()
+        && !distinct_on_constant
+        && current_rel.reltarget != root.sort_input_target
+    {
+        current_rel = make_pathtarget_projection_rel(
+            root,
+            current_rel,
+            &root.sort_input_target,
+            catalog,
+            false,
+        );
+        projection_done = current_rel.reltarget == root.final_target;
+    }
+
     if !root.query_pathkeys.is_empty() && !distinct_on_constant {
         current_rel = make_ordered_rel(root, current_rel, catalog);
     }

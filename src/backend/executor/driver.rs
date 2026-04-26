@@ -54,6 +54,11 @@ pub fn execute_query_desc(
         saved
     };
     ctx.cte_tables.clear();
+    ctx.cte_tables.extend(
+        ctx.pinned_cte_tables
+            .iter()
+            .map(|(cte_id, table)| (*cte_id, table.clone())),
+    );
     ctx.cte_producers.clear();
     ctx.recursive_worktables.clear();
     let result = (|| {

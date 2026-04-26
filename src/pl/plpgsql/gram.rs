@@ -536,9 +536,13 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
             }
             Rule::raise_condition_clause => {
                 let mut condition_name = None;
+                let mut explicit_sqlstate = None;
                 for inner in part.into_inner() {
                     match inner.as_rule() {
                         Rule::ident => condition_name = Some(build_ident(inner)),
+                        Rule::sqlstate_condition => {
+                            explicit_sqlstate = Some(sqlstate_condition_literal(inner)?);
+                        }
                         Rule::raise_using_clause => {
                             for item in inner.into_inner() {
                                 let mut item_name = None;
@@ -564,14 +568,21 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
                         _ => {}
                     }
                 }
-                let condition_name = condition_name.ok_or(ParseError::UnexpectedEof)?;
-                sqlstate = Some(
-                    exception_condition_name_sqlstate(&condition_name)
-                        .unwrap_or("P0001")
-                        .to_string(),
-                );
-                if message.is_none() {
-                    message = Some(condition_name);
+                if let Some(value) = explicit_sqlstate {
+                    if message.is_none() {
+                        message = Some(value.clone());
+                    }
+                    sqlstate = Some(value);
+                } else {
+                    let condition_name = condition_name.ok_or(ParseError::UnexpectedEof)?;
+                    sqlstate = Some(
+                        exception_condition_name_sqlstate(&condition_name)
+                            .unwrap_or("P0001")
+                            .to_string(),
+                    );
+                    if message.is_none() {
+                        message = Some(condition_name);
+                    }
                 }
             }
             _ => {}
@@ -584,6 +595,21 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         message: message.ok_or(ParseError::UnexpectedEof)?,
         params,
     })
+}
+
+fn sqlstate_condition_literal(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    let sql = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::sql_string)
+        .ok_or(ParseError::UnexpectedEof)?;
+    let expr = parse_expr(sql.as_str())?;
+    let SqlExpr::Const(Value::Text(sqlstate)) = expr else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "SQLSTATE string literal",
+            actual: sql.as_str().into(),
+        });
+    };
+    Ok(sqlstate.to_string())
 }
 
 fn raise_string_literal_text(sql: &str) -> Result<String, ParseError> {
