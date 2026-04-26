@@ -4106,6 +4106,35 @@ fn parse_grant_all_on_table_statement() {
 }
 
 #[test]
+fn parse_grant_update_on_table_statement() {
+    let stmt = parse_statement("grant update on atest2 to regress_priv_user3").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UpdateOnTable,
+            object_names: vec!["atest2".into()],
+            grantee_names: vec!["regress_priv_user3".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_multiple_table_privileges_statement() {
+    let stmt =
+        parse_statement("grant select, update on table grantor_test3 to regress_grantor3").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::TablePrivileges("rw".into()),
+            object_names: vec!["grantor_test3".into()],
+            grantee_names: vec!["regress_grantor3".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
 fn parse_grant_execute_on_function_statement() {
     let stmt = parse_statement("grant execute on function f_leak(text) to public").unwrap();
     assert_eq!(
@@ -4155,6 +4184,20 @@ fn parse_revoke_all_privileges_on_table_from_public_statement() {
             privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
             object_names: vec!["tenant_table".into()],
             grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_delete_on_table_statement() {
+    let stmt = parse_statement("revoke delete on atest3 from regress_priv_group2").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::DeleteOnTable,
+            object_names: vec!["atest3".into()],
+            grantee_names: vec!["regress_priv_group2".into()],
             cascade: false,
         })
     );

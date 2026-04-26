@@ -14,16 +14,29 @@ use std::collections::{BTreeSet, VecDeque};
 const TABLE_ALL_PRIVILEGE_CHARS: &str = "arwdDxtm";
 const TABLE_SELECT_PRIVILEGE_CHARS: &str = "r";
 const TABLE_INSERT_PRIVILEGE_CHARS: &str = "a";
+const TABLE_UPDATE_PRIVILEGE_CHARS: &str = "w";
+const TABLE_DELETE_PRIVILEGE_CHARS: &str = "d";
+const TABLE_TRUNCATE_PRIVILEGE_CHARS: &str = "D";
+const TABLE_REFERENCES_PRIVILEGE_CHARS: &str = "x";
+const TABLE_TRIGGER_PRIVILEGE_CHARS: &str = "t";
+const TABLE_MAINTAIN_PRIVILEGE_CHARS: &str = "m";
 const SCHEMA_ALL_PRIVILEGE_CHARS: &str = "UC";
 const SCHEMA_USAGE_PRIVILEGE_CHARS: &str = "U";
 const TYPE_USAGE_PRIVILEGE_CHARS: &str = "U";
 const FUNCTION_EXECUTE_PRIVILEGE_CHARS: &str = "X";
 
-fn table_privilege_chars(privilege: GrantObjectPrivilege) -> Option<&'static str> {
+fn table_privilege_chars(privilege: &GrantObjectPrivilege) -> Option<&str> {
     match privilege {
         GrantObjectPrivilege::AllPrivilegesOnTable => Some(TABLE_ALL_PRIVILEGE_CHARS),
         GrantObjectPrivilege::SelectOnTable => Some(TABLE_SELECT_PRIVILEGE_CHARS),
         GrantObjectPrivilege::InsertOnTable => Some(TABLE_INSERT_PRIVILEGE_CHARS),
+        GrantObjectPrivilege::UpdateOnTable => Some(TABLE_UPDATE_PRIVILEGE_CHARS),
+        GrantObjectPrivilege::DeleteOnTable => Some(TABLE_DELETE_PRIVILEGE_CHARS),
+        GrantObjectPrivilege::TruncateOnTable => Some(TABLE_TRUNCATE_PRIVILEGE_CHARS),
+        GrantObjectPrivilege::ReferencesOnTable => Some(TABLE_REFERENCES_PRIVILEGE_CHARS),
+        GrantObjectPrivilege::TriggerOnTable => Some(TABLE_TRIGGER_PRIVILEGE_CHARS),
+        GrantObjectPrivilege::MaintainOnTable => Some(TABLE_MAINTAIN_PRIVILEGE_CHARS),
+        GrantObjectPrivilege::TablePrivileges(chars) => Some(chars.as_str()),
         _ => None,
     }
 }
@@ -438,7 +451,14 @@ impl Database {
             }
             GrantObjectPrivilege::AllPrivilegesOnTable
             | GrantObjectPrivilege::SelectOnTable
-            | GrantObjectPrivilege::InsertOnTable => self
+            | GrantObjectPrivilege::InsertOnTable
+            | GrantObjectPrivilege::UpdateOnTable
+            | GrantObjectPrivilege::DeleteOnTable
+            | GrantObjectPrivilege::TruncateOnTable
+            | GrantObjectPrivilege::ReferencesOnTable
+            | GrantObjectPrivilege::TriggerOnTable
+            | GrantObjectPrivilege::MaintainOnTable
+            | GrantObjectPrivilege::TablePrivileges(_) => self
                 .execute_grant_table_acl_stmt_with_search_path(
                     client_id,
                     stmt,
@@ -482,7 +502,14 @@ impl Database {
             }
             GrantObjectPrivilege::AllPrivilegesOnTable
             | GrantObjectPrivilege::SelectOnTable
-            | GrantObjectPrivilege::InsertOnTable => self
+            | GrantObjectPrivilege::InsertOnTable
+            | GrantObjectPrivilege::UpdateOnTable
+            | GrantObjectPrivilege::DeleteOnTable
+            | GrantObjectPrivilege::TruncateOnTable
+            | GrantObjectPrivilege::ReferencesOnTable
+            | GrantObjectPrivilege::TriggerOnTable
+            | GrantObjectPrivilege::MaintainOnTable
+            | GrantObjectPrivilege::TablePrivileges(_) => self
                 .execute_revoke_table_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt,
@@ -548,7 +575,14 @@ impl Database {
             }
             GrantObjectPrivilege::AllPrivilegesOnTable
             | GrantObjectPrivilege::SelectOnTable
-            | GrantObjectPrivilege::InsertOnTable => self
+            | GrantObjectPrivilege::InsertOnTable
+            | GrantObjectPrivilege::UpdateOnTable
+            | GrantObjectPrivilege::DeleteOnTable
+            | GrantObjectPrivilege::TruncateOnTable
+            | GrantObjectPrivilege::ReferencesOnTable
+            | GrantObjectPrivilege::TriggerOnTable
+            | GrantObjectPrivilege::MaintainOnTable
+            | GrantObjectPrivilege::TablePrivileges(_) => self
                 .execute_grant_table_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt,
@@ -611,7 +645,14 @@ impl Database {
             }
             GrantObjectPrivilege::AllPrivilegesOnTable
             | GrantObjectPrivilege::SelectOnTable
-            | GrantObjectPrivilege::InsertOnTable => self
+            | GrantObjectPrivilege::InsertOnTable
+            | GrantObjectPrivilege::UpdateOnTable
+            | GrantObjectPrivilege::DeleteOnTable
+            | GrantObjectPrivilege::TruncateOnTable
+            | GrantObjectPrivilege::ReferencesOnTable
+            | GrantObjectPrivilege::TriggerOnTable
+            | GrantObjectPrivilege::MaintainOnTable
+            | GrantObjectPrivilege::TablePrivileges(_) => self
                 .execute_revoke_table_acl_stmt_with_search_path(
                     client_id,
                     stmt,
@@ -739,90 +780,100 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        let object_name = single_object_name(&stmt.object_names, "single table name")?;
-        let privilege_chars = table_privilege_chars(stmt.privilege.clone())
+        let privilege_chars = table_privilege_chars(&stmt.privilege)
             .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
-        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = catalog.lookup_relation(object_name).ok_or_else(|| {
-            ExecError::Parse(ParseError::TableDoesNotExist(object_name.to_string()))
-        })?;
+        if stmt.object_names.is_empty() {
+            return Err(ExecError::Parse(ParseError::UnexpectedEof));
+        }
         let auth = self.auth_state(client_id);
-        let auth_catalog = self
-            .auth_catalog(client_id, Some((xid, cid)))
-            .map_err(map_catalog_error)?;
-        if !auth_catalog
-            .role_by_oid(auth.current_user_oid())
-            .is_some_and(|row| row.rolsuper)
-            && !auth.has_effective_membership(relation.owner_oid, &auth_catalog)
-        {
-            return Err(ExecError::DetailedError {
-                message: format!("must be owner of table {object_name}"),
-                detail: None,
-                hint: None,
-                sqlstate: "42501",
-            });
-        }
-        let owner_name = auth_catalog
-            .role_by_oid(relation.owner_oid)
-            .map(|row| row.rolname.clone())
-            .ok_or_else(|| ExecError::DetailedError {
-                message: format!("owner for table \"{object_name}\" does not exist"),
-                detail: None,
-                hint: None,
-                sqlstate: "XX000",
+        let mut current_cid = cid;
+        for object_name in &stmt.object_names {
+            let catalog = self.lazy_catalog_lookup(
+                client_id,
+                Some((xid, current_cid)),
+                configured_search_path,
+            );
+            let relation = catalog.lookup_relation(object_name).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(object_name.to_string()))
             })?;
-        let grantor_name = auth_catalog
-            .role_by_oid(auth.current_user_oid())
-            .map(|row| row.rolname.clone())
-            .ok_or_else(|| ExecError::DetailedError {
-                message: "current user does not exist".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "XX000",
-            })?;
-        let catcache = self
-            .backend_catcache(client_id, Some((xid, cid)))
-            .map_err(map_catalog_error)?;
-        let mut acl = catcache
-            .class_by_oid(relation.relation_oid)
-            .and_then(|row| row.relacl.clone())
-            .unwrap_or_else(|| {
-                table_owner_default_acl(&owner_name, relation.relkind)
-                    .into_iter()
-                    .collect()
-            });
-        for grantee_name in &stmt.grantee_names {
-            let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
-                String::new()
-            } else {
-                auth_catalog
-                    .role_by_name(grantee_name)
-                    .map(|row| row.rolname.clone())
-                    .ok_or_else(|| {
-                        ExecError::Parse(role_management_error(format!(
-                            "role \"{}\" does not exist",
-                            grantee_name
-                        )))
-                    })?
+            let auth_catalog = self
+                .auth_catalog(client_id, Some((xid, current_cid)))
+                .map_err(map_catalog_error)?;
+            if !auth_catalog
+                .role_by_oid(auth.current_user_oid())
+                .is_some_and(|row| row.rolsuper)
+                && !auth.has_effective_membership(relation.owner_oid, &auth_catalog)
+            {
+                return Err(ExecError::DetailedError {
+                    message: format!("must be owner of table {object_name}"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42501",
+                });
+            }
+            let owner_name = auth_catalog
+                .role_by_oid(relation.owner_oid)
+                .map(|row| row.rolname.clone())
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("owner for table \"{object_name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+            let grantor_name = auth_catalog
+                .role_by_oid(auth.current_user_oid())
+                .map(|row| row.rolname.clone())
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: "current user does not exist".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+            let catcache = self
+                .backend_catcache(client_id, Some((xid, current_cid)))
+                .map_err(map_catalog_error)?;
+            let mut acl = catcache
+                .class_by_oid(relation.relation_oid)
+                .and_then(|row| row.relacl.clone())
+                .unwrap_or_else(|| {
+                    table_owner_default_acl(&owner_name, relation.relkind)
+                        .into_iter()
+                        .collect()
+                });
+            for grantee_name in &stmt.grantee_names {
+                let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
+                    String::new()
+                } else {
+                    auth_catalog
+                        .role_by_name(grantee_name)
+                        .map(|row| row.rolname.clone())
+                        .ok_or_else(|| {
+                            ExecError::Parse(role_management_error(format!(
+                                "role \"{}\" does not exist",
+                                grantee_name
+                            )))
+                        })?
+                };
+                grant_table_acl_entry(&mut acl, &grantee_acl_name, &grantor_name, privilege_chars);
+            }
+            let new_acl = collapse_relation_acl_defaults(acl, &owner_name, relation.relkind);
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: current_cid,
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
             };
-            grant_table_acl_entry(&mut acl, &grantee_acl_name, &grantor_name, privilege_chars);
+            let effect = self
+                .catalog
+                .write()
+                .alter_relation_acl_mvcc(relation.relation_oid, new_acl, &ctx)
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+            current_cid = current_cid.saturating_add(1);
         }
-        let new_acl = collapse_relation_acl_defaults(acl, &owner_name, relation.relkind);
-        let ctx = CatalogWriteContext {
-            pool: self.pool.clone(),
-            txns: self.txns.clone(),
-            xid,
-            cid,
-            client_id,
-            waiter: None,
-            interrupts: self.interrupt_state(client_id),
-        };
-        let effect = self
-            .catalog
-            .write()
-            .alter_relation_acl_mvcc(relation.relation_oid, new_acl, &ctx)
-            .map_err(map_catalog_error)?;
-        catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -835,77 +886,87 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        let object_name = single_object_name(&stmt.object_names, "single table name")?;
-        let privilege_chars = table_privilege_chars(stmt.privilege.clone())
+        let privilege_chars = table_privilege_chars(&stmt.privilege)
             .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
-        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = catalog.lookup_relation(object_name).ok_or_else(|| {
-            ExecError::Parse(ParseError::TableDoesNotExist(object_name.to_string()))
-        })?;
+        if stmt.object_names.is_empty() {
+            return Err(ExecError::Parse(ParseError::UnexpectedEof));
+        }
         let auth = self.auth_state(client_id);
-        let auth_catalog = self
-            .auth_catalog(client_id, Some((xid, cid)))
-            .map_err(map_catalog_error)?;
-        if !auth_catalog
-            .role_by_oid(auth.current_user_oid())
-            .is_some_and(|row| row.rolsuper)
-            && !auth.has_effective_membership(relation.owner_oid, &auth_catalog)
-        {
-            return Err(ExecError::DetailedError {
-                message: format!("must be owner of table {object_name}"),
-                detail: None,
-                hint: None,
-                sqlstate: "42501",
-            });
-        }
-        let owner_name = auth_catalog
-            .role_by_oid(relation.owner_oid)
-            .map(|row| row.rolname.clone())
-            .ok_or_else(|| ExecError::DetailedError {
-                message: format!("owner for table \"{object_name}\" does not exist"),
-                detail: None,
-                hint: None,
-                sqlstate: "XX000",
+        let mut current_cid = cid;
+        for object_name in &stmt.object_names {
+            let catalog = self.lazy_catalog_lookup(
+                client_id,
+                Some((xid, current_cid)),
+                configured_search_path,
+            );
+            let relation = catalog.lookup_relation(object_name).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(object_name.to_string()))
             })?;
-        let catcache = self
-            .backend_catcache(client_id, Some((xid, cid)))
-            .map_err(map_catalog_error)?;
-        let mut acl = catcache
-            .class_by_oid(relation.relation_oid)
-            .and_then(|row| row.relacl.clone())
-            .unwrap_or_default();
-        for grantee_name in &stmt.grantee_names {
-            let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
-                String::new()
-            } else {
-                auth_catalog
-                    .role_by_name(grantee_name)
-                    .map(|row| row.rolname.clone())
-                    .ok_or_else(|| {
-                        ExecError::Parse(role_management_error(format!(
-                            "role \"{}\" does not exist",
-                            grantee_name
-                        )))
-                    })?
+            let auth_catalog = self
+                .auth_catalog(client_id, Some((xid, current_cid)))
+                .map_err(map_catalog_error)?;
+            if !auth_catalog
+                .role_by_oid(auth.current_user_oid())
+                .is_some_and(|row| row.rolsuper)
+                && !auth.has_effective_membership(relation.owner_oid, &auth_catalog)
+            {
+                return Err(ExecError::DetailedError {
+                    message: format!("must be owner of table {object_name}"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42501",
+                });
+            }
+            let owner_name = auth_catalog
+                .role_by_oid(relation.owner_oid)
+                .map(|row| row.rolname.clone())
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("owner for table \"{object_name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+            let catcache = self
+                .backend_catcache(client_id, Some((xid, current_cid)))
+                .map_err(map_catalog_error)?;
+            let mut acl = catcache
+                .class_by_oid(relation.relation_oid)
+                .and_then(|row| row.relacl.clone())
+                .unwrap_or_default();
+            for grantee_name in &stmt.grantee_names {
+                let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
+                    String::new()
+                } else {
+                    auth_catalog
+                        .role_by_name(grantee_name)
+                        .map(|row| row.rolname.clone())
+                        .ok_or_else(|| {
+                            ExecError::Parse(role_management_error(format!(
+                                "role \"{}\" does not exist",
+                                grantee_name
+                            )))
+                        })?
+                };
+                revoke_table_acl_entry(&mut acl, &grantee_acl_name, privilege_chars);
+            }
+            let new_acl = collapse_relation_acl_defaults(acl, &owner_name, relation.relkind);
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: current_cid,
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
             };
-            revoke_table_acl_entry(&mut acl, &grantee_acl_name, privilege_chars);
+            let effect = self
+                .catalog
+                .write()
+                .alter_relation_acl_mvcc(relation.relation_oid, new_acl, &ctx)
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+            current_cid = current_cid.saturating_add(1);
         }
-        let new_acl = collapse_relation_acl_defaults(acl, &owner_name, relation.relkind);
-        let ctx = CatalogWriteContext {
-            pool: self.pool.clone(),
-            txns: self.txns.clone(),
-            xid,
-            cid,
-            client_id,
-            waiter: None,
-            interrupts: self.interrupt_state(client_id),
-        };
-        let effect = self
-            .catalog
-            .write()
-            .alter_relation_acl_mvcc(relation.relation_oid, new_acl, &ctx)
-            .map_err(map_catalog_error)?;
-        catalog_effects.push(effect);
         let _ = stmt.cascade;
         Ok(StatementResult::AffectedRows(0))
     }
@@ -2429,6 +2490,17 @@ mod tests {
             .oid
     }
 
+    fn table_acl(db: &Database, relname: &str) -> Option<Vec<String>> {
+        db.catalog
+            .read()
+            .catcache()
+            .unwrap()
+            .class_rows()
+            .into_iter()
+            .find(|row| row.relname == relname)
+            .and_then(|row| row.relacl)
+    }
+
     #[test]
     fn database_create_grant_allows_create_schema() {
         let base = temp_dir("db_create_grant");
@@ -2448,6 +2520,28 @@ mod tests {
             session.execute(&db, "create schema tenant_schema").unwrap(),
             StatementResult::AffectedRows(0)
         );
+    }
+
+    #[test]
+    fn table_grant_update_delete_and_revoke_delete_update_acl() {
+        let base = temp_dir("table_grant_update_delete");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role tenant").unwrap();
+        session.execute(&db, "create table acl_t1 (a int)").unwrap();
+        session.execute(&db, "create table acl_t2 (a int)").unwrap();
+
+        session
+            .execute(&db, "grant update, delete on acl_t1, acl_t2 to tenant")
+            .unwrap();
+        session
+            .execute(&db, "revoke delete on acl_t1 from tenant")
+            .unwrap();
+
+        let acl_t1 = table_acl(&db, "acl_t1").unwrap();
+        let acl_t2 = table_acl(&db, "acl_t2").unwrap();
+        assert!(acl_t1.iter().any(|item| item.starts_with("tenant=w/")));
+        assert!(acl_t2.iter().any(|item| item.starts_with("tenant=wd/")));
     }
 
     #[test]
