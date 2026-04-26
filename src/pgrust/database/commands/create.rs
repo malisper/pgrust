@@ -595,6 +595,9 @@ impl Database {
                     action.enforced && !action.not_valid,
                     action.no_inherit,
                     action.expr_sql.clone(),
+                    action.parent_constraint_oid.unwrap_or(0),
+                    action.is_local,
+                    action.inhcount,
                     &constraint_ctx,
                 )
                 .map_err(map_catalog_error)?;

@@ -755,13 +755,112 @@ fn parse_partition_of_elements(
     elements_sql: &str,
     options: ParseOptions,
 ) -> Result<Vec<CreateTableElement>, PartitionStatementParseError> {
-    let synthetic = format!("create table __pgrust_partition_of__ ({elements_sql})");
-    let stmt = parse_statement_with_options_inner(synthetic, options)
-        .map_err(PartitionStatementParseError::Parse)?;
-    let Statement::CreateTable(create_stmt) = stmt else {
-        return Err(PartitionStatementParseError::Unsupported);
+    let mut elements = Vec::new();
+    for item in
+        split_top_level_items(elements_sql, ',').map_err(PartitionStatementParseError::Parse)?
+    {
+        if looks_like_partition_column_override(&item) {
+            elements.push(CreateTableElement::PartitionColumnOverride(
+                parse_partition_column_override(&item)?,
+            ));
+            continue;
+        }
+        let synthetic = format!("create table __pgrust_partition_of__ ({item})");
+        match parse_statement_with_options_inner(synthetic, options) {
+            Ok(Statement::CreateTable(create_stmt)) if create_stmt.elements.len() == 1 => {
+                elements.extend(create_stmt.elements);
+            }
+            Ok(_) => return Err(PartitionStatementParseError::Unsupported),
+            Err(_) => elements.push(CreateTableElement::PartitionColumnOverride(
+                parse_partition_column_override(&item)?,
+            )),
+        }
+    }
+    Ok(elements)
+}
+
+fn looks_like_partition_column_override(item: &str) -> bool {
+    let Ok((_name, rest)) =
+        parse_unqualified_identifier(item.trim_start(), "partition column name")
+    else {
+        return false;
     };
-    Ok(create_stmt.elements)
+    let rest = rest.trim_start();
+    keyword_at_start(rest, "with")
+        || keyword_at_start(rest, "not")
+        || keyword_at_start(rest, "null")
+        || keyword_at_start(rest, "default")
+        || keyword_at_start(rest, "check")
+}
+
+fn parse_partition_column_override(
+    item: &str,
+) -> Result<PartitionColumnOverride, PartitionStatementParseError> {
+    let (name, mut rest) = parse_unqualified_identifier(item.trim_start(), "partition column name")
+        .map_err(PartitionStatementParseError::Parse)?;
+    rest = rest.trim_start();
+    if keyword_at_start(rest, "with") {
+        rest = consume_keyword(rest, "with").trim_start();
+        if !keyword_at_start(rest, "options") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "OPTIONS",
+                actual: rest.to_string(),
+            }
+            .into());
+        }
+        rest = consume_keyword(rest, "options").trim_start();
+    }
+
+    let mut default_expr = None;
+    let mut constraints = Vec::new();
+    while !rest.is_empty() {
+        if keyword_at_start(rest, "not") {
+            rest = consume_keyword(rest, "not").trim_start();
+            if !keyword_at_start(rest, "null") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "NULL",
+                    actual: rest.to_string(),
+                }
+                .into());
+            }
+            rest = consume_keyword(rest, "null").trim_start();
+            constraints.push(ColumnConstraint::NotNull {
+                attributes: ConstraintAttributes::default(),
+            });
+        } else if keyword_at_start(rest, "null") {
+            rest = consume_keyword(rest, "null").trim_start();
+        } else if keyword_at_start(rest, "check") {
+            rest = consume_keyword(rest, "check").trim_start();
+            let (expr_sql, next) =
+                take_parenthesized_segment(rest).map_err(PartitionStatementParseError::Parse)?;
+            parse_expr(&expr_sql).map_err(PartitionStatementParseError::Parse)?;
+            constraints.push(ColumnConstraint::Check {
+                attributes: ConstraintAttributes::default(),
+                expr_sql: expr_sql.trim().to_string(),
+            });
+            rest = next.trim_start();
+        } else if keyword_at_start(rest, "default") {
+            rest = consume_keyword(rest, "default").trim_start();
+            if rest.is_empty() {
+                return Err(ParseError::UnexpectedEof.into());
+            }
+            parse_expr(rest).map_err(PartitionStatementParseError::Parse)?;
+            default_expr = Some(rest.to_string());
+            rest = "";
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "partition column option",
+                actual: rest.to_string(),
+            }
+            .into());
+        }
+    }
+
+    Ok(PartitionColumnOverride {
+        name,
+        default_expr,
+        constraints,
+    })
 }
 
 fn parse_partition_spec_clause(
@@ -13002,6 +13101,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::CurrentUser => "current_user".to_string(),
         SqlExpr::SessionUser => "session_user".to_string(),
         SqlExpr::CurrentRole => "current_role".to_string(),
+        SqlExpr::AtTimeZone { .. } => "timezone".to_string(),
         SqlExpr::FuncCall { name, .. } => name.clone(),
         _ => "?column?".to_string(),
     }
@@ -14691,20 +14791,20 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     Rule::at_time_zone_suffix => {
                         let zone = suffix
                             .into_inner()
-                            .find(|part| part.as_rule() == Rule::concat_expr)
+                            .find(|part| part.as_rule() == Rule::postfix_expr)
                             .map(build_expr)
-                            .transpose()?;
-                        expr = match zone {
-                            Some(zone) => simple_func_call(
-                                "timezone",
-                                vec![
-                                    SqlFunctionArg::positional(zone),
-                                    SqlFunctionArg::positional(expr),
-                                ],
-                            ),
-                            None => {
-                                simple_func_call("timezone", vec![SqlFunctionArg::positional(expr)])
-                            }
+                            .ok_or(ParseError::UnexpectedEof)??;
+                        expr = SqlExpr::AtTimeZone {
+                            expr: Box::new(expr),
+                            zone: Box::new(zone),
+                        };
+                    }
+                    Rule::at_local_suffix => {
+                        expr = SqlExpr::AtTimeZone {
+                            expr: Box::new(expr),
+                            zone: Box::new(SqlExpr::Const(Value::Text(
+                                "__pgrust_local_timezone__".into(),
+                            ))),
                         };
                     }
                     _ => {}

@@ -871,9 +871,9 @@ fn bind_function_from_item_with_ctes(
 
     match name {
         "generate_series" => {
-            if args.len() < 2 || args.len() > 3 {
+            if args.len() < 2 || args.len() > 4 {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "generate_series(start, stop[, step])",
+                    expected: "generate_series(start, stop, step[, timezone])",
                     actual: format!("generate_series with {} arguments", args.len()),
                 });
             }
@@ -909,7 +909,7 @@ fn bind_function_from_item_with_ctes(
                 grouped_outer,
                 ctes,
             );
-            let step_type = if args.len() == 3 {
+            let step_type = if args.len() >= 3 {
                 Some(infer_sql_expr_type_with_ctes(
                     &args[2],
                     &call_scope,
@@ -921,8 +921,26 @@ fn bind_function_from_item_with_ctes(
             } else {
                 None
             };
+            let timezone_type = if args.len() == 4 {
+                Some(infer_sql_expr_type_with_ctes(
+                    &args[3],
+                    &call_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                ))
+            } else {
+                None
+            };
             let common = resolve_generate_series_common_type(start_type, stop_type, step_type)?;
-            let step = if args.len() == 3 {
+            if timezone_type.is_some() && !matches!(common.kind, SqlTypeKind::TimestampTz) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "generate_series timestamptz arguments with timezone",
+                    actual: sql_type_name(common),
+                });
+            }
+            let step = if args.len() >= 3 {
                 let step_expr = bind_expr_with_outer_and_ctes(
                     &args[2],
                     &call_scope,
@@ -950,6 +968,23 @@ fn bind_function_from_item_with_ctes(
                     _ => Expr::Const(Value::Int32(1)),
                 }
             };
+            let timezone = if args.len() == 4 {
+                let timezone_expr = bind_expr_with_outer_and_ctes(
+                    &args[3],
+                    &call_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                Some(coerce_bound_expr(
+                    timezone_expr,
+                    timezone_type.expect("generate_series timezone type"),
+                    SqlType::new(SqlTypeKind::Text),
+                ))
+            } else {
+                None
+            };
             let mut output_columns = vec![QueryColumn {
                 name: "generate_series".to_string(),
                 sql_type: common,
@@ -972,6 +1007,7 @@ fn bind_function_from_item_with_ctes(
                     start: coerce_bound_expr(start, start_type, common),
                     stop: coerce_bound_expr(stop, stop_type, common),
                     step,
+                    timezone,
                     output_columns,
                     with_ordinality,
                 }),

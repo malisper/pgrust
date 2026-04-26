@@ -45,7 +45,9 @@ use super::trigger::RuntimeTriggers;
 use super::upsert::execute_insert_on_conflict_rows;
 use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr};
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
-use crate::backend::executor::value_io::{coerce_assignment_value, encode_tuple_values};
+use crate::backend::executor::value_io::{
+    coerce_assignment_value_with_config, encode_tuple_values_with_config,
+};
 use crate::backend::executor::{
     ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef,
     apply_jsonb_subscript_assignment, cast_value_with_source_type_catalog_and_config,
@@ -1004,7 +1006,7 @@ pub(crate) fn toast_tuple_for_write(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<(HeapTuple, Vec<StoredToastValue>), ExecError> {
-    let mut tuple_values = encode_tuple_values(desc, values)?;
+    let mut tuple_values = encode_tuple_values_with_config(desc, values, &ctx.datetime_config)?;
     let attr_descs = desc.attribute_descs();
     let Some(toast) = toast else {
         let tuple = HeapTuple::from_values(&attr_descs, &tuple_values)?;
@@ -3392,7 +3394,7 @@ pub(crate) fn apply_assignment_target(
             &ctx.datetime_config,
         )
     } else {
-        coerce_assignment_value(&value, assignment_type)
+        coerce_assignment_value_with_config(&value, assignment_type, &ctx.datetime_config)
     }
     .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
     let resolved = target

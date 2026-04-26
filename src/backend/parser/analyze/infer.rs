@@ -324,6 +324,26 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Collate { expr: inner, .. } => {
             infer_sql_expr_type_with_ctes(inner, scope, catalog, outer_scopes, grouped_outer, ctes)
         }
+        SqlExpr::AtTimeZone { expr, .. } => {
+            let source = infer_sql_expr_type_with_ctes(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            if matches!(source.kind, SqlTypeKind::TimestampTz)
+                || matches!(
+                    expr.as_ref(),
+                    SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+                )
+            {
+                SqlType::new(SqlTypeKind::Timestamp)
+            } else {
+                SqlType::new(SqlTypeKind::TimestampTz)
+            }
+        }
         SqlExpr::UnaryPlus(inner) => {
             infer_sql_expr_type_with_ctes(inner, scope, catalog, outer_scopes, grouped_outer, ctes)
         }
@@ -736,9 +756,33 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 Some(BuiltinScalarFunction::ToRegCollation) => {
                     SqlType::new(SqlTypeKind::RegCollation)
                 }
+                Some(BuiltinScalarFunction::Timezone) => {
+                    let source_index = if args.args().len() == 1 { 0 } else { 1 };
+                    match args.args().get(source_index).map(|arg| {
+                        infer_sql_expr_type_with_ctes(
+                            &arg.value,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )
+                    }) {
+                        Some(SqlType {
+                            kind: SqlTypeKind::TimestampTz,
+                            ..
+                        }) => SqlType::new(SqlTypeKind::Timestamp),
+                        Some(SqlType {
+                            kind: SqlTypeKind::TimeTz,
+                            ..
+                        }) => SqlType::new(SqlTypeKind::TimeTz),
+                        Some(_) => SqlType::new(SqlTypeKind::TimestampTz),
+                        None => SqlType::new(SqlTypeKind::TimestampTz),
+                    }
+                }
                 Some(BuiltinScalarFunction::DatePart) => SqlType::new(SqlTypeKind::Float8),
-                Some(BuiltinScalarFunction::TimeZone) => SqlType::new(SqlTypeKind::TimeTz),
                 Some(BuiltinScalarFunction::Extract) => SqlType::new(SqlTypeKind::Numeric),
+                Some(BuiltinScalarFunction::TimeZone) => SqlType::new(SqlTypeKind::TimeTz),
                 Some(BuiltinScalarFunction::DateTrunc) => match args.args().get(1).map(|arg| {
                     infer_sql_expr_type_with_ctes(
                         &arg.value,
@@ -779,6 +823,11 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     }) => SqlType::new(SqlTypeKind::TimestampTz),
                     _ => SqlType::new(SqlTypeKind::Timestamp),
                 },
+                Some(BuiltinScalarFunction::DateAdd)
+                | Some(BuiltinScalarFunction::DateSubtract)
+                | Some(BuiltinScalarFunction::ToTimestamp) => {
+                    SqlType::new(SqlTypeKind::TimestampTz)
+                }
                 Some(BuiltinScalarFunction::IsFinite) => SqlType::new(SqlTypeKind::Bool),
                 Some(
                     BuiltinScalarFunction::MacAddrEq
@@ -822,6 +871,9 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 Some(BuiltinScalarFunction::MakeDate) => SqlType::new(SqlTypeKind::Date),
                 Some(BuiltinScalarFunction::MakeTime) => SqlType::new(SqlTypeKind::Time),
                 Some(BuiltinScalarFunction::MakeTimestamp) => SqlType::new(SqlTypeKind::Timestamp),
+                Some(BuiltinScalarFunction::MakeTimestampTz) => {
+                    SqlType::new(SqlTypeKind::TimestampTz)
+                }
                 Some(BuiltinScalarFunction::Age) => SqlType::new(SqlTypeKind::Interval),
                 Some(BuiltinScalarFunction::ToJson)
                 | Some(BuiltinScalarFunction::ArrayToJson)

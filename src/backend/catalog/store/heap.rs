@@ -3605,14 +3605,46 @@ impl CatalogStore {
         convalidated: bool,
         connoinherit: bool,
         conbin: impl Into<String>,
+        conparentid: u32,
+        conislocal: bool,
+        coninhcount: i16,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.create_check_constraint_mvcc_with_row(
+            relation_oid,
+            conname,
+            conenforced,
+            convalidated,
+            connoinherit,
+            conbin,
+            conparentid,
+            conislocal,
+            coninhcount,
+            ctx,
+        )
+        .map(|(_, effect)| effect)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_check_constraint_mvcc_with_row(
+        &mut self,
+        relation_oid: u32,
+        conname: impl Into<String>,
+        conenforced: bool,
+        convalidated: bool,
+        connoinherit: bool,
+        conbin: impl Into<String>,
+        conparentid: u32,
+        conislocal: bool,
+        coninhcount: i16,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(PgConstraintRow, CatalogMutationEffect), CatalogError> {
         let conname = conname.into();
         let conbin = conbin.into();
         let table = self
             .relation_id_get_relation(ctx, relation_oid)?
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        if table.relkind != 'r' {
+        if !matches!(table.relkind, 'r' | 'p') {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
         if relation_constraint_exists_mvcc(self, ctx, relation_oid, &conname, None)? {
@@ -3632,7 +3664,7 @@ impl CatalogStore {
             conrelid: relation_oid,
             contypid: 0,
             conindid: 0,
-            conparentid: 0,
+            conparentid,
             confrelid: 0,
             confupdtype: ' ',
             confdeltype: ' ',
@@ -3645,8 +3677,8 @@ impl CatalogStore {
             confdelsetcols: None,
             conexclop: None,
             conbin: Some(conbin),
-            conislocal: true,
-            coninhcount: 0,
+            conislocal,
+            coninhcount,
             connoinherit,
             conperiod: false,
         };
@@ -3664,6 +3696,51 @@ impl CatalogStore {
         ];
         insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
         self.control = control;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok((constraint, effect))
+    }
+
+    pub fn update_check_constraint_inheritance_mvcc(
+        &mut self,
+        relation_oid: u32,
+        constraint_oid: u32,
+        conparentid: u32,
+        conislocal: bool,
+        coninhcount: i16,
+        connoinherit: bool,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let old_row = relation_constraint_row_by_oid_mvcc(self, ctx, constraint_oid)?
+            .filter(|row| row.conrelid == relation_oid && row.contype == CONSTRAINT_CHECK)
+            .ok_or_else(|| CatalogError::UnknownTable(constraint_oid.to_string()))?;
+        let mut new_row = old_row.clone();
+        new_row.conparentid = conparentid;
+        new_row.conislocal = conislocal;
+        new_row.coninhcount = coninhcount;
+        new_row.connoinherit = connoinherit;
+
+        let kinds = vec![BootstrapCatalogKind::PgConstraint];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: vec![old_row],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: vec![new_row],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -4540,6 +4617,77 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn ensure_relation_toast_table_mvcc(
+        &mut self,
+        relation_oid: u32,
+        toast_namespace_oid: u32,
+        toast_namespace_name: &str,
+        ctx: &CatalogWriteContext,
+    ) -> Result<Option<CatalogMutationEffect>, CatalogError> {
+        let class_row = class_row_by_oid_mvcc(self, ctx, relation_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let relation_name = class_row.relname.clone();
+        let relation = self
+            .relation_id_get_relation(ctx, relation_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_entry = catalog_entry_from_relation_row(&class_row, &relation);
+
+        let mut control = self.control_state()?;
+        let Some(toast) = build_toast_catalog_changes(
+            &relation_name,
+            &old_entry,
+            toast_namespace_name,
+            toast_namespace_oid,
+            &mut control,
+        )?
+        else {
+            return Ok(None);
+        };
+
+        self.persist_control_values(control.next_oid, control.next_rel_number)?;
+        let mut kinds = create_table_sync_kinds(&toast.new_parent);
+        merge_catalog_kinds(&mut kinds, &create_table_sync_kinds(&toast.toast_entry));
+        merge_catalog_kinds(&mut kinds, &create_index_sync_kinds());
+        kinds.retain(|kind| *kind != BootstrapCatalogKind::PgInherits);
+
+        let old_rows = rows_for_existing_relation_mvcc(self, ctx, &old_entry)?;
+        let mut new_rows = {
+            let type_lookup = CatalogStoreTypeLookup { store: &*self, ctx };
+            let mut rows =
+                rows_for_new_relation_entry(&type_lookup, &relation_name, &toast.new_parent)?;
+            extend_physical_catalog_rows(
+                &mut rows,
+                rows_for_new_relation_entry(&type_lookup, &toast.toast_name, &toast.toast_entry)?,
+            );
+            extend_physical_catalog_rows(
+                &mut rows,
+                rows_for_new_relation_entry(&type_lookup, &toast.index_name, &toast.index_entry)?,
+            );
+            rows
+        };
+        new_rows.depends.push(PgDependRow {
+            classid: PG_CLASS_RELATION_OID,
+            objid: toast.toast_entry.relation_oid,
+            objsubid: 0,
+            refclassid: PG_CLASS_RELATION_OID,
+            refobjid: relation_oid,
+            refobjsubid: 0,
+            deptype: crate::include::catalog::DEPENDENCY_INTERNAL,
+        });
+        sort_pg_depend_rows(&mut new_rows.depends);
+        preserve_non_derived_relation_rows_mvcc(self, ctx, &old_entry, &kinds, &mut new_rows)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, toast.new_parent.relation_oid);
+        effect_record_oid(&mut effect.namespace_oids, toast.new_parent.namespace_oid);
+        effect_record_oid(&mut effect.type_oids, toast.new_parent.row_type_oid);
+        record_toast_effects(&mut effect, &toast);
+        Ok(Some(effect))
+    }
+
     pub fn alter_table_drop_column_mvcc(
         &mut self,
         relation_oid: u32,
@@ -4595,7 +4743,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, control| {
-                if entry.relkind != 'r' {
+                if !matches!(entry.relkind, 'r' | 'p') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;

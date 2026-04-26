@@ -213,6 +213,7 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             start,
             stop,
             step,
+            timezone,
             output_columns,
             with_ordinality,
         } => SetReturningCall::GenerateSeries {
@@ -221,6 +222,9 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             start: simplify_expr(start, None)?,
             stop: simplify_expr(stop, None)?,
             step: simplify_expr(step, None)?,
+            timezone: timezone
+                .map(|timezone| simplify_expr(timezone, None))
+                .transpose()?,
             output_columns,
             with_ordinality,
         },

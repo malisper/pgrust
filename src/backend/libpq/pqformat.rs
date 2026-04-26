@@ -150,7 +150,9 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::DivisionByZero(_) => "division by zero".to_string(),
         ExecError::GenerateSeriesZeroStep => "step size cannot equal zero".to_string(),
         ExecError::GenerateSeriesInvalidArg(arg, issue) => {
-            if *arg == "step size" {
+            if *arg == "step size" && *issue == "infinity" {
+                "step size cannot be infinite".to_string()
+            } else if *arg == "step size" {
                 format!("{arg} cannot be {issue}")
             } else {
                 format!("{arg} value cannot be {issue}")

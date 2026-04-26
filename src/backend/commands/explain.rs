@@ -1422,7 +1422,11 @@ fn render_verbose_set_returning_call(
     let name = set_returning_call_label(call);
     let args = match call {
         SetReturningCall::GenerateSeries {
-            start, stop, step, ..
+            start,
+            stop,
+            step,
+            timezone,
+            ..
         } => {
             let mut args = vec![
                 render_verbose_function_arg(start, ctx),
@@ -1433,6 +1437,9 @@ fn render_verbose_set_returning_call(
                 Expr::Const(Value::Int32(1)) | Expr::Const(Value::Int64(1))
             ) {
                 args.push(render_verbose_function_arg(step, ctx));
+            }
+            if let Some(timezone) = timezone {
+                args.push(render_verbose_function_arg(timezone, ctx));
             }
             args
         }
@@ -2190,11 +2197,18 @@ fn collect_direct_set_returning_call_subplans<'a>(
 ) {
     match call {
         SetReturningCall::GenerateSeries {
-            start, stop, step, ..
+            start,
+            stop,
+            step,
+            timezone,
+            ..
         } => {
             collect_direct_expr_subplans(start, out);
             collect_direct_expr_subplans(stop, out);
             collect_direct_expr_subplans(step, out);
+            if let Some(timezone) = timezone {
+                collect_direct_expr_subplans(timezone, out);
+            }
         }
         SetReturningCall::PartitionTree { relid, .. }
         | SetReturningCall::PartitionAncestors { relid, .. } => {

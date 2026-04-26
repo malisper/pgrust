@@ -266,6 +266,44 @@ pub(super) fn bind_arithmetic_expr(
             ),
         ));
     }
+    if !left_type.is_array
+        && !right_type.is_array
+        && op == "-"
+        && left_type.kind == right_type.kind
+        && matches!(
+            left_type.kind,
+            SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+        )
+    {
+        return Ok(Expr::binary_op(
+            make,
+            SqlType::new(SqlTypeKind::Interval),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_left_type,
+                left_type,
+            ),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_right_type,
+                right_type,
+            ),
+        ));
+    }
     let common = resolve_numeric_binary_type(op, left_type, right_type)?;
     let left = coerce_bound_expr(
         bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,
@@ -585,6 +623,13 @@ pub(super) fn supports_comparison_operator(
                 | SqlTypeKind::PgLsn
                 | SqlTypeKind::MacAddr
                 | SqlTypeKind::MacAddr8
+                | SqlTypeKind::RegClass
+                | SqlTypeKind::RegType
+                | SqlTypeKind::RegRole
+                | SqlTypeKind::RegOperator
+                | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegConfig
+                | SqlTypeKind::RegDictionary
         )
         && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
     {

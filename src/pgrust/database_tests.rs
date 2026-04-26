@@ -4312,6 +4312,254 @@ fn partition_tuple_routing_handles_nested_and_default_partitions() {
 }
 
 #[test]
+fn partitioned_table_parent_defaults_not_null_and_checks_are_cataloged_and_inherited() {
+    let base = temp_dir("partition_parent_column_metadata");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parted_meta (
+                a int4 default 1,
+                b int4 not null default 0,
+                constraint parted_meta_b_nonnegative check (b >= 0)
+            ) partition by list (a)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_attrdef where adrelid = 'parted_meta'::regclass"
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select conname, contype from pg_constraint \
+             where conrelid = 'parted_meta'::regclass order by conname"
+        ),
+        vec![
+            vec![
+                Value::Text("parted_meta_b_nonnegative".into()),
+                Value::Text("c".into()),
+            ],
+            vec![
+                Value::Text("parted_meta_b_not_null".into()),
+                Value::Text("n".into()),
+            ],
+        ]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table parted_meta_one partition of parted_meta for values in (1)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into parted_meta default values")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select a, b from parted_meta"),
+        vec![vec![Value::Int32(1), Value::Int32(0)]]
+    );
+
+    match session.execute(&db, "insert into parted_meta values (1, null)") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint: _,
+            ..
+        }) if relation == "parted_meta_one" && column == "b" => {}
+        other => panic!("expected inherited not-null violation, got {other:?}"),
+    }
+
+    match session.execute(&db, "insert into parted_meta values (1, -1)") {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "parted_meta_one" && constraint == "parted_meta_b_nonnegative" => {}
+        other => panic!("expected inherited check violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn partition_column_options_override_inherited_defaults_and_nullability() {
+    let base = temp_dir("partition_column_options_override");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parted_opts (
+                a text,
+                b int4 not null default 1,
+                constraint check_a check (length(a) > 0)
+            ) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table part_b partition of parted_opts \
+             (b with options not null default 0, constraint check_a check (length(a) > 0)) \
+             for values in ('b')",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select conname, conislocal, coninhcount \
+             from pg_constraint where conrelid = 'part_b'::regclass \
+             order by coninhcount desc, conname"
+        ),
+        vec![
+            vec![
+                Value::Text("check_a".into()),
+                Value::Bool(false),
+                Value::Int16(1),
+            ],
+            vec![
+                Value::Text("part_b_b_not_null".into()),
+                Value::Bool(true),
+                Value::Int16(1),
+            ],
+        ]
+    );
+
+    session
+        .execute(&db, "insert into part_b (a) values ('b')")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select a, b from part_b"),
+        vec![vec![Value::Text("b".into()), Value::Int32(0)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_attrdef where adrelid = 'part_b'::regclass"
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    match session.execute(&db, "insert into part_b values ('b', null)") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint: _,
+            ..
+        }) if relation == "part_b" && column == "b" => {}
+        other => panic!("expected partition-local not-null violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_add_check_reconciles_existing_partition_constraint() {
+    let dir = temp_dir("alter_partition_check_reconcile");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parted (
+                a text default 'a',
+                b int4
+            ) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table part_b partition of parted
+             (constraint check_b check (b >= 0))
+             for values in ('b')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table parted add constraint check_b check (b >= 0)",
+        )
+        .unwrap();
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select c.relname, con.conname, con.conparentid <> 0, con.conislocal, con.coninhcount
+         from pg_constraint con
+         join pg_class c on c.oid = con.conrelid
+         where con.conname = 'check_b'
+         order by c.relname",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                Value::Text("part_b".into()),
+                Value::Text("check_b".into()),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Int16(1),
+            ],
+            vec![
+                Value::Text("parted".into()),
+                Value::Text("check_b".into()),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Int16(0),
+            ],
+        ]
+    );
+
+    match session.execute(&db, "insert into parted values ('b', -1)") {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "part_b" && constraint == "check_b" => {}
+        other => panic!("expected reconciled inherited check violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn partitioned_parent_defaults_route_before_child_not_null_checks() {
+    let base = temp_dir("partition_parent_default_routes_before_not_null");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parted_notnull_inh_test \
+             (a int4 default 1, b int4 not null default 0) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table parted_notnull_inh_test1 \
+             partition of parted_notnull_inh_test \
+             (a not null, b default 1) for values in (1)",
+        )
+        .unwrap();
+
+    match session.execute(&db, "insert into parted_notnull_inh_test (b) values (null)") {
+        Err(ExecError::NotNullViolation {
+            relation, column, ..
+        }) if relation == "parted_notnull_inh_test1" && column == "b" => {}
+        other => panic!("expected child not-null violation after routing, got {other:?}"),
+    }
+}
+
+#[test]
 fn hash_partitioned_tables_route_rows_and_validate_bounds() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
@@ -6628,7 +6876,7 @@ fn inherited_update_delete_follow_postgres_targeting_rules() {
 }
 
 #[test]
-fn inheritance_guardrails_still_reject_truncate_and_column_alter() {
+fn inheritance_guardrails_reject_truncate_but_allow_column_alter() {
     let dir = temp_dir("inheritance_guardrails");
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
@@ -6647,14 +6895,31 @@ fn inheritance_guardrails_still_reject_truncate_and_column_alter() {
             if message.contains("TRUNCATE on inherited parents")
     ));
 
-    let alter_err = session
+    session
+        .execute(&db, "insert into parent_guard values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into child_guard values (2)")
+        .unwrap();
+
+    session
         .execute(&db, "alter table parent_guard add column b int4")
-        .unwrap_err();
-    assert!(matches!(
-        alter_err,
-        ExecError::Parse(ParseError::FeatureNotSupported(message))
-            if message.contains("inheritance tree members")
-    ));
+        .unwrap();
+    session
+        .execute(&db, "alter table parent_guard rename column b to bb")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select a, bb from parent_guard order by a"),
+        vec![
+            vec![Value::Int32(1), Value::Null],
+            vec![Value::Int32(2), Value::Null],
+        ]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select a, bb from only child_guard order by a"),
+        vec![vec![Value::Int32(2), Value::Null]]
+    );
 }
 
 #[test]
@@ -8494,6 +8759,12 @@ fn create_schema_executes_embedded_create_table_elements() {
     let db = Database::open_ephemeral(16).unwrap();
     let mut session = Session::new(1);
 
+    session
+        .execute(&db, "set datestyle to 'Postgres, MDY'")
+        .unwrap();
+    session
+        .execute(&db, "set timezone = 'America/Los_Angeles'")
+        .unwrap();
     session
         .execute(
             &db,
@@ -20807,7 +21078,7 @@ fn set_local_time_zone_updates_timestamptz_json_output() {
 
     assert_eq!(
         session_query_rows(&mut session, &db, "show timezone"),
-        vec![vec![Value::Text("+10:30".into())]]
+        vec![vec![Value::Text("-10:30".into())]]
     );
     assert_eq!(
         session_query_rows(
@@ -20815,7 +21086,7 @@ fn set_local_time_zone_updates_timestamptz_json_output() {
             &db,
             "select timestamptz '2014-05-28 12:22:35.614298-04'::text",
         ),
-        vec![vec![Value::Text("2014-05-29 02:52:35.614298+10:30".into())]]
+        vec![vec![Value::Text("2014-05-28 05:52:35.614298-10:30".into())]]
     );
     assert_eq!(
         session_query_rows(
@@ -20825,7 +21096,7 @@ fn set_local_time_zone_updates_timestamptz_json_output() {
         ),
         vec![vec![Value::Jsonb(
             crate::backend::executor::jsonb::parse_jsonb_text(
-                "\"2014-05-29T02:52:35.614298+10:30\"",
+                "\"2014-05-28T05:52:35.614298-10:30\"",
             )
             .unwrap()
         )]]
@@ -20849,6 +21120,360 @@ fn set_local_time_zone_updates_timestamptz_json_output() {
     );
 
     session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn timestamptz_precision_preserves_infinity_values() {
+    let base = temp_dir("timestamptz_precision_infinity");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table timestamptz_tbl (d1 timestamp(2) with time zone)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into timestamptz_tbl values ('-infinity')")
+        .unwrap();
+    session
+        .execute(&db, "insert into timestamptz_tbl values ('infinity')")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select d1::text from timestamptz_tbl order by d1",
+        ),
+        vec![
+            vec![Value::Text("-infinity".into())],
+            vec![Value::Text("infinity".into())],
+        ]
+    );
+    assert!(
+        session
+            .execute(&db, "select '294277-12-31 16:00:00-08'::timestamptz",)
+            .is_err()
+    );
+}
+
+#[test]
+fn pg_sleep_returns_null() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select pg_sleep(0)"),
+        vec![vec![Value::Null]]
+    );
+}
+
+#[test]
+fn now_and_date_keywords_are_transaction_stable() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    let first = session_query_rows(
+        &mut session,
+        &db,
+        "select now()::text, timestamptz 'now'::text, date 'today'::text, date 'tomorrow'::text, date 'yesterday'::text",
+    );
+    session.execute(&db, "select pg_sleep(0.001)").unwrap();
+    let second = session_query_rows(
+        &mut session,
+        &db,
+        "select now()::text, timestamptz 'now'::text, date 'today'::text, date 'tomorrow'::text, date 'yesterday'::text",
+    );
+    session.execute(&db, "rollback").unwrap();
+
+    assert_eq!(first, second);
+}
+
+#[test]
+fn timestamp_tz_now_literal_applies_declared_precision() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table timestamptz_tbl (d1 timestamp(2) with time zone)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into timestamptz_tbl values ('now')")
+        .unwrap();
+    session.execute(&db, "select pg_sleep(0.1)").unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into timestamptz_tbl values ('now')")
+        .unwrap();
+    session.execute(&db, "select pg_sleep(0.1)").unwrap();
+    session
+        .execute(&db, "insert into timestamptz_tbl values ('now')")
+        .unwrap();
+    session.execute(&db, "select pg_sleep(0.1)").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from timestamptz_tbl where d1 = timestamp(2) with time zone 'now'",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn at_time_zone_uses_named_timezone_rules() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select (timestamp '2001-02-16 20:38:40' at time zone 'America/Denver')::text",
+        ),
+        vec![vec![Value::Text("2001-02-17 03:38:40+00".into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select (timestamptz '2001-02-16 20:38:40+00' at time zone 'America/Denver')::text",
+        ),
+        vec![vec![Value::Text("2001-02-16 13:38:40".into())]]
+    );
+    session
+        .execute(&db, "set timezone = 'America/Los_Angeles'")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select ('19970210 173201' at time zone 'America/New_York')::text",
+        ),
+        vec![vec![Value::Text("1997-02-10 20:32:01".into())]]
+    );
+}
+
+#[test]
+fn timestamp_at_local_and_timezone_function_use_session_timezone() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set timezone = 'Europe/Paris'")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select (cast('1978-07-07 19:38 America/New_York' as timestamptz) at local)::text",
+        ),
+        vec![vec![Value::Text("1978-07-08 01:38:00".into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select timezone(timestamp '1978-07-07 19:38')::text",
+        ),
+        vec![vec![Value::Text("1978-07-07 19:38:00+02".into())]]
+    );
+}
+
+#[test]
+fn make_timestamptz_and_timezone_abbreviations_work() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select make_timestamptz(2014, 12, 10, 0, 0, 0, 'Europe/Prague') at time zone 'UTC'",
+        ),
+        vec![vec![Value::Timestamp(
+            crate::include::nodes::datetime::TimestampADT(
+                crate::backend::utils::time::datetime::days_from_ymd(2014, 12, 9).unwrap() as i64
+                    * crate::include::nodes::datetime::USECS_PER_DAY
+                    + 23 * 3_600_000_000
+            )
+        )]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select (timestamp '2014-10-26 01:00:00' at time zone 'MSK')::text",
+        ),
+        vec![vec![Value::Text("2014-10-25 22:00:00+00".into())]]
+    );
+
+    session
+        .execute(&db, "set timezone = 'America/Los_Angeles'")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select timestamptz 'Jan 01 00:00:00 2024 LMT'::text",
+        ),
+        vec![vec![Value::Text("2023-12-31 23:52:58-08".into())]]
+    );
+}
+
+#[test]
+fn date_trunc_accepts_timestamptz_timezone_argument() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select date_trunc('day', timestamptz '2001-02-16 20:38:40+00', 'GMT')::text",
+        ),
+        vec![vec![Value::Text("2001-02-16 00:00:00+00".into())]]
+    );
+}
+
+#[test]
+fn to_char_formats_timestamptz_with_session_timezone() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set timezone = 'America/Los_Angeles'")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select to_char(timestamptz '2001-02-16 20:38:40+00',
+                    'YYYY-MM-DD HH24:MI:SS DAY Month TZH:TZM OF')",
+        ),
+        vec![vec![Value::Text(
+            "2001-02-16 12:38:40 FRIDAY    February  -08:00 -08".into()
+        )]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select to_char(timestamptz '2018-11-02 12:34:56.789012+00',
+                    'FF1 FF2 FF3 FF4 FF5 FF6 MS US')",
+        ),
+        vec![vec![Value::Text(
+            "7 78 789 7890 78901 789012 789 789012".into()
+        )]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select to_char(timestamptz '2001-02-16 20:38:40+00',
+                    'IYYY IYY IY I IW IDDD ID YYYYTH YYYYth')",
+        ),
+        vec![vec![Value::Text(
+            "2001 001 01 1 07 047 5 2001ST 2001st".into()
+        )]]
+    );
+}
+
+#[test]
+fn timestamp_input_accepts_timezone_before_year() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select ('Wed Jul 11 10:51:14 America/New_York 2001'::timestamptz at time zone 'UTC')::text,
+                    ('Wed Jul 11 10:51:14 GMT-4 2001'::timestamptz at time zone 'UTC')::text,
+                    ('Wed Jul 11 10:51:14 GMT+4 2001'::timestamptz at time zone 'UTC')::text,
+                    ('Wed Jul 11 10:51:14 PST-03:00 2001'::timestamptz at time zone 'UTC')::text,
+                    ('Wed Jul 11 10:51:14 PST+03:00 2001'::timestamptz at time zone 'UTC')::text",
+        ),
+        vec![vec![
+            Value::Text("2001-07-11 14:51:14".into()),
+            Value::Text("2001-07-11 06:51:14".into()),
+            Value::Text("2001-07-11 14:51:14".into()),
+            Value::Text("2001-07-11 07:51:14".into()),
+            Value::Text("2001-07-11 13:51:14".into()),
+        ]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select ('10000 Mar 12 23:58:48 IST'::timestamptz at time zone 'UTC')::text,
+                    ('100000312 23:58:48 IST'::timestamptz at time zone 'UTC')::text,
+                    ('1000000312 23:58:48 IST'::timestamptz at time zone 'UTC')::text",
+        ),
+        vec![vec![
+            Value::Text("10000-03-12 21:58:48".into()),
+            Value::Text("10000-03-12 21:58:48".into()),
+            Value::Text("100000-03-12 21:58:48".into()),
+        ]]
+    );
+}
+
+#[test]
+fn timestamptz_missing_regression_functions_work() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select (date_bin('5 min'::interval,
+                    timestamptz '2020-02-01 01:01:01+00',
+                    timestamptz '2020-02-01 00:02:30+00') at time zone 'UTC')::text",
+        ),
+        vec![vec![Value::Text("2020-02-01 00:57:30".into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select (date_add('2022-10-30 00:00:00+01'::timestamptz,
+                    '1 day'::interval) at time zone 'UTC')::text,
+                    (date_subtract('2022-10-30 00:00:00+01'::timestamptz,
+                    '1 day'::interval) at time zone 'UTC')::text,
+                    (date_add('2021-10-31 00:00:00+02'::timestamptz,
+                    '1 day'::interval, 'Europe/Warsaw') at time zone 'UTC')::text",
+        ),
+        vec![vec![
+            Value::Text("2022-10-30 23:00:00".into()),
+            Value::Text("2022-10-28 23:00:00".into()),
+            Value::Text("2021-10-31 23:00:00".into()),
+        ]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select (to_timestamp(0) at time zone 'UTC')::text,
+                    (to_timestamp(1262349296.7890123) at time zone 'UTC')::text,
+                    date_part('year', timestamptz 'infinity'),
+                    date_part('day', timestamptz '-infinity')",
+        ),
+        vec![vec![
+            Value::Text("1970-01-01 00:00:00".into()),
+            Value::Text("2010-01-01 12:34:56.789012".into()),
+            Value::Float64(f64::INFINITY),
+            Value::Null,
+        ]]
+    );
 }
 
 #[test]

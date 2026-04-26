@@ -1412,7 +1412,11 @@ fn rewrite_trigger_system_column_refs(expr: &mut SqlExpr) {
         | SqlExpr::JsonGet(left, right)
         | SqlExpr::JsonGetText(left, right)
         | SqlExpr::JsonPath(left, right)
-        | SqlExpr::JsonPathText(left, right) => {
+        | SqlExpr::JsonPathText(left, right)
+        | SqlExpr::AtTimeZone {
+            expr: left,
+            zone: right,
+        } => {
             rewrite_trigger_system_column_refs(left);
             rewrite_trigger_system_column_refs(right);
         }

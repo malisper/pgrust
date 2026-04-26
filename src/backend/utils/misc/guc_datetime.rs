@@ -18,16 +18,22 @@ pub struct DateTimeConfig {
     pub date_style_format: DateStyleFormat,
     pub date_order: DateOrder,
     pub time_zone: String,
+    pub transaction_timestamp_usecs: Option<i64>,
+    pub statement_timestamp_usecs: Option<i64>,
     pub max_stack_depth_kb: u32,
     pub xml: XmlConfig,
 }
 
 impl Default for DateTimeConfig {
     fn default() -> Self {
+        let (date_style_format, date_order) =
+            parse_datestyle(&default_datestyle()).unwrap_or((DateStyleFormat::Iso, DateOrder::Mdy));
         Self {
-            date_style_format: DateStyleFormat::Iso,
-            date_order: DateOrder::Mdy,
-            time_zone: "UTC".into(),
+            date_style_format,
+            date_order,
+            time_zone: default_timezone(),
+            transaction_timestamp_usecs: None,
+            statement_timestamp_usecs: None,
             max_stack_depth_kb:
                 crate::backend::utils::misc::stack_depth::effective_default_max_stack_depth_kb(),
             xml: XmlConfig::default(),
@@ -35,28 +41,24 @@ impl Default for DateTimeConfig {
     }
 }
 
-pub fn default_datestyle() -> &'static str {
-    "ISO, MDY"
+pub fn default_datestyle() -> String {
+    std::env::var("PGDATESTYLE").unwrap_or_else(|_| "ISO, MDY".into())
 }
 
 pub fn default_datetime_config() -> DateTimeConfig {
     let mut config = DateTimeConfig::default();
-    if let Ok(value) = std::env::var("PGDATESTYLE")
-        && let Some((date_style_format, date_order)) = parse_datestyle(&value)
-    {
+    if let Some((date_style_format, date_order)) = parse_datestyle(&default_datestyle()) {
         config.date_style_format = date_style_format;
         config.date_order = date_order;
     }
-    if let Ok(value) = std::env::var("PGTZ")
-        && let Some(time_zone) = parse_timezone(&value)
-    {
+    if let Some(time_zone) = parse_timezone(&default_timezone()) {
         config.time_zone = time_zone;
     }
     config
 }
 
-pub fn default_timezone() -> &'static str {
-    "UTC"
+pub fn default_timezone() -> String {
+    std::env::var("PGTZ").unwrap_or_else(|_| "UTC".into())
 }
 
 pub fn parse_datestyle(value: &str) -> Option<(DateStyleFormat, DateOrder)> {
@@ -113,11 +115,35 @@ pub fn parse_timezone(value: &str) -> Option<String> {
         return None;
     }
 
+    // :HACK: PostgreSQL accepts SET TIME ZONE '-08' as an ISO-style fixed
+    // offset in its regression tests, while bare numeric SET TIME ZONE -8 uses
+    // the POSIX sign convention handled below.
+    if trimmed.len() == 3
+        && matches!(trimmed.as_bytes().first(), Some(b'+') | Some(b'-'))
+        && trimmed.as_bytes().get(1) == Some(&b'0')
+        && trimmed.as_bytes().get(2).is_some_and(u8::is_ascii_digit)
+        && let Some(offset) = parse_offset_seconds(trimmed)
+    {
+        return Some(format_offset(offset));
+    }
+
     if let Ok(hours) = trimmed.parse::<f64>() {
         if !hours.is_finite() {
             return None;
         }
-        return Some(format_offset((hours * 3600.0).round() as i32));
+        return Some(format_offset(-(hours * 3600.0).round() as i32));
+    }
+
+    if matches!(trimmed.as_bytes().first(), Some(b'+') | Some(b'-')) {
+        if let Some(offset) = parse_offset_seconds(trimmed) {
+            return Some(format_offset(-offset));
+        }
+    }
+
+    if trimmed.contains(':') {
+        if let Some(offset) = parse_offset_seconds(&format!("+{trimmed}")) {
+            return Some(format_offset(-offset));
+        }
     }
 
     Some(trimmed.to_string())
@@ -129,10 +155,13 @@ mod tests {
 
     #[test]
     fn parses_numeric_timezones_as_fixed_offsets() {
-        assert_eq!(parse_timezone("10.5"), Some("+10:30".into()));
-        assert_eq!(parse_timezone("-8"), Some("-08".into()));
-        assert_eq!(parse_timezone("+9.75"), Some("+09:45".into()));
+        assert_eq!(parse_timezone("10.5"), Some("-10:30".into()));
+        assert_eq!(parse_timezone("-8"), Some("+08".into()));
+        assert_eq!(parse_timezone("-08"), Some("-08".into()));
+        assert_eq!(parse_timezone("+9.75"), Some("-09:45".into()));
+        assert_eq!(parse_timezone("+02:00"), Some("-02".into()));
+        assert_eq!(parse_timezone("04:30"), Some("-04:30".into()));
     }
 }
 use crate::backend::utils::misc::guc_xml::XmlConfig;
-use crate::backend::utils::time::datetime::format_offset;
+use crate::backend::utils::time::datetime::{format_offset, parse_offset_seconds};
