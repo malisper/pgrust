@@ -1853,11 +1853,14 @@ fn drop_routine_signature_matches(
     }
     if proc_kind != 'p' || row.proallargtypes.is_none() {
         let input_oids = parse_proc_argtype_oids(&row.proargtypes).unwrap_or_default();
-        return specs.iter().all(|spec| !matches!(spec.mode, Some(b'o')))
-            && input_oids.len() == specs.len()
+        let callable_specs = specs
+            .iter()
+            .filter(|spec| !matches!(spec.mode, Some(b'o')))
+            .collect::<Vec<_>>();
+        return input_oids.len() == callable_specs.len()
             && input_oids
                 .iter()
-                .zip(specs)
+                .zip(callable_specs)
                 .all(|(oid, spec)| *oid == spec.type_oid);
     }
 

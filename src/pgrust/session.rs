@@ -806,7 +806,7 @@ fn inline_sql_procedure_body(row: &PgProcRow, args: &[Value]) -> Result<String, 
             if name.is_empty() || index >= args.len() {
                 continue;
             }
-            let replacement = render_sql_literal(&args[index])?;
+            let replacement = format!("({})", render_sql_literal(&args[index])?);
             sql = substitute_named_arg(&sql, name, &replacement);
         }
     }
