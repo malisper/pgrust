@@ -9788,6 +9788,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pg_get_ruledef", BuiltinScalarFunction::PgGetRuleDef),
         ("pg_get_ruledef_ext", BuiltinScalarFunction::PgGetRuleDef),
         ("pg_get_viewdef", BuiltinScalarFunction::PgGetViewDef),
+        ("pg_get_ruledef", BuiltinScalarFunction::PgGetRuleDef),
+        ("pg_get_ruledef_ext", BuiltinScalarFunction::PgGetRuleDef),
         (
             "pg_get_statisticsobjdef",
             BuiltinScalarFunction::PgGetStatisticsObjDef,
@@ -15049,6 +15051,7 @@ mod tests {
             BuiltinScalarFunction::PgDescribeObject,
             BuiltinScalarFunction::PgGetRuleDef,
             BuiltinScalarFunction::PgGetViewDef,
+            BuiltinScalarFunction::PgGetRuleDef,
             BuiltinScalarFunction::PgNotify,
             BuiltinScalarFunction::PgNotificationQueueUsage,
             BuiltinScalarFunction::PgIndexAmHasProperty,
