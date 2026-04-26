@@ -431,6 +431,7 @@ impl Database {
                     &namespace.toast_name,
                     self.auth_state(client_id).current_user_oid(),
                     of_type_oid,
+                    reloptions.clone(),
                     &ctx,
                 )
                 .map_err(map_catalog_error)?

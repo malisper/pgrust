@@ -1213,7 +1213,7 @@ fn parse_partition_of_table_storage_clause(
     let pair = pairs
         .next()
         .ok_or(PartitionStatementParseError::Unsupported)?;
-    validate_table_storage_clause(pair)?;
+    build_table_storage_options(pair).map_err(|_| PartitionStatementParseError::Unsupported)?;
     Ok("")
 }
 
@@ -11642,6 +11642,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             inner,
         )?)),
         Rule::alter_table_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
+        Rule::alter_table_reset_stmt => {
+            Ok(Statement::AlterTableReset(build_alter_table_reset(inner)?))
+        }
         Rule::alter_table_set_row_security_stmt => Ok(Statement::AlterTableSetRowSecurity(
             build_alter_table_set_row_security(inner)?,
         )),
@@ -11824,6 +11827,33 @@ fn build_analyze_options(pair: Pair<'_, Rule>) -> Result<AnalyzeOptionsBuilder, 
             }
             Rule::analyze_buffer_usage_limit_option => {
                 options.buffer_usage_limit = Some(parse_option_scalar(part)?);
+            }
+            Rule::analyze_hyphen_option => {
+                let token = part
+                    .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::identifier)
+                    .next_back()
+                    .ok_or(ParseError::UnexpectedEof)?
+                    .as_str()
+                    .to_string();
+                return Err(ParseError::UnexpectedToken {
+                    expected: "ANALYZE option",
+                    actual: format!("syntax error at or near \"{token}\""),
+                });
+            }
+            Rule::analyze_unknown_option => {
+                let name = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::identifier)
+                    .ok_or(ParseError::UnexpectedEof)?
+                    .as_str()
+                    .to_ascii_lowercase();
+                return Err(ParseError::DetailedError {
+                    message: format!("unrecognized ANALYZE option \"{name}\""),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
+                });
             }
             _ => {}
         }
@@ -14253,6 +14283,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     let mut elements = Vec::new();
     let mut of_type_name = None;
     let mut inherits = Vec::new();
+    let mut options = Vec::new();
     let mut ctas_columns = Vec::new();
     let mut query = None;
     let mut query_sql = None;
@@ -14324,7 +14355,9 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                     .map(|inner| inner.into_inner().map(build_identifier).collect())
                     .unwrap_or_default();
             }
-            Rule::table_storage_clause => validate_table_storage_clause(part)?,
+            Rule::table_storage_clause => {
+                options.extend(build_table_storage_options(part)?);
+            }
             _ => {}
         }
     }
@@ -14355,6 +14388,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             persistence,
             on_commit,
             elements,
+            options,
             inherits,
             partition_spec: None,
             partition_of: None,
@@ -15664,6 +15698,33 @@ fn build_alter_table_set(pair: Pair<'_, Rule>) -> Result<AlterTableSetStatement,
     })
 }
 
+fn build_alter_table_reset(pair: Pair<'_, Rule>) -> Result<AlterTableResetStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut options = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::ident_list => options = part.into_inner().map(build_identifier).collect(),
+            _ => {}
+        }
+    }
+    Ok(AlterTableResetStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        options,
+    })
+}
+
 fn build_alter_table_set_row_security(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableSetRowSecurityStatement, ParseError> {
@@ -15912,11 +15973,12 @@ fn build_set_value_atom(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
     }
 }
 
-fn validate_table_storage_clause(pair: Pair<'_, Rule>) -> Result<(), ParseError> {
+fn build_table_storage_options(pair: Pair<'_, Rule>) -> Result<Vec<RelOption>, ParseError> {
     let part = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match part.as_rule() {
-        Rule::without_oids_clause => Ok(()),
+        Rule::without_oids_clause => Ok(Vec::new()),
         Rule::table_with_clause => {
+            let mut options = Vec::new();
             for item in part
                 .into_inner()
                 .filter(|inner| inner.as_rule() == Rule::table_with_item)
@@ -15936,8 +15998,12 @@ fn validate_table_storage_clause(pair: Pair<'_, Rule>) -> Result<(), ParseError>
                 {
                     return Err(ParseError::TablesDeclaredWithOidsNotSupported);
                 }
+                options.push(RelOption {
+                    name,
+                    value: value.unwrap_or_else(|| "true".into()),
+                });
             }
-            Ok(())
+            Ok(options)
         }
         _ => Err(ParseError::UnexpectedToken {
             expected: "table storage clause",

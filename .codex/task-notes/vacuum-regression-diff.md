@@ -38,10 +38,6 @@ scripts/cargo_isolated.sh build --bin pgrust_server
 CARGO_TARGET_DIR=/tmp/pgrust-target-pool/delhi-v3/2 .context/run_regression_timeout30.sh --skip-build --port 5649 --timeout 240 --schedule .context/vacuum_only_schedule --test vacuum
 
 Remaining:
-Focused vacuum regression still fails: 189/328 queries matched, 604 diff lines.
-Latest diff copied to /tmp/diffs/vacuum.delhi-v3.after-empty.diff.
-Remaining failures are mostly CLUSTER support, unsupported index access methods
-and primary-key/index DDL cascades, partition/inheritance DDL and ALTER OWNER
-behavior, VACUUM FULL on system catalogs/catalog tuple rewrite conflicts, lazy
-toast vacuum stats, relation-size truncation semantics, ANALYZE error text, and
-permission warning name/order differences.
+This was an earlier checkpoint. See `vacuum-regression.md` for the final state:
+focused vacuum regression is down to 326/328 query matches, with only
+unsupported `ALTER TABLE ... CLUSTER ON ...` and `CLUSTER table` remaining.

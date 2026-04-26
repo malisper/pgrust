@@ -810,6 +810,7 @@ impl CatalogStore {
             crate::include::catalog::PG_TOAST_NAMESPACE_OID,
             crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
             owner_oid,
+            None,
             ctx,
         )
     }
@@ -824,6 +825,7 @@ impl CatalogStore {
         toast_namespace_oid: u32,
         toast_namespace_name: &str,
         owner_oid: u32,
+        reloptions: Option<Vec<String>>,
         ctx: &CatalogWriteContext,
     ) -> Result<(CreateTableResult, CatalogMutationEffect), CatalogError> {
         self.create_storage_relation_mvcc_with_options(
@@ -837,6 +839,7 @@ impl CatalogStore {
             toast_namespace_name,
             owner_oid,
             0,
+            reloptions,
             ctx,
         )
     }
@@ -852,6 +855,7 @@ impl CatalogStore {
         toast_namespace_name: &str,
         owner_oid: u32,
         of_type_oid: u32,
+        reloptions: Option<Vec<String>>,
         ctx: &CatalogWriteContext,
     ) -> Result<(CreateTableResult, CatalogMutationEffect), CatalogError> {
         self.create_storage_relation_mvcc_with_options(
@@ -865,6 +869,7 @@ impl CatalogStore {
             toast_namespace_name,
             owner_oid,
             of_type_oid,
+            reloptions,
             ctx,
         )
     }
@@ -892,6 +897,7 @@ impl CatalogStore {
             toast_namespace_name,
             owner_oid,
             0,
+            None,
             ctx,
         )
     }
@@ -908,6 +914,7 @@ impl CatalogStore {
         toast_namespace_name: &str,
         owner_oid: u32,
         of_type_oid: u32,
+        reloptions: Option<Vec<String>>,
         ctx: &CatalogWriteContext,
     ) -> Result<(CreateTableResult, CatalogMutationEffect), CatalogError> {
         let name = name.into();
@@ -920,7 +927,7 @@ impl CatalogStore {
             ));
         }
         let mut control = self.control_state()?;
-        let entry = build_relation_entry(
+        let mut entry = build_relation_entry(
             name.clone(),
             desc,
             namespace_oid,
@@ -931,6 +938,7 @@ impl CatalogStore {
             of_type_oid,
             &mut control,
         )?;
+        entry.reloptions = reloptions;
         let toast = build_toast_catalog_changes(
             &name,
             &entry,
@@ -2645,24 +2653,12 @@ impl CatalogStore {
                 })
                 .collect::<Vec<_>>();
 
-        let mut rows_to_delete = PhysicalCatalogRows {
+        let rows_to_delete = PhysicalCatalogRows {
             inherits: vec![removed_inherit],
             depends: removed_depends,
             ..PhysicalCatalogRows::default()
         };
-        let mut rows_to_insert = PhysicalCatalogRows::default();
-        if let Some(old_parent) = class_row_by_oid_mvcc(self, ctx, parent_oid)? {
-            let has_remaining_children = relation_inherited_by_mvcc(self, ctx, parent_oid)?
-                .into_iter()
-                .any(|row| row.inhrelid != relation_oid);
-            if old_parent.relhassubclass != has_remaining_children {
-                rows_to_delete.classes.push(old_parent.clone());
-                rows_to_insert.classes.push(PgClassRow {
-                    relhassubclass: has_remaining_children,
-                    ..old_parent
-                });
-            }
-        }
+        let rows_to_insert = PhysicalCatalogRows::default();
 
         let mut kinds = vec![
             BootstrapCatalogKind::PgDepend,
@@ -2823,31 +2819,18 @@ impl CatalogStore {
                 })
                 .collect::<Vec<_>>();
 
-        let mut rows_to_delete = PhysicalCatalogRows {
+        let rows_to_delete = PhysicalCatalogRows {
             attributes: old_attributes,
             constraints: old_constraints,
             inherits: vec![removed_inherit],
             depends: removed_depends,
             ..PhysicalCatalogRows::default()
         };
-        let mut rows_to_insert = PhysicalCatalogRows {
+        let rows_to_insert = PhysicalCatalogRows {
             attributes: new_attributes,
             constraints: new_constraints,
             ..PhysicalCatalogRows::default()
         };
-
-        if let Some(old_parent) = class_row_by_oid_mvcc(self, ctx, parent_oid)? {
-            let has_remaining_children = relation_inherited_by_mvcc(self, ctx, parent_oid)?
-                .into_iter()
-                .any(|row| row.inhparent == parent_oid && row.inhrelid != relation_oid);
-            if old_parent.relhassubclass != has_remaining_children {
-                rows_to_delete.classes.push(old_parent.clone());
-                rows_to_insert.classes.push(PgClassRow {
-                    relhassubclass: has_remaining_children,
-                    ..old_parent
-                });
-            }
-        }
 
         let mut kinds = vec![
             BootstrapCatalogKind::PgAttribute,
@@ -5919,6 +5902,27 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_relation_reloptions_mvcc(
+        &mut self,
+        relation_oid: u32,
+        reloptions: Option<Vec<String>>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, _new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                if !matches!(entry.relkind, 'r' | 'p' | 'm') {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                entry.reloptions = reloptions;
+                Ok(((), vec![BootstrapCatalogKind::PgClass]))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
     pub fn replace_relation_partitioning_mvcc(
         &mut self,
         relation_oid: u32,
@@ -5957,12 +5961,16 @@ impl CatalogStore {
         relation_oid: u32,
         relpages: i32,
         reltuples: f64,
+        clear_relhassubclass: bool,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, _new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
                 entry.relpages = relpages;
                 entry.reltuples = reltuples;
+                if clear_relhassubclass {
+                    entry.relhassubclass = false;
+                }
                 Ok(((), vec![BootstrapCatalogKind::PgClass]))
             })?;
 
@@ -6004,6 +6012,7 @@ impl CatalogStore {
         relallvisible: i32,
         relallfrozen: i32,
         relfrozenxid: u32,
+        clear_relhassubclass: bool,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, _new_entry, _, kinds) =
@@ -6013,6 +6022,9 @@ impl CatalogStore {
                 entry.relallvisible = relallvisible;
                 entry.relallfrozen = relallfrozen;
                 entry.relfrozenxid = relfrozenxid;
+                if clear_relhassubclass {
+                    entry.relhassubclass = false;
+                }
                 Ok(((), vec![BootstrapCatalogKind::PgClass]))
             })?;
 
@@ -9325,12 +9337,12 @@ fn drop_relation_entries_visible(
             .inherit_rows()
             .into_iter()
             .any(|row| row.inhparent == *parent_oid && !dropped_oids.contains(&row.inhrelid));
-        if old_parent.relhassubclass == has_remaining {
+        if old_parent.relhassubclass || !has_remaining {
             continue;
         }
         rows_to_delete.classes.push(old_parent.clone());
         rows_to_insert.classes.push(PgClassRow {
-            relhassubclass: has_remaining,
+            relhassubclass: true,
             ..old_parent
         });
     }
@@ -9397,12 +9409,12 @@ fn drop_relation_entries_mvcc(
         let has_remaining = relation_inherited_by_mvcc(store, ctx, *parent_oid)?
             .into_iter()
             .any(|row| !dropped_oids.contains(&row.inhrelid));
-        if old_parent.relhassubclass == has_remaining {
+        if old_parent.relhassubclass || !has_remaining {
             continue;
         }
         rows_to_delete.classes.push(old_parent.clone());
         rows_to_insert.classes.push(PgClassRow {
-            relhassubclass: has_remaining,
+            relhassubclass: true,
             ..old_parent
         });
     }
