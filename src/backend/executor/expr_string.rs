@@ -1565,6 +1565,23 @@ pub(super) fn eval_lower_function(values: &[Value]) -> Result<Value, ExecError> 
     Ok(Value::Text(CompactString::from_owned(text.to_lowercase())))
 }
 
+pub(super) fn eval_upper_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let text = text_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "upper",
+            left: text_value.clone(),
+            right: Value::Text("".into()),
+        })?;
+    Ok(Value::Text(CompactString::from_owned(text.to_uppercase())))
+}
+
 pub(super) fn eval_text_starts_with_function(values: &[Value]) -> Result<Value, ExecError> {
     match values {
         [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),

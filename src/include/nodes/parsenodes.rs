@@ -12,6 +12,7 @@ use std::fmt;
 pub enum UngroupedColumnClause {
     SelectTarget,
     Having,
+    OrderBy,
     Other,
 }
 

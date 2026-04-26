@@ -497,6 +497,7 @@ pub enum BuiltinScalarFunction {
     ArrayReplace,
     ArraySort,
     Lower,
+    Upper,
     Unistr,
     Ascii,
     Chr,

@@ -1415,6 +1415,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::Log10
             | BuiltinScalarFunction::Length
             | BuiltinScalarFunction::Lower
+            | BuiltinScalarFunction::Upper
             | BuiltinScalarFunction::Unistr
             | BuiltinScalarFunction::Scale
             | BuiltinScalarFunction::MinScale
@@ -2930,6 +2931,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("enum_range", BuiltinScalarFunction::EnumRange),
         ("enum_range_bounds", BuiltinScalarFunction::EnumRange),
         ("lower", BuiltinScalarFunction::Lower),
+        ("upper", BuiltinScalarFunction::Upper),
         ("unistr", BuiltinScalarFunction::Unistr),
         ("ascii", BuiltinScalarFunction::Ascii),
         ("chr", BuiltinScalarFunction::Chr),
@@ -3813,6 +3815,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ArrayLower
             | BuiltinScalarFunction::ArrayUpper
             | BuiltinScalarFunction::Lower
+            | BuiltinScalarFunction::Upper
             | BuiltinScalarFunction::Unistr
             | BuiltinScalarFunction::Ascii
             | BuiltinScalarFunction::Chr
@@ -4112,6 +4115,10 @@ mod tests {
             Some(BuiltinScalarFunction::Lower)
         );
         assert_eq!(
+            resolve_scalar_function("upper"),
+            Some(BuiltinScalarFunction::Upper)
+        );
+        assert_eq!(
             resolve_scalar_function("ceiling"),
             Some(BuiltinScalarFunction::Ceiling)
         );
@@ -4224,6 +4231,20 @@ mod tests {
         assert_eq!(resolved.scalar_impl, Some(BuiltinScalarFunction::Lower));
         assert!(!resolved.func_variadic);
         assert_eq!(resolved.vatype_oid, 0);
+    }
+
+    #[test]
+    fn resolve_function_call_prefers_text_upper_for_text_arguments() {
+        let resolved = resolve_function_call(
+            &Catalog::default(),
+            "upper",
+            &[SqlType::new(SqlTypeKind::Text)],
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.scalar_impl, Some(BuiltinScalarFunction::Upper));
+        assert_eq!(resolved.result_type, SqlType::new(SqlTypeKind::Text));
     }
 
     #[test]

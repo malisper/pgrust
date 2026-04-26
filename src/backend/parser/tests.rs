@@ -12020,6 +12020,22 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
 }
 
 #[test]
+fn analyze_grouped_query_matches_bound_equivalent_group_exprs() {
+    for sql in [
+        "select id % 2, count(name) from people group by people.id % 2 order by people.id % 2",
+        "select lower(people.name), count(name) from people group by lower(name) order by lower(name)",
+    ] {
+        let stmt = parse_select(sql).unwrap();
+        let (query, _) =
+            analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+
+        assert_eq!(query.group_by.len(), 1, "{sql}");
+        assert_eq!(query.target_list[0].expr, query.group_by[0], "{sql}");
+        assert_eq!(query.sort_clause[0].expr, query.group_by[0], "{sql}");
+    }
+}
+
+#[test]
 fn analyze_group_by_resolves_select_alias_when_no_input_column_matches() {
     let stmt = parse_select("select id as two, count(*) from people group by two").unwrap();
     let (query, _) =

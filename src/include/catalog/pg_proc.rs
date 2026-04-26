@@ -3232,6 +3232,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            6204,
+            "upper",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "upper",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
             6203,
             "length",
             INT4_TYPE_OID,
@@ -8294,6 +8306,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("enum_range", BuiltinScalarFunction::EnumRange),
         ("enum_range_bounds", BuiltinScalarFunction::EnumRange),
         ("lower", BuiltinScalarFunction::Lower),
+        ("upper", BuiltinScalarFunction::Upper),
         ("unistr", BuiltinScalarFunction::Unistr),
         ("strpos", BuiltinScalarFunction::Strpos),
         ("position", BuiltinScalarFunction::Position),
@@ -13680,6 +13693,14 @@ mod tests {
         assert_eq!(
             proc_oid_for_builtin_scalar_function(BuiltinScalarFunction::Lower),
             Some(6202)
+        );
+        assert_eq!(
+            builtin_scalar_function_for_proc_oid(6204),
+            Some(BuiltinScalarFunction::Upper)
+        );
+        assert_eq!(
+            proc_oid_for_builtin_scalar_function(BuiltinScalarFunction::Upper),
+            Some(6204)
         );
         assert_eq!(
             builtin_scalar_function_for_proc_oid(

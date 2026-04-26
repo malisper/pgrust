@@ -3295,6 +3295,7 @@ fn is_local_timezone_marker(expr: &Expr) -> bool {
 fn builtin_scalar_function_name(func: BuiltinScalarFunction) -> String {
     match func {
         BuiltinScalarFunction::Lower => "lower".into(),
+        BuiltinScalarFunction::Upper => "upper".into(),
         BuiltinScalarFunction::Length => "length".into(),
         BuiltinScalarFunction::JsonBuildArray => "json_build_array".into(),
         BuiltinScalarFunction::JsonBuildObject => "json_build_object".into(),

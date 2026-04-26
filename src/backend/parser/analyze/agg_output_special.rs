@@ -369,7 +369,7 @@ pub(super) fn bind_grouped_func_call(
                 ],
             ))
         }
-        BuiltinScalarFunction::Lower => {
+        BuiltinScalarFunction::Lower | BuiltinScalarFunction::Upper => {
             let arg_type = grouped_infer_sql_expr_type(
                 &lowered_args[0],
                 input_scope,

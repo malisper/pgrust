@@ -99,6 +99,7 @@ use super::expr_string::{
     eval_to_number_function, eval_to_oct_function, eval_translate_function, eval_trim_function,
     eval_unicode_assigned_function, eval_unicode_is_normalized_function,
     eval_unicode_normalize_function, eval_unicode_version_function, eval_unistr_function,
+    eval_upper_function,
 };
 use super::expr_txid::eval_txid_builtin_function;
 use super::expr_xml::{eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function};
@@ -4628,6 +4629,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::PgSizePretty => eval_pg_size_pretty_function(&values),
         BuiltinScalarFunction::PgSizeBytes => eval_pg_size_bytes_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
+        BuiltinScalarFunction::Upper => eval_upper_function(&values),
         BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
         BuiltinScalarFunction::UnicodeVersion => eval_unicode_version_function(&values),
         BuiltinScalarFunction::UnicodeAssigned => eval_unicode_assigned_function(&values),
@@ -6721,6 +6723,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::RPad => eval_rpad_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
+        BuiltinScalarFunction::Upper => eval_upper_function(&values),
         BuiltinScalarFunction::TextStartsWith => eval_text_starts_with_function(&values),
         BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
         BuiltinScalarFunction::Initcap => eval_initcap_function(&values),

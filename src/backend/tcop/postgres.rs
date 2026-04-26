@@ -336,6 +336,19 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         }) => {
             return find_ungrouped_column_position(sql, token, clause);
         }
+        ExecError::Parse(crate::backend::parser::ParseError::AmbiguousColumn(name)) => {
+            return find_last_identifier_position(sql, name);
+        }
+        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            expected: "GROUP BY position in select list",
+            actual,
+        }) if actual.starts_with("GROUP BY position ") => {
+            return find_last_case_insensitive_token_position(sql, "GROUP BY").and_then(|index| {
+                sql[index..]
+                    .find(char::is_numeric)
+                    .map(|offset| index + offset + 1)
+            });
+        }
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
             expected: "text or bit argument",
             actual,
@@ -1453,10 +1466,32 @@ fn find_ungrouped_column_position(
             let start = lower.find("having")? + "having".len();
             (start, sql.len())
         }
+        UngroupedColumnClause::OrderBy => {
+            let start = lower.rfind("order by")? + "order by".len();
+            (start, sql.len())
+        }
         UngroupedColumnClause::Other => (0, sql.len()),
     };
     let segment = &sql[start..end];
     find_identifier_in_segment(segment, token).map(|offset| start + offset + 1)
+}
+
+fn find_last_identifier_position(sql: &str, token: &str) -> Option<usize> {
+    let token_lower = token.to_ascii_lowercase();
+    let sql_lower = sql.to_ascii_lowercase();
+    let mut from = 0;
+    let mut last = None;
+    while let Some(found) = sql_lower[from..].find(&token_lower) {
+        let idx = from + found;
+        let before = sql[..idx].chars().next_back();
+        let after = sql[idx + token.len()..].chars().next();
+        let is_ident = |ch: char| ch.is_ascii_alphanumeric() || ch == '_' || ch == '.';
+        if !before.is_some_and(is_ident) && !after.is_some_and(is_ident) {
+            last = Some(idx + 1);
+        }
+        from = idx + token.len();
+    }
+    last
 }
 
 fn find_identifier_in_segment(segment: &str, token: &str) -> Option<usize> {
