@@ -2652,14 +2652,51 @@ fn format_foreign_key_constraintdef_for_catalog(
         referenced_name,
         referenced_columns.join(", ")
     );
-    if row.confdeltype == 'r' {
-        def.push_str(" ON DELETE RESTRICT");
-    }
-    if row.confupdtype == 'r' {
-        def.push_str(" ON UPDATE RESTRICT");
+    append_foreign_key_match_type(&mut def, row.confmatchtype);
+    append_foreign_key_action(&mut def, "ON UPDATE", row.confupdtype);
+    let appended_delete = append_foreign_key_action(&mut def, "ON DELETE", row.confdeltype);
+    if appended_delete
+        && let Some(set_columns) = row
+            .confdelsetcols
+            .as_ref()
+            .and_then(|attnums| index_column_names_for_heap(&relation.desc, attnums))
+        && !set_columns.is_empty()
+    {
+        def.push_str(" (");
+        def.push_str(&set_columns.join(", "));
+        def.push(')');
     }
     append_constraint_deferrability(&mut def, row);
     Some(def)
+}
+
+fn append_foreign_key_match_type(def: &mut String, match_type: char) {
+    match match_type {
+        'f' => def.push_str(" MATCH FULL"),
+        'p' => def.push_str(" MATCH PARTIAL"),
+        _ => {}
+    }
+}
+
+fn append_foreign_key_action(def: &mut String, clause: &str, action: char) -> bool {
+    let Some(keyword) = foreign_key_action_keyword(action) else {
+        return false;
+    };
+    def.push(' ');
+    def.push_str(clause);
+    def.push(' ');
+    def.push_str(keyword);
+    true
+}
+
+fn foreign_key_action_keyword(action: char) -> Option<&'static str> {
+    match action {
+        'r' => Some("RESTRICT"),
+        'c' => Some("CASCADE"),
+        'n' => Some("SET NULL"),
+        'd' => Some("SET DEFAULT"),
+        _ => None,
+    }
 }
 
 fn append_constraint_deferrability(

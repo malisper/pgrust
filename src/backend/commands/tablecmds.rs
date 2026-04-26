@@ -1187,11 +1187,12 @@ pub(crate) fn write_insert_heap_row(
         None,
         ctx,
     )?;
-    crate::backend::executor::enforce_outbound_foreign_keys(
+    crate::backend::executor::enforce_outbound_foreign_keys_for_insert(
         relation_name,
+        rel,
         &relation_constraints.foreign_keys,
-        None,
         values,
+        crate::backend::executor::InsertForeignKeyCheckPhase::BeforeHeapInsert,
         ctx,
     )?;
     let (tuple, _toasted) = toast_tuple_for_write(desc, values, toast, toast_index, ctx, xid, cid)?;
@@ -5382,6 +5383,16 @@ pub(crate) fn execute_insert_rows(
             return Err(err);
         }
     }
+    for values in &inserted_rows {
+        crate::backend::executor::enforce_outbound_foreign_keys_for_insert(
+            relation_name,
+            rel,
+            &relation_constraints.foreign_keys,
+            values,
+            crate::backend::executor::InsertForeignKeyCheckPhase::AfterIndexInsert,
+            ctx,
+        )?;
+    }
 
     if let Some(triggers) = &triggers {
         if let Some(capture) = transition_capture.as_ref() {
@@ -5563,6 +5574,14 @@ pub fn execute_prepared_insert_row(
         &prepared.indexes,
         &values,
         heap_tid,
+        ctx,
+    )?;
+    crate::backend::executor::enforce_outbound_foreign_keys_for_insert(
+        &prepared.relation_name,
+        prepared.rel,
+        &prepared.relation_constraints.foreign_keys,
+        &values,
+        crate::backend::executor::InsertForeignKeyCheckPhase::AfterIndexInsert,
         ctx,
     )?;
     ctx.session_stats
