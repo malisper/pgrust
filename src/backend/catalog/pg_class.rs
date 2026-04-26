@@ -28,6 +28,7 @@ pub fn relkind_for_plain_table() -> PgClassRow {
         relpartbound: None,
         reloptions: None,
         relacl: None,
+        relreplident: 'd',
         reloftype: 0,
     }
 }

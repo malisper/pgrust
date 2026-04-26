@@ -3113,9 +3113,13 @@ impl CatalogStore {
             typowner: owner_oid,
             typacl: None,
             typlen: -1,
+            typbyval: false,
+            typtype: 'p',
+            typisdefined: false,
             typalign: AttributeAlign::Int,
             typstorage: AttributeStorage::Plain,
             typrelid: 0,
+            typsubscript: 0,
             typelem: 0,
             typarray: 0,
             typinput: 0,
@@ -3124,8 +3128,10 @@ impl CatalogStore {
             typsend: 0,
             typmodin: 0,
             typmodout: 0,
+            typdelim: ',',
             typanalyze: 0,
-            typsubscript: 0,
+            typbasetype: 0,
+            typcollation: 0,
             sql_type: SqlType::new(SqlTypeKind::Shell).with_identity(oid, 0),
         };
         let kinds = [BootstrapCatalogKind::PgType];
@@ -3178,9 +3184,13 @@ impl CatalogStore {
             typowner: old_row.typowner,
             typacl: old_row.typacl.clone(),
             typlen,
+            typbyval: matches!(typlen, 1 | 2 | 4 | 8),
+            typtype: 'b',
+            typisdefined: true,
             typalign,
             typstorage,
             typrelid: 0,
+            typsubscript: support_proc_oids.get(7).copied().unwrap_or(0),
             typelem,
             typarray: array_oid,
             typinput: support_proc_oids.first().copied().unwrap_or(0),
@@ -3189,8 +3199,10 @@ impl CatalogStore {
             typsend: support_proc_oids.get(3).copied().unwrap_or(0),
             typmodin: support_proc_oids.get(4).copied().unwrap_or(0),
             typmodout: support_proc_oids.get(5).copied().unwrap_or(0),
+            typdelim: ',',
             typanalyze: support_proc_oids.get(6).copied().unwrap_or(0),
-            typsubscript: support_proc_oids.get(7).copied().unwrap_or(0),
+            typbasetype: 0,
+            typcollation: 0,
             sql_type: base_sql_type,
         };
         let array_row = PgTypeRow {
@@ -3200,19 +3212,25 @@ impl CatalogStore {
             typowner: old_row.typowner,
             typacl: old_row.typacl.clone(),
             typlen: -1,
+            typbyval: false,
+            typtype: 'b',
+            typisdefined: true,
             typalign: AttributeAlign::Int,
             typstorage: AttributeStorage::Extended,
             typrelid: 0,
+            typsubscript: 6179,
             typelem: type_oid,
             typarray: 0,
             typinput: 750,
             typoutput: 751,
             typreceive: 2400,
             typsend: 2401,
-            typmodin: support_proc_oids.get(4).copied().unwrap_or(0),
-            typmodout: support_proc_oids.get(5).copied().unwrap_or(0),
+            typmodin: 0,
+            typmodout: 0,
+            typdelim: ',',
             typanalyze: 3816,
-            typsubscript: 6179,
+            typbasetype: 0,
+            typcollation: 0,
             sql_type: SqlType::array_of(base_sql_type),
         };
         let mut depends = vec![
@@ -7428,10 +7446,11 @@ fn rows_for_new_relation_entry(
             .iter()
             .enumerate()
             .map(|(idx, column)| {
+                let atttypid = resolved_sql_type_oid(type_lookup, entry, column.sql_type)?;
                 Ok(PgAttributeRow {
                     attrelid: entry.relation_oid,
                     attname: column.name.clone(),
-                    atttypid: resolved_sql_type_oid(type_lookup, entry, column.sql_type)?,
+                    atttypid,
                     attlen: column.storage.attlen,
                     attnum: idx.saturating_add(1) as i16,
                     attnotnull: !column.storage.nullable,
@@ -7459,6 +7478,8 @@ fn rows_for_new_relation_entry(
                     attoptions: None,
                     attfdwoptions: None,
                     attmissingval: None,
+                    attbyval: crate::include::catalog::builtin_type_row_by_oid(atttypid)
+                        .is_some_and(|row| row.typbyval),
                     sql_type: column.sql_type,
                 })
             })
@@ -7843,6 +7864,7 @@ fn class_row_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> PgC
         relpartbound: entry.relpartbound.clone(),
         reloptions: entry.reloptions.clone(),
         relacl: entry.relacl.clone(),
+        relreplident: 'd',
         reloftype: entry.of_type_oid,
     }
 }

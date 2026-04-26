@@ -3179,6 +3179,42 @@ pub(super) fn eval_pg_rust_test_fdw_handler(values: &[Value]) -> Result<Value, E
     Ok(Value::Null)
 }
 
+const PG_PARAMETER_ACL_PARNAME_INDEX_OID: u32 = 6246;
+const PG_REPLICATION_ORIGIN_RONAME_INDEX_OID: u32 = 6002;
+const PG_SECLABEL_OBJECT_INDEX_OID: u32 = 3597;
+const PG_SHSECLABEL_OBJECT_INDEX_OID: u32 = 3593;
+
+pub(super) fn eval_pg_rust_is_catalog_text_unique_index_oid(
+    values: &[Value],
+) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::TypeMismatch {
+            op: "pg_rust_is_catalog_text_unique_index_oid",
+            left: values.first().cloned().unwrap_or(Value::Null),
+            right: Value::Int64(0),
+        });
+    };
+    let oid = match value {
+        Value::Null => return Ok(Value::Null),
+        Value::Int32(oid) if *oid >= 0 => *oid as u32,
+        Value::Int64(oid) if *oid >= 0 && *oid <= i64::from(u32::MAX) => *oid as u32,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "pg_rust_is_catalog_text_unique_index_oid",
+                left: other.clone(),
+                right: Value::Int64(0),
+            });
+        }
+    };
+    Ok(Value::Bool(matches!(
+        oid,
+        PG_PARAMETER_ACL_PARNAME_INDEX_OID
+            | PG_REPLICATION_ORIGIN_RONAME_INDEX_OID
+            | PG_SECLABEL_OBJECT_INDEX_OID
+            | PG_SHSECLABEL_OBJECT_INDEX_OID
+    )))
+}
+
 pub(super) fn eval_pg_rust_test_widget_in(values: &[Value]) -> Result<Value, ExecError> {
     let [input] = values else {
         return Err(ExecError::TypeMismatch {

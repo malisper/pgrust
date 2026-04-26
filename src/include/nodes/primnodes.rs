@@ -367,6 +367,7 @@ pub enum HashFunctionKind {
 pub enum BuiltinScalarFunction {
     Random,
     RandomNormal,
+    Pi,
     CurrentDatabase,
     Version,
     PgBackendPid,
@@ -388,6 +389,7 @@ pub enum BuiltinScalarFunction {
     PgRustTestInt44In,
     PgRustTestInt44Out,
     PgRustTestPtInWidget,
+    PgRustIsCatalogTextUniqueIndexOid,
     CurrentSetting,
     PgNotify,
     PgNotificationQueueUsage,

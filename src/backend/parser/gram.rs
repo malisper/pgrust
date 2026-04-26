@@ -19251,7 +19251,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::kw_current_date => Ok(SqlExpr::CurrentDate),
         Rule::kw_current_catalog => Ok(SqlExpr::CurrentCatalog),
         Rule::kw_current_schema => Ok(SqlExpr::CurrentSchema),
-        Rule::kw_current_user => Ok(SqlExpr::CurrentUser),
+        Rule::kw_current_user | Rule::kw_user_value => Ok(SqlExpr::CurrentUser),
         Rule::kw_session_user => Ok(SqlExpr::SessionUser),
         Rule::kw_current_role => Ok(SqlExpr::CurrentRole),
         Rule::kw_current_time => Ok(SqlExpr::CurrentTime {
