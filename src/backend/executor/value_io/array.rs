@@ -6,7 +6,7 @@ use crate::backend::storage::page::bufpage::max_align;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::AttributeAlign;
 use crate::include::catalog::{
-    FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, INTERVAL_TYPE_OID, builtin_type_rows,
+    FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, INTERVAL_TYPE_OID, UNKNOWN_TYPE_OID, builtin_type_rows,
     multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use std::collections::HashMap;
@@ -796,7 +796,10 @@ fn builtin_type_oid_by_kind() -> &'static HashMap<SqlTypeKind, u32> {
     BUILTIN_TYPE_OID_BY_KIND.get_or_init(|| {
         let mut by_kind = HashMap::new();
         for row in builtin_type_rows() {
-            if !row.sql_type.is_array && !matches!(row.sql_type.kind, SqlTypeKind::AnyArray) {
+            if row.oid != UNKNOWN_TYPE_OID
+                && !row.sql_type.is_array
+                && !matches!(row.sql_type.kind, SqlTypeKind::AnyArray)
+            {
                 by_kind.entry(row.sql_type.kind).or_insert(row.oid);
             }
         }

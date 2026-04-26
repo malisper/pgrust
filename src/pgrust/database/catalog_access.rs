@@ -159,10 +159,16 @@ impl Database {
             if schema_name.is_empty() || schema_name == "$user" || schema_name == "pg_catalog" {
                 continue;
             }
-            if allow_temporary_namespace
-                && persistence == TablePersistence::Temporary
-                && is_temp_schema_name(&schema_name)
-            {
+            if allow_temporary_namespace && is_temp_schema_name(&schema_name) {
+                if persistence == TablePersistence::Unlogged {
+                    return Err(ParseError::DetailedError {
+                        message: "only temporary relations may be created in temporary schemas"
+                            .into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P16",
+                    });
+                }
                 return Ok((
                     lowered_name,
                     Self::temp_namespace_oid(temp_backend_id),

@@ -1026,6 +1026,9 @@ pub trait CatalogLookup {
         }
         let mut fallback = None;
         for row in self.type_rows() {
+            if row.oid == crate::include::catalog::UNKNOWN_TYPE_OID {
+                continue;
+            }
             if row.sql_type.kind != sql_type.kind || row.sql_type.is_array != sql_type.is_array {
                 continue;
             }
@@ -1775,6 +1778,9 @@ impl CatalogLookup for Catalog {
         }
         let mut fallback = None;
         for row in builtin_type_rows() {
+            if row.oid == crate::include::catalog::UNKNOWN_TYPE_OID {
+                continue;
+            }
             if row.sql_type.kind != sql_type.kind || row.sql_type.is_array != sql_type.is_array {
                 continue;
             }
