@@ -1284,6 +1284,7 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::Aggregate { input, .. }
@@ -1344,6 +1345,7 @@ fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::Aggregate { input, .. }
@@ -1617,6 +1619,7 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::Unique { input, .. }
@@ -1717,6 +1720,7 @@ fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::WindowAgg { input, .. }
@@ -2001,6 +2005,7 @@ fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::Unique { input, .. }
@@ -2052,6 +2057,7 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::Unique { input, .. }
@@ -2218,6 +2224,29 @@ fn ordinary_grouped_aggregate_uses_hashed_strategy() {
         } => {
             assert_eq!(*strategy, AggregateStrategy::Hashed);
             assert!(!matches!(input.as_ref(), Plan::OrderBy { .. }));
+        }
+        other => panic!("expected aggregate plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn disabled_hashagg_uses_sorted_grouping_strategy() {
+    let catalog = LiteralDefaultCatalog;
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select grp, count(*) from (values (2), (1), (2)) as t(grp) group by grp",
+        &catalog,
+        PlannerConfig {
+            enable_hashagg: false,
+            ..PlannerConfig::default()
+        },
+    );
+    let aggregate = find_aggregate_plan(&planned.plan_tree).expect("aggregate plan");
+    match aggregate {
+        Plan::Aggregate {
+            strategy, input, ..
+        } => {
+            assert_eq!(*strategy, AggregateStrategy::Sorted);
+            assert!(matches!(input.as_ref(), Plan::OrderBy { .. }));
         }
         other => panic!("expected aggregate plan, got {other:?}"),
     }
@@ -3387,6 +3416,7 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
             | Plan::Filter { input, .. }
             | Plan::Projection { input, .. }
             | Plan::OrderBy { input, .. }
+            | Plan::IncrementalSort { input, .. }
             | Plan::Limit { input, .. }
             | Plan::LockRows { input, .. }
             | Plan::Unique { input, .. }

@@ -485,6 +485,35 @@ pub(super) fn optimize_path_with_config(
                     display_items,
                 }
             }
+            Path::IncrementalSort {
+                pathtarget,
+                input,
+                items,
+                presorted_count,
+                display_items,
+                presorted_display_items,
+                ..
+            } => {
+                let input = optimize_path_with_config(*input, catalog, config);
+                let input_info = input.plan_info();
+                let remaining_keys = items.len().saturating_sub(presorted_count).max(1);
+                let sort_cost =
+                    estimate_sort_cost(input_info.plan_rows.as_f64(), remaining_keys) * 0.5;
+                Path::IncrementalSort {
+                    plan_info: PlanEstimate::new(
+                        input_info.startup_cost.as_f64(),
+                        input_info.total_cost.as_f64() + sort_cost,
+                        input_info.plan_rows.as_f64(),
+                        input_info.plan_width,
+                    ),
+                    pathtarget,
+                    input: Box::new(input),
+                    items,
+                    presorted_count,
+                    display_items,
+                    presorted_display_items,
+                }
+            }
             Path::Limit {
                 pathtarget,
                 input,
@@ -2173,6 +2202,7 @@ fn contains_seq_scan(path: &Path) -> bool {
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. }
         | Path::Unique { input, .. }
@@ -2217,6 +2247,7 @@ fn cross_join_left_relid_count(path: &Path) -> Option<usize> {
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => cross_join_left_relid_count(input),
         _ => None,
@@ -2229,6 +2260,7 @@ fn path_is_values_relation(path: &Path) -> bool {
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. }
         | Path::SubqueryScan { input, .. }
@@ -2630,6 +2662,12 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
                     .any(|target| expr_uses_immediate_outer_columns(&target.expr))
         }
         Path::OrderBy { input, items, .. } => {
+            path_uses_immediate_outer_columns(input)
+                || items
+                    .iter()
+                    .any(|item| expr_uses_immediate_outer_columns(&item.expr))
+        }
+        Path::IncrementalSort { input, items, .. } => {
             path_uses_immediate_outer_columns(input)
                 || items
                     .iter()

@@ -3,11 +3,11 @@ use crate::backend::executor::hashjoin::HashJoinPhase;
 use crate::backend::parser::SqlType;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, CteScanState,
-    FilterState, FunctionScanState, HashJoinState, HashState, IndexOnlyScanState, IndexScanState,
-    LimitState, LockRowsState, MergeAppendState, MergeJoinState, NestedLoopJoinState,
-    NodeExecStats, OrderByState, ProjectSetState, ProjectionState, RecursiveUnionState,
-    RecursiveWorkTable, ResultState, SeqScanState, SetOpState, SubqueryScanState, UniqueState,
-    ValuesState, WindowAggState, WorkTableScanState,
+    FilterState, FunctionScanState, HashJoinState, HashState, IncrementalSortState,
+    IndexOnlyScanState, IndexScanState, LimitState, LockRowsState, MergeAppendState,
+    MergeJoinState, NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState,
+    ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState, SeqScanState,
+    SetOpState, SubqueryScanState, UniqueState, ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{
@@ -297,6 +297,10 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
             input, predicate, ..
         } => plan_uses_outer_columns(input) || expr_uses_outer_columns(predicate),
         Plan::OrderBy { input, items, .. } => {
+            plan_uses_outer_columns(input)
+                || items.iter().any(|item| expr_uses_outer_columns(&item.expr))
+        }
+        Plan::IncrementalSort { input, items, .. } => {
             plan_uses_outer_columns(input)
                 || items.iter().any(|item| expr_uses_outer_columns(&item.expr))
         }
@@ -1081,6 +1085,26 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 stats: NodeExecStats::default(),
             })
         }
+        Plan::IncrementalSort {
+            plan_info,
+            input,
+            items,
+            presorted_count,
+            display_items,
+            presorted_display_items,
+        } => Box::new(IncrementalSortState {
+            input: executor_start(*input),
+            items,
+            presorted_count,
+            display_items,
+            presorted_display_items,
+            rows: Vec::new(),
+            next_index: 0,
+            lookahead: None,
+            current_bindings: Vec::new(),
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
         Plan::Limit {
             plan_info,
             input,

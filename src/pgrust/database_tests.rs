@@ -23013,6 +23013,53 @@ fn set_guc_to_default_resets_runtime_value() {
         .execute(&db, "set enable_bitmapscan to default")
         .unwrap();
     assert!(session.planner_config().enable_bitmapscan);
+
+    session.execute(&db, "set enable_hashagg to off").unwrap();
+    assert!(!session.planner_config().enable_hashagg);
+
+    session
+        .execute(&db, "set enable_hashagg to default")
+        .unwrap();
+    assert!(session.planner_config().enable_hashagg);
+}
+
+#[test]
+fn disabled_hashagg_keeps_distinct_limit_sorted() {
+    let base = temp_dir("disabled_hashagg_distinct_limit");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table distinct_limit_test (x int4, y int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into distinct_limit_test \
+             select g % 10, g % 10 from generate_series(1, 1000) g",
+        )
+        .unwrap();
+    session.execute(&db, "set enable_hashagg to off").unwrap();
+
+    let lines = session_explain_lines(
+        &mut session,
+        &db,
+        "select distinct y, x from distinct_limit_test limit 10",
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("HashAggregate")),
+        "expected no HashAggregate with enable_hashagg off, got {lines:?}"
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select distinct y, x from distinct_limit_test limit 10",
+        ),
+        (0..10)
+            .map(|value| vec![Value::Int32(value), Value::Int32(value)])
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

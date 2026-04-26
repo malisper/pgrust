@@ -10996,6 +10996,7 @@ fn build_plan_for_recursive_mixed_cte_query() {
             Plan::Hash { input, .. }
             | Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
+            | Plan::IncrementalSort { input, .. }
             | Plan::Limit { input, .. }
             | Plan::LockRows { input, .. }
             | Plan::Projection { input, .. }

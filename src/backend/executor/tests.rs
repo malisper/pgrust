@@ -4989,6 +4989,7 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
             | Plan::Unique { input, .. }
             | Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
+            | Plan::IncrementalSort { input, .. }
             | Plan::Projection { input, .. }
             | Plan::Aggregate { input, .. }
             | Plan::WindowAgg { input, .. }

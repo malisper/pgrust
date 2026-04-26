@@ -137,6 +137,7 @@ fn contains_seq_scan(path: &Path) -> bool {
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. }
         | Path::Unique { input, .. }
@@ -181,6 +182,7 @@ fn cross_join_left_relid_count(path: &Path) -> Option<usize> {
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => cross_join_left_relid_count(input),
         _ => None,

@@ -597,6 +597,7 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
         Path::Unique { input, .. }
         | Path::Filter { input, .. }
         | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => build_path_tlist(root, input),
         Path::Aggregate {
@@ -1187,6 +1188,7 @@ fn path_single_relid(path: &Path) -> Option<usize> {
         | Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. }
         | Path::Aggregate { input, .. }
@@ -3009,6 +3011,12 @@ fn validate_executable_plan(plan: &Plan) {
                 .for_each(|item| validate_executable_expr(&item.expr, "OrderBy", "items"));
             validate_executable_plan(input);
         }
+        Plan::IncrementalSort { input, items, .. } => {
+            items
+                .iter()
+                .for_each(|item| validate_executable_expr(&item.expr, "IncrementalSort", "items"));
+            validate_executable_plan(input);
+        }
         Plan::Limit { input, .. } | Plan::LockRows { input, .. } => validate_executable_plan(input),
         Plan::Projection { input, targets, .. } => {
             targets
@@ -3440,6 +3448,12 @@ fn validate_planner_path(path: &Path) {
         Path::OrderBy { input, items, .. } => {
             for item in items {
                 validate_planner_expr(&item.expr, "OrderBy", "items");
+            }
+            validate_planner_path(input);
+        }
+        Path::IncrementalSort { input, items, .. } => {
+            for item in items {
+                validate_planner_expr(&item.expr, "IncrementalSort", "items");
             }
             validate_planner_path(input);
         }
@@ -4234,6 +4248,43 @@ fn set_order_references(
     }
 }
 
+fn set_incremental_sort_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    input: Box<Path>,
+    items: Vec<OrderByEntry>,
+    presorted_count: usize,
+    display_items: Vec<String>,
+    presorted_display_items: Vec<String>,
+) -> Plan {
+    let input_tlist = build_path_tlist(ctx.root, &input);
+    let items = items
+        .into_iter()
+        .map(|item| lower_order_by_expr_for_input(ctx.root, item, &input, &input_tlist))
+        .collect::<Vec<_>>();
+    let lowered_items = items
+        .into_iter()
+        .map(|item| {
+            lower_order_by_entry(
+                ctx,
+                item,
+                LowerMode::Input {
+                    path: Some(&input),
+                    tlist: &input_tlist,
+                },
+            )
+        })
+        .collect();
+    Plan::IncrementalSort {
+        plan_info,
+        input: Box::new(set_plan_refs(ctx, *input)),
+        items: lowered_items,
+        presorted_count,
+        display_items,
+        presorted_display_items,
+    }
+}
+
 fn set_limit_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
@@ -4921,6 +4972,23 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             display_items,
             ..
         } => set_order_references(ctx, plan_info, input, items, display_items),
+        Path::IncrementalSort {
+            plan_info,
+            input,
+            items,
+            presorted_count,
+            display_items,
+            presorted_display_items,
+            ..
+        } => set_incremental_sort_references(
+            ctx,
+            plan_info,
+            input,
+            items,
+            presorted_count,
+            display_items,
+            presorted_display_items,
+        ),
         Path::Limit {
             plan_info,
             input,
@@ -5503,6 +5571,7 @@ fn expand_output_var(var: Var, path: &Path) -> Expr {
         Path::SubqueryScan { .. } => Expr::Var(var),
         Path::Filter { input, .. }
         | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => expand_output_var(var, input),
         Path::NestedLoopJoin { left, right, .. }

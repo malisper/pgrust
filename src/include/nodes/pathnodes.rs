@@ -34,6 +34,8 @@ pub struct PlannerConfig {
     pub enable_indexscan: bool,
     pub enable_indexonlyscan: bool,
     pub enable_bitmapscan: bool,
+    pub enable_hashagg: bool,
+    pub enable_sort: bool,
 }
 
 impl Default for PlannerConfig {
@@ -44,6 +46,8 @@ impl Default for PlannerConfig {
             enable_indexscan: true,
             enable_indexonlyscan: true,
             enable_bitmapscan: true,
+            enable_hashagg: true,
+            enable_sort: true,
         }
     }
 }
@@ -550,6 +554,15 @@ pub enum Path {
         input: Box<Path>,
         items: Vec<OrderByEntry>,
         display_items: Vec<String>,
+    },
+    IncrementalSort {
+        plan_info: PlanEstimate,
+        pathtarget: PathTarget,
+        input: Box<Path>,
+        items: Vec<OrderByEntry>,
+        presorted_count: usize,
+        display_items: Vec<String>,
+        presorted_display_items: Vec<String>,
     },
     Limit {
         plan_info: PlanEstimate,
