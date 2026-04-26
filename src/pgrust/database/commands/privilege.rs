@@ -428,6 +428,69 @@ impl Database {
         }
     }
 
+    pub(crate) fn execute_revoke_object_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &RevokeObjectStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        match stmt.privilege {
+            GrantObjectPrivilege::CreateOnDatabase => {
+                self.execute_revoke_database_create_stmt(client_id, stmt)
+            }
+            GrantObjectPrivilege::AllPrivilegesOnTable | GrantObjectPrivilege::SelectOnTable => {
+                self.execute_revoke_table_acl_stmt_in_transaction_with_search_path(
+                    client_id,
+                    stmt,
+                    xid,
+                    cid,
+                    configured_search_path,
+                    catalog_effects,
+                )
+            }
+            GrantObjectPrivilege::AllPrivilegesOnSchema | GrantObjectPrivilege::UsageOnSchema => {
+                self.execute_schema_acl_stmt_in_transaction_with_search_path(
+                    client_id,
+                    stmt.privilege.clone(),
+                    &stmt.object_names,
+                    &stmt.grantee_names,
+                    xid,
+                    cid,
+                    configured_search_path,
+                    catalog_effects,
+                    true,
+                )
+            }
+            GrantObjectPrivilege::UsageOnType => self
+                .execute_type_acl_stmt_in_transaction_with_search_path(
+                    client_id,
+                    stmt.privilege.clone(),
+                    &stmt.object_names,
+                    &stmt.grantee_names,
+                    xid,
+                    cid,
+                    configured_search_path,
+                    catalog_effects,
+                    true,
+                ),
+            GrantObjectPrivilege::ExecuteOnFunction => self
+                .execute_function_acl_stmt_in_transaction_with_search_path(
+                    client_id,
+                    stmt.privilege.clone(),
+                    &stmt.object_names,
+                    &stmt.grantee_names,
+                    xid,
+                    cid,
+                    configured_search_path,
+                    catalog_effects,
+                    true,
+                ),
+        }
+    }
+
     pub(crate) fn execute_grant_object_stmt_in_transaction_with_search_path(
         &self,
         client_id: ClientId,
@@ -464,16 +527,29 @@ impl Database {
                     false,
                 )
             }
-            GrantObjectPrivilege::UsageOnType => self.execute_grant_type_acl_stmt_with_search_path(
-                client_id,
-                stmt,
-                configured_search_path,
-            ),
-            GrantObjectPrivilege::ExecuteOnFunction => self
-                .execute_grant_function_acl_stmt_with_search_path(
+            GrantObjectPrivilege::UsageOnType => self
+                .execute_type_acl_stmt_in_transaction_with_search_path(
                     client_id,
-                    stmt,
+                    stmt.privilege.clone(),
+                    &stmt.object_names,
+                    &stmt.grantee_names,
+                    xid,
+                    cid,
                     configured_search_path,
+                    catalog_effects,
+                    false,
+                ),
+            GrantObjectPrivilege::ExecuteOnFunction => self
+                .execute_function_acl_stmt_in_transaction_with_search_path(
+                    client_id,
+                    stmt.privilege.clone(),
+                    &stmt.object_names,
+                    &stmt.grantee_names,
+                    xid,
+                    cid,
+                    configured_search_path,
+                    catalog_effects,
+                    false,
                 ),
         }
     }
@@ -996,11 +1072,39 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
+        let result = self.execute_type_acl_stmt_in_transaction_with_search_path(
+            client_id,
+            privilege,
+            object_names,
+            grantee_names,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+            revoke,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    fn execute_type_acl_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        privilege: GrantObjectPrivilege,
+        object_names: &[String],
+        grantee_names: &[String],
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        revoke: bool,
+    ) -> Result<StatementResult, ExecError> {
         let privilege_chars = object_privilege_chars(privilege.clone())
             .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
         let auth = self.auth_state(client_id);
         let auth_catalog = self
-            .auth_catalog(client_id, Some((xid, 0)))
+            .auth_catalog(client_id, Some((xid, cid)))
             .map_err(map_catalog_error)?;
         let grantor_name = auth_catalog
             .role_by_oid(auth.current_user_oid())
@@ -1011,12 +1115,12 @@ impl Database {
                 hint: None,
                 sqlstate: "XX000",
             })?;
-        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, 0)), configured_search_path);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
             xid,
-            cid: 0,
+            cid,
             client_id,
             waiter: None,
             interrupts: self.interrupt_state(client_id),
@@ -1145,16 +1249,7 @@ impl Database {
                 catalog_effects.push(effect);
             }
         }
-        let result = self.finish_txn(
-            client_id,
-            xid,
-            Ok(StatementResult::AffectedRows(0)),
-            &catalog_effects,
-            &[],
-            &[],
-        );
-        guard.disarm();
-        result
+        Ok(StatementResult::AffectedRows(0))
     }
 
     fn execute_grant_function_acl_stmt_with_search_path(
@@ -1201,11 +1296,39 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
+        let result = self.execute_function_acl_stmt_in_transaction_with_search_path(
+            client_id,
+            privilege,
+            object_names,
+            grantee_names,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+            revoke,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    fn execute_function_acl_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        privilege: GrantObjectPrivilege,
+        object_names: &[String],
+        grantee_names: &[String],
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        revoke: bool,
+    ) -> Result<StatementResult, ExecError> {
         let privilege_chars = object_privilege_chars(privilege.clone())
             .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
         let auth = self.auth_state(client_id);
         let auth_catalog = self
-            .auth_catalog(client_id, Some((xid, 0)))
+            .auth_catalog(client_id, Some((xid, cid)))
             .map_err(map_catalog_error)?;
         let grantor_name = auth_catalog
             .role_by_oid(auth.current_user_oid())
@@ -1220,7 +1343,7 @@ impl Database {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
             xid,
-            cid: 0,
+            cid,
             client_id,
             waiter: None,
             interrupts: self.interrupt_state(client_id),
@@ -1229,7 +1352,7 @@ impl Database {
             let row = lookup_function_row_by_signature(
                 self,
                 client_id,
-                Some((xid, 0)),
+                Some((xid, cid)),
                 configured_search_path,
                 object_name,
             )?;
@@ -1297,16 +1420,7 @@ impl Database {
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
         }
-        let result = self.finish_txn(
-            client_id,
-            xid,
-            Ok(StatementResult::AffectedRows(0)),
-            &catalog_effects,
-            &[],
-            &[],
-        );
-        guard.disarm();
-        result
+        Ok(StatementResult::AffectedRows(0))
     }
 
     pub(crate) fn execute_grant_role_membership_stmt(

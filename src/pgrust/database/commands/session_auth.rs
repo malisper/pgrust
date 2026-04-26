@@ -13,9 +13,28 @@ impl Database {
         client_id: ClientId,
         stmt: &SetSessionAuthorizationStatement,
     ) -> Result<AuthState, ExecError> {
+        self.execute_set_session_authorization_stmt_with_txn(client_id, stmt, None)
+    }
+
+    pub(crate) fn execute_set_session_authorization_stmt_in_transaction(
+        &self,
+        client_id: ClientId,
+        stmt: &SetSessionAuthorizationStatement,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<AuthState, ExecError> {
+        self.execute_set_session_authorization_stmt_with_txn(client_id, stmt, Some((xid, cid)))
+    }
+
+    fn execute_set_session_authorization_stmt_with_txn(
+        &self,
+        client_id: ClientId,
+        stmt: &SetSessionAuthorizationStatement,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+    ) -> Result<AuthState, ExecError> {
         let auth = self.auth_state(client_id);
         let auth_catalog = self
-            .auth_catalog(client_id, None)
+            .auth_catalog(client_id, txn_ctx)
             .map_err(map_session_auth_error)?;
         let target = find_role_by_name(auth_catalog.roles(), &stmt.role_name)
             .cloned()
@@ -56,6 +75,25 @@ impl Database {
         client_id: ClientId,
         stmt: &SetRoleStatement,
     ) -> Result<AuthState, ExecError> {
+        self.execute_set_role_stmt_with_txn(client_id, stmt, None)
+    }
+
+    pub(crate) fn execute_set_role_stmt_in_transaction(
+        &self,
+        client_id: ClientId,
+        stmt: &SetRoleStatement,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<AuthState, ExecError> {
+        self.execute_set_role_stmt_with_txn(client_id, stmt, Some((xid, cid)))
+    }
+
+    fn execute_set_role_stmt_with_txn(
+        &self,
+        client_id: ClientId,
+        stmt: &SetRoleStatement,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+    ) -> Result<AuthState, ExecError> {
         let mut next = self.auth_state(client_id);
         let Some(role_name) = stmt.role_name.as_ref() else {
             next.reset_role();
@@ -64,7 +102,7 @@ impl Database {
             return Ok(next);
         };
         let auth_catalog = self
-            .auth_catalog(client_id, None)
+            .auth_catalog(client_id, txn_ctx)
             .map_err(map_session_auth_error)?;
         let target = find_role_by_name(auth_catalog.roles(), role_name)
             .cloned()
