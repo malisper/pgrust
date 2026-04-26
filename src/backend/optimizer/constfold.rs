@@ -1003,13 +1003,6 @@ fn simplify_op_expr(op: OpExpr, case_test_value: Option<&Value>) -> Result<Expr,
             return Ok(expr);
         }
     }
-    if matches!(op.op, OpExprKind::Eq)
-        && let [left, right] = args.as_slice()
-        && left == right
-        && matches!(left, Expr::Var(_))
-    {
-        return Ok(Expr::IsNotNull(Box::new(left.clone())));
-    }
     Ok(Expr::Op(Box::new(OpExpr { args, ..op })))
 }
 

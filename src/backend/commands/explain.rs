@@ -540,6 +540,13 @@ fn render_nonverbose_group_key_expr(
     {
         return format!("('{rendered}'::xid)");
     }
+    if matches!(expr, Expr::Var(_)) {
+        let name = rendered
+            .rsplit_once('.')
+            .map(|(_, name)| name)
+            .unwrap_or(&rendered);
+        return format!("({name})");
+    }
     if (matches!(expr, Expr::Op(_)) || rendered.contains(" || "))
         && rendered.starts_with('(')
         && rendered.ends_with(')')
