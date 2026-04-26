@@ -201,6 +201,7 @@ pub struct PgProcRow {
     pub proname: String,
     pub pronamespace: u32,
     pub proowner: u32,
+    pub proacl: Option<Vec<String>>,
     pub prolang: u32,
     pub procost: f64,
     pub prorows: f64,
@@ -272,6 +273,11 @@ pub fn pg_proc_desc() -> RelationDesc {
                 true,
             ),
             column_desc("prosrc", SqlType::new(SqlTypeKind::Text), false),
+            column_desc(
+                "proacl",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                true,
+            ),
         ],
     }
 }
@@ -9092,6 +9098,7 @@ fn proc_row_with_parallel(
         proname: proname.into(),
         pronamespace: PG_CATALOG_NAMESPACE_OID,
         proowner: BOOTSTRAP_SUPERUSER_OID,
+        proacl: None,
         prolang: PG_LANGUAGE_INTERNAL_OID,
         procost: 1.0,
         prorows: if proretset { 1000.0 } else { 0.0 },

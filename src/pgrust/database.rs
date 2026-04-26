@@ -263,6 +263,7 @@ pub(crate) struct DomainEntry {
     pub check: Option<String>,
     pub not_null: bool,
     pub enum_check: Option<DomainCheckEntry>,
+    pub typacl: Option<Vec<String>>,
     pub comment: Option<String>,
 }
 
@@ -289,6 +290,7 @@ pub(crate) struct EnumTypeEntry {
     pub namespace_oid: u32,
     pub labels: Vec<EnumLabelEntry>,
     pub creating_xid: Option<TransactionId>,
+    pub typacl: Option<Vec<String>>,
     pub comment: Option<String>,
 }
 
@@ -307,6 +309,7 @@ pub(crate) struct RangeTypeEntry {
     pub subtype: SqlType,
     pub subtype_diff: Option<String>,
     pub collation: Option<String>,
+    pub typacl: Option<Vec<String>>,
     pub comment: Option<String>,
 }
 
@@ -728,6 +731,7 @@ impl Database {
                 typname: domain.name.clone(),
                 typnamespace: domain.namespace_oid,
                 typowner: BOOTSTRAP_SUPERUSER_OID,
+                typacl: domain.typacl.clone(),
                 typlen: if domain.sql_type.is_array { -1 } else { 0 },
                 typalign: AttributeAlign::Int,
                 typstorage: AttributeStorage::Extended,
@@ -762,6 +766,7 @@ impl Database {
                         typname: entry.name.clone(),
                         typnamespace: entry.namespace_oid,
                         typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typacl: entry.typacl.clone(),
                         typlen: 4,
                         typalign: AttributeAlign::Int,
                         typstorage: AttributeStorage::Plain,
@@ -775,6 +780,7 @@ impl Database {
                         typname: format!("_{}", entry.name),
                         typnamespace: entry.namespace_oid,
                         typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typacl: entry.typacl.clone(),
                         typlen: -1,
                         typalign: AttributeAlign::Int,
                         typstorage: AttributeStorage::Extended,
@@ -974,6 +980,8 @@ impl Database {
                         typname: entry.name.clone(),
                         typnamespace: entry.namespace_oid,
                         typowner: entry.owner_oid,
+                        typacl: entry.typacl.clone(),
+                        typowner: entry.owner_oid,
                         typlen: -1,
                         typalign: AttributeAlign::Int,
                         typstorage: AttributeStorage::Extended,
@@ -986,6 +994,8 @@ impl Database {
                         oid: entry.array_oid,
                         typname: array_name,
                         typnamespace: entry.namespace_oid,
+                        typowner: entry.owner_oid,
+                        typacl: entry.typacl.clone(),
                         typowner: entry.owner_oid,
                         typlen: -1,
                         typalign: AttributeAlign::Int,
@@ -1000,6 +1010,8 @@ impl Database {
                         typname: entry.multirange_name.clone(),
                         typnamespace: entry.namespace_oid,
                         typowner: entry.owner_oid,
+                        typacl: entry.typacl.clone(),
+                        typowner: entry.owner_oid,
                         typlen: -1,
                         typalign: AttributeAlign::Int,
                         typstorage: AttributeStorage::Extended,
@@ -1012,6 +1024,8 @@ impl Database {
                         oid: entry.multirange_array_oid,
                         typname: multirange_array_name,
                         typnamespace: entry.namespace_oid,
+                        typowner: entry.owner_oid,
+                        typacl: entry.typacl.clone(),
                         typowner: entry.owner_oid,
                         typlen: -1,
                         typalign: AttributeAlign::Int,

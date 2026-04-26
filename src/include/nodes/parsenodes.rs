@@ -2418,6 +2418,8 @@ pub enum GrantObjectPrivilege {
     AllPrivilegesOnTable,
     SelectOnTable,
     AllPrivilegesOnSchema,
+    UsageOnSchema,
+    UsageOnType,
     ExecuteOnFunction,
     UsageOnType,
 }

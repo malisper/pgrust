@@ -22711,6 +22711,119 @@ fn create_operator_quoted_attributes_warn_before_missing_function() {
 }
 
 #[test]
+fn create_operator_rejects_setof_argument_type() {
+    let db = Database::open_ephemeral(16).unwrap();
+
+    match db.execute(
+        1,
+        "create operator #*# (rightarg = setof int8, procedure = factorial)",
+    ) {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "SETOF type not allowed for operator argument");
+        }
+        other => panic!("expected SETOF argument error, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_operator_enforces_type_and_function_acl() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role regress_rol_op_acl")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create type type_op_acl as enum ('new', 'open', 'closed')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function fn_op_acl(int8, int8) returns type_op_acl language sql immutable as $$ select null::type_op_acl $$",
+        )
+        .unwrap();
+    session
+        .execute(&db, "revoke usage on type type_op_acl from public")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "revoke execute on function fn_op_acl(int8, int8) from public",
+        )
+        .unwrap();
+    session.execute(&db, "set role regress_rol_op_acl").unwrap();
+
+    match session.execute(
+        &db,
+        "create operator #*# (leftarg = int8, rightarg = int8, procedure = fn_op_acl)",
+    ) {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert!(message.starts_with("permission denied for "));
+        }
+        other => panic!("expected ACL failure, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_operator_negator_and_commutator_errors_match_postgres() {
+    let db = Database::open_ephemeral(16).unwrap();
+
+    match db.execute(
+        1,
+        "create operator === (leftarg = integer, rightarg = integer, procedure = int4eq, negator = ===)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. })) => {
+            assert_eq!(message, "operator cannot be its own negator");
+        }
+        other => panic!("expected self-negator error, got {:?}", other),
+    }
+
+    let db = Database::open_ephemeral(16).unwrap();
+    db.execute(
+        1,
+        "create operator === (leftarg = integer, rightarg = integer, procedure = int4eq, commutator = ===!!!)",
+    )
+    .unwrap();
+    match db.execute(
+        1,
+        "create operator ===!!! (leftarg = integer, rightarg = integer, procedure = int4ne, negator = ===!!!)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. })) => {
+            assert_eq!(message, "operator cannot be its own negator");
+        }
+        other => panic!("expected shell replacement self-negator error, got {:?}", other),
+    }
+
+    let db = Database::open_ephemeral(16).unwrap();
+    match db.execute(
+        1,
+        "create operator === (leftarg = integer, rightarg = integer, procedure = int4eq, commutator = =)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. })) => {
+            assert_eq!(
+                message,
+                "commutator operator = is already the commutator of operator ="
+            );
+        }
+        other => panic!("expected commutator pair error, got {:?}", other),
+    }
+
+    let db = Database::open_ephemeral(16).unwrap();
+    match db.execute(
+        1,
+        "create operator === (leftarg = integer, rightarg = integer, procedure = int4eq, negator = <>)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. })) => {
+            assert_eq!(message, "negator operator <> is already the negator of operator =");
+        }
+        other => panic!("expected negator pair error, got {:?}", other),
+    }
+}
+
+#[test]
 fn copy_from_rows_respects_active_transaction() {
     let base = temp_dir("copy_from_rows_txn");
     let db = Database::open(&base, 16).unwrap();

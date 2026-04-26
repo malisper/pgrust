@@ -3770,6 +3770,34 @@ fn parse_grant_all_on_multiple_schemas_statement() {
 }
 
 #[test]
+fn parse_grant_usage_on_schema_statement() {
+    let stmt = parse_statement("grant usage on schema public to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnSchema,
+            object_names: vec!["public".into()],
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_usage_on_type_statement() {
+    let stmt = parse_statement("grant usage on type custom_t to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnType,
+            object_names: vec!["custom_t".into()],
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
 fn parse_grant_select_on_table_statement() {
     let stmt = parse_statement("grant select on uaccount to public").unwrap();
     assert_eq!(
@@ -3831,6 +3859,48 @@ fn parse_revoke_all_privileges_on_table_from_public_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
             object_names: vec!["tenant_table".into()],
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_usage_on_schema_statement() {
+    let stmt = parse_statement("revoke usage on schema public from public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnSchema,
+            object_names: vec!["public".into()],
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_usage_on_type_statement() {
+    let stmt = parse_statement("revoke usage on type custom_t from public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnType,
+            object_names: vec!["custom_t".into()],
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_execute_on_function_statement() {
+    let stmt = parse_statement("revoke execute on function f_leak(text) from public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::ExecuteOnFunction,
+            object_names: vec!["f_leak(text)".into()],
             grantee_names: vec!["public".into()],
             cascade: false,
         })
@@ -10531,6 +10601,7 @@ fn lower_create_table_resolves_named_domain_types() {
             typname: "dom_int".into(),
             typnamespace: PUBLIC_NAMESPACE_OID,
             typowner: BOOTSTRAP_SUPERUSER_OID,
+            typacl: None,
             typlen: 4,
             typalign: AttributeAlign::Int,
             typstorage: AttributeStorage::Plain,

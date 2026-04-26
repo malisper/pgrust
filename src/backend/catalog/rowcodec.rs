@@ -300,6 +300,7 @@ pub(crate) fn namespace_row_from_values(
         oid: expect_oid(&values[0])?,
         nspname: expect_text(&values[1])?,
         nspowner: expect_oid(&values[2])?,
+        nspacl: nullable_text_array(&values[3])?,
     })
 }
 
@@ -619,6 +620,7 @@ pub(crate) fn pg_proc_row_from_values(values: Vec<Value>) -> Result<PgProcRow, C
         proargmodes: nullable_char_array(&values[21])?,
         proargnames: nullable_text_array(&values[22])?,
         prosrc: expect_text(&values[23])?,
+        proacl: nullable_text_array(&values[24])?,
     })
 }
 
@@ -934,6 +936,7 @@ pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, C
         typrelid,
         typelem,
         typarray,
+        typacl: nullable_text_array(&values[10])?,
         sql_type: decode_builtin_sql_type(oid).unwrap_or_else(|| {
             if typrelid != 0 {
                 SqlType::named_composite(oid, typrelid)
@@ -1042,6 +1045,7 @@ fn namespace_row_values(row: PgNamespaceRow) -> Vec<Value> {
         Value::Int32(row.oid as i32),
         Value::Text(row.nspname.into()),
         Value::Int32(row.nspowner as i32),
+        nullable_array_value(row.nspacl.map(text_array_value)),
     ]
 }
 
@@ -1320,6 +1324,7 @@ fn pg_proc_row_values(row: PgProcRow) -> Vec<Value> {
             .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID)
         })),
         Value::Text(row.prosrc.into()),
+        nullable_array_value(row.proacl.map(text_array_value)),
     ]
 }
 
@@ -1495,6 +1500,7 @@ fn pg_type_row_values(row: PgTypeRow) -> Vec<Value> {
         Value::Int32(row.typrelid as i32),
         Value::Int32(row.typelem as i32),
         Value::Int32(row.typarray as i32),
+        nullable_array_value(row.typacl.map(text_array_value)),
     ]
 }
 

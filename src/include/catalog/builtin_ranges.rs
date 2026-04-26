@@ -839,6 +839,7 @@ fn range_proc_row(
         proname: proname.into(),
         pronamespace,
         proowner: BOOTSTRAP_SUPERUSER_OID,
+        proacl: None,
         prolang: PG_LANGUAGE_INTERNAL_OID,
         procost: 1.0,
         prorows: 0.0,

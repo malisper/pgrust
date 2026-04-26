@@ -581,6 +581,7 @@ mod tests {
             proname: "test_sql_func".into(),
             pronamespace: 2200,
             proowner: 10,
+            proacl: None,
             prolang: PG_LANGUAGE_SQL_OID,
             procost: 1.0,
             prorows: 0.0,

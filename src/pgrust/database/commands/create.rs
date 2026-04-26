@@ -1089,6 +1089,7 @@ impl Database {
                 check: create_stmt.check.clone(),
                 not_null: create_stmt.not_null,
                 enum_check,
+                typacl: None,
                 comment: None,
             },
         );
@@ -1346,6 +1347,7 @@ impl Database {
             proname: function_name.clone(),
             pronamespace: namespace_oid,
             proowner: BOOTSTRAP_SUPERUSER_OID,
+            proacl: None,
             prolang: language_row.oid,
             procost: create_stmt
                 .cost
@@ -1605,6 +1607,7 @@ impl Database {
             proname: aggregate_name.clone(),
             pronamespace: namespace_oid,
             proowner: BOOTSTRAP_SUPERUSER_OID,
+            proacl: None,
             prolang: PG_LANGUAGE_INTERNAL_OID,
             procost: 1.0,
             prorows: 0.0,

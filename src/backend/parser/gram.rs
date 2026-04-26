@@ -3892,6 +3892,12 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("grant all on schema ") {
         return Ok(Statement::GrantObject(build_grant_schema_all(sql)?));
     }
+    if lowered.starts_with("grant usage on schema ") {
+        return Ok(Statement::GrantObject(build_grant_schema_usage(sql)?));
+    }
+    if lowered.starts_with("grant usage on type ") {
+        return Ok(Statement::GrantObject(build_grant_type_usage(sql)?));
+    }
     if lowered.starts_with("grant execute on function ") {
         return Ok(Statement::GrantObject(build_grant_function_execute(sql)?));
     }
@@ -3916,8 +3922,14 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("revoke create on database ") {
         return Ok(Statement::RevokeObject(build_revoke_database_create(sql)?));
     }
+    if lowered.starts_with("revoke usage on schema ") {
+        return Ok(Statement::RevokeObject(build_revoke_schema_usage(sql)?));
+    }
     if lowered.starts_with("revoke usage on type ") {
         return Ok(Statement::RevokeObject(build_revoke_type_usage(sql)?));
+    }
+    if lowered.starts_with("revoke execute on function ") {
+        return Ok(Statement::RevokeObject(build_revoke_function_execute(sql)?));
     }
     if lowered.starts_with("revoke all privileges on ") {
         return Ok(Statement::RevokeObject(build_revoke_table_all_privileges(
@@ -4045,6 +4057,38 @@ fn build_grant_schema_all(sql: &str) -> Result<GrantObjectStatement, ParseError>
     })
 }
 
+fn build_grant_schema_usage(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let prefix = "grant usage on schema ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_names, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege: GrantObjectPrivilege::UsageOnSchema,
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
+fn build_grant_type_usage(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let prefix = "grant usage on type ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_names, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege: GrantObjectPrivilege::UsageOnType,
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
 fn build_grant_function_execute(sql: &str) -> Result<GrantObjectStatement, ParseError> {
     let prefix = "grant execute on function ";
     let rest = sql
@@ -4072,6 +4116,54 @@ fn build_revoke_database_create(sql: &str) -> Result<RevokeObjectStatement, Pars
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::CreateOnDatabase,
         object_names: vec![normalize_simple_identifier(object_name)?],
+        grantee_names,
+        cascade,
+    })
+}
+
+fn build_revoke_schema_usage(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let prefix = "revoke usage on schema ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_names, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege: GrantObjectPrivilege::UsageOnSchema,
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        cascade,
+    })
+}
+
+fn build_revoke_type_usage(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let prefix = "revoke usage on type ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_names, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege: GrantObjectPrivilege::UsageOnType,
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        cascade,
+    })
+}
+
+fn build_revoke_function_execute(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let prefix = "revoke execute on function ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege: GrantObjectPrivilege::ExecuteOnFunction,
+        object_names: vec![object_name.trim().to_ascii_lowercase()],
         grantee_names,
         cascade,
     })
