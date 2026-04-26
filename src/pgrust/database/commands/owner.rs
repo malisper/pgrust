@@ -4,7 +4,9 @@ use crate::backend::commands::rolecmds::role_management_error;
 use crate::backend::parser::{
     AlterRelationOwnerStatement, AlterSchemaOwnerStatement, BoundRelation,
 };
-use crate::pgrust::database::ddl::{lookup_heap_relation_for_alter_table, relation_kind_name};
+use crate::pgrust::database::ddl::{
+    lookup_table_or_partitioned_table_for_alter_table, relation_kind_name,
+};
 
 fn lookup_relation_for_owner_change(
     catalog: &dyn CatalogLookup,
@@ -12,7 +14,12 @@ fn lookup_relation_for_owner_change(
     expected_relkind: char,
 ) -> Result<BoundRelation, ExecError> {
     match catalog.lookup_any_relation(relation_name) {
-        Some(entry) if entry.relkind == expected_relkind => Ok(entry),
+        Some(entry)
+            if entry.relkind == expected_relkind
+                || expected_relkind == 'r' && entry.relkind == 'p' =>
+        {
+            Ok(entry)
+        }
         Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
             name: relation_name.to_string(),
             expected: relation_kind_name(expected_relkind),
@@ -52,7 +59,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        if lookup_heap_relation_for_alter_table(
+        if lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.relation_name,
             alter_stmt.if_exists,
@@ -110,7 +117,7 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        if lookup_heap_relation_for_alter_table(
+        if lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.relation_name,
             alter_stmt.if_exists,
@@ -307,14 +314,27 @@ impl Database {
                 "authorization catalog unavailable: {err:?}"
             )))
         })?;
-        let new_owner = find_role_by_name(auth_catalog.roles(), &alter_stmt.new_owner)
-            .cloned()
-            .ok_or_else(|| {
-                ExecError::Parse(role_management_error(format!(
-                    "role \"{}\" does not exist",
-                    alter_stmt.new_owner
-                )))
-            })?;
+        let new_owner = if alter_stmt.new_owner.eq_ignore_ascii_case("current_user") {
+            let auth = self.auth_state(client_id);
+            auth_catalog
+                .role_by_oid(auth.current_user_oid())
+                .cloned()
+                .ok_or_else(|| {
+                    ExecError::Parse(role_management_error(format!(
+                        "role with OID {} does not exist",
+                        auth.current_user_oid()
+                    )))
+                })?
+        } else {
+            find_role_by_name(auth_catalog.roles(), &alter_stmt.new_owner)
+                .cloned()
+                .ok_or_else(|| {
+                    ExecError::Parse(role_management_error(format!(
+                        "role \"{}\" does not exist",
+                        alter_stmt.new_owner
+                    )))
+                })?
+        };
         ensure_can_set_role(self, client_id, new_owner.oid, &new_owner.rolname)?;
 
         let ctx = CatalogWriteContext {

@@ -382,6 +382,7 @@ pub enum Statement {
     AlterSchemaOwner(AlterSchemaOwnerStatement),
     AlterTableSet(AlterTableSetStatement),
     AlterTableReplicaIdentity(AlterTableReplicaIdentityStatement),
+    AlterTableReset(AlterTableResetStatement),
     AlterTableSetRowSecurity(AlterTableSetRowSecurityStatement),
     AlterPolicy(AlterPolicyStatement),
     AlterTableSetNotNull(AlterTableSetNotNullStatement),
@@ -1740,6 +1741,7 @@ pub struct CreateTableStatement {
     pub persistence: TablePersistence,
     pub on_commit: OnCommitAction,
     pub elements: Vec<CreateTableElement>,
+    pub options: Vec<RelOption>,
     pub inherits: Vec<String>,
     pub partition_spec: Option<RawPartitionSpec>,
     pub partition_of: Option<String>,
@@ -2147,6 +2149,14 @@ pub struct AlterTableReplicaIdentityStatement {
     pub only: bool,
     pub table_name: String,
     pub index_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableResetStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub options: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

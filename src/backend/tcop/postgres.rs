@@ -392,6 +392,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return find_case_insensitive_token_position(sql, "any")
                     .or_else(|| find_case_insensitive_token_position(sql, "all"));
             }
+            if let Some(option) = message
+                .strip_prefix("unrecognized ANALYZE option \"")
+                .and_then(|rest| rest.strip_suffix('"'))
+            {
+                return find_case_insensitive_token_position(sql, option);
+            }
             if let Some(position) = publication_where_error_position(sql, message, None) {
                 return Some(position);
             }
@@ -507,6 +513,13 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::DetailedError {
             message, detail, ..
         } => {
+            if matches!(
+                message.as_str(),
+                "parallel option requires a value between 0 and 1024"
+                    | "parallel workers for vacuum must be between 0 and 1024"
+            ) {
+                return find_case_insensitive_token_position(sql, "PARALLEL");
+            }
             if message.starts_with("invalid input syntax for type numeric time zone: ") {
                 return None;
             }

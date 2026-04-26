@@ -3226,6 +3226,17 @@ fn parse_alter_table_set_statement() {
         })
     );
 
+    let stmt = parse_statement("alter table vac_truncate_test reset (vacuum_truncate)").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableReset(AlterTableResetStatement {
+            if_exists: false,
+            only: false,
+            table_name: "vac_truncate_test".into(),
+            options: vec!["vacuum_truncate".into()],
+        })
+    );
+
     let stmt = parse_statement(
         "alter table attmp alter column i set (n_distinct = 1, n_distinct_inherited = 2)",
     )
@@ -8711,6 +8722,18 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("analyze (verbose, skip_locked, buffer_usage_limit '512 kB') vacparted").unwrap(), Statement::Analyze(AnalyzeStatement { verbose: true, skip_locked: true, buffer_usage_limit: Some(limit), .. }) if limit == "512 kB")
     );
     assert!(
+        matches!(
+            parse_statement("analyze (nonexistentarg) does_not_exit"),
+            Err(ParseError::DetailedError { message, .. }) if message == "unrecognized ANALYZE option \"nonexistentarg\""
+        )
+    );
+    assert!(
+        matches!(
+            parse_statement("analyze (nonexistent-arg) does_not_exist"),
+            Err(ParseError::UnexpectedToken { actual, .. }) if actual == "syntax error at or near \"arg\""
+        )
+    );
+    assert!(
         matches!(parse_statement("insert into people (id, name) values (1, 'alice')").unwrap(), Statement::Insert(InsertStatement { table_name, .. }) if table_name == "people")
     );
     assert!(matches!(
@@ -10183,6 +10206,7 @@ fn create_table_temp_name_validation() {
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![],
+            options: Vec::new(),
             inherits: Vec::new(),
             partition_spec: None,
             partition_of: None,
@@ -10200,6 +10224,7 @@ fn create_table_temp_name_validation() {
         persistence: TablePersistence::Temporary,
         on_commit: OnCommitAction::PreserveRows,
         elements: vec![],
+        options: Vec::new(),
         inherits: Vec::new(),
         partition_spec: None,
         partition_of: None,
@@ -10216,6 +10241,7 @@ fn create_table_temp_name_validation() {
         persistence: TablePersistence::Permanent,
         on_commit: OnCommitAction::DeleteRows,
         elements: vec![],
+        options: Vec::new(),
         inherits: Vec::new(),
         partition_spec: None,
         partition_of: None,

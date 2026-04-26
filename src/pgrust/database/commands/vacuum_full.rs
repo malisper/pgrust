@@ -30,6 +30,9 @@ impl Database {
                     target.table_name.clone(),
                 )));
             };
+            if is_pg_catalog_relation(&catalog, &relation) {
+                continue;
+            }
             if process_main {
                 if !matches!(relation.relkind, 'r' | 'm') {
                     continue;
@@ -65,14 +68,25 @@ impl Database {
                     catalog_effects,
                     false,
                 )?;
+                let refreshed = self.lookup_vacuum_full_relation(
+                    client_id,
+                    xid,
+                    cid.saturating_add(1),
+                    configured_search_path,
+                    toast_relation.relation_oid,
+                )?;
+                stats_targets.push(refreshed);
             }
         }
 
         if stats_targets.is_empty() {
             return Ok(Vec::new());
         }
-        let refreshed_catalog =
-            self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let refreshed_catalog = self.lazy_catalog_lookup(
+            client_id,
+            Some((xid, cid.saturating_add(1))),
+            configured_search_path,
+        );
         collect_vacuum_stats_for_relations(&stats_targets, &refreshed_catalog, ctx)
     }
 
@@ -258,6 +272,12 @@ fn push_unique_oid(oids: &mut Vec<u32>, oid: u32) {
     if !oids.contains(&oid) {
         oids.push(oid);
     }
+}
+
+fn is_pg_catalog_relation(catalog: &dyn CatalogLookup, relation: &BoundRelation) -> bool {
+    catalog
+        .namespace_row_by_oid(relation.namespace_oid)
+        .is_some_and(|namespace| namespace.nspname == "pg_catalog")
 }
 
 fn reinitialize_indexes(

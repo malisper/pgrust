@@ -345,6 +345,20 @@ fn create_view_reloptions(options: &[RelOption]) -> Result<Option<Vec<String>>, 
     Ok((!reloptions.is_empty()).then_some(reloptions))
 }
 
+fn create_table_reloptions(options: &[RelOption]) -> Result<Option<Vec<String>>, ExecError> {
+    let mut reloptions = Vec::new();
+    for option in options {
+        let name = option.name.to_ascii_lowercase();
+        if option.name != name {
+            return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                option.name.clone(),
+            )));
+        }
+        reloptions.push(format!("{name}={}", option.value.to_ascii_lowercase()));
+    }
+    Ok((!reloptions.is_empty()).then_some(reloptions))
+}
+
 fn validate_polymorphic_range_return_type(
     prorettype: u32,
     callable_arg_oids: &[u32],
@@ -1243,7 +1257,7 @@ impl Database {
         lowered: &crate::backend::parser::LoweredCreateTable,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
-    ) -> Result<(), ExecError> {
+    ) -> Result<CommandId, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let mut next_cid = table_cid.saturating_add(1);
         if relation.relkind == 'p' || relation.relispartition {
@@ -1558,7 +1572,7 @@ impl Database {
             )?;
         }
 
-        Ok(())
+        Ok(foreign_key_base_cid.saturating_add(lowered.foreign_key_actions.len() as u32))
     }
 
     pub(super) fn refresh_partitioned_relation_metadata(
@@ -3163,6 +3177,7 @@ impl Database {
 
         let table_cid = cid;
         let relation_relkind = created_relkind(&lowered);
+        let reloptions = create_table_reloptions(&create_stmt.options)?;
         match persistence {
             TablePersistence::Permanent => {
                 let mut catalog_guard = self.catalog.write();
@@ -3186,6 +3201,7 @@ impl Database {
                         crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                         self.auth_state(client_id).current_user_oid(),
                         lowered.of_type_oid,
+                        reloptions.clone(),
                         &ctx,
                     )
                 } else {
@@ -3198,7 +3214,7 @@ impl Database {
                             'p',
                             relation_relkind,
                             self.auth_state(client_id).current_user_oid(),
-                            None,
+                            reloptions.clone(),
                             &ctx,
                         )
                         .map(|(entry, effect)| {
@@ -3324,7 +3340,7 @@ impl Database {
                             constraint_cid_base =
                                 constraint_cid_base.max(table_cid.saturating_add(4));
                         }
-                        self.install_create_table_constraints_in_transaction(
+                        let next_cid = self.install_create_table_constraints_in_transaction(
                             client_id,
                             xid,
                             constraint_cid_base,
@@ -3339,7 +3355,7 @@ impl Database {
                             &relation,
                             &lowered,
                             xid,
-                            constraint_cid_base.saturating_add(1),
+                            next_cid,
                             catalog_effects,
                         )?;
                         if let Some(parent_oid) = lowered.partition_parent_oid {
@@ -3377,7 +3393,7 @@ impl Database {
                     table_cid,
                     relation_relkind,
                     lowered.of_type_oid,
-                    None,
+                    reloptions.clone(),
                     catalog_effects,
                     temp_effects,
                 )?;
@@ -3479,7 +3495,7 @@ impl Database {
                 {
                     constraint_cid_base = constraint_cid_base.max(table_cid.saturating_add(4));
                 }
-                self.install_create_table_constraints_in_transaction(
+                let next_cid = self.install_create_table_constraints_in_transaction(
                     client_id,
                     xid,
                     constraint_cid_base,
@@ -3495,7 +3511,7 @@ impl Database {
                         .reconcile_partitioned_parent_indexes_for_attached_child_in_transaction(
                             client_id,
                             xid,
-                            constraint_cid_base.saturating_add(1),
+                            next_cid,
                             parent_oid,
                             relation.relation_oid,
                             configured_search_path,
@@ -3989,6 +4005,7 @@ impl Database {
                             )
                         })
                         .collect(),
+                    options: Vec::new(),
                     inherits: Vec::new(),
                     partition_spec: None,
                     partition_of: None,
@@ -4015,6 +4032,7 @@ impl Database {
                         crate::include::catalog::PG_TOAST_NAMESPACE_OID,
                         crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                         self.auth_state(client_id).current_user_oid(),
+                        None,
                         &write_ctx,
                     )
                     .map_err(map_catalog_error)?;

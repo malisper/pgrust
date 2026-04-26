@@ -8,7 +8,7 @@ use crate::backend::executor::{
     ExecError, ExecutorContext, Value, format_array_value_text, render_datetime_value_text,
     render_internal_char_text, render_tsquery_text, render_tsvector_text,
 };
-use crate::backend::parser::{BoundRelation, CatalogLookup, ParseError};
+use crate::backend::parser::{BoundIndexRelation, BoundRelation, CatalogLookup, ParseError};
 use crate::backend::storage::page::bufpage::ItemIdFlags;
 use crate::backend::storage::page::bufpage::{
     page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number,
@@ -31,6 +31,7 @@ pub(crate) struct AnalyzeRelationStats {
     pub relation_oid: u32,
     pub relpages: i32,
     pub reltuples: f64,
+    pub clear_relhassubclass: bool,
     pub statistics: Vec<PgStatisticRow>,
 }
 
@@ -203,31 +204,47 @@ fn collect_analyze_stats_for_relation(
     out: &mut Vec<AnalyzeRelationStats>,
 ) -> Result<(), ExecError> {
     if relation.relkind == 'p' {
-        let inherited = if only {
+        let has_subclass = catalog.has_subclass(relation.relation_oid);
+        let member_oids = (!only && has_subclass)
+            .then(|| catalog.find_all_inheritors(relation.relation_oid))
+            .unwrap_or_default();
+        let clear_relhassubclass = has_subclass && !only && member_oids.len() < 2;
+        let inherited = if member_oids.len() < 2 {
             InheritanceAnalyzeStats {
                 reltuples: 0.0,
                 statistics: Vec::new(),
             }
         } else {
-            sample_inheritance_tree(&relation, &selected, catalog, ctx)?
+            sample_inheritance_tree(&relation, &selected, &member_oids, catalog, ctx)?
         };
         out.push(AnalyzeRelationStats {
             relation_oid: relation.relation_oid,
             relpages: -1,
             reltuples: inherited.reltuples,
+            clear_relhassubclass,
             statistics: inherited.statistics,
         });
         return Ok(());
     }
     let root_stats = sample_relation(&relation, &selected, catalog, ctx)?;
     let mut statistics = root_stats.statistics;
+    let mut clear_relhassubclass = false;
     if !only && catalog.has_subclass(relation.relation_oid) {
-        statistics.extend(sample_inheritance_tree(&relation, &selected, catalog, ctx)?.statistics);
+        let member_oids = catalog.find_all_inheritors(relation.relation_oid);
+        if member_oids.len() < 2 {
+            clear_relhassubclass = true;
+        } else {
+            statistics.extend(
+                sample_inheritance_tree(&relation, &selected, &member_oids, catalog, ctx)?
+                    .statistics,
+            );
+        }
     }
     out.push(AnalyzeRelationStats {
         relation_oid: relation.relation_oid,
         relpages: root_stats.relpages,
         reltuples: root_stats.reltuples,
+        clear_relhassubclass,
         statistics,
     });
     if selected.len() == relation.desc.columns.len() {
@@ -286,6 +303,8 @@ fn sample_relation(
     let sampled_block_count = sampled_blocks.len();
     let mut reservoir = ReservoirSampler::new(sample_rows_target);
     let mut visible_rows_on_sampled_blocks = 0usize;
+    let expression_indexes = analyze_expression_indexes(relation, catalog);
+    let mut expression_rows = Vec::new();
     let toast_ctx = relation.toast.map(|toast| ToastFetchContext {
         relation: toast,
         pool: ctx.pool.clone(),
@@ -330,6 +349,13 @@ fn sample_relation(
             }
             let tuple = HeapTuple::parse(tuple_bytes)?;
             let raw = tuple.deform(&relation.desc.attribute_descs())?;
+            if !expression_indexes.is_empty() {
+                expression_rows.push(materialize_relation_row_values(
+                    relation,
+                    &raw,
+                    toast_ctx.as_ref(),
+                )?);
+            }
             let mut values = Vec::with_capacity(selected_columns.len());
             let mut widths = Vec::with_capacity(selected_columns.len());
             for index in selected_columns {
@@ -357,6 +383,7 @@ fn sample_relation(
             visible_rows_on_sampled_blocks += 1;
         }
     }
+    evaluate_expression_indexes_for_analyze(relation, &expression_indexes, &expression_rows, ctx)?;
 
     let reltuples = if sampled_block_count == 0 || nblocks == 0 {
         0.0
@@ -378,6 +405,7 @@ fn sample_relation(
         relation_oid: relation.relation_oid,
         relpages,
         reltuples,
+        clear_relhassubclass: false,
         statistics,
     })
 }
@@ -441,6 +469,7 @@ fn sample_expression_indexes(
             relation_oid: index.relation_oid,
             relpages: nblocks as i32,
             reltuples,
+            clear_relhassubclass: false,
             statistics,
         });
     }
@@ -450,6 +479,7 @@ fn sample_expression_indexes(
 fn sample_inheritance_tree(
     relation: &BoundRelation,
     selected_columns: &[usize],
+    member_oids: &[u32],
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<InheritanceAnalyzeStats, ExecError> {
@@ -465,8 +495,8 @@ fn sample_inheritance_tree(
     let mut reservoir = ReservoirSampler::new(sample_rows_target);
     let mut visible_rows = 0usize;
 
-    for member_oid in catalog.find_all_inheritors(relation.relation_oid) {
-        let Some(member) = catalog.relation_by_oid(member_oid) else {
+    for member_oid in member_oids {
+        let Some(member) = catalog.relation_by_oid(*member_oid) else {
             continue;
         };
         let mapping = inherited_selected_column_mapping(relation, &member, selected_columns)?;
@@ -563,6 +593,67 @@ fn sample_inheritance_tree(
             true,
         )?,
     })
+}
+
+fn analyze_expression_indexes(
+    relation: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+) -> Vec<BoundIndexRelation> {
+    catalog
+        .index_relations_for_heap(relation.relation_oid)
+        .into_iter()
+        .filter(|index| {
+            index.index_meta.indexprs.as_deref().is_some_and(|exprs| {
+                !exprs.trim().is_empty()
+                    && index.index_meta.indisvalid
+                    && index.index_meta.indisready
+            })
+        })
+        .collect()
+}
+
+fn materialize_relation_row_values(
+    relation: &BoundRelation,
+    raw: &[Option<&[u8]>],
+    toast_ctx: Option<&ToastFetchContext>,
+) -> Result<Vec<Value>, ExecError> {
+    relation
+        .desc
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            decode_value_with_toast(column, raw.get(index).copied().flatten(), toast_ctx)
+        })
+        .collect()
+}
+
+fn evaluate_expression_indexes_for_analyze(
+    relation: &BoundRelation,
+    indexes: &[BoundIndexRelation],
+    rows: &[Vec<Value>],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for values in rows {
+        for index in indexes {
+            if !crate::backend::commands::tablecmds::row_matches_index_predicate(
+                index,
+                values,
+                None,
+                relation.relation_oid,
+                ctx,
+            )? {
+                continue;
+            }
+            let _ = crate::backend::commands::tablecmds::index_key_values_for_row(
+                index,
+                &relation.desc,
+                values,
+                ctx,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn inherited_selected_column_mapping(

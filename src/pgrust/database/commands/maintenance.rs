@@ -58,6 +58,8 @@ struct AutovacuumTarget {
 pub(crate) struct VacuumExecOptions {
     analyze: bool,
     full: bool,
+    truncate: Option<bool>,
+    default_truncate: bool,
     parallel_workers: Option<i32>,
     process_main: bool,
     process_toast: bool,
@@ -151,13 +153,29 @@ fn validate_buffer_usage_limit(raw: &str) -> Result<(), ExecError> {
     if kb == 0 || (128..=16_777_216).contains(&kb) {
         return Ok(());
     }
+    if raw.trim().split_whitespace().next().is_some_and(|number| {
+        number
+            .parse::<i64>()
+            .ok()
+            .is_some_and(|value| i32::try_from(value).is_err())
+    }) {
+        return Err(ExecError::DetailedError {
+            message: "BUFFER_USAGE_LIMIT option must be 0 or between 128 kB and 16777216 kB".into(),
+            detail: None,
+            hint: Some("Value exceeds integer range.".into()),
+            sqlstate: "22023",
+        });
+    }
     Err(vacuum_option_error(
         "BUFFER_USAGE_LIMIT option must be 0 or between 128 kB and 16777216 kB",
         "22023",
     ))
 }
 
-fn vacuum_exec_options(stmt: &VacuumStatement) -> Result<VacuumExecOptions, ExecError> {
+fn vacuum_exec_options(
+    stmt: &VacuumStatement,
+    gucs: Option<&std::collections::HashMap<String, String>>,
+) -> Result<VacuumExecOptions, ExecError> {
     let parallel_workers = parse_vacuum_parallel_workers(stmt)?;
     if let Some(raw) = &stmt.buffer_usage_limit {
         validate_buffer_usage_limit(raw)?;
@@ -217,6 +235,16 @@ fn vacuum_exec_options(stmt: &VacuumStatement) -> Result<VacuumExecOptions, Exec
     Ok(VacuumExecOptions {
         analyze: stmt.analyze,
         full: stmt.full,
+        truncate: stmt.truncate,
+        default_truncate: gucs
+            .and_then(|gucs| gucs.get("vacuum_truncate"))
+            .map(|value| {
+                !matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "false" | "off" | "no" | "0"
+                )
+            })
+            .unwrap_or(true),
         parallel_workers,
         process_main: stmt.process_main.unwrap_or(true),
         process_toast,
@@ -501,6 +529,57 @@ fn relation_display_name_for_target(catalog: &dyn CatalogLookup, relation_oid: u
         .unwrap_or_else(|| relation_oid.to_string())
 }
 
+fn relation_warning_name_for_target(
+    catalog: &dyn CatalogLookup,
+    relation: &BoundRelation,
+    target: &MaintenanceTarget,
+) -> String {
+    catalog
+        .class_row_by_oid(relation.relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation_basename(&target.table_name).to_string())
+}
+
+fn validate_maintenance_columns(
+    target: &MaintenanceTarget,
+    relation: &BoundRelation,
+) -> Result<(), ExecError> {
+    let mut seen = BTreeSet::new();
+    for column in &target.columns {
+        let normalized = column.to_ascii_lowercase();
+        if !seen.insert(normalized) {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "column \"{}\" of relation \"{}\" appears more than once",
+                    column,
+                    relation_basename(&target.table_name)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42701",
+            });
+        }
+        if !relation
+            .desc
+            .columns
+            .iter()
+            .any(|desc| !desc.dropped && desc.name.eq_ignore_ascii_case(column))
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "column \"{}\" of relation \"{}\" does not exist",
+                    column,
+                    relation_basename(&target.table_name)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42703",
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_maintenance_targets_for_vacuum(
     targets: &[MaintenanceTarget],
     catalog: &dyn CatalogLookup,
@@ -527,25 +606,31 @@ fn validate_maintenance_targets_for_vacuum(
                 "0A000",
             ));
         }
-        for column in &target.columns {
-            if !entry
-                .desc
-                .columns
-                .iter()
-                .any(|desc| !desc.dropped && desc.name.eq_ignore_ascii_case(column))
-            {
-                return Err(ExecError::DetailedError {
-                    message: format!(
-                        "column \"{}\" of relation \"{}\" does not exist",
-                        column,
-                        relation_basename(&target.table_name)
-                    ),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42703",
-                });
+        validate_maintenance_columns(target, &entry)?;
+    }
+    Ok(())
+}
+
+fn validate_maintenance_targets_for_analyze(
+    targets: &[MaintenanceTarget],
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    for target in targets {
+        let entry = match catalog.lookup_any_relation(&target.table_name) {
+            Some(entry) if relkind_is_analyzable(entry.relkind) => entry,
+            Some(_) => {
+                return Err(ExecError::Parse(ParseError::WrongObjectType {
+                    name: target.table_name.clone(),
+                    expected: "table",
+                }));
             }
-        }
+            None => {
+                return Err(ExecError::Parse(ParseError::UnknownTable(
+                    target.table_name.clone(),
+                )));
+            }
+        };
+        validate_maintenance_columns(target, &entry)?;
     }
     Ok(())
 }
@@ -595,6 +680,40 @@ fn expand_explicit_maintenance_targets(
     Ok(expanded)
 }
 
+fn expand_explicit_analyze_targets(
+    targets: &[MaintenanceTarget],
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<MaintenanceTarget>, ExecError> {
+    let mut expanded = Vec::new();
+    let mut seen = BTreeSet::new();
+    for target in targets {
+        let relation = lookup_analyzable_relation_for_ddl(catalog, &target.table_name)?;
+        if seen.insert(relation.relation_oid) {
+            expanded.push(target.clone());
+        }
+        if target.only {
+            continue;
+        }
+        for child_oid in catalog.find_all_inheritors(relation.relation_oid) {
+            if child_oid == relation.relation_oid || !seen.insert(child_oid) {
+                continue;
+            }
+            let Some(child) = catalog.relation_by_oid(child_oid) else {
+                continue;
+            };
+            if !relkind_is_analyzable(child.relkind) {
+                continue;
+            }
+            expanded.push(MaintenanceTarget {
+                table_name: relation_display_name_for_target(catalog, child.relation_oid),
+                columns: target.columns.clone(),
+                only: false,
+            });
+        }
+    }
+    Ok(expanded)
+}
+
 fn relation_is_maintenance_owner(
     relation: &BoundRelation,
     auth: &AuthState,
@@ -628,19 +747,47 @@ fn filter_explicit_vacuum_targets_by_permission(
             allowed.push(target.clone());
             continue;
         }
-        let relname = relation_display_name_for_target(catalog, relation.relation_oid);
-        if options.process_main {
+        let relname = relation_warning_name_for_target(catalog, &relation, target);
+        let warned_vacuum = options.process_main || options.process_toast;
+        if warned_vacuum {
             push_warning(format!(
                 "permission denied to vacuum \"{}\", skipping it",
                 relname
             ));
-        }
-        if options.analyze {
+        } else if options.analyze {
             push_warning(format!(
                 "permission denied to analyze \"{}\", skipping it",
                 relname
             ));
         }
+    }
+    Ok(allowed)
+}
+
+fn filter_explicit_analyze_targets_by_permission(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    catalog: &dyn CatalogLookup,
+    targets: &[MaintenanceTarget],
+) -> Result<Vec<MaintenanceTarget>, ExecError> {
+    let auth = db.auth_state(client_id);
+    let auth_catalog = db
+        .auth_catalog(client_id, txn_ctx)
+        .map_err(map_catalog_error)?;
+    let database_owner_oid = current_database_owner_oid(db, client_id, txn_ctx)?;
+    let mut allowed = Vec::with_capacity(targets.len());
+    for target in targets {
+        let relation = lookup_analyzable_relation_for_ddl(catalog, &target.table_name)?;
+        if relation_is_maintenance_owner(&relation, &auth, &auth_catalog, database_owner_oid) {
+            allowed.push(target.clone());
+            continue;
+        }
+        let relname = relation_warning_name_for_target(catalog, &relation, target);
+        push_warning(format!(
+            "permission denied to analyze \"{}\", skipping it",
+            relname
+        ));
     }
     Ok(allowed)
 }
@@ -745,13 +892,20 @@ impl Database {
         configured_search_path: Option<&[String]>,
         analyze_stmt: &AnalyzeStatement,
     ) -> Result<Vec<MaintenanceTarget>, ExecError> {
-        collect_catalog_analyze_targets(
+        let raw_targets = collect_catalog_analyze_targets(
             self,
             client_id,
             txn_ctx,
             configured_search_path,
             analyze_stmt,
-        )
+        )?;
+        if analyze_stmt.targets.is_empty() {
+            return Ok(raw_targets);
+        }
+        let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+        validate_maintenance_targets_for_analyze(&raw_targets, &catalog)?;
+        let expanded = expand_explicit_analyze_targets(&raw_targets, &catalog)?;
+        filter_explicit_analyze_targets_by_permission(self, client_id, txn_ctx, &catalog, &expanded)
     }
 
     pub(crate) fn effective_vacuum_targets_with_search_path(
@@ -1030,6 +1184,7 @@ impl Database {
                         result.relallvisible,
                         result.relallfrozen,
                         result.relfrozenxid,
+                        analyze_result.clear_relhassubclass,
                         &write_ctx,
                     )
                     .map_err(ExecError::from)?;
@@ -1070,6 +1225,7 @@ impl Database {
                     result.relation_oid,
                     result.relpages,
                     result.reltuples,
+                    result.clear_relhassubclass,
                     &write_ctx,
                 )
                 .map_err(ExecError::from)?;
@@ -1725,8 +1881,9 @@ impl Database {
         client_id: ClientId,
         vacuum_stmt: &VacuumStatement,
         configured_search_path: Option<&[String]>,
+        gucs: Option<&std::collections::HashMap<String, String>>,
     ) -> Result<StatementResult, ExecError> {
-        let options = vacuum_exec_options(vacuum_stmt)?;
+        let options = vacuum_exec_options(vacuum_stmt, gucs)?;
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let raw_targets = self.effective_vacuum_targets_with_search_path(
@@ -1875,6 +2032,7 @@ impl Database {
                     result.relation_oid,
                     result.relpages,
                     result.reltuples,
+                    result.clear_relhassubclass,
                     &write_ctx,
                 )
                 .map_err(ExecError::from)?;
@@ -1979,10 +2137,25 @@ impl Database {
                 catalog_effects,
             )?
         } else if !options.process_main {
-            let _process_toast = options.process_toast;
-            Vec::new()
+            crate::backend::commands::tablecmds::collect_vacuum_stats_with_options(
+                targets,
+                &catalog,
+                &mut ctx,
+                false,
+                options.process_toast,
+                options.truncate,
+                options.default_truncate,
+            )?
         } else {
-            crate::backend::commands::tablecmds::collect_vacuum_stats(targets, &catalog, &mut ctx)?
+            crate::backend::commands::tablecmds::collect_vacuum_stats_with_options(
+                targets,
+                &catalog,
+                &mut ctx,
+                true,
+                options.process_toast,
+                options.truncate,
+                options.default_truncate,
+            )?
         };
         let vacuum_elapsed = vacuum_started.elapsed();
         let analyzed = if options.analyze {
@@ -2055,6 +2228,7 @@ impl Database {
                         result.relallvisible,
                         result.relallfrozen,
                         result.relfrozenxid,
+                        analyze_result.clear_relhassubclass,
                         &write_ctx,
                     )
                     .map_err(ExecError::from)?;
@@ -2095,6 +2269,7 @@ impl Database {
                     result.relation_oid,
                     result.relpages,
                     result.reltuples,
+                    result.clear_relhassubclass,
                     &write_ctx,
                 )
                 .map_err(ExecError::from)?;
