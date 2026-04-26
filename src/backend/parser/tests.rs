@@ -2791,8 +2791,10 @@ fn parse_alter_table_constraint_statements() {
                     ..attrs()
                 },
                 columns: vec!["owner_id".into(), "owner_name".into()],
+                period: None,
                 referenced_table: "people".into(),
                 referenced_columns: Some(vec!["id".into(), "name".into()]),
+                referenced_period: None,
                 match_type: ForeignKeyMatchType::Full,
                 on_delete: ForeignKeyAction::NoAction,
                 on_delete_set_columns: None,
@@ -2814,8 +2816,10 @@ fn parse_alter_table_constraint_statements() {
             constraint: TableConstraint::ForeignKey {
                 attributes: attrs(),
                 columns: vec!["owner_id".into(), "owner_name".into()],
+                period: None,
                 referenced_table: "people".into(),
                 referenced_columns: Some(vec!["id".into(), "name".into()]),
+                referenced_period: None,
                 match_type: ForeignKeyMatchType::Full,
                 on_delete: ForeignKeyAction::NoAction,
                 on_delete_set_columns: None,
@@ -2837,13 +2841,66 @@ fn parse_alter_table_constraint_statements() {
             constraint: TableConstraint::ForeignKey {
                 attributes: attrs(),
                 columns: vec!["owner_id".into(), "owner_name".into()],
+                period: None,
                 referenced_table: "people".into(),
                 referenced_columns: Some(vec!["id".into(), "name".into()]),
+                referenced_period: None,
                 match_type: ForeignKeyMatchType::Simple,
                 on_delete: ForeignKeyAction::SetNull,
                 on_delete_set_columns: Some(vec!["owner_name".into()]),
                 on_update: ForeignKeyAction::NoAction,
             },
+        })
+    );
+
+    let stmt = parse_statement(
+        "alter table pets add constraint pets_owner_fk foreign key (owner_id, period valid_at) references people(id, period valid_at)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "pets".into(),
+            constraint: TableConstraint::ForeignKey {
+                attributes: ConstraintAttributes {
+                    name: Some("pets_owner_fk".into()),
+                    ..attrs()
+                },
+                columns: vec!["owner_id".into(), "valid_at".into()],
+                period: Some("valid_at".into()),
+                referenced_table: "people".into(),
+                referenced_columns: Some(vec!["id".into(), "valid_at".into()]),
+                referenced_period: Some("valid_at".into()),
+                match_type: ForeignKeyMatchType::Simple,
+                on_delete: ForeignKeyAction::NoAction,
+                on_delete_set_columns: None,
+                on_update: ForeignKeyAction::NoAction,
+            },
+        })
+    );
+
+    let stmt = parse_statement(
+        "alter table pets add column valid_at daterange, add constraint pets_pk primary key (owner_id, valid_at without overlaps)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableMulti(vec![
+            "ALTER TABLE pets add column valid_at daterange".into(),
+            "ALTER TABLE pets add constraint pets_pk primary key (owner_id, valid_at without overlaps)".into(),
+        ])
+    );
+
+    let stmt = parse_statement("alter table pets replica identity using index pets_pk").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableReplicaIdentity(AlterTableReplicaIdentityStatement {
+            if_exists: false,
+            only: false,
+            table_name: "pets".into(),
+            index_name: "pets_pk".into(),
         })
     );
 
@@ -3605,6 +3662,19 @@ fn parse_alter_table_drop_column_statement() {
             only: false,
             table_name: "items".into(),
             column_name: "note".into(),
+            cascade: false,
+        })
+    );
+
+    let stmt = parse_statement("alter table items drop column note cascade").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableDropColumn(AlterTableDropColumnStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            column_name: "note".into(),
+            cascade: true,
         })
     );
 }
@@ -4816,6 +4886,20 @@ fn parse_create_instead_of_trigger_statement() {
             func_args: Vec::new(),
         })
     );
+}
+
+#[test]
+fn parse_create_trigger_statement_for_statement_without_each() {
+    let stmt = parse_statement(
+        "create trigger audit_stmt after insert on public.people for statement execute function public.audit_people()",
+    )
+    .unwrap();
+    match stmt {
+        Statement::CreateTrigger(CreateTriggerStatement { level, .. }) => {
+            assert_eq!(level, TriggerLevel::Statement);
+        }
+        other => panic!("expected create trigger, got {other:?}"),
+    }
 }
 
 #[test]
@@ -8502,11 +8586,11 @@ fn build_plan_wraps_order_by_and_limit() {
                 } => {
                     assert_eq!(limit, Some(2));
                     assert_eq!(offset, 1);
-                    match *input {
+                    match strip_projections(input.as_ref()) {
                         Plan::OrderBy { input, items, .. } => {
                             assert_eq!(items.len(), 1);
                             assert!(items[0].descending);
-                            assert!(matches!(*input, Plan::Filter { .. }));
+                            assert!(matches!(input.as_ref(), Plan::Filter { .. }));
                         }
                         other => panic!("expected order by, got {:?}", other),
                     }
@@ -8523,7 +8607,7 @@ fn build_plan_resolves_order_by_ordinal_against_target_list() {
     let stmt = parse_select("select name, id from people order by 2 desc").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
-        Plan::Projection { input, .. } => match *input {
+        Plan::Projection { input, .. } => match strip_projections(input.as_ref()) {
             Plan::OrderBy { items, .. } => {
                 assert_eq!(items.len(), 1);
                 assert!(items[0].descending);
@@ -9070,6 +9154,21 @@ fn parse_merge_statement() {
         MergeMatchKind::NotMatchedBySource
     );
     assert!(matches!(stmt.when_clauses[2].action, MergeAction::Delete));
+    assert!(stmt.returning.is_empty());
+}
+
+#[test]
+fn parse_merge_returning_clause() {
+    let stmt = parse_statement(
+        "merge into target t using source s on t.tid = s.sid \
+         when matched then delete returning merge_action(), old, new, t.*",
+    )
+    .unwrap();
+    let stmt = match stmt {
+        Statement::Merge(stmt) => stmt,
+        other => panic!("expected merge statement, got {other:?}"),
+    };
+    assert_eq!(stmt.returning.len(), 4);
 }
 
 #[test]
@@ -9102,6 +9201,21 @@ fn plan_merge_uses_join_shape_for_explain() {
         strip_projections(&bound.input_plan.plan_tree),
         Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. } | Plan::MergeJoin { .. }
     ));
+    assert_eq!(bound.visible_column_count, 5);
+    assert_eq!(bound.target_ctid_index, 5);
+    assert_eq!(bound.source_present_index, 6);
+    assert_eq!(
+        bound.input_plan.column_names(),
+        [
+            "id",
+            "name",
+            "note",
+            "id",
+            "owner_id",
+            "__merge_target_ctid",
+            "__merge_source_present",
+        ]
+    );
 }
 
 #[test]
@@ -11374,10 +11488,42 @@ fn parse_create_table_foreign_key_constraints() {
         vec![TableConstraint::ForeignKey {
             attributes: attrs(),
             columns: vec!["owner_name".into()],
+            period: None,
             referenced_table: "people".into(),
             referenced_columns: Some(vec!["name".into()]),
+            referenced_period: None,
             match_type: ForeignKeyMatchType::Simple,
             on_delete: ForeignKeyAction::Restrict,
+            on_delete_set_columns: None,
+            on_update: ForeignKeyAction::NoAction,
+        }]
+    );
+
+    let stmt = parse_statement(
+        "create table temporal_fk (
+            parent_id int4range,
+            valid_at daterange,
+            constraint temporal_fk_parent_fk foreign key (parent_id, period valid_at) references temporal_parent(id, period valid_at)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert_eq!(
+        ct.constraints().cloned().collect::<Vec<_>>(),
+        vec![TableConstraint::ForeignKey {
+            attributes: ConstraintAttributes {
+                name: Some("temporal_fk_parent_fk".into()),
+                ..attrs()
+            },
+            columns: vec!["parent_id".into(), "valid_at".into()],
+            period: Some("valid_at".into()),
+            referenced_table: "temporal_parent".into(),
+            referenced_columns: Some(vec!["id".into(), "valid_at".into()]),
+            referenced_period: Some("valid_at".into()),
+            match_type: ForeignKeyMatchType::Simple,
+            on_delete: ForeignKeyAction::NoAction,
             on_delete_set_columns: None,
             on_update: ForeignKeyAction::NoAction,
         }]
@@ -12182,9 +12328,13 @@ fn lower_create_table_resolves_named_domain_types() {
             typowner: BOOTSTRAP_SUPERUSER_OID,
             typacl: None,
             typlen: 4,
+            typbyval: true,
+            typtype: 'd',
+            typisdefined: true,
             typalign: AttributeAlign::Int,
             typstorage: AttributeStorage::Plain,
             typrelid: 0,
+            typsubscript: 0,
             typelem: 0,
             typarray: 0,
             typinput: 0,
@@ -12193,8 +12343,10 @@ fn lower_create_table_resolves_named_domain_types() {
             typsend: 0,
             typmodin: 0,
             typmodout: 0,
+            typdelim: ',',
             typanalyze: 0,
-            typsubscript: 0,
+            typbasetype: crate::include::catalog::INT4_TYPE_OID,
+            typcollation: 0,
             sql_type: SqlType::new(SqlTypeKind::Int4),
         }],
     };

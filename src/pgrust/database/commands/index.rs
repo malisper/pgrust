@@ -15,9 +15,9 @@ use crate::include::access::brin::BrinOptions;
 use crate::include::access::gin::GinOptions;
 use crate::include::access::hash::HashOptions;
 use crate::include::catalog::{
-    BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID,
-    SPGIST_AM_OID, builtin_range_rows, multirange_type_ref_for_sql_type,
-    range_type_ref_for_sql_type,
+    ANYMULTIRANGEOID, ANYRANGEOID, BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID,
+    GIST_RANGE_FAMILY_OID, HASH_AM_OID, SPGIST_AM_OID, builtin_range_rows,
+    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::parsenodes::RelOption;
 use std::collections::BTreeSet;
@@ -824,13 +824,23 @@ impl Database {
                     "="
                 };
                 let mut operator_type_oids = vec![type_oid];
-                if op_name == "&&"
-                    && let Some(multirange_type) = multirange_type_ref_for_sql_type(column.sql_type)
-                {
-                    operator_type_oids.push(multirange_type.range_type_oid());
+                if op_name == "&&" {
+                    if let Some(range_type) = range_type_ref_for_sql_type(column.sql_type) {
+                        operator_type_oids.push(range_type.type_oid());
+                        operator_type_oids.push(ANYRANGEOID);
+                    }
+                    if let Some(multirange_type) = multirange_type_ref_for_sql_type(column.sql_type)
+                    {
+                        operator_type_oids.push(multirange_type.type_oid());
+                        operator_type_oids.push(multirange_type.range_type_oid());
+                        operator_type_oids.push(ANYMULTIRANGEOID);
+                        operator_type_oids.push(ANYRANGEOID);
+                    }
                 }
+                let mut seen_operator_type_oids = BTreeSet::new();
                 operator_type_oids
                     .into_iter()
+                    .filter(|oid| seen_operator_type_oids.insert(*oid))
                     .find_map(|candidate_oid| {
                         catalog.operator_by_name_left_right(op_name, candidate_oid, candidate_oid)
                     })
@@ -1187,6 +1197,7 @@ impl Database {
                 transaction_lock_scope_id: None,
                 next_command_id: cid,
                 default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+                random_state: crate::backend::executor::PgPrngState::shared(),
                 expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -1197,7 +1208,8 @@ impl Database {
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 catalog: visible_catalog,
-                compiled_functions: std::collections::HashMap::new(),
+                plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+                pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
@@ -1686,6 +1698,7 @@ impl Database {
             transaction_lock_scope_id: None,
             next_command_id: cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            random_state: crate::backend::executor::PgPrngState::shared(),
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
@@ -1696,7 +1709,8 @@ impl Database {
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             catalog: visible_catalog,
-            compiled_functions: std::collections::HashMap::new(),
+            plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+            pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),

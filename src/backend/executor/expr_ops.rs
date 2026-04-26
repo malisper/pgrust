@@ -13,6 +13,7 @@ use super::expr_bit::{
 use super::expr_bool::order_bool_values;
 use super::expr_casts::{
     cast_value, cast_value_with_source_type_catalog_and_config, pg_lsn_out_of_range,
+    render_internal_char_text,
 };
 use super::expr_money::{
     money_add, money_cash_div, money_cmp, money_div_float, money_div_int, money_mul_float,
@@ -20,10 +21,7 @@ use super::expr_money::{
 };
 use super::expr_network::{network_add, network_bitwise_binary, network_bitwise_not, network_sub};
 use super::node_types::*;
-use super::{
-    compare_multirange_values, expr_casts::render_internal_char_text,
-    expr_range::compare_range_values,
-};
+use super::{compare_multirange_values, expr_range::compare_range_values};
 use crate::backend::executor::jsonb::{
     JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb, jsonb_concat,
 };
@@ -102,6 +100,7 @@ pub(crate) fn compare_order_values(
         }
         (Value::Int32(a), Value::Int32(b)) => Ok(a.cmp(b)),
         (Value::EnumOid(a), Value::EnumOid(b)) => Ok(a.cmp(b)),
+        (Value::InternalChar(a), Value::InternalChar(b)) => Ok(a.cmp(b)),
         (Value::Int64(a), Value::Int64(b)) => Ok(a.cmp(b)),
         (Value::Xid8(a), Value::Xid8(b)) => Ok(a.cmp(b)),
         (Value::PgLsn(a), Value::PgLsn(b)) => Ok(a.cmp(b)),
@@ -111,6 +110,12 @@ pub(crate) fn compare_order_values(
         (Value::Float64(a), Value::Int16(b)) => Ok(pg_float_cmp(*a, f64::from(*b))),
         (Value::Float64(a), Value::Int32(b)) => Ok(pg_float_cmp(*a, f64::from(*b))),
         (Value::Float64(a), Value::Int64(b)) => Ok(pg_float_cmp(*a, *b as f64)),
+        (a, Value::Float64(b)) if parsed_numeric_float_value(a).is_some() => {
+            Ok(pg_float_cmp(parsed_numeric_float_value(a).unwrap(), *b))
+        }
+        (Value::Float64(a), b) if parsed_numeric_float_value(b).is_some() => {
+            Ok(pg_float_cmp(*a, parsed_numeric_float_value(b).unwrap()))
+        }
         (Value::Date(a), Value::Date(b)) => Ok(a.cmp(b)),
         (Value::Time(a), Value::Time(b)) => Ok(a.cmp(b)),
         (Value::TimeTz(a), Value::TimeTz(b)) => Ok(timetz_order_key(*a).cmp(&timetz_order_key(*b))),
@@ -221,15 +226,8 @@ pub(crate) fn compare_values(
         (Value::Int32(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i32))),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(l == r)),
         (Value::EnumOid(l), Value::EnumOid(r)) => Ok(Value::Bool(l == r)),
-        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Bool((*l as i64) == *r)),
         (Value::Int32(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(f64::from(*l), *r))),
-        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i64))),
-        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(*l == (*r as i64))),
-        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(l == r)),
         (Value::Int64(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(*l as f64, *r))),
-        (Value::Xid8(l), Value::Xid8(r)) => Ok(Value::Bool(l == r)),
-        (Value::PgLsn(l), Value::PgLsn(r)) => Ok(Value::Bool(l == r)),
-        (Value::Money(l), Value::Money(r)) => Ok(Value::Bool(l == r)),
         (Value::InternalChar(l), Value::InternalChar(r)) => Ok(Value::Bool(l == r)),
         (Value::InternalChar(l), r) if r.as_text().is_some() => Ok(Value::Bool(
             render_internal_char_text(*l) == r.as_text().unwrap(),
@@ -237,6 +235,13 @@ pub(crate) fn compare_values(
         (l, Value::InternalChar(r)) if l.as_text().is_some() => Ok(Value::Bool(
             l.as_text().unwrap() == render_internal_char_text(*r),
         )),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Bool((*l as i64) == *r)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i64))),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(*l == (*r as i64))),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(l == r)),
+        (Value::Xid8(l), Value::Xid8(r)) => Ok(Value::Bool(l == r)),
+        (Value::PgLsn(l), Value::PgLsn(r)) => Ok(Value::Bool(l == r)),
+        (Value::Money(l), Value::Money(r)) => Ok(Value::Bool(l == r)),
         (Value::Date(l), Value::Date(r)) => Ok(Value::Bool(l == r)),
         (Value::Time(l), Value::Time(r)) => Ok(Value::Bool(l == r)),
         (Value::TimeTz(l), Value::TimeTz(r)) => Ok(Value::Bool(l == r)),
@@ -256,6 +261,12 @@ pub(crate) fn compare_values(
         (Value::Float64(l), Value::Int32(r)) => Ok(Value::Bool(pg_float_eq(*l, f64::from(*r)))),
         (Value::Float64(l), Value::Int64(r)) => Ok(Value::Bool(pg_float_eq(*l, *r as f64))),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(*l, *r))),
+        (l, Value::Float64(r)) if parsed_numeric_float_value(l).is_some() => Ok(Value::Bool(
+            pg_float_eq(parsed_numeric_float_value(l).unwrap(), *r),
+        )),
+        (Value::Float64(l), r) if parsed_numeric_float_value(r).is_some() => Ok(Value::Bool(
+            pg_float_eq(*l, parsed_numeric_float_value(r).unwrap()),
+        )),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             Ok(Value::Bool(
                 parsed_numeric_value(l)
@@ -1517,6 +1528,26 @@ pub(crate) fn order_values(
             ">=" => pg_float_cmp(*l, *r) != Ordering::Less,
             _ => unreachable!(),
         })),
+        (l, Value::Float64(r)) if parsed_numeric_float_value(l).is_some() => {
+            let ordering = pg_float_cmp(parsed_numeric_float_value(l).unwrap(), *r);
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
+        (Value::Float64(l), r) if parsed_numeric_float_value(r).is_some() => {
+            let ordering = pg_float_cmp(*l, parsed_numeric_float_value(r).unwrap());
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
         (Value::Bool(_), Value::Bool(_)) => order_bool_values(op, &left, &right),
         (Value::Record(l), Value::Record(r)) => order_record_values(op, l, r, collation_oid),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
@@ -2464,6 +2495,19 @@ fn parsed_numeric_value(value: &Value) -> Option<NumericValue> {
     }
 }
 
+fn parsed_numeric_float_value(value: &Value) -> Option<f64> {
+    match parsed_numeric_value(value)? {
+        NumericValue::PosInf => Some(f64::INFINITY),
+        NumericValue::NegInf => Some(f64::NEG_INFINITY),
+        NumericValue::NaN => Some(f64::NAN),
+        NumericValue::Finite { coeff, scale, .. } => {
+            let coeff = coeff.to_f64()?;
+            let scale = i32::try_from(scale).ok()?;
+            Some(coeff / 10f64.powi(scale))
+        }
+    }
+}
+
 fn numeric_value_to_i128(value: &Value, nan_message: &'static str) -> Result<i128, ExecError> {
     match parsed_numeric_value(value).ok_or_else(|| ExecError::TypeMismatch {
         op: "pg_lsn numeric offset",
@@ -2574,6 +2618,20 @@ mod tests {
             Err(crate::backend::executor::ExecError::DetailedError { sqlstate, .. })
                 if sqlstate == "0A000"
         ));
+    }
+
+    #[test]
+    fn compare_values_supports_internal_char_equality() {
+        assert_eq!(
+            super::compare_values(
+                "=",
+                Value::InternalChar(b'd'),
+                Value::InternalChar(b'd'),
+                None,
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
     }
 
     #[test]

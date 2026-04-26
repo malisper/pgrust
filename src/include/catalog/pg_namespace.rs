@@ -2,7 +2,8 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID, PUBLIC_NAMESPACE_OID,
+    BOOTSTRAP_SUPERUSER_OID, INFORMATION_SCHEMA_NAMESPACE_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_TOAST_NAMESPACE_OID, PUBLIC_NAMESPACE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,7 +29,7 @@ pub fn pg_namespace_desc() -> RelationDesc {
     }
 }
 
-pub fn bootstrap_pg_namespace_rows() -> [PgNamespaceRow; 3] {
+pub fn bootstrap_pg_namespace_rows() -> [PgNamespaceRow; 4] {
     [
         PgNamespaceRow {
             oid: PG_CATALOG_NAMESPACE_OID,
@@ -45,6 +46,12 @@ pub fn bootstrap_pg_namespace_rows() -> [PgNamespaceRow; 3] {
         PgNamespaceRow {
             oid: PUBLIC_NAMESPACE_OID,
             nspname: "public".into(),
+            nspowner: BOOTSTRAP_SUPERUSER_OID,
+            nspacl: None,
+        },
+        PgNamespaceRow {
+            oid: INFORMATION_SCHEMA_NAMESPACE_OID,
+            nspname: "information_schema".into(),
             nspowner: BOOTSTRAP_SUPERUSER_OID,
             nspacl: None,
         },

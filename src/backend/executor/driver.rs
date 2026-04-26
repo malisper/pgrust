@@ -54,6 +54,11 @@ pub fn execute_query_desc(
         saved
     };
     ctx.cte_tables.clear();
+    ctx.cte_tables.extend(
+        ctx.pinned_cte_tables
+            .iter()
+            .map(|(cte_id, table)| (*cte_id, table.clone())),
+    );
     ctx.cte_producers.clear();
     ctx.recursive_worktables.clear();
     let result = (|| {
@@ -555,6 +560,11 @@ fn execute_statement_with_source(
         }
         Statement::Delete(stmt) => execute_delete(bind_delete(&stmt, catalog)?, catalog, ctx, xid),
         Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
+        Statement::AlterTableMulti(_) | Statement::AlterTableReplicaIdentity(_) => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "utility statement in executor".into(),
+            )))
+        }
         Statement::Begin(_)
         | Statement::Commit
         | Statement::Rollback

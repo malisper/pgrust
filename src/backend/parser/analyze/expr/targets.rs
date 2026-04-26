@@ -950,6 +950,7 @@ fn bind_select_list_srf_call(
                                 func_variadic: resolved.func_variadic,
                                 relid,
                                 output_columns,
+                                with_ordinality: false,
                             },
                             ResolvedSrfImpl::PartitionAncestors => {
                                 SetReturningCall::PartitionAncestors {
@@ -957,6 +958,7 @@ fn bind_select_list_srf_call(
                                     func_variadic: resolved.func_variadic,
                                     relid,
                                     output_columns,
+                                    with_ordinality: false,
                                 }
                             }
                             _ => {

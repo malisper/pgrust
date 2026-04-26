@@ -5,6 +5,7 @@ use crate::backend::utils::cache::system_view_registry::{
     SyntheticSystemViewKind, synthetic_system_view,
 };
 use crate::backend::utils::trigger::format_trigger_definition;
+use crate::include::catalog::{PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID};
 use crate::include::nodes::parsenodes::{JoinTreeNode, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
     SetReturningCall, attrno_index, is_system_attr, set_returning_call_exprs,
@@ -136,9 +137,13 @@ pub(super) fn bind_builtin_system_view(
                     Value::Int64(i64::from(row.typnamespace)),
                     Value::Int64(i64::from(row.typowner)),
                     Value::Int16(row.typlen),
+                    Value::Bool(row.typbyval),
+                    Value::InternalChar(row.typtype as u8),
+                    Value::Bool(row.typisdefined),
                     Value::InternalChar(row.typalign.as_char() as u8),
                     Value::InternalChar(row.typstorage.as_char() as u8),
                     Value::Int64(i64::from(row.typrelid)),
+                    Value::Int64(i64::from(row.typsubscript)),
                     Value::Int64(i64::from(row.typelem)),
                     Value::Int64(i64::from(row.typarray)),
                     Value::Int64(i64::from(row.typinput)),
@@ -147,8 +152,10 @@ pub(super) fn bind_builtin_system_view(
                     Value::Int64(i64::from(row.typsend)),
                     Value::Int64(i64::from(row.typmodin)),
                     Value::Int64(i64::from(row.typmodout)),
+                    Value::InternalChar(row.typdelim as u8),
                     Value::Int64(i64::from(row.typanalyze)),
-                    Value::Int64(i64::from(row.typsubscript)),
+                    Value::Int64(i64::from(row.typbasetype)),
+                    Value::Int64(i64::from(row.typcollation)),
                     match row.typacl {
                         Some(values) => Value::Array(
                             values
@@ -158,6 +165,31 @@ pub(super) fn bind_builtin_system_view(
                         ),
                         None => Value::Null,
                     },
+                ]
+            })
+            .collect(),
+        SyntheticSystemViewKind::PgRange => catalog
+            .range_rows()
+            .into_iter()
+            .map(|row| {
+                let rngcanonical = row
+                    .rngcanonical
+                    .as_deref()
+                    .and_then(|name| catalog.proc_rows_by_name(name).first().map(|proc| proc.oid))
+                    .unwrap_or(0);
+                let rngsubdiff = row
+                    .rngsubdiff
+                    .as_deref()
+                    .and_then(|name| catalog.proc_rows_by_name(name).first().map(|proc| proc.oid))
+                    .unwrap_or(0);
+                vec![
+                    Value::Int64(i64::from(row.rngtypid)),
+                    Value::Int64(i64::from(row.rngsubtype)),
+                    Value::Int64(i64::from(row.rngmultitypid)),
+                    Value::Int64(i64::from(row.rngcollation)),
+                    Value::Int64(i64::from(row.rngsubopc)),
+                    Value::Int64(i64::from(rngcanonical)),
+                    Value::Int64(i64::from(rngsubdiff)),
                 ]
             })
             .collect(),
@@ -178,6 +210,9 @@ pub(super) fn bind_builtin_system_view(
         SyntheticSystemViewKind::InformationSchemaViews => information_schema_view_rows(catalog),
         SyntheticSystemViewKind::InformationSchemaColumns => {
             information_schema_column_rows(catalog)
+        }
+        SyntheticSystemViewKind::InformationSchemaColumnColumnUsage => {
+            information_schema_column_column_usage_rows(catalog)
         }
         SyntheticSystemViewKind::InformationSchemaTriggers => {
             information_schema_trigger_rows(catalog)
@@ -219,23 +254,251 @@ fn information_schema_view_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> 
 }
 
 fn information_schema_column_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
+    let Some(visible) = catalog.materialize_visible_catalog() else {
+        return Vec::new();
+    };
+
+    let view_metadata = information_schema_view_metadata(catalog)
+        .into_iter()
+        .map(|view| (view.relation_oid, view.updatability))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut seen_relation_oids = std::collections::BTreeSet::new();
     let mut rows = Vec::new();
-    for view in information_schema_view_metadata(catalog) {
-        for (index, column) in view.relation_desc.columns.iter().enumerate() {
-            let updatable = view
-                .updatability
-                .columns
-                .get(index)
-                .is_some_and(|entry| entry.insertable || entry.updatable);
+    for (name, entry) in visible.relcache().entries() {
+        if !matches!(entry.relkind, 'r' | 'p' | 'v' | 'f')
+            || !seen_relation_oids.insert(entry.relation_oid)
+        {
+            continue;
+        }
+        let (schema_name, table_name) = split_qualified_relation_name(name);
+        if schema_name.eq_ignore_ascii_case("pg_catalog")
+            || schema_name.eq_ignore_ascii_case(INFO_SCHEMA_NAME)
+        {
+            continue;
+        }
+        for (index, column) in entry.desc.columns.iter().enumerate() {
+            if column.dropped {
+                continue;
+            }
+            let is_generated = column.generated.is_some();
+            let is_updatable = match entry.relkind {
+                'r' | 'p' => true,
+                'v' | 'f' => view_metadata
+                    .get(&entry.relation_oid)
+                    .and_then(|updatability| updatability.columns.get(index))
+                    .is_some_and(|entry| entry.insertable || entry.updatable),
+                _ => false,
+            };
+            let type_oid = catalog.type_oid_for_sql_type(column.sql_type).unwrap_or(0);
+            let (udt_schema, udt_name) = catalog
+                .type_by_oid(type_oid)
+                .and_then(|row| {
+                    let namespace = catalog.namespace_row_by_oid(row.typnamespace)?;
+                    Some((namespace.nspname, row.typname))
+                })
+                .unwrap_or_else(|| ("pg_catalog".into(), sql_type_name(column.sql_type)));
             rows.push(vec![
-                Value::Text(view.table_name.clone().into()),
+                Value::Text(REGRESSION_DATABASE_NAME.into()),
+                Value::Text(schema_name.clone().into()),
+                Value::Text(table_name.clone().into()),
                 Value::Text(column.name.clone().into()),
                 Value::Int32((index + 1) as i32),
-                yes_or_no(updatable),
+                if is_generated {
+                    Value::Null
+                } else {
+                    column
+                        .default_expr
+                        .as_ref()
+                        .map(|sql| Value::Text(sql.clone().into()))
+                        .unwrap_or(Value::Null)
+                },
+                yes_or_no(column.storage.nullable),
+                Value::Text(information_schema_data_type(column.sql_type, catalog).into()),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Text(REGRESSION_DATABASE_NAME.into()),
+                Value::Text(udt_schema.into()),
+                Value::Text(udt_name.into()),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Text((index + 1).to_string().into()),
+                Value::Text("NO".into()),
+                yes_or_no(column.identity.is_some()),
+                column
+                    .identity
+                    .map(|kind| match kind {
+                        crate::include::nodes::parsenodes::ColumnIdentityKind::Always => {
+                            Value::Text("ALWAYS".into())
+                        }
+                        crate::include::nodes::parsenodes::ColumnIdentityKind::ByDefault => {
+                            Value::Text("BY DEFAULT".into())
+                        }
+                    })
+                    .unwrap_or(Value::Null),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                column
+                    .identity
+                    .map(|_| yes_or_no(false))
+                    .unwrap_or(Value::Null),
+                Value::Text(if is_generated { "ALWAYS" } else { "NEVER" }.into()),
+                if is_generated {
+                    column
+                        .default_expr
+                        .as_ref()
+                        .map(|sql| Value::Text(format_generation_expression_sql(sql).into()))
+                        .unwrap_or(Value::Null)
+                } else {
+                    Value::Null
+                },
+                yes_or_no(is_updatable),
             ]);
         }
     }
+    rows.sort_by(|left, right| {
+        value_text(left.get(1))
+            .cmp(value_text(right.get(1)))
+            .then_with(|| value_text(left.get(2)).cmp(value_text(right.get(2))))
+            .then_with(|| value_int32(left.get(4)).cmp(&value_int32(right.get(4))))
+    });
     rows
+}
+
+fn information_schema_column_column_usage_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
+    let Some(visible) = catalog.materialize_visible_catalog() else {
+        return Vec::new();
+    };
+    let depend_rows = visible.depend_rows();
+    let mut rows = std::collections::BTreeSet::new();
+    for (name, entry) in visible.relcache().entries() {
+        if !matches!(entry.relkind, 'r' | 'p') {
+            continue;
+        }
+        let (schema_name, table_name) = split_qualified_relation_name(name);
+        if schema_name.eq_ignore_ascii_case("pg_catalog")
+            || schema_name.eq_ignore_ascii_case(INFO_SCHEMA_NAME)
+        {
+            continue;
+        }
+        for (dependent_index, dependent_column) in entry.desc.columns.iter().enumerate() {
+            if dependent_column.dropped || dependent_column.generated.is_none() {
+                continue;
+            }
+            let Some(attrdef_oid) = dependent_column.attrdef_oid else {
+                continue;
+            };
+            let dependent_attnum = (dependent_index + 1) as i32;
+            for depend in depend_rows.iter().filter(|row| {
+                row.classid == PG_ATTRDEF_RELATION_OID
+                    && row.objid == attrdef_oid
+                    && row.refclassid == PG_CLASS_RELATION_OID
+                    && row.refobjid == entry.relation_oid
+                    && row.refobjsubid > 0
+                    && row.refobjsubid != dependent_attnum
+            }) {
+                let Some(column_index) = depend
+                    .refobjsubid
+                    .checked_sub(1)
+                    .and_then(|index| usize::try_from(index).ok())
+                else {
+                    continue;
+                };
+                let Some(source_column) = entry.desc.columns.get(column_index) else {
+                    continue;
+                };
+                if source_column.dropped {
+                    continue;
+                }
+                rows.insert((
+                    schema_name.clone(),
+                    table_name.clone(),
+                    source_column.name.clone(),
+                    dependent_column.name.clone(),
+                ));
+            }
+        }
+    }
+    rows.into_iter()
+        .map(|(schema_name, table_name, column_name, dependent_column)| {
+            vec![
+                Value::Text(REGRESSION_DATABASE_NAME.into()),
+                Value::Text(schema_name.into()),
+                Value::Text(table_name.into()),
+                Value::Text(column_name.into()),
+                Value::Text(dependent_column.into()),
+            ]
+        })
+        .collect()
+}
+
+fn information_schema_data_type(sql_type: SqlType, catalog: &dyn CatalogLookup) -> String {
+    if sql_type.is_array {
+        return "ARRAY".into();
+    }
+    let Some(type_oid) = catalog.type_oid_for_sql_type(sql_type) else {
+        return sql_type_name(sql_type);
+    };
+    let Some(row) = catalog.type_by_oid(type_oid) else {
+        return sql_type_name(sql_type);
+    };
+    let schema_name = catalog
+        .namespace_row_by_oid(row.typnamespace)
+        .map(|row| row.nspname)
+        .unwrap_or_else(|| "pg_catalog".into());
+    if schema_name == "pg_catalog" {
+        sql_type_name(sql_type)
+    } else {
+        "USER-DEFINED".into()
+    }
+}
+
+fn format_generation_expression_sql(sql: &str) -> String {
+    let trimmed = sql.trim();
+    if trimmed.is_empty() || trimmed.starts_with('(') {
+        return trimmed.to_string();
+    }
+    match crate::backend::parser::parse_expr(trimmed) {
+        Ok(SqlExpr::Column(_))
+        | Ok(SqlExpr::Const(_))
+        | Ok(SqlExpr::IntegerLiteral(_))
+        | Ok(SqlExpr::NumericLiteral(_))
+        | Ok(SqlExpr::FuncCall { .. }) => trimmed.to_string(),
+        Ok(_) => format!("({trimmed})"),
+        Err(_) => trimmed.to_string(),
+    }
+}
+
+fn value_text(value: Option<&Value>) -> &str {
+    match value {
+        Some(Value::Text(value)) => value.as_str(),
+        _ => "",
+    }
+}
+
+fn value_int32(value: Option<&Value>) -> i32 {
+    match value {
+        Some(Value::Int32(value)) => *value,
+        _ => 0,
+    }
 }
 
 fn information_schema_trigger_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {

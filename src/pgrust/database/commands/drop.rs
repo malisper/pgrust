@@ -306,6 +306,7 @@ struct DropTableDependencyContext<'a> {
     graph: &'a CatalogDependencyGraph,
     constraints_by_oid: BTreeMap<u32, PgConstraintRow>,
     rewrites_by_oid: BTreeMap<u32, PgRewriteRow>,
+    search_path: &'a [String],
 }
 
 fn is_drop_table_relkind(relkind: char) -> bool {
@@ -323,7 +324,11 @@ fn drop_table_relation_kind_name(relkind: char) -> &'static str {
     }
 }
 
-fn drop_table_display_relation_name(catcache: &CatCache, relation_oid: u32) -> String {
+fn drop_table_display_relation_name(
+    catcache: &CatCache,
+    relation_oid: u32,
+    search_path: &[String],
+) -> String {
     let Some(class) = catcache.class_by_oid(relation_oid) else {
         return relation_oid.to_string();
     };
@@ -334,6 +339,9 @@ fn drop_table_display_relation_name(catcache: &CatCache, relation_oid: u32) -> S
     match schema_name.as_str() {
         "public" | "pg_catalog" => class.relname.clone(),
         schema_name if schema_name.starts_with("pg_temp_") => class.relname.clone(),
+        schema_name if search_path.iter().any(|entry| entry == schema_name) => {
+            class.relname.clone()
+        }
         _ => format!("{schema_name}.{}", class.relname),
     }
 }
@@ -529,7 +537,11 @@ fn drop_table_direct_dependencies(
                     relation_oid: row.objid,
                     relkind: class.relkind,
                     is_partition: class.relispartition,
-                    display_name: drop_table_display_relation_name(ctx.catcache, row.objid),
+                    display_name: drop_table_display_relation_name(
+                        ctx.catcache,
+                        row.objid,
+                        ctx.search_path,
+                    ),
                 });
             }
             PG_CONSTRAINT_RELATION_OID if row.deptype == DEPENDENCY_NORMAL => {
@@ -546,6 +558,7 @@ fn drop_table_direct_dependencies(
                     relation_display_name: drop_table_display_relation_name(
                         ctx.catcache,
                         constraint.conrelid,
+                        ctx.search_path,
                     ),
                     constraint: DropForeignKeyConstraintPlan {
                         oid: constraint.oid,
@@ -569,7 +582,11 @@ fn drop_table_direct_dependencies(
                         relation_oid: owner.oid,
                         relkind: owner.relkind,
                         is_partition: owner.relispartition,
-                        display_name: drop_table_display_relation_name(ctx.catcache, owner.oid),
+                        display_name: drop_table_display_relation_name(
+                            ctx.catcache,
+                            owner.oid,
+                            ctx.search_path,
+                        ),
                     });
                 } else if rule_oids.insert(rewrite.oid) {
                     deps.push(DropTableDependency::Rule {
@@ -578,6 +595,7 @@ fn drop_table_direct_dependencies(
                         relation_display_name: drop_table_display_relation_name(
                             ctx.catcache,
                             owner.oid,
+                            ctx.search_path,
                         ),
                         rule: DropRulePlan {
                             rewrite_oid: rewrite.oid,
@@ -604,7 +622,11 @@ fn drop_table_direct_dependencies(
             relation_oid: inherit.inhrelid,
             relkind: class.relkind,
             is_partition: class.relispartition,
-            display_name: drop_table_display_relation_name(ctx.catcache, inherit.inhrelid),
+            display_name: drop_table_display_relation_name(
+                ctx.catcache,
+                inherit.inhrelid,
+                ctx.search_path,
+            ),
         });
     }
 
@@ -641,7 +663,7 @@ fn plan_drop_table_relation(
         return;
     };
     let source_relkind = class.relkind;
-    let source_name = drop_table_display_relation_name(ctx.catcache, relation_oid);
+    let source_name = drop_table_display_relation_name(ctx.catcache, relation_oid, ctx.search_path);
     let referenced_kind = drop_table_relation_kind_name(source_relkind);
 
     for dep in drop_table_direct_dependencies(ctx, relation_oid) {
@@ -1566,6 +1588,7 @@ impl Database {
                     .into_iter()
                     .map(|row| (row.oid, row))
                     .collect(),
+                search_path: &search_path,
             };
             let mut plan = DropTablePlan::default();
             for &relation_oid in &explicit_relation_oids {

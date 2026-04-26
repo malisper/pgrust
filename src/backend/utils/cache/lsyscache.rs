@@ -574,6 +574,16 @@ fn visible_type_row_by_name(
     }
 
     let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
+    let pg_catalog_in_search_path = search_path
+        .iter()
+        .any(|schema| schema.eq_ignore_ascii_case("pg_catalog"));
+    if !pg_catalog_in_search_path
+        && let Some(namespace) = namespace_row_by_name(db, client_id, txn_ctx, "pg_catalog")
+        && let Some(row) =
+            type_row_by_name_namespace(db, client_id, txn_ctx, normalized, namespace.oid)
+    {
+        return Some(row);
+    }
     for schema in search_path {
         let Some(namespace) = namespace_row_by_name(db, client_id, txn_ctx, schema) else {
             continue;
@@ -2199,6 +2209,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         let mut dynamic_type_rows = self.db.domain_type_rows_for_search_path(&self.search_path);
         dynamic_type_rows.extend(self.db.enum_type_rows_for_search_path(&self.search_path));
         dynamic_type_rows.extend(self.db.range_type_rows_for_search_path(&self.search_path));
+        let dynamic_range_rows = self.db.range_rows();
         Some(
             VisibleCatalog::with_search_path(
                 relcache.with_search_path(&self.search_path),
@@ -2208,7 +2219,8 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             .with_enum_rows(self.db.enum_rows_for_catalog())
             .with_uncommitted_enum_label_oids(self.db.uncommitted_enum_label_oids())
             .with_domain_checks(self.db.domain_checks_for_catalog())
-            .with_dynamic_type_rows(dynamic_type_rows),
+            .with_dynamic_type_rows(dynamic_type_rows)
+            .with_dynamic_range_rows(dynamic_range_rows),
         )
     }
 }

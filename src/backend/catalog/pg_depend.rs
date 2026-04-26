@@ -1,6 +1,6 @@
 use crate::backend::catalog::catalog::CatalogEntry;
 use crate::backend::executor::RelationDesc;
-use crate::backend::parser::SqlTypeKind;
+use crate::backend::parser::{SqlTypeKind, parse_expr};
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
     DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_ATTRDEF_RELATION_OID,
@@ -10,6 +10,7 @@ use crate::include::catalog::{
     PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_RELATION_OID,
     PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow, PgDependRow, PgStatisticExtRow,
 };
+use crate::include::nodes::parsenodes::{SqlExpr, function_arg_values};
 use std::collections::BTreeSet;
 
 pub fn sort_pg_depend_rows(rows: &mut [PgDependRow]) {
@@ -217,6 +218,7 @@ pub fn derived_relation_depend_rows(
             deptype: DEPENDENCY_AUTO,
         })
     }));
+    rows.extend(generated_column_attrdef_depend_rows(relation_oid, desc));
     rows.extend(desc.columns.iter().enumerate().filter_map(|(idx, column)| {
         Some(PgDependRow {
             classid: PG_CONSTRAINT_RELATION_OID,
@@ -258,6 +260,223 @@ pub fn derived_relation_depend_rows(
             }),
     );
     rows
+}
+
+fn generated_column_attrdef_depend_rows(
+    relation_oid: u32,
+    desc: &RelationDesc,
+) -> Vec<PgDependRow> {
+    let column_names = desc
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, column)| {
+            (!column.dropped).then(|| (column.name.to_ascii_lowercase(), (idx + 1) as i32))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut rows = Vec::new();
+    for column in &desc.columns {
+        if column.dropped || column.generated.is_none() {
+            continue;
+        }
+        let (Some(attrdef_oid), Some(expr_sql)) =
+            (column.attrdef_oid, column.default_expr.as_ref())
+        else {
+            continue;
+        };
+        let Ok(expr) = parse_expr(expr_sql) else {
+            continue;
+        };
+        let mut referenced = BTreeSet::new();
+        collect_sql_expr_column_names(&expr, &mut referenced);
+        rows.extend(referenced.into_iter().filter_map(|name| {
+            let attnum = column_names.get(&name.to_ascii_lowercase()).copied()?;
+            Some(PgDependRow {
+                classid: PG_ATTRDEF_RELATION_OID,
+                objid: attrdef_oid,
+                objsubid: 0,
+                refclassid: PG_CLASS_RELATION_OID,
+                refobjid: relation_oid,
+                refobjsubid: attnum,
+                deptype: DEPENDENCY_NORMAL,
+            })
+        }));
+    }
+    rows
+}
+
+fn collect_sql_expr_column_names(expr: &SqlExpr, out: &mut BTreeSet<String>) {
+    match expr {
+        SqlExpr::Column(name) => {
+            out.insert(name.clone());
+        }
+        SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::BitAnd(left, right)
+        | SqlExpr::BitOr(left, right)
+        | SqlExpr::BitXor(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::Mod(left, right)
+        | SqlExpr::Concat(left, right)
+        | SqlExpr::Eq(left, right)
+        | SqlExpr::NotEq(left, right)
+        | SqlExpr::Lt(left, right)
+        | SqlExpr::LtEq(left, right)
+        | SqlExpr::Gt(left, right)
+        | SqlExpr::GtEq(left, right)
+        | SqlExpr::RegexMatch(left, right)
+        | SqlExpr::And(left, right)
+        | SqlExpr::Or(left, right)
+        | SqlExpr::IsDistinctFrom(left, right)
+        | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::Overlaps(left, right)
+        | SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
+        | SqlExpr::JsonbContains(left, right)
+        | SqlExpr::JsonbContained(left, right)
+        | SqlExpr::JsonbExists(left, right)
+        | SqlExpr::JsonbExistsAny(left, right)
+        | SqlExpr::JsonbExistsAll(left, right)
+        | SqlExpr::JsonbPathExists(left, right)
+        | SqlExpr::JsonbPathMatch(left, right)
+        | SqlExpr::JsonGet(left, right)
+        | SqlExpr::JsonGetText(left, right)
+        | SqlExpr::JsonPath(left, right)
+        | SqlExpr::JsonPathText(left, right) => {
+            collect_sql_expr_column_names(left, out);
+            collect_sql_expr_column_names(right, out);
+        }
+        SqlExpr::BinaryOperator { left, right, .. }
+        | SqlExpr::GeometryBinaryOp { left, right, .. } => {
+            collect_sql_expr_column_names(left, out);
+            collect_sql_expr_column_names(right, out);
+        }
+        SqlExpr::UnaryPlus(inner)
+        | SqlExpr::Negate(inner)
+        | SqlExpr::BitNot(inner)
+        | SqlExpr::Cast(inner, _)
+        | SqlExpr::Not(inner)
+        | SqlExpr::IsNull(inner)
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::FieldSelect { expr: inner, .. } => {
+            collect_sql_expr_column_names(inner, out);
+        }
+        SqlExpr::Subscript { expr: inner, .. }
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::PrefixOperator { expr: inner, .. }
+        | SqlExpr::Collate { expr: inner, .. } => {
+            collect_sql_expr_column_names(inner, out);
+        }
+        SqlExpr::AtTimeZone { expr, zone } => {
+            collect_sql_expr_column_names(expr, out);
+            collect_sql_expr_column_names(zone, out);
+        }
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_sql_expr_column_names(expr, out);
+            collect_sql_expr_column_names(pattern, out);
+            if let Some(escape) = escape {
+                collect_sql_expr_column_names(escape, out);
+            }
+        }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            if let Some(arg) = arg {
+                collect_sql_expr_column_names(arg, out);
+            }
+            for when in args {
+                collect_sql_expr_column_names(&when.expr, out);
+                collect_sql_expr_column_names(&when.result, out);
+            }
+            if let Some(defresult) = defresult {
+                collect_sql_expr_column_names(defresult, out);
+            }
+        }
+        SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => {
+            for element in elements {
+                collect_sql_expr_column_names(element, out);
+            }
+        }
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            collect_sql_expr_column_names(array, out);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_sql_expr_column_names(lower, out);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_sql_expr_column_names(upper, out);
+                }
+            }
+        }
+        SqlExpr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                collect_sql_expr_column_names(child, out);
+            }
+        }
+        SqlExpr::FuncCall {
+            args,
+            order_by,
+            within_group,
+            filter,
+            ..
+        } => {
+            for arg in function_arg_values(args) {
+                collect_sql_expr_column_names(arg, out);
+            }
+            for item in order_by {
+                collect_sql_expr_column_names(&item.expr, out);
+            }
+            if let Some(within_group) = within_group {
+                for item in within_group {
+                    collect_sql_expr_column_names(&item.expr, out);
+                }
+            }
+            if let Some(filter) = filter {
+                collect_sql_expr_column_names(filter, out);
+            }
+        }
+        SqlExpr::QuantifiedArray { left, array, .. } => {
+            collect_sql_expr_column_names(left, out);
+            collect_sql_expr_column_names(array, out);
+        }
+        SqlExpr::Default
+        | SqlExpr::Const(_)
+        | SqlExpr::IntegerLiteral(_)
+        | SqlExpr::NumericLiteral(_)
+        | SqlExpr::ScalarSubquery(_)
+        | SqlExpr::ArraySubquery(_)
+        | SqlExpr::Exists(_)
+        | SqlExpr::InSubquery { .. }
+        | SqlExpr::QuantifiedSubquery { .. }
+        | SqlExpr::Random
+        | SqlExpr::CurrentDate
+        | SqlExpr::CurrentCatalog
+        | SqlExpr::CurrentSchema
+        | SqlExpr::CurrentUser
+        | SqlExpr::SessionUser
+        | SqlExpr::CurrentRole
+        | SqlExpr::CurrentTime { .. }
+        | SqlExpr::CurrentTimestamp { .. }
+        | SqlExpr::LocalTime { .. }
+        | SqlExpr::LocalTimestamp { .. } => {}
+    }
 }
 
 pub fn proc_depend_rows(

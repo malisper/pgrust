@@ -13,8 +13,8 @@ use crate::backend::libpq::pqcomm::{
 };
 use crate::backend::libpq::pqformat::{
     FloatFormatOptions, format_bytea_text, format_exec_error, format_exec_error_hint,
-    infer_command_tag, send_auth_ok, send_backend_key_data, send_bind_complete,
-    send_close_complete, send_command_complete, send_copy_data, send_copy_done,
+    infer_command_tag, infer_dml_returning_command_tag, send_auth_ok, send_backend_key_data,
+    send_bind_complete, send_close_complete, send_command_complete, send_copy_data, send_copy_done,
     send_copy_in_response, send_copy_out_response, send_empty_query, send_error,
     send_error_with_fields, send_error_with_hint, send_no_data, send_notice, send_notice_with_hint,
     send_notice_with_severity, send_notification_response, send_parameter_description,
@@ -429,6 +429,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 && let Some(position) = find_missing_function_position(sql, message)
             {
                 return Some(position);
+            }
+            if message.ends_with(" is not a unique index") {
+                return find_case_insensitive_token_position(sql, "ADD CONSTRAINT");
             }
             if let Some(value) = extract_quoted_error_value(message) {
                 value
@@ -2490,11 +2493,13 @@ fn execute_query_statement(
             let enum_labels = enum_label_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             flush_pending_backend_messages_with_sql(stream, db, &state.session, &sql)?;
+            let command_tag = infer_dml_returning_command_tag(&sql, rows.len())
+                .unwrap_or_else(|| format!("SELECT {}", rows.len()));
             send_query_result(
                 stream,
                 &columns,
                 &rows,
-                &format!("SELECT {}", rows.len()),
+                &command_tag,
                 FloatFormatOptions {
                     extra_float_digits: state.session.extra_float_digits(),
                     bytea_output: state.session.bytea_output(),
@@ -4398,7 +4403,7 @@ fn foreign_key_constraint_def(
     relation: &crate::backend::utils::cache::relcache::RelCacheEntry,
     row: &crate::include::catalog::PgConstraintRow,
 ) -> Option<String> {
-    let local_columns = row
+    let mut local_columns = row
         .conkey
         .as_ref()?
         .iter()
@@ -4422,7 +4427,7 @@ fn foreign_key_constraint_def(
         None,
         row.confrelid,
     )?;
-    let referenced_columns = row
+    let mut referenced_columns = row
         .confkey
         .as_ref()?
         .iter()
@@ -4438,6 +4443,14 @@ fn foreign_key_constraint_def(
                 .map(|column| column.name.clone())
         })
         .collect::<Option<Vec<_>>>()?;
+    if row.conperiod {
+        if let Some(column) = local_columns.last_mut() {
+            *column = format!("PERIOD {column}");
+        }
+        if let Some(column) = referenced_columns.last_mut() {
+            *column = format!("PERIOD {column}");
+        }
+    }
     let mut def = format!(
         "FOREIGN KEY ({}) REFERENCES {}({})",
         local_columns.join(", "),
@@ -5608,7 +5621,10 @@ fn handle_execute(
                     )?;
                 }
                 if result.completed {
-                    send_command_complete(stream, &format!("SELECT {}", result.processed))
+                    let tag = result
+                        .command_tag
+                        .unwrap_or_else(|| format!("SELECT {}", result.processed));
+                    send_command_complete(stream, &tag)
                 } else {
                     send_portal_suspended(stream)
                 }

@@ -517,6 +517,8 @@ fn run_statement(
         | Statement::CommentOnStatistics(_)
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableAddConstraint(_)
+        | Statement::AlterTableMulti(_)
+        | Statement::AlterTableReplicaIdentity(_)
         | Statement::AlterTableDropConstraint(_)
         | Statement::AlterTableAlterConstraint(_)
         | Statement::AlterTableRenameConstraint(_)
@@ -764,6 +766,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -774,7 +777,8 @@ fn run_statement(
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
-                compiled_functions: std::collections::HashMap::new(),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
@@ -819,6 +823,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -829,7 +834,8 @@ fn run_statement(
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
-                compiled_functions: std::collections::HashMap::new(),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
@@ -874,6 +880,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -884,7 +891,8 @@ fn run_statement(
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
-                compiled_functions: std::collections::HashMap::new(),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
@@ -929,6 +937,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -939,7 +948,8 @@ fn run_statement(
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
-                compiled_functions: std::collections::HashMap::new(),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
@@ -1089,6 +1099,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -1099,7 +1110,8 @@ fn run_statement(
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
-                compiled_functions: std::collections::HashMap::new(),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
@@ -1144,6 +1156,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -1154,7 +1167,8 @@ fn run_statement(
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
-                compiled_functions: std::collections::HashMap::new(),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
@@ -1202,6 +1216,7 @@ fn run_statement(
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,
+                    random_state: pgrust::backend::executor::PgPrngState::shared(),
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1212,7 +1227,8 @@ fn run_statement(
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
                     catalog: relcache.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
@@ -1271,6 +1287,7 @@ fn run_statement(
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,
+                    random_state: pgrust::backend::executor::PgPrngState::shared(),
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1281,7 +1298,8 @@ fn run_statement(
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
                     catalog: relcache.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
@@ -1340,6 +1358,7 @@ fn run_statement(
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,
+                    random_state: pgrust::backend::executor::PgPrngState::shared(),
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1350,7 +1369,8 @@ fn run_statement(
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
                     catalog: relcache.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),

@@ -5,6 +5,7 @@ use crate::include::nodes::primnodes::QueryColumn;
 pub enum SyntheticSystemViewKind {
     PgEnum,
     PgType,
+    PgRange,
     PgViews,
     PgMatviews,
     PgIndexes,
@@ -21,6 +22,7 @@ pub enum SyntheticSystemViewKind {
     InformationSchemaTables,
     InformationSchemaViews,
     InformationSchemaColumns,
+    InformationSchemaColumnColumnUsage,
     InformationSchemaTriggers,
 }
 
@@ -94,6 +96,7 @@ pub fn synthetic_system_views() -> &'static [SyntheticSystemView] {
 const PG_VIEW_ALIASES: &[&str] = &["pg_views", "pg_catalog.pg_views"];
 const PG_ENUM_ALIASES: &[&str] = &["pg_enum", "pg_catalog.pg_enum"];
 const PG_TYPE_ALIASES: &[&str] = &["pg_type", "pg_catalog.pg_type"];
+const PG_RANGE_ALIASES: &[&str] = &["pg_range", "pg_catalog.pg_range"];
 const PG_MATVIEWS_ALIASES: &[&str] = &["pg_matviews", "pg_catalog.pg_matviews"];
 const PG_INDEXES_ALIASES: &[&str] = &["pg_indexes", "pg_catalog.pg_indexes"];
 const PG_POLICIES_ALIASES: &[&str] = &["pg_policies", "pg_catalog.pg_policies"];
@@ -115,6 +118,8 @@ const PG_LOCKS_ALIASES: &[&str] = &["pg_locks", "pg_catalog.pg_locks"];
 const INFORMATION_SCHEMA_TABLES_ALIASES: &[&str] = &["information_schema.tables"];
 const INFORMATION_SCHEMA_VIEWS_ALIASES: &[&str] = &["information_schema.views"];
 const INFORMATION_SCHEMA_COLUMNS_ALIASES: &[&str] = &["information_schema.columns"];
+const INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_ALIASES: &[&str] =
+    &["information_schema.column_column_usage"];
 const INFORMATION_SCHEMA_TRIGGERS_ALIASES: &[&str] = &["information_schema.triggers"];
 
 const PG_ENUM_COLUMNS: &[SyntheticSystemViewColumn] = &[
@@ -130,9 +135,13 @@ const PG_TYPE_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::new("typnamespace", SqlType::new(SqlTypeKind::Oid)),
     SyntheticSystemViewColumn::new("typowner", SqlType::new(SqlTypeKind::Oid)),
     SyntheticSystemViewColumn::new("typlen", SqlType::new(SqlTypeKind::Int2)),
+    SyntheticSystemViewColumn::new("typbyval", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("typtype", SqlType::new(SqlTypeKind::InternalChar)),
+    SyntheticSystemViewColumn::new("typisdefined", SqlType::new(SqlTypeKind::Bool)),
     SyntheticSystemViewColumn::new("typalign", SqlType::new(SqlTypeKind::InternalChar)),
     SyntheticSystemViewColumn::new("typstorage", SqlType::new(SqlTypeKind::InternalChar)),
     SyntheticSystemViewColumn::new("typrelid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("typsubscript", SqlType::new(SqlTypeKind::RegProc)),
     SyntheticSystemViewColumn::new("typelem", SqlType::new(SqlTypeKind::Oid)),
     SyntheticSystemViewColumn::new("typarray", SqlType::new(SqlTypeKind::Oid)),
     SyntheticSystemViewColumn::new("typinput", SqlType::new(SqlTypeKind::RegProc)),
@@ -141,9 +150,21 @@ const PG_TYPE_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::new("typsend", SqlType::new(SqlTypeKind::RegProc)),
     SyntheticSystemViewColumn::new("typmodin", SqlType::new(SqlTypeKind::RegProc)),
     SyntheticSystemViewColumn::new("typmodout", SqlType::new(SqlTypeKind::RegProc)),
+    SyntheticSystemViewColumn::new("typdelim", SqlType::new(SqlTypeKind::InternalChar)),
     SyntheticSystemViewColumn::new("typanalyze", SqlType::new(SqlTypeKind::RegProc)),
-    SyntheticSystemViewColumn::new("typsubscript", SqlType::new(SqlTypeKind::RegProc)),
+    SyntheticSystemViewColumn::new("typbasetype", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("typcollation", SqlType::new(SqlTypeKind::Oid)),
     SyntheticSystemViewColumn::new("typacl", SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
+];
+
+const PG_RANGE_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("rngtypid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("rngsubtype", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("rngmultitypid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("rngcollation", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("rngsubopc", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("rngcanonical", SqlType::new(SqlTypeKind::RegProc)),
+    SyntheticSystemViewColumn::new("rngsubdiff", SqlType::new(SqlTypeKind::RegProc)),
 ];
 
 const PG_VIEWS_COLUMNS: &[SyntheticSystemViewColumn] = &[
@@ -415,13 +436,61 @@ const INFORMATION_SCHEMA_VIEWS_COLUMNS: &[SyntheticSystemViewColumn] = &[
 ];
 
 const INFORMATION_SCHEMA_COLUMNS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("table_catalog"),
+    SyntheticSystemViewColumn::text("table_schema"),
     SyntheticSystemViewColumn::text("table_name"),
     SyntheticSystemViewColumn::text("column_name"),
     SyntheticSystemViewColumn::new("ordinal_position", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("column_default"),
+    SyntheticSystemViewColumn::text("is_nullable"),
+    SyntheticSystemViewColumn::text("data_type"),
+    SyntheticSystemViewColumn::new("character_maximum_length", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("character_octet_length", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("numeric_precision", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("numeric_precision_radix", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("numeric_scale", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("datetime_precision", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("interval_type"),
+    SyntheticSystemViewColumn::new("interval_precision", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("character_set_catalog"),
+    SyntheticSystemViewColumn::text("character_set_schema"),
+    SyntheticSystemViewColumn::text("character_set_name"),
+    SyntheticSystemViewColumn::text("collation_catalog"),
+    SyntheticSystemViewColumn::text("collation_schema"),
+    SyntheticSystemViewColumn::text("collation_name"),
+    SyntheticSystemViewColumn::text("domain_catalog"),
+    SyntheticSystemViewColumn::text("domain_schema"),
+    SyntheticSystemViewColumn::text("domain_name"),
+    SyntheticSystemViewColumn::text("udt_catalog"),
+    SyntheticSystemViewColumn::text("udt_schema"),
+    SyntheticSystemViewColumn::text("udt_name"),
+    SyntheticSystemViewColumn::text("scope_catalog"),
+    SyntheticSystemViewColumn::text("scope_schema"),
+    SyntheticSystemViewColumn::text("scope_name"),
+    SyntheticSystemViewColumn::new("maximum_cardinality", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("dtd_identifier"),
+    SyntheticSystemViewColumn::text("is_self_referencing"),
+    SyntheticSystemViewColumn::text("is_identity"),
+    SyntheticSystemViewColumn::text("identity_generation"),
+    SyntheticSystemViewColumn::text("identity_start"),
+    SyntheticSystemViewColumn::text("identity_increment"),
+    SyntheticSystemViewColumn::text("identity_maximum"),
+    SyntheticSystemViewColumn::text("identity_minimum"),
+    SyntheticSystemViewColumn::text("identity_cycle"),
+    SyntheticSystemViewColumn::text("is_generated"),
+    SyntheticSystemViewColumn::text("generation_expression"),
     SyntheticSystemViewColumn::text("is_updatable"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 19] = [
+const INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("table_catalog"),
+    SyntheticSystemViewColumn::text("table_schema"),
+    SyntheticSystemViewColumn::text("table_name"),
+    SyntheticSystemViewColumn::text("column_name"),
+    SyntheticSystemViewColumn::text("dependent_column"),
+];
+
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 21] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgEnum,
         canonical_name: "pg_catalog.pg_enum",
@@ -434,6 +503,13 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 19] = [
         canonical_name: "pg_catalog.pg_type",
         aliases: PG_TYPE_ALIASES,
         columns: PG_TYPE_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgRange,
+        canonical_name: "pg_catalog.pg_range",
+        aliases: PG_RANGE_ALIASES,
+        columns: PG_RANGE_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {
@@ -546,6 +622,13 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 19] = [
         canonical_name: "information_schema.columns",
         aliases: INFORMATION_SCHEMA_COLUMNS_ALIASES,
         columns: INFORMATION_SCHEMA_COLUMNS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::InformationSchemaColumnColumnUsage,
+        canonical_name: "information_schema.column_column_usage",
+        aliases: INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_ALIASES,
+        columns: INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {
