@@ -13,6 +13,7 @@ use crate::include::nodes::parsenodes::{
     DropAggregateStatement, DropFunctionStatement, DropIndexStatement, DropProcedureStatement,
     DropSchemaStatement,
 };
+use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pgrust::database::save_range_type_entries;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -704,8 +705,10 @@ impl Database {
                 return Ok(StatementResult::AffectedRows(0));
             }
             [] => {
+                let signature =
+                    drop_signature_for_oids(&catalog, &drop_stmt.aggregate_name, &arg_oids);
                 return Err(ExecError::DetailedError {
-                    message: format!("aggregate {} does not exist", drop_stmt.aggregate_name),
+                    message: format!("aggregate {signature} does not exist"),
                     detail: None,
                     hint: None,
                     sqlstate: "42883",
@@ -1457,9 +1460,12 @@ impl Database {
                 if drop_stmt.if_exists {
                     continue;
                 }
-                return Err(ExecError::Parse(ParseError::TableDoesNotExist(
-                    index_name.clone(),
-                )));
+                return Err(ExecError::DetailedError {
+                    message: format!("index \"{index_name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                });
             };
             if !matches!(entry.relkind, 'i' | 'I') {
                 return Err(ExecError::Parse(ParseError::WrongObjectType {
@@ -1928,6 +1934,24 @@ impl Database {
             result
         }
     }
+}
+
+fn drop_signature_for_oids(catalog: &dyn CatalogLookup, name: &str, arg_oids: &[u32]) -> String {
+    let args = arg_oids
+        .iter()
+        .map(|oid| drop_signature_type_name(catalog, *oid))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({args})")
+}
+
+fn drop_signature_type_name(catalog: &dyn CatalogLookup, oid: u32) -> String {
+    if let Some(row) = catalog.type_by_oid(oid) {
+        let mut sql_type = row.sql_type;
+        sql_type.type_oid = 0;
+        return format_sql_type_name(sql_type);
+    }
+    oid.to_string()
 }
 
 fn drop_routine_signature_matches(

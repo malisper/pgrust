@@ -17,6 +17,10 @@ pub enum UngroupedColumnClause {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
+    Positioned {
+        source: Box<ParseError>,
+        position: usize,
+    },
     UnexpectedEof,
     UnexpectedToken {
         expected: &'static str,
@@ -97,9 +101,35 @@ pub enum ParseError {
     RecursiveView(String),
 }
 
+impl ParseError {
+    pub fn with_position(self, position: usize) -> Self {
+        match self {
+            ParseError::Positioned { source, .. } => ParseError::Positioned { source, position },
+            source => ParseError::Positioned {
+                source: Box::new(source),
+                position,
+            },
+        }
+    }
+
+    pub fn position(&self) -> Option<usize> {
+        match self {
+            ParseError::Positioned { position, .. } => Some(*position),
+            _ => None,
+        }
+    }
+
+    pub fn unpositioned(&self) -> &ParseError {
+        match self {
+            ParseError::Positioned { source, .. } => source.unpositioned(),
+            other => other,
+        }
+    }
+}
+
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        match self.unpositioned() {
             ParseError::UnexpectedEof => write!(f, "unexpected end of input"),
             ParseError::UnexpectedToken { actual, .. } => write!(f, "{actual}"),
             ParseError::InvalidInteger(value) => write!(f, "invalid integer: {value}"),
@@ -242,6 +272,9 @@ impl fmt::Display for ParseError {
             }
             ParseError::RecursiveView(name) => {
                 write!(f, "infinite recursion detected in view \"{name}\"")
+            }
+            ParseError::Positioned { .. } => {
+                unreachable!("positioned parse errors unwrap before display")
             }
         }
     }

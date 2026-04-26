@@ -3941,10 +3941,6 @@ fn bind_select_query_with_outer(
             );
         }
 
-        if stmt.targets.is_empty() && stmt.from.is_none() {
-            return Err(ParseError::EmptySelectList);
-        }
-
         let (mut base, scope) = if let Some(from) = &stmt.from {
             bind_from_item_with_ctes(
                 from,

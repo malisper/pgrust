@@ -111,6 +111,9 @@ pub(super) fn lookup_heap_relation_for_alter_table(
     match lookup_heap_relation_for_ddl(catalog, name) {
         Ok(relation) => Ok(Some(relation)),
         Err(ExecError::Parse(ParseError::TableDoesNotExist(_))) if if_exists => Ok(None),
+        Err(ExecError::Parse(ParseError::TableDoesNotExist(_))) => {
+            Err(ExecError::Parse(ParseError::UnknownTable(name.to_string())))
+        }
         Err(err) => Err(err),
     }
 }
@@ -127,9 +130,7 @@ pub(super) fn lookup_table_or_partitioned_table_for_alter_table(
             expected: "table",
         })),
         None if if_exists => Ok(None),
-        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
-            name.to_string(),
-        ))),
+        None => Err(ExecError::Parse(ParseError::UnknownTable(name.to_string()))),
     }
 }
 
@@ -1115,6 +1116,7 @@ fn serial_kind_for_identity_sql_type(sql_type: SqlType) -> Result<SerialKind, Pa
 
 pub(super) fn validate_alter_table_rename_column(
     desc: &RelationDesc,
+    relation_name: &str,
     column_name: &str,
     new_column_name: &str,
 ) -> Result<String, ExecError> {
@@ -1125,10 +1127,14 @@ pub(super) fn validate_alter_table_rename_column(
         }));
     }
     if is_system_column_name(new_column_name) {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "new non-system column name",
-            actual: new_column_name.to_string(),
-        }));
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "column name \"{new_column_name}\" conflicts with a system column name"
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42701",
+        });
     }
     if new_column_name.contains('.') {
         return Err(ExecError::Parse(ParseError::UnsupportedQualifiedName(
@@ -1151,10 +1157,14 @@ pub(super) fn validate_alter_table_rename_column(
             && !column.name.eq_ignore_ascii_case(column_name)
             && column.name.eq_ignore_ascii_case(&normalized_new)
     }) {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "new column name",
-            actual: format!("column already exists: {new_column_name}"),
-        }));
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "column \"{new_column_name}\" of relation \"{relation_name}\" already exists"
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42701",
+        });
     }
 
     Ok(normalized_new)
