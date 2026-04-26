@@ -37,6 +37,7 @@ use crate::backend::utils::time::date::{
 };
 use crate::backend::utils::time::datetime::{
     DateTimeParseError, timestamp_parts_from_usecs, timezone_offset_seconds,
+    timezone_offset_seconds_at_utc,
 };
 use crate::backend::utils::time::timestamp::{parse_timestamp_text, parse_timestamptz_text};
 use crate::include::catalog::{
@@ -119,13 +120,27 @@ fn timestamptz_local_timestamp(value: TimestampTzADT, config: &DateTimeConfig) -
     if !value.is_finite() {
         return TimestampADT(value.0);
     }
-    TimestampADT(value.0 + i64::from(timezone_offset_seconds(config)) * USECS_PER_SEC)
+    TimestampADT(
+        value.0 + i64::from(timezone_offset_seconds_at_utc(config, value.0)) * USECS_PER_SEC,
+    )
 }
 
 fn timestamp_time_tz_part(value: TimestampADT, config: &DateTimeConfig) -> Option<TimeTzADT> {
     timestamp_time_part(value).map(|time| TimeTzADT {
         time,
         offset_seconds: timezone_offset_seconds(config),
+    })
+}
+
+fn timestamptz_time_tz_part(value: TimestampTzADT, config: &DateTimeConfig) -> Option<TimeTzADT> {
+    if !value.is_finite() {
+        return None;
+    }
+    let offset_seconds = timezone_offset_seconds_at_utc(config, value.0);
+    let local = TimestampADT(value.0 + i64::from(offset_seconds) * USECS_PER_SEC);
+    timestamp_time_part(local).map(|time| TimeTzADT {
+        time,
+        offset_seconds,
     })
 }
 
@@ -3996,14 +4011,12 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     column: "time".into(),
                     details: "invalid input syntax for type time".into(),
                 }),
-            SqlTypeKind::TimeTz => {
-                timestamp_time_tz_part(timestamptz_local_timestamp(v, config), config)
-                    .map(Value::TimeTz)
-                    .ok_or_else(|| ExecError::InvalidStorageValue {
-                        column: "timetz".into(),
-                        details: "invalid input syntax for type time with time zone".into(),
-                    })
-            }
+            SqlTypeKind::TimeTz => timestamptz_time_tz_part(v, config)
+                .map(Value::TimeTz)
+                .ok_or_else(|| ExecError::InvalidStorageValue {
+                    column: "timetz".into(),
+                    details: "invalid input syntax for type time with time zone".into(),
+                }),
             SqlTypeKind::Text
             | SqlTypeKind::Name
             | SqlTypeKind::Char
