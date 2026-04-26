@@ -125,9 +125,13 @@ than the threshold is a regression, and a latency-ratio increase larger than the
 threshold is a regression. It exits non-zero only when a regression is detected,
 so it can be used manually now and wired into automation later.
 
-By default it also builds benchmark binaries into a worktree-local
-`.bench-target/` directory instead of the repo's shared `/tmp/pgrust-target`.
-That avoids cargo lock contention with other agents working in parallel.
+By default it also builds benchmark binaries into the bounded pgrust target
+pool under `/tmp`, for example `/tmp/pgrust-target-pool/pgrust/<slot>`,
+instead of the repo's single shared `/tmp/pgrust-target`. That reduces cargo
+lock contention with other agents working in parallel while still reusing
+artifacts within each pool slot. Use `PGRUST_TARGET_POOL_SIZE`,
+`PGRUST_TARGET_POOL_DIR`, or `PGRUST_TARGET_SLOT` to tune slot count, location,
+or explicit assignment.
 
 By default, if a PostgreSQL comparison is requested, the runner creates a
 temporary local PostgreSQL cluster under the results directory and stops it at

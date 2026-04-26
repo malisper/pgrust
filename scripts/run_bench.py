@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
@@ -38,6 +39,44 @@ PGBENCH_WORKLOADS = {
 }
 TOUCHED_INDEX_WORKLOADS = {"activity-count", "top-touched"}
 EVENT_INDEX_WORKLOADS = {"event-join"}
+
+
+def default_cargo_target_dir() -> Path:
+    repo_slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", REPO_ROOT.name).strip("-")
+    pool_size_raw = os.environ.get("PGRUST_TARGET_POOL_SIZE", "8")
+    try:
+        pool_size = int(pool_size_raw)
+    except ValueError as exc:
+        raise SystemExit(
+            f"PGRUST_TARGET_POOL_SIZE must be a positive integer, got: {pool_size_raw}"
+        ) from exc
+    if pool_size < 1:
+        raise SystemExit(
+            f"PGRUST_TARGET_POOL_SIZE must be a positive integer, got: {pool_size_raw}"
+        )
+
+    slot_raw = os.environ.get("PGRUST_TARGET_SLOT")
+    if slot_raw is not None:
+        try:
+            slot = int(slot_raw)
+        except ValueError as exc:
+            raise SystemExit(
+                f"PGRUST_TARGET_SLOT must be a non-negative integer, got: {slot_raw}"
+            ) from exc
+        if slot < 0 or slot >= pool_size:
+            raise SystemExit(
+                f"PGRUST_TARGET_SLOT must be between 0 and {pool_size - 1}, got: {slot_raw}"
+            )
+    else:
+        slot_key = os.environ.get("PGRUST_TARGET_POOL_KEY", str(REPO_ROOT))
+        slot_hash = hashlib.sha1(slot_key.encode("utf-8")).hexdigest()[:8]
+        slot = int(slot_hash, 16) % pool_size
+
+    pool_root = os.environ.get(
+        "PGRUST_TARGET_POOL_DIR",
+        str(Path("/tmp") / "pgrust-target-pool" / repo_slug),
+    )
+    return Path(pool_root) / str(slot)
 
 
 def utc_now() -> str:
@@ -125,7 +164,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target-dir",
         type=Path,
-        help="Cargo target dir for benchmark builds. Default: <repo>/.bench-target.",
+        help="Cargo target dir for benchmark builds. Default: bounded target-dir pool under /tmp.",
     )
     parser.add_argument(
         "--skip-build",
@@ -266,7 +305,7 @@ class BenchmarkRunner:
         self.artifacts_dir.mkdir(exist_ok=True)
         self.pgrust_data_dir = self.results_dir / "pgrust-data"
         self.postgres_data_dir = self.results_dir / "postgres-data"
-        self.cargo_target_dir = args.target_dir or REPO_ROOT / ".bench-target"
+        self.cargo_target_dir = args.target_dir or default_cargo_target_dir()
         self.repo_target_dir = self.cargo_target_dir / "release"
         self.server_process: subprocess.Popen[str] | None = None
         self.postgres_started_by_runner = False

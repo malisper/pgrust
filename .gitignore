@@ -1,5 +1,7 @@
 target/
 .bench-target/
+.context/target*/
+.context/cargo-target*/
 .bench-history/
 __pycache__/
 perl5/

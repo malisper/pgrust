@@ -152,8 +152,20 @@ Conductor workspaces live under `~/conductor/pgrust/<city>/`; use
 
 Run focused validation for the files/features changed.
 
-- Structural Rust changes: `cargo check`.
-- Module behavior: targeted `cargo test --lib --quiet <test-or-module>`.
+- `.cargo/config.toml` sends normal Cargo build artifacts to
+  `/tmp/pgrust-target` and uses `sccache` through
+  `scripts/rustc_sccache_wrapper.sh` when available.
+- For parallel agent work, run Cargo through `scripts/cargo_isolated.sh`, which
+  maps each checkout into a bounded pool under
+  `/tmp/pgrust-target-pool/pgrust/<slot>` and enables `sccache`. Override with
+  `PGRUST_TARGET_POOL_SIZE`, `PGRUST_TARGET_POOL_DIR`, or
+  `PGRUST_TARGET_SLOT` when needed. Do not put Cargo target dirs under
+  `.context/`, conductor workspaces, archived contexts, or repo-local
+  `target-*`/`cargo-target-*` paths because conductor can archive those
+  multi-GB build caches.
+- Structural Rust changes: `scripts/cargo_isolated.sh check`.
+- Module behavior: targeted
+  `scripts/cargo_isolated.sh test --lib --quiet <test-or-module>`.
 - SQL behavior: relevant regression file, not the full harness unless asked.
 - Do not run the full test suite unless the user asks; CI covers it.
 
