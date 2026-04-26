@@ -14,6 +14,7 @@ pub(crate) struct SeededSqlHarness {
     pub base: PathBuf,
     pub txns: TransactionManager,
     catalog: Catalog,
+    random_state: Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
 }
 
 impl SeededSqlHarness {
@@ -26,6 +27,7 @@ impl SeededSqlHarness {
             base,
             txns,
             catalog,
+            random_state: crate::backend::executor::PgPrngState::shared(),
         }
     }
 
@@ -38,6 +40,7 @@ impl SeededSqlHarness {
         let txns = self.txns.clone();
         let sql = sql.to_string();
         let mut catalog = std::mem::take(&mut self.catalog);
+        let random_state = Arc::clone(&self.random_state);
 
         let (catalog, result) = run_with_large_stack_result("executor-test-sql", move || {
             let smgr = MdStorageManager::new(&base);
@@ -57,6 +60,7 @@ impl SeededSqlHarness {
                 large_objects: Some(Arc::new(
                     crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
                 )),
+                stats_import_runtime: None,
                 async_notify_runtime: None,
                 advisory_locks: Arc::new(crate::backend::storage::lmgr::AdvisoryLockManager::new()),
                 row_locks: Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
@@ -88,6 +92,7 @@ impl SeededSqlHarness {
                 transaction_lock_scope_id: None,
                 next_command_id: 0,
                 default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+                random_state,
                 expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -98,8 +103,13 @@ impl SeededSqlHarness {
                 catalog_effects: Vec::new(),
                 temp_effects: Vec::new(),
                 database: None,
+                pending_catalog_effects: Vec::new(),
+                pending_table_locks: Vec::new(),
                 catalog: catalog.materialize_visible_catalog(),
-                compiled_functions: std::collections::HashMap::new(),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
+                    crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
+                )),
+                pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),

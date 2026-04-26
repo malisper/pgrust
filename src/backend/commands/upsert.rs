@@ -610,7 +610,7 @@ pub(crate) fn execute_insert_on_conflict_rows(
                     continue;
                 }
                 match insert_index_entry_for_row(
-                    stmt.rel, &stmt.desc, index, &values, heap_tid, ctx,
+                    stmt.rel, &stmt.desc, index, &values, heap_tid, None, ctx,
                 ) {
                     Ok(()) => {}
                     Err(ExecError::UniqueViolation {
@@ -631,7 +631,9 @@ pub(crate) fn execute_insert_on_conflict_rows(
             }
 
             for index in &non_arbiter_indexes {
-                insert_index_entry_for_row(stmt.rel, &stmt.desc, index, &values, heap_tid, ctx)?;
+                insert_index_entry_for_row(
+                    stmt.rel, &stmt.desc, index, &values, heap_tid, None, ctx,
+                )?;
             }
             let mut inserted_values = values.to_vec();
             Value::materialize_all(&mut inserted_values);

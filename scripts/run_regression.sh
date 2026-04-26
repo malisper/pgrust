@@ -127,6 +127,15 @@ transform_alter_generic_fixture() {
     " "$input_path" > "$output_path"
 }
 
+transform_type_sanity_fixture() {
+    local input_path="$1"
+    local output_path="$2"
+
+    perl -0pe "
+        s/CREATE FUNCTION is_catalog_text_unique_index_oid\\(oid\\) RETURNS bool\\n\\s+AS :'regresslib', 'is_catalog_text_unique_index_oid'\\n\\s+LANGUAGE C STRICT;/CREATE FUNCTION is_catalog_text_unique_index_oid(oid) RETURNS bool\\n    AS 'pg_rust_is_catalog_text_unique_index_oid'\\n    LANGUAGE internal STRICT;/s;
+    " "$input_path" > "$output_path"
+}
+
 transform_triggers_fixture() {
     local input_path="$1"
     local output_path="$2"
@@ -215,6 +224,13 @@ prepare_test_fixture() {
             PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
             transform_alter_generic_fixture "$sql_file" "$PREPARED_SQL_FILE"
             transform_alter_generic_fixture "$expected_file" "$PREPARED_EXPECTED_FILE"
+            ;;
+        type_sanity)
+            mkdir -p "$fixture_dir"
+            PREPARED_SQL_FILE="$fixture_dir/${test_name}.sql"
+            PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
+            transform_type_sanity_fixture "$sql_file" "$PREPARED_SQL_FILE"
+            transform_type_sanity_fixture "$expected_file" "$PREPARED_EXPECTED_FILE"
             ;;
         triggers)
             mkdir -p "$fixture_dir"
@@ -545,7 +561,7 @@ SKIP_BUILD=false
 SKIP_SERVER=false
 TIMEOUT=60
 JOBS=4
-STATEMENT_TIMEOUT=5
+STATEMENT_TIMEOUT="${PGRUST_STATEMENT_TIMEOUT:-5}"
 SINGLE_TEST=""
 RESULTS_DIR=""
 DATA_DIR=""

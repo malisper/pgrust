@@ -335,8 +335,10 @@ pub(super) fn root_call_returns_set(
         return false;
     };
     let normalized = name.to_ascii_lowercase();
-    if matches!(normalized.as_str(), "generate_series" | "unnest")
-        || resolve_json_table_function(&normalized).is_some()
+    if matches!(
+        normalized.as_str(),
+        "generate_series" | "generate_subscripts" | "unnest"
+    ) || resolve_json_table_function(&normalized).is_some()
         || resolve_json_record_function(&normalized).is_some_and(|kind| kind.is_set_returning())
         || resolve_regex_table_function(&normalized).is_some()
         || resolve_string_table_function(&normalized).is_some()
@@ -502,6 +504,98 @@ fn bind_select_list_srf_call(
                 output_columns: vec![QueryColumn {
                     name: "generate_series".into(),
                     sql_type: common,
+                    wire_type_oid: None,
+                }],
+                with_ordinality: false,
+            })
+        }
+        "generate_subscripts" => {
+            if !(2..=3).contains(&args.len()) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "generate_subscripts(array, dimension [, reverse])",
+                    actual: format!("generate_subscripts with {} arguments", args.len()),
+                });
+            }
+            let array_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            if !array_type.is_array
+                && !matches!(
+                    array_type.kind,
+                    SqlTypeKind::Int2Vector | SqlTypeKind::OidVector
+                )
+            {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "array argument to generate_subscripts",
+                    actual: sql_type_name(array_type),
+                });
+            }
+            let dimension_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let array = bind_expr_with_outer_and_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            let dimension = bind_expr_with_outer_and_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            let reverse = if args.len() == 3 {
+                let reverse_type = infer_sql_expr_type_with_ctes(
+                    &args[2],
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                Some(coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        &args[2],
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    reverse_type,
+                    SqlType::new(SqlTypeKind::Bool),
+                ))
+            } else {
+                None
+            };
+            Ok(SetReturningCall::GenerateSubscripts {
+                func_oid: resolved_proc_oid,
+                func_variadic: resolved_func_variadic,
+                array,
+                dimension: coerce_bound_expr(
+                    dimension,
+                    dimension_type,
+                    SqlType::new(SqlTypeKind::Int4),
+                ),
+                reverse,
+                output_columns: vec![QueryColumn {
+                    name: "generate_subscripts".into(),
+                    sql_type: SqlType::new(SqlTypeKind::Int4),
                     wire_type_oid: None,
                 }],
                 with_ordinality: false,
@@ -856,6 +950,7 @@ fn bind_select_list_srf_call(
                                 func_variadic: resolved.func_variadic,
                                 relid,
                                 output_columns,
+                                with_ordinality: false,
                             },
                             ResolvedSrfImpl::PartitionAncestors => {
                                 SetReturningCall::PartitionAncestors {
@@ -863,6 +958,7 @@ fn bind_select_list_srf_call(
                                     func_variadic: resolved.func_variadic,
                                     relid,
                                     output_columns,
+                                    with_ordinality: false,
                                 }
                             }
                             _ => {

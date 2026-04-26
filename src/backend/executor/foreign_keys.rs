@@ -8,14 +8,27 @@ use crate::backend::access::heap::heapam::{
 };
 use crate::backend::access::index::indexam;
 use crate::backend::access::transam::xact::{CommandId, Snapshot};
+use crate::backend::commands::trigger::trigger_is_enabled_for_session;
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::parser::{
     BoundForeignKeyConstraint, BoundReferencedByForeignKey, ForeignKeyMatchType,
 };
 use crate::include::access::scankey::ScanKeyData;
+use crate::include::catalog::{
+    RI_FKEY_CASCADE_DEL_PROC_OID, RI_FKEY_CASCADE_UPD_PROC_OID, RI_FKEY_CHECK_INS_PROC_OID,
+    RI_FKEY_CHECK_UPD_PROC_OID, RI_FKEY_NOACTION_DEL_PROC_OID, RI_FKEY_NOACTION_UPD_PROC_OID,
+    RI_FKEY_RESTRICT_DEL_PROC_OID, RI_FKEY_RESTRICT_UPD_PROC_OID, RI_FKEY_SETDEFAULT_DEL_PROC_OID,
+    RI_FKEY_SETDEFAULT_UPD_PROC_OID, RI_FKEY_SETNULL_DEL_PROC_OID, RI_FKEY_SETNULL_UPD_PROC_OID,
+};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{SlotKind, ToastRelationRef, TupleSlot};
 
+use super::expr_multirange::{
+    multirange_contains_multirange, multirange_contains_range, multirange_from_range,
+    multirange_overlaps_multirange, multirange_overlaps_range, normalize_multirange,
+};
+use super::expr_range::{range_contains_range, range_overlap};
+use super::relation_values_visible_for_error_detail;
 use super::{ConstraintTiming, ExecError, ExecutorContext, compare_order_values};
 
 fn maybe_defer_constraint(
@@ -36,6 +49,108 @@ fn maybe_defer_constraint(
     true
 }
 
+fn foreign_key_check_trigger_enabled(
+    constraint: &BoundForeignKeyConstraint,
+    is_update: bool,
+    ctx: &ExecutorContext,
+) -> bool {
+    let proc_oid = if is_update {
+        RI_FKEY_CHECK_UPD_PROC_OID
+    } else {
+        RI_FKEY_CHECK_INS_PROC_OID
+    };
+    foreign_key_trigger_enabled(constraint.constraint_oid, proc_oid, None, ctx)
+}
+
+pub(crate) fn foreign_key_action_trigger_enabled_on_update(
+    constraint: &BoundReferencedByForeignKey,
+    ctx: &ExecutorContext,
+) -> bool {
+    foreign_key_trigger_enabled(
+        constraint.constraint_oid,
+        foreign_key_update_proc_oid(constraint.on_update),
+        Some(constraint.child_relation_oid),
+        ctx,
+    )
+}
+
+pub(crate) fn foreign_key_action_trigger_enabled_on_delete(
+    constraint: &BoundReferencedByForeignKey,
+    ctx: &ExecutorContext,
+) -> bool {
+    foreign_key_trigger_enabled(
+        constraint.constraint_oid,
+        foreign_key_delete_proc_oid(constraint.on_delete),
+        Some(constraint.child_relation_oid),
+        ctx,
+    )
+}
+
+fn foreign_key_trigger_enabled(
+    constraint_oid: u32,
+    proc_oid: u32,
+    constrrelid: Option<u32>,
+    ctx: &ExecutorContext,
+) -> bool {
+    let Some(catalog) = ctx.catalog.as_ref() else {
+        return true;
+    };
+    let trigger = catalog.relcache().entries().find_map(|(_, relation)| {
+        catalog
+            .trigger_rows_for_relation(relation.relation_oid)
+            .into_iter()
+            .find(|row| {
+                row.tgisinternal
+                    && row.tgconstraint == constraint_oid
+                    && row.tgfoid == proc_oid
+                    && constrrelid.is_none_or(|oid| row.tgconstrrelid == oid)
+            })
+    });
+    trigger
+        .as_ref()
+        .is_none_or(|row| trigger_is_enabled_for_session(row, ctx.session_replication_role))
+}
+
+fn foreign_key_delete_proc_oid(action: crate::include::nodes::parsenodes::ForeignKeyAction) -> u32 {
+    match action {
+        crate::include::nodes::parsenodes::ForeignKeyAction::Cascade => {
+            RI_FKEY_CASCADE_DEL_PROC_OID
+        }
+        crate::include::nodes::parsenodes::ForeignKeyAction::Restrict => {
+            RI_FKEY_RESTRICT_DEL_PROC_OID
+        }
+        crate::include::nodes::parsenodes::ForeignKeyAction::SetNull => {
+            RI_FKEY_SETNULL_DEL_PROC_OID
+        }
+        crate::include::nodes::parsenodes::ForeignKeyAction::SetDefault => {
+            RI_FKEY_SETDEFAULT_DEL_PROC_OID
+        }
+        crate::include::nodes::parsenodes::ForeignKeyAction::NoAction => {
+            RI_FKEY_NOACTION_DEL_PROC_OID
+        }
+    }
+}
+
+fn foreign_key_update_proc_oid(action: crate::include::nodes::parsenodes::ForeignKeyAction) -> u32 {
+    match action {
+        crate::include::nodes::parsenodes::ForeignKeyAction::Cascade => {
+            RI_FKEY_CASCADE_UPD_PROC_OID
+        }
+        crate::include::nodes::parsenodes::ForeignKeyAction::Restrict => {
+            RI_FKEY_RESTRICT_UPD_PROC_OID
+        }
+        crate::include::nodes::parsenodes::ForeignKeyAction::SetNull => {
+            RI_FKEY_SETNULL_UPD_PROC_OID
+        }
+        crate::include::nodes::parsenodes::ForeignKeyAction::SetDefault => {
+            RI_FKEY_SETDEFAULT_UPD_PROC_OID
+        }
+        crate::include::nodes::parsenodes::ForeignKeyAction::NoAction => {
+            RI_FKEY_NOACTION_UPD_PROC_OID
+        }
+    }
+}
+
 pub(crate) fn enforce_outbound_foreign_keys(
     relation_name: &str,
     constraints: &[BoundForeignKeyConstraint],
@@ -45,6 +160,9 @@ pub(crate) fn enforce_outbound_foreign_keys(
 ) -> Result<(), ExecError> {
     for constraint in constraints {
         if !constraint.enforced {
+            continue;
+        }
+        if !foreign_key_check_trigger_enabled(constraint, previous_values.is_some(), ctx) {
             continue;
         }
         if previous_values.is_some_and(|previous| {
@@ -83,7 +201,12 @@ pub(crate) fn enforce_outbound_foreign_keys(
         ) {
             continue;
         }
-        if referenced_key_exists(constraint, &key_values, ctx)? {
+        let exists = if constraint.period_column_index.is_some() {
+            temporal_referenced_key_exists(constraint, values, ctx)?
+        } else {
+            referenced_key_exists(constraint, &key_values, ctx)?
+        };
+        if exists {
             continue;
         }
         return Err(ExecError::ForeignKeyViolation {
@@ -115,6 +238,9 @@ pub(crate) fn enforce_inbound_foreign_keys_on_update(
         if !constraint.enforced {
             continue;
         }
+        if !foreign_key_action_trigger_enabled_on_update(constraint, ctx) {
+            continue;
+        }
         if !key_columns_changed(
             previous_values,
             values,
@@ -130,7 +256,25 @@ pub(crate) fn enforce_inbound_foreign_keys_on_update(
         ) {
             continue;
         }
-        enforce_inbound_foreign_key(relation_name, constraint, previous_values, ctx)?;
+        if constraint.referenced_period_column_index.is_some() {
+            let key_values =
+                extract_key_values(previous_values, &constraint.referenced_column_indexes);
+            if temporal_child_reference_would_be_invalid(
+                constraint,
+                previous_values,
+                Some(values),
+                ctx,
+            )? {
+                return Err(inbound_foreign_key_violation(
+                    relation_name,
+                    constraint,
+                    &key_values,
+                    ctx,
+                ));
+            }
+        } else {
+            enforce_inbound_foreign_key(relation_name, constraint, previous_values, ctx)?;
+        }
     }
     Ok(())
 }
@@ -145,6 +289,9 @@ pub(crate) fn enforce_inbound_foreign_keys_on_delete(
         if !constraint.enforced {
             continue;
         }
+        if !foreign_key_action_trigger_enabled_on_delete(constraint, ctx) {
+            continue;
+        }
         if maybe_defer_constraint(
             ctx,
             constraint.constraint_oid,
@@ -153,7 +300,19 @@ pub(crate) fn enforce_inbound_foreign_keys_on_delete(
         ) {
             continue;
         }
-        enforce_inbound_foreign_key(relation_name, constraint, values, ctx)?;
+        if constraint.referenced_period_column_index.is_some() {
+            let key_values = extract_key_values(values, &constraint.referenced_column_indexes);
+            if temporal_child_reference_would_be_invalid(constraint, values, None, ctx)? {
+                return Err(inbound_foreign_key_violation(
+                    relation_name,
+                    constraint,
+                    &key_values,
+                    ctx,
+                ));
+            }
+        } else {
+            enforce_inbound_foreign_key(relation_name, constraint, values, ctx)?;
+        }
     }
     Ok(())
 }
@@ -194,18 +353,27 @@ fn inbound_foreign_key_violation(
     key_values: &[Value],
     ctx: &ExecutorContext,
 ) -> ExecError {
+    let detail =
+        if relation_values_visible_for_error_detail(constraint.referenced_relation_oid, ctx) {
+            format!(
+                "Key ({})=({}) is still referenced from table \"{}\".",
+                constraint.referenced_column_names.join(", "),
+                render_key_values(key_values, ctx),
+                constraint.child_relation_name
+            )
+        } else {
+            format!(
+                "Key is still referenced from table \"{}\".",
+                constraint.child_relation_name
+            )
+        };
     ExecError::ForeignKeyViolation {
         constraint: constraint.constraint_name.clone(),
         message: format!(
             "update or delete on table \"{relation_name}\" violates foreign key constraint \"{}\" on table \"{}\"",
             constraint.constraint_name, constraint.child_relation_name
         ),
-        detail: Some(format!(
-            "Key ({})=({}) is still referenced from table \"{}\".",
-            constraint.referenced_column_names.join(", "),
-            render_key_values(key_values, ctx),
-            constraint.child_relation_name
-        )),
+        detail: Some(detail),
     }
 }
 
@@ -223,6 +391,194 @@ fn referenced_key_exists(
         &snapshot,
         ctx,
     )
+}
+
+fn temporal_referenced_key_exists(
+    constraint: &BoundForeignKeyConstraint,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    let Some(period_index) = constraint.period_column_index else {
+        return Ok(false);
+    };
+    let Some(referenced_period_index) = constraint.referenced_period_column_index else {
+        return Ok(false);
+    };
+    let Some(child_period) = values.get(period_index) else {
+        return Ok(false);
+    };
+    let mut snapshot = ctx.snapshot.clone();
+    snapshot.current_cid = CommandId::MAX;
+    let parent_periods = collect_temporal_parent_periods(
+        constraint.referenced_rel,
+        constraint.referenced_toast,
+        &constraint.referenced_desc,
+        &constraint.column_indexes,
+        Some(period_index),
+        values,
+        &constraint.referenced_column_indexes,
+        Some(referenced_period_index),
+        None,
+        None,
+        &snapshot,
+        ctx,
+    )?;
+    temporal_periods_cover(&parent_periods, child_period)
+}
+
+fn temporal_child_reference_would_be_invalid(
+    constraint: &BoundReferencedByForeignKey,
+    old_parent_values: &[Value],
+    replacement_parent_values: Option<&[Value]>,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    let Some(child_period_index) = constraint.child_period_column_index else {
+        return Ok(false);
+    };
+    let Some(referenced_period_index) = constraint.referenced_period_column_index else {
+        return Ok(false);
+    };
+    let Some(old_parent_period) = old_parent_values.get(referenced_period_index) else {
+        return Ok(false);
+    };
+    let mut snapshot = ctx.snapshot.clone();
+    snapshot.current_cid = CommandId::MAX;
+    let mut scan = heap_scan_begin_visible(
+        &ctx.pool,
+        ctx.client_id,
+        constraint.child_rel,
+        snapshot.clone(),
+    )?;
+    let desc = Rc::new(constraint.child_desc.clone());
+    let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+    let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
+    let mut slot = TupleSlot::empty(decoder.ncols());
+    slot.decoder = Some(Rc::clone(&decoder));
+    slot.toast = slot_toast_context(constraint.child_toast, ctx);
+    let mut invalid = false;
+
+    while !invalid {
+        ctx.check_for_interrupts()?;
+        let next = heap_scan_prepare_next_page::<ExecError>(
+            &*ctx.pool,
+            ctx.client_id,
+            &ctx.txns,
+            &mut scan,
+        )?;
+        let Some(buffer_id) = next else {
+            break;
+        };
+
+        let page =
+            unsafe { ctx.pool.page_unlocked(buffer_id) }.expect("pinned buffer must be valid");
+        let pin = scan
+            .pinned_buffer_rc()
+            .expect("buffer must be pinned after prepare_next_page");
+        let mut pending_child_values = Vec::new();
+
+        while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
+            ctx.check_for_interrupts()?;
+            slot.kind = SlotKind::BufferHeapTuple {
+                desc: Rc::clone(&desc),
+                attr_descs: Rc::clone(&attr_descs),
+                tid,
+                tuple_ptr: tuple_bytes.as_ptr(),
+                tuple_len: tuple_bytes.len(),
+                pin: Rc::clone(&pin),
+            };
+            slot.tts_nvalid = 0;
+            slot.tts_values.clear();
+            slot.decode_offset = 0;
+            slot.values()?;
+            if !values_match_cross_indexes(
+                &slot.tts_values,
+                &constraint.child_column_indexes,
+                Some(child_period_index),
+                old_parent_values,
+                &constraint.referenced_column_indexes,
+                Some(referenced_period_index),
+            ) {
+                continue;
+            }
+            let Some(child_period) = slot.tts_values.get(child_period_index) else {
+                continue;
+            };
+            if !periods_overlap(child_period, old_parent_period)? {
+                continue;
+            }
+            pending_child_values.push(
+                slot.tts_values
+                    .iter()
+                    .map(Value::to_owned_value)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        drop(pin);
+
+        for child_values in pending_child_values {
+            if !temporal_child_period_still_covered(
+                constraint,
+                &child_values,
+                old_parent_values,
+                replacement_parent_values,
+                &snapshot,
+                ctx,
+            )? {
+                invalid = true;
+                break;
+            }
+        }
+    }
+
+    heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, &mut scan)?;
+    Ok(invalid)
+}
+
+fn temporal_child_period_still_covered(
+    constraint: &BoundReferencedByForeignKey,
+    child_values: &[Value],
+    excluded_parent_values: &[Value],
+    replacement_parent_values: Option<&[Value]>,
+    snapshot: &Snapshot,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    let Some(child_period_index) = constraint.child_period_column_index else {
+        return Ok(false);
+    };
+    let Some(referenced_period_index) = constraint.referenced_period_column_index else {
+        return Ok(false);
+    };
+    let Some(child_period) = child_values.get(child_period_index) else {
+        return Ok(false);
+    };
+    let mut parent_periods = collect_temporal_parent_periods(
+        constraint.referenced_rel,
+        constraint.referenced_toast,
+        &constraint.referenced_desc,
+        &constraint.child_column_indexes,
+        Some(child_period_index),
+        child_values,
+        &constraint.referenced_column_indexes,
+        Some(referenced_period_index),
+        Some(excluded_parent_values),
+        replacement_parent_values,
+        snapshot,
+        ctx,
+    )?;
+    if let Some(replacement) = replacement_parent_values
+        && values_match_cross_indexes(
+            child_values,
+            &constraint.child_column_indexes,
+            Some(child_period_index),
+            replacement,
+            &constraint.referenced_column_indexes,
+            Some(referenced_period_index),
+        )
+        && let Some(period) = replacement.get(referenced_period_index)
+    {
+        parent_periods.push(period.to_owned_value());
+    }
+    temporal_periods_cover(&parent_periods, child_period)
 }
 
 fn child_row_exists(
@@ -381,6 +737,95 @@ fn heap_has_matching_row(
     Ok(found)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn collect_temporal_parent_periods(
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    desc: &crate::backend::executor::RelationDesc,
+    child_key_indexes: &[usize],
+    child_period_index: Option<usize>,
+    child_values: &[Value],
+    parent_key_indexes: &[usize],
+    parent_period_index: Option<usize>,
+    excluded_parent_values: Option<&[Value]>,
+    replacement_parent_values: Option<&[Value]>,
+    snapshot: &Snapshot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, rel, snapshot.clone())?;
+    let desc = Rc::new(desc.clone());
+    let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+    let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
+    let mut slot = TupleSlot::empty(decoder.ncols());
+    slot.decoder = Some(Rc::clone(&decoder));
+    slot.toast = slot_toast_context(toast, ctx);
+    let mut periods = Vec::new();
+
+    loop {
+        ctx.check_for_interrupts()?;
+        let next = heap_scan_prepare_next_page::<ExecError>(
+            &*ctx.pool,
+            ctx.client_id,
+            &ctx.txns,
+            &mut scan,
+        )?;
+        let Some(buffer_id) = next else {
+            break;
+        };
+
+        let page =
+            unsafe { ctx.pool.page_unlocked(buffer_id) }.expect("pinned buffer must be valid");
+        let pin = scan
+            .pinned_buffer_rc()
+            .expect("buffer must be pinned after prepare_next_page");
+
+        while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
+            ctx.check_for_interrupts()?;
+            slot.kind = SlotKind::BufferHeapTuple {
+                desc: Rc::clone(&desc),
+                attr_descs: Rc::clone(&attr_descs),
+                tid,
+                tuple_ptr: tuple_bytes.as_ptr(),
+                tuple_len: tuple_bytes.len(),
+                pin: Rc::clone(&pin),
+            };
+            slot.tts_nvalid = 0;
+            slot.tts_values.clear();
+            slot.decode_offset = 0;
+            slot.values()?;
+            let _ = replacement_parent_values;
+            if excluded_parent_values.is_some_and(|excluded| {
+                row_matches_key(
+                    &slot.tts_values,
+                    parent_key_indexes,
+                    &extract_key_values(excluded, parent_key_indexes),
+                )
+            }) {
+                continue;
+            }
+            if !values_match_cross_indexes(
+                child_values,
+                child_key_indexes,
+                child_period_index,
+                &slot.tts_values,
+                parent_key_indexes,
+                parent_period_index,
+            ) {
+                continue;
+            }
+            if let Some(period_index) = parent_period_index
+                && let Some(period) = slot.tts_values.get(period_index)
+            {
+                periods.push(period.to_owned_value());
+            }
+        }
+        drop(pin);
+    }
+
+    heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, &mut scan)?;
+    Ok(periods)
+}
+
 fn row_matches_key(values: &[Value], key_indexes: &[usize], key_values: &[Value]) -> bool {
     key_indexes.iter().zip(key_values).all(|(index, expected)| {
         values.get(*index).is_some_and(|actual| {
@@ -389,6 +834,118 @@ fn row_matches_key(values: &[Value], key_indexes: &[usize], key_values: &[Value]
                 == Ordering::Equal
         })
     })
+}
+
+fn values_match_cross_indexes(
+    left_values: &[Value],
+    left_indexes: &[usize],
+    left_period_index: Option<usize>,
+    right_values: &[Value],
+    right_indexes: &[usize],
+    right_period_index: Option<usize>,
+) -> bool {
+    left_indexes
+        .iter()
+        .zip(right_indexes)
+        .filter(|(left, right)| {
+            Some(**left) != left_period_index && Some(**right) != right_period_index
+        })
+        .all(|(left, right)| {
+            left_values
+                .get(*left)
+                .zip(right_values.get(*right))
+                .is_some_and(|(left, right)| {
+                    compare_order_values(left, right, None, None, false)
+                        .expect("foreign-key key comparisons use implicit default collation")
+                        == Ordering::Equal
+                })
+        })
+}
+
+fn periods_overlap(left: &Value, right: &Value) -> Result<bool, ExecError> {
+    match (left, right) {
+        (Value::Range(left), Value::Range(right)) => Ok(range_overlap(left, right)),
+        (Value::Multirange(left), Value::Range(right)) => {
+            Ok(multirange_overlaps_range(left, right))
+        }
+        (Value::Range(left), Value::Multirange(right)) => {
+            Ok(multirange_overlaps_range(right, left))
+        }
+        (Value::Multirange(left), Value::Multirange(right)) => {
+            Ok(multirange_overlaps_multirange(left, right))
+        }
+        (Value::Null, _) | (_, Value::Null) => Ok(false),
+        _ => Err(ExecError::TypeMismatch {
+            op: "PERIOD foreign key",
+            left: left.to_owned_value(),
+            right: right.to_owned_value(),
+        }),
+    }
+}
+
+fn temporal_periods_cover(
+    parent_periods: &[Value],
+    child_period: &Value,
+) -> Result<bool, ExecError> {
+    match child_period {
+        Value::Range(child) => {
+            let mut ranges = Vec::new();
+            for period in parent_periods {
+                match period {
+                    Value::Range(range) => ranges.push(range.clone()),
+                    Value::Multirange(multirange) => ranges.extend(multirange.ranges.clone()),
+                    Value::Null => {}
+                    other => {
+                        return Err(ExecError::TypeMismatch {
+                            op: "PERIOD foreign key",
+                            left: other.to_owned_value(),
+                            right: child_period.to_owned_value(),
+                        });
+                    }
+                }
+            }
+            if ranges.is_empty() {
+                return Ok(false);
+            }
+            match multirange_from_range(child) {
+                Ok(multirange) => {
+                    let parent = normalize_multirange(multirange.multirange_type, ranges)?;
+                    Ok(multirange_contains_range(&parent, child))
+                }
+                Err(_) => Ok(ranges
+                    .iter()
+                    .any(|parent| range_contains_range(parent, child))),
+            }
+        }
+        Value::Multirange(child) => {
+            let mut ranges = Vec::new();
+            for period in parent_periods {
+                match period {
+                    Value::Range(range) => ranges.push(range.clone()),
+                    Value::Multirange(multirange) => ranges.extend(multirange.ranges.clone()),
+                    Value::Null => {}
+                    other => {
+                        return Err(ExecError::TypeMismatch {
+                            op: "PERIOD foreign key",
+                            left: other.to_owned_value(),
+                            right: child_period.to_owned_value(),
+                        });
+                    }
+                }
+            }
+            if ranges.is_empty() {
+                return Ok(false);
+            }
+            let parent = normalize_multirange(child.multirange_type, ranges)?;
+            Ok(multirange_contains_multirange(&parent, child))
+        }
+        Value::Null => Ok(true),
+        other => Err(ExecError::TypeMismatch {
+            op: "PERIOD foreign key",
+            left: other.to_owned_value(),
+            right: Value::Null,
+        }),
+    }
 }
 
 fn key_columns_changed(previous_values: &[Value], values: &[Value], indexes: &[usize]) -> bool {

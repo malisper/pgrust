@@ -337,27 +337,48 @@ fn finalize_set_returning_call(
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::GenerateSubscripts {
+            func_oid,
+            func_variadic,
+            array,
+            dimension,
+            reverse,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::GenerateSubscripts {
+            func_oid,
+            func_variadic,
+            array: finalize_expr_subqueries(array, catalog, subplans),
+            dimension: finalize_expr_subqueries(dimension, catalog, subplans),
+            reverse: reverse.map(|reverse| finalize_expr_subqueries(reverse, catalog, subplans)),
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::PartitionTree {
             func_oid,
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionTree {
             func_oid,
             func_variadic,
             relid: finalize_expr_subqueries(relid, catalog, subplans),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid: finalize_expr_subqueries(relid, catalog, subplans),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PgLockStatus {
             func_oid,
@@ -806,27 +827,48 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::GenerateSubscripts {
+            func_oid,
+            func_variadic,
+            array,
+            dimension,
+            reverse,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::GenerateSubscripts {
+            func_oid,
+            func_variadic,
+            array: rebase_expr_subplan_ids(array, base),
+            dimension: rebase_expr_subplan_ids(dimension, base),
+            reverse: reverse.map(|reverse| rebase_expr_subplan_ids(reverse, base)),
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::PartitionTree {
             func_oid,
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionTree {
             func_oid,
             func_variadic,
             relid: rebase_expr_subplan_ids(relid, base),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid: rebase_expr_subplan_ids(relid, base),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PgLockStatus {
             func_oid,
@@ -1104,8 +1146,13 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .map(|child| rebase_plan_subplan_ids(child, base))
                 .collect(),
         },
-        Plan::Unique { plan_info, input } => Plan::Unique {
+        Plan::Unique {
             plan_info,
+            key_indices,
+            input,
+        } => Plan::Unique {
+            plan_info,
+            key_indices,
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
         },
         Plan::BitmapIndexScan {
@@ -1184,11 +1231,13 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
         Plan::SetOp {
             plan_info,
             op,
+            strategy,
             output_columns,
             children,
         } => Plan::SetOp {
             plan_info,
             op,
+            strategy,
             output_columns,
             children: children
                 .into_iter()
@@ -1370,6 +1419,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
         Plan::Aggregate {
             plan_info,
             strategy,
+            disabled,
             input,
             group_by,
             passthrough_exprs,
@@ -1379,6 +1429,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
         } => Plan::Aggregate {
             plan_info,
             strategy,
+            disabled,
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
             group_by: group_by
                 .into_iter()
@@ -1546,8 +1597,13 @@ pub(super) fn finalize_plan_subqueries(
                 .map(|child| finalize_plan_subqueries(child, catalog, subplans))
                 .collect(),
         },
-        Plan::Unique { plan_info, input } => Plan::Unique {
+        Plan::Unique {
             plan_info,
+            key_indices,
+            input,
+        } => Plan::Unique {
+            plan_info,
+            key_indices,
             input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
         },
         Plan::BitmapHeapScan {
@@ -1596,11 +1652,13 @@ pub(super) fn finalize_plan_subqueries(
         Plan::SetOp {
             plan_info,
             op,
+            strategy,
             output_columns,
             children,
         } => Plan::SetOp {
             plan_info,
             op,
+            strategy,
             output_columns,
             children: children
                 .into_iter()
@@ -1787,6 +1845,7 @@ pub(super) fn finalize_plan_subqueries(
         Plan::Aggregate {
             plan_info,
             strategy,
+            disabled,
             input,
             group_by,
             passthrough_exprs,
@@ -1796,6 +1855,7 @@ pub(super) fn finalize_plan_subqueries(
         } => Plan::Aggregate {
             plan_info,
             strategy,
+            disabled,
             input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
             group_by: group_by
                 .into_iter()

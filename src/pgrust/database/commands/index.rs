@@ -15,9 +15,9 @@ use crate::include::access::brin::BrinOptions;
 use crate::include::access::gin::GinOptions;
 use crate::include::access::hash::HashOptions;
 use crate::include::catalog::{
-    BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID,
-    SPGIST_AM_OID, builtin_range_rows, multirange_type_ref_for_sql_type,
-    range_type_ref_for_sql_type,
+    ANYMULTIRANGEOID, ANYRANGEOID, BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID,
+    GIST_RANGE_FAMILY_OID, HASH_AM_OID, SPGIST_AM_OID, builtin_range_rows,
+    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::parsenodes::RelOption;
 use std::collections::BTreeSet;
@@ -49,6 +49,15 @@ fn map_unique_index_build_violation(
     }
 }
 
+fn invalid_fillfactor_error(value: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("value {value} out of bounds for option \"fillfactor\""),
+        detail: Some("Valid values are between \"10\" and \"100\".".into()),
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
 pub(super) fn catalog_entry_from_bound_relation(
     relation: &crate::backend::parser::BoundRelation,
 ) -> crate::backend::catalog::CatalogEntry {
@@ -59,6 +68,7 @@ pub(super) fn catalog_entry_from_bound_relation(
         owner_oid: relation.owner_oid,
         relacl: None,
         reloptions: None,
+        of_type_oid: 0,
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: relation.toast.map(|toast| toast.relation_oid).unwrap_or(0),
@@ -96,6 +106,7 @@ pub(super) fn catalog_entry_from_bound_index_relation(
         owner_oid,
         relacl: None,
         reloptions: None,
+        of_type_oid: 0,
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,
@@ -341,17 +352,12 @@ impl Database {
         let mut resolved = HashOptions::default();
         for option in options {
             if option.name.eq_ignore_ascii_case("fillfactor") {
-                let fillfactor = option.value.parse::<u16>().map_err(|_| {
-                    ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "integer fillfactor between 10 and 100",
-                        actual: option.value.clone(),
-                    })
-                })?;
+                let fillfactor = option
+                    .value
+                    .parse::<u16>()
+                    .map_err(|_| invalid_fillfactor_error(&option.value))?;
                 if !(10..=100).contains(&fillfactor) {
-                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "integer fillfactor between 10 and 100",
-                        actual: option.value.clone(),
-                    }));
+                    return Err(invalid_fillfactor_error(&option.value));
                 }
                 resolved.fillfactor = fillfactor;
                 continue;
@@ -818,13 +824,23 @@ impl Database {
                     "="
                 };
                 let mut operator_type_oids = vec![type_oid];
-                if op_name == "&&"
-                    && let Some(multirange_type) = multirange_type_ref_for_sql_type(column.sql_type)
-                {
-                    operator_type_oids.push(multirange_type.range_type_oid());
+                if op_name == "&&" {
+                    if let Some(range_type) = range_type_ref_for_sql_type(column.sql_type) {
+                        operator_type_oids.push(range_type.type_oid());
+                        operator_type_oids.push(ANYRANGEOID);
+                    }
+                    if let Some(multirange_type) = multirange_type_ref_for_sql_type(column.sql_type)
+                    {
+                        operator_type_oids.push(multirange_type.type_oid());
+                        operator_type_oids.push(multirange_type.range_type_oid());
+                        operator_type_oids.push(ANYMULTIRANGEOID);
+                        operator_type_oids.push(ANYRANGEOID);
+                    }
                 }
+                let mut seen_operator_type_oids = BTreeSet::new();
                 operator_type_oids
                     .into_iter()
+                    .filter(|oid| seen_operator_type_oids.insert(*oid))
                     .find_map(|candidate_oid| {
                         catalog.operator_by_name_left_right(op_name, candidate_oid, candidate_oid)
                     })
@@ -957,47 +973,6 @@ impl Database {
             .as_ref()
             .and_then(|meta| meta.indpred.as_deref())
             .is_some_and(|predicate| !predicate.trim().is_empty());
-        if has_expression_keys
-            && access_method_oid != GIST_AM_OID
-            && access_method_oid != SPGIST_AM_OID
-        {
-            self.build_expression_index_rows_in_transaction(
-                client_id,
-                relation,
-                &index_entry,
-                index_name,
-                visible_catalog,
-                xid,
-                cid,
-                access_method_oid,
-                access_method_handler,
-                maintenance_work_mem_kb,
-            )?;
-            let mut catalog_guard = self.catalog.write();
-            let readiness_ctx = CatalogWriteContext {
-                pool: self.pool.clone(),
-                txns: self.txns.clone(),
-                xid,
-                cid: cid.saturating_add(1),
-                client_id,
-                waiter: None,
-                interrupts,
-            };
-            let ready_effect = catalog_guard
-                .set_index_entry_ready_valid_mvcc(&index_entry, true, true, &readiness_ctx)
-                .map_err(|err| match err {
-                    CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
-                    _ => ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "index catalog readiness update",
-                        actual: "index readiness update failed".into(),
-                    }),
-                })?;
-            drop(catalog_guard);
-            self.apply_catalog_mutation_effect_immediate(&ready_effect)?;
-            catalog_effects.push(ready_effect);
-            return Ok(index_entry);
-        }
-
         let snapshot = self
             .txns
             .read()
@@ -1119,6 +1094,7 @@ impl Database {
                     relation_oid: index_entry.relation_oid,
                     namespace_oid: index_entry.namespace_oid,
                     owner_oid: index_entry.owner_oid,
+                    of_type_oid: index_entry.of_type_oid,
                     row_type_oid: index_entry.row_type_oid,
                     array_type_oid: index_entry.array_type_oid,
                     reltoastrelid: index_entry.reltoastrelid,
@@ -1197,6 +1173,7 @@ impl Database {
                 lock_status_provider: Some(Arc::new(self.clone())),
                 sequences: Some(self.sequences.clone()),
                 large_objects: Some(self.large_objects.clone()),
+                stats_import_runtime: None,
                 async_notify_runtime: Some(self.async_notify_runtime.clone()),
                 advisory_locks: Arc::clone(&self.advisory_locks),
                 row_locks: Arc::clone(&self.row_locks),
@@ -1220,6 +1197,7 @@ impl Database {
                 transaction_lock_scope_id: None,
                 next_command_id: cid,
                 default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+                random_state: crate::backend::executor::PgPrngState::shared(),
                 expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -1230,8 +1208,11 @@ impl Database {
                 catalog_effects: Vec::new(),
                 temp_effects: Vec::new(),
                 database: Some(self.clone()),
+                pending_catalog_effects: Vec::new(),
+                pending_table_locks: Vec::new(),
                 catalog: visible_catalog,
-                compiled_functions: std::collections::HashMap::new(),
+                plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+                pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
@@ -1314,6 +1295,7 @@ impl Database {
                         index_meta: index_meta.clone(),
                         default_toast_compression: ctx.default_toast_compression,
                         heap_tid,
+                        old_heap_tid: None,
                         values: key_values,
                         unique_check: if index_meta.indisunique {
                             IndexUniqueCheck::Yes
@@ -1695,6 +1677,7 @@ impl Database {
             lock_status_provider: Some(Arc::new(self.clone())),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            stats_import_runtime: None,
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&self.advisory_locks),
             row_locks: Arc::clone(&self.row_locks),
@@ -1718,6 +1701,7 @@ impl Database {
             transaction_lock_scope_id: None,
             next_command_id: cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            random_state: crate::backend::executor::PgPrngState::shared(),
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
@@ -1728,8 +1712,11 @@ impl Database {
             catalog_effects: Vec::new(),
             temp_effects: Vec::new(),
             database: Some(self.clone()),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             catalog: visible_catalog,
-            compiled_functions: std::collections::HashMap::new(),
+            plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+            pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
@@ -1739,7 +1726,7 @@ impl Database {
         reinitialize_index_relation(index, &mut ctx, xid)?;
         let rows = collect_matching_rows_heap(heap.rel, &heap.desc, heap.toast, None, &mut ctx)?;
         for (tid, values) in rows {
-            insert_index_entry_for_row(heap.rel, &heap.desc, index, &values, tid, &mut ctx)?;
+            insert_index_entry_for_row(heap.rel, &heap.desc, index, &values, tid, None, &mut ctx)?;
         }
         Ok(())
     }

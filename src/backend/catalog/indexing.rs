@@ -63,6 +63,7 @@ pub fn system_catalog_index_entry_for_db(
         owner_oid: BOOTSTRAP_SUPERUSER_OID,
         relacl: None,
         reloptions: None,
+        of_type_oid: 0,
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,
@@ -420,6 +421,7 @@ pub fn maintain_catalog_indexes_for_insert_in_db(
             index_meta: system_catalog_index_relcache(*descriptor),
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             heap_tid,
+            old_heap_tid: None,
             values: values.to_vec(),
             unique_check: if descriptor.unique {
                 IndexUniqueCheck::Yes

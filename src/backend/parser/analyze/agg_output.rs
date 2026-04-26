@@ -301,6 +301,18 @@ fn query_references_local_cte(
                     SetReturningCall::GenerateSeries {
                         start, stop, step, ..
                     } => vec![start, stop, step],
+                    SetReturningCall::GenerateSubscripts {
+                        array,
+                        dimension,
+                        reverse,
+                        ..
+                    } => {
+                        let mut args = vec![array, dimension];
+                        if let Some(reverse) = reverse {
+                            args.push(reverse);
+                        }
+                        args
+                    }
                     SetReturningCall::PartitionTree { relid, .. }
                     | SetReturningCall::PartitionAncestors { relid, .. } => vec![relid],
                     SetReturningCall::PgLockStatus { .. } => Vec::new(),
@@ -507,6 +519,7 @@ fn bind_grouped_window_agg_call(
     } else {
         bound_args
     };
+    let coerced_args = preserve_array_agg_array_arg_type(Some(func), &arg_types, coerced_args);
     let bound_filter = filter
         .map(|expr| {
             with_windows_disallowed(|| {
@@ -791,6 +804,8 @@ fn bind_grouped_visible_outer_aggregate_call(
                 coerce_bound_expr(arg, actual_type, declared_type)
             })
             .collect();
+        let coerced_args =
+            preserve_array_agg_array_arg_type(resolved.builtin_impl, &arg_types, coerced_args);
         (Vec::new(), coerced_args, bound_order_by)
     };
     let (aggfnoid, aggtype, aggvariadic) = if hypothetical {
@@ -1009,12 +1024,8 @@ fn bind_grouped_arithmetic_expr(
     agg_list: &[CollectedAggregate],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
-    let raw_left_type =
-        grouped_infer_sql_expr_type(left, input_scope, catalog, outer_scopes, grouped_outer);
-    let raw_right_type =
-        grouped_infer_sql_expr_type(right, input_scope, catalog, outer_scopes, grouped_outer);
-    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
-    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    let raw_left_expr = left;
+    let raw_right_expr = right;
     let left = bind_agg_output_expr_in_clause(
         left,
         clause.clone(),
@@ -1039,6 +1050,27 @@ fn bind_grouped_arithmetic_expr(
         agg_list,
         n_keys,
     )?;
+    let raw_left_type = expr_sql_type_hint(&left).unwrap_or_else(|| {
+        grouped_infer_sql_expr_type(
+            raw_left_expr,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+        )
+    });
+    let raw_right_type = expr_sql_type_hint(&right).unwrap_or_else(|| {
+        grouped_infer_sql_expr_type(
+            raw_right_expr,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+        )
+    });
+    let left_type =
+        coerce_unknown_string_literal_type(raw_left_expr, raw_left_type, raw_right_type);
+    let right_type = coerce_unknown_string_literal_type(raw_right_expr, raw_right_type, left_type);
     if !left_type.is_array
         && !right_type.is_array
         && is_numeric_family(left_type)
@@ -1071,6 +1103,14 @@ pub(super) fn bind_agg_output_expr_in_clause(
         if gk == expr {
             return Ok(grouped_key_expr(group_key_exprs, i));
         }
+    }
+    if let Ok(bound_expr) =
+        bind_grouped_plain_expr(expr, input_scope, catalog, outer_scopes, grouped_outer)
+        && let Some(i) = group_key_exprs
+            .iter()
+            .position(|group_key| group_key == &bound_expr)
+    {
+        return Ok(grouped_key_expr(group_key_exprs, i));
     }
 
     match expr {
@@ -1465,6 +1505,11 @@ pub(super) fn bind_agg_output_expr_in_clause(
                             coerce_bound_expr(arg, actual_type, declared_type)
                         })
                         .collect();
+                    let coerced_args = preserve_array_agg_array_arg_type(
+                        resolved.builtin_impl,
+                        &arg_types,
+                        coerced_args,
+                    );
                     (Vec::new(), coerced_args, bound_order_by)
                 };
                 let (aggfnoid, aggtype, aggvariadic) = if hypothetical {
@@ -2495,6 +2540,82 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 n_keys,
             )?),
         )),
+        SqlExpr::Overlaps(l, r) => {
+            let SqlExpr::Row(left_items) = l.as_ref() else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "row expression",
+                    actual: format!("{l:?}"),
+                });
+            };
+            let SqlExpr::Row(right_items) = r.as_ref() else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "row expression",
+                    actual: format!("{r:?}"),
+                });
+            };
+            let ([left_start, left_end_or_interval], [right_start, right_end_or_interval]) =
+                (left_items.as_slice(), right_items.as_slice())
+            else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "two-element OVERLAPS rows",
+                    actual: format!("{} and {} elements", left_items.len(), right_items.len()),
+                });
+            };
+            let left_end_type = grouped_infer_sql_expr_type(
+                left_end_or_interval,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            );
+            let right_end_type = grouped_infer_sql_expr_type(
+                right_end_or_interval,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            );
+            let left_end =
+                if !left_end_type.is_array && matches!(left_end_type.kind, SqlTypeKind::Interval) {
+                    SqlExpr::Add(
+                        Box::new(left_start.clone()),
+                        Box::new(left_end_or_interval.clone()),
+                    )
+                } else {
+                    left_end_or_interval.clone()
+                };
+            let right_end = if !right_end_type.is_array
+                && matches!(right_end_type.kind, SqlTypeKind::Interval)
+            {
+                SqlExpr::Add(
+                    Box::new(right_start.clone()),
+                    Box::new(right_end_or_interval.clone()),
+                )
+            } else {
+                right_end_or_interval.clone()
+            };
+            let lowered = SqlExpr::And(
+                Box::new(SqlExpr::Lt(
+                    Box::new(left_start.clone()),
+                    Box::new(right_end),
+                )),
+                Box::new(SqlExpr::Lt(
+                    Box::new(right_start.clone()),
+                    Box::new(left_end),
+                )),
+            );
+            bind_agg_output_expr(
+                &lowered,
+                group_by_exprs,
+                group_key_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )
+        }
         SqlExpr::ArrayLiteral(elements) => bind_grouped_array_literal(
             elements,
             group_by_exprs,
@@ -3497,4 +3618,19 @@ fn build_ungrouped_column_error(
         token: token.to_string(),
         clause,
     }
+}
+
+fn preserve_array_agg_array_arg_type(
+    func: Option<AggFunc>,
+    arg_types: &[SqlType],
+    mut args: Vec<Expr>,
+) -> Vec<Expr> {
+    if func == Some(AggFunc::ArrayAgg)
+        && let (Some(arg_type), Some(first_arg)) = (arg_types.first().copied(), args.first_mut())
+        && arg_type.is_array
+        && !expr_sql_type_hint(first_arg).is_some_and(|ty| ty.is_array)
+    {
+        *first_arg = Expr::Cast(Box::new(first_arg.clone()), arg_type);
+    }
+    args
 }

@@ -13,19 +13,74 @@ const ARRAY_RECV_PROC_OID: u32 = 2400;
 const ARRAY_SEND_PROC_OID: u32 = 2401;
 const ARRAY_TYPANALYZE_PROC_OID: u32 = 3816;
 const ARRAY_SUBSCRIPT_HANDLER_PROC_OID: u32 = 6179;
+const RAW_ARRAY_SUBSCRIPT_HANDLER_PROC_OID: u32 = 6180;
+const RECORD_IN_PROC_OID: u32 = 2290;
+const RECORD_OUT_PROC_OID: u32 = 2291;
+const RECORD_RECV_PROC_OID: u32 = 2402;
+const RECORD_SEND_PROC_OID: u32 = 2403;
+const INT2VECTOR_IN_PROC_OID: u32 = 40;
+const INT2VECTOR_OUT_PROC_OID: u32 = 41;
+const TEXT_IN_PROC_OID: u32 = 46;
+const TEXT_OUT_PROC_OID: u32 = 47;
+const OIDVECTOR_IN_PROC_OID: u32 = 54;
+const OIDVECTOR_OUT_PROC_OID: u32 = 55;
+const INT2VECTOR_RECV_PROC_OID: u32 = 2410;
+const INT2VECTOR_SEND_PROC_OID: u32 = 2411;
+const TEXT_RECV_PROC_OID: u32 = 2414;
+const TEXT_SEND_PROC_OID: u32 = 2415;
+const OIDVECTOR_RECV_PROC_OID: u32 = 2420;
+const OIDVECTOR_SEND_PROC_OID: u32 = 2421;
+const BRIN_BLOOM_SUMMARY_IN_PROC_OID: u32 = 4596;
+const BRIN_BLOOM_SUMMARY_OUT_PROC_OID: u32 = 4597;
+const BRIN_BLOOM_SUMMARY_RECV_PROC_OID: u32 = 4598;
+const BRIN_BLOOM_SUMMARY_SEND_PROC_OID: u32 = 4599;
+const BRIN_MINMAX_MULTI_SUMMARY_IN_PROC_OID: u32 = 4638;
+const BRIN_MINMAX_MULTI_SUMMARY_OUT_PROC_OID: u32 = 4639;
+const BRIN_MINMAX_MULTI_SUMMARY_RECV_PROC_OID: u32 = 4640;
+const BRIN_MINMAX_MULTI_SUMMARY_SEND_PROC_OID: u32 = 4641;
+const GTSVECTOR_IN_PROC_OID: u32 = 3646;
+const GTSVECTOR_OUT_PROC_OID: u32 = 3647;
 const INTERNAL_IN_PROC_OID: u32 = 2304;
 const ANYARRAY_IN_PROC_OID: u32 = 2296;
+const ANYARRAY_OUT_PROC_OID: u32 = 2297;
 const ANYELEMENT_IN_PROC_OID: u32 = 2312;
 const ANYENUM_IN_PROC_OID: u32 = 3504;
+const ANYENUM_OUT_PROC_OID: u32 = 3505;
 const ANYNONARRAY_IN_PROC_OID: u32 = 2777;
 const ANYRANGE_IN_PROC_OID: u32 = 3832;
+const ANYRANGE_OUT_PROC_OID: u32 = 3833;
 const RANGE_IN_PROC_OID: u32 = 3834;
+const RANGE_OUT_PROC_OID: u32 = 3835;
+const RANGE_RECV_PROC_OID: u32 = 3836;
+const RANGE_SEND_PROC_OID: u32 = 3837;
+const RANGE_TYPANALYZE_PROC_OID: u32 = 3916;
 const ANYMULTIRANGE_IN_PROC_OID: u32 = 4229;
+const ANYMULTIRANGE_OUT_PROC_OID: u32 = 4230;
 const MULTIRANGE_IN_PROC_OID: u32 = 4231;
+const MULTIRANGE_OUT_PROC_OID: u32 = 4232;
+const MULTIRANGE_RECV_PROC_OID: u32 = 4233;
+const MULTIRANGE_SEND_PROC_OID: u32 = 4234;
+const MULTIRANGE_TYPANALYZE_PROC_OID: u32 = 4242;
 const ANYCOMPATIBLE_IN_PROC_OID: u32 = 5086;
 const ANYCOMPATIBLEARRAY_IN_PROC_OID: u32 = 5088;
+const ANYCOMPATIBLEARRAY_OUT_PROC_OID: u32 = 5089;
 const ANYCOMPATIBLENONARRAY_IN_PROC_OID: u32 = 5092;
 const ANYCOMPATIBLERANGE_IN_PROC_OID: u32 = 5094;
+const ANYCOMPATIBLERANGE_OUT_PROC_OID: u32 = 5095;
+const ANYCOMPATIBLEMULTIRANGE_IN_PROC_OID: u32 = 4226;
+const ANYCOMPATIBLEMULTIRANGE_OUT_PROC_OID: u32 = 4227;
+const DOMAIN_IN_PROC_OID: u32 = 2597;
+const DOMAIN_RECV_PROC_OID: u32 = 2598;
+const ENUM_IN_PROC_OID: u32 = 3506;
+const ENUM_OUT_PROC_OID: u32 = 3507;
+const ENUM_RECV_PROC_OID: u32 = 3532;
+const ENUM_SEND_PROC_OID: u32 = 3533;
+const CSTRING_IN_PROC_OID: u32 = 2292;
+const CSTRING_OUT_PROC_OID: u32 = 2293;
+const VOID_IN_PROC_OID: u32 = 2298;
+const VOID_OUT_PROC_OID: u32 = 2299;
+const PG_RUST_TYPE_INPUT_PROC_BASE: u32 = 100_000;
+const PG_RUST_TYPE_OUTPUT_PROC_BASE: u32 = 200_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgTypeRow {
@@ -35,9 +90,13 @@ pub struct PgTypeRow {
     pub typowner: u32,
     pub typacl: Option<Vec<String>>,
     pub typlen: i16,
+    pub typbyval: bool,
+    pub typtype: char,
+    pub typisdefined: bool,
     pub typalign: AttributeAlign,
     pub typstorage: AttributeStorage,
     pub typrelid: u32,
+    pub typsubscript: u32,
     pub typelem: u32,
     pub typarray: u32,
     pub typinput: u32,
@@ -46,8 +105,10 @@ pub struct PgTypeRow {
     pub typsend: u32,
     pub typmodin: u32,
     pub typmodout: u32,
+    pub typdelim: char,
     pub typanalyze: u32,
-    pub typsubscript: u32,
+    pub typbasetype: u32,
+    pub typcollation: u32,
     pub sql_type: SqlType,
 }
 
@@ -59,9 +120,13 @@ pub fn pg_type_desc() -> RelationDesc {
             column_desc("typnamespace", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("typowner", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("typlen", SqlType::new(SqlTypeKind::Int2), false),
+            column_desc("typbyval", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc("typtype", SqlType::new(SqlTypeKind::InternalChar), false),
+            column_desc("typisdefined", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("typalign", SqlType::new(SqlTypeKind::InternalChar), false),
             column_desc("typstorage", SqlType::new(SqlTypeKind::InternalChar), false),
             column_desc("typrelid", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("typsubscript", SqlType::new(SqlTypeKind::RegProc), false),
             column_desc("typelem", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("typarray", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("typinput", SqlType::new(SqlTypeKind::RegProc), false),
@@ -70,8 +135,10 @@ pub fn pg_type_desc() -> RelationDesc {
             column_desc("typsend", SqlType::new(SqlTypeKind::RegProc), false),
             column_desc("typmodin", SqlType::new(SqlTypeKind::RegProc), false),
             column_desc("typmodout", SqlType::new(SqlTypeKind::RegProc), false),
+            column_desc("typdelim", SqlType::new(SqlTypeKind::InternalChar), false),
             column_desc("typanalyze", SqlType::new(SqlTypeKind::RegProc), false),
-            column_desc("typsubscript", SqlType::new(SqlTypeKind::RegProc), false),
+            column_desc("typbasetype", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("typcollation", SqlType::new(SqlTypeKind::Oid), false),
             column_desc(
                 "typacl",
                 SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
@@ -115,11 +182,6 @@ fn build_builtin_type_rows() -> Vec<PgTypeRow> {
             "anyelement",
             ANYELEMENTOID,
             SqlType::new(SqlTypeKind::AnyElement),
-        ),
-        builtin_type_row(
-            "anyenum",
-            ANYENUMOID,
-            SqlType::new(SqlTypeKind::AnyElement).with_identity(ANYENUMOID, 0),
         ),
         builtin_type_row(
             "anynonarray",
@@ -228,7 +290,7 @@ fn build_builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::array_of(SqlType::new(SqlTypeKind::Uuid)),
         ),
         builtin_type_row(
-            "\"char\"",
+            "char",
             INTERNAL_CHAR_TYPE_OID,
             SqlType::new(SqlTypeKind::InternalChar),
         ),
@@ -254,6 +316,11 @@ fn build_builtin_type_rows() -> Vec<PgTypeRow> {
             "int2vector",
             INT2VECTOR_TYPE_OID,
             SqlType::new(SqlTypeKind::Int2Vector),
+        ),
+        builtin_type_row(
+            "_int2vector",
+            INT2VECTOR_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Int2Vector)),
         ),
         builtin_type_row(
             "_int2",
@@ -314,16 +381,6 @@ fn build_builtin_type_rows() -> Vec<PgTypeRow> {
             4,
             AttributeAlign::Int,
         ),
-        {
-            let mut row = builtin_type_row(
-                "cstring",
-                CSTRING_TYPE_OID,
-                SqlType::new(SqlTypeKind::Text).with_identity(CSTRING_TYPE_OID, 0),
-            );
-            row.typinput = 2292;
-            row.typoutput = 2293;
-            row
-        },
         builtin_type_row("oid", OID_TYPE_OID, SqlType::new(SqlTypeKind::Oid)),
         builtin_type_row(
             "regproc",
@@ -436,6 +493,11 @@ fn build_builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::new(SqlTypeKind::OidVector),
         ),
         builtin_type_row(
+            "_oidvector",
+            OIDVECTOR_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::OidVector)),
+        ),
+        builtin_type_row(
             "_oid",
             OID_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::Oid)),
@@ -540,16 +602,51 @@ fn build_builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::array_of(SqlType::new(SqlTypeKind::Inet)),
         ),
         builtin_type_row("point", POINT_TYPE_OID, SqlType::new(SqlTypeKind::Point)),
+        builtin_type_row(
+            "_point",
+            POINT_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Point)),
+        ),
         builtin_type_row("lseg", LSEG_TYPE_OID, SqlType::new(SqlTypeKind::Lseg)),
+        builtin_type_row(
+            "_lseg",
+            LSEG_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Lseg)),
+        ),
         builtin_type_row("path", PATH_TYPE_OID, SqlType::new(SqlTypeKind::Path)),
+        builtin_type_row(
+            "_path",
+            PATH_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Path)),
+        ),
         builtin_type_row("box", BOX_TYPE_OID, SqlType::new(SqlTypeKind::Box)),
+        builtin_type_row(
+            "_box",
+            BOX_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Box)),
+        ),
         builtin_type_row(
             "polygon",
             POLYGON_TYPE_OID,
             SqlType::new(SqlTypeKind::Polygon),
         ),
+        builtin_type_row(
+            "_polygon",
+            POLYGON_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Polygon)),
+        ),
         builtin_type_row("line", LINE_TYPE_OID, SqlType::new(SqlTypeKind::Line)),
+        builtin_type_row(
+            "_line",
+            LINE_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Line)),
+        ),
         builtin_type_row("circle", CIRCLE_TYPE_OID, SqlType::new(SqlTypeKind::Circle)),
+        builtin_type_row(
+            "_circle",
+            CIRCLE_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Circle)),
+        ),
         builtin_type_row(
             "varchar",
             VARCHAR_TYPE_OID,
@@ -560,7 +657,7 @@ fn build_builtin_type_rows() -> Vec<PgTypeRow> {
             VARCHAR_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::Varchar)),
         ),
-        builtin_type_row("char", BPCHAR_TYPE_OID, SqlType::new(SqlTypeKind::Char)),
+        builtin_type_row("bpchar", BPCHAR_TYPE_OID, SqlType::new(SqlTypeKind::Char)),
         builtin_type_row(
             "_bpchar",
             BPCHAR_ARRAY_TYPE_OID,
@@ -768,6 +865,15 @@ fn build_builtin_type_rows() -> Vec<PgTypeRow> {
             TSVECTOR_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::TsVector)),
         ),
+        gtsvector_type_row(),
+        builtin_type_row(
+            "_gtsvector",
+            GTSVECTOR_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::new(SqlTypeKind::TsVector).with_identity(GTSVECTOR_TYPE_OID, 0),
+            )
+            .with_identity(GTSVECTOR_ARRAY_TYPE_OID, 0),
+        ),
         builtin_type_row(
             "tsquery",
             TSQUERY_TYPE_OID,
@@ -818,6 +924,22 @@ fn build_builtin_type_rows() -> Vec<PgTypeRow> {
             "pg_dependencies",
             PG_DEPENDENCIES_TYPE_OID,
             SqlType::new(SqlTypeKind::Bytea).with_identity(PG_DEPENDENCIES_TYPE_OID, 0),
+        ),
+        brin_summary_type_row(
+            "pg_brin_bloom_summary",
+            PG_BRIN_BLOOM_SUMMARY_TYPE_OID,
+            BRIN_BLOOM_SUMMARY_IN_PROC_OID,
+            BRIN_BLOOM_SUMMARY_OUT_PROC_OID,
+            BRIN_BLOOM_SUMMARY_RECV_PROC_OID,
+            BRIN_BLOOM_SUMMARY_SEND_PROC_OID,
+        ),
+        brin_summary_type_row(
+            "pg_brin_minmax_multi_summary",
+            PG_BRIN_MINMAX_MULTI_SUMMARY_TYPE_OID,
+            BRIN_MINMAX_MULTI_SUMMARY_IN_PROC_OID,
+            BRIN_MINMAX_MULTI_SUMMARY_OUT_PROC_OID,
+            BRIN_MINMAX_MULTI_SUMMARY_RECV_PROC_OID,
+            BRIN_MINMAX_MULTI_SUMMARY_SEND_PROC_OID,
         ),
         builtin_type_row(
             "pg_mcv_list",
@@ -992,8 +1114,9 @@ fn build_builtin_type_rows() -> Vec<PgTypeRow> {
             ),
         ),
     ]);
+    rows.extend(information_schema_domain_type_rows(&rows));
     annotate_array_type_links(&mut rows);
-    annotate_type_io_procs(&mut rows);
+    annotate_catalog_type_io_procs(&mut rows);
     rows
 }
 
@@ -1004,46 +1127,39 @@ pub fn builtin_type_name_for_oid(oid: u32) -> Option<String> {
 pub fn bootstrap_composite_type_rows() -> Vec<PgTypeRow> {
     let mut rows = vec![
         composite_type_row(
-            "pg_namespace",
-            PG_NAMESPACE_ROWTYPE_OID,
-            PG_CATALOG_NAMESPACE_OID,
-            PG_NAMESPACE_RELATION_OID,
-            0,
-        ),
-        composite_type_row(
             "pg_type",
             PG_TYPE_ROWTYPE_OID,
             PG_CATALOG_NAMESPACE_OID,
             PG_TYPE_RELATION_OID,
-            0,
+            PG_TYPE_ARRAY_TYPE_OID,
         ),
         composite_type_row(
             "pg_proc",
             PG_PROC_ROWTYPE_OID,
             PG_CATALOG_NAMESPACE_OID,
             PG_PROC_RELATION_OID,
-            0,
+            PG_PROC_ARRAY_TYPE_OID,
         ),
         composite_type_row(
             "pg_attribute",
             PG_ATTRIBUTE_ROWTYPE_OID,
             PG_CATALOG_NAMESPACE_OID,
             PG_ATTRIBUTE_RELATION_OID,
-            0,
+            PG_ATTRIBUTE_ARRAY_TYPE_OID,
         ),
         composite_type_row(
             "pg_class",
             PG_CLASS_ROWTYPE_OID,
             PG_CATALOG_NAMESPACE_OID,
             PG_CLASS_RELATION_OID,
-            0,
+            PG_CLASS_ARRAY_TYPE_OID,
         ),
         composite_type_row(
             "pg_database",
             PG_DATABASE_ROWTYPE_OID,
             PG_CATALOG_NAMESPACE_OID,
             PG_DATABASE_RELATION_OID,
-            0,
+            PG_DATABASE_ARRAY_TYPE_OID,
         ),
         composite_type_row(
             "pg_statistic",
@@ -1065,6 +1181,41 @@ pub fn bootstrap_composite_type_rows() -> Vec<PgTypeRow> {
             PG_CATALOG_NAMESPACE_OID,
             PG_STATISTIC_EXT_DATA_RELATION_OID,
             PG_STATISTIC_EXT_DATA_ARRAY_TYPE_OID,
+        ),
+        composite_array_type_row(
+            "pg_type",
+            PG_TYPE_ARRAY_TYPE_OID,
+            PG_CATALOG_NAMESPACE_OID,
+            PG_TYPE_ROWTYPE_OID,
+            PG_TYPE_RELATION_OID,
+        ),
+        composite_array_type_row(
+            "pg_proc",
+            PG_PROC_ARRAY_TYPE_OID,
+            PG_CATALOG_NAMESPACE_OID,
+            PG_PROC_ROWTYPE_OID,
+            PG_PROC_RELATION_OID,
+        ),
+        composite_array_type_row(
+            "pg_attribute",
+            PG_ATTRIBUTE_ARRAY_TYPE_OID,
+            PG_CATALOG_NAMESPACE_OID,
+            PG_ATTRIBUTE_ROWTYPE_OID,
+            PG_ATTRIBUTE_RELATION_OID,
+        ),
+        composite_array_type_row(
+            "pg_class",
+            PG_CLASS_ARRAY_TYPE_OID,
+            PG_CATALOG_NAMESPACE_OID,
+            PG_CLASS_ROWTYPE_OID,
+            PG_CLASS_RELATION_OID,
+        ),
+        composite_array_type_row(
+            "pg_database",
+            PG_DATABASE_ARRAY_TYPE_OID,
+            PG_CATALOG_NAMESPACE_OID,
+            PG_DATABASE_ROWTYPE_OID,
+            PG_DATABASE_RELATION_OID,
         ),
         composite_array_type_row(
             "pg_statistic",
@@ -1101,9 +1252,13 @@ fn builtin_type_row(name: &str, oid: u32, sql_type: SqlType) -> PgTypeRow {
         typowner: BOOTSTRAP_SUPERUSER_OID,
         typacl: None,
         typlen: storage.attlen,
+        typbyval: typbyval_for_sql_type(sql_type, storage.attlen),
+        typtype: typtype_for_sql_type(sql_type),
+        typisdefined: true,
         typalign: storage.attalign,
         typstorage: storage.attstorage,
         typrelid: 0,
+        typsubscript: 0,
         typelem: 0,
         typarray: 0,
         typinput: 0,
@@ -1112,8 +1267,10 @@ fn builtin_type_row(name: &str, oid: u32, sql_type: SqlType) -> PgTypeRow {
         typsend: 0,
         typmodin: 0,
         typmodout: 0,
+        typdelim: ',',
         typanalyze: 0,
-        typsubscript: 0,
+        typbasetype: 0,
+        typcollation: crate::backend::catalog::catalog::default_column_collation_oid(sql_type),
         sql_type,
     }
 }
@@ -1132,9 +1289,13 @@ fn fixed_builtin_type_row(
         typowner: BOOTSTRAP_SUPERUSER_OID,
         typacl: None,
         typlen,
+        typbyval: typbyval_for_sql_type(sql_type, typlen),
+        typtype: typtype_for_sql_type(sql_type),
+        typisdefined: true,
         typalign,
         typstorage: AttributeStorage::Plain,
         typrelid: 0,
+        typsubscript: 0,
         typelem: 0,
         typarray: 0,
         typinput: 0,
@@ -1143,8 +1304,10 @@ fn fixed_builtin_type_row(
         typsend: 0,
         typmodin: 0,
         typmodout: 0,
+        typdelim: ',',
         typanalyze: 0,
-        typsubscript: 0,
+        typbasetype: 0,
+        typcollation: crate::backend::catalog::catalog::default_column_collation_oid(sql_type),
         sql_type,
     }
 }
@@ -1156,11 +1319,18 @@ fn builtin_range_type_row(
     multirange_oid: u32,
     discrete: bool,
 ) -> PgTypeRow {
-    builtin_type_row(
+    let mut row = builtin_type_row(
         name,
         oid,
         SqlType::range(oid, subtype_oid).with_range_metadata(subtype_oid, multirange_oid, discrete),
-    )
+    );
+    if matches!(
+        subtype_oid,
+        INT8_TYPE_OID | TIMESTAMP_TYPE_OID | TIMESTAMPTZ_TYPE_OID
+    ) {
+        row.typalign = AttributeAlign::Double;
+    }
+    row
 }
 
 fn builtin_multirange_type_row(
@@ -1170,13 +1340,172 @@ fn builtin_multirange_type_row(
     subtype_oid: u32,
     discrete: bool,
 ) -> PgTypeRow {
-    builtin_type_row(
+    let mut row = builtin_type_row(
         name,
         oid,
         SqlType::multirange(oid, range_oid)
             .with_range_metadata(subtype_oid, oid, discrete)
             .with_multirange_range_oid(range_oid),
-    )
+    );
+    if matches!(
+        subtype_oid,
+        INT8_TYPE_OID | TIMESTAMP_TYPE_OID | TIMESTAMPTZ_TYPE_OID
+    ) {
+        row.typalign = AttributeAlign::Double;
+    }
+    row
+}
+
+fn brin_summary_type_row(
+    name: &str,
+    oid: u32,
+    typinput: u32,
+    typoutput: u32,
+    typreceive: u32,
+    typsend: u32,
+) -> PgTypeRow {
+    let mut row = builtin_type_row(
+        name,
+        oid,
+        SqlType::new(SqlTypeKind::Bytea).with_identity(oid, 0),
+    );
+    row.typlen = -1;
+    row.typbyval = false;
+    row.typalign = AttributeAlign::Int;
+    row.typstorage = AttributeStorage::Extended;
+    row.typinput = typinput;
+    row.typoutput = typoutput;
+    row.typreceive = typreceive;
+    row.typsend = typsend;
+    row.typcollation = DEFAULT_COLLATION_OID;
+    row
+}
+
+fn gtsvector_type_row() -> PgTypeRow {
+    // :HACK: PostgreSQL exposes gtsvector as a GiST support type. pgrust
+    // catalogs it so regtype/catalog sanity checks work, but there is no
+    // executable runtime behavior behind this type yet.
+    let mut row = builtin_type_row(
+        "gtsvector",
+        GTSVECTOR_TYPE_OID,
+        SqlType::new(SqlTypeKind::TsVector).with_identity(GTSVECTOR_TYPE_OID, 0),
+    );
+    row.typinput = GTSVECTOR_IN_PROC_OID;
+    row.typoutput = GTSVECTOR_OUT_PROC_OID;
+    row
+}
+
+fn information_schema_domain_type_rows(existing: &[PgTypeRow]) -> Vec<PgTypeRow> {
+    let specs = [
+        (
+            "cardinal_number",
+            INFORMATION_SCHEMA_CARDINAL_NUMBER_TYPE_OID,
+            INFORMATION_SCHEMA_CARDINAL_NUMBER_ARRAY_TYPE_OID,
+            INT4_TYPE_OID,
+            SqlType::new(SqlTypeKind::Int4),
+        ),
+        (
+            "character_data",
+            INFORMATION_SCHEMA_CHARACTER_DATA_TYPE_OID,
+            INFORMATION_SCHEMA_CHARACTER_DATA_ARRAY_TYPE_OID,
+            VARCHAR_TYPE_OID,
+            SqlType::new(SqlTypeKind::Varchar),
+        ),
+        (
+            "sql_identifier",
+            INFORMATION_SCHEMA_SQL_IDENTIFIER_TYPE_OID,
+            INFORMATION_SCHEMA_SQL_IDENTIFIER_ARRAY_TYPE_OID,
+            NAME_TYPE_OID,
+            SqlType::new(SqlTypeKind::Name),
+        ),
+        (
+            "time_stamp",
+            INFORMATION_SCHEMA_TIME_STAMP_TYPE_OID,
+            INFORMATION_SCHEMA_TIME_STAMP_ARRAY_TYPE_OID,
+            TIMESTAMPTZ_TYPE_OID,
+            SqlType::with_time_precision(SqlTypeKind::TimestampTz, 2),
+        ),
+        (
+            "yes_or_no",
+            INFORMATION_SCHEMA_YES_OR_NO_TYPE_OID,
+            INFORMATION_SCHEMA_YES_OR_NO_ARRAY_TYPE_OID,
+            VARCHAR_TYPE_OID,
+            SqlType::with_char_len(SqlTypeKind::Varchar, 3),
+        ),
+    ];
+
+    specs
+        .into_iter()
+        .flat_map(|(name, oid, array_oid, base_oid, sql_type)| {
+            let base = existing
+                .iter()
+                .find(|row| row.oid == base_oid)
+                .expect("information_schema domain base type");
+            let domain_sql_type = sql_type.with_identity(oid, 0);
+            [
+                PgTypeRow {
+                    oid,
+                    typname: name.into(),
+                    typnamespace: INFORMATION_SCHEMA_NAMESPACE_OID,
+                    typowner: BOOTSTRAP_SUPERUSER_OID,
+                    typacl: None,
+                    typlen: base.typlen,
+                    typbyval: base.typbyval,
+                    typtype: 'd',
+                    typisdefined: true,
+                    typalign: base.typalign,
+                    typstorage: base.typstorage,
+                    typrelid: 0,
+                    typsubscript: 0,
+                    typelem: 0,
+                    typarray: array_oid,
+                    typinput: 0,
+                    typoutput: base.typoutput,
+                    typreceive: base.typreceive,
+                    typsend: base.typsend,
+                    typmodin: base.typmodin,
+                    typmodout: base.typmodout,
+                    typdelim: base.typdelim,
+                    typanalyze: base.typanalyze,
+                    typbasetype: base_oid,
+                    typcollation: base.typcollation,
+                    sql_type: domain_sql_type,
+                },
+                PgTypeRow {
+                    oid: array_oid,
+                    typname: format!("_{name}"),
+                    typnamespace: INFORMATION_SCHEMA_NAMESPACE_OID,
+                    typowner: BOOTSTRAP_SUPERUSER_OID,
+                    typacl: None,
+                    typlen: -1,
+                    typbyval: false,
+                    typtype: 'b',
+                    typisdefined: true,
+                    typalign: if base.typalign == AttributeAlign::Double {
+                        AttributeAlign::Double
+                    } else {
+                        AttributeAlign::Int
+                    },
+                    typstorage: AttributeStorage::Extended,
+                    typrelid: 0,
+                    typsubscript: ARRAY_SUBSCRIPT_HANDLER_PROC_OID,
+                    typelem: oid,
+                    typarray: 0,
+                    typinput: ARRAY_IN_PROC_OID,
+                    typoutput: ARRAY_OUT_PROC_OID,
+                    typreceive: ARRAY_RECV_PROC_OID,
+                    typsend: ARRAY_SEND_PROC_OID,
+                    typmodin: 0,
+                    typmodout: 0,
+                    typdelim: ',',
+                    typanalyze: ARRAY_TYPANALYZE_PROC_OID,
+                    typbasetype: 0,
+                    typcollation: 0,
+                    sql_type: SqlType::array_of(domain_sql_type).with_identity(array_oid, 0),
+                },
+            ]
+        })
+        .collect()
 }
 
 pub fn composite_type_row(
@@ -1193,19 +1522,25 @@ pub fn composite_type_row(
         typowner: BOOTSTRAP_SUPERUSER_OID,
         typacl: None,
         typlen: -1,
+        typbyval: false,
+        typtype: 'c',
+        typisdefined: true,
         typalign: AttributeAlign::Double,
         typstorage: AttributeStorage::Extended,
         typrelid: relid,
+        typsubscript: 0,
         typelem: 0,
         typarray: array_oid,
-        typinput: 0,
-        typoutput: 0,
-        typreceive: 0,
-        typsend: 0,
+        typinput: RECORD_IN_PROC_OID,
+        typoutput: RECORD_OUT_PROC_OID,
+        typreceive: RECORD_RECV_PROC_OID,
+        typsend: RECORD_SEND_PROC_OID,
         typmodin: 0,
         typmodout: 0,
+        typdelim: ',',
         typanalyze: 0,
-        typsubscript: 0,
+        typbasetype: 0,
+        typcollation: 0,
         sql_type: SqlType::named_composite(oid, relid),
     }
 }
@@ -1224,19 +1559,25 @@ pub fn composite_array_type_row(
         typowner: BOOTSTRAP_SUPERUSER_OID,
         typacl: None,
         typlen: -1,
+        typbyval: false,
+        typtype: 'b',
+        typisdefined: true,
         typalign: AttributeAlign::Double,
         typstorage: AttributeStorage::Extended,
         typrelid: 0,
+        typsubscript: ARRAY_SUBSCRIPT_HANDLER_PROC_OID,
         typelem: elem_oid,
         typarray: 0,
-        typinput: 0,
-        typoutput: 0,
-        typreceive: 0,
-        typsend: 0,
+        typinput: ARRAY_IN_PROC_OID,
+        typoutput: ARRAY_OUT_PROC_OID,
+        typreceive: ARRAY_RECV_PROC_OID,
+        typsend: ARRAY_SEND_PROC_OID,
         typmodin: 0,
         typmodout: 0,
-        typanalyze: 0,
-        typsubscript: 0,
+        typdelim: ',',
+        typanalyze: ARRAY_TYPANALYZE_PROC_OID,
+        typbasetype: 0,
+        typcollation: 0,
         sql_type: SqlType::array_of(SqlType::named_composite(elem_oid, relid)),
     }
 }
@@ -1245,26 +1586,165 @@ fn annotate_array_type_links(rows: &mut [PgTypeRow]) {
     let snapshot = rows.to_vec();
     for row in rows.iter_mut() {
         if row.sql_type.is_array {
-            row.typelem = snapshot
-                .iter()
-                .find(|base_row| {
-                    !base_row.sql_type.is_array
-                        && SqlType::array_of(base_row.sql_type) == row.sql_type
+            let elem_oid = array_element_oid_override(row.oid)
+                .or_else(|| {
+                    snapshot
+                        .iter()
+                        .find(|base_row| {
+                            !base_row.sql_type.is_array
+                                && SqlType::array_of(base_row.sql_type) == row.sql_type
+                        })
+                        .map(|base_row| base_row.oid)
                 })
-                .map(|base_row| base_row.oid)
-                .unwrap_or(row.sql_type.type_oid);
-        } else if let Some(array_oid) = snapshot
-            .iter()
-            .find(|array_row| array_row.sql_type == SqlType::array_of(row.sql_type))
-            .map(|array_row| array_row.oid)
-        {
-            row.typarray = array_oid;
+                .unwrap_or(row.typelem);
+            if elem_oid != 0 {
+                row.typelem = elem_oid;
+                if let Some(base_row) = snapshot.iter().find(|base_row| base_row.oid == elem_oid) {
+                    row.typalign = if base_row.typalign == AttributeAlign::Double {
+                        AttributeAlign::Double
+                    } else {
+                        AttributeAlign::Int
+                    };
+                }
+            }
+            row.typsubscript = ARRAY_SUBSCRIPT_HANDLER_PROC_OID;
+        } else {
+            annotate_builtin_element_type(row);
+            if let Some(array_oid) = snapshot
+                .iter()
+                .find(|array_row| {
+                    array_element_oid_override(array_row.oid) == Some(row.oid)
+                        || array_row.typelem == row.oid
+                        || array_row.sql_type == SqlType::array_of(row.sql_type)
+                })
+                .map(|array_row| array_row.oid)
+            {
+                row.typarray = array_oid;
+            }
         }
     }
 }
 
-fn annotate_type_io_procs(rows: &mut [PgTypeRow]) {
+fn array_element_oid_override(array_oid: u32) -> Option<u32> {
+    match array_oid {
+        CID_ARRAY_TYPE_OID => Some(CID_TYPE_OID),
+        XID8_ARRAY_TYPE_OID => Some(XID8_TYPE_OID),
+        TXID_SNAPSHOT_ARRAY_TYPE_OID => Some(TXID_SNAPSHOT_TYPE_OID),
+        PG_SNAPSHOT_ARRAY_TYPE_OID => Some(PG_SNAPSHOT_TYPE_OID),
+        ACLITEM_ARRAY_TYPE_OID => Some(ACLITEM_TYPE_OID),
+        GTSVECTOR_ARRAY_TYPE_OID => Some(GTSVECTOR_TYPE_OID),
+        _ => None,
+    }
+}
+
+fn annotate_builtin_element_type(row: &mut PgTypeRow) {
+    match row.oid {
+        INT2VECTOR_TYPE_OID => {
+            row.typelem = INT2_TYPE_OID;
+            row.typsubscript = ARRAY_SUBSCRIPT_HANDLER_PROC_OID;
+        }
+        OIDVECTOR_TYPE_OID => {
+            row.typelem = OID_TYPE_OID;
+            row.typsubscript = ARRAY_SUBSCRIPT_HANDLER_PROC_OID;
+        }
+        POINT_TYPE_OID | LINE_TYPE_OID => {
+            row.typelem = FLOAT8_TYPE_OID;
+            row.typsubscript = RAW_ARRAY_SUBSCRIPT_HANDLER_PROC_OID;
+        }
+        LSEG_TYPE_OID | BOX_TYPE_OID => {
+            row.typelem = POINT_TYPE_OID;
+            row.typsubscript = RAW_ARRAY_SUBSCRIPT_HANDLER_PROC_OID;
+        }
+        _ => {}
+    }
+}
+
+fn typbyval_for_sql_type(sql_type: SqlType, typlen: i16) -> bool {
+    if sql_type.is_array || typlen < 0 {
+        return false;
+    }
+    matches!(
+        sql_type.kind,
+        SqlTypeKind::Bool
+            | SqlTypeKind::InternalChar
+            | SqlTypeKind::Int2
+            | SqlTypeKind::Int4
+            | SqlTypeKind::Oid
+            | SqlTypeKind::RegProc
+            | SqlTypeKind::RegClass
+            | SqlTypeKind::RegType
+            | SqlTypeKind::RegRole
+            | SqlTypeKind::RegNamespace
+            | SqlTypeKind::RegOper
+            | SqlTypeKind::RegOperator
+            | SqlTypeKind::RegProcedure
+            | SqlTypeKind::RegCollation
+            | SqlTypeKind::Xid
+            | SqlTypeKind::Date
+            | SqlTypeKind::Float4
+            | SqlTypeKind::Int8
+            | SqlTypeKind::Float8
+            | SqlTypeKind::Money
+            | SqlTypeKind::Time
+            | SqlTypeKind::Timestamp
+            | SqlTypeKind::TimestampTz
+            | SqlTypeKind::PgLsn
+            | SqlTypeKind::Enum
+            | SqlTypeKind::AnyElement
+            | SqlTypeKind::AnyEnum
+    )
+}
+
+fn typtype_for_sql_type(sql_type: SqlType) -> char {
+    if sql_type.is_array {
+        return 'b';
+    }
+    match sql_type.kind {
+        SqlTypeKind::Range => 'r',
+        SqlTypeKind::Multirange => 'm',
+        SqlTypeKind::Composite => 'c',
+        SqlTypeKind::Enum => 'e',
+        SqlTypeKind::AnyArray
+        | SqlTypeKind::AnyCompatible
+        | SqlTypeKind::AnyCompatibleArray
+        | SqlTypeKind::AnyCompatibleMultirange
+        | SqlTypeKind::AnyCompatibleRange
+        | SqlTypeKind::AnyElement
+        | SqlTypeKind::AnyEnum
+        | SqlTypeKind::AnyMultirange
+        | SqlTypeKind::AnyRange
+        | SqlTypeKind::Cstring
+        | SqlTypeKind::FdwHandler
+        | SqlTypeKind::Internal
+        | SqlTypeKind::Record
+        | SqlTypeKind::Shell
+        | SqlTypeKind::Trigger
+        | SqlTypeKind::Void => 'p',
+        _ => 'b',
+    }
+}
+
+pub fn annotate_catalog_type_io_procs(rows: &mut [PgTypeRow]) {
     for row in rows.iter_mut() {
+        if row.typtype == 'd' {
+            row.typinput = DOMAIN_IN_PROC_OID;
+            row.typreceive = DOMAIN_RECV_PROC_OID;
+            if row.typoutput == 0 {
+                row.typoutput = synthetic_type_output_proc_oid(row.oid);
+            }
+            continue;
+        }
+
+        if row.sql_type.is_array {
+            row.typsubscript = ARRAY_SUBSCRIPT_HANDLER_PROC_OID;
+            row.typinput = ARRAY_IN_PROC_OID;
+            row.typoutput = ARRAY_OUT_PROC_OID;
+            row.typreceive = ARRAY_RECV_PROC_OID;
+            row.typsend = ARRAY_SEND_PROC_OID;
+            row.typanalyze = ARRAY_TYPANALYZE_PROC_OID;
+            continue;
+        }
+
         row.typinput = match row.oid {
             INTERNAL_TYPE_OID => INTERNAL_IN_PROC_OID,
             ANYARRAYOID => ANYARRAY_IN_PROC_OID,
@@ -1277,16 +1757,31 @@ fn annotate_type_io_procs(rows: &mut [PgTypeRow]) {
             ANYCOMPATIBLEARRAYOID => ANYCOMPATIBLEARRAY_IN_PROC_OID,
             ANYCOMPATIBLENONARRAYOID => ANYCOMPATIBLENONARRAY_IN_PROC_OID,
             ANYCOMPATIBLERANGEOID => ANYCOMPATIBLERANGE_IN_PROC_OID,
+            ANYCOMPATIBLEMULTIRANGEOID => ANYCOMPATIBLEMULTIRANGE_IN_PROC_OID,
+            CSTRING_TYPE_OID => CSTRING_IN_PROC_OID,
+            VOID_TYPE_OID => VOID_IN_PROC_OID,
+            RECORD_TYPE_OID => RECORD_IN_PROC_OID,
+            REFCURSOR_TYPE_OID => TEXT_IN_PROC_OID,
+            INT2VECTOR_TYPE_OID => INT2VECTOR_IN_PROC_OID,
+            OIDVECTOR_TYPE_OID => OIDVECTOR_IN_PROC_OID,
             TIMESTAMP_TYPE_OID => 1312,
             TIMESTAMPTZ_TYPE_OID => 1150,
             TXID_SNAPSHOT_TYPE_OID => 2939,
             PG_SNAPSHOT_TYPE_OID => 5055,
             TSVECTOR_TYPE_OID => 3610,
             TSQUERY_TYPE_OID => 3612,
-            _ if row.sql_type.is_array => ARRAY_IN_PROC_OID,
+            _ if matches!(
+                row.sql_type.kind,
+                SqlTypeKind::Record | SqlTypeKind::Composite
+            ) =>
+            {
+                RECORD_IN_PROC_OID
+            }
+            _ if matches!(row.sql_type.kind, SqlTypeKind::Enum) => ENUM_IN_PROC_OID,
             _ if matches!(row.sql_type.kind, SqlTypeKind::Range) => RANGE_IN_PROC_OID,
             _ if matches!(row.sql_type.kind, SqlTypeKind::Multirange) => MULTIRANGE_IN_PROC_OID,
-            _ => row.typinput,
+            _ if row.typinput != 0 => row.typinput,
+            _ => synthetic_type_input_proc_oid(row.oid),
         };
         if row.sql_type.is_array {
             row.typoutput = ARRAY_OUT_PROC_OID;
@@ -1296,13 +1791,102 @@ fn annotate_type_io_procs(rows: &mut [PgTypeRow]) {
             row.typsubscript = ARRAY_SUBSCRIPT_HANDLER_PROC_OID;
         }
         row.typoutput = match row.oid {
+            ANYARRAYOID => ANYARRAY_OUT_PROC_OID,
+            ANYENUMOID => ANYENUM_OUT_PROC_OID,
+            ANYRANGEOID => ANYRANGE_OUT_PROC_OID,
+            ANYMULTIRANGEOID => ANYMULTIRANGE_OUT_PROC_OID,
+            ANYCOMPATIBLEARRAYOID => ANYCOMPATIBLEARRAY_OUT_PROC_OID,
+            ANYCOMPATIBLERANGEOID => ANYCOMPATIBLERANGE_OUT_PROC_OID,
+            ANYCOMPATIBLEMULTIRANGEOID => ANYCOMPATIBLEMULTIRANGE_OUT_PROC_OID,
+            CSTRING_TYPE_OID => CSTRING_OUT_PROC_OID,
+            VOID_TYPE_OID => VOID_OUT_PROC_OID,
+            RECORD_TYPE_OID => RECORD_OUT_PROC_OID,
+            REFCURSOR_TYPE_OID => TEXT_OUT_PROC_OID,
+            INT2VECTOR_TYPE_OID => INT2VECTOR_OUT_PROC_OID,
+            OIDVECTOR_TYPE_OID => OIDVECTOR_OUT_PROC_OID,
             TXID_SNAPSHOT_TYPE_OID => 2940,
             PG_SNAPSHOT_TYPE_OID => 5056,
             TSVECTOR_TYPE_OID => 3611,
             TSQUERY_TYPE_OID => 3613,
-            _ => row.typoutput,
+            _ if matches!(
+                row.sql_type.kind,
+                SqlTypeKind::Record | SqlTypeKind::Composite
+            ) =>
+            {
+                RECORD_OUT_PROC_OID
+            }
+            _ if matches!(row.sql_type.kind, SqlTypeKind::Enum) => ENUM_OUT_PROC_OID,
+            _ if matches!(row.sql_type.kind, SqlTypeKind::Range) => RANGE_OUT_PROC_OID,
+            _ if matches!(row.sql_type.kind, SqlTypeKind::Multirange) => MULTIRANGE_OUT_PROC_OID,
+            _ if row.typoutput != 0 => row.typoutput,
+            _ => synthetic_type_output_proc_oid(row.oid),
+        };
+        row.typreceive = match row.oid {
+            ANYARRAYOID => 2502,
+            ANYCOMPATIBLEARRAYOID => 5090,
+            RECORD_TYPE_OID => RECORD_RECV_PROC_OID,
+            REFCURSOR_TYPE_OID => TEXT_RECV_PROC_OID,
+            INT2VECTOR_TYPE_OID => INT2VECTOR_RECV_PROC_OID,
+            OIDVECTOR_TYPE_OID => OIDVECTOR_RECV_PROC_OID,
+            _ if matches!(
+                row.sql_type.kind,
+                SqlTypeKind::Record | SqlTypeKind::Composite
+            ) =>
+            {
+                RECORD_RECV_PROC_OID
+            }
+            _ if matches!(row.sql_type.kind, SqlTypeKind::Enum) => ENUM_RECV_PROC_OID,
+            _ if matches!(row.sql_type.kind, SqlTypeKind::Range) => RANGE_RECV_PROC_OID,
+            _ if matches!(row.sql_type.kind, SqlTypeKind::Multirange) => MULTIRANGE_RECV_PROC_OID,
+            _ => row.typreceive,
+        };
+        row.typsend = match row.oid {
+            RECORD_TYPE_OID => RECORD_SEND_PROC_OID,
+            REFCURSOR_TYPE_OID => TEXT_SEND_PROC_OID,
+            INT2VECTOR_TYPE_OID => INT2VECTOR_SEND_PROC_OID,
+            OIDVECTOR_TYPE_OID => OIDVECTOR_SEND_PROC_OID,
+            _ if matches!(
+                row.sql_type.kind,
+                SqlTypeKind::Record | SqlTypeKind::Composite
+            ) =>
+            {
+                RECORD_SEND_PROC_OID
+            }
+            _ if matches!(row.sql_type.kind, SqlTypeKind::Enum) => ENUM_SEND_PROC_OID,
+            _ if matches!(row.sql_type.kind, SqlTypeKind::Range) => RANGE_SEND_PROC_OID,
+            _ if matches!(row.sql_type.kind, SqlTypeKind::Multirange) => MULTIRANGE_SEND_PROC_OID,
+            _ => row.typsend,
+        };
+        row.typanalyze = match row.oid {
+            _ if matches!(row.sql_type.kind, SqlTypeKind::Range) => RANGE_TYPANALYZE_PROC_OID,
+            _ if matches!(row.sql_type.kind, SqlTypeKind::Multirange) => {
+                MULTIRANGE_TYPANALYZE_PROC_OID
+            }
+            _ => row.typanalyze,
         };
     }
+
+    let annotated_rows = rows.to_vec();
+    for row in rows.iter_mut().filter(|row| row.typtype == 'd') {
+        if let Some(base) = annotated_rows
+            .iter()
+            .find(|base| base.oid == row.typbasetype)
+        {
+            row.typoutput = base.typoutput;
+            row.typsend = base.typsend;
+            row.typmodin = base.typmodin;
+            row.typmodout = base.typmodout;
+            row.typanalyze = base.typanalyze;
+        }
+    }
+}
+
+pub fn synthetic_type_input_proc_oid(type_oid: u32) -> u32 {
+    PG_RUST_TYPE_INPUT_PROC_BASE + type_oid
+}
+
+pub fn synthetic_type_output_proc_oid(type_oid: u32) -> u32 {
+    PG_RUST_TYPE_OUTPUT_PROC_BASE + type_oid
 }
 
 #[cfg(test)]
@@ -1317,7 +1901,6 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "pg_namespace",
                 "pg_type",
                 "pg_proc",
                 "pg_attribute",
@@ -1326,18 +1909,29 @@ mod tests {
                 "pg_statistic",
                 "pg_statistic_ext",
                 "pg_statistic_ext_data",
+                "_pg_type",
+                "_pg_proc",
+                "_pg_attribute",
+                "_pg_class",
+                "_pg_database",
                 "_pg_statistic",
                 "_pg_statistic_ext",
                 "_pg_statistic_ext_data",
             ]
         );
-        assert_eq!(rows[0].oid, PG_NAMESPACE_ROWTYPE_OID);
-        assert_eq!(rows[2].oid, PG_PROC_ROWTYPE_OID);
-        assert_eq!(rows[4].oid, PG_CLASS_ROWTYPE_OID);
-        assert_eq!(rows[5].oid, PG_DATABASE_ROWTYPE_OID);
-        assert_eq!(rows[6].oid, PG_STATISTIC_ROWTYPE_OID);
-        assert_eq!(rows[7].oid, PG_STATISTIC_EXT_ROWTYPE_OID);
-        assert_eq!(rows[8].oid, PG_STATISTIC_EXT_DATA_ROWTYPE_OID);
+        assert!(rows.iter().all(|row| row.oid != 0));
+        assert_eq!(rows[0].oid, PG_TYPE_ROWTYPE_OID);
+        assert_eq!(rows[1].oid, PG_PROC_ROWTYPE_OID);
+        assert_eq!(rows[3].oid, PG_CLASS_ROWTYPE_OID);
+        assert_eq!(rows[4].oid, PG_DATABASE_ROWTYPE_OID);
+        assert_eq!(rows[5].oid, PG_STATISTIC_ROWTYPE_OID);
+        assert_eq!(rows[6].oid, PG_STATISTIC_EXT_ROWTYPE_OID);
+        assert_eq!(rows[7].oid, PG_STATISTIC_EXT_DATA_ROWTYPE_OID);
+        assert_eq!(rows[0].typarray, PG_TYPE_ARRAY_TYPE_OID);
+        assert!(
+            rows.iter()
+                .any(|row| row.oid == PG_TYPE_ARRAY_TYPE_OID && row.typelem == PG_TYPE_ROWTYPE_OID)
+        );
     }
 
     #[test]
@@ -1387,10 +1981,65 @@ mod tests {
     }
 
     #[test]
+    fn builtin_type_array_links_cover_identity_and_vector_types() {
+        let rows = builtin_type_rows();
+        for (base_oid, array_oid, elem_oid) in [
+            (
+                INTERNAL_CHAR_TYPE_OID,
+                INTERNAL_CHAR_ARRAY_TYPE_OID,
+                INTERNAL_CHAR_TYPE_OID,
+            ),
+            (CID_TYPE_OID, CID_ARRAY_TYPE_OID, CID_TYPE_OID),
+            (ACLITEM_TYPE_OID, ACLITEM_ARRAY_TYPE_OID, ACLITEM_TYPE_OID),
+            (
+                INT2VECTOR_TYPE_OID,
+                INT2VECTOR_ARRAY_TYPE_OID,
+                INT2VECTOR_TYPE_OID,
+            ),
+            (
+                OIDVECTOR_TYPE_OID,
+                OIDVECTOR_ARRAY_TYPE_OID,
+                OIDVECTOR_TYPE_OID,
+            ),
+            (
+                GTSVECTOR_TYPE_OID,
+                GTSVECTOR_ARRAY_TYPE_OID,
+                GTSVECTOR_TYPE_OID,
+            ),
+            (POINT_TYPE_OID, POINT_ARRAY_TYPE_OID, POINT_TYPE_OID),
+        ] {
+            let base = rows
+                .iter()
+                .find(|row| row.oid == base_oid)
+                .expect("base type row");
+            let array = rows
+                .iter()
+                .find(|row| row.oid == array_oid)
+                .expect("array type row");
+            assert_eq!(base.typarray, array_oid);
+            assert_eq!(array.typelem, elem_oid);
+            assert_eq!(array.typtype, 'b');
+        }
+
+        let int2vector = rows
+            .iter()
+            .find(|row| row.oid == INT2VECTOR_TYPE_OID)
+            .expect("int2vector type row");
+        assert_eq!(int2vector.typelem, INT2_TYPE_OID);
+        assert_eq!(int2vector.typinput, INT2VECTOR_IN_PROC_OID);
+        assert_eq!(int2vector.typoutput, INT2VECTOR_OUT_PROC_OID);
+    }
+
+    #[test]
     fn builtin_types_include_statistics_payload_types() {
         for (oid, name) in [
             (PG_NDISTINCT_TYPE_OID, "pg_ndistinct"),
             (PG_DEPENDENCIES_TYPE_OID, "pg_dependencies"),
+            (PG_BRIN_BLOOM_SUMMARY_TYPE_OID, "pg_brin_bloom_summary"),
+            (
+                PG_BRIN_MINMAX_MULTI_SUMMARY_TYPE_OID,
+                "pg_brin_minmax_multi_summary",
+            ),
             (PG_MCV_LIST_TYPE_OID, "pg_mcv_list"),
         ] {
             assert!(builtin_type_rows().iter().any(|row| {

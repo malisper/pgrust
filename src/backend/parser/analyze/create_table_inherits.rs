@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::backend::access::common::toast_compression::compression_name;
-use crate::backend::utils::misc::notices::push_notice;
+use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
 
 use super::create_table::{LoweredCreateTable, lower_create_table};
 use super::{
@@ -18,6 +18,7 @@ struct MergedColumnSpec {
     not_null_inhcount: i16,
     not_null_is_local: bool,
     conflicting_parent_default: bool,
+    conflicting_parent_generated: bool,
 }
 
 pub fn lower_create_table_with_catalog(
@@ -360,7 +361,7 @@ fn merge_inherited_columns(
                     column.default_expr.clone()
                 },
                 generated,
-                identity: column.identity,
+                identity: None,
                 storage: Some(column.storage.attstorage),
                 compression: Some(column.storage.attcompression),
                 constraints: inherited_constraints_for_parent(column),
@@ -376,6 +377,7 @@ fn merge_inherited_columns(
                     not_null_inhcount: inherited_not_null_count(column),
                     not_null_is_local: false,
                     conflicting_parent_default: false,
+                    conflicting_parent_generated: false,
                 });
                 column_lookup.insert(normalized, index);
             }
@@ -383,13 +385,13 @@ fn merge_inherited_columns(
     }
 
     let mut seen_local_columns = BTreeSet::new();
-    for column in stmt.columns() {
+    for (local_index, column) in stmt.columns().enumerate() {
         let normalized = column.name.to_ascii_lowercase();
         if !seen_local_columns.insert(normalized.clone()) {
             return Err(duplicate_column_error(&column.name));
         }
         if let Some(index) = column_lookup.get(&normalized).copied() {
-            merge_local_column(&mut merged[index], column)?;
+            merge_local_column(&mut merged[index], column, local_index, index)?;
         } else {
             let index = merged.len();
             merged.push(MergedColumnSpec {
@@ -399,6 +401,7 @@ fn merge_inherited_columns(
                 not_null_inhcount: 0,
                 not_null_is_local: !column.nullable(),
                 conflicting_parent_default: false,
+                conflicting_parent_generated: false,
             });
             column_lookup.insert(normalized, index);
         }
@@ -413,6 +416,23 @@ fn merge_inherited_columns(
             return Err(ParseError::UnknownColumn(override_.name.clone()));
         };
         merge_partition_column_override(&mut merged[index], override_)?;
+    }
+
+    if let Some(conflict) = merged
+        .iter()
+        .find(|column| column.conflicting_parent_generated)
+    {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "column \"{}\" inherits conflicting generation expressions",
+                conflict.column.name
+            ),
+            detail: None,
+            hint: Some(
+                "To resolve the conflict, specify a generation expression explicitly.".into(),
+            ),
+            sqlstate: "42P16",
+        });
     }
 
     if let Some(conflict) = merged
@@ -457,11 +477,16 @@ fn merge_parent_column(
             merged.not_null_is_local = false;
         }
     }
-    ensure_matching_column_generated(
+    ensure_matching_column_generated_kind(
         &merged.column.name,
         merged.column.generated.as_ref(),
         parent.generated.as_ref(),
     )?;
+    if let (Some(left), Some(right)) = (&merged.column.generated, &parent.generated)
+        && left.expr_sql != right.expr_sql
+    {
+        merged.conflicting_parent_generated = true;
+    }
     if merged.column.generated.is_none() {
         merged.column.generated = parent.generated.clone();
     }
@@ -477,13 +502,25 @@ fn merge_parent_column(
 fn merge_local_column(
     merged: &mut MergedColumnSpec,
     local: &crate::backend::parser::ColumnDef,
+    local_index: usize,
+    inherited_index: usize,
 ) -> Result<(), ParseError> {
     ensure_matching_column_type(&merged.column.name, &merged.column.ty, &local.ty)?;
     if merged.attinhcount > 0 {
-        push_notice(format!(
-            "merging column \"{}\" with inherited definition",
-            merged.column.name
-        ));
+        if local_index != inherited_index {
+            push_notice_with_detail(
+                format!(
+                    "moving and merging column \"{}\" with inherited definition",
+                    merged.column.name
+                ),
+                "User-specified column moved to the position of the inherited column.",
+            );
+        } else {
+            push_notice(format!(
+                "merging column \"{}\" with inherited definition",
+                merged.column.name
+            ));
+        }
     }
     merged.attislocal = true;
     if let Some(local_compression) = local.compression {
@@ -505,6 +542,8 @@ fn merge_local_column(
                 "cannot define not-null constraint with NO INHERIT on column \"{}\"",
                 merged.column.name
             )));
+        } else {
+            replace_not_null_constraint(&mut merged.column, attributes.clone());
         }
     } else if !local.nullable() {
         ensure_not_null_constraint(&mut merged.column);
@@ -516,7 +555,44 @@ fn merge_local_column(
     if local.unique() {
         ensure_unique_constraint(&mut merged.column);
     }
-    ensure_matching_column_generated(
+    if merged.column.generated.is_none() && local.generated.is_some() {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "child column \"{}\" specifies generation expression",
+                merged.column.name
+            ),
+            detail: None,
+            hint: Some(
+                "A child table column cannot be generated unless its parent column is.".into(),
+            ),
+            sqlstate: "42P16",
+        });
+    }
+    if merged.column.generated.is_some() && local.generated.is_none() {
+        if local.default_expr.is_some() {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "column \"{}\" inherits from generated column but specifies default",
+                    merged.column.name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
+        if local.identity.is_some() {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "column \"{}\" inherits from generated column but specifies identity",
+                    merged.column.name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
+    }
+    ensure_matching_column_generated_kind(
         &merged.column.name,
         merged.column.generated.as_ref(),
         local.generated.as_ref(),
@@ -525,6 +601,7 @@ fn merge_local_column(
         merged.column.generated = local.generated.clone();
         merged.column.default_expr = None;
         merged.conflicting_parent_default = false;
+        merged.conflicting_parent_generated = false;
     }
     if local.default_expr.is_some() {
         if merged.column.generated.is_some() {
@@ -567,6 +644,8 @@ fn merge_partition_column_override(
                 "cannot define not-null constraint with NO INHERIT on column \"{}\"",
                 merged.column.name
             )));
+        } else {
+            replace_not_null_constraint(&mut merged.column, attributes.clone());
         }
     }
     if let Some(default_expr) = &override_.default_expr {
@@ -626,7 +705,10 @@ fn inherited_constraints_for_parent(
     let mut constraints = Vec::new();
     if !column.storage.nullable && !column.not_null_constraint_no_inherit {
         constraints.push(ColumnConstraint::NotNull {
-            attributes: ConstraintAttributes::default(),
+            attributes: ConstraintAttributes {
+                name: column.not_null_constraint_name.clone(),
+                ..ConstraintAttributes::default()
+            },
         });
     }
     constraints
@@ -663,6 +745,18 @@ fn ensure_not_null_constraint(column: &mut crate::backend::parser::ColumnDef) {
     column.constraints.push(ColumnConstraint::NotNull {
         attributes: ConstraintAttributes::default(),
     });
+}
+
+fn replace_not_null_constraint(
+    column: &mut crate::backend::parser::ColumnDef,
+    attributes: ConstraintAttributes,
+) {
+    column
+        .constraints
+        .retain(|constraint| !matches!(constraint, ColumnConstraint::NotNull { .. }));
+    column
+        .constraints
+        .push(ColumnConstraint::NotNull { attributes });
 }
 
 fn ensure_primary_key_constraint(column: &mut crate::backend::parser::ColumnDef) {
@@ -717,27 +811,38 @@ fn ensure_matching_column_compression(
     })
 }
 
-fn ensure_matching_column_generated(
+fn ensure_matching_column_generated_kind(
     name: &str,
     left: Option<&crate::include::nodes::parsenodes::ColumnGeneratedDef>,
     right: Option<&crate::include::nodes::parsenodes::ColumnGeneratedDef>,
 ) -> Result<(), ParseError> {
     match (left, right) {
         (Some(left), Some(right)) if left.kind != right.kind => Err(ParseError::DetailedError {
-            message: format!("column \"{name}\" has a generation conflict"),
-            detail: Some("Generated columns must be both virtual or both stored.".into()),
+            message: format!("column \"{name}\" inherits from generated column of different kind"),
+            detail: Some(format!(
+                "Parent column is {}, child column is {}.",
+                generated_kind_name(left.kind),
+                generated_kind_name(right.kind)
+            )),
             hint: None,
             sqlstate: "42P16",
         }),
         (Some(_), None) | (None, Some(_)) => Err(ParseError::DetailedError {
-            message: format!("column \"{name}\" has a generation conflict"),
-            detail: Some(
-                "A generated column cannot inherit from or merge with a normal column.".into(),
-            ),
+            message: format!("inherited column \"{name}\" has a generation conflict"),
+            detail: None,
             hint: None,
             sqlstate: "42P16",
         }),
         _ => Ok(()),
+    }
+}
+
+fn generated_kind_name(
+    kind: crate::include::nodes::parsenodes::ColumnGeneratedKind,
+) -> &'static str {
+    match kind {
+        crate::include::nodes::parsenodes::ColumnGeneratedKind::Virtual => "VIRTUAL",
+        crate::include::nodes::parsenodes::ColumnGeneratedKind::Stored => "STORED",
     }
 }
 

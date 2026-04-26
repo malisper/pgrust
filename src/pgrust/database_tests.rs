@@ -12,8 +12,9 @@ use crate::backend::utils::misc::notices::{
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BootstrapCatalogKind, CSTRING_TYPE_OID, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
-    PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID,
-    PG_TYPE_RELATION_OID, PgAggregateRow, TEXT_TYPE_OID,
+    PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID,
+    PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
+    TEXT_TYPE_OID,
 };
 use crate::include::nodes::datum::{ArrayValue, IntervalValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
@@ -190,6 +191,7 @@ fn analyze_executor_context(
         lock_status_provider: Some(Arc::new(db.clone())),
         sequences: Some(db.sequences.clone()),
         large_objects: Some(db.large_objects.clone()),
+        stats_import_runtime: None,
         async_notify_runtime: Some(db.async_notify_runtime.clone()),
         advisory_locks: Arc::clone(&db.advisory_locks),
         row_locks: Arc::clone(&db.row_locks),
@@ -213,6 +215,7 @@ fn analyze_executor_context(
         transaction_lock_scope_id: None,
         next_command_id: cid,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+        random_state: crate::backend::executor::PgPrngState::shared(),
         timed: false,
         allow_side_effects: false,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -223,8 +226,13 @@ fn analyze_executor_context(
         catalog_effects: Vec::new(),
         temp_effects: Vec::new(),
         database: None,
+        pending_catalog_effects: Vec::new(),
+        pending_table_locks: Vec::new(),
         catalog: visible_catalog,
-        compiled_functions: HashMap::new(),
+        plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
+            crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
+        )),
+        pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: HashMap::new(),
         cte_producers: HashMap::new(),
         recursive_worktables: HashMap::new(),
@@ -257,6 +265,88 @@ fn ephemeral_database_executes_basic_sql() {
             vec![Value::Int32(1), Value::Text("a".into())],
             vec![Value::Int32(2), Value::Text("b".into())],
         ]
+    );
+}
+
+#[test]
+fn session_setseed_affects_following_random_statement() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select oid, prosrc from pg_proc where proname = 'setseed'",
+        ),
+        vec![vec![Value::Int64(1599), Value::Text("setseed".into())]]
+    );
+    session
+        .execute(&db, "select setseed(0.5)")
+        .expect("seed random state");
+    let result = session
+        .execute(&db, "select random() from generate_series(1, 3)")
+        .expect("read seeded random values");
+    let StatementResult::Query { rows, .. } = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(rows.len(), 3);
+    let expected = [0.9851677175347999, 0.825301858027981, 0.12974610012450416];
+    for (row, expected) in rows.iter().zip(expected) {
+        match row.first() {
+            Some(Value::Float64(actual)) => assert_eq!(*actual, expected),
+            other => panic!("expected float8 random value, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn cte_order_by_feeds_row_number_in_materialized_order() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "
+            with samples as (
+                select column1 r from (values (3), (1), (2)) v order by 1
+            ), indexed_samples as (
+                select row_number() over () i, r from samples
+            )
+            select i, r from indexed_samples
+            ",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Int64(1), Value::Int32(1)],
+            vec![Value::Int64(2), Value::Int32(2)],
+            vec![Value::Int64(3), Value::Int32(3)],
+        ],
+    );
+}
+
+#[test]
+fn order_by_ordinal_sorts_projected_volatile_value() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select random() r from generate_series(1, 50) order by 1",
+    );
+    let values = rows
+        .iter()
+        .map(|row| match row.as_slice() {
+            [Value::Float64(value)] => *value,
+            other => panic!("expected one float8 column, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        values.windows(2).all(|pair| pair[0] <= pair[1]),
+        "ORDER BY 1 must sort the projected random() values: {values:?}"
     );
 }
 
@@ -434,6 +524,238 @@ fn txid_current_assigns_xid_in_autocommit_select() {
         other => panic!("expected one txid_current row, got {other:?}"),
     };
     assert!(txid >= 3);
+}
+
+#[test]
+fn repeatable_read_reuses_first_snapshot() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+
+    db.execute(10, "create table rr_items (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rr_items values (1)").unwrap();
+
+    reader
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rr_items"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    db.execute(20, "insert into rr_items values (2)").unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rr_items"),
+        vec![vec![Value::Int64(1)]]
+    );
+    reader.execute(&db, "commit").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 30, "select count(*) from rr_items"),
+        vec![vec![Value::Int64(2)]]
+    );
+}
+
+#[test]
+fn repeatable_read_streaming_uses_transaction_snapshot() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+
+    db.execute(10, "create table rr_streaming (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rr_streaming values (1)")
+        .unwrap();
+
+    reader
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rr_streaming"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    db.execute(20, "insert into rr_streaming values (2)")
+        .unwrap();
+
+    let stmt = crate::backend::parser::parse_select("select count(*) from rr_streaming").unwrap();
+    let mut guard = reader.execute_streaming(&db, &stmt).unwrap();
+    let slot = crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx)
+        .unwrap()
+        .expect("streaming count row");
+    let values = slot.values().unwrap();
+    assert_eq!(values[0].to_owned_value(), Value::Int64(1));
+    assert!(
+        crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx)
+            .unwrap()
+            .is_none()
+    );
+    drop(guard);
+
+    reader.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn read_committed_uses_fresh_statement_snapshots() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+
+    db.execute(10, "create table rc_items (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rc_items values (1)").unwrap();
+
+    reader.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rc_items"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    db.execute(20, "insert into rc_items values (2)").unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rc_items"),
+        vec![vec![Value::Int64(2)]]
+    );
+    reader.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn repeatable_read_sees_own_writes_after_snapshot() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    db.execute(10, "create table rr_own_writes (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rr_own_writes values (1)")
+        .unwrap();
+
+    session
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from rr_own_writes"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    session
+        .execute(&db, "insert into rr_own_writes values (2)")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from rr_own_writes"),
+        vec![vec![Value::Int64(2)]]
+    );
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn set_transaction_isolation_after_query_errors() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session_query_rows(&mut session, &db, "select 1");
+
+    let err = session
+        .execute(&db, "set transaction isolation level repeatable read")
+        .unwrap_err();
+    assert_sqlstate(err, "25001", "must be called before any query");
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn set_session_characteristics_sets_default_transaction_isolation() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "set session characteristics as transaction isolation level repeatable read",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show default_transaction_isolation"),
+        vec![vec![Value::Text("repeatable read".into())]]
+    );
+
+    session.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show transaction isolation level"),
+        vec![vec![Value::Text("repeatable read".into())]]
+    );
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn repeatable_read_update_conflict_errors() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+    let mut writer = Session::new(2);
+
+    db.execute(
+        10,
+        "create table rr_update_conflict (id int4 not null, v int4 not null)",
+    )
+    .unwrap();
+    db.execute(10, "insert into rr_update_conflict values (1, 10)")
+        .unwrap();
+
+    reader
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut reader,
+            &db,
+            "select v from rr_update_conflict where id = 1"
+        ),
+        vec![vec![Value::Int32(10)]]
+    );
+
+    writer.execute(&db, "begin").unwrap();
+    writer
+        .execute(&db, "update rr_update_conflict set v = 20 where id = 1")
+        .unwrap();
+    writer.execute(&db, "commit").unwrap();
+
+    let err = reader
+        .execute(&db, "update rr_update_conflict set v = 30 where id = 1")
+        .unwrap_err();
+    assert_sqlstate(err, "40001", "concurrent update");
+    reader.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn repeatable_read_delete_conflict_errors() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+    let mut writer = Session::new(2);
+
+    db.execute(10, "create table rr_delete_conflict (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rr_delete_conflict values (1)")
+        .unwrap();
+
+    reader
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rr_delete_conflict"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    writer.execute(&db, "begin").unwrap();
+    writer
+        .execute(&db, "delete from rr_delete_conflict where id = 1")
+        .unwrap();
+    writer.execute(&db, "commit").unwrap();
+
+    let err = reader
+        .execute(&db, "delete from rr_delete_conflict where id = 1")
+        .unwrap_err();
+    assert_sqlstate(err, "40001", "concurrent delete");
+    reader.execute(&db, "rollback").unwrap();
 }
 
 #[test]
@@ -1460,6 +1782,131 @@ fn query_rows(db: &Database, client_id: u32, sql: &str) -> Vec<Vec<Value>> {
 }
 
 #[test]
+fn stats_import_restores_and_clears_relation_stats() {
+    let db = Database::open_ephemeral(64).expect("open ephemeral database");
+    db.execute(1, "create schema stats_import").unwrap();
+    db.execute(
+        1,
+        "create table stats_import.test(id integer primary key, name text)",
+    )
+    .unwrap();
+
+    let restore_rows = query_rows(
+        &db,
+        1,
+        "select pg_catalog.pg_restore_relation_stats(
+                'schemaname', 'stats_import',
+                'relname', 'test',
+                'relpages', 18::integer,
+                'reltuples', 21::real,
+                'relallvisible', 24::integer,
+                'relallfrozen', 27::integer)",
+    );
+    let notices = take_backend_notices();
+    assert_eq!(restore_rows, vec![vec![Value::Bool(true)]], "{notices:?}");
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relpages, reltuples, relallvisible, relallfrozen
+             from pg_class
+             where oid = 'stats_import.test'::regclass",
+        ),
+        vec![vec![
+            Value::Int32(18),
+            Value::Float64(21.0),
+            Value::Int32(24),
+            Value::Int32(27),
+        ]]
+    );
+
+    db.execute(1, "select pg_clear_relation_stats('stats_import', 'test')")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relpages, reltuples, relallvisible, relallfrozen
+             from pg_class
+             where oid = 'stats_import.test'::regclass",
+        ),
+        vec![vec![
+            Value::Int32(0),
+            Value::Float64(-1.0),
+            Value::Int32(0),
+            Value::Int32(0),
+        ]]
+    );
+}
+
+#[test]
+fn stats_import_locks_partitioned_index_and_parent() {
+    let db = Database::open_ephemeral(64).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema stats_import").unwrap();
+    session
+        .execute(
+            &db,
+            "create table stats_import.part_parent (i int4) partition by range (i)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table stats_import.part_child_1
+             partition of stats_import.part_parent
+             for values from (0) to (10)
+             with (autovacuum_enabled = false)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create index part_parent_i on stats_import.part_parent(i)",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select pg_catalog.pg_restore_relation_stats(
+                'schemaname', 'stats_import',
+                'relname', 'part_parent_i',
+                'relpages', 2::integer)",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_locks
+             where relation = 'stats_import.part_parent'::regclass
+               and pid = pg_backend_pid()
+               and mode = 'ShareUpdateExclusiveLock'
+               and granted",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_locks
+             where relation = 'stats_import.part_parent_i'::regclass
+               and pid = pg_backend_pid()
+               and mode = 'ShareUpdateExclusiveLock'
+               and granted",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
 fn filtered_cross_join_preserves_left_outer_row_order() {
     let base = temp_dir("filtered_cross_join_left_order");
     let db = Database::open(&base, 16).unwrap();
@@ -1502,6 +1949,24 @@ fn session_query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Ve
     match session.execute(db, sql).unwrap() {
         StatementResult::Query { rows, .. } => rows,
         other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+fn assert_sqlstate(err: ExecError, expected_sqlstate: &str, expected_message_part: &str) {
+    match err {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        }
+        | ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, expected_sqlstate);
+            assert!(
+                message.contains(expected_message_part),
+                "expected message to contain {expected_message_part:?}, got {message:?}"
+            );
+        }
+        other => panic!("expected SQLSTATE {expected_sqlstate}, got {other:?}"),
     }
 }
 
@@ -6382,9 +6847,9 @@ fn new_indexes_report_never_analyzed_reltuples() {
         query_rows(
             &db,
             1,
-            "select reltuples from pg_class where relname = 'fresh_items_id_idx'",
+            "select relpages, reltuples from pg_class where relname = 'fresh_items_id_idx'",
         ),
-        vec![vec![Value::Float64(-1.0)]]
+        vec![vec![Value::Int32(1), Value::Float64(0.0)]]
     );
 }
 
@@ -7550,6 +8015,100 @@ fn base_table_scan_exposes_ctid_system_column() {
 }
 
 #[test]
+fn outer_join_null_extended_ctid_is_null() {
+    let dir = temp_dir("outer_join_ctid");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table ctid_source(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table ctid_target(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into ctid_source values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into ctid_target values (2)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select t.ctid is not null, t.id, s.id from ctid_source s full outer join ctid_target t on s.id = t.id order by t.id, s.id"
+        ),
+        vec![
+            vec![Value::Bool(true), Value::Int32(2), Value::Null],
+            vec![Value::Bool(false), Value::Null, Value::Int32(1)],
+        ]
+    );
+}
+
+#[test]
+fn merge_checks_target_and_source_privileges() {
+    let dir = temp_dir("merge_privileges");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role merge_owner login")
+        .unwrap();
+    session
+        .execute(&db, "create role merge_tenant login")
+        .unwrap();
+    session
+        .execute(&db, "create table merge_target(id int4, value int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table merge_source(id int4, value int4)")
+        .unwrap();
+    session
+        .execute(&db, "alter table merge_target owner to merge_owner")
+        .unwrap();
+    session
+        .execute(&db, "alter table merge_source owner to merge_owner")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization merge_tenant")
+        .unwrap();
+
+    match session.execute(
+        &db,
+        "merge into merge_target t using merge_source s on t.id = s.id when matched then do nothing",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "permission denied for table merge_target");
+            assert_eq!(sqlstate, "42501");
+        }
+        other => panic!("expected merge target privilege error, got {other:?}"),
+    }
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "grant select on merge_target to merge_tenant")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization merge_tenant")
+        .unwrap();
+    match session.execute(
+        &db,
+        "merge into merge_target t using merge_source s on t.id = s.id when matched then do nothing",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "permission denied for table merge_source");
+            assert_eq!(sqlstate, "42501");
+        }
+        other => panic!("expected merge source privilege error, got {other:?}"),
+    }
+}
+
+#[test]
 fn inherited_update_delete_follow_postgres_targeting_rules() {
     let dir = temp_dir("inheritance_guardrails");
     let db = Database::open(&dir, 128).unwrap();
@@ -8139,6 +8698,303 @@ fn information_schema_view_metadata_tracks_updatable_views() {
                 Value::Text("YES".into()),
             ],
         ]
+    );
+}
+
+#[test]
+fn information_schema_columns_reports_generated_column_metadata() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table gtest0 (a int primary key, b int generated always as (55) virtual)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table gtest1 (a int primary key, b int generated always as (a * 2) virtual)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select table_name, column_name, column_default, is_nullable, is_generated, generation_expression
+             from information_schema.columns
+             where table_schema = 'public' and table_name in ('gtest0', 'gtest1')
+             order by 1, 2",
+        ),
+        vec![
+            vec![
+                Value::Text("gtest0".into()),
+                Value::Text("a".into()),
+                Value::Null,
+                Value::Text("NO".into()),
+                Value::Text("NEVER".into()),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("gtest0".into()),
+                Value::Text("b".into()),
+                Value::Null,
+                Value::Text("YES".into()),
+                Value::Text("ALWAYS".into()),
+                Value::Text("55".into()),
+            ],
+            vec![
+                Value::Text("gtest1".into()),
+                Value::Text("a".into()),
+                Value::Null,
+                Value::Text("NO".into()),
+                Value::Text("NEVER".into()),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("gtest1".into()),
+                Value::Text("b".into()),
+                Value::Null,
+                Value::Text("YES".into()),
+                Value::Text("ALWAYS".into()),
+                Value::Text("(a * 2)".into()),
+            ],
+        ]
+    );
+
+    let rows = query_rows(
+        &db,
+        1,
+        "select * from information_schema.columns where table_name = 'gtest1' and column_name = 'b'",
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].len(), 44);
+}
+
+#[test]
+fn information_schema_column_column_usage_reports_generated_dependencies() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table gtest1 (a int primary key, b int generated always as (a * 2) virtual)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select table_name, column_name, dependent_column
+             from information_schema.column_column_usage
+             where table_schema = 'public'
+             order by 1, 2, 3",
+        ),
+        vec![vec![
+            Value::Text("gtest1".into()),
+            Value::Text("a".into()),
+            Value::Text("b".into()),
+        ]]
+    );
+
+    let relation = db
+        .lazy_catalog_lookup(1, None, None)
+        .lookup_any_relation("gtest1")
+        .unwrap();
+    let attrdef_oid = relation.desc.columns[1].attrdef_oid.unwrap();
+    assert!(
+        db.backend_catcache(1, None)
+            .unwrap()
+            .depend_rows()
+            .iter()
+            .any(|row| {
+                row.classid == PG_ATTRDEF_RELATION_OID
+                    && row.objid == attrdef_oid
+                    && row.refclassid == PG_CLASS_RELATION_OID
+                    && row.refobjid == relation.relation_oid
+                    && row.refobjsubid == 1
+                    && row.deptype == 'n'
+            })
+    );
+}
+
+#[test]
+fn generated_column_source_drop_uses_dependency_metadata_for_restrict_and_cascade() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table gtest10 (
+            a int primary key,
+            b int,
+            c int generated always as (b * 2) virtual
+        )",
+    )
+    .unwrap();
+
+    match db.execute(1, "alter table gtest10 drop column b") {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(
+                message,
+                "cannot drop column b of table gtest10 because other objects depend on it"
+            );
+            assert_eq!(
+                detail.as_deref(),
+                Some("column c of table gtest10 depends on column b of table gtest10")
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some("Use DROP ... CASCADE to drop the dependent objects too.")
+            );
+            assert_eq!(sqlstate, "2BP01");
+        }
+        other => panic!("expected generated dependency restrict error, got {other:?}"),
+    }
+
+    clear_backend_notices();
+    db.execute(1, "alter table gtest10 drop column b cascade")
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec!["drop cascades to column c of table gtest10".to_string()]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select column_name
+             from information_schema.columns
+             where table_name = 'gtest10'
+             order by ordinal_position",
+        ),
+        vec![vec![Value::Text("a".into())]]
+    );
+}
+
+#[test]
+fn generated_inheritance_metadata_conflicts_and_not_null_names_match_parent() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table gtest1 (a int primary key, b int generated always as (a * 2) virtual)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table gtesty (x int, b int generated always as (x * 22) virtual)",
+    )
+    .unwrap();
+
+    match db.execute(1, "create table gtest1_y () inherits (gtest1, gtesty)") {
+        Err(ExecError::Parse(ParseError::DetailedError { message, hint, .. })) => {
+            assert_eq!(
+                message,
+                "column \"b\" inherits conflicting generation expressions"
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some("To resolve the conflict, specify a generation expression explicitly.")
+            );
+        }
+        other => panic!("expected generated inheritance conflict, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "create table gtest1_y (b int generated always as (x + 1) virtual) inherits (gtest1, gtesty)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select generation_expression
+             from information_schema.columns
+             where table_name = 'gtest1_y' and column_name = 'b'",
+        ),
+        vec![vec![Value::Text("(x + 1)".into())]]
+    );
+
+    db.execute(1, "create table gtest_normal (a int, b int)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table gtest_normal_child (a int, b int generated always as (a * 2) virtual)",
+    )
+    .unwrap();
+    match db.execute(1, "alter table gtest_normal_child inherit gtest_normal") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "column \"b\" in child table must not be a generated column"
+            );
+        }
+        other => panic!("expected alter inherit generated mismatch, got {other:?}"),
+    }
+
+    db.execute(1, "create table gtestxx_1 (a int not null, b int)")
+        .unwrap();
+    match db.execute(1, "alter table gtestxx_1 inherit gtest1") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "column \"b\" in child table must be a generated column"
+            );
+        }
+        other => panic!("expected alter inherit missing generated column, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "create table gtestx (x int, b int generated always as (a * 22) virtual) inherits (gtest1)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.conname
+             from pg_constraint c
+             join pg_class r on r.oid = c.conrelid
+             where r.relname = 'gtestx' and c.contype = 'n'",
+        ),
+        vec![vec![Value::Text("gtest1_a_not_null".into())]]
+    );
+}
+
+#[test]
+fn drop_table_cascade_notice_uses_visible_search_path_name() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create schema generated_virtual_tests")
+        .unwrap();
+    session
+        .execute(&db, "set search_path = generated_virtual_tests")
+        .unwrap();
+    session
+        .execute(&db, "create table gtestp (f1 int)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table gtestc (f2 int generated always as (f1 + 1) virtual) inherits (gtestp)",
+        )
+        .unwrap();
+    take_backend_notice_messages();
+
+    session.execute(&db, "drop table gtestp cascade").unwrap();
+
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from("drop cascades to table gtestc")]
     );
 }
 
@@ -8786,6 +9642,28 @@ fn hash_index_build_sizes_initial_buckets_for_low_fillfactor() {
 }
 
 #[test]
+fn hash_index_fillfactor_out_of_range_uses_postgres_error_shape() {
+    let base = temp_dir("hash_index_fillfactor_range");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    match db.execute(
+        1,
+        "create index items_id_hash on items using hash (id) with (fillfactor = 9)",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        }) if message == "value 9 out of bounds for option \"fillfactor\""
+            && detail == "Valid values are between \"10\" and \"100\"."
+            && sqlstate == "22023" => {}
+        other => panic!("expected fillfactor range error, got {other:?}"),
+    }
+}
+
+#[test]
 fn hash_expression_partial_index_matches_equality_quals() {
     let base = temp_dir("hash_expression_partial_index");
     let db = Database::open(&base, 16).unwrap();
@@ -9264,7 +10142,7 @@ fn create_index_and_alter_table_set_are_noops() {
                     Value::Text("b".into()),
                 ],
                 vec![
-                    Value::Text("char".into()),
+                    Value::Text("bpchar".into()),
                     Value::Text("text".into()),
                     Value::Text("i".into()),
                     Value::Text("f".into()),
@@ -9344,7 +10222,7 @@ fn create_index_and_alter_table_set_are_noops() {
                         Value::Text("numeric".into()),
                     ],
                     vec![
-                        Value::Text("char".into()),
+                        Value::Text("bpchar".into()),
                         Value::Text("text".into()),
                         Value::Text("text".into()),
                     ],
@@ -11047,6 +11925,192 @@ fn statement_trigger_return_value_is_ignored() {
 }
 
 #[test]
+fn foreign_key_actions_respect_disabled_internal_triggers() {
+    let dir = temp_dir("fk_actions_disabled_internal_triggers");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 references parents(id) on delete cascade)",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1), (2)")
+        .unwrap();
+    db.execute(1, "insert into children values (1), (2)")
+        .unwrap();
+
+    db.execute(1, "alter table parents disable trigger user")
+        .unwrap();
+    db.execute(1, "delete from parents where id = 2").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id from children order by id"),
+        vec![vec![Value::Int32(1)]]
+    );
+
+    db.execute(1, "alter table parents disable trigger all")
+        .unwrap();
+    db.execute(1, "delete from parents where id = 1").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id from children order by id"),
+        vec![vec![Value::Int32(1)]]
+    );
+}
+
+#[test]
+fn foreign_key_checks_respect_disabled_internal_triggers() {
+    let dir = temp_dir("fk_checks_disabled_internal_triggers");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(1, "create table children (id int4 references parents(id))")
+        .unwrap();
+
+    db.execute(1, "alter table children disable trigger all")
+        .unwrap();
+    db.execute(1, "insert into children values (99)").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id from children"),
+        vec![vec![Value::Int32(99)]]
+    );
+
+    db.execute(1, "alter table children enable trigger all")
+        .unwrap();
+    match db.execute(1, "insert into children values (100)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. })
+            if constraint == "children_id_fkey" => {}
+        other => panic!("expected foreign key violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn partition_trigger_state_propagates_to_clones_unless_only() {
+    let dir = temp_dir("partition_trigger_state_propagates");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parent_part (id int4) partition by range (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table child_part partition of parent_part for values from (0) to (10)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function part_trig_fn() returns trigger language plpgsql as $$ begin return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger part_trig after insert on parent_part for each row execute function part_trig_fn()",
+    )
+    .unwrap();
+
+    db.execute(1, "alter table parent_part disable trigger part_trig")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, t.tgenabled::text \
+             from pg_trigger t join pg_class c on c.oid = t.tgrelid \
+             where t.tgname = 'part_trig' order by c.relname"
+        ),
+        vec![
+            vec![Value::Text("child_part".into()), Value::Text("D".into())],
+            vec![Value::Text("parent_part".into()), Value::Text("D".into())],
+        ]
+    );
+
+    db.execute(
+        1,
+        "alter table only parent_part enable always trigger part_trig",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, t.tgenabled::text \
+             from pg_trigger t join pg_class c on c.oid = t.tgrelid \
+             where t.tgname = 'part_trig' order by c.relname"
+        ),
+        vec![
+            vec![Value::Text("child_part".into()), Value::Text("D".into())],
+            vec![Value::Text("parent_part".into()), Value::Text("A".into())],
+        ]
+    );
+}
+
+#[test]
+fn trigger_relid_regclass_assignment_uses_relation_name() {
+    let dir = temp_dir("trigger_relid_regclass_assignment");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(1, "create table trigger_items (id int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function relid_notice() returns trigger language plpgsql as $$ \
+         declare relid text; \
+         begin \
+           relid := TG_RELID::regclass; \
+           raise notice 'relid %', relid; \
+           return new; \
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger relid_notice before insert on trigger_items for each row execute function relid_notice()",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "insert into trigger_items values (1)")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![String::from("relid trigger_items")]
+    );
+}
+
+#[test]
+fn partition_ancestors_supports_with_ordinality() {
+    let dir = temp_dir("partition_ancestors_with_ordinality");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parent_part (id int4) partition by range (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table child_part partition of parent_part for values from (0) to (10)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relid::regclass::text, ordinality \
+             from pg_partition_ancestors('child_part') with ordinality as a(relid, ordinality)"
+        ),
+        vec![
+            vec![Value::Text("child_part".into()), Value::Int64(1)],
+            vec![Value::Text("parent_part".into()), Value::Int64(2)],
+        ]
+    );
+}
+
+#[test]
 fn transition_table_statement_triggers_can_read_statement_rows() {
     let dir = temp_dir("transition_table_statement_rows");
     let db = Database::open(&dir, 64).unwrap();
@@ -12626,6 +13690,51 @@ fn regoperator_literal_cast_resolves_operator_signature() {
 }
 
 #[test]
+fn case_and_nullif_preserve_array_domain_function_results() {
+    let base = temp_dir("case_array_domain_function_result");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create domain arrdomain as int[]").unwrap();
+    db.execute(
+        1,
+        "create function make_ad(int,int) returns arrdomain as \
+         'declare x arrdomain; begin x := array[$1,$2]; return x; end' \
+         language plpgsql volatile",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function ad_eq(arrdomain, arrdomain) returns boolean as \
+         'begin return array_eq($1, $2); end' language plpgsql",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create operator = (procedure = ad_eq, leftarg = arrdomain, rightarg = arrdomain)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select make_ad(1,2)"),
+        vec![vec![Value::Array(vec![Value::Int32(1), Value::Int32(2)])]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select case make_ad(1,2) \
+             when array[2,4]::arrdomain then 'wrong' \
+             when array[1,2]::arrdomain then 'right' end",
+        ),
+        vec![vec![Value::Text("right".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select nullif(make_ad(1,2), array[2,3]::arrdomain)"),
+        vec![vec![Value::Array(vec![Value::Int32(1), Value::Int32(2)])]]
+    );
+}
+
+#[test]
 fn create_function_accepts_cstring_but_table_columns_reject_it() {
     let base = temp_dir("cstring_type_signature");
     let db = Database::open(&base, 16).unwrap();
@@ -12910,7 +14019,7 @@ fn alter_index_alter_column_set_statistics_updates_expression_column_and_resets(
             1,
             "select attstattarget from pg_attribute \
              where attrelid = (select oid from pg_class where relname = 'attmp_idx') \
-               and attname = 'expr2'",
+               and attname = 'expr'",
         ),
         vec![vec![Value::Int16(1000)]]
     );
@@ -12923,7 +14032,7 @@ fn alter_index_alter_column_set_statistics_updates_expression_column_and_resets(
             1,
             "select attstattarget from pg_attribute \
              where attrelid = (select oid from pg_class where relname = 'attmp_idx') \
-               and attname = 'expr2'",
+               and attname = 'expr'",
         ),
         vec![vec![Value::Int16(-1)]]
     );
@@ -13038,7 +14147,7 @@ fn alter_index_and_table_set_statistics_clamp_and_emit_warning() {
             1,
             "select attstattarget from pg_attribute \
              where attrelid = (select oid from pg_class where relname = 'attmp_idx') \
-               and attname = 'expr2'",
+               and attname = 'expr'",
         ),
         vec![vec![Value::Int16(10000)]]
     );
@@ -16300,6 +17409,70 @@ fn without_overlaps_primary_key_records_catalog_metadata_and_enforces_overlaps()
 }
 
 #[test]
+fn without_overlaps_accepts_custom_range_period_column() {
+    let base = temp_dir("without_overlaps_custom_range");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create type textrange2 as range (subtype=text, collation=\"C\")",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table temporal_custom_range (\
+             id int4range, \
+             valid_at textrange2, \
+             constraint temporal_custom_range_pk primary key (id, valid_at without overlaps)\
+         )",
+    )
+    .unwrap();
+
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("temporal_custom_range").unwrap();
+    let constraint = lookup
+        .constraint_rows_for_relation(relation.relation_oid)
+        .into_iter()
+        .find(|row| row.conname == "temporal_custom_range_pk")
+        .unwrap();
+    assert!(constraint.conperiod);
+    assert_eq!(constraint.conexclop.as_deref(), Some(&[72_000, 3888][..]));
+}
+
+#[test]
+fn without_overlaps_replica_identity_using_index_marks_pg_index() {
+    let base = temp_dir("without_overlaps_replica_identity");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table temporal_rng (\
+             id int4range, \
+             valid_at daterange, \
+             constraint temporal_rng_pk primary key (id, valid_at without overlaps)\
+         )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table temporal_rng replica identity using index temporal_rng_pk",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select i.indisreplident \
+             from pg_index i \
+             join pg_class c on c.oid = i.indexrelid \
+             where c.relname = 'temporal_rng_pk'",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
 fn without_overlaps_unique_handles_nulls_empty_ranges_and_updates() {
     let base = temp_dir("without_overlaps_unique_runtime");
     let db = Database::open(&base, 16).unwrap();
@@ -16606,6 +17779,115 @@ fn create_table_like_copies_identity_only_when_requested() {
             "select attidentity from pg_attribute where attrelid = (select oid from pg_class where relname = 'like_id_copy') and attname = 'a'",
         ),
         vec![vec![Value::Text("a".into())]]
+    );
+}
+
+#[test]
+fn identity_sequence_options_drive_owned_sequence() {
+    let base = temp_dir("identity_sequence_options");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table identity_opts (a smallint generated by default as identity (start with 7 increment by 5), b text)",
+    )
+    .unwrap();
+    db.execute(1, "insert into identity_opts default values")
+        .unwrap();
+    db.execute(1, "insert into identity_opts default values")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select a from identity_opts order by a"),
+        vec![vec![Value::Int16(7)], vec![Value::Int16(12)]]
+    );
+}
+
+#[test]
+fn alter_identity_and_overriding_enforce_generated_always() {
+    let base = temp_dir("alter_identity_overriding");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table alter_id (a int not null, b text)")
+        .unwrap();
+    match db.execute(
+        1,
+        "alter table alter_id alter column a add generated always as identity",
+    ) {
+        Ok(_) => {}
+        other => panic!("expected ADD IDENTITY to succeed, got {other:?}"),
+    }
+    db.execute(1, "insert into alter_id default values")
+        .unwrap();
+    db.execute(1, "insert into alter_id default values")
+        .unwrap();
+
+    match db.execute(1, "insert into alter_id values (42, 'blocked')") {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. })) => {
+            assert_eq!(
+                message,
+                "cannot insert a non-DEFAULT value into column \"a\""
+            );
+        }
+        other => panic!("expected generated-always insert error, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "insert into alter_id overriding system value values (42, 'system')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into alter_id overriding user value values (99, 'user')",
+    )
+    .unwrap();
+
+    match db.execute(1, "update alter_id set a = 55 where b = 'system'") {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. })) => {
+            assert_eq!(message, "column \"a\" can only be updated to DEFAULT");
+        }
+        other => panic!("expected generated-always update error, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from alter_id order by a"),
+        vec![
+            vec![Value::Int32(1), Value::Null],
+            vec![Value::Int32(2), Value::Null],
+            vec![Value::Int32(3), Value::Text("user".into())],
+            vec![Value::Int32(42), Value::Text("system".into())],
+        ]
+    );
+
+    db.execute(
+        1,
+        "alter table alter_id alter column a set generated by default set increment by 10 restart with 100",
+    )
+    .unwrap();
+    db.execute(1, "insert into alter_id values (200, 'default-explicit')")
+        .unwrap();
+    db.execute(1, "insert into alter_id default values")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a from alter_id where b = 'default-explicit' or b is null order by a desc limit 2",
+        ),
+        vec![vec![Value::Int32(200)], vec![Value::Int32(100)]]
+    );
+
+    db.execute(1, "alter table alter_id alter column a drop identity")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select oid from pg_class where relname = 'alter_id_a_seq'"
+        ),
+        Vec::<Vec<Value>>::new()
     );
 }
 
@@ -17182,6 +18464,109 @@ fn create_index_supports_expression_keys() {
             Value::Text("[\"d + e\"]".into()),
         ]]
     );
+}
+
+#[test]
+fn unique_expression_index_build_accepts_distinct_existing_rows() {
+    let base = temp_dir("unique_expression_index_build_distinct");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (value float8)").unwrap();
+    db.execute(
+        1,
+        "insert into items values (1935401906), (1345971420), (656473370)",
+    )
+    .unwrap();
+    db.execute(1, "create unique index items_abs_key on items (abs(value))")
+        .unwrap();
+}
+
+#[test]
+fn functional_textcat_index_builds_and_enforces_uniqueness() {
+    let base = temp_dir("functional_textcat_index");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table func_index_heap (f1 text, f2 text)")
+        .unwrap();
+    db.execute(1, "insert into func_index_heap values ('ABC', 'DEF')")
+        .unwrap();
+    db.execute(1, "insert into func_index_heap values ('AB', 'CDEFG')")
+        .unwrap();
+    db.execute(
+        1,
+        "create unique index func_index_index on func_index_heap (textcat(f1,f2))",
+    )
+    .unwrap();
+
+    match db.execute(1, "insert into func_index_heap values ('ABCD', 'EF')") {
+        Err(ExecError::UniqueViolation { constraint, .. }) if constraint == "func_index_index" => {}
+        other => panic!("expected textcat index unique violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn unique_expression_index_update_allows_unchanged_key() {
+    let base = temp_dir("unique_expression_index_update_unchanged_key");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, value float8)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 1234.1234), (2, 488912369)")
+        .unwrap();
+    db.execute(1, "create unique index items_abs_key on items (abs(value))")
+        .unwrap();
+
+    db.execute(1, "update items set value = -1234.1234 where id = 1")
+        .unwrap();
+    db.execute(1, "update items set id = 20 where value = 488912369")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id, value from items order by abs(value), id"
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Float64(-1234.1234)],
+            vec![Value::Int32(20), Value::Float64(488912369.0)],
+        ]
+    );
+}
+
+#[test]
+fn unique_abs_float_index_update_allows_new_distinct_key() {
+    let base = temp_dir("unique_abs_float_index_update_distinct_key");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table hash_f8_heap (seqno int4, random float8)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into hash_f8_heap values (8906, 1615625451), (8932, 488912369)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create unique index hash_f8_index_1 on hash_f8_heap(abs(random))",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select atttypid from pg_attribute where attrelid = 'hash_f8_index_1'::regclass and attnum = 1",
+        ),
+        vec![vec![Value::Int64(
+            crate::include::catalog::FLOAT8_TYPE_OID as i64
+        )]]
+    );
+
+    db.execute(
+        1,
+        "update hash_f8_heap set random = '-1234.1234'::float8 where seqno = 8906",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -18363,6 +19748,36 @@ fn alter_table_add_unique_using_index_include_derives_key_conkey() {
         ),
         vec![vec![Value::Text("UNIQUE (a) INCLUDE (payload)".into())]]
     );
+}
+
+#[test]
+fn alter_table_add_constraint_using_nonunique_index_matches_postgres_error() {
+    let base = temp_dir("alter_using_nonunique_index");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(1, "create table using_items (a int4)").unwrap();
+    db.execute(1, "create index using_items_idx on using_items (a)")
+        .unwrap();
+
+    match db.execute(
+        1,
+        "alter table using_items add constraint using_items_key unique using index using_items_idx",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        })) => {
+            assert_eq!(message, "\"using_items_idx\" is not a unique index");
+            assert_eq!(
+                detail.as_deref(),
+                Some("Cannot create a primary key or unique constraint using such an index.")
+            );
+            assert_eq!(sqlstate, "42809");
+        }
+        other => panic!("expected nonunique USING INDEX error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -19558,7 +20973,7 @@ fn rejected_create_table_like_sequence_does_not_poison_catalog_after_sequence_dr
     );
     assert_eq!(
         query_rows(&db, 1, "select count(*) from pg_namespace"),
-        vec![vec![Value::Int64(3)]]
+        vec![vec![Value::Int64(4)]]
     );
 }
 
@@ -25906,6 +27321,44 @@ fn create_language_c_function_without_link_symbol_uses_function_name() {
 }
 
 #[test]
+fn create_language_internal_function_dispatches_by_prosrc() {
+    let base = temp_dir("language_internal_function_prosrc");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function is_catalog_text_unique_index_oid(oid) returns bool \
+             as 'pg_rust_is_catalog_text_unique_index_oid' language internal strict",
+        )
+        .unwrap();
+
+    let visible = db.backend_catcache(1, None).unwrap();
+    let proc = visible
+        .proc_rows_by_name("is_catalog_text_unique_index_oid")
+        .into_iter()
+        .find(|row| row.proname == "is_catalog_text_unique_index_oid")
+        .expect("function row");
+    assert_eq!(proc.prolang, PG_LANGUAGE_INTERNAL_OID);
+    assert_eq!(proc.prosrc, "pg_rust_is_catalog_text_unique_index_oid");
+
+    let result = session
+        .execute(
+            &db,
+            "select is_catalog_text_unique_index_oid(6246::oid), \
+                    is_catalog_text_unique_index_oid(2675::oid)",
+        )
+        .unwrap();
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Bool(true), Value::Bool(false)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
 fn create_function_persists_explicit_cost() {
     let base = temp_dir("search_path_function_cost");
     let db = Database::open(&base, 16).unwrap();
@@ -27660,6 +29113,112 @@ fn plpgsql_cte_select_into_assigns_target() {
         session_query_rows(&mut session, &db, "select cte_select_into_value()"),
         vec![vec![Value::Int32(3)]]
     );
+}
+
+#[test]
+fn plpgsql_cte_body_can_reference_local_generate_series_bound() {
+    let base = temp_dir("plpgsql_cte_local_generate_series");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            r#"
+            create function cte_local_series_count(n int4) returns int8 language plpgsql as $$
+            declare
+                total int8;
+            begin
+                with samples as (
+                    select generate_series from generate_series(1, n)
+                )
+                select into total count(*) from samples;
+                return total;
+            end
+            $$
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select cte_local_series_count(5)"),
+        vec![vec![Value::Int64(5)]]
+    );
+}
+
+#[test]
+fn plpgsql_cte_assignment_subquery_can_reference_local_generate_series_bound() {
+    let base = temp_dir("plpgsql_cte_assignment_local_generate_series");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            r#"
+            create function cte_assignment_local_series_count(n int4) returns bool language plpgsql as $$
+            declare
+                ok bool;
+            begin
+                ok := (
+                    with samples as (
+                        select generate_series from generate_series(1, n)
+                    )
+                    select count(*) = n from samples
+                );
+                return ok;
+            end
+            $$
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select cte_assignment_local_series_count(5)"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn plpgsql_cte_assignment_subquery_with_random_normal_ks_expr_returns() {
+    let base = temp_dir("plpgsql_cte_random_normal_ks_expr");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            r#"
+            create function cte_random_normal_ks_expr(n int4) returns bool language plpgsql as $$
+            declare
+                c float8 := 1.94947;
+                ok bool;
+            begin
+                ok := (
+                    with samples as (
+                        select random_normal() r from generate_series(1, n) order by 1
+                    ), indexed_samples as (
+                        select (row_number() over())-1.0 i, r from samples
+                    )
+                    select max(abs((1+erf(r/sqrt(2)))/2 - i/n)) < c / sqrt(n)
+                    from indexed_samples
+                );
+                return ok;
+            end
+            $$
+            "#,
+        )
+        .unwrap();
+
+    match session_query_rows(&mut session, &db, "select cte_random_normal_ks_expr(1000)").as_slice()
+    {
+        [row] => assert!(matches!(row.as_slice(), [Value::Bool(_)])),
+        rows => panic!("expected one boolean row, got {rows:?}"),
+    }
 }
 
 #[test]
@@ -29972,6 +31531,206 @@ fn create_or_replace_function_updates_existing_body() {
 }
 
 #[test]
+fn plpgsql_function_cache_reuses_scalar_across_statements() {
+    let dir = temp_dir("plpgsql_cache_scalar");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
+        )
+        .unwrap();
+    assert_eq!(session.plpgsql_function_cache_len(), 0);
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(2)"),
+        vec![vec![Value::Int32(3)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+}
+
+#[test]
+fn plpgsql_function_cache_recompiles_create_or_replace_body() {
+    let dir = temp_dir("plpgsql_cache_replace");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+
+    session
+        .execute(
+            &db,
+            "create or replace function inc(x int4) returns int4 language plpgsql as $$ begin return x + 2; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(3)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+}
+
+#[test]
+fn plpgsql_function_cache_does_not_reuse_dropped_function_body() {
+    let dir = temp_dir("plpgsql_cache_drop_recreate");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(2)]]
+    );
+    session.execute(&db, "drop function inc(int4)").unwrap();
+    session
+        .execute(
+            &db,
+            "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 9; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(10)]]
+    );
+}
+
+#[test]
+fn plpgsql_function_cache_keeps_polymorphic_signatures_separate() {
+    let dir = temp_dir("plpgsql_cache_polymorphic");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function echo_any(x anyelement) returns anyelement language plpgsql as $$ begin return x; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select echo_any(7::int4)"),
+        vec![vec![Value::Int32(7)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select echo_any('txt'::text)"),
+        vec![vec![Value::Text("txt".into())]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 2);
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select echo_any(8::int4)"),
+        vec![vec![Value::Int32(8)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 2);
+}
+
+#[test]
+fn plpgsql_function_cache_reuses_trigger_function_across_statements() {
+    let dir = temp_dir("plpgsql_cache_trigger");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4, note text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function row_notice() returns trigger language plpgsql as $$
+             begin
+               raise notice '%:%', TG_OP, NEW.id;
+               return NEW;
+             end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create trigger items_notice before insert on items for each row execute function row_notice()",
+        )
+        .unwrap();
+
+    clear_notices();
+    session
+        .execute(&db, "insert into items values (1, 'a')")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["INSERT:1".to_string()]);
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+    clear_notices();
+    session
+        .execute(&db, "insert into items values (2, 'b')")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["INSERT:2".to_string()]);
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+}
+
+#[test]
+fn plpgsql_function_cache_uses_current_transition_table_rows() {
+    let dir = temp_dir("plpgsql_cache_transition_table");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4, note text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function insert_transition_notice() returns trigger language plpgsql as $$
+             declare c int4; s int4;
+             begin
+               select count(*), sum(id) into c, s from new_rows;
+               raise notice 'insert:%:%', c, s;
+               return null;
+             end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create trigger items_insert_ref after insert on items referencing new table as new_rows for each statement execute function insert_transition_notice()",
+        )
+        .unwrap();
+
+    clear_notices();
+    session
+        .execute(&db, "insert into items values (1, 'a'), (2, 'b')")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["insert:2:3".to_string()]);
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+
+    clear_notices();
+    session
+        .execute(
+            &db,
+            "insert into items values (10, 'x'), (20, 'y'), (30, 'z')",
+        )
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["insert:3:60".to_string()]);
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+}
+
+#[test]
 fn grant_all_on_schema_public_is_accepted() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -30143,6 +31902,121 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
         ),
         vec![vec![Value::Int64(0)]]
     );
+}
+
+#[test]
+fn drop_policy_non_owner_uses_relation_wording() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut other = Session::new(2);
+
+    owner
+        .execute(&db, "create role policy_owner nologin")
+        .unwrap();
+    owner
+        .execute(&db, "create role policy_other nologin")
+        .unwrap();
+    owner
+        .execute(&db, "set session authorization policy_owner")
+        .unwrap();
+    owner.execute(&db, "create table items (a int4)").unwrap();
+    owner
+        .execute(&db, "create policy p1 on items using (true)")
+        .unwrap();
+
+    other
+        .execute(&db, "set session authorization policy_other")
+        .unwrap();
+    let err = other.execute(&db, "drop policy p1 on items").unwrap_err();
+    assert_eq!(
+        crate::backend::libpq::pqformat::format_exec_error(&err),
+        "must be owner of relation items"
+    );
+}
+
+#[test]
+fn rls_key_errors_hide_values_when_relation_rows_are_not_visible() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut bob = Session::new(2);
+
+    owner.execute(&db, "create role rls_owner nologin").unwrap();
+    owner.execute(&db, "create role rls_bob nologin").unwrap();
+    owner
+        .execute(&db, "set session authorization rls_owner")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table category (cid int4 primary key, cname text)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table document (did int4 primary key, cid int4 references category(cid), dauthor name)",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "grant all on category to public")
+        .unwrap();
+    owner
+        .execute(&db, "grant all on document to public")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "insert into category values (33, 'technology'), (44, 'manga')",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "insert into document values (7, 33, 'rls_carol'), (8, 44, 'rls_carol')",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "alter table category enable row level security")
+        .unwrap();
+    owner
+        .execute(&db, "alter table document enable row level security")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy category_bob on category to rls_bob using (cid = 33)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy document_bob_select on document for select to rls_bob using (dauthor = current_user)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy document_bob_insert on document for insert to rls_bob with check (true)",
+        )
+        .unwrap();
+
+    bob.execute(&db, "set session authorization rls_bob")
+        .unwrap();
+    match bob.execute(&db, "delete from category where cid = 33") {
+        Err(ExecError::ForeignKeyViolation { detail, .. }) => {
+            assert_eq!(
+                detail.as_deref(),
+                Some("Key is still referenced from table \"document\".")
+            );
+        }
+        other => panic!("expected redacted foreign key violation, got {other:?}"),
+    }
+    match bob.execute(&db, "insert into document values (8, 44, current_user)") {
+        Err(ExecError::UniqueViolation { detail, .. }) => {
+            assert_eq!(detail, None);
+        }
+        other => panic!("expected redacted unique violation, got {other:?}"),
+    }
 }
 
 #[test]
@@ -32503,6 +34377,109 @@ fn create_type_exposes_catalog_rows_and_function_row_expansion() {
 }
 
 #[test]
+fn typed_table_create_alter_of_and_composite_attribute_cascade() {
+    let dir = temp_dir("typed_table_catalog_rows");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type person_t as (id int4, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table persons of person_t (id with options primary key, name not null default 'unknown')",
+    )
+    .unwrap();
+    db.execute(1, "insert into persons(id) values (1)").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from persons"),
+        vec![vec![Value::Int32(1), Value::Text("unknown".into())]]
+    );
+
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    let person_type = visible.type_by_name("person_t").unwrap();
+    let persons = visible.lookup_any_relation("persons").unwrap();
+    assert_eq!(persons.of_type_oid, person_type.oid);
+    assert!(
+        db.backend_catcache(1, None)
+            .unwrap()
+            .depend_rows()
+            .iter()
+            .any(|row| {
+                row.classid == PG_CLASS_RELATION_OID
+                    && row.objid == persons.relation_oid
+                    && row.refclassid == PG_TYPE_RELATION_OID
+                    && row.refobjid == person_type.oid
+            })
+    );
+    drop(visible);
+
+    db.execute(1, "alter table persons not of").unwrap();
+    assert_eq!(
+        db.lazy_catalog_lookup(1, None, None)
+            .lookup_any_relation("persons")
+            .unwrap()
+            .of_type_oid,
+        0
+    );
+
+    db.execute(1, "alter table persons of person_t").unwrap();
+    let err = db
+        .execute(1, "alter type person_t drop attribute name restrict")
+        .unwrap_err();
+    match err {
+        ExecError::DetailedError { hint, .. } => {
+            assert_eq!(
+                hint.as_deref(),
+                Some("Use ALTER ... CASCADE to alter the typed tables too.")
+            );
+        }
+        other => panic!("expected dependent typed table error, got {other:?}"),
+    }
+
+    db.execute(1, "alter type person_t add attribute age int4 cascade")
+        .unwrap();
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    let persons = visible.lookup_any_relation("persons").unwrap();
+    assert_eq!(
+        persons
+            .desc
+            .columns
+            .iter()
+            .filter(|column| !column.dropped)
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id", "name", "age"]
+    );
+}
+
+#[test]
+fn typed_table_rows_coerce_to_composite_type_and_drop_type_cascades() {
+    let dir = temp_dir("typed_table_row_function_drop_cascade");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type person_type as (id int4, name text)")
+        .unwrap();
+    db.execute(1, "create table persons of person_type")
+        .unwrap();
+    db.execute(1, "insert into persons values (1, 'test')")
+        .unwrap();
+    db.execute(
+        1,
+        "create function namelen(person_type) returns int4 language sql as $$ select length($1.name) $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, namelen(persons) from persons"),
+        vec![vec![Value::Int32(1), Value::Int32(4)]]
+    );
+
+    db.execute(1, "drop type person_type cascade").unwrap();
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    assert!(visible.type_by_name("person_type").is_none());
+    assert!(visible.lookup_any_relation("persons").is_none());
+}
+
+#[test]
 fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
     let dir = temp_dir("create_enum_type_catalog_rows");
     let db = Database::open(&dir, 64).unwrap();
@@ -33727,7 +35704,7 @@ fn drop_type_enforces_restrict_and_if_exists() {
             assert!(
                 detail
                     .unwrap_or_default()
-                    .contains("function widget_rows depends on type widget")
+                    .contains("function widget_rows() depends on type widget")
             );
         }
         other => panic!("expected dependent-function drop restriction, got {other:?}"),

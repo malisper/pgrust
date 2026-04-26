@@ -1,10 +1,13 @@
 use super::super::*;
 use super::constraint::{find_constraint_row, validate_check_rows, validate_not_null_rows};
-use super::create::{aggregate_signature_arg_oids, resolve_aggregate_proc_rows};
+use super::create::{
+    aggregate_signature_arg_oids, format_aggregate_signature, resolve_aggregate_proc_rows,
+};
 use super::operator::{
     lookup_operator_row, operator_signature_display, resolve_operator_type_oid,
     unsupported_postfix_operator_error,
 };
+use super::typed_table::reject_typed_table_ddl;
 use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_indexes_for_row};
 use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
@@ -614,6 +617,7 @@ impl Database {
             lock_status_provider: Some(Arc::new(self.clone())),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            stats_import_runtime: None,
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&self.advisory_locks),
             row_locks: Arc::clone(&self.row_locks),
@@ -637,6 +641,7 @@ impl Database {
             transaction_lock_scope_id: None,
             next_command_id: cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            random_state: crate::backend::executor::PgPrngState::shared(),
             timed: false,
             allow_side_effects: false,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -647,8 +652,11 @@ impl Database {
             catalog_effects: Vec::new(),
             temp_effects: Vec::new(),
             database: Some(self.clone()),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
-            compiled_functions: std::collections::HashMap::new(),
+            plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+            pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
@@ -974,7 +982,14 @@ impl Database {
             [(row, _agg)] => row.clone(),
             [] => {
                 return Err(ExecError::DetailedError {
-                    message: format!("aggregate {} does not exist", comment_stmt.aggregate_name),
+                    message: format!(
+                        "aggregate {} does not exist",
+                        format_aggregate_signature(
+                            &comment_stmt.aggregate_name,
+                            &comment_stmt.signature,
+                            &catalog
+                        )?
+                    ),
                     detail: None,
                     hint: None,
                     sqlstate: "42883",
@@ -1469,6 +1484,7 @@ impl Database {
             lock_status_provider: Some(Arc::new(self.clone())),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            stats_import_runtime: None,
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&self.advisory_locks),
             row_locks: Arc::clone(&self.row_locks),
@@ -1492,6 +1508,7 @@ impl Database {
             transaction_lock_scope_id: None,
             next_command_id: cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            random_state: crate::backend::executor::PgPrngState::shared(),
             timed: false,
             allow_side_effects: false,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -1502,8 +1519,11 @@ impl Database {
             catalog_effects: Vec::new(),
             temp_effects: Vec::new(),
             database: Some(self.clone()),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
-            compiled_functions: std::collections::HashMap::new(),
+            plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+            pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
@@ -1579,6 +1599,7 @@ impl Database {
             lock_status_provider: Some(Arc::new(self.clone())),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            stats_import_runtime: None,
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&self.advisory_locks),
             row_locks: Arc::clone(&self.row_locks),
@@ -1602,6 +1623,7 @@ impl Database {
             transaction_lock_scope_id: None,
             next_command_id: cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            random_state: crate::backend::executor::PgPrngState::shared(),
             timed: false,
             allow_side_effects: false,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -1612,8 +1634,11 @@ impl Database {
             catalog_effects: Vec::new(),
             temp_effects: Vec::new(),
             database: Some(self.clone()),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
-            compiled_functions: std::collections::HashMap::new(),
+            plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+            pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
@@ -2000,6 +2025,7 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
+        reject_typed_table_ddl(&relation, "add column to")?;
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
         let _ = dependent_view_rewrites_for_relation(
             self,
@@ -2066,6 +2092,7 @@ impl Database {
                 lock_status_provider: Some(Arc::new(self.clone())),
                 sequences: Some(self.sequences.clone()),
                 large_objects: Some(self.large_objects.clone()),
+                stats_import_runtime: None,
                 async_notify_runtime: Some(self.async_notify_runtime.clone()),
                 advisory_locks: Arc::clone(&self.advisory_locks),
                 row_locks: Arc::clone(&self.row_locks),
@@ -2090,6 +2117,7 @@ impl Database {
                 transaction_lock_scope_id: None,
                 next_command_id: cid,
                 default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+                random_state: crate::backend::executor::PgPrngState::shared(),
                 timed: false,
                 allow_side_effects: false,
                 expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -2100,8 +2128,11 @@ impl Database {
                 catalog_effects: Vec::new(),
                 temp_effects: Vec::new(),
                 database: Some(self.clone()),
+                pending_catalog_effects: Vec::new(),
+                pending_table_locks: Vec::new(),
                 catalog: catalog.materialize_visible_catalog(),
-                compiled_functions: std::collections::HashMap::new(),
+                plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+                pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),

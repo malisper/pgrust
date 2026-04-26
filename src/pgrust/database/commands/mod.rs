@@ -1,9 +1,11 @@
 mod alter_column_compression;
 mod alter_column_default;
+mod alter_column_identity;
 mod alter_column_options;
 mod alter_column_statistics;
 mod alter_column_storage;
 mod alter_column_type;
+mod cast;
 mod constraint;
 mod conversion;
 mod create;
@@ -38,3 +40,4 @@ mod session_auth;
 mod tablespace;
 mod trigger;
 mod typecmds;
+mod typed_table;

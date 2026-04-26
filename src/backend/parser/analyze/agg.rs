@@ -247,9 +247,8 @@ pub(super) fn expr_contains_agg(catalog: &dyn CatalogLookup, expr: &SqlExpr) -> 
         | SqlExpr::And(l, r)
         | SqlExpr::Or(l, r)
         | SqlExpr::IsDistinctFrom(l, r)
-        | SqlExpr::IsNotDistinctFrom(l, r) => {
-            expr_contains_agg(catalog, l) || expr_contains_agg(catalog, r)
-        }
+        | SqlExpr::IsNotDistinctFrom(l, r)
+        | SqlExpr::Overlaps(l, r) => expr_contains_agg(catalog, l) || expr_contains_agg(catalog, r),
         SqlExpr::Like {
             expr,
             pattern,
@@ -414,7 +413,8 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         | SqlExpr::And(l, r)
         | SqlExpr::Or(l, r)
         | SqlExpr::IsDistinctFrom(l, r)
-        | SqlExpr::IsNotDistinctFrom(l, r) => {
+        | SqlExpr::IsNotDistinctFrom(l, r)
+        | SqlExpr::Overlaps(l, r) => {
             expr_references_input_scope(l) || expr_references_input_scope(r)
         }
         SqlExpr::Like {
@@ -624,7 +624,8 @@ pub(super) fn collect_aggs(
         | SqlExpr::And(l, r)
         | SqlExpr::Or(l, r)
         | SqlExpr::IsDistinctFrom(l, r)
-        | SqlExpr::IsNotDistinctFrom(l, r) => {
+        | SqlExpr::IsNotDistinctFrom(l, r)
+        | SqlExpr::Overlaps(l, r) => {
             collect_aggs(catalog, l, aggs);
             collect_aggs(catalog, r, aggs);
         }
@@ -702,6 +703,7 @@ pub(super) fn sql_expr_name(expr: &SqlExpr) -> String {
         | SqlExpr::InSubquery { .. }
         | SqlExpr::QuantifiedSubquery { .. }
         | SqlExpr::ArrayLiteral(_)
+        | SqlExpr::Overlaps(_, _)
         | SqlExpr::ArrayOverlap(_, _)
         | SqlExpr::ArrayContains(_, _)
         | SqlExpr::ArrayContained(_, _)

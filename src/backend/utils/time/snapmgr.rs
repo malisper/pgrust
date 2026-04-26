@@ -65,6 +65,33 @@ pub fn invalidate_catalog_snapshot(db: &Database, client_id: ClientId) {
     }
 }
 
+pub fn set_transaction_snapshot_override(
+    db: &Database,
+    client_id: ClientId,
+    xid: TransactionId,
+    snapshot: Snapshot,
+) {
+    let mut states = db.backend_cache_states.write();
+    let state = states.entry(client_id).or_default();
+    state.transaction_snapshot_override = Some((xid, snapshot));
+    state.catalog_snapshot = None;
+    state.catalog_snapshot_ctx = None;
+    state.catcache = None;
+    state.relcache = None;
+    state.cache_ctx = None;
+}
+
+pub fn clear_transaction_snapshot_override(db: &Database, client_id: ClientId) {
+    if let Some(state) = db.backend_cache_states.write().get_mut(&client_id) {
+        state.transaction_snapshot_override = None;
+        state.catalog_snapshot = None;
+        state.catalog_snapshot_ctx = None;
+        state.catcache = None;
+        state.relcache = None;
+        state.cache_ctx = None;
+    }
+}
+
 pub fn get_catalog_snapshot(
     db: &Database,
     client_id: ClientId,
@@ -90,8 +117,23 @@ pub fn get_catalog_snapshot(
     }
 
     let snapshot = if let Some((xid, cid)) = txn_ctx {
-        let txns = db.txns.read();
-        txns.snapshot_for_command(xid, cid).ok()
+        let override_snapshot = db
+            .backend_cache_states
+            .read()
+            .get(&client_id)
+            .and_then(|state| state.transaction_snapshot_override.clone())
+            .filter(|(override_xid, _)| *override_xid == xid)
+            .map(|(_, mut snapshot)| {
+                snapshot.current_xid = xid;
+                snapshot.current_cid = cid;
+                snapshot
+            });
+        if override_snapshot.is_some() {
+            override_snapshot
+        } else {
+            let txns = db.txns.read();
+            txns.snapshot_for_command(xid, cid).ok()
+        }
     } else {
         let txns = db.txns.read();
         txns.snapshot(INVALID_TRANSACTION_ID).ok()

@@ -288,6 +288,15 @@ fn render_view_query_with_options(
                 .join(", ")
         ));
     }
+    if let Some(limit) = query.limit_count {
+        lines.push(format!("  LIMIT {limit}"));
+    }
+    if query.limit_offset != 0 {
+        lines.push(format!("  OFFSET {}", query.limit_offset));
+    }
+    if let Some(locking_clause) = query.locking_clause {
+        lines.push(format!(" {}", locking_clause.sql()));
+    }
     lines.join("\n") + ";"
 }
 
@@ -715,6 +724,16 @@ fn render_sublink(
             } else {
                 format!("({left} {} ANY ({subquery}))", render_subquery_op(op))
             }
+        }
+        SubLinkType::RowCompareSubLink(op) => {
+            let Some(testexpr) = &sublink.testexpr else {
+                return format!("ROWCOMPARE ({subquery})");
+            };
+            format!(
+                "({} {} ({subquery}))",
+                render_wrapped_expr(testexpr, query, catalog, options),
+                render_subquery_op(op)
+            )
         }
         SubLinkType::AllSubLink(op) => {
             let Some(testexpr) = &sublink.testexpr else {

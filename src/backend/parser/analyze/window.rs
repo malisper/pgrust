@@ -214,6 +214,7 @@ pub(super) fn expr_contains_window(expr: &SqlExpr) -> bool {
         | SqlExpr::Or(left, right)
         | SqlExpr::IsDistinctFrom(left, right)
         | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::Overlaps(left, right)
         | SqlExpr::AtTimeZone {
             expr: left,
             zone: right,

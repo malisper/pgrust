@@ -1,4 +1,5 @@
 use super::super::*;
+use super::typed_table::reject_typed_table_ddl;
 use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{
     collect_matching_rows_heap, insert_index_entry_for_row, reinitialize_index_relation,
@@ -146,7 +147,7 @@ fn rebuild_relation_indexes_for_alter_column_type(
     {
         reinitialize_index_relation(index, ctx, xid)?;
         for (tid, values) in rewritten_rows {
-            insert_index_entry_for_row(relation.rel, new_desc, index, values, *tid, ctx)?;
+            insert_index_entry_for_row(relation.rel, new_desc, index, values, *tid, None, ctx)?;
         }
     }
     Ok(())
@@ -229,6 +230,7 @@ fn collect_alter_column_type_targets(
                 actual: "system catalog".into(),
             }));
         }
+        reject_typed_table_ddl(&target_relation, "alter column type of")?;
         reject_relation_with_dependent_views(
             db,
             client_id,
@@ -341,6 +343,7 @@ impl Database {
                 actual: "system catalog".into(),
             }));
         }
+        reject_typed_table_ddl(&relation, "alter column type of")?;
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
         let targets = collect_alter_column_type_targets(
             self, &catalog, client_id, xid, cid, &relation, alter_stmt,
@@ -354,6 +357,7 @@ impl Database {
             lock_status_provider: Some(std::sync::Arc::new(self.clone())),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            stats_import_runtime: None,
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
             row_locks: std::sync::Arc::clone(&self.row_locks),
@@ -377,6 +381,7 @@ impl Database {
             transaction_lock_scope_id: None,
             next_command_id: cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            random_state: crate::backend::executor::PgPrngState::shared(),
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
@@ -387,8 +392,11 @@ impl Database {
             catalog_effects: Vec::new(),
             temp_effects: Vec::new(),
             database: Some(self.clone()),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
-            compiled_functions: std::collections::HashMap::new(),
+            plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+            pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),

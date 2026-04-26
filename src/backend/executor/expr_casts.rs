@@ -41,10 +41,13 @@ use crate::backend::utils::time::date::{
     DateParseError, parse_date_text, parse_time_text, parse_timetz_text,
 };
 use crate::backend::utils::time::datetime::{
-    DateTimeParseError, timestamp_parts_from_usecs, timezone_offset_seconds,
+    DateTimeParseError, current_timezone_name, named_timezone_offset_seconds,
+    named_timezone_offset_seconds_for_local, timestamp_parts_from_usecs, timezone_offset_seconds,
     timezone_offset_seconds_at_utc,
 };
-use crate::backend::utils::time::timestamp::{parse_timestamp_text, parse_timestamptz_text};
+use crate::backend::utils::time::timestamp::{
+    is_valid_finite_timestamp_usecs, parse_timestamp_text, parse_timestamptz_text,
+};
 use crate::include::catalog::{
     INT2_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID, XID8_TYPE_OID, bootstrap_pg_cast_rows,
     builtin_type_rows, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
@@ -53,7 +56,7 @@ use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT,
     USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE, USECS_PER_SEC,
 };
-use crate::include::nodes::datum::ArrayDimension;
+use crate::include::nodes::datum::{ArrayDimension, BitString};
 use crate::pgrust::compact_string::CompactString;
 use num_bigint::BigInt;
 use num_integer::Integer;
@@ -61,11 +64,40 @@ use num_traits::{Signed, ToPrimitive, Zero};
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
+const DOMAIN_IN_PROC_OID: u32 = 2597;
+
 pub(crate) struct InputErrorInfo {
     pub(crate) message: String,
     pub(crate) detail: Option<String>,
     pub(crate) hint: Option<String>,
     pub(crate) sqlstate: &'static str,
+}
+
+fn cast_integer_to_bit_string(
+    value: u64,
+    source_width: i32,
+    negative: bool,
+    target_type: SqlType,
+) -> BitString {
+    let target_len = match target_type.kind {
+        SqlTypeKind::Bit => target_type.bit_len().unwrap_or(1),
+        SqlTypeKind::VarBit => target_type.bit_len().unwrap_or(source_width),
+        _ => unreachable!("integer bit cast target checked by caller"),
+    }
+    .max(0);
+    let mut bytes = vec![0u8; BitString::byte_len(target_len)];
+    for bit_idx in 0..target_len as usize {
+        let right_index = target_len as usize - 1 - bit_idx;
+        let bit_set = if right_index < source_width as usize {
+            ((value >> right_index) & 1) != 0
+        } else {
+            negative
+        };
+        if bit_set {
+            bytes[bit_idx / 8] |= 1 << (7 - (bit_idx % 8));
+        }
+    }
+    BitString::new(target_len, bytes)
 }
 
 fn unsupported_anyarray_input() -> ExecError {
@@ -95,6 +127,15 @@ fn unsupported_trigger_input() -> ExecError {
     }
 }
 
+fn cannot_cast_type_error(source: &'static str, target: &'static str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("cannot cast type {source} to {target}"),
+        detail: None,
+        hint: None,
+        sqlstate: "42846",
+    }
+}
+
 fn timestamp_date_part(value: TimestampADT) -> DateADT {
     if !value.is_finite() {
         return DateADT(match value.0 {
@@ -105,6 +146,50 @@ fn timestamp_date_part(value: TimestampADT) -> DateADT {
     }
     let (days, _) = timestamp_parts_from_usecs(value.0);
     DateADT(days)
+}
+
+fn date_out_of_range_for_timestamp_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "date out of range for timestamp".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    }
+}
+
+fn date_timestamp_cast(value: DateADT) -> Result<TimestampADT, ExecError> {
+    match value.0 {
+        DATEVAL_NOBEGIN => Ok(TimestampADT(
+            crate::include::nodes::datetime::TIMESTAMP_NOBEGIN,
+        )),
+        DATEVAL_NOEND => Ok(TimestampADT(
+            crate::include::nodes::datetime::TIMESTAMP_NOEND,
+        )),
+        days => {
+            let usecs = i128::from(days) * i128::from(USECS_PER_DAY);
+            let usecs =
+                i64::try_from(usecs).map_err(|_| date_out_of_range_for_timestamp_error())?;
+            if !is_valid_finite_timestamp_usecs(usecs) {
+                return Err(date_out_of_range_for_timestamp_error());
+            }
+            Ok(TimestampADT(usecs))
+        }
+    }
+}
+
+fn date_timestamptz_cast(
+    value: DateADT,
+    config: &DateTimeConfig,
+) -> Result<TimestampTzADT, ExecError> {
+    let timestamp = date_timestamp_cast(value)?;
+    if !timestamp.is_finite() {
+        return Ok(TimestampTzADT(timestamp.0));
+    }
+    let timestamptz = timestamp_to_timestamptz(timestamp, config);
+    if !is_valid_finite_timestamp_usecs(timestamptz.0) {
+        return Err(date_out_of_range_for_timestamp_error());
+    }
+    Ok(timestamptz)
 }
 
 fn timestamp_time_part(value: TimestampADT) -> Option<TimeADT> {
@@ -118,7 +203,10 @@ fn timestamp_to_timestamptz(value: TimestampADT, config: &DateTimeConfig) -> Tim
     if !value.is_finite() {
         return TimestampTzADT(value.0);
     }
-    TimestampTzADT(value.0 - i64::from(timezone_offset_seconds(config)) * USECS_PER_SEC)
+    let offset = named_timezone_offset_seconds_for_local(current_timezone_name(config), value.0)
+        .or_else(|| named_timezone_offset_seconds(current_timezone_name(config)))
+        .unwrap_or_else(|| timezone_offset_seconds(config));
+    TimestampTzADT(value.0 - i64::from(offset) * USECS_PER_SEC)
 }
 
 fn timestamptz_local_timestamp(value: TimestampTzADT, config: &DateTimeConfig) -> TimestampADT {
@@ -436,6 +524,13 @@ fn cast_text_to_regnamespace(
     Ok(Value::Int64(namespace_oid as i64))
 }
 
+fn cast_text_to_regtype(
+    text: &str,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    expr_reg::resolve_regtype_oid(text, catalog).map(|oid| Value::Int64(oid as i64))
+}
+
 fn regclass_text_input(value: &Value, source_type: Option<SqlType>) -> Option<&str> {
     let source_is_text_like = source_type.is_some_and(|ty| {
         matches!(
@@ -473,6 +568,30 @@ fn cast_regnamespace_to_text(
     Ok(catalog
         .and_then(|catalog| catalog.namespace_row_by_oid(oid))
         .map(|row| Value::Text(row.nspname.into()))
+        .unwrap_or_else(|| Value::Text(oid.to_string().into())))
+}
+
+fn cast_regclass_to_text(
+    value: &Value,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    let oid = match value {
+        Value::Int32(oid) if *oid >= 0 => *oid as u32,
+        Value::Int64(oid) if *oid >= 0 && *oid <= i64::from(u32::MAX) => *oid as u32,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "::text",
+                left: other.clone(),
+                right: Value::Text("".into()),
+            });
+        }
+    };
+    if oid == 0 {
+        return Ok(Value::Text("-".into()));
+    }
+    Ok(catalog
+        .and_then(|catalog| catalog.class_row_by_oid(oid))
+        .map(|row| Value::Text(expr_reg::quote_identifier_if_needed(&row.relname).into()))
         .unwrap_or_else(|| Value::Text(oid.to_string().into())))
 }
 
@@ -1458,7 +1577,9 @@ pub(crate) fn parse_interval_text_value_with_style(
 }
 
 fn expand_interval_tokens(text: &str) -> Vec<String> {
-    text.split_whitespace()
+    let tokens = text
+        .split_whitespace()
+        .filter(|token| *token != "@")
         .flat_map(|token| {
             if token.contains(':') {
                 return vec![token.to_string()];
@@ -1467,7 +1588,24 @@ fn expand_interval_tokens(text: &str) -> Vec<String> {
                 .map(|(value, unit)| vec![value, unit])
                 .unwrap_or_else(|| vec![token.to_string()])
         })
-        .collect()
+        .collect::<Vec<_>>();
+    merge_interval_sign_tokens(tokens)
+}
+
+fn merge_interval_sign_tokens(tokens: Vec<String>) -> Vec<String> {
+    let mut merged = Vec::with_capacity(tokens.len());
+    let mut idx = 0;
+    while idx < tokens.len() {
+        let token = &tokens[idx];
+        if matches!(token.as_str(), "+" | "-") && idx + 1 < tokens.len() {
+            merged.push(format!("{token}{}", tokens[idx + 1]));
+            idx += 2;
+        } else {
+            merged.push(token.clone());
+            idx += 1;
+        }
+    }
+    merged
 }
 
 fn interval_sql_standard_force_negative(tokens: &[String], style: IntervalStyle) -> bool {
@@ -2447,7 +2585,8 @@ fn parse_text_array_literal_with_options_and_catalog(
     explicit: bool,
     catalog: Option<&dyn CatalogLookup>,
 ) -> Result<Value, ExecError> {
-    let (bounds, input) = parse_array_bounds_prefix(raw)?;
+    let parse_input = raw.trim_start();
+    let (bounds, input) = parse_array_bounds_prefix(parse_input, raw)?;
     let element_type_oid = array_element_type_oid(element_type);
     if input == "{}" {
         let mut array = ArrayValue::empty();
@@ -2456,13 +2595,13 @@ fn parse_text_array_literal_with_options_and_catalog(
         }
         return Ok(Value::PgArray(array));
     }
-    if !input.starts_with('{') || !input.ends_with('}') {
+    if !input.starts_with('{') {
         return Err(invalid_array_literal(
             raw,
             Some("Array value must start with \"{\" or dimension information.".into()),
         ));
     }
-    let mut parser = ArrayTextParser::new(input, element_type, explicit, catalog);
+    let mut parser = ArrayTextParser::new(input, raw, element_type, explicit, catalog);
     let value = parser.parse_array()?;
     parser.skip_ws();
     if !parser.is_eof() {
@@ -2514,14 +2653,17 @@ struct ParsedArrayBounds {
     lengths: Option<Vec<usize>>,
 }
 
-fn parse_array_bounds_prefix(raw: &str) -> Result<(ParsedArrayBounds, &str), ExecError> {
-    if !raw.starts_with('[') {
-        return Ok((ParsedArrayBounds::default(), raw));
+fn parse_array_bounds_prefix<'a>(
+    input: &'a str,
+    raw: &str,
+) -> Result<(ParsedArrayBounds, &'a str), ExecError> {
+    if !input.starts_with('[') {
+        return Ok((ParsedArrayBounds::default(), input));
     }
-    let Some(equals) = raw.find('=') else {
-        return Ok((ParsedArrayBounds::default(), raw));
+    let Some(equals) = input.find('=') else {
+        return Ok((ParsedArrayBounds::default(), input));
     };
-    let bounds = &raw[..equals];
+    let bounds = &input[..equals];
     let mut lower_bounds = Vec::new();
     let mut lengths = Vec::new();
     let mut remaining = bounds;
@@ -2530,26 +2672,25 @@ fn parse_array_bounds_prefix(raw: &str) -> Result<(ParsedArrayBounds, &str), Exe
             return Err(invalid_array_literal(raw, None));
         };
         let part = &rest[..end];
-        let Some((lower, upper)) = part.split_once(':') else {
-            return Err(invalid_array_literal(
-                raw,
-                Some("Specified array dimensions do not match array contents.".into()),
-            ));
+        let (lower, upper) = if let Some((lower, upper)) = part.split_once(':') {
+            (lower.trim(), upper.trim())
+        } else {
+            ("1", part.trim())
         };
-        if lower.trim().is_empty() {
+        if lower.is_empty() {
             return Err(invalid_array_literal(
                 raw,
                 Some("\"[\" must introduce explicitly-specified array dimensions.".into()),
             ));
         };
-        if upper.trim().is_empty() {
+        if upper.is_empty() {
             return Err(invalid_array_literal(
                 raw,
                 Some("Missing array dimension value.".into()),
             ));
         }
-        let lower = parse_array_bound(lower.trim(), raw)?;
-        let upper = parse_array_bound(upper.trim(), raw)?;
+        let lower = parse_array_bound(lower, raw)?;
+        let upper = parse_array_bound(upper, raw)?;
         if upper < lower {
             return Err(ExecError::ArrayInput {
                 message: "upper bound cannot be less than lower bound".into(),
@@ -2567,7 +2708,16 @@ fn parse_array_bounds_prefix(raw: &str) -> Result<(ParsedArrayBounds, &str), Exe
             });
         }
         lower_bounds.push(lower as i32);
-        lengths.push((upper - lower + 1) as usize);
+        lengths.push(
+            (upper - lower + 1)
+                .try_into()
+                .map_err(|_| ExecError::ArrayInput {
+                    message: "array bound is out of integer range".into(),
+                    value: raw.into(),
+                    detail: None,
+                    sqlstate: "22003",
+                })?,
+        );
         remaining = &rest[end + 1..];
     }
     Ok((
@@ -2575,17 +2725,26 @@ fn parse_array_bounds_prefix(raw: &str) -> Result<(ParsedArrayBounds, &str), Exe
             lower_bounds,
             lengths: Some(lengths),
         },
-        &raw[equals + 1..],
+        &input[equals + 1..],
     ))
 }
 
 fn parse_array_bound(text: &str, raw: &str) -> Result<i64, ExecError> {
-    text.parse::<i64>().map_err(|_| ExecError::ArrayInput {
+    let value = text.parse::<i64>().map_err(|_| ExecError::ArrayInput {
         message: "array bound is out of integer range".into(),
         value: raw.into(),
         detail: None,
         sqlstate: "22003",
-    })
+    })?;
+    if !(i32::MIN as i64..=i32::MAX as i64).contains(&value) {
+        return Err(ExecError::ArrayInput {
+            message: "array bound is out of integer range".into(),
+            value: raw.into(),
+            detail: None,
+            sqlstate: "22003",
+        });
+    }
+    Ok(value)
 }
 
 fn invalid_array_literal(raw: &str, detail: Option<String>) -> ExecError {
@@ -2599,21 +2758,29 @@ fn invalid_array_literal(raw: &str, detail: Option<String>) -> ExecError {
 
 struct ArrayTextParser<'a> {
     input: &'a str,
+    raw: &'a str,
     offset: usize,
     element_type: SqlType,
     explicit: bool,
     catalog: Option<&'a dyn CatalogLookup>,
 }
 
+struct UnquotedArrayToken {
+    text: String,
+    escaped: bool,
+}
+
 impl<'a> ArrayTextParser<'a> {
     fn new(
         input: &'a str,
+        raw: &'a str,
         element_type: SqlType,
         explicit: bool,
         catalog: Option<&'a dyn CatalogLookup>,
     ) -> Self {
         Self {
             input,
+            raw,
             offset: 0,
             element_type,
             explicit,
@@ -2639,7 +2806,7 @@ impl<'a> ArrayTextParser<'a> {
                     self.skip_ws();
                     if self.peek_char() == Some('}') {
                         return Err(invalid_array_literal(
-                            self.input,
+                            self.raw,
                             Some("Unexpected \"}\" character.".into()),
                         ));
                     }
@@ -2662,33 +2829,33 @@ impl<'a> ArrayTextParser<'a> {
                 let text = self.parse_quoted_string()?;
                 self.skip_ws();
                 if matches!(self.peek_char(), Some(ch) if !matches!(ch, ',' | '}')) {
+                    if self.peek_char() == Some('{') {
+                        return Err(invalid_array_literal(
+                            self.raw,
+                            Some("Unexpected \"{\" character.".into()),
+                        ));
+                    }
                     return Err(invalid_array_literal(
-                        self.input,
+                        self.raw,
                         Some("Incorrectly quoted array element.".into()),
                     ));
                 }
                 self.cast_item_text(&text)
             }
             Some(_) => {
-                let text = self.parse_unquoted_token();
-                if text.is_empty() {
+                let token = self.parse_unquoted_token()?;
+                if token.text.is_empty() {
                     let detail = match self.peek_char() {
                         Some(',') => "Unexpected \",\" character.",
                         Some('}') => "Unexpected \"}\" character.",
                         _ => "Unexpected array element.",
                     };
-                    return Err(invalid_array_literal(self.input, Some(detail.into())));
+                    return Err(invalid_array_literal(self.raw, Some(detail.into())));
                 }
-                if text.contains('{') {
-                    return Err(invalid_array_literal(
-                        self.input,
-                        Some("Unexpected \"{\" character.".into()),
-                    ));
-                }
-                if text.eq_ignore_ascii_case("NULL") {
+                if !token.escaped && token.text.eq_ignore_ascii_case("NULL") {
                     Ok(Value::Null)
                 } else {
-                    self.cast_item_text(text.trim_end())
+                    self.cast_item_text(token.text.trim_end())
                 }
             }
             None => self.type_mismatch(),
@@ -2719,7 +2886,7 @@ impl<'a> ArrayTextParser<'a> {
                 '\\' => {
                     let escaped = self
                         .bump_char()
-                        .ok_or_else(|| invalid_array_literal(self.input, None))?;
+                        .ok_or_else(|| invalid_array_literal(self.raw, None))?;
                     text.push(escaped);
                 }
                 other => text.push(other),
@@ -2728,15 +2895,50 @@ impl<'a> ArrayTextParser<'a> {
         self.type_mismatch()
     }
 
-    fn parse_unquoted_token(&mut self) -> &'a str {
-        let start = self.offset;
+    fn parse_unquoted_token(&mut self) -> Result<UnquotedArrayToken, ExecError> {
+        let mut text = String::new();
+        let mut escaped = false;
+        let mut escaped_brace_depth = 0usize;
         while let Some(ch) = self.peek_char() {
-            if matches!(ch, ',' | '}') {
+            if escaped_brace_depth == 0 && matches!(ch, ',' | '}') {
                 break;
             }
-            self.bump_char();
+            match ch {
+                '"' => {
+                    return Err(invalid_array_literal(
+                        self.raw,
+                        Some("Incorrectly quoted array element.".into()),
+                    ));
+                }
+                '{' => {
+                    return Err(invalid_array_literal(
+                        self.raw,
+                        Some("Unexpected \"{\" character.".into()),
+                    ));
+                }
+                '\\' => {
+                    self.bump_char();
+                    let escaped_ch = self
+                        .bump_char()
+                        .ok_or_else(|| invalid_array_literal(self.raw, None))?;
+                    if escaped_ch == '{' {
+                        escaped_brace_depth += 1;
+                    }
+                    text.push(escaped_ch);
+                    escaped = true;
+                }
+                '}' if escaped_brace_depth > 0 => {
+                    self.bump_char();
+                    escaped_brace_depth -= 1;
+                    text.push(ch);
+                }
+                other => {
+                    self.bump_char();
+                    text.push(other);
+                }
+            }
         }
-        &self.input[start..self.offset]
+        Ok(UnquotedArrayToken { text, escaped })
     }
 
     fn skip_ws(&mut self) {
@@ -2769,7 +2971,7 @@ impl<'a> ArrayTextParser<'a> {
 
     fn type_mismatch<T>(&self) -> Result<T, ExecError> {
         Err(invalid_array_literal(
-            self.input,
+            self.raw,
             Some("Unexpected array element.".into()),
         ))
     }
@@ -2868,7 +3070,10 @@ fn user_defined_base_type_row(
         return None;
     }
     let row = catalog.type_by_oid(ty.type_oid)?;
-    if row.typinput == 0 || row.typrelid != 0 || row.sql_type.is_array {
+    if row.typinput == 0 || row.typtype != 'b' || row.typrelid != 0 || row.sql_type.is_array {
+        return None;
+    }
+    if row.typinput == DOMAIN_IN_PROC_OID {
         return None;
     }
     if builtin_type_rows()
@@ -3285,6 +3490,26 @@ pub(crate) fn datetime_parse_error_details(
     }
 }
 
+fn timestamp_parse_error(
+    column: &'static str,
+    ty: &'static str,
+    text: &str,
+    err: DateTimeParseError,
+) -> ExecError {
+    if matches!(err, DateTimeParseError::FieldOutOfRange) {
+        return ExecError::DetailedError {
+            message: datetime_parse_error_details(ty, text, err),
+            detail: None,
+            hint: Some("Perhaps you need a different \"DateStyle\" setting.".into()),
+            sqlstate: "22008",
+        };
+    }
+    ExecError::InvalidStorageValue {
+        column: column.into(),
+        details: datetime_parse_error_details(ty, text, err),
+    }
+}
+
 fn date_parse_error(text: &str, err: DateParseError) -> ExecError {
     match err {
         DateParseError::Invalid => ExecError::DetailedError {
@@ -3511,6 +3736,22 @@ pub(crate) fn cast_value_with_source_type_and_config(
     cast_value_with_source_type_catalog_and_config(value, source_type, ty, None, config)
 }
 
+fn cast_text_input_for_source_type(
+    text: &str,
+    source_type: Option<SqlType>,
+    target_type: SqlType,
+) -> &str {
+    let source_is_bpchar =
+        source_type.is_some_and(|ty| !ty.is_array && matches!(ty.kind, SqlTypeKind::Char));
+    let target_trims_bpchar = !target_type.is_array
+        && matches!(target_type.kind, SqlTypeKind::Text | SqlTypeKind::Varchar);
+    if source_is_bpchar && target_trims_bpchar {
+        text.trim_end_matches(' ')
+    } else {
+        text
+    }
+}
+
 fn enforce_domain_check(
     value: Value,
     ty: SqlType,
@@ -3720,6 +3961,14 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
     {
         return cast_regnamespace_to_text(&value, catalog);
     }
+    if matches!(ty.kind, SqlTypeKind::Text)
+        && !ty.is_array
+        && source_type.is_some_and(|source| {
+            matches!(source.element_type().kind, SqlTypeKind::RegClass) && !source.is_array
+        })
+    {
+        return cast_regclass_to_text(&value, catalog);
+    }
 
     if let Some(result) = cast_geometry_value(value.clone(), ty) {
         return result;
@@ -3803,6 +4052,15 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Ok(Value::Money(i64::from(v) * 100)),
             SqlType {
+                kind: SqlTypeKind::Bit | SqlTypeKind::VarBit,
+                ..
+            } => Ok(Value::Bit(cast_integer_to_bit_string(
+                v as u16 as u64,
+                16,
+                v < 0,
+                ty,
+            ))),
+            SqlType {
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Cstring
@@ -3824,8 +4082,6 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::Internal
                     | SqlTypeKind::InternalChar
-                    | SqlTypeKind::Bit
-                    | SqlTypeKind::VarBit
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
@@ -3948,6 +4204,15 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Ok(Value::Money(i64::from(v) * 100)),
             SqlType {
+                kind: SqlTypeKind::Bit | SqlTypeKind::VarBit,
+                ..
+            } => Ok(Value::Bit(cast_integer_to_bit_string(
+                v as u32 as u64,
+                32,
+                v < 0,
+                ty,
+            ))),
+            SqlType {
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Cstring
@@ -3969,8 +4234,6 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::Internal
                     | SqlTypeKind::InternalChar
-                    | SqlTypeKind::Bit
-                    | SqlTypeKind::VarBit
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
@@ -4169,6 +4432,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         },
         Value::Date(v) => match ty.kind {
             SqlTypeKind::Date => Ok(Value::Date(v)),
+            SqlTypeKind::Timestamp => date_timestamp_cast(v).map(Value::Timestamp),
+            SqlTypeKind::TimestampTz => date_timestamptz_cast(v, config).map(Value::TimestampTz),
             SqlTypeKind::Text
             | SqlTypeKind::Name
             | SqlTypeKind::Char
@@ -4177,9 +4442,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             | SqlTypeKind::Jsonb
             | SqlTypeKind::JsonPath
             | SqlTypeKind::Time
-            | SqlTypeKind::TimeTz
-            | SqlTypeKind::Timestamp
-            | SqlTypeKind::TimestampTz => cast_text_value_with_config(
+            | SqlTypeKind::TimeTz => cast_text_value_with_config(
                 &render_datetime_value_text_with_config(&Value::Date(v), config)
                     .expect("datetime values render"),
                 ty,
@@ -4194,6 +4457,11 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         },
         Value::Time(v) => match ty.kind {
             SqlTypeKind::Time => Ok(apply_time_precision(Value::Time(v), ty.time_precision())),
+            SqlTypeKind::Interval => Ok(Value::Interval(IntervalValue {
+                months: 0,
+                days: 0,
+                time_micros: v.0,
+            })),
             SqlTypeKind::Text
             | SqlTypeKind::Name
             | SqlTypeKind::Char
@@ -4219,6 +4487,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         Value::TimeTz(v) => match ty.kind {
             SqlTypeKind::TimeTz => Ok(apply_time_precision(Value::TimeTz(v), ty.time_precision())),
             SqlTypeKind::Time => Ok(Value::Time(v.time)),
+            SqlTypeKind::Interval => Err(cannot_cast_type_error("time with time zone", "interval")),
             SqlTypeKind::Text
             | SqlTypeKind::Name
             | SqlTypeKind::Char
@@ -4326,6 +4595,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     i128::from(v.time_micros).rem_euclid(i128::from(USECS_PER_DAY)) as i64,
                 )))
             }
+            SqlTypeKind::TimeTz => Err(cannot_cast_type_error("interval", "time with time zone")),
             SqlTypeKind::Text
             | SqlTypeKind::Name
             | SqlTypeKind::Char
@@ -4345,18 +4615,24 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             }),
         },
         Value::Text(text) => {
+            let text = cast_text_input_for_source_type(text.as_str(), source_type, ty);
             if matches!(ty.kind, SqlTypeKind::Enum) {
-                cast_text_to_enum(text.as_str(), ty, catalog)
+                cast_text_to_enum(text, ty, catalog)
+            } else if matches!(ty.kind, SqlTypeKind::RegType) {
+                cast_text_to_regtype(text, catalog)
             } else {
-                cast_text_value_with_config(text.as_str(), ty, true, config)
+                cast_text_value_with_config(text, ty, true, config)
             }
         }
         Value::TextRef(ptr, len) => {
             let text = unsafe {
                 std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize))
             };
+            let text = cast_text_input_for_source_type(text, source_type, ty);
             if matches!(ty.kind, SqlTypeKind::Enum) {
                 cast_text_to_enum(text, ty, catalog)
+            } else if matches!(ty.kind, SqlTypeKind::RegType) {
+                cast_text_to_regtype(text, catalog)
             } else {
                 cast_text_value_with_config(text, ty, true, config)
             }
@@ -4747,6 +5023,15 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     sqlstate: "22003",
                 }),
             SqlType {
+                kind: SqlTypeKind::Bit | SqlTypeKind::VarBit,
+                ..
+            } => Ok(Value::Bit(cast_integer_to_bit_string(
+                v as u64,
+                64,
+                v < 0,
+                ty,
+            ))),
+            SqlType {
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Cstring
@@ -4768,8 +5053,6 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::Internal
                     | SqlTypeKind::InternalChar
-                    | SqlTypeKind::Bit
-                    | SqlTypeKind::VarBit
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
@@ -5040,6 +5323,12 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     crate::backend::executor::value_io::format_array_text(&items),
                 )))
             }
+            SqlTypeKind::Int2Vector if items.is_empty() => {
+                Err(invalid_vector_array_error("int2vector"))
+            }
+            SqlTypeKind::OidVector if items.is_empty() => {
+                Err(invalid_vector_array_error("oidvector"))
+            }
             _ => Ok(Value::Array(items)),
         },
         Value::PgArray(array) => match ty.kind {
@@ -5047,6 +5336,12 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 Ok(Value::Text(CompactString::from_owned(
                     crate::backend::executor::value_io::format_array_value_text(&array),
                 )))
+            }
+            SqlTypeKind::Int2Vector if array.elements.is_empty() => {
+                Err(invalid_vector_array_error("int2vector"))
+            }
+            SqlTypeKind::OidVector if array.elements.is_empty() => {
+                Err(invalid_vector_array_error("oidvector"))
             }
             _ => Ok(Value::PgArray(array)),
         },
@@ -5094,6 +5389,9 @@ fn parse_int2vector_array_text(text: &str) -> Result<Value, ExecError> {
     for item in text.split_ascii_whitespace() {
         items.push(cast_text_to_int2(item)?);
     }
+    if items.is_empty() {
+        return Err(invalid_vector_array_error("int2vector"));
+    }
     Ok(Value::PgArray(
         ArrayValue::from_dimensions(vector_array_dimensions(items.len()), items)
             .with_element_type_oid(INT2_TYPE_OID),
@@ -5105,10 +5403,22 @@ fn parse_oidvector_array_text(text: &str, element_type_oid: u32) -> Result<Value
     for item in text.split_ascii_whitespace() {
         items.push(cast_text_to_oid(item)?);
     }
+    if items.is_empty() {
+        return Err(invalid_vector_array_error("oidvector"));
+    }
     Ok(Value::PgArray(
         ArrayValue::from_dimensions(vector_array_dimensions(items.len()), items)
             .with_element_type_oid(element_type_oid),
     ))
+}
+
+fn invalid_vector_array_error(type_name: &'static str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("array is not a valid {type_name}"),
+        detail: None,
+        hint: None,
+        sqlstate: "22P02",
+    }
 }
 
 fn is_oid_vector_array_element(kind: SqlTypeKind) -> bool {
@@ -5333,16 +5643,12 @@ pub(crate) fn cast_text_value_with_config(
         SqlTypeKind::Timestamp => parse_timestamp_text(text, config)
             .map(Value::Timestamp)
             .map(|value| apply_time_precision(value, ty.time_precision()))
-            .map_err(|err| ExecError::InvalidStorageValue {
-                column: "timestamp".into(),
-                details: datetime_parse_error_details("timestamp", text, err),
-            }),
+            .map_err(|err| timestamp_parse_error("timestamp", "timestamp", text, err)),
         SqlTypeKind::TimestampTz => parse_timestamptz_text(text, config)
             .map(Value::TimestampTz)
             .map(|value| apply_time_precision(value, ty.time_precision()))
-            .map_err(|err| ExecError::InvalidStorageValue {
-                column: "timestamptz".into(),
-                details: datetime_parse_error_details("timestamp with time zone", text, err),
+            .map_err(|err| {
+                timestamp_parse_error("timestamptz", "timestamp with time zone", text, err)
             }),
         SqlTypeKind::InternalChar => Ok(Value::InternalChar(parse_internal_char_text(text))),
         SqlTypeKind::Bit | SqlTypeKind::VarBit => Ok(Value::Bit(coerce_bit_string(
@@ -5992,14 +6298,18 @@ fn has_nonzero_digit(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cast_float_to_int, cast_value, cast_value_with_source_type_and_config,
-        parse_input_type_name, parse_interval_text_value, parse_pg_float, parse_text_array_literal,
-        render_interval_text_with_style, soft_input_error_info,
+        cast_float_to_int, cast_text_to_regtype, cast_text_value_with_config, cast_value,
+        cast_value_with_source_type_and_config, parse_input_type_name, parse_interval_text_value,
+        parse_pg_float, parse_text_array_literal, render_interval_text_with_style,
+        soft_input_error_info,
     };
     use crate::backend::executor::exec_expr::parse_numeric_text;
     use crate::backend::executor::{ExecError, Value};
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::backend::utils::misc::guc_datetime::{DateTimeConfig, IntervalStyle};
+    use crate::include::catalog::{
+        BOOL_TYPE_OID, GTSVECTOR_TYPE_OID, INT4_TYPE_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
+    };
     use crate::include::nodes::datetime::{
         DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
     };
@@ -6112,28 +6422,127 @@ mod tests {
     }
 
     #[test]
+    fn regtype_cast_resolves_catalog_only_types() {
+        assert_eq!(
+            cast_text_to_regtype("gtsvector", None).unwrap(),
+            Value::Int64(GTSVECTOR_TYPE_OID as i64)
+        );
+    }
+
+    #[test]
     fn parse_text_array_literal_uses_scalar_input_parsers() {
         assert_eq!(
             parse_text_array_literal("{1,2}", SqlType::new(SqlTypeKind::Int4)).unwrap(),
-            Value::Array(vec![Value::Int32(1), Value::Int32(2)])
+            Value::PgArray(
+                ArrayValue::from_1d(vec![Value::Int32(1), Value::Int32(2)])
+                    .with_element_type_oid(INT4_TYPE_OID)
+            )
         );
         assert_eq!(
             parse_text_array_literal("{\"NULL\",NULL}", SqlType::new(SqlTypeKind::Text)).unwrap(),
-            Value::Array(vec![Value::Text("NULL".into()), Value::Null])
+            Value::PgArray(
+                ArrayValue::from_1d(vec![Value::Text("NULL".into()), Value::Null])
+                    .with_element_type_oid(TEXT_TYPE_OID)
+            )
         );
         assert_eq!(
             parse_text_array_literal("{true,false}", SqlType::new(SqlTypeKind::Bool)).unwrap(),
-            Value::Array(vec![Value::Bool(true), Value::Bool(false)])
+            Value::PgArray(
+                ArrayValue::from_1d(vec![Value::Bool(true), Value::Bool(false)])
+                    .with_element_type_oid(BOOL_TYPE_OID)
+            )
         );
         assert_eq!(
             parse_text_array_literal("{{1,4},{2,5},{3,6}}", SqlType::new(SqlTypeKind::Int4))
                 .unwrap(),
-            Value::Array(vec![
-                Value::Array(vec![Value::Int32(1), Value::Int32(4)]),
-                Value::Array(vec![Value::Int32(2), Value::Int32(5)]),
-                Value::Array(vec![Value::Int32(3), Value::Int32(6)]),
-            ])
+            Value::PgArray(
+                ArrayValue::from_dimensions(
+                    vec![
+                        crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 1,
+                            length: 3,
+                        },
+                        crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 1,
+                            length: 2,
+                        },
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(4),
+                        Value::Int32(2),
+                        Value::Int32(5),
+                        Value::Int32(3),
+                        Value::Int32(6),
+                    ],
+                )
+                .with_element_type_oid(INT4_TYPE_OID)
+            )
         );
+    }
+
+    #[test]
+    fn parse_text_array_literal_matches_postgres_escape_and_shape_rules() {
+        assert_eq!(
+            cast_value(
+                Value::Text("{null,n\\ull,\"null\"}".into()),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+            )
+            .unwrap(),
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::Null,
+                    Value::Text("null".into()),
+                    Value::Text("null".into())
+                ])
+                .with_element_type_oid(TEXT_TYPE_OID)
+            )
+        );
+        assert_eq!(
+            cast_value(
+                Value::Text("  {   {  \"  0 second  \"   ,  0 second  }   }".into()),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+            )
+            .unwrap(),
+            Value::PgArray(
+                ArrayValue::from_dimensions(
+                    vec![
+                        crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 1,
+                            length: 1,
+                        },
+                        crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 1,
+                            length: 2,
+                        },
+                    ],
+                    vec![
+                        Value::Text("  0 second  ".into()),
+                        Value::Text("0 second".into()),
+                    ],
+                )
+                .with_element_type_oid(TEXT_TYPE_OID)
+            )
+        );
+
+        for raw in [
+            "{{1},{{2}}}",
+            "{{{1}},{2}}",
+            "{{},{{}}}",
+            "{{1},{}}",
+            "{{},{1}}",
+        ] {
+            assert!(matches!(
+                parse_text_array_literal(raw, SqlType::new(SqlTypeKind::Text)),
+                Err(ExecError::ArrayInput { detail: Some(detail), .. })
+                    if detail == "Multidimensional arrays must have sub-arrays with matching dimensions."
+            ));
+        }
+        assert!(matches!(
+            parse_text_array_literal("{a\"b\"}", SqlType::new(SqlTypeKind::Text)),
+            Err(ExecError::ArrayInput { detail: Some(detail), .. })
+                if detail == "Incorrectly quoted array element."
+        ));
     }
 
     #[test]
@@ -6144,7 +6553,10 @@ mod tests {
                 SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
             )
             .unwrap(),
-            Value::Array(vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)])
+            Value::PgArray(
+                ArrayValue::from_1d(vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)])
+                    .with_element_type_oid(INT4_TYPE_OID)
+            )
         );
         assert_eq!(
             cast_value(
@@ -6152,8 +6564,56 @@ mod tests {
                 SqlType::array_of(SqlType::new(SqlTypeKind::Varchar))
             )
             .unwrap(),
-            Value::Array(vec![Value::Text("a".into()), Value::Text("b".into())])
+            Value::PgArray(
+                ArrayValue::from_1d(vec![Value::Text("a".into()), Value::Text("b".into())])
+                    .with_element_type_oid(VARCHAR_TYPE_OID)
+            )
         );
+    }
+
+    #[test]
+    fn parse_text_array_literal_handles_explicit_bounds_like_postgres() {
+        assert_eq!(
+            cast_value(
+                Value::Text("[2]={1,7}".into()),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+            )
+            .unwrap(),
+            Value::PgArray(
+                ArrayValue::from_1d(vec![Value::Int32(1), Value::Int32(7)])
+                    .with_element_type_oid(INT4_TYPE_OID)
+            )
+        );
+        assert!(matches!(
+            cast_value(
+                Value::Text("[2]={1}".into()),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+            ),
+            Err(ExecError::ArrayInput { detail: Some(detail), .. })
+                if detail == "Specified array dimensions do not match array contents."
+        ));
+        assert!(matches!(
+            cast_value(
+                Value::Text("[21474836488:21474836489]={1,2}".into()),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+            ),
+            Err(ExecError::ArrayInput { message, .. })
+                if message == "array bound is out of integer range"
+        ));
+    }
+
+    #[test]
+    fn empty_array_casts_to_vectors_are_rejected() {
+        assert!(matches!(
+            cast_value(Value::Array(vec![]), SqlType::new(SqlTypeKind::OidVector)),
+            Err(ExecError::DetailedError { message, .. })
+                if message == "array is not a valid oidvector"
+        ));
+        assert!(matches!(
+            cast_value(Value::Array(vec![]), SqlType::new(SqlTypeKind::Int2Vector)),
+            Err(ExecError::DetailedError { message, .. })
+                if message == "array is not a valid int2vector"
+        ));
     }
 
     #[test]
@@ -6177,6 +6637,21 @@ mod tests {
                         months: 0,
                     }),
                 ])
+                .with_element_type_oid(crate::include::catalog::INTERVAL_TYPE_OID),
+            )
+        );
+        assert_eq!(
+            cast_value(
+                Value::Text("{@ 1 hour @ 42 minutes @ 20 seconds}".into()),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Interval))
+            )
+            .unwrap(),
+            Value::PgArray(
+                ArrayValue::from_1d(vec![Value::Interval(IntervalValue {
+                    time_micros: 6_140_000_000,
+                    days: 0,
+                    months: 0,
+                })])
                 .with_element_type_oid(crate::include::catalog::INTERVAL_TYPE_OID),
             )
         );
@@ -6221,6 +6696,69 @@ mod tests {
     }
 
     #[test]
+    fn date_timestamp_cast_reports_postgres_range_error() {
+        let date = DateADT(
+            crate::backend::utils::time::datetime::days_from_ymd(2_202_020, 10, 5).unwrap(),
+        );
+
+        assert!(matches!(
+            cast_value(Value::Date(date), SqlType::new(SqlTypeKind::Timestamp)),
+            Err(ExecError::DetailedError {
+                message,
+                sqlstate: "22008",
+                ..
+            }) if message == "date out of range for timestamp"
+        ));
+    }
+
+    #[test]
+    fn time_interval_casts_match_postgres_support() {
+        assert_eq!(
+            cast_value(
+                Value::Time(TimeADT((1 * 3600 + 2 * 60) * USECS_PER_SEC)),
+                SqlType::new(SqlTypeKind::Interval)
+            )
+            .unwrap(),
+            Value::Interval(IntervalValue {
+                months: 0,
+                days: 0,
+                time_micros: (1 * 3600 + 2 * 60) * USECS_PER_SEC,
+            })
+        );
+
+        assert!(matches!(
+            cast_value(
+                Value::TimeTz(TimeTzADT {
+                    time: TimeADT((1 * 3600 + 2 * 60) * USECS_PER_SEC),
+                    offset_seconds: -8 * 3600,
+                }),
+                SqlType::new(SqlTypeKind::Interval)
+            ),
+            Err(ExecError::DetailedError {
+                message,
+                sqlstate: "42846",
+                ..
+            }) if message == "cannot cast type time with time zone to interval"
+        ));
+
+        assert!(matches!(
+            cast_value(
+                Value::Interval(IntervalValue {
+                    months: 0,
+                    days: 0,
+                    time_micros: (2 * 3600 + 3 * 60) * USECS_PER_SEC,
+                }),
+                SqlType::new(SqlTypeKind::TimeTz)
+            ),
+            Err(ExecError::DetailedError {
+                message,
+                sqlstate: "42846",
+                ..
+            }) if message == "cannot cast type interval to time with time zone"
+        ));
+    }
+
+    #[test]
     fn bpchar_without_typmod_preserves_text_width() {
         assert_eq!(
             cast_value(
@@ -6237,6 +6775,31 @@ mod tests {
             )
             .unwrap(),
             Value::Text("WS".into())
+        );
+    }
+
+    #[test]
+    fn bpchar_to_varchar_and_text_trims_padding() {
+        let source = Some(SqlType::with_char_len(SqlTypeKind::Char, 4));
+        assert_eq!(
+            cast_value_with_source_type_and_config(
+                Value::Text("a   ".into()),
+                source,
+                SqlType::new(SqlTypeKind::Varchar),
+                &DateTimeConfig::default(),
+            )
+            .unwrap(),
+            Value::Text("a".into())
+        );
+        assert_eq!(
+            cast_value_with_source_type_and_config(
+                Value::Text("ab  ".into()),
+                source,
+                SqlType::new(SqlTypeKind::Text),
+                &DateTimeConfig::default(),
+            )
+            .unwrap(),
+            Value::Text("ab".into())
         );
     }
 
@@ -6280,6 +6843,27 @@ mod tests {
     }
 
     #[test]
+    fn timestamp_field_out_of_range_input_uses_datestyle_hint() {
+        let err = cast_text_value_with_config(
+            "13/01/2000",
+            SqlType::new(SqlTypeKind::Timestamp),
+            true,
+            &DateTimeConfig::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::DetailedError {
+                message,
+                hint: Some(hint),
+                sqlstate: "22008",
+                ..
+            } if message == "date/time field value out of range: \"13/01/2000\""
+                && hint == "Perhaps you need a different \"DateStyle\" setting."
+        ));
+    }
+
+    #[test]
     fn interval_input_keeps_i64_microsecond_edge_values() {
         assert_eq!(
             parse_interval_text_value("-9223372036854775807 us").unwrap(),
@@ -6295,6 +6879,26 @@ mod tests {
                 time_micros: i64::MIN,
                 days: 0,
                 months: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn interval_input_accepts_postgres_mixed_signed_fields() {
+        assert_eq!(
+            parse_interval_text_value("1 month - 1 second").unwrap(),
+            IntervalValue {
+                months: 1,
+                days: 0,
+                time_micros: -1_000_000,
+            }
+        );
+        assert_eq!(
+            parse_interval_text_value("2 days - 12:34:56").unwrap(),
+            IntervalValue {
+                months: 0,
+                days: 2,
+                time_micros: -45_296_000_000,
             }
         );
     }

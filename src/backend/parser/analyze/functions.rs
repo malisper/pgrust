@@ -4,15 +4,15 @@ use crate::include::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
     ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
     TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_hypothetical_aggregate_function_for_proc_oid,
-    builtin_type_rows, builtin_window_function_for_proc_oid,
+    builtin_type_name_for_oid, builtin_type_rows, builtin_window_function_for_proc_oid,
 };
 use crate::include::catalog::{
     multirange_type_ref_for_sql_type, range_type_ref_for_multirange_sql_type,
     range_type_ref_for_sql_type,
 };
 use crate::include::nodes::primnodes::{
-    BuiltinWindowFunction, HypotheticalAggFunc, JsonRecordFunction, RegexTableFunction,
-    StringTableFunction,
+    BuiltinWindowFunction, HashFunctionKind, HypotheticalAggFunc, JsonRecordFunction,
+    RegexTableFunction, StringTableFunction,
 };
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -57,7 +57,7 @@ pub(super) enum ResolvedFunctionRowShape {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ResolvedFunctionCall {
+pub(crate) struct ResolvedFunctionCall {
     pub proc_oid: u32,
     pub proname: String,
     pub prokind: char,
@@ -83,7 +83,7 @@ struct CandidateMatch {
     vatype_oid: u32,
 }
 
-pub(super) fn resolve_function_call(
+pub(crate) fn resolve_function_call(
     catalog: &dyn CatalogLookup,
     name: &str,
     actual_types: &[SqlType],
@@ -363,6 +363,11 @@ fn normalize_builtin_function_name(name: &str) -> &str {
 }
 
 fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
+    if row.proname.eq_ignore_ascii_case("timestamptz")
+        && matches!(row.proargtypes.trim(), "1082 1083" | "1082 1266")
+    {
+        return Some(BuiltinScalarFunction::TimestampTzConstructor);
+    }
     builtin_scalar_function_for_proc_src(&row.prosrc)
         .or_else(|| builtin_scalar_function_for_proc_src(&row.proname))
 }
@@ -645,6 +650,9 @@ fn match_proc_arg_type(
     let declared_type = catalog.type_by_oid(declared_oid)?.sql_type;
     if let Some(cost) = arg_type_match_cost(actual_type, declared_type) {
         return Some((cost, declared_type));
+    }
+    if catalog_implicit_cast_exists(catalog, actual_type, declared_oid) {
+        return Some((3, declared_type));
     }
     if is_text_like_type(actual_type) && catalog_text_input_cast_exists(catalog, declared_oid) {
         return Some((3, declared_type));
@@ -1089,6 +1097,28 @@ fn can_coerce_to_compatible_anchor(value: SqlType, anchor: SqlType) -> bool {
             ))
 }
 
+fn catalog_implicit_cast_exists(
+    catalog: &dyn CatalogLookup,
+    actual_type: SqlType,
+    declared_oid: u32,
+) -> bool {
+    let Some(source_oid) = catalog.type_oid_for_sql_type(actual_type) else {
+        return false;
+    };
+    catalog
+        .cast_by_source_target(source_oid, declared_oid)
+        .is_some_and(|row| row.castcontext == 'i')
+}
+
+fn is_builtin_text_like_type(ty: SqlType) -> bool {
+    !ty.is_array
+        && matches!(
+            ty.kind,
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
+        )
+        && (ty.type_oid == 0 || builtin_type_name_for_oid(ty.type_oid).is_some())
+}
+
 fn canonical_polymorphic_type(mut ty: SqlType) -> SqlType {
     if !ty.is_array && !ty.is_range() && !ty.is_multirange() && ty.typrelid == 0 {
         ty.type_oid = 0;
@@ -1156,7 +1186,7 @@ fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usi
     if is_numeric_family(actual_type) && is_numeric_family(target_type) {
         return Some(1);
     }
-    if is_text_like_type(actual_type) && is_text_like_type(target_type) {
+    if is_builtin_text_like_type(actual_type) && is_builtin_text_like_type(target_type) {
         return Some(1);
     }
     if is_bit_string_type(actual_type) && is_bit_string_type(target_type) {
@@ -1218,7 +1248,8 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::TsMatch
             | BuiltinScalarFunction::TsQueryAnd
             | BuiltinScalarFunction::TsQueryOr
-            | BuiltinScalarFunction::TsVectorConcat => args.len() == 2,
+            | BuiltinScalarFunction::TsVectorConcat
+            | BuiltinScalarFunction::TextCat => args.len() == 2,
             BuiltinScalarFunction::CashLarger | BuiltinScalarFunction::CashSmaller => {
                 args.len() == 2
             }
@@ -1227,9 +1258,11 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::XmlIsWellFormed
             | BuiltinScalarFunction::XmlIsWellFormedDocument
             | BuiltinScalarFunction::XmlIsWellFormedContent => args.len() == 1,
+            BuiltinScalarFunction::Pi => args.is_empty(),
             BuiltinScalarFunction::Random | BuiltinScalarFunction::RandomNormal => {
                 matches!(args.len(), 0 | 2)
             }
+            BuiltinScalarFunction::SetSeed => args.len() == 1,
             BuiltinScalarFunction::UuidIn
             | BuiltinScalarFunction::UuidOut
             | BuiltinScalarFunction::UuidRecv
@@ -1283,8 +1316,11 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::MakeDate | BuiltinScalarFunction::MakeTime => args.len() == 3,
             BuiltinScalarFunction::MakeTimestamp => args.len() == 6,
             BuiltinScalarFunction::MakeTimestampTz => matches!(args.len(), 6 | 7),
-            BuiltinScalarFunction::ToTimestamp => args.len() == 1,
+            BuiltinScalarFunction::TimestampTzConstructor => args.len() == 2,
+            BuiltinScalarFunction::ToTimestamp => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::IntervalHash => args.len() == 1,
+            BuiltinScalarFunction::HashValue(_) => args.len() == 1,
+            BuiltinScalarFunction::HashValueExtended(_) => args.len() == 2,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
             BuiltinScalarFunction::UnicodeVersion => args.is_empty(),
             BuiltinScalarFunction::UnicodeAssigned => args.len() == 1,
@@ -1299,6 +1335,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgRustTestFdwHandler => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncSetup => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncConversion => args.len() == 4,
+            BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid => args.len() == 1,
             BuiltinScalarFunction::PgRustTestWidgetIn
             | BuiltinScalarFunction::PgRustTestWidgetOut
             | BuiltinScalarFunction::PgRustTestInt44In
@@ -1388,6 +1425,10 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgStatGetXactFunctionCalls
             | BuiltinScalarFunction::PgStatGetXactFunctionTotalTime
             | BuiltinScalarFunction::PgStatGetXactFunctionSelfTime => args.len() == 1,
+            BuiltinScalarFunction::PgRestoreRelationStats
+            | BuiltinScalarFunction::PgRestoreAttributeStats => true,
+            BuiltinScalarFunction::PgClearRelationStats => args.len() == 2,
+            BuiltinScalarFunction::PgClearAttributeStats => args.len() == 4,
             BuiltinScalarFunction::ParseIdent => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
             BuiltinScalarFunction::ArrayLength
@@ -1415,6 +1456,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::Log10
             | BuiltinScalarFunction::Length
             | BuiltinScalarFunction::Lower
+            | BuiltinScalarFunction::Upper
             | BuiltinScalarFunction::Unistr
             | BuiltinScalarFunction::Scale
             | BuiltinScalarFunction::MinScale
@@ -1544,11 +1586,17 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::ArrayPrepend
             | BuiltinScalarFunction::ArrayCat
             | BuiltinScalarFunction::ArrayPosition
-            | BuiltinScalarFunction::ArraySort => matches!(args.len(), 2 | 3),
+            | BuiltinScalarFunction::ArraySort => matches!(args.len(), 1 | 2 | 3),
             BuiltinScalarFunction::ArrayPositions | BuiltinScalarFunction::ArrayRemove => {
                 args.len() == 2
             }
             BuiltinScalarFunction::ArrayReplace => args.len() == 3,
+            BuiltinScalarFunction::TrimArray | BuiltinScalarFunction::ArraySample => {
+                args.len() == 2
+            }
+            BuiltinScalarFunction::ArrayShuffle | BuiltinScalarFunction::ArrayReverse => {
+                args.len() == 1
+            }
             BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,
             BuiltinScalarFunction::Greatest | BuiltinScalarFunction::Least => !args.is_empty(),
             BuiltinScalarFunction::BTrim
@@ -1903,6 +1951,12 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::IntervalHash => {
             return Some(SqlType::new(SqlTypeKind::Int4));
         }
+        BuiltinScalarFunction::HashValue(_) => {
+            return Some(SqlType::new(SqlTypeKind::Int4));
+        }
+        BuiltinScalarFunction::HashValueExtended(_) => {
+            return Some(SqlType::new(SqlTypeKind::Int8));
+        }
         BuiltinScalarFunction::TxidCurrent | BuiltinScalarFunction::TxidCurrentIfAssigned => {
             return Some(SqlType::new(SqlTypeKind::Int8));
         }
@@ -2119,6 +2173,16 @@ fn scalar_named_arg_signature(func: BuiltinScalarFunction) -> Option<NamedArgSig
                 Some(NamedArgDefault::Text("use_json_null")),
             ],
         }),
+        BuiltinScalarFunction::PgClearRelationStats => Some(NamedArgSignature {
+            params: &["schemaname", "relname"],
+            required: 2,
+            defaults: &[None, None],
+        }),
+        BuiltinScalarFunction::PgClearAttributeStats => Some(NamedArgSignature {
+            params: &["schemaname", "relname", "attname", "inherited"],
+            required: 4,
+            defaults: &[None, None, None, None],
+        }),
         _ => None,
     }
 }
@@ -2173,18 +2237,70 @@ fn table_function_named_arg_signature(name: &str) -> Option<NamedArgSignature> {
 }
 
 fn builtin_scalar_function_for_proc_src(proc_src: &str) -> Option<BuiltinScalarFunction> {
-    legacy_scalar_function_entries()
-        .iter()
-        .find_map(|(name, func)| proc_src.eq_ignore_ascii_case(name).then_some(*func))
-        .or_else(|| {
-            range_prefixed_proc_src(proc_src).and_then(builtin_scalar_function_for_proc_src)
-        })
-        .or_else(|| {
-            proc_src
-                .rsplit_once('_')
-                .filter(|(_, suffix)| suffix.chars().all(|ch| ch.is_ascii_digit()))
-                .and_then(|(base, _)| builtin_scalar_function_for_proc_src(base))
-        })
+    hash_scalar_function_for_proc_src(proc_src).or_else(|| {
+        legacy_scalar_function_entries()
+            .iter()
+            .find_map(|(name, func)| proc_src.eq_ignore_ascii_case(name).then_some(*func))
+            .or_else(|| {
+                range_prefixed_proc_src(proc_src).and_then(builtin_scalar_function_for_proc_src)
+            })
+            .or_else(|| {
+                proc_src
+                    .rsplit_once('_')
+                    .filter(|(_, suffix)| suffix.chars().all(|ch| ch.is_ascii_digit()))
+                    .and_then(|(base, _)| builtin_scalar_function_for_proc_src(base))
+            })
+    })
+}
+
+fn hash_scalar_function_for_proc_src(proc_src: &str) -> Option<BuiltinScalarFunction> {
+    let normalized = proc_src.to_ascii_lowercase();
+    let (base, extended) = normalized
+        .strip_suffix("_extended")
+        .map(|base| (base, true))
+        .or_else(|| normalized.strip_suffix("extended").map(|base| (base, true)))
+        .unwrap_or((normalized.as_str(), false));
+    let kind = match base {
+        "hashbool" => HashFunctionKind::Bool,
+        "hashint2" => HashFunctionKind::Int2,
+        "hashint4" => HashFunctionKind::Int4,
+        "hashint8" => HashFunctionKind::Int8,
+        "hashoid" => HashFunctionKind::Oid,
+        "hashchar" => HashFunctionKind::InternalChar,
+        "hashname" => HashFunctionKind::Name,
+        "hashtext" => HashFunctionKind::Text,
+        "hashvarchar" => HashFunctionKind::Varchar,
+        "hashbpchar" => HashFunctionKind::BpChar,
+        "hashfloat4" => HashFunctionKind::Float4,
+        "hashfloat8" => HashFunctionKind::Float8,
+        "hash_numeric" => HashFunctionKind::Numeric,
+        "hashtimestamp" | "timestamp_hash" => HashFunctionKind::Timestamp,
+        "hashtimestamptz" | "timestamptz_hash" => HashFunctionKind::TimestampTz,
+        "hashdate" => HashFunctionKind::Date,
+        "hashtime" | "time_hash" => HashFunctionKind::Time,
+        "hashtimetz" | "timetz_hash" => HashFunctionKind::TimeTz,
+        "hashbytea" => HashFunctionKind::Bytea,
+        "hashoidvector" => HashFunctionKind::OidVector,
+        "hash_aclitem" => HashFunctionKind::AclItem,
+        "hashinet" => HashFunctionKind::Inet,
+        "hashmacaddr" => HashFunctionKind::MacAddr,
+        "hashmacaddr8" => HashFunctionKind::MacAddr8,
+        "hash_array" => HashFunctionKind::Array,
+        "interval_hash" => HashFunctionKind::Interval,
+        "uuid_hash" => HashFunctionKind::Uuid,
+        "pg_lsn_hash" => HashFunctionKind::PgLsn,
+        "hashenum" => HashFunctionKind::Enum,
+        "jsonb_hash" => HashFunctionKind::Jsonb,
+        "hash_range" => HashFunctionKind::Range,
+        "hash_multirange" => HashFunctionKind::Multirange,
+        "hash_record" => HashFunctionKind::Record,
+        _ => return None,
+    };
+    Some(if extended {
+        BuiltinScalarFunction::HashValueExtended(kind)
+    } else {
+        BuiltinScalarFunction::HashValue(kind)
+    })
 }
 
 fn range_prefixed_proc_src(proc_src: &str) -> Option<&str> {
@@ -2238,6 +2354,9 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("random_normal", BuiltinScalarFunction::RandomNormal),
         ("drandom_normal", BuiltinScalarFunction::RandomNormal),
         ("drandom_normal_noargs", BuiltinScalarFunction::RandomNormal),
+        ("setseed", BuiltinScalarFunction::SetSeed),
+        ("pi", BuiltinScalarFunction::Pi),
+        ("dpi", BuiltinScalarFunction::Pi),
         ("uuid_in", BuiltinScalarFunction::UuidIn),
         ("uuid_out", BuiltinScalarFunction::UuidOut),
         ("uuid_recv", BuiltinScalarFunction::UuidRecv),
@@ -2397,6 +2516,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_rust_test_enc_conversion",
             BuiltinScalarFunction::PgRustTestEncConversion,
+        ),
+        (
+            "pg_rust_is_catalog_text_unique_index_oid",
+            BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid,
         ),
         (
             "pg_rust_test_widget_in",
@@ -2774,6 +2897,22 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_stat_get_xact_function_self_time",
             BuiltinScalarFunction::PgStatGetXactFunctionSelfTime,
         ),
+        (
+            "pg_restore_relation_stats",
+            BuiltinScalarFunction::PgRestoreRelationStats,
+        ),
+        (
+            "pg_clear_relation_stats",
+            BuiltinScalarFunction::PgClearRelationStats,
+        ),
+        (
+            "pg_restore_attribute_stats",
+            BuiltinScalarFunction::PgRestoreAttributeStats,
+        ),
+        (
+            "pg_clear_attribute_stats",
+            BuiltinScalarFunction::PgClearAttributeStats,
+        ),
         ("to_json", BuiltinScalarFunction::ToJson),
         ("to_jsonb", BuiltinScalarFunction::ToJsonb),
         ("to_tsvector", BuiltinScalarFunction::ToTsVector),
@@ -2904,6 +3043,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::JsonbPathQueryFirst,
         ),
         ("initcap", BuiltinScalarFunction::Initcap),
+        ("textcat", BuiltinScalarFunction::TextCat),
         ("concat", BuiltinScalarFunction::Concat),
         ("concat_ws", BuiltinScalarFunction::ConcatWs),
         ("format", BuiltinScalarFunction::Format),
@@ -2929,12 +3069,17 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("array_positions", BuiltinScalarFunction::ArrayPositions),
         ("array_remove", BuiltinScalarFunction::ArrayRemove),
         ("array_replace", BuiltinScalarFunction::ArrayReplace),
+        ("trim_array", BuiltinScalarFunction::TrimArray),
+        ("array_shuffle", BuiltinScalarFunction::ArrayShuffle),
+        ("array_sample", BuiltinScalarFunction::ArraySample),
+        ("array_reverse", BuiltinScalarFunction::ArrayReverse),
         ("array_sort", BuiltinScalarFunction::ArraySort),
         ("enum_first", BuiltinScalarFunction::EnumFirst),
         ("enum_last", BuiltinScalarFunction::EnumLast),
         ("enum_range", BuiltinScalarFunction::EnumRange),
         ("enum_range_bounds", BuiltinScalarFunction::EnumRange),
         ("lower", BuiltinScalarFunction::Lower),
+        ("upper", BuiltinScalarFunction::Upper),
         ("unistr", BuiltinScalarFunction::Unistr),
         ("ascii", BuiltinScalarFunction::Ascii),
         ("chr", BuiltinScalarFunction::Chr),
@@ -3689,6 +3834,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::TsRank
             | BuiltinScalarFunction::TsRankCd
             | BuiltinScalarFunction::RandomNormal
+            | BuiltinScalarFunction::SetSeed
             | BuiltinScalarFunction::UuidIn
             | BuiltinScalarFunction::UuidOut
             | BuiltinScalarFunction::UuidRecv
@@ -3703,6 +3849,8 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::Xid8Cmp
             | BuiltinScalarFunction::UuidHash
             | BuiltinScalarFunction::UuidHashExtended
+            | BuiltinScalarFunction::HashValue(_)
+            | BuiltinScalarFunction::HashValueExtended(_)
             | BuiltinScalarFunction::GenRandomUuid
             | BuiltinScalarFunction::UuidV7
             | BuiltinScalarFunction::UuidExtractVersion
@@ -3778,6 +3926,10 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgStatGetCheckpointerWriteTime
             | BuiltinScalarFunction::PgStatGetCheckpointerSyncTime
             | BuiltinScalarFunction::PgStatGetCheckpointerStatResetTime
+            | BuiltinScalarFunction::PgRestoreRelationStats
+            | BuiltinScalarFunction::PgClearRelationStats
+            | BuiltinScalarFunction::PgRestoreAttributeStats
+            | BuiltinScalarFunction::PgClearAttributeStats
             | BuiltinScalarFunction::ToJson
             | BuiltinScalarFunction::ToJsonb
             | BuiltinScalarFunction::ArrayToJson
@@ -3818,6 +3970,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ArrayLower
             | BuiltinScalarFunction::ArrayUpper
             | BuiltinScalarFunction::Lower
+            | BuiltinScalarFunction::Upper
             | BuiltinScalarFunction::Unistr
             | BuiltinScalarFunction::Ascii
             | BuiltinScalarFunction::Chr
@@ -3848,6 +4001,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ToChar
             | BuiltinScalarFunction::ToDate
             | BuiltinScalarFunction::ToNumber
+            | BuiltinScalarFunction::TimestampTzConstructor
             | BuiltinScalarFunction::ToTimestamp
             | BuiltinScalarFunction::Age
             | BuiltinScalarFunction::RegexpMatch
@@ -4013,6 +4167,9 @@ fn catalog_builtin_type_oid(catalog: &dyn CatalogLookup, sql_type: SqlType) -> O
 
 fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) -> bool {
     if let Some(row) = catalog.type_by_oid(target_oid) {
+        if row.typtype == 'd' && row.typbasetype != 0 {
+            return catalog_text_input_cast_exists(catalog, row.typbasetype);
+        }
         if row.sql_type.is_array {
             return true;
         }
@@ -4022,10 +4179,12 @@ fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) 
         if matches!(row.sql_type.kind, SqlTypeKind::Enum) {
             return true;
         }
-        if matches!(
-            row.sql_type.kind,
-            SqlTypeKind::Text | SqlTypeKind::Char | SqlTypeKind::Varchar
-        ) {
+        if is_builtin_text_like_type(row.sql_type)
+            || matches!(
+                row.sql_type.kind,
+                SqlTypeKind::Int2Vector | SqlTypeKind::OidVector
+            )
+        {
             return true;
         }
         if matches!(
@@ -4117,6 +4276,10 @@ mod tests {
             Some(BuiltinScalarFunction::Lower)
         );
         assert_eq!(
+            resolve_scalar_function("upper"),
+            Some(BuiltinScalarFunction::Upper)
+        );
+        assert_eq!(
             resolve_scalar_function("ceiling"),
             Some(BuiltinScalarFunction::Ceiling)
         );
@@ -4144,9 +4307,70 @@ mod tests {
             resolve_scalar_function("trunc"),
             Some(BuiltinScalarFunction::Trunc)
         );
+        assert_eq!(
+            resolve_scalar_function("pg_catalog.pg_restore_relation_stats"),
+            Some(BuiltinScalarFunction::PgRestoreRelationStats)
+        );
+        assert_eq!(
+            resolve_scalar_function("pg_clear_attribute_stats"),
+            Some(BuiltinScalarFunction::PgClearAttributeStats)
+        );
         assert_eq!(resolve_scalar_function("count"), None);
         assert_eq!(resolve_scalar_function("json_array_elements"), None);
         assert_eq!(resolve_scalar_function("int4"), None);
+    }
+
+    #[test]
+    fn resolve_stats_import_calls_as_builtin_proc_rows() {
+        let catalog = Catalog::default();
+        let text = SqlType::new(SqlTypeKind::Text);
+        let int4 = SqlType::new(SqlTypeKind::Int4);
+        let bool_ty = SqlType::new(SqlTypeKind::Bool);
+        let float4 = SqlType::new(SqlTypeKind::Float4);
+
+        let restore = resolve_function_call(
+            &catalog,
+            "pg_catalog.pg_restore_relation_stats",
+            &[text, text, text, text, text, int4, text, float4],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            restore.scalar_impl,
+            Some(BuiltinScalarFunction::PgRestoreRelationStats)
+        );
+
+        let clear = resolve_function_call(
+            &catalog,
+            "pg_clear_attribute_stats",
+            &[text, text, text, bool_ty],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            clear.scalar_impl,
+            Some(BuiltinScalarFunction::PgClearAttributeStats)
+        );
+
+        let stmt = crate::backend::parser::parse_select(
+            "select pg_catalog.pg_restore_relation_stats(
+                'schemaname', 'stats_import',
+                'relname', 'test',
+                'relpages', 18::integer,
+                'reltuples', 21::real)",
+        )
+        .unwrap();
+        let planned = pg_plan_query(&stmt, &catalog).unwrap();
+        let Plan::Projection { targets, .. } = planned.plan_tree else {
+            panic!("expected projection plan");
+        };
+        let Expr::Func(func) = &targets[0].expr else {
+            panic!("expected function target");
+        };
+        assert_eq!(
+            crate::include::nodes::primnodes::expr_sql_type_hint(&func.args[7]).map(|ty| ty.kind),
+            Some(SqlTypeKind::Float4)
+        );
     }
 
     #[test]
@@ -4229,6 +4453,20 @@ mod tests {
         assert_eq!(resolved.scalar_impl, Some(BuiltinScalarFunction::Lower));
         assert!(!resolved.func_variadic);
         assert_eq!(resolved.vatype_oid, 0);
+    }
+
+    #[test]
+    fn resolve_function_call_prefers_text_upper_for_text_arguments() {
+        let resolved = resolve_function_call(
+            &Catalog::default(),
+            "upper",
+            &[SqlType::new(SqlTypeKind::Text)],
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.scalar_impl, Some(BuiltinScalarFunction::Upper));
+        assert_eq!(resolved.result_type, SqlType::new(SqlTypeKind::Text));
     }
 
     #[test]

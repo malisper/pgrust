@@ -3,6 +3,65 @@ use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{ANYOID, range_type_ref_for_sql_type};
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 
+fn signed_integer_literal_type(expr: &SqlExpr) -> Option<SqlTypeKind> {
+    let (negative, value) = match expr {
+        SqlExpr::IntegerLiteral(value) => (false, value.as_str()),
+        SqlExpr::Negate(inner) => match inner.as_ref() {
+            SqlExpr::IntegerLiteral(value) => (true, value.as_str()),
+            _ => return None,
+        },
+        SqlExpr::UnaryPlus(inner) => match inner.as_ref() {
+            SqlExpr::IntegerLiteral(value) => (false, value.as_str()),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if !value.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let signed = if negative {
+        format!("-{value}")
+    } else {
+        value.to_string()
+    };
+    if signed.parse::<i32>().is_ok() {
+        Some(SqlTypeKind::Int4)
+    } else if signed.parse::<i64>().is_ok() {
+        Some(SqlTypeKind::Int8)
+    } else {
+        None
+    }
+}
+
+fn random_bound_target_type(args: &[SqlExpr], arg_types: &[SqlType]) -> SqlType {
+    if args.len() == 2
+        && let (Some(left), Some(right)) = (
+            signed_integer_literal_type(&args[0]),
+            signed_integer_literal_type(&args[1]),
+        )
+    {
+        return if matches!(left, SqlTypeKind::Int8) || matches!(right, SqlTypeKind::Int8) {
+            SqlType::new(SqlTypeKind::Int8)
+        } else {
+            SqlType::new(SqlTypeKind::Int4)
+        };
+    }
+
+    let left_type = arg_types[0];
+    let right_type = arg_types[1];
+    if matches!(left_type.kind, SqlTypeKind::Numeric)
+        || matches!(right_type.kind, SqlTypeKind::Numeric)
+    {
+        SqlType::new(SqlTypeKind::Numeric)
+    } else if matches!(left_type.kind, SqlTypeKind::Int8)
+        || matches!(right_type.kind, SqlTypeKind::Int8)
+    {
+        SqlType::new(SqlTypeKind::Int8)
+    } else {
+        SqlType::new(SqlTypeKind::Int4)
+    }
+}
+
 pub(super) fn bind_row_to_json_call(
     name: &str,
     args: &[SqlFunctionArg],
@@ -260,32 +319,38 @@ pub(super) fn bind_user_defined_scalar_function_call(
             "named arguments are not supported for user-defined function calls".into(),
         ));
     }
-    let arg_types = args
+    let bound_args_with_types = args
         .iter()
         .map(|arg| {
-            infer_sql_expr_type_with_ctes(
+            let bound = bind_expr_with_outer_and_ctes(
                 &arg.value,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            )
+            )?;
+            let sql_type = expr_sql_type_hint(&bound).unwrap_or_else(|| {
+                infer_sql_expr_type_with_ctes(
+                    &arg.value,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+            });
+            Ok((bound, sql_type))
         })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    let arg_types = bound_args_with_types
+        .iter()
+        .map(|(_, sql_type)| *sql_type)
         .collect::<Vec<_>>();
-    let bound_args = args
-        .iter()
-        .map(|arg| {
-            bind_expr_with_outer_and_ctes(
-                &arg.value,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let bound_args = bound_args_with_types
+        .into_iter()
+        .map(|(bound, _)| bound)
+        .collect::<Vec<_>>();
     let coerced_args = bound_args
         .into_iter()
         .zip(arg_types)
@@ -386,14 +451,6 @@ pub(super) fn bind_scalar_function_call(
     } else {
         args.iter()
             .map(|arg| {
-                let sql_type = infer_sql_expr_type_with_ctes(
-                    arg,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
                 let bound = bind_expr_with_outer_and_ctes(
                     arg,
                     scope,
@@ -402,6 +459,16 @@ pub(super) fn bind_scalar_function_call(
                     grouped_outer,
                     ctes,
                 )?;
+                let sql_type = expr_sql_type_hint(&bound).unwrap_or_else(|| {
+                    infer_sql_expr_type_with_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                });
                 Ok((bound, sql_type))
             })
             .collect::<Result<Vec<_>, ParseError>>()?
@@ -466,19 +533,7 @@ pub(super) fn bind_scalar_function_call(
             let target_types = if matches!(func, BuiltinScalarFunction::RandomNormal) {
                 vec![SqlType::new(SqlTypeKind::Float8); bound_args.len()]
             } else if bound_args.len() == 2 {
-                let left_type = arg_types[0];
-                let right_type = arg_types[1];
-                let target = if matches!(left_type.kind, SqlTypeKind::Numeric)
-                    || matches!(right_type.kind, SqlTypeKind::Numeric)
-                {
-                    SqlType::new(SqlTypeKind::Numeric)
-                } else if matches!(left_type.kind, SqlTypeKind::Int8)
-                    || matches!(right_type.kind, SqlTypeKind::Int8)
-                {
-                    SqlType::new(SqlTypeKind::Int8)
-                } else {
-                    SqlType::new(SqlTypeKind::Int4)
-                };
+                let target = random_bound_target_type(args, &arg_types);
                 vec![target; 2]
             } else if declared_arg_types.len() == bound_args.len() {
                 declared_arg_types.to_vec()
@@ -847,6 +902,23 @@ pub(super) fn bind_scalar_function_call(
                 ));
             }
             Ok(build_func(false, args))
+        }
+        BuiltinScalarFunction::TimestampTzConstructor => {
+            let second_type = match arg_types.get(1).map(|ty| ty.kind) {
+                Some(SqlTypeKind::TimeTz) => SqlType::new(SqlTypeKind::TimeTz),
+                _ => SqlType::new(SqlTypeKind::Time),
+            };
+            Ok(build_func(
+                false,
+                vec![
+                    coerce_bound_expr(
+                        bound_args[0].clone(),
+                        arg_types[0],
+                        SqlType::new(SqlTypeKind::Date),
+                    ),
+                    coerce_bound_expr(bound_args[1].clone(), arg_types[1], second_type),
+                ],
+            ))
         }
         BuiltinScalarFunction::Age => Ok(build_func(false, bound_args)),
         BuiltinScalarFunction::IntervalHash => Ok(build_func(
@@ -1889,7 +1961,9 @@ pub(super) fn bind_scalar_function_call(
                 ],
             ))
         }
-        BuiltinScalarFunction::Lower | BuiltinScalarFunction::Unistr => {
+        BuiltinScalarFunction::Lower
+        | BuiltinScalarFunction::Upper
+        | BuiltinScalarFunction::Unistr => {
             let arg_type = infer_sql_expr_type_with_ctes(
                 &args[0],
                 scope,
@@ -2319,6 +2393,19 @@ pub(super) fn bind_scalar_function_call(
                 .map(|(ty, arg)| coerce_bound_expr(arg, ty, SqlType::new(SqlTypeKind::Text)))
                 .collect(),
         )),
+        BuiltinScalarFunction::ToTimestamp if bound_args.len() == 2 => {
+            Ok(Expr::resolved_builtin_func(
+                func,
+                func_oid,
+                Some(SqlType::new(SqlTypeKind::TimestampTz)),
+                false,
+                arg_types
+                    .into_iter()
+                    .zip(bound_args)
+                    .map(|(ty, arg)| coerce_bound_expr(arg, ty, SqlType::new(SqlTypeKind::Text)))
+                    .collect(),
+            ))
+        }
         BuiltinScalarFunction::ToTimestamp => Ok(Expr::resolved_builtin_func(
             func,
             func_oid,
@@ -2569,6 +2656,34 @@ pub(super) fn bind_scalar_function_call(
         }
         BuiltinScalarFunction::WidthBucket => {
             if args.len() == 2 {
+                let operand_type = infer_sql_expr_type_with_ctes(
+                    &args[0],
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                let thresholds_type = infer_sql_expr_type_with_ctes(
+                    &args[1],
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                if thresholds_type.is_array {
+                    let element_type = thresholds_type.element_type();
+                    let operand_type =
+                        coerce_unknown_string_literal_type(&args[0], operand_type, element_type);
+                    if !width_bucket_threshold_types_compatible(operand_type, element_type) {
+                        return Err(function_does_not_exist_error(
+                            "width_bucket",
+                            &[operand_type, thresholds_type],
+                            catalog,
+                        ));
+                    }
+                }
                 return Ok(build_func(func_variadic, bound_args));
             }
             let raw_operand_type = infer_sql_expr_type_with_ctes(
@@ -3067,6 +3182,9 @@ pub(super) fn bind_scalar_function_call(
             ))
         }
         BuiltinScalarFunction::PgTypeof => {
+            if expr_contains_set_returning(&bound_args[0]) {
+                return Ok(build_func(func_variadic, bound_args));
+            }
             let arg_type = infer_sql_expr_type_with_ctes(
                 &args[0],
                 scope,
@@ -3244,6 +3362,8 @@ pub(super) fn bind_scalar_function_call(
         | BuiltinScalarFunction::HashMacAddrExtended
         | BuiltinScalarFunction::HashMacAddr8
         | BuiltinScalarFunction::HashMacAddr8Extended
+        | BuiltinScalarFunction::HashValue(_)
+        | BuiltinScalarFunction::HashValueExtended(_)
         | BuiltinScalarFunction::TxidSnapshotXmin
         | BuiltinScalarFunction::TxidSnapshotXmax
         | BuiltinScalarFunction::TxidVisibleInSnapshot
@@ -3444,4 +3564,13 @@ fn bind_regex_split_to_array_args(
         ));
     }
     out
+}
+
+fn width_bucket_threshold_types_compatible(operand: SqlType, threshold: SqlType) -> bool {
+    let operand = operand.element_type();
+    let threshold = threshold.element_type();
+    operand == threshold
+        || (is_numeric_family(operand) && is_numeric_family(threshold))
+        || (is_text_like_type(operand) && is_text_like_type(threshold))
+        || (!is_text_like_type(operand) && !is_text_like_type(threshold))
 }

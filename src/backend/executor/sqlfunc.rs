@@ -707,6 +707,23 @@ fn render_sql_literal_with_catalog(
             let text = format_array_value_text_with_config(&array, datetime_config);
             format!("{}::{element_name}[]", quote_sql_string(&text))
         }
+        Value::Record(record) => {
+            let type_oid = record.type_oid();
+            if type_oid == 0 {
+                return Err(sql_function_runtime_error(
+                    "cannot infer SQL function record argument type",
+                    None,
+                    "42804",
+                ));
+            }
+            let type_name = type_name_for_oid(catalog, type_oid)?;
+            let fields = record
+                .fields
+                .iter()
+                .map(|field| render_sql_literal_with_catalog(field, catalog, datetime_config))
+                .collect::<Result<Vec<_>, _>>()?;
+            format!("ROW({})::{type_name}", fields.join(", "))
+        }
         _ => {
             return Err(sql_function_runtime_error(
                 "SQL function argument type is not supported by the lightweight SQL-function runtime",

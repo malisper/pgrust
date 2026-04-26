@@ -34,6 +34,7 @@ pub struct VisibleCatalog {
     uncommitted_enum_label_oids: BTreeSet<u32>,
     domain_checks: BTreeMap<u32, (String, Vec<u32>)>,
     dynamic_type_rows: Vec<PgTypeRow>,
+    dynamic_range_rows: Vec<PgRangeRow>,
 }
 
 impl VisibleCatalog {
@@ -54,6 +55,7 @@ impl VisibleCatalog {
             uncommitted_enum_label_oids: BTreeSet::new(),
             domain_checks: BTreeMap::new(),
             dynamic_type_rows: Vec::new(),
+            dynamic_range_rows: Vec::new(),
         }
     }
 
@@ -78,6 +80,11 @@ impl VisibleCatalog {
 
     pub fn with_dynamic_type_rows(mut self, rows: Vec<PgTypeRow>) -> Self {
         self.dynamic_type_rows = rows;
+        self
+    }
+
+    pub fn with_dynamic_range_rows(mut self, rows: Vec<PgRangeRow>) -> Self {
+        self.dynamic_range_rows = rows;
         self
     }
 
@@ -169,6 +176,12 @@ impl VisibleCatalog {
             .as_ref()
             .map(|catcache| catcache.authid_rows())
             .unwrap_or_default()
+    }
+
+    pub fn class_row_by_oid(&self, oid: u32) -> Option<PgClassRow> {
+        self.catcache
+            .as_ref()
+            .and_then(|catcache| catcache.class_by_oid(oid).cloned())
     }
 
     pub fn proc_rows(&self) -> Vec<PgProcRow> {
@@ -496,6 +509,13 @@ impl CatalogLookup for VisibleCatalog {
             .find(|row| row.castsource == source_type_oid && row.casttarget == target_type_oid)
     }
 
+    fn cast_rows(&self) -> Vec<PgCastRow> {
+        self.catcache
+            .as_ref()
+            .map(CatCache::cast_rows)
+            .unwrap_or_else(bootstrap_pg_cast_rows)
+    }
+
     fn type_rows(&self) -> Vec<PgTypeRow> {
         let mut rows = self
             .catcache
@@ -520,7 +540,9 @@ impl CatalogLookup for VisibleCatalog {
     }
 
     fn range_rows(&self) -> Vec<PgRangeRow> {
-        builtin_range_rows()
+        let mut rows = builtin_range_rows();
+        rows.extend(self.dynamic_range_rows.clone());
+        rows
     }
 
     fn enum_label_oid(&self, type_oid: u32, label: &str) -> Option<u32> {
@@ -810,6 +832,7 @@ fn bound_relation_from_relcache_entry(
             }),
         namespace_oid: entry.namespace_oid,
         owner_oid: entry.owner_oid,
+        of_type_oid: entry.of_type_oid,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         relispopulated: entry.relispopulated,

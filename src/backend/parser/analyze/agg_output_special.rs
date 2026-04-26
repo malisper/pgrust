@@ -2,10 +2,14 @@ use super::agg_output::{
     bind_agg_output_expr, current_grouped_agg_visible_ctes, grouped_infer_common_scalar_expr_type,
     grouped_infer_sql_expr_type,
 };
-use super::functions::{resolve_scalar_function, validate_scalar_function_arity};
+use super::expr::catalog_backed_explicit_cast_allowed;
+use super::functions::{
+    fixed_scalar_return_type, resolve_function_cast_type, resolve_scalar_function,
+    validate_scalar_function_arity,
+};
 use super::infer::infer_array_literal_type_with_ctes;
 use super::*;
-use crate::include::nodes::primnodes::{SubLink, SubLinkType};
+use crate::include::nodes::primnodes::{SubLink, SubLinkType, expr_sql_type_hint};
 
 pub(super) fn bind_grouped_concat_expr(
     left: &SqlExpr,
@@ -301,6 +305,41 @@ pub(super) fn bind_grouped_func_call(
             n_keys,
         );
     }
+    if !func_variadic
+        && !name.eq_ignore_ascii_case("pg_lsn")
+        && let Some(target_type) = resolve_function_cast_type(catalog, name)
+        && args.len() == 1
+        && args.iter().all(|arg| arg.name.is_none())
+    {
+        let source_type = grouped_infer_sql_expr_type(
+            &args[0].value,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+        );
+        let bound_arg = bind_agg_output_expr(
+            &args[0].value,
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        )?;
+        if catalog_backed_explicit_cast_allowed(source_type, target_type, catalog) {
+            return Ok(Expr::Cast(
+                Box::new(bound_arg),
+                if source_type == target_type {
+                    source_type
+                } else {
+                    target_type
+                },
+            ));
+        }
+    }
     let func = resolve_scalar_function(name).ok_or_else(|| ParseError::UnexpectedToken {
         expected: "supported builtin function",
         actual: name.to_string(),
@@ -323,22 +362,25 @@ pub(super) fn bind_grouped_func_call(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let arg_types = bound_args
+        .iter()
+        .zip(lowered_args.iter())
+        .map(|(arg, raw_arg)| {
+            expr_sql_type_hint(arg).unwrap_or_else(|| {
+                grouped_infer_sql_expr_type(
+                    raw_arg,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
     match func {
         BuiltinScalarFunction::Left | BuiltinScalarFunction::Repeat => {
-            let left_type = grouped_infer_sql_expr_type(
-                &lowered_args[0],
-                input_scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-            );
-            let right_type = grouped_infer_sql_expr_type(
-                &lowered_args[1],
-                input_scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-            );
+            let left_type = arg_types[0];
+            let right_type = arg_types[1];
             if !should_use_text_concat(&lowered_args[0], left_type, &lowered_args[0], left_type) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "text argument",
@@ -369,14 +411,8 @@ pub(super) fn bind_grouped_func_call(
                 ],
             ))
         }
-        BuiltinScalarFunction::Lower => {
-            let arg_type = grouped_infer_sql_expr_type(
-                &lowered_args[0],
-                input_scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-            );
+        BuiltinScalarFunction::Lower | BuiltinScalarFunction::Upper => {
+            let arg_type = arg_types[0];
             Ok(Expr::builtin_func(
                 func,
                 Some(SqlType::new(SqlTypeKind::Text)),
@@ -388,7 +424,48 @@ pub(super) fn bind_grouped_func_call(
                 )],
             ))
         }
-        _ => Ok(Expr::builtin_func(func, None, func_variadic, bound_args)),
+        BuiltinScalarFunction::Abs => {
+            let arg_type = arg_types[0];
+            Ok(Expr::builtin_func(
+                func,
+                Some(arg_type),
+                func_variadic,
+                bound_args,
+            ))
+        }
+        BuiltinScalarFunction::Erf | BuiltinScalarFunction::Erfc => Ok(Expr::builtin_func(
+            func,
+            Some(SqlType::new(SqlTypeKind::Float8)),
+            func_variadic,
+            vec![coerce_bound_expr(
+                bound_args[0].clone(),
+                arg_types[0],
+                SqlType::new(SqlTypeKind::Float8),
+            )],
+        )),
+        BuiltinScalarFunction::Sqrt | BuiltinScalarFunction::Exp | BuiltinScalarFunction::Ln => {
+            let result_type = if matches!(arg_types[0].kind, SqlTypeKind::Numeric) {
+                SqlType::new(SqlTypeKind::Numeric)
+            } else {
+                SqlType::new(SqlTypeKind::Float8)
+            };
+            Ok(Expr::builtin_func(
+                func,
+                Some(result_type),
+                func_variadic,
+                vec![coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_types[0],
+                    result_type,
+                )],
+            ))
+        }
+        _ => Ok(Expr::builtin_func(
+            func,
+            fixed_scalar_return_type(func),
+            func_variadic,
+            bound_args,
+        )),
     }
 }
 

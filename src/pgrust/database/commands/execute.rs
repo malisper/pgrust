@@ -29,6 +29,76 @@ fn statement_timestamp_usecs(config: &DateTimeConfig) -> i64 {
 }
 
 impl Database {
+    pub(crate) fn execute_alter_table_replica_identity_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &crate::backend::parser::AlterTableReplicaIdentityStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let Some(relation) =
+            crate::pgrust::database::ddl::lookup_table_or_partitioned_table_for_alter_table(
+                &catalog,
+                &stmt.table_name,
+                stmt.if_exists,
+            )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
+        let index = catalog
+            .index_relations_for_heap(relation.relation_oid)
+            .into_iter()
+            .find(|index| index.name.eq_ignore_ascii_case(&stmt.index_name))
+            .ok_or_else(|| {
+                ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                    expected: "index on table",
+                    actual: format!(
+                        "index \"{}\" does not exist for table \"{}\"",
+                        stmt.index_name, stmt.table_name
+                    ),
+                })
+            })?;
+        if !index.index_meta.indisunique {
+            return Err(ExecError::Parse(
+                crate::backend::parser::ParseError::DetailedError {
+                    message: format!(
+                        "cannot use non-unique index \"{}\" as replica identity",
+                        stmt.index_name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42809",
+                },
+            ));
+        }
+
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: 0,
+            client_id,
+            waiter: None,
+            interrupts,
+        };
+        let mut catalog_effects = Vec::new();
+        let result = self
+            .catalog
+            .write()
+            .set_replica_identity_index_mvcc(relation.relation_oid, index.relation_oid, &ctx)
+            .map(|effect| {
+                catalog_effects.push(effect);
+                StatementResult::AffectedRows(0)
+            })
+            .map_err(map_catalog_error);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
     pub(crate) fn execute_truncate_table_in_transaction_with_search_path(
         &self,
         client_id: ClientId,
@@ -242,6 +312,27 @@ impl Database {
         gucs: &std::collections::HashMap<String, String>,
         planner_config: PlannerConfig,
     ) -> Result<StatementResult, ExecError> {
+        self.execute_statement_with_search_path_datetime_config_gucs_planner_config_and_random_state(
+            client_id,
+            stmt,
+            configured_search_path,
+            datetime_config,
+            gucs,
+            planner_config,
+            crate::backend::executor::PgPrngState::shared(),
+        )
+    }
+
+    pub(crate) fn execute_statement_with_search_path_datetime_config_gucs_planner_config_and_random_state(
+        &self,
+        client_id: ClientId,
+        stmt: Statement,
+        configured_search_path: Option<&[String]>,
+        datetime_config: &DateTimeConfig,
+        gucs: &std::collections::HashMap<String, String>,
+        planner_config: PlannerConfig,
+        random_state: std::sync::Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
+    ) -> Result<StatementResult, ExecError> {
         let datetime_config = autocommit_datetime_config(datetime_config);
         let statement_lock_scope_id = Some(self.allocate_statement_lock_scope_id());
         let stats_state = self.session_stats_state(client_id);
@@ -256,6 +347,7 @@ impl Database {
             &datetime_config,
             gucs,
             planner_config,
+            random_state,
         );
         if let Some(scope_id) = statement_lock_scope_id {
             advisory_locks.unlock_all_statement(client_id, scope_id);
@@ -337,6 +429,7 @@ impl Database {
         datetime_config: &DateTimeConfig,
         gucs: &std::collections::HashMap<String, String>,
         planner_config: PlannerConfig,
+        random_state: std::sync::Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
     ) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::commands::tablecmds::execute_truncate_table;
@@ -344,6 +437,22 @@ impl Database {
         let session_replication_role = self.session_replication_role(client_id);
 
         match stmt {
+            Statement::AlterTableMulti(ref statements) => {
+                for sql in statements {
+                    let substmt = crate::backend::parser::parse_statement(sql)?;
+                    self.execute_statement_with_search_path_inner(
+                        client_id,
+                        substmt,
+                        statement_lock_scope_id,
+                        configured_search_path,
+                        datetime_config,
+                        gucs,
+                        planner_config,
+                        std::sync::Arc::clone(&random_state),
+                    )?;
+                }
+                Ok(StatementResult::AffectedRows(0))
+            }
             Statement::Do(ref do_stmt) => execute_do_with_gucs(do_stmt, gucs),
             Statement::SetConstraints(_) => {
                 crate::backend::utils::misc::notices::push_warning(
@@ -547,11 +656,18 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableAlterColumnIdentity(ref alter_stmt) => self
+                .execute_alter_table_alter_column_identity_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableAddConstraint(ref alter_stmt) => self
                 .execute_alter_table_add_constraint_stmt_with_search_path(
                     client_id,
                     alter_stmt,
                     configured_search_path,
+                    None,
                 ),
             Statement::AlterTableDropConstraint(ref alter_stmt) => self
                 .execute_alter_table_drop_constraint_stmt_with_search_path(
@@ -601,6 +717,18 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableOf(ref alter_stmt) => self
+                .execute_alter_table_of_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTableNotOf(ref alter_stmt) => self
+                .execute_alter_table_not_of_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableAttachPartition(ref alter_stmt) => self
                 .execute_alter_table_attach_partition_stmt_with_search_path(
                     client_id,
@@ -619,6 +747,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableReplicaIdentity(ref alter_stmt) => self
+                .execute_alter_table_replica_identity_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterPolicy(ref alter_stmt) => self
                 .execute_alter_policy_stmt_with_search_path(
                     client_id,
@@ -628,7 +762,8 @@ impl Database {
             Statement::Show(_)
             | Statement::Set(_)
             | Statement::Reset(_)
-            | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+            | Statement::AlterTableSet(_)
+            | Statement::AlterIndexSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CreateRole(ref create_stmt) => {
                 self.execute_create_role_stmt(client_id, create_stmt, None)
             }
@@ -726,6 +861,18 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterAggregateRename(ref rename_stmt) => self
+                .execute_alter_aggregate_rename_stmt_with_search_path(
+                    client_id,
+                    rename_stmt,
+                    configured_search_path,
+                ),
+            Statement::CreateCast(ref create_stmt) => self
+                .execute_create_cast_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateOperator(ref create_stmt) => self
                 .execute_create_operator_stmt_with_search_path(
                     client_id,
@@ -794,6 +941,7 @@ impl Database {
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    stats_import_runtime: Some(std::sync::Arc::new(self.clone())),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     row_locks: std::sync::Arc::clone(&self.row_locks),
@@ -817,6 +965,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -827,8 +976,11 @@ impl Database {
                     catalog_effects: Vec::new(),
                     temp_effects: Vec::new(),
                     database: Some(self.clone()),
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
@@ -1032,6 +1184,7 @@ impl Database {
                     Arc::new(parking_lot::Mutex::new(ExecutorTransactionState {
                         xid: None,
                         cid: 0,
+                        transaction_snapshot: None,
                     }));
                 let deferred_foreign_keys =
                     crate::backend::executor::DeferredForeignKeyTracker::default();
@@ -1042,6 +1195,7 @@ impl Database {
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    stats_import_runtime: Some(std::sync::Arc::new(self.clone())),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     row_locks: std::sync::Arc::clone(&self.row_locks),
@@ -1065,6 +1219,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1075,8 +1230,11 @@ impl Database {
                     catalog_effects: Vec::new(),
                     temp_effects: Vec::new(),
                     database: Some(self.clone()),
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: visible_catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
@@ -1094,8 +1252,11 @@ impl Database {
                 };
                 let pending_async_notifications =
                     std::mem::take(&mut ctx.pending_async_notifications);
-                let catalog_effects = std::mem::take(&mut ctx.catalog_effects);
+                let mut catalog_effects = std::mem::take(&mut ctx.catalog_effects);
                 let temp_effects = std::mem::take(&mut ctx.temp_effects);
+                let pending_catalog_effects = std::mem::take(&mut ctx.pending_catalog_effects);
+                let pending_table_locks = std::mem::take(&mut ctx.pending_table_locks);
+                catalog_effects.extend(pending_catalog_effects);
                 drop(ctx);
                 let xid = transaction_state.lock().xid;
                 let result = if let Some(xid) = xid {
@@ -1131,6 +1292,7 @@ impl Database {
                     result
                 };
 
+                unlock_relations(&self.table_locks, client_id, &pending_table_locks);
                 unlock_relations(&self.table_locks, client_id, &rels);
                 result
             }
@@ -1163,6 +1325,7 @@ impl Database {
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    stats_import_runtime: Some(std::sync::Arc::new(self.clone())),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     row_locks: std::sync::Arc::clone(&self.row_locks),
@@ -1186,6 +1349,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1196,8 +1360,11 @@ impl Database {
                     catalog_effects: Vec::new(),
                     temp_effects: Vec::new(),
                     database: Some(self.clone()),
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
@@ -1271,6 +1438,7 @@ impl Database {
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    stats_import_runtime: Some(std::sync::Arc::new(self.clone())),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     row_locks: std::sync::Arc::clone(&self.row_locks),
@@ -1294,6 +1462,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1304,8 +1473,11 @@ impl Database {
                     catalog_effects: Vec::new(),
                     temp_effects: Vec::new(),
                     database: Some(self.clone()),
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
@@ -1380,6 +1552,7 @@ impl Database {
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    stats_import_runtime: Some(std::sync::Arc::new(self.clone())),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     row_locks: std::sync::Arc::clone(&self.row_locks),
@@ -1403,6 +1576,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1413,8 +1587,11 @@ impl Database {
                     catalog_effects: Vec::new(),
                     temp_effects: Vec::new(),
                     database: Some(self.clone()),
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
@@ -1513,6 +1690,11 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::DropCast(ref drop_stmt) => self.execute_drop_cast_stmt_with_search_path(
+                client_id,
+                drop_stmt,
+                configured_search_path,
+            ),
             Statement::AlterType(ref alter_stmt) => self.execute_alter_type_stmt_with_search_path(
                 client_id,
                 alter_stmt,
@@ -1779,6 +1961,7 @@ impl Database {
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    stats_import_runtime: Some(std::sync::Arc::new(self.clone())),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     row_locks: std::sync::Arc::clone(&self.row_locks),
@@ -1802,6 +1985,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1812,8 +1996,11 @@ impl Database {
                     catalog_effects: Vec::new(),
                     temp_effects: Vec::new(),
                     database: Some(self.clone()),
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
@@ -1837,7 +2024,8 @@ impl Database {
                 vacuum_stmt,
                 configured_search_path,
             ),
-            Statement::Begin
+            Statement::SetTransaction(_)
+            | Statement::Begin(_)
             | Statement::Commit
             | Statement::Rollback
             | Statement::Savepoint(_)
@@ -1905,6 +2093,7 @@ impl Database {
             transaction_lock_scope_id,
             configured_search_path,
             datetime_config,
+            None,
             PlannerConfig::default(),
         )
     }
@@ -1918,7 +2107,35 @@ impl Database {
         transaction_lock_scope_id: Option<u64>,
         configured_search_path: Option<&[String]>,
         datetime_config: &DateTimeConfig,
+        snapshot_override: Option<crate::backend::access::transam::xact::Snapshot>,
         planner_config: PlannerConfig,
+    ) -> Result<SelectGuard, ExecError> {
+        self.execute_streaming_with_config_and_random_state(
+            client_id,
+            select_stmt,
+            txn_ctx,
+            statement_lock_scope_id,
+            transaction_lock_scope_id,
+            configured_search_path,
+            datetime_config,
+            snapshot_override,
+            planner_config,
+            crate::backend::executor::PgPrngState::shared(),
+        )
+    }
+
+    pub(crate) fn execute_streaming_with_config_and_random_state(
+        &self,
+        client_id: ClientId,
+        select_stmt: &crate::backend::parser::SelectStatement,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+        statement_lock_scope_id: Option<u64>,
+        transaction_lock_scope_id: Option<u64>,
+        configured_search_path: Option<&[String]>,
+        datetime_config: &DateTimeConfig,
+        snapshot_override: Option<crate::backend::access::transam::xact::Snapshot>,
+        planner_config: PlannerConfig,
+        random_state: std::sync::Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
     ) -> Result<SelectGuard, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::executor::executor_start;
@@ -1942,9 +2159,14 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         lock_relations_interruptible(&self.table_locks, client_id, &rels, interrupts.as_ref())?;
 
-        let (snapshot, command_id) = match txn_ctx {
-            Some((xid, cid)) => (self.txns.read().snapshot_for_command(xid, cid)?, cid),
-            None => (self.txns.read().snapshot(INVALID_TRANSACTION_ID)?, 0),
+        let (snapshot, command_id) = match (snapshot_override, txn_ctx) {
+            (Some(snapshot), Some((_xid, cid))) => (snapshot, cid),
+            (Some(snapshot), None) => {
+                let cid = snapshot.current_cid;
+                (snapshot, cid)
+            }
+            (None, Some((xid, cid))) => (self.txns.read().snapshot_for_command(xid, cid)?, cid),
+            (None, None) => (self.txns.read().snapshot(INVALID_TRANSACTION_ID)?, 0),
         };
         let columns = query_desc.columns();
         let column_names = query_desc.column_names();
@@ -1957,6 +2179,7 @@ impl Database {
             lock_status_provider: Some(std::sync::Arc::new(self.clone())),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            stats_import_runtime: Some(std::sync::Arc::new(self.clone())),
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
             row_locks: std::sync::Arc::clone(&self.row_locks),
@@ -1979,6 +2202,7 @@ impl Database {
             transaction_lock_scope_id,
             next_command_id: command_id,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            random_state,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
@@ -1989,8 +2213,11 @@ impl Database {
             catalog_effects: Vec::new(),
             temp_effects: Vec::new(),
             database: Some(self.clone()),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             catalog: visible_catalog_snapshot,
-            compiled_functions: std::collections::HashMap::new(),
+            plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+            pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),

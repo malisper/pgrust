@@ -46,6 +46,14 @@ struct SegKey {
     segno: u32,
 }
 
+type RelForkKey = (RelFileLocator, ForkNumber);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LruEntry {
+    key: SegKey,
+    generation: u64,
+}
+
 // ---------------------------------------------------------------------------
 // MdStorageManager
 // ---------------------------------------------------------------------------
@@ -64,10 +72,13 @@ const DEFAULT_MAX_OPEN_FDS: usize = 1000;
 pub struct MdStorageManager {
     base_dir: PathBuf,
     open_segs: HashMap<SegKey, OpenSeg>,
+    open_forks: HashMap<RelForkKey, HashSet<SegKey>>,
     /// LRU order tracker: front = least recently used, back = most recently used.
     /// Like PG's VFD doubly-linked ring, but simpler (VecDeque instead of
     /// intrusive list). Used to evict the LRU file when we hit max_open_fds.
-    lru_order: VecDeque<SegKey>,
+    lru_order: VecDeque<LruEntry>,
+    lru_generations: HashMap<SegKey, u64>,
+    next_lru_generation: u64,
     /// Maximum total open file descriptors (segment files + external).
     /// Matches PG's `max_files_per_process`.
     max_open_fds: usize,
@@ -113,7 +124,10 @@ impl MdStorageManager {
         MdStorageManager {
             base_dir,
             open_segs: HashMap::new(),
+            open_forks: HashMap::new(),
             lru_order: VecDeque::new(),
+            lru_generations: HashMap::new(),
+            next_lru_generation: 0,
             max_open_fds: DEFAULT_MAX_OPEN_FDS,
             external_fds: 0,
             in_recovery,
@@ -129,7 +143,9 @@ impl MdStorageManager {
     /// Rust equivalent of `PROCSIGNAL_BARRIER_SMGRRELEASE`.
     pub fn release_all(&mut self) {
         self.open_segs.clear();
+        self.open_forks.clear();
         self.lru_order.clear();
+        self.lru_generations.clear();
     }
 
     /// Evict the least-recently-used file descriptor to stay under
@@ -137,8 +153,10 @@ impl MdStorageManager {
     /// segment files and external FDs (sockets, WAL, etc.) against the limit.
     fn evict_lru(&mut self) {
         while self.open_segs.len() + self.external_fds >= self.max_open_fds {
-            if let Some(victim) = self.lru_order.pop_front() {
-                self.open_segs.remove(&victim);
+            if let Some(entry) = self.lru_order.pop_front() {
+                if self.lru_generations.get(&entry.key) == Some(&entry.generation) {
+                    self.remove_open_seg(&entry.key);
+                }
             } else {
                 break;
             }
@@ -147,10 +165,40 @@ impl MdStorageManager {
 
     /// Move a segment key to the MRU (most recently used) position.
     fn touch_lru(&mut self, key: &SegKey) {
-        if let Some(pos) = self.lru_order.iter().position(|k| k == key) {
-            self.lru_order.remove(pos);
+        self.next_lru_generation = self.next_lru_generation.wrapping_add(1);
+        let generation = self.next_lru_generation;
+        self.lru_generations.insert(*key, generation);
+        self.lru_order.push_back(LruEntry {
+            key: *key,
+            generation,
+        });
+    }
+
+    fn insert_open_seg(&mut self, key: SegKey, seg: OpenSeg) {
+        self.open_segs.insert(key, seg);
+        self.open_forks
+            .entry((key.rel, key.fork))
+            .or_default()
+            .insert(key);
+        self.touch_lru(&key);
+    }
+
+    fn remove_open_seg(&mut self, key: &SegKey) -> Option<OpenSeg> {
+        let removed = self.open_segs.remove(key);
+        if removed.is_some() {
+            let fork_key = (key.rel, key.fork);
+            let remove_fork = if let Some(keys) = self.open_forks.get_mut(&fork_key) {
+                keys.remove(key);
+                keys.is_empty()
+            } else {
+                false
+            };
+            if remove_fork {
+                self.open_forks.remove(&fork_key);
+            }
+            self.lru_generations.remove(key);
         }
-        self.lru_order.push_back(*key);
+        removed
     }
 
     /// Register an external file descriptor (socket, WAL file, etc.) that
@@ -210,8 +258,7 @@ impl MdStorageManager {
                         SmgrError::Io(e)
                     }
                 })?;
-            self.open_segs.insert(key, OpenSeg { file, segno });
-            self.lru_order.push_back(key);
+            self.insert_open_seg(key, OpenSeg { file, segno });
         } else {
             self.touch_lru(&key);
         }
@@ -237,8 +284,7 @@ impl MdStorageManager {
                 .create(true)
                 .truncate(false)
                 .open(&path)?;
-            self.open_segs.insert(key, OpenSeg { file, segno });
-            self.lru_order.push_back(key);
+            self.insert_open_seg(key, OpenSeg { file, segno });
         } else {
             self.touch_lru(&key);
         }
@@ -287,7 +333,7 @@ impl MdStorageManager {
             }
 
             let key = SegKey { rel, fork, segno };
-            self.open_segs.remove(&key);
+            self.remove_open_seg(&key);
 
             match OpenOptions::new().write(true).open(&path) {
                 Ok(f) => {
@@ -306,8 +352,7 @@ impl MdStorageManager {
     fn remove_segments_from(&mut self, rel: RelFileLocator, fork: ForkNumber, start_segno: u32) {
         for segno in start_segno.. {
             let key = SegKey { rel, fork, segno };
-            self.open_segs.remove(&key);
-            self.lru_order.retain(|k| k != &key);
+            self.remove_open_seg(&key);
 
             let path = self.seg_path(rel, fork, segno);
             match fs::remove_file(&path) {
@@ -458,10 +503,11 @@ impl StorageManager for MdStorageManager {
     }
 
     fn close(&mut self, rel: RelFileLocator, fork: ForkNumber) -> Result<(), SmgrError> {
-        self.open_segs
-            .retain(|key, _| !(key.rel == rel && key.fork == fork));
-        self.lru_order
-            .retain(|key| !(key.rel == rel && key.fork == fork));
+        if let Some(keys) = self.open_forks.remove(&(rel, fork)) {
+            for key in keys {
+                self.remove_open_seg(&key);
+            }
+        }
         self.nblocks_cache.remove(&(rel, fork));
         Ok(())
     }
@@ -508,8 +554,7 @@ impl StorageManager for MdStorageManager {
             segno: 0,
         };
         self.evict_lru();
-        self.open_segs.insert(key, OpenSeg { file, segno: 0 });
-        self.lru_order.push_back(key);
+        self.insert_open_seg(key, OpenSeg { file, segno: 0 });
         self.created_forks.insert((rel, fork));
 
         Ok(())
@@ -754,13 +799,13 @@ impl StorageManager for MdStorageManager {
             fork,
             segno: target_seg,
         };
-        self.open_segs.remove(&key);
+        self.remove_open_seg(&key);
 
         let path = self.seg_path(rel, fork, target_seg);
         if path.exists() {
             let file = OpenOptions::new().read(true).write(true).open(&path)?;
             file.set_len(target_byte_len)?;
-            self.open_segs.insert(
+            self.insert_open_seg(
                 key,
                 OpenSeg {
                     file,
@@ -795,7 +840,10 @@ impl StorageManager for MdStorageManager {
             let key = SegKey { rel, fork, segno };
             if !self.open_segs.contains_key(&key) {
                 let file = OpenOptions::new().read(true).write(true).open(&path)?;
-                self.open_segs.insert(key, OpenSeg { file, segno });
+                self.evict_lru();
+                self.insert_open_seg(key, OpenSeg { file, segno });
+            } else {
+                self.touch_lru(&key);
             }
 
             let seg = self.open_segs.get_mut(&key).unwrap();
@@ -1371,6 +1419,51 @@ mod tests {
             page_pattern(1),
             "data should be intact after release_all"
         );
+    }
+
+    #[test]
+    fn test_exists_closes_only_target_fork_handles() {
+        let (mut smgr, _base) = temp_smgr("exists_closes_target");
+        let rel1 = test_rel(14100);
+        let rel2 = test_rel(14101);
+
+        smgr.open(rel1).unwrap();
+        smgr.open(rel2).unwrap();
+        smgr.create(rel1, ForkNumber::Main, false).unwrap();
+        smgr.create(rel2, ForkNumber::Main, false).unwrap();
+
+        assert!(
+            smgr.open_forks.contains_key(&(rel1, ForkNumber::Main)),
+            "rel1 should have an open main fork handle"
+        );
+        assert!(
+            smgr.open_forks.contains_key(&(rel2, ForkNumber::Main)),
+            "rel2 should have an open main fork handle"
+        );
+
+        assert!(smgr.exists(rel1, ForkNumber::Main));
+        assert!(
+            !smgr.open_forks.contains_key(&(rel1, ForkNumber::Main)),
+            "exists should close only the target fork"
+        );
+        assert!(
+            smgr.open_forks.contains_key(&(rel2, ForkNumber::Main)),
+            "exists should leave unrelated fork handles cached"
+        );
+    }
+
+    #[test]
+    fn test_close_preserves_other_forks_for_same_relation() {
+        let (mut smgr, _base) = temp_smgr("close_preserves_other_forks");
+        let rel = test_rel(14102);
+
+        smgr.open(rel).unwrap();
+        smgr.create(rel, ForkNumber::Main, false).unwrap();
+        smgr.create(rel, ForkNumber::Fsm, false).unwrap();
+
+        smgr.close(rel, ForkNumber::Main).unwrap();
+        assert!(!smgr.open_forks.contains_key(&(rel, ForkNumber::Main)));
+        assert!(smgr.open_forks.contains_key(&(rel, ForkNumber::Fsm)));
     }
 
     // -----------------------------------------------------------------------

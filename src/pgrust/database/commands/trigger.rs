@@ -9,7 +9,13 @@ use crate::backend::parser::{
     SqlTypeKind, TriggerEvent, TriggerLevel, TriggerTiming,
     bind_scalar_expr_in_named_relation_scope, parse_expr,
 };
-use crate::include::catalog::{PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PgTriggerRow};
+use crate::include::catalog::{
+    PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PgConstraintRow, PgTriggerRow,
+    RI_FKEY_CASCADE_DEL_PROC_OID, RI_FKEY_CASCADE_UPD_PROC_OID, RI_FKEY_CHECK_INS_PROC_OID,
+    RI_FKEY_CHECK_UPD_PROC_OID, RI_FKEY_NOACTION_DEL_PROC_OID, RI_FKEY_NOACTION_UPD_PROC_OID,
+    RI_FKEY_RESTRICT_DEL_PROC_OID, RI_FKEY_RESTRICT_UPD_PROC_OID, RI_FKEY_SETDEFAULT_DEL_PROC_OID,
+    RI_FKEY_SETDEFAULT_UPD_PROC_OID, RI_FKEY_SETNULL_DEL_PROC_OID, RI_FKEY_SETNULL_UPD_PROC_OID,
+};
 use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_trigger_relation_for_ddl};
 
 const TRIGGER_TYPE_ROW: i16 = 1 << 0;
@@ -31,6 +37,81 @@ const TRIGGER_NEW_CTID_COLUMN: &str = "__trigger_new_ctid";
 const TRIGGER_OLD_CTID_COLUMN: &str = "__trigger_old_ctid";
 
 impl Database {
+    pub(super) fn create_foreign_key_triggers_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        constraint: &PgConstraintRow,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        let rows = foreign_key_trigger_rows(constraint);
+        let interrupts = self.interrupt_state(client_id);
+        let mut next_cid = cid;
+        for row in rows {
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_cid,
+                client_id,
+                waiter: None,
+                interrupts: Arc::clone(&interrupts),
+            };
+            next_cid = next_cid.saturating_add(1);
+            let effect = self
+                .catalog
+                .write()
+                .create_trigger_mvcc(row, &ctx)
+                .map_err(map_catalog_error)?
+                .1;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
+        self.plan_cache.invalidate_all();
+        Ok(next_cid)
+    }
+
+    pub(super) fn drop_foreign_key_triggers_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        constraint: &PgConstraintRow,
+        catalog: &dyn CatalogLookup,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let mut rows = catalog.trigger_rows_for_relation(constraint.conrelid);
+        if constraint.confrelid != constraint.conrelid {
+            rows.extend(catalog.trigger_rows_for_relation(constraint.confrelid));
+        }
+        rows.retain(|row| row.tgisinternal && row.tgconstraint == constraint.oid);
+        let interrupts = self.interrupt_state(client_id);
+        for (index, row) in rows.into_iter().enumerate() {
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: cid.saturating_add(index as u32),
+                client_id,
+                waiter: None,
+                interrupts: Arc::clone(&interrupts),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .drop_trigger_mvcc(row.tgrelid, &row.tgname, &ctx)
+                .map_err(map_catalog_error)?
+                .1;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
+        if !catalog_effects.is_empty() {
+            self.plan_cache.invalidate_all();
+        }
+        Ok(())
+    }
+
     pub(crate) fn execute_create_trigger_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -529,7 +610,7 @@ impl Database {
         ensure_relation_owner(self, client_id, &relation, &stmt.table_name)?;
 
         let all_triggers = catalog.trigger_rows_for_relation(relation.relation_oid);
-        let selected = match &stmt.target {
+        let mut selected = match &stmt.target {
             AlterTableTriggerTarget::Named(name) => {
                 let Some(row) = lookup_trigger_row(&catalog, relation.relation_oid, name) else {
                     return Err(missing_trigger_error(name, &stmt.table_name));
@@ -542,6 +623,19 @@ impl Database {
                 .filter(|row| !row.tgisinternal)
                 .collect(),
         };
+        if !stmt.only && relation.relkind == 'p' {
+            let mut inherited = Vec::new();
+            for row in &selected {
+                if trigger_row_is_row(row) {
+                    inherited.extend(inherited_trigger_descendants(
+                        &catalog,
+                        relation.relation_oid,
+                        row.oid,
+                    ));
+                }
+            }
+            selected.extend(inherited);
+        }
         if selected.is_empty() {
             return Ok(StatementResult::AffectedRows(0));
         }
@@ -910,6 +1004,103 @@ fn cloned_partition_trigger_row(parent: &PgTriggerRow, child_oid: u32) -> PgTrig
         tgqual: parent.tgqual.clone(),
         tgoldtable: parent.tgoldtable.clone(),
         tgnewtable: parent.tgnewtable.clone(),
+    }
+}
+
+fn foreign_key_trigger_rows(constraint: &PgConstraintRow) -> Vec<PgTriggerRow> {
+    vec![
+        foreign_key_trigger_row(
+            constraint,
+            constraint.conrelid,
+            constraint.confrelid,
+            RI_FKEY_CHECK_INS_PROC_OID,
+            TRIGGER_TYPE_ROW | TRIGGER_TYPE_INSERT,
+            "c",
+            1,
+        ),
+        foreign_key_trigger_row(
+            constraint,
+            constraint.conrelid,
+            constraint.confrelid,
+            RI_FKEY_CHECK_UPD_PROC_OID,
+            TRIGGER_TYPE_ROW | TRIGGER_TYPE_UPDATE,
+            "c",
+            2,
+        ),
+        foreign_key_trigger_row(
+            constraint,
+            constraint.confrelid,
+            constraint.conrelid,
+            foreign_key_delete_proc_oid(constraint.confdeltype),
+            TRIGGER_TYPE_ROW | TRIGGER_TYPE_DELETE,
+            "a",
+            3,
+        ),
+        foreign_key_trigger_row(
+            constraint,
+            constraint.confrelid,
+            constraint.conrelid,
+            foreign_key_update_proc_oid(constraint.confupdtype),
+            TRIGGER_TYPE_ROW | TRIGGER_TYPE_UPDATE,
+            "a",
+            4,
+        ),
+    ]
+}
+
+fn foreign_key_trigger_row(
+    constraint: &PgConstraintRow,
+    tgrelid: u32,
+    tgconstrrelid: u32,
+    tgfoid: u32,
+    tgtype: i16,
+    prefix: &str,
+    offset: u32,
+) -> PgTriggerRow {
+    PgTriggerRow {
+        oid: 0,
+        tgrelid,
+        tgparentid: 0,
+        tgname: format!(
+            "RI_ConstraintTrigger_{}_{}",
+            prefix,
+            u64::from(constraint.oid) * 10 + u64::from(offset)
+        ),
+        tgfoid,
+        tgtype,
+        tgenabled: TRIGGER_ENABLED_ORIGIN,
+        tgisinternal: true,
+        tgconstrrelid,
+        tgconstrindid: constraint.conindid,
+        tgconstraint: constraint.oid,
+        tgdeferrable: constraint.condeferrable,
+        tginitdeferred: constraint.condeferred,
+        tgnargs: 0,
+        tgattr: Vec::new(),
+        tgargs: Vec::new(),
+        tgqual: None,
+        tgoldtable: None,
+        tgnewtable: None,
+    }
+}
+
+fn foreign_key_delete_proc_oid(action: char) -> u32 {
+    match action {
+        'c' => RI_FKEY_CASCADE_DEL_PROC_OID,
+        'r' => RI_FKEY_RESTRICT_DEL_PROC_OID,
+        'n' => RI_FKEY_SETNULL_DEL_PROC_OID,
+        'd' => RI_FKEY_SETDEFAULT_DEL_PROC_OID,
+        _ => RI_FKEY_NOACTION_DEL_PROC_OID,
+    }
+}
+
+fn foreign_key_update_proc_oid(action: char) -> u32 {
+    match action {
+        'c' => RI_FKEY_CASCADE_UPD_PROC_OID,
+        'r' => RI_FKEY_RESTRICT_UPD_PROC_OID,
+        'n' => RI_FKEY_SETNULL_UPD_PROC_OID,
+        'd' => RI_FKEY_SETDEFAULT_UPD_PROC_OID,
+        _ => RI_FKEY_NOACTION_UPD_PROC_OID,
     }
 }
 
@@ -1399,6 +1590,7 @@ fn rewrite_trigger_system_column_refs(expr: &mut SqlExpr) {
         | SqlExpr::Or(left, right)
         | SqlExpr::IsDistinctFrom(left, right)
         | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::Overlaps(left, right)
         | SqlExpr::ArrayOverlap(left, right)
         | SqlExpr::ArrayContains(left, right)
         | SqlExpr::ArrayContained(left, right)

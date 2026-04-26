@@ -83,6 +83,7 @@ impl RuntimeTriggers {
         let mut triggers = catalog
             .trigger_rows_for_relation(relation_oid)
             .into_iter()
+            .filter(|row| !row.tgisinternal)
             .filter(|row| trigger_is_enabled_for_session(row, session_replication_role))
             .filter(|row| trigger_matches_event(row, event, modified_attnums))
             .map(|row| {
@@ -735,6 +736,7 @@ fn rewrite_trigger_system_column_refs(expr: &mut SqlExpr) {
         | SqlExpr::Or(left, right)
         | SqlExpr::IsDistinctFrom(left, right)
         | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::Overlaps(left, right)
         | SqlExpr::ArrayOverlap(left, right)
         | SqlExpr::ArrayContains(left, right)
         | SqlExpr::ArrayContained(left, right)

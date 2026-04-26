@@ -50,6 +50,7 @@ fn ddl_executor_context(
     client_id: ClientId,
     xid: TransactionId,
     cid: CommandId,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
     interrupts: std::sync::Arc<crate::backend::utils::misc::interrupts::InterruptState>,
 ) -> Result<ExecutorContext, ExecError> {
     let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
@@ -60,11 +61,12 @@ fn ddl_executor_context(
         lock_status_provider: Some(std::sync::Arc::new(db.clone())),
         sequences: Some(db.sequences.clone()),
         large_objects: Some(db.large_objects.clone()),
+        stats_import_runtime: None,
         async_notify_runtime: Some(db.async_notify_runtime.clone()),
         advisory_locks: std::sync::Arc::clone(&db.advisory_locks),
         row_locks: std::sync::Arc::clone(&db.row_locks),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
-        datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        datetime_config: datetime_config.clone(),
         statement_timestamp_usecs:
             crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
         gucs: std::collections::HashMap::new(),
@@ -83,6 +85,7 @@ fn ddl_executor_context(
         transaction_lock_scope_id: None,
         next_command_id: cid,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+        random_state: crate::backend::executor::PgPrngState::shared(),
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
         system_bindings: Vec::new(),
@@ -93,8 +96,11 @@ fn ddl_executor_context(
         catalog_effects: Vec::new(),
         temp_effects: Vec::new(),
         database: Some(db.clone()),
+        pending_catalog_effects: Vec::new(),
+        pending_table_locks: Vec::new(),
         catalog: catalog.materialize_visible_catalog(),
-        compiled_functions: std::collections::HashMap::new(),
+        plpgsql_function_cache: db.plpgsql_function_cache(client_id),
+        pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
@@ -115,7 +121,16 @@ pub(super) fn validate_not_null_rows(
     cid: CommandId,
     interrupts: std::sync::Arc<crate::backend::utils::misc::interrupts::InterruptState>,
 ) -> Result<(), ExecError> {
-    let mut ctx = ddl_executor_context(db, catalog, client_id, xid, cid, interrupts)?;
+    let datetime_config = crate::backend::utils::misc::guc_datetime::DateTimeConfig::default();
+    let mut ctx = ddl_executor_context(
+        db,
+        catalog,
+        client_id,
+        xid,
+        cid,
+        &datetime_config,
+        interrupts,
+    )?;
     let rows =
         collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
     let column_name = relation.desc.columns[column_index].name.clone();
@@ -156,7 +171,16 @@ pub(super) fn validate_check_rows(
         expr,
         enforced: true,
     };
-    let mut ctx = ddl_executor_context(db, catalog, client_id, xid, cid, interrupts)?;
+    let datetime_config = crate::backend::utils::misc::guc_datetime::DateTimeConfig::default();
+    let mut ctx = ddl_executor_context(
+        db,
+        catalog,
+        client_id,
+        xid,
+        cid,
+        &datetime_config,
+        interrupts,
+    )?;
     let rows =
         collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
     for (_, values) in rows {
@@ -298,9 +322,18 @@ fn validate_temporal_constraint_rows(
     client_id: ClientId,
     xid: TransactionId,
     cid: CommandId,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
     interrupts: std::sync::Arc<crate::backend::utils::misc::interrupts::InterruptState>,
 ) -> Result<(), ExecError> {
-    let mut ctx = ddl_executor_context(db, catalog, client_id, xid, cid, interrupts)?;
+    let mut ctx = ddl_executor_context(
+        db,
+        catalog,
+        client_id,
+        xid,
+        cid,
+        datetime_config,
+        interrupts,
+    )?;
     let rows =
         collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
     crate::backend::commands::tablecmds::validate_temporal_constraint_existing_rows(
@@ -324,7 +357,16 @@ fn validate_exclusion_constraint_rows(
     cid: CommandId,
     interrupts: std::sync::Arc<crate::backend::utils::misc::interrupts::InterruptState>,
 ) -> Result<(), ExecError> {
-    let mut ctx = ddl_executor_context(db, catalog, client_id, xid, cid, interrupts)?;
+    let datetime_config = crate::backend::utils::misc::guc_datetime::DateTimeConfig::default();
+    let mut ctx = ddl_executor_context(
+        db,
+        catalog,
+        client_id,
+        xid,
+        cid,
+        &datetime_config,
+        interrupts,
+    )?;
     let rows =
         collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
     crate::backend::commands::tablecmds::validate_exclusion_constraint_existing_rows(
@@ -420,10 +462,29 @@ fn validate_foreign_key_rows(
                     .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.clone())))
             })
             .collect::<Result<Vec<_>, _>>()?,
+        period_column_index: action
+            .period
+            .as_ref()
+            .map(|period_column| {
+                relation
+                    .desc
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, column)| {
+                        (!column.dropped && column.name.eq_ignore_ascii_case(period_column))
+                            .then_some(index)
+                    })
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnknownColumn(period_column.clone()))
+                    })
+            })
+            .transpose()?,
         match_type: action.match_type,
         referenced_relation_name: action.referenced_table.clone(),
         referenced_relation_oid: referenced_relation.relation_oid,
         referenced_rel: referenced_relation.rel,
+        referenced_toast: referenced_relation.toast,
         referenced_desc: referenced_relation.desc.clone(),
         referenced_column_indexes: action
             .referenced_columns
@@ -441,12 +502,39 @@ fn validate_foreign_key_rows(
                     .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.clone())))
             })
             .collect::<Result<Vec<_>, _>>()?,
+        referenced_period_column_index: action
+            .referenced_period
+            .as_ref()
+            .map(|period_column| {
+                referenced_relation
+                    .desc
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, column)| {
+                        (!column.dropped && column.name.eq_ignore_ascii_case(period_column))
+                            .then_some(index)
+                    })
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnknownColumn(period_column.clone()))
+                    })
+            })
+            .transpose()?,
         referenced_index,
         deferrable: false,
         initially_deferred: false,
         enforced: true,
     };
-    let mut ctx = ddl_executor_context(db, catalog, client_id, xid, cid, interrupts)?;
+    let datetime_config = crate::backend::utils::misc::guc_datetime::DateTimeConfig::default();
+    let mut ctx = ddl_executor_context(
+        db,
+        catalog,
+        client_id,
+        xid,
+        cid,
+        &datetime_config,
+        interrupts,
+    )?;
     let rows =
         collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
     for (_, values) in rows {
@@ -688,6 +776,9 @@ impl Database {
             let validation_action = ForeignKeyConstraintAction {
                 constraint_name: constraint.constraint_name.clone(),
                 columns: constraint.column_names.clone(),
+                period: constraint
+                    .period_column_index
+                    .map(|index| relation.desc.columns[index].name.clone()),
                 referenced_table: constraint.referenced_relation_name.clone(),
                 referenced_relation_oid: constraint.referenced_relation_oid,
                 referenced_index_oid: constraint.referenced_index.relation_oid,
@@ -697,6 +788,9 @@ impl Database {
                     .iter()
                     .map(|&index| constraint.referenced_desc.columns[index].name.clone())
                     .collect(),
+                referenced_period: constraint
+                    .referenced_period_column_index
+                    .map(|index| constraint.referenced_desc.columns[index].name.clone()),
                 match_type: constraint.match_type,
                 on_delete: ForeignKeyAction::NoAction,
                 on_delete_set_columns: None,
@@ -857,6 +951,7 @@ impl Database {
         client_id: ClientId,
         alter_stmt: &crate::backend::parser::AlterTableAddConstraintStatement,
         configured_search_path: Option<&[String]>,
+        datetime_config: Option<&crate::backend::utils::misc::guc_datetime::DateTimeConfig>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
@@ -886,6 +981,7 @@ impl Database {
             xid,
             0,
             configured_search_path,
+            datetime_config,
             &mut catalog_effects,
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
@@ -901,9 +997,13 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        datetime_config: Option<&crate::backend::utils::misc::guc_datetime::DateTimeConfig>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
+        let default_datetime_config =
+            crate::backend::utils::misc::guc_datetime::DateTimeConfig::default();
+        let datetime_config = datetime_config.unwrap_or(&default_datetime_config);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
@@ -1228,6 +1328,7 @@ impl Database {
                         client_id,
                         xid,
                         index_cid,
+                        datetime_config,
                         std::sync::Arc::clone(&interrupts),
                     )?;
                 }
@@ -1389,7 +1490,7 @@ impl Database {
                     waiter: None,
                     interrupts,
                 };
-                let effect = self
+                let (constraint_row, effect) = self
                     .catalog
                     .write()
                     .create_foreign_key_constraint_mvcc(
@@ -1407,10 +1508,18 @@ impl Database {
                         foreign_key_action_code(action.on_delete),
                         foreign_key_match_code(action.match_type),
                         delete_set_attnums.as_deref(),
+                        action.period.is_some(),
                         &ctx,
                     )
                     .map_err(map_catalog_error)?;
                 catalog_effects.push(effect);
+                self.create_foreign_key_triggers_in_transaction(
+                    client_id,
+                    xid,
+                    cid.saturating_add(1),
+                    &constraint_row,
+                    catalog_effects,
+                )?;
             }
         }
 
@@ -1618,11 +1727,21 @@ impl Database {
 
         match row.contype {
             CONSTRAINT_CHECK | CONSTRAINT_FOREIGN => {
+                if row.contype == CONSTRAINT_FOREIGN {
+                    self.drop_foreign_key_triggers_in_transaction(
+                        client_id,
+                        xid,
+                        cid,
+                        &row,
+                        &catalog,
+                        catalog_effects,
+                    )?;
+                }
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
                     xid,
-                    cid,
+                    cid: cid.saturating_add(catalog_effects.len() as u32),
                     client_id,
                     waiter: None,
                     interrupts,
@@ -2012,6 +2131,18 @@ impl Database {
         if relation.desc.columns[column_index].storage.nullable {
             return Ok(StatementResult::AffectedRows(0));
         }
+        if relation.desc.columns[column_index].identity.is_some() {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "column \"{}\" of relation \"{}\" is an identity column",
+                    relation.desc.columns[column_index].name, alter_stmt.table_name
+                )
+                .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "55000",
+            });
+        }
         let attnum = (column_index + 1) as i16;
         let existing_constraints = catalog.constraint_rows_for_relation(relation.relation_oid);
         if let Some(primary) = primary_constraint_for_attnum(&existing_constraints, attnum) {
@@ -2246,6 +2377,7 @@ impl Database {
                     client_id,
                     xid,
                     cid,
+                    &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     std::sync::Arc::clone(&interrupts),
                 )?;
                 let rows = collect_matching_rows_heap(

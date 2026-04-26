@@ -8,9 +8,11 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::optimizer::finalize_expr_subqueries;
 use crate::backend::parser::analyze::scope_for_relation;
 use crate::backend::parser::{
-    BoundCte, BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup,
-    CreateTableAsStatement, FromItem, ParseError, SelectStatement, SlotScopeColumn, SqlExpr,
-    SqlType, SqlTypeKind, Statement, bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
+    ArraySubscript, BoundCte, BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement,
+    CatalogLookup, CreateTableAsStatement, CteBody, FromItem, OrderByItem, ParseError,
+    RawWindowFrame, RawWindowFrameBound, RawWindowSpec, RawXmlExpr, SelectStatement,
+    SlotScopeColumn, SqlCallArgs, SqlCaseWhen, SqlExpr, SqlType, SqlTypeKind, Statement,
+    ValuesStatement, bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
     bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_expr,
     parse_statement, parse_type_name, pg_plan_query_with_outer_scopes_and_ctes,
     pg_plan_values_query_with_outer_scopes_and_ctes, resolve_raw_type_name,
@@ -44,6 +46,7 @@ pub struct CompiledFunction {
     pub(crate) found_slot: usize,
     pub(crate) sqlerrm_slot: usize,
     pub(crate) local_ctes: Vec<BoundCte>,
+    pub(crate) trigger_transition_ctes: Vec<CompiledTriggerTransitionCte>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +61,12 @@ pub struct TriggerTransitionTable {
     pub name: String,
     pub desc: RelationDesc,
     pub rows: Vec<Vec<crate::backend::executor::Value>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledTriggerTransitionCte {
+    pub(crate) name: String,
+    pub(crate) cte_id: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -585,6 +594,7 @@ pub(crate) fn compile_do_function(
         found_slot,
         sqlerrm_slot,
         local_ctes: Vec::new(),
+        trigger_transition_ctes: Vec::new(),
     })
 }
 
@@ -696,6 +706,7 @@ pub(crate) fn compile_function_from_proc(
         found_slot,
         sqlerrm_slot,
         local_ctes: Vec::new(),
+        trigger_transition_ctes: Vec::new(),
     })
 }
 
@@ -707,14 +718,20 @@ pub(crate) fn compile_trigger_function_from_proc(
 ) -> Result<CompiledFunction, ParseError> {
     let block = parse_block(&row.prosrc)?;
     let mut env = CompileEnv::default();
+    let mut trigger_transition_ctes = Vec::new();
     env.local_ctes = transition_tables
         .iter()
         .map(|table| {
-            crate::backend::parser::bound_cte_from_materialized_rows(
+            let cte = crate::backend::parser::bound_cte_from_materialized_rows(
                 table.name.clone(),
                 &table.desc,
-                &table.rows,
-            )
+                &[],
+            );
+            trigger_transition_ctes.push(CompiledTriggerTransitionCte {
+                name: table.name.clone(),
+                cte_id: cte.cte_id,
+            });
+            cte
         })
         .collect();
     let bindings = seed_trigger_env(&mut env, relation_desc);
@@ -731,6 +748,7 @@ pub(crate) fn compile_trigger_function_from_proc(
         found_slot,
         sqlerrm_slot,
         local_ctes: env.local_ctes.clone(),
+        trigger_transition_ctes,
     })
 }
 
@@ -2676,6 +2694,15 @@ fn normalize_plpgsql_expr(expr: SqlExpr, env: &CompileEnv) -> SqlExpr {
             expr: Box::new(normalize_plpgsql_expr(*expr, env)),
             index,
         },
+        SqlExpr::GeometryUnaryOp { op, expr } => SqlExpr::GeometryUnaryOp {
+            op,
+            expr: Box::new(normalize_plpgsql_expr(*expr, env)),
+        },
+        SqlExpr::GeometryBinaryOp { op, left, right } => SqlExpr::GeometryBinaryOp {
+            op,
+            left: Box::new(normalize_plpgsql_expr(*left, env)),
+            right: Box::new(normalize_plpgsql_expr(*right, env)),
+        },
         SqlExpr::PrefixOperator { op, expr } => SqlExpr::PrefixOperator {
             op,
             expr: Box::new(normalize_plpgsql_expr(*expr, env)),
@@ -2686,6 +2713,10 @@ fn normalize_plpgsql_expr(expr: SqlExpr, env: &CompileEnv) -> SqlExpr {
         SqlExpr::Collate { expr, collation } => SqlExpr::Collate {
             expr: Box::new(normalize_plpgsql_expr(*expr, env)),
             collation,
+        },
+        SqlExpr::AtTimeZone { expr, zone } => SqlExpr::AtTimeZone {
+            expr: Box::new(normalize_plpgsql_expr(*expr, env)),
+            zone: Box::new(normalize_plpgsql_expr(*zone, env)),
         },
         SqlExpr::Eq(left, right) => SqlExpr::Eq(
             Box::new(normalize_plpgsql_expr(*left, env)),
@@ -2711,6 +2742,46 @@ fn normalize_plpgsql_expr(expr: SqlExpr, env: &CompileEnv) -> SqlExpr {
             Box::new(normalize_plpgsql_expr(*left, env)),
             Box::new(normalize_plpgsql_expr(*right, env)),
         ),
+        SqlExpr::RegexMatch(left, right) => SqlExpr::RegexMatch(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+        } => SqlExpr::Like {
+            expr: Box::new(normalize_plpgsql_expr(*expr, env)),
+            pattern: Box::new(normalize_plpgsql_expr(*pattern, env)),
+            escape: escape.map(|expr| Box::new(normalize_plpgsql_expr(*expr, env))),
+            case_insensitive,
+            negated,
+        },
+        SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => SqlExpr::Similar {
+            expr: Box::new(normalize_plpgsql_expr(*expr, env)),
+            pattern: Box::new(normalize_plpgsql_expr(*pattern, env)),
+            escape: escape.map(|expr| Box::new(normalize_plpgsql_expr(*expr, env))),
+            negated,
+        },
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => SqlExpr::Case {
+            arg: arg.map(|expr| Box::new(normalize_plpgsql_expr(*expr, env))),
+            args: args
+                .into_iter()
+                .map(|arm| normalize_plpgsql_case_when(arm, env))
+                .collect(),
+            defresult: defresult.map(|expr| Box::new(normalize_plpgsql_expr(*expr, env))),
+        },
         SqlExpr::And(left, right) => SqlExpr::And(
             Box::new(normalize_plpgsql_expr(*left, env)),
             Box::new(normalize_plpgsql_expr(*right, env)),
@@ -2744,6 +2815,227 @@ fn normalize_plpgsql_expr(expr: SqlExpr, env: &CompileEnv) -> SqlExpr {
                 .map(|item| normalize_plpgsql_expr(item, env))
                 .collect(),
         ),
+        SqlExpr::ArrayOverlap(left, right) => SqlExpr::ArrayOverlap(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::ArrayContains(left, right) => SqlExpr::ArrayContains(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::ArrayContained(left, right) => SqlExpr::ArrayContained(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::JsonbContains(left, right) => SqlExpr::JsonbContains(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::JsonbContained(left, right) => SqlExpr::JsonbContained(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::JsonbExists(left, right) => SqlExpr::JsonbExists(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::JsonbExistsAny(left, right) => SqlExpr::JsonbExistsAny(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::JsonbExistsAll(left, right) => SqlExpr::JsonbExistsAll(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::JsonbPathExists(left, right) => SqlExpr::JsonbPathExists(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::JsonbPathMatch(left, right) => SqlExpr::JsonbPathMatch(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::ScalarSubquery(select) => {
+            SqlExpr::ScalarSubquery(Box::new(normalize_plpgsql_select(*select, env)))
+        }
+        SqlExpr::ArraySubquery(select) => {
+            SqlExpr::ArraySubquery(Box::new(normalize_plpgsql_select(*select, env)))
+        }
+        SqlExpr::Exists(select) => {
+            SqlExpr::Exists(Box::new(normalize_plpgsql_select(*select, env)))
+        }
+        SqlExpr::InSubquery {
+            expr,
+            subquery,
+            negated,
+        } => SqlExpr::InSubquery {
+            expr: Box::new(normalize_plpgsql_expr(*expr, env)),
+            subquery: Box::new(normalize_plpgsql_select(*subquery, env)),
+            negated,
+        },
+        SqlExpr::QuantifiedSubquery {
+            left,
+            op,
+            is_all,
+            subquery,
+        } => SqlExpr::QuantifiedSubquery {
+            left: Box::new(normalize_plpgsql_expr(*left, env)),
+            op,
+            is_all,
+            subquery: Box::new(normalize_plpgsql_select(*subquery, env)),
+        },
+        SqlExpr::QuantifiedArray {
+            left,
+            op,
+            is_all,
+            array,
+        } => SqlExpr::QuantifiedArray {
+            left: Box::new(normalize_plpgsql_expr(*left, env)),
+            op,
+            is_all,
+            array: Box::new(normalize_plpgsql_expr(*array, env)),
+        },
+        SqlExpr::ArraySubscript { array, subscripts } => SqlExpr::ArraySubscript {
+            array: Box::new(normalize_plpgsql_expr(*array, env)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| normalize_plpgsql_array_subscript(subscript, env))
+                .collect(),
+        },
+        SqlExpr::Xml(xml) => SqlExpr::Xml(Box::new(normalize_plpgsql_xml(*xml, env))),
+        SqlExpr::JsonGet(left, right) => SqlExpr::JsonGet(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::JsonGetText(left, right) => SqlExpr::JsonGetText(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::JsonPath(left, right) => SqlExpr::JsonPath(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::JsonPathText(left, right) => SqlExpr::JsonPathText(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::FuncCall {
+            name,
+            args,
+            order_by,
+            within_group,
+            distinct,
+            func_variadic,
+            filter,
+            over,
+        } => SqlExpr::FuncCall {
+            name,
+            args: normalize_plpgsql_call_args(args, env),
+            order_by: order_by
+                .into_iter()
+                .map(|item| normalize_plpgsql_order_by_item(item, env))
+                .collect(),
+            within_group: within_group.map(|items| {
+                items
+                    .into_iter()
+                    .map(|item| normalize_plpgsql_order_by_item(item, env))
+                    .collect()
+            }),
+            distinct,
+            func_variadic,
+            filter: filter.map(|expr| Box::new(normalize_plpgsql_expr(*expr, env))),
+            over: over.map(|spec| normalize_plpgsql_window_spec(spec, env)),
+        },
+        other => other,
+    }
+}
+
+fn normalize_plpgsql_case_when(mut arm: SqlCaseWhen, env: &CompileEnv) -> SqlCaseWhen {
+    arm.expr = normalize_plpgsql_expr(arm.expr, env);
+    arm.result = normalize_plpgsql_expr(arm.result, env);
+    arm
+}
+
+fn normalize_plpgsql_call_args(args: SqlCallArgs, env: &CompileEnv) -> SqlCallArgs {
+    match args {
+        SqlCallArgs::Star => SqlCallArgs::Star,
+        SqlCallArgs::Args(args) => SqlCallArgs::Args(
+            args.into_iter()
+                .map(|mut arg| {
+                    arg.value = normalize_plpgsql_expr(arg.value, env);
+                    arg
+                })
+                .collect(),
+        ),
+    }
+}
+
+fn normalize_plpgsql_order_by_item(mut item: OrderByItem, env: &CompileEnv) -> OrderByItem {
+    item.expr = normalize_plpgsql_expr(item.expr, env);
+    item
+}
+
+fn normalize_plpgsql_array_subscript(
+    mut subscript: ArraySubscript,
+    env: &CompileEnv,
+) -> ArraySubscript {
+    subscript.lower = subscript
+        .lower
+        .map(|expr| Box::new(normalize_plpgsql_expr(*expr, env)));
+    subscript.upper = subscript
+        .upper
+        .map(|expr| Box::new(normalize_plpgsql_expr(*expr, env)));
+    subscript
+}
+
+fn normalize_plpgsql_xml(mut xml: RawXmlExpr, env: &CompileEnv) -> RawXmlExpr {
+    xml.named_args = xml
+        .named_args
+        .into_iter()
+        .map(|expr| normalize_plpgsql_expr(expr, env))
+        .collect();
+    xml.args = xml
+        .args
+        .into_iter()
+        .map(|expr| normalize_plpgsql_expr(expr, env))
+        .collect();
+    xml
+}
+
+fn normalize_plpgsql_window_spec(mut spec: RawWindowSpec, env: &CompileEnv) -> RawWindowSpec {
+    spec.partition_by = spec
+        .partition_by
+        .into_iter()
+        .map(|expr| normalize_plpgsql_expr(expr, env))
+        .collect();
+    spec.order_by = spec
+        .order_by
+        .into_iter()
+        .map(|item| normalize_plpgsql_order_by_item(item, env))
+        .collect();
+    spec.frame = spec
+        .frame
+        .map(|frame| Box::new(normalize_plpgsql_window_frame(*frame, env)));
+    spec
+}
+
+fn normalize_plpgsql_window_frame(mut frame: RawWindowFrame, env: &CompileEnv) -> RawWindowFrame {
+    frame.start_bound = normalize_plpgsql_window_frame_bound(frame.start_bound, env);
+    frame.end_bound = normalize_plpgsql_window_frame_bound(frame.end_bound, env);
+    frame
+}
+
+fn normalize_plpgsql_window_frame_bound(
+    bound: RawWindowFrameBound,
+    env: &CompileEnv,
+) -> RawWindowFrameBound {
+    match bound {
+        RawWindowFrameBound::OffsetPreceding(expr) => {
+            RawWindowFrameBound::OffsetPreceding(Box::new(normalize_plpgsql_expr(*expr, env)))
+        }
+        RawWindowFrameBound::OffsetFollowing(expr) => {
+            RawWindowFrameBound::OffsetFollowing(Box::new(normalize_plpgsql_expr(*expr, env)))
+        }
         other => other,
     }
 }
@@ -2860,6 +3152,14 @@ fn normalize_labeled_field_select(
 }
 
 fn normalize_plpgsql_select(mut stmt: SelectStatement, env: &CompileEnv) -> SelectStatement {
+    stmt.with = stmt
+        .with
+        .into_iter()
+        .map(|mut cte| {
+            cte.body = normalize_plpgsql_cte_body(cte.body, env);
+            cte
+        })
+        .collect();
     stmt.targets = stmt
         .targets
         .into_iter()
@@ -2894,6 +3194,53 @@ fn normalize_plpgsql_select(mut stmt: SelectStatement, env: &CompileEnv) -> Sele
             .collect();
     }
     stmt
+}
+
+fn normalize_plpgsql_cte_body(body: CteBody, env: &CompileEnv) -> CteBody {
+    match body {
+        CteBody::Select(select) => {
+            CteBody::Select(Box::new(normalize_plpgsql_select(*select, env)))
+        }
+        CteBody::Values(values) => CteBody::Values(normalize_plpgsql_values(values, env)),
+        CteBody::RecursiveUnion {
+            all,
+            anchor,
+            recursive,
+        } => CteBody::RecursiveUnion {
+            all,
+            anchor: Box::new(normalize_plpgsql_cte_body(*anchor, env)),
+            recursive: Box::new(normalize_plpgsql_select(*recursive, env)),
+        },
+    }
+}
+
+fn normalize_plpgsql_values(mut values: ValuesStatement, env: &CompileEnv) -> ValuesStatement {
+    values.with = values
+        .with
+        .into_iter()
+        .map(|mut cte| {
+            cte.body = normalize_plpgsql_cte_body(cte.body, env);
+            cte
+        })
+        .collect();
+    values.rows = values
+        .rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|expr| normalize_plpgsql_expr(expr, env))
+                .collect()
+        })
+        .collect();
+    values.order_by = values
+        .order_by
+        .into_iter()
+        .map(|mut item| {
+            item.expr = normalize_plpgsql_expr(item.expr, env);
+            item
+        })
+        .collect();
+    values
 }
 
 fn normalize_plpgsql_from_item(item: FromItem, env: &CompileEnv) -> FromItem {

@@ -54,6 +54,11 @@ pub fn execute_query_desc(
         saved
     };
     ctx.cte_tables.clear();
+    ctx.cte_tables.extend(
+        ctx.pinned_cte_tables
+            .iter()
+            .map(|(cte_id, table)| (*cte_id, table.clone())),
+    );
     ctx.cte_producers.clear();
     ctx.recursive_worktables.clear();
     let result = (|| {
@@ -173,6 +178,7 @@ fn execute_statement_with_source(
         Statement::Show(_)
         | Statement::Checkpoint(_)
         | Statement::Set(_)
+        | Statement::SetTransaction(_)
         | Statement::SetConstraints(_)
         | Statement::Reset(_)
         | Statement::SetRole(_)
@@ -184,9 +190,13 @@ fn execute_statement_with_source(
         | Statement::AlterTableAlterColumnStorage(_)
         | Statement::AlterTableAlterColumnDefault(_)
         | Statement::AlterTableAlterColumnExpression(_)
+        | Statement::AlterTableAlterColumnIdentity(_)
         // :HACK: ALTER TABLE ... SET (...) is accepted narrowly for numeric.sql and ignored
         // until table reloptions are modeled for real.
         | Statement::AlterTableSet(_)
+        // :HACK: ALTER INDEX ... SET (...) is accepted narrowly for hash_index.sql and ignored
+        // until mutable index reloptions are modeled for real.
+        | Statement::AlterIndexSet(_)
         | Statement::AlterTableSetRowSecurity(_)
         | Statement::CreateStatistics(_)
         | Statement::AlterStatistics(_)
@@ -251,6 +261,8 @@ fn execute_statement_with_source(
         | Statement::AlterTableValidateConstraint(_)
         | Statement::AlterTableInherit(_)
         | Statement::AlterTableNoInherit(_)
+        | Statement::AlterTableOf(_)
+        | Statement::AlterTableNotOf(_)
         | Statement::AlterTableAttachPartition(_)
         | Statement::AlterTableDetachPartition(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -375,6 +387,14 @@ fn execute_statement_with_source(
             expected: "CREATE AGGREGATE handled by database/session layer",
             actual: "CREATE AGGREGATE".into(),
         })),
+        Statement::AlterAggregateRename(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER AGGREGATE handled by database/session layer",
+            actual: "ALTER AGGREGATE".into(),
+        })),
+        Statement::CreateCast(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE CAST handled by database/session layer",
+            actual: "CREATE CAST".into(),
+        })),
         Statement::CreateOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE OPERATOR handled by database/session layer",
             actual: "CREATE OPERATOR".into(),
@@ -394,6 +414,10 @@ fn execute_statement_with_source(
         Statement::DropAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP AGGREGATE handled by database/session layer",
             actual: "DROP AGGREGATE".into(),
+        })),
+        Statement::DropCast(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP CAST handled by database/session layer",
+            actual: "DROP CAST".into(),
         })),
         Statement::DropOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP OPERATOR handled by database/session layer",
@@ -542,7 +566,12 @@ fn execute_statement_with_source(
             Ok(StatementResult::AffectedRows(0))
         }
         Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
-        Statement::Begin
+        Statement::AlterTableMulti(_) | Statement::AlterTableReplicaIdentity(_) => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "utility statement in executor".into(),
+            )))
+        }
+        Statement::Begin(_)
         | Statement::Commit
         | Statement::Rollback
         | Statement::Savepoint(_)
@@ -612,6 +641,9 @@ pub fn execute_readonly_statement_with_config(
         | Statement::AlterTableAlterColumnStorage(_)
         | Statement::AlterTableAlterColumnDefault(_)
         | Statement::AlterTableAlterColumnExpression(_)
+        | Statement::AlterTableOf(_)
+        | Statement::AlterTableNotOf(_)
+        | Statement::AlterTableAlterColumnIdentity(_)
         | Statement::AlterTableAttachPartition(_)
         | Statement::AlterTableDetachPartition(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableRename(_) | Statement::AlterViewRename(_) => {
@@ -704,6 +736,14 @@ pub fn execute_readonly_statement_with_config(
             expected: "read-only statement",
             actual: "CREATE AGGREGATE".into(),
         })),
+        Statement::AlterAggregateRename(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER AGGREGATE".into(),
+        })),
+        Statement::CreateCast(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE CAST".into(),
+        })),
         Statement::CreateOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE OPERATOR".into(),
@@ -723,6 +763,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::DropAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "DROP AGGREGATE".into(),
+        })),
+        Statement::DropCast(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP CAST".into(),
         })),
         Statement::DropOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

@@ -1,7 +1,7 @@
-use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 use std::cmp::Ordering;
 
+use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
@@ -10,7 +10,7 @@ use crate::include::nodes::datetime::{
     MAX_TIME_PRECISION, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_SEC,
 };
 use crate::include::nodes::primnodes::expr_sql_type_hint;
-use rand::{Rng, RngCore};
+use rand::RngCore;
 use std::sync::Mutex;
 
 use super::expr_agg_support::{
@@ -36,9 +36,9 @@ use super::expr_date::{
     eval_extract_function_with_config, eval_isfinite_function, eval_justify_days_function,
     eval_justify_hours_function, eval_justify_interval_function, eval_make_date_function,
     eval_make_interval_function, eval_make_time_function, eval_make_timestamp_function,
-    eval_make_timestamptz_function, eval_timezone_function as eval_timetz_timezone_function,
-    eval_to_date_function, eval_to_timestamp_function, timezone_interval_seconds,
-    timezone_target_offset_seconds,
+    eval_make_timestamptz_function, eval_timestamptz_constructor_function,
+    eval_timezone_function as eval_timetz_timezone_function, eval_to_date_function,
+    eval_to_timestamp_function, timezone_interval_seconds, timezone_target_offset_seconds,
 };
 use super::expr_datetime::{
     current_date_value, current_date_value_from_timestamp_with_config, current_time_value,
@@ -70,10 +70,11 @@ use super::expr_numeric::{
 };
 use super::expr_ops::compare_order_values;
 use super::expr_ops::{
-    add_values, bitwise_and_values, bitwise_not_value, bitwise_or_values, bitwise_xor_values,
-    compare_values, compare_values_with_type, concat_values, concat_values_with_cast_context,
-    div_values, eval_and, eval_or, mod_values, mul_values, negate_value, not_equal_values,
-    not_equal_values_with_type, order_values, shift_left_values, shift_right_values, sub_values,
+    add_values, add_values_with_config, bitwise_and_values, bitwise_not_value, bitwise_or_values,
+    bitwise_xor_values, compare_values, compare_values_with_type, concat_values,
+    concat_values_with_cast_context, div_values, eval_and, eval_or, mixed_date_timestamp_ordering,
+    mod_values, mul_values, negate_value, not_equal_values, not_equal_values_with_type,
+    order_values, shift_left_values, shift_right_values, sub_values, sub_values_with_config,
     values_are_distinct,
 };
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
@@ -86,8 +87,9 @@ use super::expr_string::{
     eval_decode_function, eval_encode_function, eval_format_function, eval_get_bit_bytes,
     eval_get_byte, eval_initcap_function, eval_left_function, eval_length_function, eval_like,
     eval_lower_function, eval_lpad_function, eval_md5_function, eval_parse_ident_function,
-    eval_pg_rust_test_enc_conversion, eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler,
-    eval_pg_rust_test_int44in, eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
+    eval_pg_rust_is_catalog_text_unique_index_oid, eval_pg_rust_test_enc_conversion,
+    eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler, eval_pg_rust_test_int44in,
+    eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
     eval_pg_rust_test_pt_in_widget, eval_pg_rust_test_widget_in, eval_pg_rust_test_widget_out,
     eval_pg_size_bytes_function, eval_pg_size_pretty_function, eval_position_function,
     eval_quote_literal_function, eval_repeat_function, eval_replace_function,
@@ -99,6 +101,7 @@ use super::expr_string::{
     eval_to_number_function, eval_to_oct_function, eval_translate_function, eval_trim_function,
     eval_unicode_assigned_function, eval_unicode_is_normalized_function,
     eval_unicode_normalize_function, eval_unicode_version_function, eval_unistr_function,
+    eval_upper_function,
 };
 use super::expr_txid::eval_txid_builtin_function;
 use super::expr_xml::{eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function};
@@ -109,14 +112,13 @@ use super::pg_regex::{
     eval_similar, eval_similar_substring, eval_sql_regex_substring,
 };
 pub(crate) use super::value_io::{format_array_text, format_array_value_text};
-use super::{ExecError, ExecutorContext, exec_next, executor_start};
+use super::{ExecError, ExecutorContext, TypedFunctionArg, exec_next, executor_start};
 use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
 use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
 use crate::backend::catalog::rowcodec::pg_description_row_from_values;
 use crate::backend::executor::jsonb::{
     JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
 };
-use crate::backend::executor::sqlfunc::execute_user_defined_sql_scalar_function;
 use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
@@ -131,24 +133,23 @@ use crate::backend::utils::misc::guc::plpgsql_guc_default_value;
 use crate::backend::utils::time::datetime::current_postgres_timestamp_usecs;
 use crate::include::access::toast_compression::ToastCompressionId;
 use crate::include::catalog::{
-    BOX_SPGIST_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID, BYTEA_TYPE_OID, CONSTRAINT_CHECK,
-    CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
-    CONSTRAINT_UNIQUE, CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID,
-    INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID,
-    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
-    PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, POLY_SPGIST_OPCLASS_OID,
-    QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_SPGIST_OPCLASS_OID, bootstrap_pg_am_rows,
-    builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
+    ANYOID, BOX_SPGIST_OPCLASS_OID, BPCHAR_HASH_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID,
+    BYTEA_TYPE_OID, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
+    CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, GIN_AM_OID,
+    GIST_AM_OID, HASH_AM_OID, INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID,
+    PG_DEPENDENCIES_TYPE_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID,
+    PG_NDISTINCT_TYPE_OID, PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID,
+    POLY_SPGIST_OPCLASS_OID, QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_SPGIST_OPCLASS_OID,
+    bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
-    BoolExpr, BoolExprType, FuncExpr, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr, OpExprKind,
-    SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, ScalarFunctionImpl, SubLinkType,
-    TABLE_OID_ATTR_NO, attrno_index, is_executor_special_varno,
+    BoolExpr, BoolExprType, FuncExpr, HashFunctionKind, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr,
+    OpExprKind, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, SubLinkType, TABLE_OID_ATTR_NO,
+    attrno_index, is_executor_special_varno,
 };
 use crate::pgrust::compact_string::CompactString;
-use crate::pl::plpgsql::execute_user_defined_scalar_function;
 
 mod arrays;
 mod subquery;
@@ -160,13 +161,15 @@ use arrays::{
     eval_array_dims_function, eval_array_fill_function, eval_array_length_function,
     eval_array_lower_function, eval_array_ndims_function, eval_array_overlap,
     eval_array_position_function, eval_array_positions_function, eval_array_prepend_function,
-    eval_array_remove_function, eval_array_replace_function, eval_array_sort_function,
+    eval_array_remove_function, eval_array_replace_function, eval_array_reverse_function,
+    eval_array_sample_function, eval_array_shuffle_function, eval_array_sort_function,
     eval_array_subscript, eval_array_subscript_plpgsql, eval_array_to_string_function,
     eval_array_upper_function, eval_cardinality_function, eval_quantified_array,
-    eval_string_to_array_function, eval_width_bucket_thresholds,
+    eval_string_to_array_function, eval_trim_array_function, eval_width_bucket_thresholds,
 };
 use subquery::{
-    eval_array_subquery, eval_exists_subquery, eval_quantified_subquery, eval_scalar_subquery,
+    eval_array_subquery, eval_exists_subquery, eval_quantified_subquery, eval_row_compare_subquery,
+    eval_scalar_subquery,
 };
 
 extern crate rand;
@@ -810,6 +813,23 @@ fn type_identity_text(catalog: &dyn CatalogLookup, type_oid: u32) -> String {
     catalog
         .type_by_oid(type_oid)
         .map(|row| {
+            if type_oid == ANYOID {
+                return "\"any\"".to_string();
+            }
+            if matches!(
+                row.sql_type.kind,
+                SqlTypeKind::AnyElement
+                    | SqlTypeKind::AnyArray
+                    | SqlTypeKind::AnyRange
+                    | SqlTypeKind::AnyMultirange
+                    | SqlTypeKind::AnyCompatible
+                    | SqlTypeKind::AnyCompatibleArray
+                    | SqlTypeKind::AnyCompatibleRange
+                    | SqlTypeKind::AnyCompatibleMultirange
+                    | SqlTypeKind::AnyEnum
+            ) {
+                return row.typname;
+            }
             if !row.sql_type.is_array
                 && row.sql_type.type_oid == row.oid
                 && row.sql_type.kind == SqlTypeKind::Bytea
@@ -856,6 +876,12 @@ fn function_arguments_text(
     proc_row: &crate::include::catalog::PgProcRow,
     catalog: &dyn CatalogLookup,
 ) -> String {
+    if proc_row.prokind == 'a'
+        && let Some(aggregate_row) = catalog.aggregate_by_fnoid(proc_row.oid)
+        && matches!(aggregate_row.aggkind, 'o' | 'h')
+    {
+        return aggregate_function_arguments_text(proc_row, &aggregate_row, catalog);
+    }
     let names = proc_row.proargnames.as_deref().unwrap_or(&[]);
     let defaults = proc_arg_defaults(proc_row);
     if let (Some(types), Some(modes)) = (
@@ -925,6 +951,69 @@ fn proc_arg_defaults(proc_row: &crate::include::catalog::PgProcRow) -> Vec<Optio
     aligned.extend(legacy);
     aligned.resize(input_count, None);
     aligned
+}
+
+fn aggregate_function_arguments_text(
+    proc_row: &crate::include::catalog::PgProcRow,
+    aggregate_row: &crate::include::catalog::PgAggregateRow,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let types = proc_arg_type_oids(proc_row);
+    let names = proc_row.proargnames.as_deref().unwrap_or(&[]);
+    let modes = proc_row.proargmodes.as_deref().unwrap_or(&[]);
+    let direct_count = usize::try_from(aggregate_row.aggnumdirectargs)
+        .unwrap_or(0)
+        .min(types.len());
+    let direct_text = types
+        .iter()
+        .copied()
+        .take(direct_count)
+        .enumerate()
+        .map(|(index, type_oid)| {
+            format_function_arg(
+                modes.get(index).copied().unwrap_or(b'i'),
+                names.get(index).map(String::as_str),
+                type_oid,
+                None,
+                catalog,
+                false,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let order_text = types
+        .iter()
+        .copied()
+        .enumerate()
+        .skip(direct_count)
+        .map(|(index, type_oid)| {
+            format_function_arg(
+                modes.get(index).copied().unwrap_or(b'i'),
+                names.get(index).map(String::as_str),
+                type_oid,
+                None,
+                catalog,
+                false,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    match (direct_text.is_empty(), order_text.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => direct_text,
+        (true, false) => format!("ORDER BY {order_text}"),
+        (false, false) => format!("{direct_text} ORDER BY {order_text}"),
+    }
+}
+
+fn proc_arg_type_oids(proc_row: &crate::include::catalog::PgProcRow) -> Vec<u32> {
+    proc_row.proallargtypes.clone().unwrap_or_else(|| {
+        proc_row
+            .proargtypes
+            .split_whitespace()
+            .filter_map(|oid| oid.parse::<u32>().ok())
+            .collect()
+    })
 }
 
 fn format_function_arg(
@@ -1459,33 +1548,29 @@ fn eval_least(values: &[Value]) -> Result<Value, ExecError> {
 fn lookup_system_binding(
     bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
     varno: usize,
-) -> Result<Value, ExecError> {
+) -> Value {
     bindings
         .iter()
         .find(|binding| binding.varno == varno)
         .map(|binding| Value::Int64(i64::from(binding.table_oid)))
-        .ok_or(ExecError::DetailedError {
-            message: "tableoid is not available for this row".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        })
+        .unwrap_or(Value::Null)
 }
 
-fn lookup_ctid(slot: &TupleSlot) -> Result<Value, ExecError> {
-    slot.tid()
+fn lookup_ctid(
+    bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
+    varno: usize,
+) -> Value {
+    bindings
+        .iter()
+        .find(|binding| binding.varno == varno)
+        .and_then(|binding| binding.tid)
         .map(|tid| {
             Value::Text(CompactString::from_owned(format!(
                 "({},{})",
                 tid.block_number, tid.offset_number
             )))
         })
-        .ok_or(ExecError::DetailedError {
-            message: "ctid is not available for this row".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        })
+        .unwrap_or(Value::Null)
 }
 
 fn builtin_function_for_expr(funcid: u32) -> Result<BuiltinScalarFunction, ExecError> {
@@ -1870,6 +1955,10 @@ fn ensure_builtin_side_effects_allowed(
             | BuiltinScalarFunction::PgAdvisoryUnlock
             | BuiltinScalarFunction::PgAdvisoryUnlockShared
             | BuiltinScalarFunction::PgAdvisoryUnlockAll
+            | BuiltinScalarFunction::PgRestoreRelationStats
+            | BuiltinScalarFunction::PgClearRelationStats
+            | BuiltinScalarFunction::PgRestoreAttributeStats
+            | BuiltinScalarFunction::PgClearAttributeStats
     ) && !ctx.allow_side_effects
     {
         return Err(ExecError::DetailedError {
@@ -1902,6 +1991,10 @@ fn ensure_builtin_side_effects_allowed(
                         "pg_advisory_unlock_shared"
                     }
                     BuiltinScalarFunction::PgAdvisoryUnlockAll => "pg_advisory_unlock_all",
+                    BuiltinScalarFunction::PgRestoreRelationStats => "pg_restore_relation_stats",
+                    BuiltinScalarFunction::PgClearRelationStats => "pg_clear_relation_stats",
+                    BuiltinScalarFunction::PgRestoreAttributeStats => "pg_restore_attribute_stats",
+                    BuiltinScalarFunction::PgClearAttributeStats => "pg_clear_attribute_stats",
                     _ => unreachable!(),
                 }
             ),
@@ -2157,9 +2250,26 @@ fn eval_pg_describe_object(values: &[Value], ctx: &ExecutorContext) -> Result<Va
                 "pg_namespace" => catalog
                     .namespace_row_by_oid(objid)
                     .map(|row| format!("schema {}", row.nspname)),
+                "pg_type" => catalog.type_by_oid(objid).map(|row| {
+                    format!(
+                        "type {}",
+                        expr_reg::format_type_text(row.oid, None, catalog)
+                    )
+                }),
                 "pg_proc" => catalog
                     .proc_row_by_oid(objid)
                     .map(|row| function_identity_text(&row, catalog)),
+                "pg_cast" => catalog
+                    .cast_rows()
+                    .into_iter()
+                    .find(|row| row.oid == objid)
+                    .map(|row| {
+                        format!(
+                            "cast from {} to {}",
+                            expr_reg::format_type_text(row.castsource, None, catalog),
+                            expr_reg::format_type_text(row.casttarget, None, catalog)
+                        )
+                    }),
                 "pg_operator" => catalog
                     .operator_by_oid(objid)
                     .map(|row| operator_identity_text(&row, catalog)),
@@ -2521,9 +2631,17 @@ fn format_foreign_key_constraintdef_for_catalog(
 ) -> Option<String> {
     let relation = catalog.lookup_relation_by_oid(row.conrelid)?;
     let referenced_relation = catalog.lookup_relation_by_oid(row.confrelid)?;
-    let local_columns = index_column_names_for_heap(&relation.desc, row.conkey.as_ref()?)?;
-    let referenced_columns =
+    let mut local_columns = index_column_names_for_heap(&relation.desc, row.conkey.as_ref()?)?;
+    let mut referenced_columns =
         index_column_names_for_heap(&referenced_relation.desc, row.confkey.as_ref()?)?;
+    if row.conperiod {
+        if let Some(column) = local_columns.last_mut() {
+            *column = format!("PERIOD {column}");
+        }
+        if let Some(column) = referenced_columns.last_mut() {
+            *column = format!("PERIOD {column}");
+        }
+    }
     let referenced_name = catalog
         .class_row_by_oid(row.confrelid)
         .map(|class| class.relname)
@@ -3276,12 +3394,16 @@ fn eval_op_expr(
         (OpExprKind::UnaryPlus, [inner]) => eval_expr(inner, slot, ctx),
         (OpExprKind::Negate, [inner]) => negate_value(eval_expr(inner, slot, ctx)?),
         (OpExprKind::BitNot, [inner]) => bitwise_not_value(eval_expr(inner, slot, ctx)?),
-        (OpExprKind::Add, [left, right]) => {
-            add_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        (OpExprKind::Sub, [left, right]) => {
-            sub_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
+        (OpExprKind::Add, [left, right]) => add_values_with_config(
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
+            &ctx.datetime_config,
+        ),
+        (OpExprKind::Sub, [left, right]) => sub_values_with_config(
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
+            &ctx.datetime_config,
+        ),
         (OpExprKind::BitAnd, [left, right]) => {
             bitwise_and_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
         }
@@ -3323,6 +3445,7 @@ fn eval_op_expr(
             eval_expr(right, slot, ctx)?,
             expr_sql_type_hint(right),
             op.collation_oid,
+            Some(&ctx.datetime_config),
         ),
         (OpExprKind::NotEq, [left, right]) => not_equal_values_with_type(
             eval_expr(left, slot, ctx)?,
@@ -3330,6 +3453,7 @@ fn eval_op_expr(
             eval_expr(right, slot, ctx)?,
             expr_sql_type_hint(right),
             op.collation_oid,
+            Some(&ctx.datetime_config),
         ),
         (OpExprKind::Lt, [left, right]) => order_values_with_type(
             "<",
@@ -3421,6 +3545,16 @@ fn order_values_with_type(
 ) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
+    }
+    if let Some(ordering) = mixed_date_timestamp_ordering(&left, &right, Some(&ctx.datetime_config))
+    {
+        return Ok(Value::Bool(match op {
+            "<" => ordering == Ordering::Less,
+            "<=" => ordering != Ordering::Greater,
+            ">" => ordering == Ordering::Greater,
+            ">=" => ordering != Ordering::Less,
+            _ => unreachable!("comparison op not supported by order_values_with_type"),
+        }));
     }
     if let (
         Value::EnumOid(left_oid),
@@ -3531,48 +3665,7 @@ fn eval_func_expr(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    match func.implementation {
-        ScalarFunctionImpl::Builtin(builtin) => eval_builtin_function(
-            builtin,
-            func.funcresulttype,
-            &func.args,
-            func.funcvariadic,
-            slot,
-            ctx,
-        ),
-        ScalarFunctionImpl::UserDefined { proc_oid } => {
-            let catalog = ctx
-                .catalog
-                .as_ref()
-                .ok_or_else(|| ExecError::DetailedError {
-                    message: "user-defined functions require executor catalog context".into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "0A000",
-                })?;
-            let row =
-                catalog
-                    .proc_row_by_oid(proc_oid)
-                    .ok_or_else(|| ExecError::DetailedError {
-                        message: format!("unknown function oid {proc_oid}"),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "42883",
-                    })?;
-            match row.prolang {
-                crate::include::catalog::PG_LANGUAGE_SQL_OID => {
-                    execute_user_defined_sql_scalar_function(&row, &func.args, slot, ctx)
-                }
-                _ => execute_user_defined_scalar_function(
-                    proc_oid,
-                    func.funcresulttype,
-                    &func.args,
-                    slot,
-                    ctx,
-                ),
-            }
-        }
-    }
+    super::fmgr::call_scalar_function(func, slot, ctx)
 }
 
 fn current_temp_namespace_name(ctx: &ExecutorContext) -> Option<CompactString> {
@@ -3822,9 +3915,9 @@ pub fn eval_expr(
                     sqlstate: "XX000",
                 })
             } else if var.varattno == TABLE_OID_ATTR_NO {
-                lookup_system_binding(&ctx.system_bindings, var.varno)
+                Ok(lookup_system_binding(&ctx.system_bindings, var.varno))
             } else if var.varattno == SELF_ITEM_POINTER_ATTR_NO {
-                lookup_ctid(slot)
+                Ok(lookup_ctid(&ctx.system_bindings, var.varno))
             } else {
                 let index = attrno_index(var.varattno).ok_or_else(|| {
                     malformed_expr_error("system attribute outside executor support")
@@ -3989,6 +4082,17 @@ pub fn eval_expr(
                     ctx,
                 )
             }
+            SubLinkType::RowCompareSubLink(op) => {
+                let left = subplan.testexpr.as_ref().ok_or(ExecError::DetailedError {
+                    message: "malformed row-comparison subplan".into(),
+                    detail: Some("row-comparison subplans must carry a test expression".into()),
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+                let collation_oid = top_level_explicit_collation(left);
+                let left_value = eval_expr(left, slot, ctx)?;
+                eval_row_compare_subquery(&left_value, op, collation_oid, subplan, slot, ctx)
+            }
             SubLinkType::AllSubLink(op) => {
                 let left = subplan.testexpr.as_ref().ok_or(ExecError::DetailedError {
                     message: "malformed ALL subplan".into(),
@@ -4013,7 +4117,7 @@ pub fn eval_expr(
             let value = eval_expr(array, slot, ctx)?;
             eval_array_subscript(value, subscripts, slot, ctx)
         }
-        Expr::Random => Ok(Value::Float64(rand::random::<f64>())),
+        Expr::Random => Ok(Value::Float64(ctx.random_state.lock().double())),
         Expr::CurrentDate => Ok(current_date_value_from_timestamp_with_config(
             &ctx.datetime_config,
             ctx.statement_timestamp_usecs,
@@ -4118,6 +4222,7 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 eval_plpgsql_expr(right, slot)?,
                 expr_sql_type_hint(right),
                 op.collation_oid,
+                None,
             ),
             (OpExprKind::NotEq, [left, right]) => not_equal_values_with_type(
                 eval_plpgsql_expr(left, slot)?,
@@ -4125,6 +4230,7 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 eval_plpgsql_expr(right, slot)?,
                 expr_sql_type_hint(right),
                 op.collation_oid,
+                None,
             ),
             (OpExprKind::Lt, [left, right]) => order_values(
                 "<",
@@ -4391,6 +4497,9 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
 }
 
 fn eval_record_field(value: Value, field: &str) -> Result<Value, ExecError> {
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
     let Value::Record(record) = value else {
         return Err(ExecError::DetailedError {
             message: format!("cannot select field \"{field}\" from non-record value"),
@@ -4512,26 +4621,68 @@ fn cast_record_value_for_target(
     ))
 }
 
-fn eval_interval_hash_function(values: &[Value]) -> Result<Value, ExecError> {
-    let [value] = values else {
-        return Err(ExecError::DetailedError {
-            message: "malformed interval_hash call".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        });
+fn eval_hash_builtin_function(
+    kind: HashFunctionKind,
+    extended: bool,
+    values: &[Value],
+) -> Result<Value, ExecError> {
+    let opclass = if kind == HashFunctionKind::BpChar {
+        Some(BPCHAR_HASH_OPCLASS_OID)
+    } else {
+        None
     };
-    match value {
-        Value::Null => Ok(Value::Null),
-        Value::Interval(interval) => {
-            let span = interval.cmp_key() as i64;
-            Ok(Value::Int32((span ^ (span >> 32)) as i32))
+    if extended {
+        let [value, seed] = values else {
+            return Err(malformed_expr_error("hash_extended"));
+        };
+        if matches!(value, Value::Null) || matches!(seed, Value::Null) {
+            return Ok(Value::Null);
         }
-        other => Err(ExecError::TypeMismatch {
-            op: "interval_hash",
-            left: other.clone(),
-            right: Value::Interval(crate::include::nodes::datum::IntervalValue::zero()),
-        }),
+        let seed = match seed {
+            Value::Int16(seed) => i64::from(*seed),
+            Value::Int32(seed) => i64::from(*seed),
+            Value::Int64(seed) => *seed,
+            _ => {
+                return Err(ExecError::TypeMismatch {
+                    op: "hash_extended",
+                    left: value.clone(),
+                    right: seed.clone(),
+                });
+            }
+        };
+        let hash = crate::backend::access::hash::hash_value_extended(value, opclass, seed as u64)
+            .map_err(|message| hash_function_error(message, true))?
+            .unwrap_or(0);
+        return Ok(Value::Int64(hash as i64));
+    }
+
+    let [value] = values else {
+        return Err(malformed_expr_error("hash"));
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let hash = crate::backend::access::hash::hash_value_extended(value, opclass, 0)
+        .map_err(|message| hash_function_error(message, false))?
+        .unwrap_or(0);
+    Ok(Value::Int32(hash as u32 as i32))
+}
+
+fn hash_function_error(message: String, extended: bool) -> ExecError {
+    let message = if extended {
+        message.replacen(
+            "could not identify a hash function",
+            "could not identify an extended hash function",
+            1,
+        )
+    } else {
+        message
+    };
+    ExecError::DetailedError {
+        message,
+        detail: None,
+        hint: None,
+        sqlstate: "42883",
     }
 }
 
@@ -4628,6 +4779,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::PgSizePretty => eval_pg_size_pretty_function(&values),
         BuiltinScalarFunction::PgSizeBytes => eval_pg_size_bytes_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
+        BuiltinScalarFunction::Upper => eval_upper_function(&values),
         BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
         BuiltinScalarFunction::UnicodeVersion => eval_unicode_version_function(&values),
         BuiltinScalarFunction::UnicodeAssigned => eval_unicode_assigned_function(&values),
@@ -4637,6 +4789,15 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::BTrim => eval_trim_function("btrim", &values),
         BuiltinScalarFunction::LTrim => eval_trim_function("ltrim", &values),
         BuiltinScalarFunction::RTrim => eval_trim_function("rtrim", &values),
+        BuiltinScalarFunction::TextCat => match values.as_slice() {
+            [left, right] => concat_values(left.clone(), right.clone()),
+            _ => Err(ExecError::DetailedError {
+                message: "textcat expects exactly two arguments".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42883",
+            }),
+        },
         BuiltinScalarFunction::Concat => eval_concat_function(
             &values,
             func_variadic,
@@ -4829,7 +4990,14 @@ fn eval_plpgsql_builtin_function(
         ),
         BuiltinScalarFunction::ToDate => eval_to_date_function(&values),
         BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
-        BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(&values),
+        BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(
+            &values,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        ),
+        BuiltinScalarFunction::TimestampTzConstructor => eval_timestamptz_constructor_function(
+            &values,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        ),
         BuiltinScalarFunction::Abs => eval_abs_function(&values),
         BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
@@ -4850,6 +5018,10 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::ArrayPositions => eval_array_positions_function(&values),
         BuiltinScalarFunction::ArrayRemove => eval_array_remove_function(&values),
         BuiltinScalarFunction::ArrayReplace => eval_array_replace_function(&values),
+        BuiltinScalarFunction::TrimArray => eval_trim_array_function(&values),
+        BuiltinScalarFunction::ArrayShuffle => eval_array_shuffle_function(&values),
+        BuiltinScalarFunction::ArraySample => eval_array_sample_function(&values),
+        BuiltinScalarFunction::ArrayReverse => eval_array_reverse_function(&values),
         BuiltinScalarFunction::ArraySort => eval_array_sort_function(&values),
         BuiltinScalarFunction::BoolEq => eval_booleq(&values),
         BuiltinScalarFunction::BoolNe => eval_boolne(&values),
@@ -4861,7 +5033,13 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::JustifyHours => eval_justify_hours_function(&values),
         BuiltinScalarFunction::JustifyInterval => eval_justify_interval_function(&values),
         BuiltinScalarFunction::MakeInterval => eval_make_interval_function(&values),
-        BuiltinScalarFunction::IntervalHash => eval_interval_hash_function(&values),
+        BuiltinScalarFunction::IntervalHash => {
+            eval_hash_builtin_function(HashFunctionKind::Interval, false, &values)
+        }
+        BuiltinScalarFunction::HashValue(kind) => eval_hash_builtin_function(kind, false, &values),
+        BuiltinScalarFunction::HashValueExtended(kind) => {
+            eval_hash_builtin_function(kind, true, &values)
+        }
         BuiltinScalarFunction::XmlComment => eval_xml_comment_function(&values, None),
         BuiltinScalarFunction::XmlIsWellFormed => eval_xml_is_well_formed_function(
             &values,
@@ -5502,7 +5680,7 @@ fn eval_text_search_builtin_function(
         }
         BuiltinScalarFunction::TsVectorIn => match values {
             [Value::Null] => Ok(Value::Null),
-            [_] => {
+            [_] | [_, _, _] => {
                 // :HACK: pgrust represents SQL cstring arguments through the
                 // existing text value path for type input wrappers.
                 let text = arg_text(values, 0, "tsvectorin")?.unwrap_or_default();
@@ -5523,7 +5701,7 @@ fn eval_text_search_builtin_function(
         },
         BuiltinScalarFunction::TsQueryIn => match values {
             [Value::Null] => Ok(Value::Null),
-            [_] => {
+            [_] | [_, _, _] => {
                 // :HACK: pgrust represents SQL cstring arguments through the
                 // existing text value path for type input wrappers.
                 let text = arg_text(values, 0, "tsqueryin")?.unwrap_or_default();
@@ -6011,7 +6189,7 @@ fn eval_domain_check_upper_less_than(values: &[Value]) -> Result<Value, ExecErro
     })
 }
 
-fn eval_builtin_function(
+pub(crate) fn eval_builtin_function(
     func: BuiltinScalarFunction,
     result_type: Option<SqlType>,
     args: &[Expr],
@@ -6023,6 +6201,69 @@ fn eval_builtin_function(
     if let Some(result) = eval_json_record_builtin_function(func, result_type, args, slot, ctx) {
         return result;
     }
+    if matches!(
+        func,
+        BuiltinScalarFunction::PgRestoreRelationStats
+            | BuiltinScalarFunction::PgClearRelationStats
+            | BuiltinScalarFunction::PgRestoreAttributeStats
+            | BuiltinScalarFunction::PgClearAttributeStats
+    ) {
+        let runtime = ctx
+            .stats_import_runtime
+            .clone()
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("{func:?} requires database executor context"),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            })?;
+        let typed_args = args
+            .iter()
+            .map(|arg| {
+                Ok(TypedFunctionArg {
+                    value: eval_expr(arg, slot, ctx)?,
+                    sql_type: expr_sql_type_hint(arg),
+                })
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?;
+        return match func {
+            BuiltinScalarFunction::PgRestoreRelationStats => {
+                runtime.pg_restore_relation_stats(ctx, typed_args)
+            }
+            BuiltinScalarFunction::PgClearRelationStats => {
+                if typed_args.len() != 2 {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "pg_clear_relation_stats(schemaname, relname)",
+                        actual: format!("{} args", typed_args.len()),
+                    }));
+                }
+                runtime.pg_clear_relation_stats(
+                    ctx,
+                    typed_args[0].value.clone(),
+                    typed_args[1].value.clone(),
+                )
+            }
+            BuiltinScalarFunction::PgRestoreAttributeStats => {
+                runtime.pg_restore_attribute_stats(ctx, typed_args)
+            }
+            BuiltinScalarFunction::PgClearAttributeStats => {
+                if typed_args.len() != 4 {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "pg_clear_attribute_stats(schemaname, relname, attname, inherited)",
+                        actual: format!("{} args", typed_args.len()),
+                    }));
+                }
+                runtime.pg_clear_attribute_stats(
+                    ctx,
+                    typed_args[0].value.clone(),
+                    typed_args[1].value.clone(),
+                    typed_args[2].value.clone(),
+                    typed_args[3].value.clone(),
+                )
+            }
+            _ => unreachable!(),
+        };
+    }
     if matches!(func, BuiltinScalarFunction::PgColumnCompression)
         && let [Expr::Var(var)] = args
         && var.varlevelsup == 0
@@ -6032,6 +6273,13 @@ fn eval_builtin_function(
         && let Some(raw) = current_slot_raw_attr_bytes(slot, index)?
     {
         return eval_pg_column_compression_raw(raw);
+    }
+    if matches!(func, BuiltinScalarFunction::PgTypeof) {
+        let ty = args
+            .first()
+            .and_then(expr_sql_type_hint)
+            .unwrap_or(SqlType::new(SqlTypeKind::Text));
+        return Ok(Value::Text(sql_type_name(ty).into()));
     }
     let values = args
         .iter()
@@ -6121,8 +6369,9 @@ fn eval_builtin_function(
         | BuiltinScalarFunction::PhraseToTsQuery
         | BuiltinScalarFunction::WebSearchToTsQuery
         | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(func, &values),
-        BuiltinScalarFunction::Random => eval_random_function(&values),
-        BuiltinScalarFunction::RandomNormal => eval_random_normal_function(&values),
+        BuiltinScalarFunction::Random => eval_random_function(&values, ctx),
+        BuiltinScalarFunction::RandomNormal => eval_random_normal_function(&values, ctx),
+        BuiltinScalarFunction::SetSeed => eval_setseed_function(&values, ctx),
         BuiltinScalarFunction::TxidCurrent
         | BuiltinScalarFunction::TxidCurrentIfAssigned
         | BuiltinScalarFunction::TxidCurrentSnapshot
@@ -6315,8 +6564,19 @@ fn eval_builtin_function(
         BuiltinScalarFunction::MakeTimestampTz => {
             eval_make_timestamptz_function(&values, &ctx.datetime_config)
         }
-        BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(&values),
-        BuiltinScalarFunction::IntervalHash => eval_interval_hash_function(&values),
+        BuiltinScalarFunction::TimestampTzConstructor => {
+            eval_timestamptz_constructor_function(&values, &ctx.datetime_config)
+        }
+        BuiltinScalarFunction::ToTimestamp => {
+            eval_to_timestamp_function(&values, &ctx.datetime_config)
+        }
+        BuiltinScalarFunction::IntervalHash => {
+            eval_hash_builtin_function(HashFunctionKind::Interval, false, &values)
+        }
+        BuiltinScalarFunction::HashValue(kind) => eval_hash_builtin_function(kind, false, &values),
+        BuiltinScalarFunction::HashValueExtended(kind) => {
+            eval_hash_builtin_function(kind, true, &values)
+        }
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
         BuiltinScalarFunction::UnicodeVersion => eval_unicode_version_function(&values),
         BuiltinScalarFunction::UnicodeAssigned => eval_unicode_assigned_function(&values),
@@ -6343,6 +6603,9 @@ fn eval_builtin_function(
         BuiltinScalarFunction::PgRustTestInt44In => eval_pg_rust_test_int44in(&values),
         BuiltinScalarFunction::PgRustTestInt44Out => eval_pg_rust_test_int44out(&values),
         BuiltinScalarFunction::PgRustTestPtInWidget => eval_pg_rust_test_pt_in_widget(&values),
+        BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid => {
+            eval_pg_rust_is_catalog_text_unique_index_oid(&values)
+        }
         BuiltinScalarFunction::AmValidate | BuiltinScalarFunction::BtEqualImage => {
             Ok(Value::Bool(true))
         }
@@ -6544,6 +6807,10 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ArrayPositions => eval_array_positions_function(&values),
         BuiltinScalarFunction::ArrayRemove => eval_array_remove_function(&values),
         BuiltinScalarFunction::ArrayReplace => eval_array_replace_function(&values),
+        BuiltinScalarFunction::TrimArray => eval_trim_array_function(&values),
+        BuiltinScalarFunction::ArrayShuffle => eval_array_shuffle_function(&values),
+        BuiltinScalarFunction::ArraySample => eval_array_sample_function(&values),
+        BuiltinScalarFunction::ArrayReverse => eval_array_reverse_function(&values),
         BuiltinScalarFunction::ArraySort => eval_array_sort_function(&values),
         BuiltinScalarFunction::CurrentDatabase => {
             Ok(Value::Text(ctx.current_database_name.clone().into()))
@@ -6590,6 +6857,13 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Ceil | BuiltinScalarFunction::Ceiling => eval_ceil_function(&values),
         BuiltinScalarFunction::Floor => eval_floor_function(&values),
         BuiltinScalarFunction::Sign => eval_sign_function(&values),
+        BuiltinScalarFunction::Pi => {
+            if values.is_empty() {
+                Ok(Value::Float64(std::f64::consts::PI))
+            } else {
+                Err(malformed_expr_error("pi"))
+            }
+        }
         BuiltinScalarFunction::Sqrt => eval_sqrt_function(&values),
         BuiltinScalarFunction::Cbrt => eval_unary_float_function("cbrt", &values, |v| Ok(v.cbrt())),
         BuiltinScalarFunction::Power => eval_power_function(&values),
@@ -6709,6 +6983,15 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Concat => {
             eval_concat_function(&values, func_variadic, &ctx.datetime_config)
         }
+        BuiltinScalarFunction::TextCat => match values.as_slice() {
+            [left, right] => concat_values(left.clone(), right.clone()),
+            _ => Err(ExecError::DetailedError {
+                message: "textcat expects exactly two arguments".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42883",
+            }),
+        },
         BuiltinScalarFunction::ConcatWs => {
             eval_concat_ws_function(&values, func_variadic, &ctx.datetime_config)
         }
@@ -6721,6 +7004,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::RPad => eval_rpad_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
+        BuiltinScalarFunction::Upper => eval_upper_function(&values),
         BuiltinScalarFunction::TextStartsWith => eval_text_starts_with_function(&values),
         BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
         BuiltinScalarFunction::Initcap => eval_initcap_function(&values),
@@ -7109,16 +7393,20 @@ fn render_current_timestamp() -> String {
     }
 }
 
-fn eval_random_function(values: &[Value]) -> Result<Value, ExecError> {
+fn eval_random_function(values: &[Value], ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
     match values {
-        [] => Ok(Value::Float64(rand::random::<f64>())),
+        [] => Ok(Value::Float64(ctx.random_state.lock().double())),
         [Value::Int32(min), Value::Int32(max)] => {
             if min > max {
                 return Err(invalid_random_bound_error(
                     "lower bound must be less than or equal to upper bound",
                 ));
             }
-            Ok(Value::Int32(rand::thread_rng().gen_range(*min..=*max)))
+            Ok(Value::Int32(
+                ctx.random_state
+                    .lock()
+                    .int64_range(i64::from(*min), i64::from(*max)) as i32,
+            ))
         }
         [Value::Int64(min), Value::Int64(max)] => {
             if min > max {
@@ -7126,9 +7414,11 @@ fn eval_random_function(values: &[Value]) -> Result<Value, ExecError> {
                     "lower bound must be less than or equal to upper bound",
                 ));
             }
-            Ok(Value::Int64(rand::thread_rng().gen_range(*min..=*max)))
+            Ok(Value::Int64(
+                ctx.random_state.lock().int64_range(*min, *max),
+            ))
         }
-        [Value::Numeric(min), Value::Numeric(max)] => eval_random_numeric_range(min, max),
+        [Value::Numeric(min), Value::Numeric(max)] => eval_random_numeric_range(min, max, ctx),
         [left, right] => Err(ExecError::TypeMismatch {
             op: "random",
             left: left.clone(),
@@ -7364,15 +7654,17 @@ fn uuid_v7_timestamp(value: &[u8; 16]) -> i64 {
 }
 
 fn uuid_hash(value: &[u8; 16]) -> u32 {
-    let hash = crate::backend::access::hash::support::hash_bytes_extended(value, 0);
-    (hash as u32) ^ ((hash >> 32) as u32)
+    crate::backend::access::hash::support::hash_bytes_extended(value, 0) as u32
 }
 
 fn uuid_hash_extended(value: &[u8; 16], seed: u64) -> u64 {
     crate::backend::access::hash::support::hash_bytes_extended(value, seed)
 }
 
-fn eval_random_normal_function(values: &[Value]) -> Result<Value, ExecError> {
+fn eval_random_normal_function(
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
     let (mean, stddev) = match values {
         [] => (0.0, 1.0),
         [Value::Float64(mean), Value::Float64(stddev)] => (*mean, *stddev),
@@ -7395,10 +7687,39 @@ fn eval_random_normal_function(values: &[Value]) -> Result<Value, ExecError> {
         return Ok(Value::Float64(mean));
     }
 
-    Ok(Value::Float64((sample_standard_normal() * stddev) + mean))
+    Ok(Value::Float64(
+        (ctx.random_state.lock().double_normal() * stddev) + mean,
+    ))
 }
 
-fn eval_random_numeric_range(min: &NumericValue, max: &NumericValue) -> Result<Value, ExecError> {
+fn eval_setseed_function(values: &[Value], ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
+    match values {
+        [value] => {
+            let seed = expect_float8_arg("setseed", value)?;
+            if !seed.is_finite() || !(-1.0..=1.0).contains(&seed) {
+                return Err(ExecError::DetailedError {
+                    message: format!("setseed parameter {seed} is out of allowed range [-1,1]")
+                        .into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: INVALID_PARAMETER_VALUE_SQLSTATE,
+                });
+            }
+            ctx.random_state.lock().fseed(seed);
+            Ok(Value::Null)
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "valid builtin function arity",
+            actual: format!("SetSeed({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_random_numeric_range(
+    min: &NumericValue,
+    max: &NumericValue,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
     match min {
         NumericValue::NaN => return Err(invalid_random_bound_error("lower bound cannot be NaN")),
         NumericValue::PosInf | NumericValue::NegInf => {
@@ -7418,37 +7739,8 @@ fn eval_random_numeric_range(min: &NumericValue, max: &NumericValue) -> Result<V
             "lower bound must be less than or equal to upper bound",
         ));
     }
-
-    let (
-        NumericValue::Finite {
-            coeff: min_coeff,
-            scale: min_scale,
-            ..
-        },
-        NumericValue::Finite {
-            coeff: max_coeff,
-            scale: max_scale,
-            ..
-        },
-    ) = (min, max)
-    else {
-        unreachable!();
-    };
-
-    let scale = (*min_scale).max(*max_scale);
-    let min_aligned = align_numeric_coeff(min_coeff.clone(), *min_scale, scale);
-    let max_aligned = align_numeric_coeff(max_coeff.clone(), *max_scale, scale);
-
-    if min_aligned == max_aligned {
-        return Ok(Value::Numeric(min.clone()));
-    }
-
-    let span = (&max_aligned - &min_aligned) + BigInt::from(1u8);
-    let offset = random_bigint_below(&span, &mut rand::thread_rng());
     Ok(Value::Numeric(
-        NumericValue::finite(min_aligned + offset, scale)
-            .with_dscale(scale)
-            .normalize(),
+        ctx.random_state.lock().numeric_range(min, max),
     ))
 }
 
@@ -7458,51 +7750,5 @@ fn invalid_random_bound_error(message: &str) -> ExecError {
         detail: None,
         hint: None,
         sqlstate: INVALID_PARAMETER_VALUE_SQLSTATE,
-    }
-}
-
-fn sample_standard_normal() -> f64 {
-    let mut rng = rand::thread_rng();
-    loop {
-        let u1 = rng.r#gen::<f64>();
-        if u1 == 0.0 {
-            continue;
-        }
-        let u2 = rng.r#gen::<f64>();
-        let radius = (-2.0 * u1.ln()).sqrt();
-        let theta = 2.0 * std::f64::consts::PI * u2;
-        return radius * theta.cos();
-    }
-}
-
-fn align_numeric_coeff(coeff: BigInt, from_scale: u32, to_scale: u32) -> BigInt {
-    coeff * pow10_bigint(to_scale.saturating_sub(from_scale))
-}
-
-fn pow10_bigint(exp: u32) -> BigInt {
-    let mut value = BigInt::from(1u8);
-    for _ in 0..exp {
-        value *= 10u8;
-    }
-    value
-}
-
-fn random_bigint_below(upper_exclusive: &BigInt, rng: &mut impl RngCore) -> BigInt {
-    debug_assert!(*upper_exclusive > BigInt::from(0u8));
-    let (_, upper_bytes) = upper_exclusive.to_bytes_be();
-    let mut candidate_bytes = vec![0u8; upper_bytes.len().max(1)];
-    let high_mask = if upper_bytes.is_empty() {
-        0xff
-    } else {
-        0xff_u8 >> upper_bytes[0].leading_zeros()
-    };
-
-    loop {
-        rng.fill_bytes(&mut candidate_bytes);
-        candidate_bytes[0] &= high_mask;
-        let candidate = BigInt::from_bytes_be(Sign::Plus, &candidate_bytes);
-        if candidate < *upper_exclusive {
-            return candidate;
-        }
     }
 }

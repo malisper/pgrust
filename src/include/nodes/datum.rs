@@ -349,7 +349,7 @@ impl ArrayValue {
         let mut lengths = Vec::new();
         let mut elements = Vec::new();
         flatten_nested_values(values, 0, &mut lengths, &mut elements)?;
-        if lengths.is_empty() {
+        if lengths.is_empty() || elements.is_empty() {
             return Ok(Self::empty());
         }
         let dimensions = lengths
@@ -404,6 +404,17 @@ fn flatten_nested_values(
         return Err("multidimensional arrays must have matching extents".into());
     }
     if all_arrays {
+        let mut expected_rank = None;
+        for value in &values {
+            let rank = nested_value_rank(value)?;
+            if let Some(expected) = expected_rank {
+                if expected != rank {
+                    return Err("multidimensional arrays must have matching extents".into());
+                }
+            } else {
+                expected_rank = Some(rank);
+            }
+        }
         for value in values {
             let nested = match value {
                 Value::Array(values) => values,
@@ -416,6 +427,30 @@ fn flatten_nested_values(
     }
     elements.extend(values);
     Ok(())
+}
+
+fn nested_value_rank(value: &Value) -> Result<usize, String> {
+    match value {
+        Value::Array(values) => {
+            if values.is_empty() {
+                return Ok(1);
+            }
+            let mut expected = None;
+            for value in values {
+                let rank = nested_value_rank(value)?;
+                if let Some(existing) = expected {
+                    if existing != rank {
+                        return Err("multidimensional arrays must have matching extents".into());
+                    }
+                } else {
+                    expected = Some(rank);
+                }
+            }
+            Ok(expected.unwrap_or(0) + 1)
+        }
+        Value::PgArray(array) => Ok(array.dimensions.len().max(1)),
+        _ => Ok(0),
+    }
 }
 
 fn set_array_length(lengths: &mut Vec<usize>, depth: usize, length: usize) -> Result<(), String> {

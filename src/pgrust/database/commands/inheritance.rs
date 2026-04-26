@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::super::*;
+use super::typed_table::reject_typed_table_ddl;
 use crate::backend::parser::BoundRelation;
 use crate::backend::storage::lmgr::{TableLockMode, lock_table_requests_interruptible};
 use crate::include::catalog::CONSTRAINT_CHECK;
@@ -108,8 +109,57 @@ fn validate_inherit_columns(
                 sqlstate: "42804",
             });
         }
+        match (parent_column.generated, child_column.generated) {
+            (Some(_), None) => {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "column \"{}\" in child table must be a generated column",
+                        parent_column.name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42804",
+                });
+            }
+            (None, Some(_)) => {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "column \"{}\" in child table must not be a generated column",
+                        parent_column.name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42804",
+                });
+            }
+            (Some(parent_kind), Some(child_kind)) if parent_kind != child_kind => {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "column \"{}\" inherits from generated column of different kind",
+                        parent_column.name
+                    ),
+                    detail: Some(format!(
+                        "Parent column is {}, child column is {}.",
+                        generated_kind_name(parent_kind),
+                        generated_kind_name(child_kind)
+                    )),
+                    hint: None,
+                    sqlstate: "42804",
+                });
+            }
+            _ => {}
+        }
     }
     Ok(())
+}
+
+fn generated_kind_name(
+    kind: crate::include::nodes::parsenodes::ColumnGeneratedKind,
+) -> &'static str {
+    match kind {
+        crate::include::nodes::parsenodes::ColumnGeneratedKind::Virtual => "VIRTUAL",
+        crate::include::nodes::parsenodes::ColumnGeneratedKind::Stored => "STORED",
+    }
 }
 
 fn validate_inherit_constraints(
@@ -211,6 +261,8 @@ impl Database {
         let parent = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.parent_name)?;
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
         ensure_relation_owner(self, client_id, &parent, &alter_stmt.parent_name)?;
+        reject_typed_table_ddl(&relation, "change inheritance of")?;
+        reject_typed_table_ddl(&parent, "change inheritance of")?;
         validate_inherit_duplicate_or_cycle(&catalog, &relation, &parent)?;
         validate_inherit_columns(&catalog, &relation, &parent)?;
         validate_inherit_constraints(&catalog, &relation, &parent)?;
@@ -309,6 +361,8 @@ impl Database {
         };
         let parent = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.parent_name)?;
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
+        reject_typed_table_ddl(&relation, "change inheritance of")?;
+        reject_typed_table_ddl(&parent, "change inheritance of")?;
 
         if !catalog
             .inheritance_parents(relation.relation_oid)

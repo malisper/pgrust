@@ -2,7 +2,7 @@ use super::*;
 use crate::backend::executor::expr_string::eval_like;
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::include::nodes::datum::ArrayValue;
+use crate::include::nodes::datum::{ArrayValue, RecordValue};
 use crate::include::nodes::primnodes::{Expr, Var, user_attrno};
 
 fn local_var(index: usize) -> Expr {
@@ -54,6 +54,11 @@ fn with_scoped_subquery_runtime<T>(
     let saved_cte_producers = ctx.cte_producers.clone();
     let saved_recursive_worktables = ctx.recursive_worktables.clone();
     ctx.cte_tables = saved_cte_tables.clone();
+    ctx.cte_tables.extend(
+        ctx.pinned_cte_tables
+            .iter()
+            .map(|(cte_id, table)| (*cte_id, table.clone())),
+    );
     ctx.cte_producers = saved_cte_producers.clone();
     ctx.recursive_worktables = saved_recursive_worktables.clone();
     let result = f(ctx);
@@ -94,6 +99,50 @@ pub(super) fn eval_scalar_subquery(
             first_value = Some(values[0].clone());
         }
         Ok(first_value.unwrap_or(Value::Null))
+    })
+}
+
+fn record_value_from_row(values: Vec<Value>) -> Value {
+    Value::Record(RecordValue::anonymous(
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| (format!("col{}", index + 1), value))
+            .collect(),
+    ))
+}
+
+pub(super) fn eval_row_compare_subquery(
+    left_value: &Value,
+    op: SubqueryComparisonOp,
+    collation_oid: Option<u32>,
+    subplan: &crate::include::nodes::primnodes::SubPlan,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let plan = planned_subquery_plan(subplan, ctx)?;
+    with_scoped_subquery_runtime(ctx, |ctx| {
+        bind_subplan_params(subplan, slot, ctx)?;
+        let mut state = executor_start(plan.clone());
+        let mut first_value = None;
+        while let Some(inner_slot) = exec_next(&mut state, ctx)? {
+            let mut values = inner_slot.values()?.iter().cloned().collect::<Vec<_>>();
+            Value::materialize_all(&mut values);
+            if first_value.is_some() {
+                return Err(ExecError::CardinalityViolation {
+                    message: "more than one row returned by a subquery used as an expression"
+                        .into(),
+                    hint: None,
+                });
+            }
+            first_value = Some(record_value_from_row(values));
+        }
+        match first_value {
+            Some(right_value) => {
+                compare_subquery_values(left_value, &right_value, op, collation_oid)
+            }
+            None => Ok(Value::Null),
+        }
     })
 }
 
@@ -179,14 +228,20 @@ pub(super) fn eval_quantified_subquery(
         let mut saw_null = false;
         while let Some(inner_slot) = exec_next(&mut state, ctx)? {
             saw_row = true;
-            let values = inner_slot.values()?.iter().cloned().collect::<Vec<_>>();
-            if values.len() != 1 {
-                return Err(ExecError::CardinalityViolation {
-                    message: "subquery must return only one column".into(),
-                    hint: None,
-                });
-            }
-            match compare_subquery_values(left_value, &values[0], op, collation_oid)? {
+            let mut values = inner_slot.values()?.iter().cloned().collect::<Vec<_>>();
+            Value::materialize_all(&mut values);
+            let right_value = if matches!(left_value, Value::Record(_)) {
+                record_value_from_row(values)
+            } else {
+                if values.len() != 1 {
+                    return Err(ExecError::CardinalityViolation {
+                        message: "subquery must return only one column".into(),
+                        hint: None,
+                    });
+                }
+                values[0].clone()
+            };
+            match compare_subquery_values(left_value, &right_value, op, collation_oid)? {
                 Value::Bool(result) => {
                     if !is_all && result {
                         return Ok(Value::Bool(true));
@@ -333,6 +388,29 @@ pub(super) fn compare_subquery_values(
     op: SubqueryComparisonOp,
     collation_oid: Option<u32>,
 ) -> Result<Value, ExecError> {
+    if let (Value::Record(left), Value::Record(right)) = (left, right) {
+        return match op {
+            SubqueryComparisonOp::Eq => compare_subquery_record_values(left, right, collation_oid),
+            SubqueryComparisonOp::NotEq => {
+                match compare_subquery_record_values(left, right, collation_oid)? {
+                    Value::Bool(result) => Ok(Value::Bool(!result)),
+                    Value::Null => Ok(Value::Null),
+                    other => Err(ExecError::NonBoolQual(other)),
+                }
+            }
+            _ => {
+                let left = Value::Record(left.clone());
+                let right = Value::Record(right.clone());
+                match op {
+                    SubqueryComparisonOp::Lt => order_values("<", left, right, collation_oid),
+                    SubqueryComparisonOp::LtEq => order_values("<=", left, right, collation_oid),
+                    SubqueryComparisonOp::Gt => order_values(">", left, right, collation_oid),
+                    SubqueryComparisonOp::GtEq => order_values(">=", left, right, collation_oid),
+                    _ => unreachable!(),
+                }
+            }
+        };
+    }
     let (left, right) = coerce_quantified_compare_values(left, right)?;
     match op {
         SubqueryComparisonOp::Eq => compare_values("=", left, right, collation_oid),
@@ -360,6 +438,34 @@ pub(super) fn compare_subquery_values(
         SubqueryComparisonOp::NotILike => eval_like(&left, &right, None, collation_oid, true, true),
         SubqueryComparisonOp::Similar => eval_similar(&left, &right, None, collation_oid, false),
         SubqueryComparisonOp::NotSimilar => eval_similar(&left, &right, None, collation_oid, true),
+    }
+}
+
+fn compare_subquery_record_values(
+    left: &RecordValue,
+    right: &RecordValue,
+    collation_oid: Option<u32>,
+) -> Result<Value, ExecError> {
+    let mut saw_null = false;
+    for (left_value, right_value) in left.fields.iter().zip(&right.fields) {
+        match compare_subquery_values(
+            left_value,
+            right_value,
+            SubqueryComparisonOp::Eq,
+            collation_oid,
+        )? {
+            Value::Bool(false) => return Ok(Value::Bool(false)),
+            Value::Bool(true) => {}
+            Value::Null => saw_null = true,
+            other => return Err(ExecError::NonBoolQual(other)),
+        }
+    }
+    if left.fields.len() != right.fields.len() {
+        Ok(Value::Bool(false))
+    } else if saw_null {
+        Ok(Value::Null)
+    } else {
+        Ok(Value::Bool(true))
     }
 }
 

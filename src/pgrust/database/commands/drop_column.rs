@@ -1,10 +1,87 @@
+use std::collections::BTreeSet;
+
 use super::super::*;
+use super::typed_table::reject_typed_table_ddl;
+use crate::backend::parser::{BoundRelation, bind_generated_expr, expr_references_column};
+use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
     any_dependent_view_references_column, dependent_view_rewrites_for_relation,
     is_system_column_name, lookup_heap_relation_for_alter_table,
-    reject_column_referenced_by_generated_columns, reject_column_with_trigger_dependencies,
+    reject_column_with_trigger_dependencies,
 };
+
+fn display_relation_name(catalog: &dyn CatalogLookup, relation: &BoundRelation) -> String {
+    let relname = catalog
+        .class_row_by_oid(relation.relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation.relation_oid.to_string());
+    let Some(schema) = catalog
+        .namespace_row_by_oid(relation.namespace_oid)
+        .map(|row| row.nspname)
+    else {
+        return relname;
+    };
+    if matches!(schema.as_str(), "public" | "pg_catalog")
+        || catalog
+            .search_path()
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(&schema))
+    {
+        relname
+    } else {
+        format!("{schema}.{relname}")
+    }
+}
+
+fn generated_columns_referencing_any(
+    catalog: &dyn CatalogLookup,
+    relation: &BoundRelation,
+    source_indices: &BTreeSet<usize>,
+) -> Result<Vec<usize>, ExecError> {
+    let mut dependent_indices = Vec::new();
+    for (generated_index, generated_column) in relation.desc.columns.iter().enumerate() {
+        if source_indices.contains(&generated_index) || generated_column.generated.is_none() {
+            continue;
+        }
+        let Some(expr) = bind_generated_expr(&relation.desc, generated_index, catalog)
+            .map_err(ExecError::Parse)?
+        else {
+            continue;
+        };
+        if source_indices
+            .iter()
+            .any(|source_index| expr_references_column(&expr, *source_index))
+        {
+            dependent_indices.push(generated_index);
+        }
+    }
+    Ok(dependent_indices)
+}
+
+fn generated_columns_to_drop_for_column(
+    catalog: &dyn CatalogLookup,
+    relation: &BoundRelation,
+    column_index: usize,
+) -> Result<Vec<usize>, ExecError> {
+    let mut source_indices = BTreeSet::from([column_index]);
+    let mut dependent_indices = BTreeSet::new();
+    loop {
+        let mut changed = false;
+        for dependent_index in
+            generated_columns_referencing_any(catalog, relation, &source_indices)?
+        {
+            if dependent_indices.insert(dependent_index) {
+                source_indices.insert(dependent_index);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    Ok(dependent_indices.into_iter().collect())
+}
 
 impl Database {
     pub(crate) fn execute_alter_table_drop_column_stmt_with_search_path(
@@ -72,6 +149,7 @@ impl Database {
                 actual: "temporary table".into(),
             }));
         }
+        reject_typed_table_ddl(&relation, "drop column from")?;
         ensure_relation_owner(self, client_id, &relation, &drop_stmt.table_name)?;
         reject_inheritance_tree_ddl(
             &catalog,
@@ -96,12 +174,27 @@ impl Database {
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::UnknownColumn(drop_stmt.column_name.clone()))
             })?;
-        reject_column_referenced_by_generated_columns(
-            &catalog,
-            &relation.desc,
-            column_index,
-            "drop",
-        )?;
+        let dependent_generated_indices =
+            generated_columns_to_drop_for_column(&catalog, &relation, column_index)?;
+        let relation_display_name = display_relation_name(&catalog, &relation);
+        if !drop_stmt.cascade
+            && let Some(dependent_index) = dependent_generated_indices.first()
+        {
+            let referenced = &relation.desc.columns[column_index];
+            let dependent = &relation.desc.columns[*dependent_index];
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot drop column {} of table {} because other objects depend on it",
+                    referenced.name, relation_display_name
+                ),
+                detail: Some(format!(
+                    "column {} of table {} depends on column {} of table {}",
+                    dependent.name, relation_display_name, referenced.name, relation_display_name
+                )),
+                hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+                sqlstate: "2BP01",
+            });
+        }
         let dependent_views = dependent_view_rewrites_for_relation(
             self,
             client_id,
@@ -149,6 +242,29 @@ impl Database {
             &mut next_cid,
             catalog_effects,
         )?;
+        for dependent_index in dependent_generated_indices.into_iter().rev() {
+            let dependent_column_name = relation.desc.columns[dependent_index].name.clone();
+            push_notice(format!(
+                "drop cascades to column {} of table {}",
+                dependent_column_name, relation_display_name
+            ));
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_cid,
+                client_id,
+                waiter: None,
+                interrupts: interrupts.clone(),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .alter_table_drop_column_mvcc(relation.relation_oid, &dependent_column_name, &ctx)
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+            next_cid = next_cid.saturating_add(1);
+        }
         for index in dependent_indexes {
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),

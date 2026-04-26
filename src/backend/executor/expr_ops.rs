@@ -13,6 +13,7 @@ use super::expr_bit::{
 use super::expr_bool::order_bool_values;
 use super::expr_casts::{
     cast_value, cast_value_with_source_type_catalog_and_config, pg_lsn_out_of_range,
+    render_internal_char_text,
 };
 use super::expr_money::{
     money_add, money_cash_div, money_cmp, money_div_float, money_div_int, money_mul_float,
@@ -27,8 +28,11 @@ use crate::backend::executor::jsonb::{
 use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::datetime::{
-    days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
+    current_timezone_name, days_from_ymd, days_in_month, named_timezone_offset_seconds,
+    named_timezone_offset_seconds_for_local, timestamp_parts_from_usecs, timezone_offset_seconds,
+    timezone_offset_seconds_at_utc, ymd_from_days,
 };
+use crate::backend::utils::time::timestamp::is_valid_finite_timestamp_usecs;
 use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
 use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT,
@@ -96,6 +100,7 @@ pub(crate) fn compare_order_values(
         }
         (Value::Int32(a), Value::Int32(b)) => Ok(a.cmp(b)),
         (Value::EnumOid(a), Value::EnumOid(b)) => Ok(a.cmp(b)),
+        (Value::InternalChar(a), Value::InternalChar(b)) => Ok(a.cmp(b)),
         (Value::Int64(a), Value::Int64(b)) => Ok(a.cmp(b)),
         (Value::Xid8(a), Value::Xid8(b)) => Ok(a.cmp(b)),
         (Value::PgLsn(a), Value::PgLsn(b)) => Ok(a.cmp(b)),
@@ -105,6 +110,12 @@ pub(crate) fn compare_order_values(
         (Value::Float64(a), Value::Int16(b)) => Ok(pg_float_cmp(*a, f64::from(*b))),
         (Value::Float64(a), Value::Int32(b)) => Ok(pg_float_cmp(*a, f64::from(*b))),
         (Value::Float64(a), Value::Int64(b)) => Ok(pg_float_cmp(*a, *b as f64)),
+        (a, Value::Float64(b)) if parsed_numeric_float_value(a).is_some() => {
+            Ok(pg_float_cmp(parsed_numeric_float_value(a).unwrap(), *b))
+        }
+        (Value::Float64(a), b) if parsed_numeric_float_value(b).is_some() => {
+            Ok(pg_float_cmp(*a, parsed_numeric_float_value(b).unwrap()))
+        }
         (Value::Date(a), Value::Date(b)) => Ok(a.cmp(b)),
         (Value::Time(a), Value::Time(b)) => Ok(a.cmp(b)),
         (Value::TimeTz(a), Value::TimeTz(b)) => Ok(timetz_order_key(*a).cmp(&timetz_order_key(*b))),
@@ -200,13 +211,30 @@ pub(crate) fn compare_values(
     if let Some((left, right)) = coerce_temporal_text_pair(&left, &right) {
         return compare_values(op, left, right, collation_oid);
     }
+    if let Some(ordering) = mixed_date_timestamp_ordering(&left, &right, None) {
+        return Ok(Value::Bool(match op {
+            "=" => ordering == Ordering::Equal,
+            "<>" => ordering != Ordering::Equal,
+            _ => unreachable!("comparison op not supported by compare_values"),
+        }));
+    }
     match (&left, &right) {
         (Value::Int16(l), Value::Int16(r)) => Ok(Value::Bool(l == r)),
         (Value::Int16(l), Value::Int32(r)) => Ok(Value::Bool((*l as i32) == *r)),
         (Value::Int16(l), Value::Int64(r)) => Ok(Value::Bool((*l as i64) == *r)),
+        (Value::Int16(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(f64::from(*l), *r))),
         (Value::Int32(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i32))),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(l == r)),
         (Value::EnumOid(l), Value::EnumOid(r)) => Ok(Value::Bool(l == r)),
+        (Value::Int32(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(f64::from(*l), *r))),
+        (Value::Int64(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(*l as f64, *r))),
+        (Value::InternalChar(l), Value::InternalChar(r)) => Ok(Value::Bool(l == r)),
+        (Value::InternalChar(l), r) if r.as_text().is_some() => Ok(Value::Bool(
+            render_internal_char_text(*l) == r.as_text().unwrap(),
+        )),
+        (l, Value::InternalChar(r)) if l.as_text().is_some() => Ok(Value::Bool(
+            l.as_text().unwrap() == render_internal_char_text(*r),
+        )),
         (Value::Int32(l), Value::Int64(r)) => Ok(Value::Bool((*l as i64) == *r)),
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i64))),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(*l == (*r as i64))),
@@ -229,7 +257,16 @@ pub(crate) fn compare_values(
         (Value::MacAddr(l), Value::MacAddr(r)) => Ok(Value::Bool(l == r)),
         (Value::MacAddr8(l), Value::MacAddr8(r)) => Ok(Value::Bool(l == r)),
         (Value::Bit(l), Value::Bit(r)) => Ok(Value::Bool(l == r)),
+        (Value::Float64(l), Value::Int16(r)) => Ok(Value::Bool(pg_float_eq(*l, f64::from(*r)))),
+        (Value::Float64(l), Value::Int32(r)) => Ok(Value::Bool(pg_float_eq(*l, f64::from(*r)))),
+        (Value::Float64(l), Value::Int64(r)) => Ok(Value::Bool(pg_float_eq(*l, *r as f64))),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(*l, *r))),
+        (l, Value::Float64(r)) if parsed_numeric_float_value(l).is_some() => Ok(Value::Bool(
+            pg_float_eq(parsed_numeric_float_value(l).unwrap(), *r),
+        )),
+        (Value::Float64(l), r) if parsed_numeric_float_value(r).is_some() => Ok(Value::Bool(
+            pg_float_eq(*l, parsed_numeric_float_value(r).unwrap()),
+        )),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             Ok(Value::Bool(
                 parsed_numeric_value(l)
@@ -276,9 +313,17 @@ pub(crate) fn compare_values_with_type(
     right: Value,
     right_type: Option<SqlType>,
     collation_oid: Option<u32>,
+    datetime_config: Option<&DateTimeConfig>,
 ) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
+    }
+    if let Some(ordering) = mixed_date_timestamp_ordering(&left, &right, datetime_config) {
+        return Ok(Value::Bool(match op {
+            "=" => ordering == Ordering::Equal,
+            "<>" => ordering != Ordering::Equal,
+            _ => unreachable!("comparison op not supported by compare_values_with_type"),
+        }));
     }
     if let (Some(left_text), Some(right_text)) = (left.as_text(), right.as_text())
         && (is_bpchar_type(left_type) || is_bpchar_type(right_type))
@@ -312,11 +357,20 @@ pub(crate) fn not_equal_values_with_type(
     right: Value,
     right_type: Option<SqlType>,
     collation_oid: Option<u32>,
+    datetime_config: Option<&DateTimeConfig>,
 ) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
-    match compare_values_with_type("=", left, left_type, right, right_type, collation_oid)? {
+    match compare_values_with_type(
+        "=",
+        left,
+        left_type,
+        right,
+        right_type,
+        collation_oid,
+        datetime_config,
+    )? {
         Value::Bool(value) => Ok(Value::Bool(!value)),
         other => Err(ExecError::NonBoolQual(other)),
     }
@@ -421,6 +475,10 @@ pub(crate) fn add_values(left: Value, right: Value) -> Result<Value, ExecError> 
             .checked_add(*r)
             .map(Value::Interval)
             .ok_or_else(interval_out_of_range),
+        (Value::Date(l), Value::Time(r)) => date_time_value(*l, *r).map(Value::Timestamp),
+        (Value::Time(l), Value::Date(r)) => date_time_value(*r, *l).map(Value::Timestamp),
+        (Value::Date(l), Value::TimeTz(r)) => date_timetz_value(*l, *r).map(Value::TimestampTz),
+        (Value::TimeTz(l), Value::Date(r)) => date_timetz_value(*r, *l).map(Value::TimestampTz),
         (Value::Date(l), Value::Interval(r)) => date_interval_op(*l, *r, false),
         (Value::Interval(l), Value::Date(r)) => date_interval_op(*r, *l, false),
         (Value::Timestamp(l), Value::Interval(r)) => timestamp_interval_op(*l, *r, false),
@@ -440,6 +498,22 @@ pub(crate) fn add_values(left: Value, right: Value) -> Result<Value, ExecError> 
             left,
             right,
         }),
+    }
+}
+
+pub(crate) fn add_values_with_config(
+    left: Value,
+    right: Value,
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    match (&left, &right) {
+        (Value::TimestampTz(l), Value::Interval(r)) => {
+            timestamptz_interval_op_with_config(*l, *r, false, config)
+        }
+        (Value::Interval(l), Value::TimestampTz(r)) => {
+            timestamptz_interval_op_with_config(*r, *l, false, config)
+        }
+        _ => add_values(left, right),
     }
 }
 
@@ -531,6 +605,9 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
             .checked_sub(*r)
             .map(Value::Interval)
             .ok_or_else(interval_out_of_range),
+        (Value::Date(l), Value::Time(r)) => {
+            date_time_value(*l, TimeADT(-r.0)).map(Value::Timestamp)
+        }
         (Value::Date(l), Value::Interval(r)) => date_interval_op(*l, *r, true),
         (Value::Timestamp(l), Value::Interval(r)) => timestamp_interval_op(*l, *r, true),
         (Value::TimestampTz(l), Value::Interval(r)) => timestamptz_interval_op(*l, *r, true),
@@ -545,6 +622,19 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
             left,
             right,
         }),
+    }
+}
+
+pub(crate) fn sub_values_with_config(
+    left: Value,
+    right: Value,
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    match (&left, &right) {
+        (Value::TimestampTz(l), Value::Interval(r)) => {
+            timestamptz_interval_op_with_config(*l, *r, true, config)
+        }
+        _ => sub_values(left, right),
     }
 }
 
@@ -603,10 +693,13 @@ fn finite_timestamp_interval(timestamp: i64, interval: IntervalValue) -> Result<
     let total = i128::from(days) * i128::from(USECS_PER_DAY)
         + i128::from(time_usecs)
         + i128::from(interval.time_micros);
-    if total <= i128::from(TIMESTAMP_NOBEGIN) || total >= i128::from(TIMESTAMP_NOEND) {
+    let Ok(total) = i64::try_from(total) else {
+        return Err(timestamp_out_of_range());
+    };
+    if !is_valid_finite_timestamp_usecs(total) {
         return Err(timestamp_out_of_range());
     }
-    Ok(total as i64)
+    Ok(total)
 }
 
 fn timestamp_interval_value(
@@ -647,6 +740,101 @@ fn date_timestamp_value(date: DateADT) -> i64 {
     }
 }
 
+fn timestamp_sort_key(timestamp: TimestampADT) -> i128 {
+    match timestamp.0 {
+        TIMESTAMP_NOBEGIN => i128::MIN,
+        TIMESTAMP_NOEND => i128::MAX,
+        value => i128::from(value),
+    }
+}
+
+fn timestamptz_sort_key(timestamp: TimestampTzADT) -> i128 {
+    match timestamp.0 {
+        TIMESTAMP_NOBEGIN => i128::MIN,
+        TIMESTAMP_NOEND => i128::MAX,
+        value => i128::from(value),
+    }
+}
+
+fn date_timestamp_sort_key(date: DateADT) -> i128 {
+    match date.0 {
+        DATEVAL_NOBEGIN => i128::MIN,
+        DATEVAL_NOEND => i128::MAX,
+        days => i128::from(days) * i128::from(USECS_PER_DAY),
+    }
+}
+
+fn date_timestamptz_sort_key(date: DateADT, config: Option<&DateTimeConfig>) -> i128 {
+    let local_usecs = date_timestamp_sort_key(date);
+    if !date.is_finite() {
+        return local_usecs;
+    }
+    let Some(config) = config else {
+        return local_usecs;
+    };
+    let offset_seconds = i64::try_from(local_usecs)
+        .ok()
+        .and_then(|local| {
+            named_timezone_offset_seconds_for_local(current_timezone_name(config), local)
+                .or_else(|| named_timezone_offset_seconds(current_timezone_name(config)))
+        })
+        .unwrap_or_else(|| timezone_offset_seconds(config));
+    local_usecs - i128::from(offset_seconds) * i128::from(USECS_PER_SEC)
+}
+
+pub(crate) fn mixed_date_timestamp_ordering(
+    left: &Value,
+    right: &Value,
+    config: Option<&DateTimeConfig>,
+) -> Option<Ordering> {
+    Some(match (left, right) {
+        (Value::Date(left), Value::Timestamp(right)) => {
+            date_timestamp_sort_key(*left).cmp(&timestamp_sort_key(*right))
+        }
+        (Value::Timestamp(left), Value::Date(right)) => {
+            timestamp_sort_key(*left).cmp(&date_timestamp_sort_key(*right))
+        }
+        (Value::Date(left), Value::TimestampTz(right)) => {
+            date_timestamptz_sort_key(*left, config).cmp(&timestamptz_sort_key(*right))
+        }
+        (Value::TimestampTz(left), Value::Date(right)) => {
+            timestamptz_sort_key(*left).cmp(&date_timestamptz_sort_key(*right, config))
+        }
+        _ => return None,
+    })
+}
+
+fn checked_timestamp_usecs(usecs: i64) -> Result<TimestampADT, ExecError> {
+    if !is_valid_finite_timestamp_usecs(usecs) {
+        Err(timestamp_out_of_range())
+    } else {
+        Ok(TimestampADT(usecs))
+    }
+}
+
+fn date_time_value(date: DateADT, time: TimeADT) -> Result<TimestampADT, ExecError> {
+    let timestamp = date_timestamp_value(date);
+    if timestamp == TIMESTAMP_NOBEGIN || timestamp == TIMESTAMP_NOEND {
+        return Ok(TimestampADT(timestamp));
+    }
+    timestamp
+        .checked_add(time.0)
+        .ok_or_else(timestamp_out_of_range)
+        .and_then(checked_timestamp_usecs)
+}
+
+fn date_timetz_value(date: DateADT, timetz: TimeTzADT) -> Result<TimestampTzADT, ExecError> {
+    let timestamp = date_timestamp_value(date);
+    if timestamp == TIMESTAMP_NOBEGIN || timestamp == TIMESTAMP_NOEND {
+        return Ok(TimestampTzADT(timestamp));
+    }
+    timestamp
+        .checked_add(timetz.time.0)
+        .and_then(|value| value.checked_sub(i64::from(timetz.offset_seconds) * USECS_PER_SEC))
+        .ok_or_else(timestamp_out_of_range)
+        .and_then(|value| checked_timestamp_usecs(value).map(|value| TimestampTzADT(value.0)))
+}
+
 fn date_interval_op(
     date: DateADT,
     interval: IntervalValue,
@@ -671,6 +859,78 @@ fn timestamptz_interval_op(
     subtract: bool,
 ) -> Result<Value, ExecError> {
     timestamp_interval_value(timestamp.0, interval, subtract)
+        .map(|value| Value::TimestampTz(TimestampTzADT(value)))
+}
+
+fn timezone_offset_seconds_for_local(config: &DateTimeConfig, local_usecs: i64) -> i32 {
+    named_timezone_offset_seconds_for_local(current_timezone_name(config), local_usecs)
+        .unwrap_or_else(|| timezone_offset_seconds(config))
+}
+
+fn finite_timestamptz_interval(
+    timestamp: i64,
+    interval: IntervalValue,
+    config: &DateTimeConfig,
+) -> Result<i64, ExecError> {
+    if interval.months == 0 && interval.days == 0 {
+        return finite_timestamp_interval(timestamp, interval);
+    }
+
+    let offset = timezone_offset_seconds_at_utc(config, timestamp);
+    let local = timestamp
+        .checked_add(i64::from(offset) * USECS_PER_SEC)
+        .ok_or_else(timestamp_out_of_range)?;
+    let local = finite_timestamp_interval(
+        local,
+        IntervalValue {
+            months: interval.months,
+            days: interval.days,
+            time_micros: 0,
+        },
+    )?;
+    let new_offset = timezone_offset_seconds_for_local(config, local);
+    let utc = local
+        .checked_sub(i64::from(new_offset) * USECS_PER_SEC)
+        .ok_or_else(timestamp_out_of_range)?;
+    finite_timestamp_interval(
+        utc,
+        IntervalValue {
+            months: 0,
+            days: 0,
+            time_micros: interval.time_micros,
+        },
+    )
+}
+
+fn timestamptz_interval_op_with_config(
+    timestamp: TimestampTzADT,
+    interval: IntervalValue,
+    subtract: bool,
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    let interval = if subtract {
+        interval
+            .checked_negate()
+            .ok_or_else(interval_out_of_range)?
+    } else {
+        interval
+    };
+    if interval.is_neg_infinity() {
+        if timestamp.0 == TIMESTAMP_NOEND {
+            return Err(timestamp_out_of_range());
+        }
+        return Ok(Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOBEGIN)));
+    }
+    if interval.is_infinity() {
+        if timestamp.0 == TIMESTAMP_NOBEGIN {
+            return Err(timestamp_out_of_range());
+        }
+        return Ok(Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOEND)));
+    }
+    if timestamp.0 == TIMESTAMP_NOBEGIN || timestamp.0 == TIMESTAMP_NOEND {
+        return Ok(Value::TimestampTz(timestamp));
+    }
+    finite_timestamptz_interval(timestamp.0, interval, config)
         .map(|value| Value::TimestampTz(TimestampTzADT(value)))
 }
 
@@ -1169,17 +1429,41 @@ pub(crate) fn order_values(
     if let Some((left, right)) = coerce_temporal_text_pair(&left, &right) {
         return order_values(op, left, right, collation_oid);
     }
+    if let Some(ordering) = mixed_date_timestamp_ordering(&left, &right, None) {
+        return Ok(Value::Bool(match op {
+            "<" => ordering == Ordering::Less,
+            "<=" => ordering != Ordering::Greater,
+            ">" => ordering == Ordering::Greater,
+            ">=" => ordering != Ordering::Less,
+            _ => unreachable!("comparison op not supported by order_values"),
+        }));
+    }
     match (&left, &right) {
         (Value::Int16(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Int16(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l as i32, *r, op))),
         (Value::Int16(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l as i64, *r, op))),
+        (Value::Int16(l), Value::Float64(r)) => Ok(Value::Bool(compare_ord(
+            pg_float_cmp(f64::from(*l), *r),
+            Ordering::Equal,
+            op,
+        ))),
         (Value::Int32(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r as i32, op))),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::EnumOid(l), Value::EnumOid(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Int32(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l as i64, *r, op))),
+        (Value::Int32(l), Value::Float64(r)) => Ok(Value::Bool(compare_ord(
+            pg_float_cmp(f64::from(*l), *r),
+            Ordering::Equal,
+            op,
+        ))),
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::Int64(l), Value::Float64(r)) => Ok(Value::Bool(compare_ord(
+            pg_float_cmp(*l as f64, *r),
+            Ordering::Equal,
+            op,
+        ))),
         (Value::Xid8(l), Value::Xid8(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::PgLsn(l), Value::PgLsn(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Money(l), Value::Money(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
@@ -1210,6 +1494,21 @@ pub(crate) fn order_values(
         }
         (Value::MacAddr(l), Value::MacAddr(r)) => Ok(Value::Bool(compare_ord(l, r, op))),
         (Value::MacAddr8(l), Value::MacAddr8(r)) => Ok(Value::Bool(compare_ord(l, r, op))),
+        (Value::Float64(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(
+            pg_float_cmp(*l, f64::from(*r)),
+            Ordering::Equal,
+            op,
+        ))),
+        (Value::Float64(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(
+            pg_float_cmp(*l, f64::from(*r)),
+            Ordering::Equal,
+            op,
+        ))),
+        (Value::Float64(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(
+            pg_float_cmp(*l, *r as f64),
+            Ordering::Equal,
+            op,
+        ))),
         (Value::Date(l), Value::Date(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Time(l), Value::Time(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::TimeTz(l), Value::TimeTz(r)) => Ok(Value::Bool(compare_ord(
@@ -1229,6 +1528,26 @@ pub(crate) fn order_values(
             ">=" => pg_float_cmp(*l, *r) != Ordering::Less,
             _ => unreachable!(),
         })),
+        (l, Value::Float64(r)) if parsed_numeric_float_value(l).is_some() => {
+            let ordering = pg_float_cmp(parsed_numeric_float_value(l).unwrap(), *r);
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
+        (Value::Float64(l), r) if parsed_numeric_float_value(r).is_some() => {
+            let ordering = pg_float_cmp(*l, parsed_numeric_float_value(r).unwrap());
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
         (Value::Bool(_), Value::Bool(_)) => order_bool_values(op, &left, &right),
         (Value::Record(l), Value::Record(r)) => order_record_values(op, l, r, collation_oid),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
@@ -2176,6 +2495,19 @@ fn parsed_numeric_value(value: &Value) -> Option<NumericValue> {
     }
 }
 
+fn parsed_numeric_float_value(value: &Value) -> Option<f64> {
+    match parsed_numeric_value(value)? {
+        NumericValue::PosInf => Some(f64::INFINITY),
+        NumericValue::NegInf => Some(f64::NEG_INFINITY),
+        NumericValue::NaN => Some(f64::NAN),
+        NumericValue::Finite { coeff, scale, .. } => {
+            let coeff = coeff.to_f64()?;
+            let scale = i32::try_from(scale).ok()?;
+            Some(coeff / 10f64.powi(scale))
+        }
+    }
+}
+
 fn numeric_value_to_i128(value: &Value, nan_message: &'static str) -> Result<i128, ExecError> {
     match parsed_numeric_value(value).ok_or_else(|| ExecError::TypeMismatch {
         op: "pg_lsn numeric offset",
@@ -2235,8 +2567,12 @@ fn exact_numeric_binary(
 mod tests {
     use std::cmp::Ordering;
 
+    use crate::backend::utils::misc::guc_datetime::{DateStyleFormat, DateTimeConfig};
+    use crate::backend::utils::time::datetime::days_from_ymd;
+    use crate::backend::utils::time::timestamp::{format_timestamptz_text, parse_timestamptz_text};
     use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
-    use crate::include::nodes::datum::{NumericValue, Value};
+    use crate::include::nodes::datetime::{TimestampADT, USECS_PER_DAY, USECS_PER_HOUR};
+    use crate::include::nodes::datum::{IntervalValue, NumericValue, Value};
 
     #[test]
     fn compare_order_values_orders_int64_values_directly() {
@@ -2285,6 +2621,20 @@ mod tests {
     }
 
     #[test]
+    fn compare_values_supports_internal_char_equality() {
+        assert_eq!(
+            super::compare_values(
+                "=",
+                Value::InternalChar(b'd'),
+                Value::InternalChar(b'd'),
+                None,
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
     fn numeric_divides_by_large_power_of_ten_without_full_bigint_division() {
         let numerator = super::parse_numeric_text("6e131071").unwrap();
         let denominator = super::parse_numeric_text("1e131071").unwrap();
@@ -2293,5 +2643,68 @@ mod tests {
             numerator.div(&denominator, 0),
             Some(NumericValue::from_i64(6))
         );
+    }
+
+    #[test]
+    fn timestamptz_interval_day_uses_local_dst_calendar() {
+        let config = DateTimeConfig {
+            date_style_format: DateStyleFormat::Postgres,
+            time_zone: "CST7CDT,M4.1.0,M10.5.0".into(),
+            ..DateTimeConfig::default()
+        };
+        let start = parse_timestamptz_text("2005-04-02 12:00-07", &config).unwrap();
+        let day = IntervalValue {
+            months: 0,
+            days: 1,
+            time_micros: 0,
+        };
+        let hours = IntervalValue {
+            months: 0,
+            days: 0,
+            time_micros: 24 * USECS_PER_HOUR,
+        };
+
+        let Value::TimestampTz(calendar_day) =
+            super::add_values_with_config(Value::TimestampTz(start), Value::Interval(day), &config)
+                .unwrap()
+        else {
+            panic!("expected timestamptz result");
+        };
+        let Value::TimestampTz(fixed_hours) = super::add_values_with_config(
+            Value::TimestampTz(start),
+            Value::Interval(hours),
+            &config,
+        )
+        .unwrap() else {
+            panic!("expected timestamptz result");
+        };
+
+        assert_eq!(
+            format_timestamptz_text(calendar_day, &config),
+            "Sun Apr 03 12:00:00 2005 CDT"
+        );
+        assert_eq!(
+            format_timestamptz_text(fixed_hours, &config),
+            "Sun Apr 03 13:00:00 2005 CDT"
+        );
+    }
+
+    #[test]
+    fn timestamp_interval_arithmetic_checks_postgres_finite_range() {
+        let timestamp = TimestampADT(i64::from(days_from_ymd(2000, 1, 1).unwrap()) * USECS_PER_DAY);
+        let interval = IntervalValue {
+            months: 0,
+            days: 2_483_590,
+            time_micros: 0,
+        };
+
+        assert!(matches!(
+            super::sub_values(Value::Timestamp(timestamp), Value::Interval(interval)),
+            Err(crate::backend::executor::ExecError::DetailedError {
+                message,
+                sqlstate: "22008",
+                ..
+            }) if message == "timestamp out of range"
+        ));
     }
 }

@@ -7,7 +7,8 @@ use crate::backend::utils::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
 };
 use crate::include::catalog::{
-    ANYOID, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    ANYOID, PG_LANGUAGE_INTERNAL_OID, builtin_scalar_function_for_proc_oid,
+    builtin_type_name_for_oid, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::primnodes::{
     BoolExprType, CaseExpr as BoundCaseExpr, CaseTestExpr as BoundCaseTestExpr,
@@ -41,7 +42,8 @@ use self::ops::{
 };
 use self::subquery::{
     bind_array_subquery_expr, bind_exists_subquery_expr, bind_in_subquery_expr,
-    bind_quantified_array_expr, bind_quantified_subquery_expr, bind_scalar_subquery_expr,
+    bind_quantified_array_expr, bind_quantified_subquery_expr, bind_row_compare_subquery_expr,
+    bind_scalar_subquery_expr,
 };
 pub(crate) use self::targets::{BoundSelectTargets, bind_select_targets};
 use self::targets::{bind_set_returning_expr_from_parts, root_call_returns_set};
@@ -283,6 +285,88 @@ fn bind_row_expr_fields(
         field_exprs.push((field_name, expr));
     }
     Ok(field_exprs)
+}
+
+fn overlaps_row_items(expr: &SqlExpr) -> Result<(&SqlExpr, &SqlExpr), ParseError> {
+    let SqlExpr::Row(items) = expr else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "row expression",
+            actual: format!("{expr:?}"),
+        });
+    };
+    match items.as_slice() {
+        [start, end] => Ok((start, end)),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "two-element OVERLAPS row",
+            actual: format!("{} elements", items.len()),
+        }),
+    }
+}
+
+fn overlaps_end_expr(
+    start: &SqlExpr,
+    end_or_interval: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> SqlExpr {
+    let end_type = infer_sql_expr_type_with_ctes(
+        end_or_interval,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    );
+    if !end_type.is_array && matches!(end_type.kind, SqlTypeKind::Interval) {
+        SqlExpr::Add(Box::new(start.clone()), Box::new(end_or_interval.clone()))
+    } else {
+        end_or_interval.clone()
+    }
+}
+
+fn bind_overlaps_expr(
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let (left_start, left_end_or_interval) = overlaps_row_items(left)?;
+    let (right_start, right_end_or_interval) = overlaps_row_items(right)?;
+    let left_end = overlaps_end_expr(
+        left_start,
+        left_end_or_interval,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    );
+    let right_end = overlaps_end_expr(
+        right_start,
+        right_end_or_interval,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    );
+    let lowered = SqlExpr::And(
+        Box::new(SqlExpr::Lt(
+            Box::new(left_start.clone()),
+            Box::new(right_end),
+        )),
+        Box::new(SqlExpr::Lt(
+            Box::new(right_start.clone()),
+            Box::new(left_end),
+        )),
+    );
+    bind_expr_with_outer_and_ctes(&lowered, scope, catalog, outer_scopes, grouped_outer, ctes)
 }
 
 fn expand_bound_record_expr_fields(
@@ -1084,6 +1168,8 @@ fn bind_visible_outer_aggregate_call(
                 coerce_bound_expr(arg, actual_type, declared_type)
             })
             .collect();
+        let coerced_args =
+            preserve_array_agg_array_arg_type(resolved.builtin_impl, &arg_types, coerced_args);
         (Vec::new(), coerced_args, bound_order_by)
     };
     let (aggfnoid, aggtype, aggvariadic) = if hypothetical {
@@ -1118,6 +1204,21 @@ fn bind_visible_outer_aggregate_call(
             aggno,
         },
     ))))
+}
+
+fn preserve_array_agg_array_arg_type(
+    func: Option<AggFunc>,
+    arg_types: &[SqlType],
+    mut args: Vec<Expr>,
+) -> Vec<Expr> {
+    if func == Some(AggFunc::ArrayAgg)
+        && let (Some(arg_type), Some(first_arg)) = (arg_types.first().copied(), args.first_mut())
+        && arg_type.is_array
+        && !expr_sql_type_hint(first_arg).is_some_and(|ty| ty.is_array)
+    {
+        *first_arg = Expr::Cast(Box::new(first_arg.clone()), arg_type);
+    }
+    args
 }
 
 fn bind_window_func_call(
@@ -1323,6 +1424,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 descriptor,
                 fields: field_exprs,
             }
+        }
+        SqlExpr::Overlaps(left, right) => {
+            return bind_overlaps_expr(
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
         }
         SqlExpr::BinaryOperator { op, left, right } => match op.as_str() {
             "@@" => bind_overloaded_binary_expr(
@@ -1933,6 +2045,11 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             )
         }
         SqlExpr::Cast(inner, ty) => {
+            let target_type = if raw_type_name_is_unknown(ty) {
+                SqlType::new(SqlTypeKind::Text)
+            } else {
+                resolve_raw_type_name(ty, catalog)?
+            };
             let source_type = infer_sql_expr_type_with_ctes(
                 inner,
                 scope,
@@ -1956,7 +2073,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                             )
                         })
                         .collect::<Result<_, _>>()?,
-                    array_type: raw_type_name_hint(ty),
+                    array_type: target_type,
                 }
             } else {
                 bind_expr_with_outer_and_ctes(
@@ -1973,11 +2090,47 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             } else {
                 domain_lookup_for_raw_type_name(ty, catalog)
             };
-            let target_type = if raw_type_name_is_unknown(ty) {
-                SqlType::new(SqlTypeKind::Text)
-            } else {
-                resolve_raw_type_name(ty, catalog)?
-            };
+            if let SqlExpr::Negate(negated_inner) = inner.as_ref()
+                && matches!(
+                    target_type.kind,
+                    SqlTypeKind::Float4
+                        | SqlTypeKind::Float8
+                        | SqlTypeKind::Numeric
+                        | SqlTypeKind::Money
+                        | SqlTypeKind::Interval
+                )
+            {
+                let negated_source_type = infer_sql_expr_type_with_ctes(
+                    negated_inner,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                if !matches!(negated_inner.as_ref(), SqlExpr::Const(Value::Null)) {
+                    validate_catalog_backed_explicit_cast(
+                        negated_source_type,
+                        target_type,
+                        catalog,
+                    )?;
+                }
+                let bound_negated_inner = bind_expr_with_outer_and_ctes(
+                    negated_inner,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                let coerced_inner =
+                    coerce_bound_expr(bound_negated_inner, negated_source_type, target_type);
+                return Ok(bind_domain_constraint_expr(
+                    Expr::op_auto(OpExprKind::Negate, vec![coerced_inner]),
+                    target_type,
+                    domain.as_ref(),
+                ));
+            }
             if target_type.kind == SqlTypeKind::RegRole
                 && let Some(bound_regrole) = bind_regrole_literal_cast(inner, target_type, catalog)?
             {
@@ -2022,12 +2175,8 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             if !matches!(inner.as_ref(), SqlExpr::Const(Value::Null)) {
                 validate_catalog_backed_explicit_cast(source_type, target_type, catalog)?;
             }
-            let coerced = coerce_bound_expr(bound_inner, source_type, target_type);
-            let cast_expr = if expr_sql_type_hint(&coerced) == Some(target_type) {
-                coerced
-            } else {
-                Expr::Cast(Box::new(coerced), target_type)
-            };
+            let cast_expr =
+                bind_explicit_cast_expr(bound_inner, source_type, target_type, catalog)?;
             bind_domain_constraint_expr(cast_expr, target_type, domain.as_ref())
         }
         SqlExpr::Collate { expr, collation } => {
@@ -2138,6 +2287,19 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     grouped_outer,
                     ctes,
                 )?
+            } else if let (SqlExpr::Row(_), SqlExpr::ScalarSubquery(subquery)) =
+                (left.as_ref(), right.as_ref())
+            {
+                bind_row_compare_subquery_expr(
+                    left,
+                    SubqueryComparisonOp::Eq,
+                    subquery,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
             } else if let Some(result) = bind_maybe_multirange_comparison(
                 "=",
                 left,
@@ -2194,6 +2356,19 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     OpExprKind::NotEq,
                     left_items,
                     right_items,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else if let (SqlExpr::Row(_), SqlExpr::ScalarSubquery(subquery)) =
+                (left.as_ref(), right.as_ref())
+            {
+                bind_row_compare_subquery_expr(
+                    left,
+                    SubqueryComparisonOp::NotEq,
+                    subquery,
                     scope,
                     catalog,
                     outer_scopes,
@@ -2805,9 +2980,13 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 grouped_outer,
                 ctes,
             )
-            .ok_or_else(|| ParseError::UnexpectedToken {
-                expected: "ARRAY[...] with a typed element or explicit cast",
-                actual: "ARRAY[]".into(),
+            .ok_or_else(|| ParseError::DetailedError {
+                message: "cannot determine type of empty array".into(),
+                detail: None,
+                hint: Some(
+                    "Explicitly cast to the desired type, for example ARRAY[]::integer[].".into(),
+                ),
+                sqlstate: "42P18",
             })?,
         },
         SqlExpr::ArraySubscript { array, subscripts } => {
@@ -4097,66 +4276,54 @@ fn bind_nullif_call(
         });
     }
 
-    let lowered_args = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
-    let common_type = infer_common_scalar_expr_type_with_ctes(
-        &lowered_args,
-        scope,
-        catalog,
-        outer_scopes,
-        grouped_outer,
-        ctes,
-        "NULLIF arguments with a common type",
-    )?;
-
-    let left_type = infer_sql_expr_type_with_ctes(
+    let left = bind_typed_expr_with_outer_and_ctes(
         &args[0].value,
         scope,
         catalog,
         outer_scopes,
         grouped_outer,
         ctes,
-    );
-    let right_type = infer_sql_expr_type_with_ctes(
+    )?;
+    reject_typed_srf(&left, "NULLIF")?;
+    let right = bind_typed_expr_with_outer_and_ctes(
         &args[1].value,
         scope,
         catalog,
         outer_scopes,
         grouped_outer,
         ctes,
-    );
-    let left = coerce_bound_expr(
-        bind_expr_with_outer_and_ctes(
-            &args[0].value,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
-        left_type,
-        common_type,
-    );
-    let right = coerce_bound_expr(
-        bind_expr_with_outer_and_ctes(
-            &args[1].value,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
+    )?;
+    reject_typed_srf(&right, "NULLIF")?;
+    let (right_expr, right_type) = if matches!(right.expr, Expr::Const(Value::Null)) {
+        (
+            coerce_bound_expr(right.expr, right.sql_type, left.sql_type),
+            left.sql_type,
+        )
+    } else {
+        (right.expr, right.sql_type)
+    };
+    let comparison = bind_lowered_comparison_expr(
+        "=",
+        OpExprKind::Eq,
+        left.expr.clone(),
+        left.sql_type,
+        left.sql_type,
+        right_expr,
+        right.sql_type,
         right_type,
-        common_type,
-    );
+        None,
+        None,
+        catalog,
+    )?;
 
     Ok(Expr::Case(Box::new(BoundCaseExpr {
-        casetype: common_type,
+        casetype: left.sql_type,
         arg: None,
         args: vec![BoundCaseWhen {
-            expr: Expr::op_auto(OpExprKind::Eq, vec![left.clone(), right]),
-            result: Expr::Cast(Box::new(Expr::Const(Value::Null)), common_type),
+            expr: comparison,
+            result: Expr::Cast(Box::new(Expr::Const(Value::Null)), left.sql_type),
         }],
-        defresult: Box::new(left),
+        defresult: Box::new(left.expr),
     })))
 }
 
@@ -4165,6 +4332,23 @@ fn validate_catalog_backed_explicit_cast(
     target_type: SqlType,
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ParseError> {
+    if matches!(
+        (source_type.kind, target_type.kind),
+        (SqlTypeKind::TimeTz, SqlTypeKind::Interval) | (SqlTypeKind::Interval, SqlTypeKind::TimeTz)
+    ) && !source_type.is_array
+        && !target_type.is_array
+    {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "cannot cast type {} to {}",
+                sql_type_name(source_type),
+                sql_type_name(target_type)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42846",
+        });
+    }
     if catalog_backed_explicit_cast_allowed(source_type, target_type, catalog) {
         return Ok(());
     }
@@ -4172,19 +4356,135 @@ fn validate_catalog_backed_explicit_cast(
         expected: "supported explicit cast",
         actual: format!(
             "cannot cast type {} to {}",
-            sql_type_name(source_type),
-            sql_type_name(target_type)
+            catalog_sql_type_name(source_type, catalog),
+            catalog_sql_type_name(target_type, catalog)
         ),
     })
 }
 
-fn catalog_backed_explicit_cast_allowed(
+fn catalog_sql_type_name(ty: SqlType, catalog: &dyn CatalogLookup) -> String {
+    if !ty.is_array
+        && ty.type_oid != 0
+        && builtin_type_name_for_oid(ty.type_oid).is_none()
+        && let Some(row) = catalog.type_by_oid(ty.type_oid)
+    {
+        return row.typname;
+    }
+    sql_type_name(ty)
+}
+
+fn bind_explicit_cast_expr(
+    bound_inner: Expr,
+    source_type: SqlType,
+    target_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<Expr, ParseError> {
+    let Some(source_oid) = catalog.type_oid_for_sql_type(source_type) else {
+        return Ok(coerce_bound_expr(bound_inner, source_type, target_type));
+    };
+    let Some(target_oid) = catalog.type_oid_for_sql_type(target_type) else {
+        return Ok(coerce_bound_expr(bound_inner, source_type, target_type));
+    };
+    let Some(cast_row) = catalog.cast_by_source_target(source_oid, target_oid) else {
+        return Ok(fallback_explicit_cast_expr(
+            bound_inner,
+            source_type,
+            target_type,
+        ));
+    };
+    if cast_row.castmethod != 'f' || cast_row.castfunc == 0 {
+        return Ok(coerce_bound_expr(bound_inner, source_type, target_type));
+    }
+    let Some(proc_row) = catalog.proc_row_by_oid(cast_row.castfunc) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "existing cast function",
+            actual: format!("function OID {}", cast_row.castfunc),
+        });
+    };
+    let builtin_impl = builtin_scalar_function_for_proc_oid(cast_row.castfunc);
+    // Built-in pg_cast rows can point at internal C functions that pgrust's
+    // generic cast executor already handles.
+    if proc_row.prolang == PG_LANGUAGE_INTERNAL_OID && builtin_impl.is_none() {
+        return Ok(fallback_explicit_cast_expr(
+            bound_inner,
+            source_type,
+            target_type,
+        ));
+    }
+    let first_arg_oid = proc_row
+        .proargtypes
+        .split_whitespace()
+        .next()
+        .and_then(|oid| oid.parse::<u32>().ok())
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "cast function with at least one argument",
+            actual: proc_row.proname.clone(),
+        })?;
+    let first_arg_type = catalog
+        .type_by_oid(first_arg_oid)
+        .map(|row| row.sql_type)
+        .ok_or_else(|| ParseError::UnsupportedType(first_arg_oid.to_string()))?;
+    let result_type = catalog
+        .type_by_oid(proc_row.prorettype)
+        .map(|row| row.sql_type)
+        .ok_or_else(|| ParseError::UnsupportedType(proc_row.prorettype.to_string()))?;
+    let arg = coerce_bound_expr(bound_inner, source_type, first_arg_type);
+    let func_expr = Expr::func_with_impl(
+        cast_row.castfunc,
+        Some(result_type),
+        false,
+        builtin_impl
+            .map(ScalarFunctionImpl::Builtin)
+            .unwrap_or(ScalarFunctionImpl::UserDefined {
+                proc_oid: cast_row.castfunc,
+            }),
+        vec![arg],
+    );
+    Ok(
+        if proc_row.prorettype == target_oid || result_type == target_type {
+            func_expr
+        } else {
+            coerce_bound_expr(func_expr, result_type, target_type)
+        },
+    )
+}
+
+fn fallback_explicit_cast_expr(
+    bound_inner: Expr,
+    source_type: SqlType,
+    target_type: SqlType,
+) -> Expr {
+    let coerced = coerce_bound_expr(bound_inner, source_type, target_type);
+    if expr_sql_type_hint(&coerced) == Some(target_type) {
+        coerced
+    } else {
+        Expr::Cast(Box::new(coerced), target_type)
+    }
+}
+
+pub(super) fn catalog_backed_explicit_cast_allowed(
     source_type: SqlType,
     target_type: SqlType,
     catalog: &dyn CatalogLookup,
 ) -> bool {
     if source_type.element_type() == target_type.element_type() {
         return true;
+    }
+    let source_oid = catalog.type_oid_for_sql_type(source_type);
+    let target_oid = catalog.type_oid_for_sql_type(target_type);
+    if let (Some(source_oid), Some(target_oid)) = (source_oid, target_oid) {
+        if source_oid == target_oid
+            || catalog
+                .cast_by_source_target(source_oid, target_oid)
+                .is_some()
+        {
+            return true;
+        }
+        if is_user_defined_base_type_oid(source_oid, catalog)
+            || is_user_defined_base_type_oid(target_oid, catalog)
+        {
+            return false;
+        }
     }
     if source_type.is_range()
         && target_type.is_multirange()
@@ -4202,6 +4502,18 @@ fn catalog_backed_explicit_cast_allowed(
         return true;
     }
     false
+}
+
+fn is_user_defined_base_type_oid(type_oid: u32, catalog: &dyn CatalogLookup) -> bool {
+    type_oid != 0
+        && builtin_type_name_for_oid(type_oid).is_none()
+        && catalog.type_by_oid(type_oid).is_some_and(|row| {
+            !row.sql_type.is_array
+                && !row.sql_type.is_range()
+                && !row.sql_type.is_multirange()
+                && matches!(row.sql_type.kind, SqlTypeKind::Text)
+                && row.typrelid == 0
+        })
 }
 
 fn bind_regprocedure_literal_cast(

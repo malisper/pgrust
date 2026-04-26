@@ -45,6 +45,11 @@ fn simplify_query(query: Query) -> Result<Query, ParseError> {
             .map(simplify_target_entry)
             .collect::<Result<Vec<_>, _>>()?,
         distinct: query.distinct,
+        distinct_on: query
+            .distinct_on
+            .into_iter()
+            .map(simplify_sort_group_clause)
+            .collect::<Result<Vec<_>, _>>()?,
         where_qual: query
             .where_qual
             .map(|expr| simplify_expr(expr, None))
@@ -229,6 +234,25 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::GenerateSubscripts {
+            func_oid,
+            func_variadic,
+            array,
+            dimension,
+            reverse,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::GenerateSubscripts {
+            func_oid,
+            func_variadic,
+            array: simplify_expr(array, None)?,
+            dimension: simplify_expr(dimension, None)?,
+            reverse: reverse
+                .map(|reverse| simplify_expr(reverse, None))
+                .transpose()?,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,
@@ -309,22 +333,26 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionTree {
             func_oid,
             func_variadic,
             relid: simplify_expr(relid, None)?,
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid: simplify_expr(relid, None)?,
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PgLockStatus {
             func_oid,
@@ -515,6 +543,9 @@ fn simplify_exprs(exprs: Vec<Expr>) -> Result<Vec<Expr>, ParseError> {
 }
 
 fn simplify_func_expr(func: FuncExpr, case_test_value: Option<&Value>) -> Result<Expr, ParseError> {
+    if stats_import_builtin_preserves_arg_types(func.implementation) {
+        return Ok(Expr::Func(Box::new(func)));
+    }
     let args = func
         .args
         .into_iter()
@@ -527,6 +558,18 @@ fn simplify_func_expr(func: FuncExpr, case_test_value: Option<&Value>) -> Result
         return Ok(expr);
     }
     Ok(Expr::Func(Box::new(FuncExpr { args, ..func })))
+}
+
+fn stats_import_builtin_preserves_arg_types(implementation: ScalarFunctionImpl) -> bool {
+    matches!(
+        implementation,
+        ScalarFunctionImpl::Builtin(
+            BuiltinScalarFunction::PgRestoreRelationStats
+                | BuiltinScalarFunction::PgClearRelationStats
+                | BuiltinScalarFunction::PgRestoreAttributeStats
+                | BuiltinScalarFunction::PgClearAttributeStats
+        )
+    )
 }
 
 fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, ParseError> {

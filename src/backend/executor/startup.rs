@@ -170,6 +170,16 @@ fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
                 || expr_uses_outer_columns(step)
                 || timezone.as_ref().is_some_and(expr_uses_outer_columns)
         }
+        SetReturningCall::GenerateSubscripts {
+            array,
+            dimension,
+            reverse,
+            ..
+        } => {
+            expr_uses_outer_columns(array)
+                || expr_uses_outer_columns(dimension)
+                || reverse.as_ref().is_some_and(expr_uses_outer_columns)
+        }
         SetReturningCall::PartitionTree { relid, .. }
         | SetReturningCall::PartitionAncestors { relid, .. } => expr_uses_outer_columns(relid),
         SetReturningCall::PgLockStatus { .. } => false,
@@ -391,8 +401,13 @@ pub fn executor_start(plan: Plan) -> PlanState {
             plan_info,
             stats: NodeExecStats::default(),
         }),
-        Plan::Unique { plan_info, input } => Box::new(UniqueState {
+        Plan::Unique {
+            plan_info,
+            key_indices,
+            input,
+        } => Box::new(UniqueState {
             input: executor_start(*input),
+            key_indices,
             previous_values: None,
             slot: TupleSlot::empty(0),
             current_bindings: Vec::new(),
@@ -1111,6 +1126,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
         Plan::Aggregate {
             plan_info,
             strategy,
+            disabled,
             input,
             group_by,
             passthrough_exprs,
@@ -1123,6 +1139,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             Box::new(AggregateState {
                 input: executor_start(*input),
                 strategy,
+                disabled,
                 group_by,
                 passthrough_exprs,
                 accumulators,
@@ -1249,12 +1266,14 @@ pub fn executor_start(plan: Plan) -> PlanState {
         Plan::SetOp {
             plan_info,
             op,
+            strategy,
             output_columns,
             children,
         } => {
             let width = output_columns.len();
             Box::new(SetOpState {
                 op,
+                strategy,
                 children: children.into_iter().map(executor_start).collect(),
                 output_columns: output_columns.into_iter().map(|c| c.name).collect(),
                 result_rows: None,

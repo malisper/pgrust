@@ -27,7 +27,7 @@ use crate::include::access::brin_page::{
 };
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PgAggregateRow, PgAmRow,
-    PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgCollationRow,
+    PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
     PgConstraintRow, PgEnumRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
     PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticExtDataRow,
     PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
@@ -574,6 +574,16 @@ fn visible_type_row_by_name(
     }
 
     let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
+    let pg_catalog_in_search_path = search_path
+        .iter()
+        .any(|schema| schema.eq_ignore_ascii_case("pg_catalog"));
+    if !pg_catalog_in_search_path
+        && let Some(namespace) = namespace_row_by_name(db, client_id, txn_ctx, "pg_catalog")
+        && let Some(row) =
+            type_row_by_name_namespace(db, client_id, txn_ctx, normalized, namespace.oid)
+    {
+        return Some(row);
+    }
     for schema in search_path {
         let Some(namespace) = namespace_row_by_name(db, client_id, txn_ctx, schema) else {
             continue;
@@ -614,6 +624,12 @@ fn visible_type_oid_for_sql_type(
     search_path: &[String],
     sql_type: SqlType,
 ) -> Option<u32> {
+    if sql_type.type_oid != 0
+        && visible_type_row_by_oid(db, client_id, txn_ctx, search_path, sql_type.type_oid)
+            .is_some_and(|row| row.sql_type == sql_type)
+    {
+        return Some(sql_type.type_oid);
+    }
     if sql_type.is_array {
         let element = sql_type.element_type();
         let element_oid = if element.type_oid != 0 {
@@ -1378,6 +1394,7 @@ pub fn lookup_any_relation(
             toast: toast_relation_from_entry(db, client_id, txn_ctx, &entry),
             namespace_oid: entry.namespace_oid,
             owner_oid: entry.owner_oid,
+            of_type_oid: entry.of_type_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
             relispopulated: entry.relispopulated,
@@ -1406,6 +1423,7 @@ pub fn lookup_any_relation(
             toast: toast_relation_from_entry(db, client_id, txn_ctx, &temp),
             namespace_oid: temp.namespace_oid,
             owner_oid: temp.owner_oid,
+            of_type_oid: temp.of_type_oid,
             relpersistence: temp.relpersistence,
             relkind: temp.relkind,
             relispopulated: temp.relispopulated,
@@ -1437,6 +1455,7 @@ pub fn lookup_any_relation(
             toast: toast_relation_from_entry(db, client_id, txn_ctx, entry),
             namespace_oid: entry.namespace_oid,
             owner_oid: entry.owner_oid,
+            of_type_oid: entry.of_type_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
             relispopulated: entry.relispopulated,
@@ -1580,6 +1599,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             toast: toast_relation_from_entry(self.db, self.client_id, self.txn_ctx, &entry),
             namespace_oid: entry.namespace_oid,
             owner_oid: entry.owner_oid,
+            of_type_oid: entry.of_type_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
             relispopulated: entry.relispopulated,
@@ -1629,6 +1649,23 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     fn operator_rows(&self) -> Vec<PgOperatorRow> {
         backend_catcache(self.db, self.client_id, self.txn_ctx)
             .map(|cache| cache.operator_rows())
+            .unwrap_or_default()
+    }
+
+    fn cast_by_source_target(
+        &self,
+        source_type_oid: u32,
+        target_type_oid: u32,
+    ) -> Option<PgCastRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .ok()?
+            .cast_by_source_target(source_type_oid, target_type_oid)
+            .cloned()
+    }
+
+    fn cast_rows(&self) -> Vec<PgCastRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .map(|cache| cache.cast_rows())
             .unwrap_or_default()
     }
 
@@ -2161,12 +2198,14 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         if let Some(temp_namespace) = owned_temp_namespace(self.db, self.client_id) {
             for (name, entry) in temp_namespace.tables {
                 relcache.insert(name.clone(), entry.entry.clone());
+                relcache.insert(format!("pg_temp.{name}"), entry.entry.clone());
                 relcache.insert(format!("{}.{}", temp_namespace.name, name), entry.entry);
             }
         }
         let mut dynamic_type_rows = self.db.domain_type_rows_for_search_path(&self.search_path);
         dynamic_type_rows.extend(self.db.enum_type_rows_for_search_path(&self.search_path));
         dynamic_type_rows.extend(self.db.range_type_rows_for_search_path(&self.search_path));
+        let dynamic_range_rows = self.db.range_rows();
         Some(
             VisibleCatalog::with_search_path(
                 relcache.with_search_path(&self.search_path),
@@ -2176,7 +2215,8 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             .with_enum_rows(self.db.enum_rows_for_catalog())
             .with_uncommitted_enum_label_oids(self.db.uncommitted_enum_label_oids())
             .with_domain_checks(self.db.domain_checks_for_catalog())
-            .with_dynamic_type_rows(dynamic_type_rows),
+            .with_dynamic_type_rows(dynamic_type_rows)
+            .with_dynamic_range_rows(dynamic_range_rows),
         )
     }
 }

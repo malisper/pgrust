@@ -10,21 +10,23 @@ use crate::include::catalog::{
     sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
-    AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec,
-    AlterColumnExpressionAction, AlterTableTriggerMode, AlterTableTriggerStateStatement,
+    AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
+    AliasColumnDef, AliasColumnSpec, AlterAggregateRenameStatement, AlterColumnExpressionAction,
+    AlterColumnIdentityAction, AlterTableTriggerMode, AlterTableTriggerStateStatement,
     AlterTableTriggerTarget, AlterTriggerRenameStatement, AlterTypeSetOptionsStatement,
-    ColumnConstraint, ColumnGeneratedKind, CommentOnAggregateStatement, CommentOnColumnStatement,
-    CommentOnFunctionStatement, CommentOnOperatorStatement, CommentOnTypeStatement,
-    CommentOnViewStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
-    CreateBaseTypeOption, CreateBaseTypeStatement, CreateCompositeTypeStatement,
+    CastContext, ColumnConstraint, ColumnGeneratedKind, ColumnIdentityKind,
+    CommentOnAggregateStatement, CommentOnColumnStatement, CommentOnFunctionStatement,
+    CommentOnOperatorStatement, CommentOnTypeStatement, CommentOnViewStatement,
+    CompositeTypeAttributeDef, CreateAggregateStatement, CreateBaseTypeOption,
+    CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement, CreateCompositeTypeStatement,
     CreateShellTypeStatement, CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement,
-    DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType,
-    GrantObjectPrivilege, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
-    PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
-    RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
-    RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint,
-    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerReferencingSpec, TriggerTiming,
-    ViewCheckOption,
+    DropCastStatement, DropTriggerStatement, DropTypeStatement, ForeignKeyAction,
+    ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef, InsertSource, InsertStatement,
+    JoinTreeNode, OverridingKind, PartitionStrategy, PublicationObjectSpec, PublicationOption,
+    PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
+    RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
+    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
+    TriggerReferencingSpec, TriggerTiming, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -40,6 +42,21 @@ fn desc() -> RelationDesc {
 
 fn builtin_type(ty: SqlType) -> RawTypeName {
     RawTypeName::Builtin(ty)
+}
+
+fn aggregate_signature_arg(arg_type: AggregateArgType) -> AggregateSignatureArg {
+    AggregateSignatureArg {
+        name: None,
+        arg_type,
+        variadic: false,
+    }
+}
+
+fn aggregate_signature(args: Vec<AggregateSignatureArg>) -> AggregateSignatureKind {
+    AggregateSignatureKind::Args(AggregateSignature {
+        args,
+        order_by: Vec::new(),
+    })
 }
 
 fn attrs() -> ConstraintAttributes {
@@ -468,6 +485,7 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         relacl: None,
         reloptions: None,
+        of_type_oid: 0,
         row_type_oid: 60_000u32.saturating_add(rel_number),
         array_type_oid: 61_000u32.saturating_add(rel_number),
         reltoastrelid: 0,
@@ -529,6 +547,7 @@ fn people_view_entry() -> CatalogEntry {
         owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         relacl: None,
         reloptions: None,
+        of_type_oid: 0,
         row_type_oid: 60020,
         array_type_oid: 60021,
         reltoastrelid: 0,
@@ -743,6 +762,7 @@ fn catalog_with_people_id_index() -> Catalog {
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60010,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -809,6 +829,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60011,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -904,6 +925,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60013,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -967,6 +989,7 @@ fn catalog_with_people_ctid_partial_unique_index() -> Catalog {
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60015,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1030,6 +1053,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60014,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1208,6 +1232,7 @@ fn bind_expression_index_metadata_does_not_discover_heap_indexes() {
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60041,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1279,6 +1304,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60015,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1350,6 +1376,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60031,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -2021,7 +2048,7 @@ fn parse_is_document_expression() {
 fn parse_transaction_alias_statements() {
     assert_eq!(
         parse_statement("begin transaction").unwrap(),
-        Statement::Begin
+        Statement::Begin(TransactionOptions::default())
     );
     assert_eq!(
         parse_statement("commit transaction").unwrap(),
@@ -2764,8 +2791,10 @@ fn parse_alter_table_constraint_statements() {
                     ..attrs()
                 },
                 columns: vec!["owner_id".into(), "owner_name".into()],
+                period: None,
                 referenced_table: "people".into(),
                 referenced_columns: Some(vec!["id".into(), "name".into()]),
+                referenced_period: None,
                 match_type: ForeignKeyMatchType::Full,
                 on_delete: ForeignKeyAction::NoAction,
                 on_delete_set_columns: None,
@@ -2787,8 +2816,10 @@ fn parse_alter_table_constraint_statements() {
             constraint: TableConstraint::ForeignKey {
                 attributes: attrs(),
                 columns: vec!["owner_id".into(), "owner_name".into()],
+                period: None,
                 referenced_table: "people".into(),
                 referenced_columns: Some(vec!["id".into(), "name".into()]),
+                referenced_period: None,
                 match_type: ForeignKeyMatchType::Full,
                 on_delete: ForeignKeyAction::NoAction,
                 on_delete_set_columns: None,
@@ -2810,13 +2841,66 @@ fn parse_alter_table_constraint_statements() {
             constraint: TableConstraint::ForeignKey {
                 attributes: attrs(),
                 columns: vec!["owner_id".into(), "owner_name".into()],
+                period: None,
                 referenced_table: "people".into(),
                 referenced_columns: Some(vec!["id".into(), "name".into()]),
+                referenced_period: None,
                 match_type: ForeignKeyMatchType::Simple,
                 on_delete: ForeignKeyAction::SetNull,
                 on_delete_set_columns: Some(vec!["owner_name".into()]),
                 on_update: ForeignKeyAction::NoAction,
             },
+        })
+    );
+
+    let stmt = parse_statement(
+        "alter table pets add constraint pets_owner_fk foreign key (owner_id, period valid_at) references people(id, period valid_at)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "pets".into(),
+            constraint: TableConstraint::ForeignKey {
+                attributes: ConstraintAttributes {
+                    name: Some("pets_owner_fk".into()),
+                    ..attrs()
+                },
+                columns: vec!["owner_id".into(), "valid_at".into()],
+                period: Some("valid_at".into()),
+                referenced_table: "people".into(),
+                referenced_columns: Some(vec!["id".into(), "valid_at".into()]),
+                referenced_period: Some("valid_at".into()),
+                match_type: ForeignKeyMatchType::Simple,
+                on_delete: ForeignKeyAction::NoAction,
+                on_delete_set_columns: None,
+                on_update: ForeignKeyAction::NoAction,
+            },
+        })
+    );
+
+    let stmt = parse_statement(
+        "alter table pets add column valid_at daterange, add constraint pets_pk primary key (owner_id, valid_at without overlaps)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableMulti(vec![
+            "ALTER TABLE pets add column valid_at daterange".into(),
+            "ALTER TABLE pets add constraint pets_pk primary key (owner_id, valid_at without overlaps)".into(),
+        ])
+    );
+
+    let stmt = parse_statement("alter table pets replica identity using index pets_pk").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableReplicaIdentity(AlterTableReplicaIdentityStatement {
+            if_exists: false,
+            only: false,
+            table_name: "pets".into(),
+            index_name: "pets_pk".into(),
         })
     );
 
@@ -2967,6 +3051,16 @@ fn parse_alter_table_constraint_statements() {
         })
     );
 
+    let stmt =
+        parse_statement("alter table items alter column note set default 'generated'").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::AlterTableAlterColumnDefault(AlterTableAlterColumnDefaultStatement {
+            default_expr: Some(SqlExpr::Const(Value::Text(value))),
+            ..
+        }) if value.as_str() == "generated"
+    ));
+
     let stmt = parse_statement("alter table items alter note drop default").unwrap();
     assert_eq!(
         stmt,
@@ -2979,6 +3073,50 @@ fn parse_alter_table_constraint_statements() {
             default_expr_sql: None,
         })
     );
+}
+
+#[test]
+fn parse_identity_options_alter_and_overriding() {
+    let stmt = parse_statement(
+        "create table items (id int generated by default as identity (start with 7 increment by 5))",
+    )
+    .unwrap();
+    let Statement::CreateTable(create) = stmt else {
+        panic!("expected create table");
+    };
+    let column = create.columns().next().unwrap();
+    let identity = column.identity.as_ref().unwrap();
+    assert_eq!(identity.kind, ColumnIdentityKind::ByDefault);
+    assert_eq!(identity.options.start, Some(7));
+    assert_eq!(identity.options.increment, Some(5));
+
+    let stmt = parse_statement(
+        "alter table items alter column id set generated always set increment by 2 restart with 100",
+    )
+    .unwrap();
+    let Statement::AlterTableAlterColumnIdentity(alter) = stmt else {
+        panic!("expected alter identity");
+    };
+    match alter.action {
+        AlterColumnIdentityAction::Set {
+            generation,
+            options,
+        } => {
+            assert_eq!(generation, Some(ColumnIdentityKind::Always));
+            assert_eq!(options.increment, Some(2));
+            assert_eq!(options.restart, Some(Some(100)));
+        }
+        other => panic!("expected set identity action, got {other:?}"),
+    }
+
+    let stmt = parse_statement("insert into items overriding user value values (42)").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::Insert(InsertStatement {
+            overriding: Some(OverridingKind::User),
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -3313,6 +3451,22 @@ fn parse_policy_statements() {
             with_check_sql: None,
         })
     );
+
+    let sql = "CREATE POLICY p4 ON items AS UGLY USING (a > 0)";
+    let err = parse_statement(sql).unwrap_err();
+    assert_eq!(err.to_string(), "unrecognized row security option \"ugly\"");
+    assert_eq!(err.position(), sql.find("UGLY").map(|index| index + 1));
+    match err.unpositioned() {
+        ParseError::DetailedError {
+            hint: Some(hint),
+            sqlstate: "42601",
+            ..
+        } => assert_eq!(
+            hint,
+            "Only PERMISSIVE or RESTRICTIVE policies are supported currently."
+        ),
+        other => panic!("expected detailed policy option error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -3370,6 +3524,22 @@ fn parse_alter_index_rename_statement() {
             only: false,
             table_name: "items_idx".into(),
             new_table_name: "items_idx_new".into(),
+        })
+    );
+}
+
+#[test]
+fn parse_alter_index_set_statement() {
+    let stmt = parse_statement("alter index if exists items_idx set (fillfactor = 10)").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterIndexSet(AlterIndexSetStatement {
+            if_exists: true,
+            index_name: "items_idx".into(),
+            options: vec![RelOption {
+                name: "fillfactor".into(),
+                value: "10".into(),
+            }],
         })
     );
 }
@@ -3506,6 +3676,19 @@ fn parse_alter_table_drop_column_statement() {
             only: false,
             table_name: "items".into(),
             column_name: "note".into(),
+            cascade: false,
+        })
+    );
+
+    let stmt = parse_statement("alter table items drop column note cascade").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableDropColumn(AlterTableDropColumnStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            column_name: "note".into(),
+            cascade: true,
         })
     );
 }
@@ -4120,6 +4303,35 @@ fn parse_grant_all_on_table_statement() {
 }
 
 #[test]
+fn parse_grant_update_on_table_statement() {
+    let stmt = parse_statement("grant update on atest2 to regress_priv_user3").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UpdateOnTable,
+            object_names: vec!["atest2".into()],
+            grantee_names: vec!["regress_priv_user3".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_multiple_table_privileges_statement() {
+    let stmt =
+        parse_statement("grant select, update on table grantor_test3 to regress_grantor3").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::TablePrivileges("rw".into()),
+            object_names: vec!["grantor_test3".into()],
+            grantee_names: vec!["regress_grantor3".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
 fn parse_grant_execute_on_function_statement() {
     let stmt = parse_statement("grant execute on function f_leak(text) to public").unwrap();
     assert_eq!(
@@ -4169,6 +4381,20 @@ fn parse_revoke_all_privileges_on_table_from_public_statement() {
             privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
             object_names: vec!["tenant_table".into()],
             grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_delete_on_table_statement() {
+    let stmt = parse_statement("revoke delete on atest3 from regress_priv_group2").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::DeleteOnTable,
+            object_names: vec!["atest3".into()],
+            grantee_names: vec!["regress_priv_group2".into()],
             cascade: false,
         })
     );
@@ -4449,6 +4675,82 @@ fn parse_do_statement_with_explicit_language() {
 }
 
 #[test]
+fn parse_create_cast_with_function_and_implicit_context() {
+    let stmt = parse_statement(
+        "create cast (int4 as casttesttype) with function pg_catalog.int4_casttesttype(int4) as implicit",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateCast(CreateCastStatement {
+            source_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+            target_type: RawTypeName::Named {
+                name: "casttesttype".into(),
+                array_bounds: 0,
+            },
+            method: CreateCastMethod::Function {
+                schema_name: Some("pg_catalog".into()),
+                function_name: "int4_casttesttype".into(),
+                arg_types: vec![RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4))],
+            },
+            context: CastContext::Implicit,
+        })
+    );
+}
+
+#[test]
+fn parse_create_cast_without_function_and_assignment_context() {
+    let stmt = parse_statement("create cast (text as casttesttype) without function as assignment")
+        .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateCast(CreateCastStatement {
+            source_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+            target_type: RawTypeName::Named {
+                name: "casttesttype".into(),
+                array_bounds: 0,
+            },
+            method: CreateCastMethod::WithoutFunction,
+            context: CastContext::Assignment,
+        })
+    );
+}
+
+#[test]
+fn parse_create_cast_with_inout_defaults_to_explicit_context() {
+    let stmt = parse_statement("create cast (int4 as casttesttype) with inout").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateCast(CreateCastStatement {
+            source_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+            target_type: RawTypeName::Named {
+                name: "casttesttype".into(),
+                array_bounds: 0,
+            },
+            method: CreateCastMethod::InOut,
+            context: CastContext::Explicit,
+        })
+    );
+}
+
+#[test]
+fn parse_drop_cast_if_exists_cascade() {
+    let stmt = parse_statement("drop cast if exists (int4 as casttesttype) cascade").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropCast(DropCastStatement {
+            if_exists: true,
+            source_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+            target_type: RawTypeName::Named {
+                name: "casttesttype".into(),
+                array_bounds: 0,
+            },
+            cascade: true,
+        })
+    );
+}
+
+#[test]
 fn parse_create_function_statement_with_returns_table() {
     let stmt = parse_statement(
         "create function public.pair_rows(x int4) returns table(a int4, b text) language plpgsql as $$ begin return next; end $$",
@@ -4465,6 +4767,7 @@ fn parse_create_function_statement_with_returns_table() {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                type_position: None,
                 default_expr: None,
                 variadic: false,
             }],
@@ -4506,6 +4809,7 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                type_position: None,
                 default_expr: None,
                 variadic: false,
             }],
@@ -4596,6 +4900,20 @@ fn parse_create_instead_of_trigger_statement() {
             func_args: Vec::new(),
         })
     );
+}
+
+#[test]
+fn parse_create_trigger_statement_for_statement_without_each() {
+    let stmt = parse_statement(
+        "create trigger audit_stmt after insert on public.people for statement execute function public.audit_people()",
+    )
+    .unwrap();
+    match stmt {
+        Statement::CreateTrigger(CreateTriggerStatement { level, .. }) => {
+            assert_eq!(level, TriggerLevel::Statement);
+        }
+        other => panic!("expected create trigger, got {other:?}"),
+    }
 }
 
 #[test]
@@ -4698,10 +5016,52 @@ fn parse_enable_replica_trigger_requires_name() {
 fn parse_set_transaction_isolation_level_serializable() {
     assert_eq!(
         parse_statement("set transaction isolation level serializable").unwrap(),
-        Statement::Set(SetStatement {
+        Statement::SetTransaction(SetTransactionStatement {
+            scope: SetTransactionScope::Transaction,
+            options: TransactionOptions {
+                isolation_level: Some(TransactionIsolationLevel::Serializable),
+                ..TransactionOptions::default()
+            },
+        })
+    );
+}
+
+#[test]
+fn parse_set_session_transaction_characteristics() {
+    assert_eq!(
+        parse_statement(
+            "set session characteristics as transaction isolation level repeatable read",
+        )
+        .unwrap(),
+        Statement::SetTransaction(SetTransactionStatement {
+            scope: SetTransactionScope::SessionCharacteristics,
+            options: TransactionOptions {
+                isolation_level: Some(TransactionIsolationLevel::RepeatableRead),
+                ..TransactionOptions::default()
+            },
+        })
+    );
+}
+
+#[test]
+fn parse_transaction_mode_options() {
+    assert_eq!(
+        parse_statement("begin isolation level repeatable read, read only, not deferrable")
+            .unwrap(),
+        Statement::Begin(TransactionOptions {
+            isolation_level: Some(TransactionIsolationLevel::RepeatableRead),
+            read_only: Some(true),
+            deferrable: Some(false),
+        })
+    );
+}
+
+#[test]
+fn parse_show_transaction_isolation_level() {
+    assert_eq!(
+        parse_statement("show transaction isolation level").unwrap(),
+        Statement::Show(ShowStatement {
             name: "transaction_isolation".into(),
-            value: Some("serializable".into()),
-            is_local: true,
         })
     );
 }
@@ -4801,6 +5161,7 @@ fn parse_create_function_statement_with_unnamed_args() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    type_position: None,
                     default_expr: None,
                     variadic: false,
                 },
@@ -4808,6 +5169,7 @@ fn parse_create_function_statement_with_unnamed_args() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    type_position: None,
                     default_expr: None,
                     variadic: false,
                 }
@@ -4822,6 +5184,48 @@ fn parse_create_function_statement_with_unnamed_args() {
             parallel: FunctionParallel::Unsafe,
             language: "plpgsql".into(),
             body: " begin return true; end ".into(),
+            link_symbol: None,
+        })
+    );
+}
+
+#[test]
+fn parse_create_function_statement_with_variadic_arg() {
+    let stmt = parse_statement(
+        "create function least_accum(variadic items anyarray) returns anyelement language sql as $$ select $1[1] $$",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateFunction(CreateFunctionStatement {
+            schema_name: None,
+            function_name: "least_accum".into(),
+            replace_existing: false,
+            cost: None,
+            args: vec![CreateFunctionArg {
+                mode: FunctionArgMode::In,
+                name: Some("items".into()),
+                ty: RawTypeName::Named {
+                    name: "anyarray".into(),
+                    array_bounds: 0,
+                },
+                type_position: Some(44),
+                default_expr: None,
+                variadic: true,
+            }],
+            return_spec: CreateFunctionReturnSpec::Type {
+                ty: RawTypeName::Named {
+                    name: "anyelement".into(),
+                    array_bounds: 0,
+                },
+                setof: false,
+            },
+            strict: false,
+            leakproof: false,
+            volatility: FunctionVolatility::Volatile,
+            parallel: FunctionParallel::Unsafe,
+            language: "sql".into(),
+            body: " select $1[1] ".into(),
             link_symbol: None,
         })
     );
@@ -4845,6 +5249,7 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    type_position: None,
                     default_expr: None,
                     variadic: false,
                 },
@@ -4852,6 +5257,7 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    type_position: None,
                     default_expr: None,
                     variadic: false,
                 }
@@ -4888,6 +5294,7 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
                 mode: FunctionArgMode::In,
                 name: None,
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bytea)),
+                type_position: None,
                 default_expr: None,
                 variadic: false,
             }],
@@ -4923,6 +5330,7 @@ fn parse_create_function_statement_with_cost_clause() {
                 mode: FunctionArgMode::In,
                 name: None,
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                type_position: None,
                 default_expr: None,
                 variadic: false,
             }],
@@ -4993,6 +5401,7 @@ fn parse_create_procedure_statement() {
                     mode: FunctionArgMode::InOut,
                     name: Some("x".into()),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                    type_position: None,
                     default_expr: None,
                     variadic: false,
                 },
@@ -5000,6 +5409,7 @@ fn parse_create_procedure_statement() {
                     mode: FunctionArgMode::In,
                     name: Some("y".into()),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                    type_position: None,
                     default_expr: Some("'a'".into()),
                     variadic: false,
                 },
@@ -5081,9 +5491,10 @@ fn parse_create_aggregate_statement_with_plain_signature() {
             schema_name: None,
             aggregate_name: "newavg".into(),
             replace_existing: false,
-            signature: AggregateSignatureKind::Args(vec![AggregateArgType::Type(
+            signature: aggregate_signature(vec![aggregate_signature_arg(AggregateArgType::Type(
                 RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
-            )]),
+            ))]),
+            hypothetical: false,
             sfunc_name: "int4_avg_accum".into(),
             stype: RawTypeName::Named {
                 name: "_int8".into(),
@@ -5123,6 +5534,7 @@ fn parse_create_aggregate_statement_with_old_style_basetype() {
             aggregate_name: "oldcnt".into(),
             replace_existing: false,
             signature: AggregateSignatureKind::Star,
+            hypothetical: false,
             sfunc_name: "int8inc".into(),
             stype: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int8)),
             finalfunc_name: None,
@@ -5159,6 +5571,7 @@ fn parse_create_or_replace_aggregate_star_signature() {
             aggregate_name: "newcnt".into(),
             replace_existing: true,
             signature: AggregateSignatureKind::Star,
+            hypothetical: false,
             sfunc_name: "int8inc".into(),
             stype: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int8)),
             finalfunc_name: None,
@@ -5191,7 +5604,9 @@ fn parse_drop_and_comment_on_aggregate_statements() {
             if_exists: true,
             schema_name: Some("public".into()),
             aggregate_name: "newcnt".into(),
-            signature: AggregateSignatureKind::Args(vec![AggregateArgType::AnyPseudo]),
+            signature: aggregate_signature(vec![aggregate_signature_arg(
+                AggregateArgType::AnyPseudo,
+            )]),
             cascade: true,
         })
     );
@@ -5209,26 +5624,62 @@ fn parse_drop_and_comment_on_aggregate_statements() {
 }
 
 #[test]
-fn parse_create_aggregate_rejects_unsupported_forms() {
-    let err = parse_statement(
+fn parse_create_aggregate_supports_ordered_variadic_and_hypothetical_forms() {
+    let stmt = parse_statement(
         "create aggregate my_percentile_disc(float8 order by anyelement) (sfunc = int8inc, stype = int8)",
     )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ParseError::FeatureNotSupported(message)
-            if message.contains("ordered-set aggregate signatures")
-    ));
+    .unwrap();
+    match stmt {
+        Statement::CreateAggregate(stmt) => {
+            assert_eq!(
+                stmt.signature,
+                AggregateSignatureKind::Args(AggregateSignature {
+                    args: vec![aggregate_signature_arg(AggregateArgType::Type(
+                        RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float8)),
+                    ))],
+                    order_by: vec![aggregate_signature_arg(AggregateArgType::Type(
+                        RawTypeName::Named {
+                            name: "anyelement".into(),
+                            array_bounds: 0,
+                        },
+                    ))],
+                })
+            );
+            assert!(!stmt.hypothetical);
+        }
+        other => panic!("expected CREATE AGGREGATE, got {other:?}"),
+    }
 
-    let err = parse_statement(
+    let stmt = parse_statement(
         "create aggregate least_agg(variadic items anyarray) (sfunc = int8inc, stype = int8)",
     )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ParseError::FeatureNotSupported(message)
-            if message.contains("VARIADIC aggregate signatures")
-    ));
+    .unwrap();
+    match stmt {
+        Statement::CreateAggregate(stmt) => {
+            assert_eq!(
+                stmt.signature,
+                aggregate_signature(vec![AggregateSignatureArg {
+                    name: Some("items".into()),
+                    arg_type: AggregateArgType::Type(RawTypeName::Named {
+                        name: "anyarray".into(),
+                        array_bounds: 0,
+                    }),
+                    variadic: true,
+                }])
+            );
+            assert!(!stmt.hypothetical);
+        }
+        other => panic!("expected CREATE AGGREGATE, got {other:?}"),
+    }
+
+    let stmt = parse_statement(
+        "create aggregate hypothetical_rank(float8 order by anyelement) (sfunc = int8inc, stype = int8, hypothetical)",
+    )
+    .unwrap();
+    match stmt {
+        Statement::CreateAggregate(stmt) => assert!(stmt.hypothetical),
+        other => panic!("expected CREATE AGGREGATE, got {other:?}"),
+    }
 
     let stmt = parse_statement(
         "create aggregate badagg(int4) (sfunc = int4pl, stype = int4, combinefunc = int4pl)",
@@ -5240,6 +5691,33 @@ fn parse_create_aggregate_rejects_unsupported_forms() {
         }
         other => panic!("expected CREATE AGGREGATE, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_alter_aggregate_rename_statement() {
+    let stmt = parse_statement(
+        "alter aggregate public.my_percentile_disc(float8 order by anyelement) rename to my_percentile_disc2",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterAggregateRename(AlterAggregateRenameStatement {
+            schema_name: Some("public".into()),
+            aggregate_name: "my_percentile_disc".into(),
+            signature: AggregateSignatureKind::Args(AggregateSignature {
+                args: vec![aggregate_signature_arg(AggregateArgType::Type(
+                    RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float8)),
+                ))],
+                order_by: vec![aggregate_signature_arg(AggregateArgType::Type(
+                    RawTypeName::Named {
+                        name: "anyelement".into(),
+                        array_bounds: 0,
+                    },
+                ))],
+            }),
+            new_name: "my_percentile_disc2".into(),
+        })
+    );
 }
 
 #[test]
@@ -5301,6 +5779,17 @@ fn parse_reset_statement() {
         stmt,
         Statement::Reset(ResetStatement {
             name: Some("extra_float_digits".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_reset_time_zone_statement() {
+    let stmt = parse_statement("reset time zone").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Reset(ResetStatement {
+            name: Some("timezone".into()),
         })
     );
 }
@@ -7235,6 +7724,15 @@ fn parse_at_time_zone_expression() {
 }
 
 #[test]
+fn parse_overlaps_expression() {
+    let stmt = parse_select(
+        "select (timestamp '2000-11-27', timestamp '2000-11-28') overlaps (timestamp '2000-11-27 12:00', interval '1 day')",
+    )
+    .unwrap();
+    assert!(matches!(&stmt.targets[0].expr, SqlExpr::Overlaps(_, _)));
+}
+
+#[test]
 fn analyze_at_time_zone_uses_timezone_function_types() {
     let stmt =
         parse_select("select timestamptz '2001-02-16 20:38:40+00' at time zone 'America/Denver'")
@@ -7289,6 +7787,136 @@ fn analyze_timetz_at_time_zone_keeps_timetz_and_interval_types() {
                     }
                 )
         ]
+    ));
+}
+
+#[test]
+fn analyze_date_time_arithmetic_uses_postgres_result_types() {
+    let stmt = parse_select(
+        "select date '2001-01-02' + time '03:04', date '2001-01-02' + timetz '03:04+02', date '2001-01-02' - time '03:04'",
+    )
+    .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+    assert!(matches!(
+        &query.target_list[0].expr,
+        Expr::Op(op) if op.opresulttype == SqlType::new(SqlTypeKind::Timestamp)
+    ));
+    assert!(matches!(
+        &query.target_list[1].expr,
+        Expr::Op(op) if op.opresulttype == SqlType::new(SqlTypeKind::TimestampTz)
+    ));
+    assert!(matches!(
+        &query.target_list[2].expr,
+        Expr::Op(op) if op.opresulttype == SqlType::new(SqlTypeKind::Timestamp)
+    ));
+
+    let err = analyze_select_query_with_outer(
+        &parse_select("select date '2001-01-02' - timetz '03:04+02'").unwrap(),
+        &catalog(),
+        &[],
+        None,
+        None,
+        &[],
+        &[],
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UndefinedOperator {
+            op: "-",
+            left_type,
+            right_type,
+        } if left_type == "date" && right_type == "time with time zone"
+    ));
+}
+
+#[test]
+fn analyze_rejects_unsupported_timetz_interval_casts_with_postgres_error() {
+    for (sql, expected) in [
+        (
+            "select cast(time with time zone '01:02-08' as interval)",
+            "cannot cast type time with time zone to interval",
+        ),
+        (
+            "select cast(interval '02:03' as time with time zone)",
+            "cannot cast type interval to time with time zone",
+        ),
+    ] {
+        let err = analyze_select_query_with_outer(
+            &parse_select(sql).unwrap(),
+            &catalog(),
+            &[],
+            None,
+            None,
+            &[],
+            &[],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::DetailedError {
+                message,
+                sqlstate: "42846",
+                ..
+            } if message == expected
+        ));
+    }
+}
+
+#[test]
+fn analyze_timestamptz_date_time_constructor_overloads() {
+    let stmt = parse_select(
+        "select timestamptz(date '2001-01-02', time '03:04'), timestamptz(date '2001-01-02', timetz '03:04+02')",
+    )
+    .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+    for target in &query.target_list {
+        assert!(matches!(
+            &target.expr,
+            Expr::Func(func)
+                if func.implementation == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+                    crate::include::nodes::primnodes::BuiltinScalarFunction::TimestampTzConstructor
+                )
+                    && func.funcresulttype == Some(SqlType::new(SqlTypeKind::TimestampTz))
+        ));
+    }
+}
+
+#[test]
+fn analyze_mixed_date_timestamp_comparisons_keep_cross_type_ops() {
+    let stmt = parse_select(
+        "select date '2001-01-02' < timestamp '2001-01-03', date '2001-01-02' <= timestamptz '2001-01-03 00:00+00', timestamp '2001-01-02' = timestamptz '2001-01-02 00:00+00'",
+    )
+    .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+
+    assert!(matches!(
+        &query.target_list[0].expr,
+        Expr::Op(op)
+            if matches!(op.args.as_slice(), [
+                Expr::Cast(_, SqlType { kind: SqlTypeKind::Date, .. }) | Expr::Const(Value::Date(_)),
+                Expr::Cast(_, SqlType { kind: SqlTypeKind::Timestamp, .. }) | Expr::Const(Value::Timestamp(_)),
+            ])
+    ));
+    assert!(matches!(
+        &query.target_list[1].expr,
+        Expr::Op(op)
+            if matches!(op.args.as_slice(), [
+                Expr::Cast(_, SqlType { kind: SqlTypeKind::Date, .. }) | Expr::Const(Value::Date(_)),
+                Expr::Cast(_, SqlType { kind: SqlTypeKind::TimestampTz, .. }) | Expr::Const(Value::TimestampTz(_)),
+            ])
+    ));
+    assert!(matches!(
+        &query.target_list[2].expr,
+        Expr::Op(op)
+            if op.args.iter().all(|arg| matches!(
+                arg,
+                Expr::Const(Value::TimestampTz(_))
+                    | Expr::Cast(_, SqlType { kind: SqlTypeKind::TimestampTz, .. })
+            ))
     ));
 }
 
@@ -7983,11 +8611,11 @@ fn build_plan_wraps_order_by_and_limit() {
                 } => {
                     assert_eq!(limit, Some(2));
                     assert_eq!(offset, 1);
-                    match *input {
+                    match strip_projections(input.as_ref()) {
                         Plan::OrderBy { input, items, .. } => {
                             assert_eq!(items.len(), 1);
                             assert!(items[0].descending);
-                            assert!(matches!(*input, Plan::Filter { .. }));
+                            assert!(matches!(input.as_ref(), Plan::Filter { .. }));
                         }
                         other => panic!("expected order by, got {:?}", other),
                     }
@@ -8004,7 +8632,7 @@ fn build_plan_resolves_order_by_ordinal_against_target_list() {
     let stmt = parse_select("select name, id from people order by 2 desc").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
-        Plan::Projection { input, .. } => match *input {
+        Plan::Projection { input, .. } => match strip_projections(input.as_ref()) {
             Plan::OrderBy { items, .. } => {
                 assert_eq!(items.len(), 1);
                 assert!(items[0].descending);
@@ -8608,6 +9236,21 @@ fn parse_merge_statement() {
         MergeMatchKind::NotMatchedBySource
     );
     assert!(matches!(stmt.when_clauses[2].action, MergeAction::Delete));
+    assert!(stmt.returning.is_empty());
+}
+
+#[test]
+fn parse_merge_returning_clause() {
+    let stmt = parse_statement(
+        "merge into target t using source s on t.tid = s.sid \
+         when matched then delete returning merge_action(), old, new, t.*",
+    )
+    .unwrap();
+    let stmt = match stmt {
+        Statement::Merge(stmt) => stmt,
+        other => panic!("expected merge statement, got {other:?}"),
+    };
+    assert_eq!(stmt.returning.len(), 4);
 }
 
 #[test]
@@ -8640,6 +9283,21 @@ fn plan_merge_uses_join_shape_for_explain() {
         strip_projections(&bound.input_plan.plan_tree),
         Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. } | Plan::MergeJoin { .. }
     ));
+    assert_eq!(bound.visible_column_count, 5);
+    assert_eq!(bound.target_ctid_index, 5);
+    assert_eq!(bound.source_present_index, 6);
+    assert_eq!(
+        bound.input_plan.column_names(),
+        [
+            "id",
+            "name",
+            "note",
+            "id",
+            "owner_id",
+            "__merge_target_ctid",
+            "__merge_source_present",
+        ]
+    );
 }
 
 #[test]
@@ -8685,6 +9343,7 @@ fn parse_create_rule_single_action() {
                     table_name: "pets".into(),
                     table_alias: None,
                     columns: None,
+                    overriding: None,
                     source: InsertSource::Values(vec![vec![
                         SqlExpr::Column("new.id".into()),
                         SqlExpr::Column("new.id".into()),
@@ -8991,6 +9650,7 @@ fn people_insert_with_on_conflict(
                 field_path: vec![],
             },
         ]),
+        overriding: None,
         source: InsertSource::Values(vec![vec![
             parse_expr("1").unwrap(),
             parse_expr("'alice'").unwrap(),
@@ -9506,6 +10166,29 @@ fn parse_show_timezone() {
         parse_statement("show timezone").unwrap(),
         Statement::Show(ShowStatement { name }) if name == "timezone"
     ));
+    assert!(matches!(
+        parse_statement("show time zone").unwrap(),
+        Statement::Show(ShowStatement { name }) if name == "timezone"
+    ));
+}
+
+#[test]
+fn parse_between_symmetric_expression() {
+    let stmt = parse_select("select time '01:00' between symmetric time '02:00' and time '00:00'")
+        .unwrap();
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::Or(_, _)));
+}
+
+#[test]
+fn parse_not_between_lowers_like_postgres() {
+    let stmt =
+        parse_select("select f1 not between date '1997-01-01' and date '1998-01-01'").unwrap();
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::Or(_, _)));
+
+    let stmt =
+        parse_select("select f1 not between symmetric date '1997-01-01' and date '1998-01-01'")
+            .unwrap();
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::And(_, _)));
 }
 
 #[test]
@@ -9554,6 +10237,7 @@ fn create_table_temp_name_validation() {
         crate::backend::parser::normalize_create_table_name(&CreateTableStatement {
             schema_name: Some("public".into()),
             table_name: "t".into(),
+            of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![],
@@ -9570,6 +10254,7 @@ fn create_table_temp_name_validation() {
     let err = crate::backend::parser::normalize_create_table_name(&CreateTableStatement {
         schema_name: Some("public".into()),
         table_name: "t".into(),
+        of_type_name: None,
         persistence: TablePersistence::Temporary,
         on_commit: OnCommitAction::PreserveRows,
         elements: vec![],
@@ -9585,6 +10270,7 @@ fn create_table_temp_name_validation() {
     let err = crate::backend::parser::normalize_create_table_name(&CreateTableStatement {
         schema_name: None,
         table_name: "t".into(),
+        of_type_name: None,
         persistence: TablePersistence::Permanent,
         on_commit: OnCommitAction::DeleteRows,
         elements: vec![],
@@ -9626,6 +10312,60 @@ fn parse_create_table_inherits_clause() {
         }
         other => panic!("expected CreateTable, got {:?}", other),
     }
+}
+
+#[test]
+fn parse_create_table_of_with_typed_column_options() {
+    let Statement::CreateTable(ct) = parse_statement(
+        "create table persons of person_type (id with options primary key, name not null default 'x')",
+    )
+    .unwrap()
+    else {
+        panic!("expected CreateTable");
+    };
+    assert_eq!(ct.table_name, "persons");
+    assert_eq!(ct.of_type_name.as_deref(), Some("person_type"));
+    assert_eq!(ct.elements.len(), 2);
+    let CreateTableElement::TypedColumnOptions(id_options) = &ct.elements[0] else {
+        panic!("expected typed column options");
+    };
+    assert_eq!(id_options.name, "id");
+    assert!(
+        id_options
+            .constraints
+            .iter()
+            .any(|constraint| matches!(constraint, ColumnConstraint::PrimaryKey { .. }))
+    );
+    let CreateTableElement::TypedColumnOptions(name_options) = &ct.elements[1] else {
+        panic!("expected typed column options");
+    };
+    assert_eq!(name_options.name, "name");
+    assert_eq!(name_options.default_expr.as_deref(), Some("'x'"));
+    assert!(
+        name_options
+            .constraints
+            .iter()
+            .any(|constraint| matches!(constraint, ColumnConstraint::NotNull { .. }))
+    );
+}
+
+#[test]
+fn parse_alter_table_of_and_not_of() {
+    let Statement::AlterTableOf(alter_of) =
+        parse_statement("alter table persons of person_type").unwrap()
+    else {
+        panic!("expected AlterTableOf");
+    };
+    assert_eq!(alter_of.table_name, "persons");
+    assert_eq!(alter_of.type_name, "person_type");
+
+    let Statement::AlterTableNotOf(not_of) =
+        parse_statement("alter table if exists persons not of").unwrap()
+    else {
+        panic!("expected AlterTableNotOf");
+    };
+    assert_eq!(not_of.table_name, "persons");
+    assert!(not_of.if_exists);
 }
 
 #[test]
@@ -9758,6 +10498,34 @@ fn parse_create_table_partition_of_with_subpartition_spec() {
                     }],
                 })
             );
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_table_partition_of_with_storage_clause() {
+    match parse_statement(
+        "create table measurement_lo partition of measurement \
+         for values from (0) to (10) with (autovacuum_enabled = false)",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.partition_of.as_deref(), Some("measurement"));
+            assert_eq!(
+                ct.partition_bound,
+                Some(RawPartitionBoundSpec::Range {
+                    from: vec![RawPartitionRangeDatum::Value(SqlExpr::IntegerLiteral(
+                        "0".into()
+                    ))],
+                    to: vec![RawPartitionRangeDatum::Value(SqlExpr::IntegerLiteral(
+                        "10".into()
+                    ))],
+                    is_default: false,
+                })
+            );
+            assert_eq!(ct.partition_spec, None);
         }
         other => panic!("expected CreateTable, got {:?}", other),
     }
@@ -10002,6 +10770,18 @@ fn parse_select_for_update_clause() {
 }
 
 #[test]
+fn parse_select_for_update_of_clause() {
+    match parse_statement("select * from people for update of people").unwrap() {
+        Statement::Select(SelectStatement {
+            from: Some(FromItem::Table { name, only: false }),
+            locking_clause: Some(SelectLockingClause::ForUpdate),
+            ..
+        }) => assert_eq!(name, "people"),
+        other => panic!("expected Select with FOR UPDATE OF, got {:?}", other),
+    }
+}
+
+#[test]
 fn parse_select_for_no_key_update_clause() {
     match parse_statement("select * from people for no key update").unwrap() {
         Statement::Select(SelectStatement {
@@ -10034,6 +10814,40 @@ fn parse_select_for_key_share_clause() {
             ..
         }) => assert_eq!(name, "people"),
         other => panic!("expected Select with FOR KEY SHARE, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_limit_null_as_unbounded_limit() {
+    match parse_statement("select * from people limit null").unwrap() {
+        Statement::Select(SelectStatement { limit: None, .. }) => {}
+        other => panic!("expected SELECT with unbounded LIMIT NULL, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_distinct_on_as_distinct_select() {
+    match parse_statement("select distinct on (id) id, name from people").unwrap() {
+        Statement::Select(SelectStatement { distinct: true, .. }) => {}
+        other => panic!("expected SELECT DISTINCT ON, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_view_with_for_update_of_clause() {
+    match parse_statement("create view locked_people as select * from people for update of people")
+        .unwrap()
+    {
+        Statement::CreateView(CreateViewStatement {
+            view_name,
+            query:
+                SelectStatement {
+                    locking_clause: Some(SelectLockingClause::ForUpdate),
+                    ..
+                },
+            ..
+        }) => assert_eq!(view_name, "locked_people"),
+        other => panic!("expected CREATE VIEW with FOR UPDATE OF, got {:?}", other),
     }
 }
 
@@ -10101,6 +10915,45 @@ fn parse_union_all_select_chain() {
     assert_eq!(set_operation.inputs.len(), 2);
     assert!(stmt.targets.is_empty());
     assert!(stmt.from.is_none());
+}
+
+#[test]
+fn parse_parenthesized_union_input_with_extra_parens() {
+    let stmt = parse_select("((select 2)) union select 2").unwrap();
+    let set_operation = stmt.set_operation.expect("set operation");
+    assert!(matches!(
+        set_operation.op,
+        SetOperator::Union { all: false }
+    ));
+    assert_eq!(set_operation.inputs.len(), 2);
+}
+
+#[test]
+fn parse_scalar_subquery_with_parenthesized_union_input() {
+    let stmt = parse_select("select (((select 2)) union select 2)").unwrap();
+    let SqlExpr::ScalarSubquery(subquery) = &stmt.targets[0].expr else {
+        panic!("expected scalar subquery, got {:?}", stmt.targets[0].expr);
+    };
+    assert!(subquery.set_operation.is_some());
+}
+
+#[test]
+fn parse_empty_select_set_operations() {
+    for sql in [
+        "select union select",
+        "select intersect select",
+        "select except select",
+    ] {
+        let stmt = parse_select(sql).unwrap();
+        let set_operation = stmt.set_operation.expect("set operation");
+        assert_eq!(set_operation.inputs.len(), 2);
+        assert!(
+            set_operation
+                .inputs
+                .iter()
+                .all(|input| input.targets.is_empty())
+        );
+    }
 }
 
 #[test]
@@ -10189,6 +11042,63 @@ fn parse_intersect_with_derived_union_inputs() {
         SetOperator::Intersect { all: false }
     ));
     assert_eq!(set_operation.inputs.len(), 2);
+}
+
+#[test]
+fn parse_parenthesized_select_statement() {
+    let stmt = parse_select("((select * from int8_tbl))").unwrap();
+    assert!(matches!(
+        stmt.from,
+        Some(FromItem::Table { ref name, .. }) if name == "int8_tbl"
+    ));
+}
+
+#[test]
+fn parse_parenthesized_set_operation_operand_with_order_limit() {
+    let stmt = parse_select(
+        "select q1 from int8_tbl except (((select q2 from int8_tbl order by q2 limit 1))) order by 1",
+    )
+    .unwrap();
+    assert_eq!(stmt.order_by.len(), 1);
+    let set_operation = stmt.set_operation.expect("set operation");
+    assert!(matches!(
+        set_operation.op,
+        SetOperator::Except { all: false }
+    ));
+    assert_eq!(set_operation.inputs.len(), 2);
+    assert_eq!(set_operation.inputs[1].order_by.len(), 1);
+    assert_eq!(set_operation.inputs[1].limit, Some(1));
+}
+
+#[test]
+fn parse_parenthesized_values_set_operation_operand() {
+    let stmt = parse_select("select 1 union all (values (2)) limit 1").unwrap();
+    assert_eq!(stmt.limit, Some(1));
+    let set_operation = stmt.set_operation.expect("set operation");
+    assert!(matches!(set_operation.op, SetOperator::Union { all: true }));
+    assert!(matches!(
+        set_operation.inputs[1].from,
+        Some(FromItem::Values { .. })
+    ));
+}
+
+#[test]
+fn parse_cte_materialization_markers() {
+    for sql in [
+        "with cte as materialized (select 1) select * from cte",
+        "with cte as not materialized (select 1) select * from cte",
+    ] {
+        match parse_statement(sql).unwrap() {
+            Statement::Select(SelectStatement { with, .. }) => {
+                assert_eq!(with.len(), 1);
+                assert!(matches!(
+                    with[0].body,
+                    crate::backend::parser::CteBody::Select(_)
+                ));
+            }
+            other => panic!("expected Select with CTE, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -10736,10 +11646,42 @@ fn parse_create_table_foreign_key_constraints() {
         vec![TableConstraint::ForeignKey {
             attributes: attrs(),
             columns: vec!["owner_name".into()],
+            period: None,
             referenced_table: "people".into(),
             referenced_columns: Some(vec!["name".into()]),
+            referenced_period: None,
             match_type: ForeignKeyMatchType::Simple,
             on_delete: ForeignKeyAction::Restrict,
+            on_delete_set_columns: None,
+            on_update: ForeignKeyAction::NoAction,
+        }]
+    );
+
+    let stmt = parse_statement(
+        "create table temporal_fk (
+            parent_id int4range,
+            valid_at daterange,
+            constraint temporal_fk_parent_fk foreign key (parent_id, period valid_at) references temporal_parent(id, period valid_at)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert_eq!(
+        ct.constraints().cloned().collect::<Vec<_>>(),
+        vec![TableConstraint::ForeignKey {
+            attributes: ConstraintAttributes {
+                name: Some("temporal_fk_parent_fk".into()),
+                ..attrs()
+            },
+            columns: vec!["parent_id".into(), "valid_at".into()],
+            period: Some("valid_at".into()),
+            referenced_table: "temporal_parent".into(),
+            referenced_columns: Some(vec!["id".into(), "valid_at".into()]),
+            referenced_period: Some("valid_at".into()),
+            match_type: ForeignKeyMatchType::Simple,
+            on_delete: ForeignKeyAction::NoAction,
             on_delete_set_columns: None,
             on_update: ForeignKeyAction::NoAction,
         }]
@@ -11149,6 +12091,39 @@ fn parse_alter_type_rename_to_statement() {
 }
 
 #[test]
+fn parse_alter_type_composite_attribute_actions() {
+    let Statement::AlterType(AlterTypeStatement::AlterComposite(stmt)) = parse_statement(
+        "alter type person add attribute age int4 cascade, rename attribute name to full_name restrict",
+    )
+    .unwrap()
+    else {
+        panic!("expected alter type composite");
+    };
+    assert_eq!(stmt.type_name, "person");
+    assert_eq!(stmt.actions.len(), 2);
+    match &stmt.actions[0] {
+        AlterCompositeTypeAction::AddAttribute { attribute, cascade } => {
+            assert_eq!(attribute.name, "age");
+            assert_eq!(attribute.ty, RawTypeName::builtin(SqlTypeKind::Int4));
+            assert!(*cascade);
+        }
+        other => panic!("expected add attribute, got {other:?}"),
+    }
+    match &stmt.actions[1] {
+        AlterCompositeTypeAction::RenameAttribute {
+            old_name,
+            new_name,
+            cascade,
+        } => {
+            assert_eq!(old_name, "name");
+            assert_eq!(new_name, "full_name");
+            assert!(!*cascade);
+        }
+        other => panic!("expected rename attribute, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_alter_type_set_options_statement() {
     let Statement::AlterType(AlterTypeStatement::SetOptions(stmt)) = parse_statement(
         "alter type public.myvarchar set (storage = extended, send = myvarcharsend, typmod_in = varchartypmodin)",
@@ -11511,9 +12486,13 @@ fn lower_create_table_resolves_named_domain_types() {
             typowner: BOOTSTRAP_SUPERUSER_OID,
             typacl: None,
             typlen: 4,
+            typbyval: true,
+            typtype: 'd',
+            typisdefined: true,
             typalign: AttributeAlign::Int,
             typstorage: AttributeStorage::Plain,
             typrelid: 0,
+            typsubscript: 0,
             typelem: 0,
             typarray: 0,
             typinput: 0,
@@ -11522,8 +12501,10 @@ fn lower_create_table_resolves_named_domain_types() {
             typsend: 0,
             typmodin: 0,
             typmodout: 0,
+            typdelim: ',',
             typanalyze: 0,
-            typsubscript: 0,
+            typbasetype: crate::include::catalog::INT4_TYPE_OID,
+            typcollation: 0,
             sql_type: SqlType::new(SqlTypeKind::Int4),
         }],
     };
@@ -11715,7 +12696,10 @@ fn build_plan_rejects_untyped_empty_array() {
     let stmt = parse_select("select ARRAY[]").unwrap();
     assert!(matches!(
         build_plan(&stmt, &catalog()),
-        Err(ParseError::UnexpectedToken { .. })
+        Err(ParseError::DetailedError { message, hint: Some(hint), sqlstate, .. })
+            if message == "cannot determine type of empty array"
+                && hint == "Explicitly cast to the desired type, for example ARRAY[]::integer[]."
+                && sqlstate == "42P18"
     ));
 }
 
@@ -11733,6 +12717,25 @@ fn build_plan_accepts_typed_empty_array() {
         }
         other => panic!("expected projection, got {other:?}"),
     }
+}
+
+#[test]
+fn build_plan_reports_postgres_any_all_array_errors() {
+    let stmt = parse_select("select 33 * any ('{1,2,3}')").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "op ANY/ALL (array) requires operator to yield boolean"
+                && sqlstate == "42809"
+    ));
+
+    let stmt = parse_select("select 33 * any (44)").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "op ANY/ALL (array) requires array on right side"
+                && sqlstate == "42809"
+    ));
 }
 
 #[test]
@@ -12172,6 +13175,22 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
             vartype: SqlType::new(SqlTypeKind::Text),
         })
     );
+}
+
+#[test]
+fn analyze_grouped_query_matches_bound_equivalent_group_exprs() {
+    for sql in [
+        "select id % 2, count(name) from people group by people.id % 2 order by people.id % 2",
+        "select lower(people.name), count(name) from people group by lower(name) order by lower(name)",
+    ] {
+        let stmt = parse_select(sql).unwrap();
+        let (query, _) =
+            analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+
+        assert_eq!(query.group_by.len(), 1, "{sql}");
+        assert_eq!(query.target_list[0].expr, query.group_by[0], "{sql}");
+        assert_eq!(query.sort_clause[0].expr, query.group_by[0], "{sql}");
+    }
 }
 
 #[test]
@@ -12798,6 +13817,28 @@ fn parse_count_distinct() {
             distinct: true,
             ..
         } if name == "count" && args.args().len() == 1
+    ));
+}
+
+#[test]
+fn parse_select_distinct_on() {
+    let stmt = parse_select("select distinct on (name, note) name from people order by name, note")
+        .unwrap();
+    assert!(stmt.distinct);
+    assert_eq!(stmt.distinct_on.len(), 2);
+    assert!(matches!(&stmt.distinct_on[0], SqlExpr::Column(name) if name == "name"));
+    assert!(matches!(&stmt.distinct_on[1], SqlExpr::Column(name) if name == "note"));
+}
+
+#[test]
+fn select_distinct_on_rejects_non_prefix_order_by() {
+    let stmt =
+        parse_select("select distinct on (name, note) name from people order by name, id, note")
+            .unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::FeatureNotSupportedMessage(message))
+            if message == "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"
     ));
 }
 
@@ -13989,7 +15030,10 @@ fn parse_insert_alias_and_begin_isolation_level() {
 
     assert!(matches!(
         parse_statement("begin transaction isolation level repeatable read").unwrap(),
-        Statement::Begin
+        Statement::Begin(TransactionOptions {
+            isolation_level: Some(TransactionIsolationLevel::RepeatableRead),
+            ..
+        })
     ));
 }
 

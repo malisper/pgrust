@@ -3,7 +3,7 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::*;
 use crate::include::nodes::primnodes::{
-    AggFunc, BuiltinScalarFunction, BuiltinWindowFunction, HypotheticalAggFunc,
+    AggFunc, BuiltinScalarFunction, BuiltinWindowFunction, HashFunctionKind, HypotheticalAggFunc,
 };
 use std::sync::OnceLock;
 
@@ -41,6 +41,18 @@ pub const TID_CMP_NE_PROC_OID: u32 = 1265;
 pub const TID_CMP_EQ_PROC_OID: u32 = 1292;
 pub const BOOL_CMP_LE_PROC_OID: u32 = 1691;
 pub const BOOL_CMP_GE_PROC_OID: u32 = 1692;
+pub const RI_FKEY_CHECK_INS_PROC_OID: u32 = 1644;
+pub const RI_FKEY_CHECK_UPD_PROC_OID: u32 = 1645;
+pub const RI_FKEY_CASCADE_DEL_PROC_OID: u32 = 1646;
+pub const RI_FKEY_CASCADE_UPD_PROC_OID: u32 = 1647;
+pub const RI_FKEY_RESTRICT_DEL_PROC_OID: u32 = 1648;
+pub const RI_FKEY_RESTRICT_UPD_PROC_OID: u32 = 1649;
+pub const RI_FKEY_SETNULL_DEL_PROC_OID: u32 = 1650;
+pub const RI_FKEY_SETNULL_UPD_PROC_OID: u32 = 1651;
+pub const RI_FKEY_SETDEFAULT_DEL_PROC_OID: u32 = 1652;
+pub const RI_FKEY_SETDEFAULT_UPD_PROC_OID: u32 = 1653;
+pub const RI_FKEY_NOACTION_DEL_PROC_OID: u32 = 1654;
+pub const RI_FKEY_NOACTION_UPD_PROC_OID: u32 = 1655;
 pub const TID_CMP_GT_PROC_OID: u32 = 2790;
 pub const TID_CMP_LT_PROC_OID: u32 = 2791;
 pub const TID_CMP_GE_PROC_OID: u32 = 2792;
@@ -76,11 +88,11 @@ pub const INTERVAL_CMP_LT_PROC_OID: u32 = 1164;
 pub const INTERVAL_CMP_LE_PROC_OID: u32 = 1165;
 pub const INTERVAL_CMP_GE_PROC_OID: u32 = 1166;
 pub const INTERVAL_CMP_GT_PROC_OID: u32 = 1167;
-pub const JSONB_CONTAINS_PROC_OID: u32 = 4044;
-pub const JSONB_CONTAINED_PROC_OID: u32 = 4045;
-pub const JSONB_EXISTS_PROC_OID: u32 = 4046;
-pub const JSONB_EXISTS_ANY_PROC_OID: u32 = 4047;
-pub const JSONB_EXISTS_ALL_PROC_OID: u32 = 4048;
+pub const JSONB_CONTAINS_PROC_OID: u32 = 4046;
+pub const JSONB_EXISTS_PROC_OID: u32 = 4047;
+pub const JSONB_EXISTS_ANY_PROC_OID: u32 = 4048;
+pub const JSONB_EXISTS_ALL_PROC_OID: u32 = 4049;
+pub const JSONB_CONTAINED_PROC_OID: u32 = 4050;
 pub const GIN_COMPARE_JSONB_PROC_OID: u32 = 3480;
 pub const GIN_EXTRACT_JSONB_PROC_OID: u32 = 3482;
 pub const GIN_EXTRACT_JSONB_QUERY_PROC_OID: u32 = 3483;
@@ -143,31 +155,61 @@ pub const BRIN_MINMAX_OPCINFO_PROC_OID: u32 = 3383;
 pub const BRIN_MINMAX_ADD_VALUE_PROC_OID: u32 = 3384;
 pub const BRIN_MINMAX_CONSISTENT_PROC_OID: u32 = 3385;
 pub const BRIN_MINMAX_UNION_PROC_OID: u32 = 3386;
-pub const HASH_BOOL_PROC_OID: u32 = 76500;
-pub const HASH_INT2_PROC_OID: u32 = 76501;
-pub const HASH_INT4_PROC_OID: u32 = 76502;
-pub const HASH_INT8_PROC_OID: u32 = 76503;
-pub const HASH_OID_PROC_OID: u32 = 76504;
-pub const HASH_CHAR_PROC_OID: u32 = 76505;
-pub const HASH_NAME_PROC_OID: u32 = 76506;
-pub const HASH_TEXT_PROC_OID: u32 = 76507;
+pub const HASH_BOOL_PROC_OID: u32 = 6417;
+pub const HASH_BOOL_EXTENDED_PROC_OID: u32 = 6418;
+pub const HASH_INT2_PROC_OID: u32 = 449;
+pub const HASH_INT2_EXTENDED_PROC_OID: u32 = 441;
+pub const HASH_INT4_PROC_OID: u32 = 450;
+pub const HASH_INT4_EXTENDED_PROC_OID: u32 = 425;
+pub const HASH_INT8_PROC_OID: u32 = 949;
+pub const HASH_INT8_EXTENDED_PROC_OID: u32 = 442;
+pub const HASH_OID_PROC_OID: u32 = 453;
+pub const HASH_OID_EXTENDED_PROC_OID: u32 = 445;
+pub const HASH_CHAR_PROC_OID: u32 = 454;
+pub const HASH_CHAR_EXTENDED_PROC_OID: u32 = 446;
+pub const HASH_NAME_PROC_OID: u32 = 455;
+pub const HASH_NAME_EXTENDED_PROC_OID: u32 = 447;
+pub const HASH_TEXT_PROC_OID: u32 = 400;
+pub const HASH_TEXT_EXTENDED_PROC_OID: u32 = 448;
 pub const HASH_VARCHAR_PROC_OID: u32 = 76508;
-pub const HASH_BPCHAR_PROC_OID: u32 = 76509;
-pub const HASH_FLOAT4_PROC_OID: u32 = 76510;
-pub const HASH_FLOAT8_PROC_OID: u32 = 76511;
-pub const HASH_NUMERIC_PROC_OID: u32 = 76512;
-pub const HASH_TIMESTAMP_PROC_OID: u32 = 76513;
-pub const HASH_TIMESTAMPTZ_PROC_OID: u32 = 76514;
-pub const HASH_DATE_PROC_OID: u32 = 76515;
-pub const HASH_TIME_PROC_OID: u32 = 76516;
-pub const HASH_TIMETZ_PROC_OID: u32 = 76517;
-pub const HASH_BYTEA_PROC_OID: u32 = 76518;
-pub const HASH_MULTIRANGE_PROC_OID: u32 = 76519;
+pub const HASH_BPCHAR_PROC_OID: u32 = 1080;
+pub const HASH_BPCHAR_EXTENDED_PROC_OID: u32 = 972;
+pub const HASH_FLOAT4_PROC_OID: u32 = 451;
+pub const HASH_FLOAT4_EXTENDED_PROC_OID: u32 = 443;
+pub const HASH_FLOAT8_PROC_OID: u32 = 452;
+pub const HASH_FLOAT8_EXTENDED_PROC_OID: u32 = 444;
+pub const HASH_NUMERIC_PROC_OID: u32 = 432;
+pub const HASH_NUMERIC_EXTENDED_PROC_OID: u32 = 780;
+pub const HASH_TIMESTAMP_PROC_OID: u32 = 2039;
+pub const HASH_TIMESTAMP_EXTENDED_PROC_OID: u32 = 3411;
+pub const HASH_TIMESTAMPTZ_PROC_OID: u32 = 6425;
+pub const HASH_TIMESTAMPTZ_EXTENDED_PROC_OID: u32 = 6426;
+pub const HASH_DATE_PROC_OID: u32 = 6415;
+pub const HASH_DATE_EXTENDED_PROC_OID: u32 = 6416;
+pub const HASH_TIME_PROC_OID: u32 = 1688;
+pub const HASH_TIME_EXTENDED_PROC_OID: u32 = 3409;
+pub const HASH_TIMETZ_PROC_OID: u32 = 1696;
+pub const HASH_TIMETZ_EXTENDED_PROC_OID: u32 = 3410;
+pub const HASH_BYTEA_PROC_OID: u32 = 6413;
+pub const HASH_BYTEA_EXTENDED_PROC_OID: u32 = 6414;
+pub const HASH_OIDVECTOR_PROC_OID: u32 = 457;
+pub const HASH_OIDVECTOR_EXTENDED_PROC_OID: u32 = 776;
+pub const HASH_ACLITEM_PROC_OID: u32 = 329;
+pub const HASH_ACLITEM_EXTENDED_PROC_OID: u32 = 777;
+pub const HASH_INET_PROC_OID: u32 = 422;
+pub const HASH_INET_EXTENDED_PROC_OID: u32 = 779;
+pub const HASH_ARRAY_PROC_OID: u32 = 626;
+pub const HASH_ARRAY_EXTENDED_PROC_OID: u32 = 782;
+pub const HASH_MULTIRANGE_PROC_OID: u32 = 4278;
+pub const HASH_MULTIRANGE_EXTENDED_PROC_OID: u32 = 4279;
 pub const HASH_UUID_PROC_OID: u32 = 2963;
-pub const HASH_RANGE_PROC_OID: u32 = 76520;
-pub const HASH_JSONB_PROC_OID: u32 = 76521;
-pub const HASH_JSONB_EXTENDED_PROC_OID: u32 = 76522;
+pub const HASH_UUID_EXTENDED_PROC_OID: u32 = 3412;
+pub const HASH_RANGE_PROC_OID: u32 = 3902;
+pub const HASH_RANGE_EXTENDED_PROC_OID: u32 = 3417;
 pub const HASH_INTERVAL_PROC_OID: u32 = 1697;
+pub const HASH_INTERVAL_EXTENDED_PROC_OID: u32 = 3418;
+pub const HASH_PG_LSN_PROC_OID: u32 = 3252;
+pub const HASH_PG_LSN_EXTENDED_PROC_OID: u32 = 3413;
 pub const ENUM_EQ_PROC_OID: u32 = 3508;
 pub const ENUM_NE_PROC_OID: u32 = 3509;
 pub const ENUM_LT_PROC_OID: u32 = 3510;
@@ -177,6 +219,10 @@ pub const ENUM_GE_PROC_OID: u32 = 3513;
 pub const ENUM_CMP_PROC_OID: u32 = 3514;
 pub const HASH_ENUM_PROC_OID: u32 = 3515;
 pub const HASH_ENUM_EXTENDED_PROC_OID: u32 = 3414;
+pub const HASH_JSONB_PROC_OID: u32 = 4045;
+pub const HASH_JSONB_EXTENDED_PROC_OID: u32 = 3416;
+pub const HASH_RECORD_PROC_OID: u32 = 6192;
+pub const HASH_RECORD_EXTENDED_PROC_OID: u32 = 6193;
 pub const MACADDR_EQ_PROC_OID: u32 = 830;
 pub const MACADDR_LT_PROC_OID: u32 = 831;
 pub const MACADDR_LE_PROC_OID: u32 = 832;
@@ -398,6 +444,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "",
             "drandom",
             0,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            1599,
+            "setseed",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[FLOAT8_TYPE_OID]),
+            "setseed",
+            1,
             false,
             false,
             'f',
@@ -1402,6 +1460,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "pg_rust_test_enc_conversion",
             4,
             &[("validlen", INT4_TYPE_OID), ("result", BYTEA_TYPE_OID)],
+        ),
+        proc_row(
+            6407,
+            "pg_rust_is_catalog_text_unique_index_oid",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "pg_rust_is_catalog_text_unique_index_oid",
+            1,
+            false,
+            true,
+            'f',
+            'i',
         ),
         proc_row(
             3100,
@@ -2895,6 +2965,22 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             'v',
         ),
+        stats_import_variadic_proc_row(6362, "pg_restore_relation_stats"),
+        stats_import_clear_proc_row(
+            6397,
+            "pg_clear_relation_stats",
+            VOID_TYPE_OID,
+            &[TEXT_TYPE_OID, TEXT_TYPE_OID],
+            &["schemaname", "relname"],
+        ),
+        stats_import_variadic_proc_row(6363, "pg_restore_attribute_stats"),
+        stats_import_clear_proc_row(
+            6398,
+            "pg_clear_attribute_stats",
+            VOID_TYPE_OID,
+            &[TEXT_TYPE_OID, TEXT_TYPE_OID, TEXT_TYPE_OID, BOOL_TYPE_OID],
+            &["schemaname", "relname", "attname", "inherited"],
+        ),
         proc_row(
             6410,
             "pg_stat_have_stats",
@@ -3220,11 +3306,35 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            1258,
+            "textcat",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID]),
+            "textcat",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
             6202,
             "lower",
             TEXT_TYPE_OID,
             &oid_argtypes(&[TEXT_TYPE_OID]),
             "lower",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            6204,
+            "upper",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "upper",
             1,
             false,
             true,
@@ -3388,11 +3498,71 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
-            6205,
+            1394,
+            "abs",
+            FLOAT4_TYPE_OID,
+            &oid_argtypes(&[FLOAT4_TYPE_OID]),
+            "float4abs",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1395,
+            "abs",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[FLOAT8_TYPE_OID]),
+            "float8abs",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1396,
+            "abs",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[INT8_TYPE_OID]),
+            "int8abs",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1397,
+            "abs",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[INT4_TYPE_OID]),
+            "int4abs",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1398,
+            "abs",
+            INT2_TYPE_OID,
+            &oid_argtypes(&[INT2_TYPE_OID]),
+            "int2abs",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1705,
             "abs",
             NUMERIC_TYPE_OID,
             &oid_argtypes(&[NUMERIC_TYPE_OID]),
-            "abs",
+            "numeric_abs",
             1,
             false,
             true,
@@ -3466,6 +3636,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             &oid_argtypes(&[FLOAT8_TYPE_OID]),
             "dsqrt",
             1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1610,
+            "pi",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[]),
+            "dpi",
+            0,
             false,
             true,
             'f',
@@ -4540,6 +4722,150 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "byteage",
             &[BYTEA_TYPE_OID, BYTEA_TYPE_OID],
         ),
+        proc_row(
+            RI_FKEY_CHECK_INS_PROC_OID,
+            "RI_FKey_check_ins",
+            TRIGGER_TYPE_OID,
+            &oid_argtypes(&[]),
+            "RI_FKey_check_ins",
+            0,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            RI_FKEY_CHECK_UPD_PROC_OID,
+            "RI_FKey_check_upd",
+            TRIGGER_TYPE_OID,
+            &oid_argtypes(&[]),
+            "RI_FKey_check_upd",
+            0,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            RI_FKEY_CASCADE_DEL_PROC_OID,
+            "RI_FKey_cascade_del",
+            TRIGGER_TYPE_OID,
+            &oid_argtypes(&[]),
+            "RI_FKey_cascade_del",
+            0,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            RI_FKEY_CASCADE_UPD_PROC_OID,
+            "RI_FKey_cascade_upd",
+            TRIGGER_TYPE_OID,
+            &oid_argtypes(&[]),
+            "RI_FKey_cascade_upd",
+            0,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            RI_FKEY_RESTRICT_DEL_PROC_OID,
+            "RI_FKey_restrict_del",
+            TRIGGER_TYPE_OID,
+            &oid_argtypes(&[]),
+            "RI_FKey_restrict_del",
+            0,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            RI_FKEY_RESTRICT_UPD_PROC_OID,
+            "RI_FKey_restrict_upd",
+            TRIGGER_TYPE_OID,
+            &oid_argtypes(&[]),
+            "RI_FKey_restrict_upd",
+            0,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            RI_FKEY_SETNULL_DEL_PROC_OID,
+            "RI_FKey_setnull_del",
+            TRIGGER_TYPE_OID,
+            &oid_argtypes(&[]),
+            "RI_FKey_setnull_del",
+            0,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            RI_FKEY_SETNULL_UPD_PROC_OID,
+            "RI_FKey_setnull_upd",
+            TRIGGER_TYPE_OID,
+            &oid_argtypes(&[]),
+            "RI_FKey_setnull_upd",
+            0,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            RI_FKEY_SETDEFAULT_DEL_PROC_OID,
+            "RI_FKey_setdefault_del",
+            TRIGGER_TYPE_OID,
+            &oid_argtypes(&[]),
+            "RI_FKey_setdefault_del",
+            0,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            RI_FKEY_SETDEFAULT_UPD_PROC_OID,
+            "RI_FKey_setdefault_upd",
+            TRIGGER_TYPE_OID,
+            &oid_argtypes(&[]),
+            "RI_FKey_setdefault_upd",
+            0,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            RI_FKEY_NOACTION_DEL_PROC_OID,
+            "RI_FKey_noaction_del",
+            TRIGGER_TYPE_OID,
+            &oid_argtypes(&[]),
+            "RI_FKey_noaction_del",
+            0,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            RI_FKEY_NOACTION_UPD_PROC_OID,
+            "RI_FKey_noaction_upd",
+            TRIGGER_TYPE_OID,
+            &oid_argtypes(&[]),
+            "RI_FKey_noaction_upd",
+            0,
+            false,
+            false,
+            'f',
+            'v',
+        ),
         nonleakproof_comparison_proc_row(
             JSONB_CMP_NE_PROC_OID,
             "jsonb_ne",
@@ -5084,6 +5410,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
         ),
     ];
     rows.extend(pg_proc_alias_pair_rows());
+    rows.extend(aggregate_support_proc_rows());
     rows.extend(aggregate_transition_proc_rows(&rows));
     rows.extend(type_io_proc_rows());
     rows.extend(selectivity_estimator_proc_rows());
@@ -5114,9 +5441,9 @@ fn text_search_proc_rows() -> Vec<PgProcRow> {
             3610,
             "tsvectorin",
             TSVECTOR_TYPE_OID,
-            &oid_argtypes(&[TEXT_TYPE_OID]),
+            &oid_argtypes(&[CSTRING_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID]),
             "tsvectorin",
-            1,
+            3,
             false,
             true,
             'f',
@@ -5125,7 +5452,7 @@ fn text_search_proc_rows() -> Vec<PgProcRow> {
         proc_row(
             3611,
             "tsvectorout",
-            TEXT_TYPE_OID,
+            CSTRING_TYPE_OID,
             &oid_argtypes(&[TSVECTOR_TYPE_OID]),
             "tsvectorout",
             1,
@@ -5138,9 +5465,9 @@ fn text_search_proc_rows() -> Vec<PgProcRow> {
             3612,
             "tsqueryin",
             TSQUERY_TYPE_OID,
-            &oid_argtypes(&[TEXT_TYPE_OID]),
+            &oid_argtypes(&[CSTRING_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID]),
             "tsqueryin",
-            1,
+            3,
             false,
             true,
             'f',
@@ -5149,7 +5476,7 @@ fn text_search_proc_rows() -> Vec<PgProcRow> {
         proc_row(
             3613,
             "tsqueryout",
-            TEXT_TYPE_OID,
+            CSTRING_TYPE_OID,
             &oid_argtypes(&[TSQUERY_TYPE_OID]),
             "tsqueryout",
             1,
@@ -5433,17 +5760,47 @@ fn text_search_proc_rows() -> Vec<PgProcRow> {
 }
 
 fn type_io_proc_rows() -> Vec<PgProcRow> {
-    [
+    let mut rows = [
         (
             2304,
             "internal_in",
             INTERNAL_TYPE_OID,
             vec![CSTRING_TYPE_OID],
         ),
+        (
+            40,
+            "int2vectorin",
+            INT2VECTOR_TYPE_OID,
+            vec![CSTRING_TYPE_OID],
+        ),
+        (
+            41,
+            "int2vectorout",
+            CSTRING_TYPE_OID,
+            vec![INT2VECTOR_TYPE_OID],
+        ),
+        (46, "textin", TEXT_TYPE_OID, vec![CSTRING_TYPE_OID]),
+        (47, "textout", CSTRING_TYPE_OID, vec![TEXT_TYPE_OID]),
+        (
+            54,
+            "oidvectorin",
+            OIDVECTOR_TYPE_OID,
+            vec![CSTRING_TYPE_OID],
+        ),
+        (
+            55,
+            "oidvectorout",
+            CSTRING_TYPE_OID,
+            vec![OIDVECTOR_TYPE_OID],
+        ),
+        (2298, "void_in", VOID_TYPE_OID, vec![CSTRING_TYPE_OID]),
+        (2299, "void_out", CSTRING_TYPE_OID, vec![VOID_TYPE_OID]),
         (2296, "anyarray_in", ANYARRAYOID, vec![CSTRING_TYPE_OID]),
+        (2297, "anyarray_out", CSTRING_TYPE_OID, vec![ANYARRAYOID]),
         (2502, "anyarray_recv", ANYARRAYOID, vec![INTERNAL_TYPE_OID]),
         (2312, "anyelement_in", ANYELEMENTOID, vec![CSTRING_TYPE_OID]),
-        (3504, "anyenum_in", ANYENUMOID, vec![INTERNAL_TYPE_OID]),
+        (3504, "anyenum_in", ANYENUMOID, vec![CSTRING_TYPE_OID]),
+        (3505, "anyenum_out", CSTRING_TYPE_OID, vec![ANYENUMOID]),
         (
             2777,
             "anynonarray_in",
@@ -5463,6 +5820,21 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             ANYARRAYOID,
             vec![INTERNAL_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
         ),
+        (2401, "array_send", BYTEA_TYPE_OID, vec![ANYARRAYOID]),
+        (
+            2290,
+            "record_in",
+            RECORD_TYPE_OID,
+            vec![CSTRING_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
+        ),
+        (2291, "record_out", CSTRING_TYPE_OID, vec![RECORD_TYPE_OID]),
+        (
+            2402,
+            "record_recv",
+            RECORD_TYPE_OID,
+            vec![INTERNAL_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
+        ),
+        (2403, "record_send", BYTEA_TYPE_OID, vec![RECORD_TYPE_OID]),
         (
             2597,
             "domain_in",
@@ -5479,27 +5851,34 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             3506,
             "enum_in",
             ANYENUMOID,
-            vec![INTERNAL_TYPE_OID, OID_TYPE_OID],
+            vec![CSTRING_TYPE_OID, OID_TYPE_OID],
         ),
+        (3507, "enum_out", CSTRING_TYPE_OID, vec![ANYENUMOID]),
         (
             3532,
             "enum_recv",
             ANYENUMOID,
             vec![INTERNAL_TYPE_OID, OID_TYPE_OID],
         ),
+        (3533, "enum_send", BYTEA_TYPE_OID, vec![ANYENUMOID]),
         (
             4229,
             "anymultirange_in",
             ANYMULTIRANGEOID,
             vec![CSTRING_TYPE_OID],
         ),
+        (
+            4230,
+            "anymultirange_out",
+            CSTRING_TYPE_OID,
+            vec![ANYMULTIRANGEOID],
+        ),
         (3832, "anyrange_in", ANYRANGEOID, vec![CSTRING_TYPE_OID]),
+        (3833, "anyrange_out", CSTRING_TYPE_OID, vec![ANYRANGEOID]),
         (1242, "boolin", BOOL_TYPE_OID, vec![CSTRING_TYPE_OID]),
         (1243, "boolout", CSTRING_TYPE_OID, vec![BOOL_TYPE_OID]),
         (42, "int4in", INT4_TYPE_OID, vec![CSTRING_TYPE_OID]),
         (43, "int4out", CSTRING_TYPE_OID, vec![INT4_TYPE_OID]),
-        (46, "textin", TEXT_TYPE_OID, vec![CSTRING_TYPE_OID]),
-        (47, "textout", CSTRING_TYPE_OID, vec![TEXT_TYPE_OID]),
         (
             1046,
             "varcharin",
@@ -5507,7 +5886,6 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             vec![CSTRING_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
         ),
         (1047, "varcharout", CSTRING_TYPE_OID, vec![VARCHAR_TYPE_OID]),
-        (2401, "array_send", BYTEA_TYPE_OID, vec![ANYARRAYOID]),
         (
             2432,
             "varcharrecv",
@@ -5540,34 +5918,16 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             vec![INT4_TYPE_OID],
         ),
         (
-            3688,
-            "ts_typanalyze",
-            BOOL_TYPE_OID,
-            vec![INTERNAL_TYPE_OID],
-        ),
-        (
-            3816,
-            "array_typanalyze",
-            BOOL_TYPE_OID,
-            vec![INTERNAL_TYPE_OID],
-        ),
-        (
-            6179,
-            "array_subscript_handler",
-            INTERNAL_TYPE_OID,
-            vec![INTERNAL_TYPE_OID],
-        ),
-        (
-            6180,
-            "raw_array_subscript_handler",
-            INTERNAL_TYPE_OID,
-            vec![INTERNAL_TYPE_OID],
-        ),
-        (
             4231,
             "multirange_in",
             ANYMULTIRANGEOID,
             vec![CSTRING_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
+        ),
+        (
+            4232,
+            "multirange_out",
+            CSTRING_TYPE_OID,
+            vec![ANYMULTIRANGEOID],
         ),
         (
             4233,
@@ -5576,17 +5936,25 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             vec![INTERNAL_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
         ),
         (
+            4234,
+            "multirange_send",
+            BYTEA_TYPE_OID,
+            vec![ANYMULTIRANGEOID],
+        ),
+        (
             3834,
             "range_in",
             ANYRANGEOID,
             vec![CSTRING_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
         ),
+        (3835, "range_out", CSTRING_TYPE_OID, vec![ANYRANGEOID]),
         (
             3836,
             "range_recv",
             ANYRANGEOID,
             vec![INTERNAL_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
         ),
+        (3837, "range_send", BYTEA_TYPE_OID, vec![ANYRANGEOID]),
         (
             5086,
             "anycompatible_in",
@@ -5598,6 +5966,12 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             "anycompatiblearray_in",
             ANYCOMPATIBLEARRAYOID,
             vec![CSTRING_TYPE_OID],
+        ),
+        (
+            5089,
+            "anycompatiblearray_out",
+            CSTRING_TYPE_OID,
+            vec![ANYCOMPATIBLEARRAYOID],
         ),
         (
             5090,
@@ -5617,10 +5991,150 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             ANYCOMPATIBLERANGEOID,
             vec![CSTRING_TYPE_OID],
         ),
+        (
+            5095,
+            "anycompatiblerange_out",
+            CSTRING_TYPE_OID,
+            vec![ANYCOMPATIBLERANGEOID],
+        ),
+        (
+            4226,
+            "anycompatiblemultirange_in",
+            ANYCOMPATIBLEMULTIRANGEOID,
+            vec![CSTRING_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
+        ),
+        (
+            4227,
+            "anycompatiblemultirange_out",
+            CSTRING_TYPE_OID,
+            vec![ANYCOMPATIBLEMULTIRANGEOID],
+        ),
+        (
+            3816,
+            "array_typanalyze",
+            BOOL_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            2410,
+            "int2vectorrecv",
+            INT2VECTOR_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            2411,
+            "int2vectorsend",
+            BYTEA_TYPE_OID,
+            vec![INT2VECTOR_TYPE_OID],
+        ),
+        (2414, "textrecv", TEXT_TYPE_OID, vec![INTERNAL_TYPE_OID]),
+        (2415, "textsend", BYTEA_TYPE_OID, vec![TEXT_TYPE_OID]),
+        (
+            2420,
+            "oidvectorrecv",
+            OIDVECTOR_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            2421,
+            "oidvectorsend",
+            BYTEA_TYPE_OID,
+            vec![OIDVECTOR_TYPE_OID],
+        ),
+        (
+            3646,
+            "gtsvectorin",
+            GTSVECTOR_TYPE_OID,
+            vec![CSTRING_TYPE_OID],
+        ),
+        (
+            3647,
+            "gtsvectorout",
+            CSTRING_TYPE_OID,
+            vec![GTSVECTOR_TYPE_OID],
+        ),
+        (
+            4596,
+            "brin_bloom_summary_in",
+            PG_BRIN_BLOOM_SUMMARY_TYPE_OID,
+            vec![CSTRING_TYPE_OID],
+        ),
+        (
+            4597,
+            "brin_bloom_summary_out",
+            CSTRING_TYPE_OID,
+            vec![PG_BRIN_BLOOM_SUMMARY_TYPE_OID],
+        ),
+        (
+            4598,
+            "brin_bloom_summary_recv",
+            PG_BRIN_BLOOM_SUMMARY_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            4599,
+            "brin_bloom_summary_send",
+            BYTEA_TYPE_OID,
+            vec![PG_BRIN_BLOOM_SUMMARY_TYPE_OID],
+        ),
+        (
+            4638,
+            "brin_minmax_multi_summary_in",
+            PG_BRIN_MINMAX_MULTI_SUMMARY_TYPE_OID,
+            vec![CSTRING_TYPE_OID],
+        ),
+        (
+            4639,
+            "brin_minmax_multi_summary_out",
+            CSTRING_TYPE_OID,
+            vec![PG_BRIN_MINMAX_MULTI_SUMMARY_TYPE_OID],
+        ),
+        (
+            4640,
+            "brin_minmax_multi_summary_recv",
+            PG_BRIN_MINMAX_MULTI_SUMMARY_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            4641,
+            "brin_minmax_multi_summary_send",
+            BYTEA_TYPE_OID,
+            vec![PG_BRIN_MINMAX_MULTI_SUMMARY_TYPE_OID],
+        ),
+        (
+            3916,
+            "range_typanalyze",
+            BOOL_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            4242,
+            "multirange_typanalyze",
+            BOOL_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            6179,
+            "array_subscript_handler",
+            INTERNAL_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            6380,
+            "array_subscript_handler_support",
+            INTERNAL_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            6180,
+            "raw_array_subscript_handler",
+            INTERNAL_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
     ]
     .into_iter()
     .map(|(oid, proname, prorettype, args)| {
-        proc_row(
+        let mut row = proc_row(
             oid,
             proname,
             prorettype,
@@ -5628,12 +6142,95 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             proname,
             args.len() as i16,
             false,
-            true,
+            proname != "domain_in" && proname != "domain_recv",
             'f',
             'i',
-        )
+        );
+        if matches!(
+            proname,
+            "array_in"
+                | "array_out"
+                | "array_recv"
+                | "array_send"
+                | "record_in"
+                | "record_out"
+                | "record_recv"
+                | "record_send"
+                | "domain_in"
+                | "domain_recv"
+                | "enum_in"
+                | "enum_out"
+                | "enum_recv"
+                | "enum_send"
+                | "anyarray_out"
+                | "anyenum_out"
+                | "anyrange_out"
+                | "range_in"
+                | "range_out"
+                | "range_recv"
+                | "range_send"
+                | "anymultirange_out"
+                | "multirange_in"
+                | "multirange_out"
+                | "multirange_recv"
+                | "multirange_send"
+                | "brin_bloom_summary_in"
+                | "brin_bloom_summary_out"
+                | "brin_bloom_summary_recv"
+                | "brin_bloom_summary_send"
+                | "brin_minmax_multi_summary_in"
+                | "brin_minmax_multi_summary_out"
+                | "brin_minmax_multi_summary_recv"
+                | "brin_minmax_multi_summary_send"
+                | "array_typanalyze"
+                | "range_typanalyze"
+                | "multirange_typanalyze"
+        ) {
+            row.provolatile = 's';
+        }
+        row
     })
-    .collect()
+    .collect::<Vec<_>>();
+    // :HACK: These catalog-only I/O rows let pg_type look like PostgreSQL
+    // without claiming pgrust can execute every type's native C I/O routine.
+    // Unmapped LANGUAGE internal calls still route through fmgr and error.
+    rows.extend(catalog_only_type_io_proc_rows());
+    rows
+}
+
+fn catalog_only_type_io_proc_rows() -> Vec<PgProcRow> {
+    let mut rows = Vec::new();
+    for typ in builtin_type_rows() {
+        if typ.typinput == synthetic_type_input_proc_oid(typ.oid) {
+            rows.push(proc_row(
+                typ.typinput,
+                &format!("pg_rust_{}_in", typ.typname.trim_start_matches('_')),
+                typ.oid,
+                &oid_argtypes(&[CSTRING_TYPE_OID]),
+                &format!("pg_rust_type_{}_in", typ.oid),
+                1,
+                false,
+                true,
+                'f',
+                's',
+            ));
+        }
+        if typ.typoutput == synthetic_type_output_proc_oid(typ.oid) {
+            rows.push(proc_row(
+                typ.typoutput,
+                &format!("pg_rust_{}_out", typ.typname.trim_start_matches('_')),
+                CSTRING_TYPE_OID,
+                &oid_argtypes(&[typ.oid]),
+                &format!("pg_rust_type_{}_out", typ.oid),
+                1,
+                false,
+                true,
+                'f',
+                's',
+            ));
+        }
+    }
+    rows
 }
 
 fn pg_proc_alias_pair_rows() -> Vec<PgProcRow> {
@@ -5705,6 +6302,54 @@ fn pg_proc_alias_pair_rows() -> Vec<PgProcRow> {
             &oid_argtypes(&[CSTRING_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID]),
             "timestamp_in",
             3,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            1176,
+            "timestamptz",
+            TIMESTAMPTZ_TYPE_OID,
+            &oid_argtypes(&[DATE_TYPE_OID, TIME_TYPE_OID]),
+            "see system_functions.sql",
+            2,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            1359,
+            "timestamptz",
+            TIMESTAMPTZ_TYPE_OID,
+            &oid_argtypes(&[DATE_TYPE_OID, TIMETZ_TYPE_OID]),
+            "datetimetz_timestamptz",
+            2,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            1158,
+            "to_timestamp",
+            TIMESTAMPTZ_TYPE_OID,
+            &oid_argtypes(&[FLOAT8_TYPE_OID]),
+            "float8_timestamptz",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1778,
+            "to_timestamp",
+            TIMESTAMPTZ_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID]),
+            "to_timestamp",
+            2,
             false,
             true,
             'f',
@@ -6014,6 +6659,170 @@ fn pg_proc_alias_pair_rows() -> Vec<PgProcRow> {
             'i',
         ),
     ]
+}
+
+fn aggregate_support_proc_rows() -> Vec<PgProcRow> {
+    let mut rows = vec![
+        proc_row(
+            218,
+            "float8pl",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[FLOAT8_TYPE_OID, FLOAT8_TYPE_OID]),
+            "float8pl",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1724,
+            "numeric_add",
+            NUMERIC_TYPE_OID,
+            &oid_argtypes(&[NUMERIC_TYPE_OID, NUMERIC_TYPE_OID]),
+            "numeric_add",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1830,
+            "int4larger",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[INT4_TYPE_OID, INT4_TYPE_OID]),
+            "int4larger",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1702,
+            "numeric_out",
+            CSTRING_TYPE_OID,
+            &oid_argtypes(&[NUMERIC_TYPE_OID]),
+            "numeric_out",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            2858,
+            "numeric_avg_accum",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, NUMERIC_TYPE_OID]),
+            "numeric_avg_accum",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            3337,
+            "numeric_avg_combine",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "numeric_avg_combine",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            2740,
+            "numeric_avg_serialize",
+            BYTEA_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID]),
+            "numeric_avg_serialize",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            2741,
+            "numeric_avg_deserialize",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[BYTEA_TYPE_OID, INTERNAL_TYPE_OID]),
+            "numeric_avg_deserialize",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1837,
+            "numeric_avg",
+            NUMERIC_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID]),
+            "numeric_avg",
+            1,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            3970,
+            "ordered_set_transition",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, ANYOID]),
+            "ordered_set_transition",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            3973,
+            "percentile_disc_final",
+            ANYELEMENTOID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, FLOAT8_TYPE_OID, ANYELEMENTOID]),
+            "percentile_disc_final",
+            3,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+    ];
+    rows.push(variadic_proc_row(
+        3971,
+        "ordered_set_transition_multi",
+        INTERNAL_TYPE_OID,
+        &oid_argtypes(&[INTERNAL_TYPE_OID, ANYOID]),
+        ANYOID,
+        "ordered_set_transition_multi",
+        2,
+        false,
+        false,
+        'f',
+        'i',
+    ));
+    rows.push(variadic_proc_row(
+        3987,
+        "rank_final",
+        INT8_TYPE_OID,
+        &oid_argtypes(&[INTERNAL_TYPE_OID, ANYOID]),
+        ANYOID,
+        "hypothetical_rank_final",
+        2,
+        false,
+        false,
+        'f',
+        'i',
+    ));
+    rows
 }
 
 fn missing_leakproof_proc_rows() -> Vec<PgProcRow> {
@@ -7544,24 +8353,81 @@ pub fn proc_oid_for_builtin_window_function(func: BuiltinWindowFunction) -> Opti
         })
 }
 
-fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
+pub fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
+    if row.proname.eq_ignore_ascii_case("timestamptz")
+        && matches!(row.proargtypes.trim(), "1082 1083" | "1082 1266")
+    {
+        return Some(BuiltinScalarFunction::TimestampTzConstructor);
+    }
     builtin_scalar_function_for_proc_src(&row.prosrc)
         .or_else(|| builtin_scalar_function_for_proc_src(&row.proname))
 }
 
 fn builtin_scalar_function_for_proc_src(proc_src: &str) -> Option<BuiltinScalarFunction> {
-    legacy_scalar_function_entries()
-        .iter()
-        .find_map(|(name, func)| proc_src.eq_ignore_ascii_case(name).then_some(*func))
-        .or_else(|| {
-            range_prefixed_proc_src(proc_src).and_then(builtin_scalar_function_for_proc_src)
-        })
-        .or_else(|| {
-            proc_src
-                .rsplit_once('_')
-                .filter(|(_, suffix)| suffix.chars().all(|ch| ch.is_ascii_digit()))
-                .and_then(|(base, _)| builtin_scalar_function_for_proc_src(base))
-        })
+    hash_scalar_function_for_proc_src(proc_src).or_else(|| {
+        legacy_scalar_function_entries()
+            .iter()
+            .find_map(|(name, func)| proc_src.eq_ignore_ascii_case(name).then_some(*func))
+            .or_else(|| {
+                range_prefixed_proc_src(proc_src).and_then(builtin_scalar_function_for_proc_src)
+            })
+            .or_else(|| {
+                proc_src
+                    .rsplit_once('_')
+                    .filter(|(_, suffix)| suffix.chars().all(|ch| ch.is_ascii_digit()))
+                    .and_then(|(base, _)| builtin_scalar_function_for_proc_src(base))
+            })
+    })
+}
+
+fn hash_scalar_function_for_proc_src(proc_src: &str) -> Option<BuiltinScalarFunction> {
+    let normalized = proc_src.to_ascii_lowercase();
+    let (base, extended) = normalized
+        .strip_suffix("_extended")
+        .map(|base| (base, true))
+        .or_else(|| normalized.strip_suffix("extended").map(|base| (base, true)))
+        .unwrap_or((normalized.as_str(), false));
+    let kind = match base {
+        "hashbool" => HashFunctionKind::Bool,
+        "hashint2" => HashFunctionKind::Int2,
+        "hashint4" => HashFunctionKind::Int4,
+        "hashint8" => HashFunctionKind::Int8,
+        "hashoid" => HashFunctionKind::Oid,
+        "hashchar" => HashFunctionKind::InternalChar,
+        "hashname" => HashFunctionKind::Name,
+        "hashtext" => HashFunctionKind::Text,
+        "hashvarchar" => HashFunctionKind::Varchar,
+        "hashbpchar" => HashFunctionKind::BpChar,
+        "hashfloat4" => HashFunctionKind::Float4,
+        "hashfloat8" => HashFunctionKind::Float8,
+        "hash_numeric" => HashFunctionKind::Numeric,
+        "hashtimestamp" | "timestamp_hash" => HashFunctionKind::Timestamp,
+        "hashtimestamptz" | "timestamptz_hash" => HashFunctionKind::TimestampTz,
+        "hashdate" => HashFunctionKind::Date,
+        "hashtime" | "time_hash" => HashFunctionKind::Time,
+        "hashtimetz" | "timetz_hash" => HashFunctionKind::TimeTz,
+        "hashbytea" => HashFunctionKind::Bytea,
+        "hashoidvector" => HashFunctionKind::OidVector,
+        "hash_aclitem" => HashFunctionKind::AclItem,
+        "hashinet" => HashFunctionKind::Inet,
+        "hashmacaddr" => HashFunctionKind::MacAddr,
+        "hashmacaddr8" => HashFunctionKind::MacAddr8,
+        "hash_array" => HashFunctionKind::Array,
+        "interval_hash" => HashFunctionKind::Interval,
+        "uuid_hash" => HashFunctionKind::Uuid,
+        "pg_lsn_hash" => HashFunctionKind::PgLsn,
+        "hashenum" => HashFunctionKind::Enum,
+        "jsonb_hash" => HashFunctionKind::Jsonb,
+        "hash_range" => HashFunctionKind::Range,
+        "hash_multirange" => HashFunctionKind::Multirange,
+        "hash_record" => HashFunctionKind::Record,
+        _ => return None,
+    };
+    Some(if extended {
+        BuiltinScalarFunction::HashValueExtended(kind)
+    } else {
+        BuiltinScalarFunction::HashValue(kind)
+    })
 }
 
 fn range_prefixed_proc_src(proc_src: &str) -> Option<&str> {
@@ -7776,6 +8642,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("random_normal", BuiltinScalarFunction::RandomNormal),
         ("drandom_normal", BuiltinScalarFunction::RandomNormal),
         ("drandom_normal_noargs", BuiltinScalarFunction::RandomNormal),
+        ("setseed", BuiltinScalarFunction::SetSeed),
         ("current_database", BuiltinScalarFunction::CurrentDatabase),
         ("pg_backend_pid", BuiltinScalarFunction::PgBackendPid),
         ("cashlarger", BuiltinScalarFunction::CashLarger),
@@ -7833,6 +8700,33 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("make_timestamp", BuiltinScalarFunction::MakeTimestamp),
         ("make_timestamptz", BuiltinScalarFunction::MakeTimestampTz),
         ("interval_hash", BuiltinScalarFunction::IntervalHash),
+        ("uuid_in", BuiltinScalarFunction::UuidIn),
+        ("uuid_out", BuiltinScalarFunction::UuidOut),
+        ("uuid_recv", BuiltinScalarFunction::UuidRecv),
+        ("uuid_send", BuiltinScalarFunction::UuidSend),
+        ("uuid_eq", BuiltinScalarFunction::UuidEq),
+        ("uuid_ne", BuiltinScalarFunction::UuidNe),
+        ("uuid_lt", BuiltinScalarFunction::UuidLt),
+        ("uuid_le", BuiltinScalarFunction::UuidLe),
+        ("uuid_gt", BuiltinScalarFunction::UuidGt),
+        ("uuid_ge", BuiltinScalarFunction::UuidGe),
+        ("uuid_cmp", BuiltinScalarFunction::UuidCmp),
+        ("uuid_hash", BuiltinScalarFunction::UuidHash),
+        (
+            "uuid_hash_extended",
+            BuiltinScalarFunction::UuidHashExtended,
+        ),
+        ("gen_random_uuid", BuiltinScalarFunction::GenRandomUuid),
+        ("uuidv7", BuiltinScalarFunction::UuidV7),
+        ("uuidv7_interval", BuiltinScalarFunction::UuidV7),
+        (
+            "uuid_extract_version",
+            BuiltinScalarFunction::UuidExtractVersion,
+        ),
+        (
+            "uuid_extract_timestamp",
+            BuiltinScalarFunction::UuidExtractTimestamp,
+        ),
         (
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
@@ -7872,6 +8766,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_rust_test_enc_conversion",
             BuiltinScalarFunction::PgRustTestEncConversion,
+        ),
+        (
+            "pg_rust_is_catalog_text_unique_index_oid",
+            BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid,
         ),
         ("amvalidate", BuiltinScalarFunction::AmValidate),
         ("btequalimage", BuiltinScalarFunction::BtEqualImage),
@@ -8202,6 +9100,22 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_stat_get_xact_function_self_time",
             BuiltinScalarFunction::PgStatGetXactFunctionSelfTime,
         ),
+        (
+            "pg_restore_relation_stats",
+            BuiltinScalarFunction::PgRestoreRelationStats,
+        ),
+        (
+            "pg_clear_relation_stats",
+            BuiltinScalarFunction::PgClearRelationStats,
+        ),
+        (
+            "pg_restore_attribute_stats",
+            BuiltinScalarFunction::PgRestoreAttributeStats,
+        ),
+        (
+            "pg_clear_attribute_stats",
+            BuiltinScalarFunction::PgClearAttributeStats,
+        ),
         ("to_json", BuiltinScalarFunction::ToJson),
         ("to_jsonb", BuiltinScalarFunction::ToJsonb),
         ("to_tsvector", BuiltinScalarFunction::ToTsVector),
@@ -8290,6 +9204,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("jsonb_object", BuiltinScalarFunction::JsonbObject),
         ("jsonb_object_two_arg", BuiltinScalarFunction::JsonbObject),
+        ("jsonb_to_tsvector", BuiltinScalarFunction::JsonbToTsVector),
         (
             "jsonb_to_tsvector_byid",
             BuiltinScalarFunction::JsonbToTsVector,
@@ -8345,6 +9260,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("substring_similar", BuiltinScalarFunction::SimilarSubstring),
         ("initcap", BuiltinScalarFunction::Initcap),
+        ("textcat", BuiltinScalarFunction::TextCat),
         ("concat", BuiltinScalarFunction::Concat),
         ("concat_ws", BuiltinScalarFunction::ConcatWs),
         ("format", BuiltinScalarFunction::Format),
@@ -8370,12 +9286,17 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("array_positions", BuiltinScalarFunction::ArrayPositions),
         ("array_remove", BuiltinScalarFunction::ArrayRemove),
         ("array_replace", BuiltinScalarFunction::ArrayReplace),
+        ("trim_array", BuiltinScalarFunction::TrimArray),
+        ("array_shuffle", BuiltinScalarFunction::ArrayShuffle),
+        ("array_sample", BuiltinScalarFunction::ArraySample),
+        ("array_reverse", BuiltinScalarFunction::ArrayReverse),
         ("array_sort", BuiltinScalarFunction::ArraySort),
         ("enum_first", BuiltinScalarFunction::EnumFirst),
         ("enum_last", BuiltinScalarFunction::EnumLast),
         ("enum_range", BuiltinScalarFunction::EnumRange),
         ("enum_range_bounds", BuiltinScalarFunction::EnumRange),
         ("lower", BuiltinScalarFunction::Lower),
+        ("upper", BuiltinScalarFunction::Upper),
         ("unistr", BuiltinScalarFunction::Unistr),
         ("strpos", BuiltinScalarFunction::Strpos),
         ("position", BuiltinScalarFunction::Position),
@@ -8545,6 +9466,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("sqrt", BuiltinScalarFunction::Sqrt),
         ("dsqrt", BuiltinScalarFunction::Sqrt),
         ("numeric_sqrt", BuiltinScalarFunction::Sqrt),
+        ("pi", BuiltinScalarFunction::Pi),
+        ("dpi", BuiltinScalarFunction::Pi),
         ("cbrt", BuiltinScalarFunction::Cbrt),
         ("dcbrt", BuiltinScalarFunction::Cbrt),
         ("power", BuiltinScalarFunction::Power),
@@ -8595,6 +9518,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("array_positions", BuiltinScalarFunction::ArrayPositions),
         ("array_remove", BuiltinScalarFunction::ArrayRemove),
         ("array_replace", BuiltinScalarFunction::ArrayReplace),
+        ("trim_array", BuiltinScalarFunction::TrimArray),
+        ("array_shuffle", BuiltinScalarFunction::ArrayShuffle),
+        ("array_sample", BuiltinScalarFunction::ArraySample),
+        ("array_reverse", BuiltinScalarFunction::ArrayReverse),
         ("array_sort", BuiltinScalarFunction::ArraySort),
         ("string_to_array", BuiltinScalarFunction::StringToArray),
         ("array_to_string", BuiltinScalarFunction::ArrayToString),
@@ -11010,7 +11937,7 @@ fn hash_equality_proc_rows() -> Vec<PgProcRow> {
 }
 
 fn hash_support_proc_rows() -> Vec<PgProcRow> {
-    [
+    let standard = [
         (HASH_BOOL_PROC_OID, "hashbool", BOOL_TYPE_OID),
         (HASH_INT2_PROC_OID, "hashint2", INT2_TYPE_OID),
         (HASH_INT4_PROC_OID, "hashint4", INT4_TYPE_OID),
@@ -11023,41 +11950,201 @@ fn hash_support_proc_rows() -> Vec<PgProcRow> {
         (HASH_BPCHAR_PROC_OID, "hashbpchar", BPCHAR_TYPE_OID),
         (HASH_FLOAT4_PROC_OID, "hashfloat4", FLOAT4_TYPE_OID),
         (HASH_FLOAT8_PROC_OID, "hashfloat8", FLOAT8_TYPE_OID),
+        (HASH_BYTEA_PROC_OID, "hashbytea", BYTEA_TYPE_OID),
+        (HASH_OIDVECTOR_PROC_OID, "hashoidvector", OIDVECTOR_TYPE_OID),
+        (HASH_ACLITEM_PROC_OID, "hash_aclitem", ACLITEM_TYPE_OID),
+        (HASH_INET_PROC_OID, "hashinet", INET_TYPE_OID),
         (HASH_NUMERIC_PROC_OID, "hash_numeric", NUMERIC_TYPE_OID),
-        (HASH_TIMESTAMP_PROC_OID, "hashtimestamp", TIMESTAMP_TYPE_OID),
+        (HASH_DATE_PROC_OID, "hashdate", DATE_TYPE_OID),
+        (HASH_TIME_PROC_OID, "time_hash", TIME_TYPE_OID),
+        (HASH_TIMETZ_PROC_OID, "timetz_hash", TIMETZ_TYPE_OID),
+        (HASH_INTERVAL_PROC_OID, "interval_hash", INTERVAL_TYPE_OID),
+        (
+            HASH_TIMESTAMP_PROC_OID,
+            "timestamp_hash",
+            TIMESTAMP_TYPE_OID,
+        ),
         (
             HASH_TIMESTAMPTZ_PROC_OID,
-            "hashtimestamptz",
+            "timestamptz_hash",
             TIMESTAMPTZ_TYPE_OID,
         ),
-        (HASH_DATE_PROC_OID, "hashdate", DATE_TYPE_OID),
-        (HASH_TIME_PROC_OID, "hashtime", TIME_TYPE_OID),
-        (HASH_TIMETZ_PROC_OID, "hashtimetz", TIMETZ_TYPE_OID),
-        (HASH_BYTEA_PROC_OID, "hashbytea", BYTEA_TYPE_OID),
+        (HASH_PG_LSN_PROC_OID, "pg_lsn_hash", PG_LSN_TYPE_OID),
+        (HASH_JSONB_PROC_OID, "jsonb_hash", JSONB_TYPE_OID),
+        (HASH_ARRAY_PROC_OID, "hash_array", ANYARRAYOID),
+        (HASH_RECORD_PROC_OID, "hash_record", RECORD_TYPE_OID),
+        (HASH_RANGE_PROC_OID, "hash_range", ANYRANGEOID),
         (
             HASH_MULTIRANGE_PROC_OID,
             "hash_multirange",
             ANYMULTIRANGEOID,
         ),
-        (HASH_JSONB_PROC_OID, "jsonb_hash", JSONB_TYPE_OID),
-        (HASH_INTERVAL_PROC_OID, "interval_hash", INTERVAL_TYPE_OID),
-    ]
-    .into_iter()
-    .map(|(oid, proname, type_oid)| {
-        proc_row(
-            oid,
-            proname,
+    ];
+    let extended = [
+        (
+            HASH_BOOL_EXTENDED_PROC_OID,
+            "hashboolextended",
+            BOOL_TYPE_OID,
+        ),
+        (
+            HASH_INT2_EXTENDED_PROC_OID,
+            "hashint2extended",
+            INT2_TYPE_OID,
+        ),
+        (
+            HASH_INT4_EXTENDED_PROC_OID,
+            "hashint4extended",
             INT4_TYPE_OID,
-            &oid_argtypes(&[type_oid]),
-            proname,
-            1,
-            false,
-            true,
-            'f',
-            'i',
-        )
-    })
-    .collect()
+        ),
+        (
+            HASH_INT8_EXTENDED_PROC_OID,
+            "hashint8extended",
+            INT8_TYPE_OID,
+        ),
+        (HASH_OID_EXTENDED_PROC_OID, "hashoidextended", OID_TYPE_OID),
+        (
+            HASH_CHAR_EXTENDED_PROC_OID,
+            "hashcharextended",
+            INTERNAL_CHAR_TYPE_OID,
+        ),
+        (
+            HASH_NAME_EXTENDED_PROC_OID,
+            "hashnameextended",
+            NAME_TYPE_OID,
+        ),
+        (
+            HASH_TEXT_EXTENDED_PROC_OID,
+            "hashtextextended",
+            TEXT_TYPE_OID,
+        ),
+        (
+            HASH_BPCHAR_EXTENDED_PROC_OID,
+            "hashbpcharextended",
+            BPCHAR_TYPE_OID,
+        ),
+        (
+            HASH_FLOAT4_EXTENDED_PROC_OID,
+            "hashfloat4extended",
+            FLOAT4_TYPE_OID,
+        ),
+        (
+            HASH_FLOAT8_EXTENDED_PROC_OID,
+            "hashfloat8extended",
+            FLOAT8_TYPE_OID,
+        ),
+        (
+            HASH_BYTEA_EXTENDED_PROC_OID,
+            "hashbyteaextended",
+            BYTEA_TYPE_OID,
+        ),
+        (
+            HASH_OIDVECTOR_EXTENDED_PROC_OID,
+            "hashoidvectorextended",
+            OIDVECTOR_TYPE_OID,
+        ),
+        (
+            HASH_ACLITEM_EXTENDED_PROC_OID,
+            "hash_aclitem_extended",
+            ACLITEM_TYPE_OID,
+        ),
+        (
+            HASH_INET_EXTENDED_PROC_OID,
+            "hashinetextended",
+            INET_TYPE_OID,
+        ),
+        (
+            HASH_NUMERIC_EXTENDED_PROC_OID,
+            "hash_numeric_extended",
+            NUMERIC_TYPE_OID,
+        ),
+        (
+            HASH_DATE_EXTENDED_PROC_OID,
+            "hashdateextended",
+            DATE_TYPE_OID,
+        ),
+        (
+            HASH_TIME_EXTENDED_PROC_OID,
+            "time_hash_extended",
+            TIME_TYPE_OID,
+        ),
+        (
+            HASH_TIMETZ_EXTENDED_PROC_OID,
+            "timetz_hash_extended",
+            TIMETZ_TYPE_OID,
+        ),
+        (
+            HASH_INTERVAL_EXTENDED_PROC_OID,
+            "interval_hash_extended",
+            INTERVAL_TYPE_OID,
+        ),
+        (
+            HASH_TIMESTAMP_EXTENDED_PROC_OID,
+            "timestamp_hash_extended",
+            TIMESTAMP_TYPE_OID,
+        ),
+        (
+            HASH_TIMESTAMPTZ_EXTENDED_PROC_OID,
+            "timestamptz_hash_extended",
+            TIMESTAMPTZ_TYPE_OID,
+        ),
+        (
+            HASH_PG_LSN_EXTENDED_PROC_OID,
+            "pg_lsn_hash_extended",
+            PG_LSN_TYPE_OID,
+        ),
+        (
+            HASH_ARRAY_EXTENDED_PROC_OID,
+            "hash_array_extended",
+            ANYARRAYOID,
+        ),
+        (
+            HASH_RECORD_EXTENDED_PROC_OID,
+            "hash_record_extended",
+            RECORD_TYPE_OID,
+        ),
+        (
+            HASH_RANGE_EXTENDED_PROC_OID,
+            "hash_range_extended",
+            ANYRANGEOID,
+        ),
+        (
+            HASH_MULTIRANGE_EXTENDED_PROC_OID,
+            "hash_multirange_extended",
+            ANYMULTIRANGEOID,
+        ),
+    ];
+
+    standard
+        .into_iter()
+        .map(|(oid, proname, type_oid)| {
+            proc_row(
+                oid,
+                proname,
+                INT4_TYPE_OID,
+                &oid_argtypes(&[type_oid]),
+                proname,
+                1,
+                false,
+                true,
+                'f',
+                'i',
+            )
+        })
+        .chain(extended.into_iter().map(|(oid, proname, type_oid)| {
+            proc_row(
+                oid,
+                proname,
+                INT8_TYPE_OID,
+                &oid_argtypes(&[type_oid, INT8_TYPE_OID]),
+                proname,
+                2,
+                false,
+                true,
+                'f',
+                'i',
+            )
+        }))
+        .collect()
 }
 
 fn hash_extended_proc_rows() -> Vec<PgProcRow> {
@@ -13460,6 +14547,51 @@ fn variadic_proc_row(
     row
 }
 
+fn stats_import_variadic_proc_row(oid: u32, proname: &str) -> PgProcRow {
+    let mut row = variadic_proc_row(
+        oid,
+        proname,
+        BOOL_TYPE_OID,
+        &oid_argtypes(&[ANYOID]),
+        ANYOID,
+        proname,
+        1,
+        false,
+        false,
+        'f',
+        'v',
+    );
+    row.proparallel = 'u';
+    row.proallargtypes = Some(vec![ANYOID]);
+    row.proargmodes = Some(vec![b'v']);
+    row.proargnames = Some(vec!["kwargs".into()]);
+    row
+}
+
+fn stats_import_clear_proc_row(
+    oid: u32,
+    proname: &str,
+    prorettype: u32,
+    argtypes: &[u32],
+    argnames: &[&str],
+) -> PgProcRow {
+    let mut row = proc_row_with_parallel(
+        oid,
+        proname,
+        prorettype,
+        &oid_argtypes(argtypes),
+        proname,
+        argtypes.len() as i16,
+        false,
+        false,
+        'f',
+        'v',
+        'u',
+    );
+    row.proargnames = Some(argnames.iter().map(|name| (*name).into()).collect());
+    row
+}
+
 fn hypothetical_aggregate_proc_row(oid: u32, proname: &str, prorettype: u32) -> PgProcRow {
     let mut row = variadic_proc_row(
         oid,
@@ -13762,6 +14894,14 @@ mod tests {
         assert_eq!(
             proc_oid_for_builtin_scalar_function(BuiltinScalarFunction::Lower),
             Some(6202)
+        );
+        assert_eq!(
+            builtin_scalar_function_for_proc_oid(6204),
+            Some(BuiltinScalarFunction::Upper)
+        );
+        assert_eq!(
+            proc_oid_for_builtin_scalar_function(BuiltinScalarFunction::Upper),
+            Some(6204)
         );
         assert_eq!(
             builtin_scalar_function_for_proc_oid(

@@ -507,14 +507,18 @@ fn run_statement(
         | Statement::AlterTableTriggerState(_)
         | Statement::AlterTriggerRename(_)
         | Statement::CreateAggregate(_)
+        | Statement::AlterAggregateRename(_)
         | Statement::DropAggregate(_)
         | Statement::AlterTableSet(_)
+        | Statement::AlterIndexSet(_)
         | Statement::CreateStatistics(_)
         | Statement::AlterStatistics(_)
         | Statement::DropStatistics(_)
         | Statement::CommentOnStatistics(_)
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableAddConstraint(_)
+        | Statement::AlterTableMulti(_)
+        | Statement::AlterTableReplicaIdentity(_)
         | Statement::AlterTableDropConstraint(_)
         | Statement::AlterTableAlterConstraint(_)
         | Statement::AlterTableRenameConstraint(_)
@@ -527,11 +531,14 @@ fn run_statement(
         | Statement::AlterTableAlterColumnStorage(_)
         | Statement::AlterTableAlterColumnDefault(_)
         | Statement::AlterTableAlterColumnExpression(_)
+        | Statement::AlterTableAlterColumnIdentity(_)
         | Statement::AlterTableSetNotNull(_)
         | Statement::AlterTableDropNotNull(_)
         | Statement::AlterTableValidateConstraint(_)
         | Statement::AlterTableInherit(_)
         | Statement::AlterTableNoInherit(_)
+        | Statement::AlterTableOf(_)
+        | Statement::AlterTableNotOf(_)
         | Statement::AlterTableAttachPartition(_)
         | Statement::AlterTableDetachPartition(_)
         | Statement::AlterIndexRename(_)
@@ -747,6 +754,7 @@ fn run_statement(
                 lock_status_provider: None,
                 sequences: None,
                 large_objects: None,
+                stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -767,6 +775,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -777,8 +786,11 @@ fn run_statement(
                 catalog_effects: Vec::new(),
                 temp_effects: Vec::new(),
                 database: None,
+                pending_catalog_effects: Vec::new(),
+                pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
-                compiled_functions: std::collections::HashMap::new(),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
@@ -802,6 +814,7 @@ fn run_statement(
                 lock_status_provider: None,
                 sequences: None,
                 large_objects: None,
+                stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -822,6 +835,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -832,8 +846,11 @@ fn run_statement(
                 catalog_effects: Vec::new(),
                 temp_effects: Vec::new(),
                 database: None,
+                pending_catalog_effects: Vec::new(),
+                pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
-                compiled_functions: std::collections::HashMap::new(),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
@@ -857,6 +874,7 @@ fn run_statement(
                 lock_status_provider: None,
                 sequences: None,
                 large_objects: None,
+                stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -877,6 +895,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -887,8 +906,11 @@ fn run_statement(
                 catalog_effects: Vec::new(),
                 temp_effects: Vec::new(),
                 database: None,
+                pending_catalog_effects: Vec::new(),
+                pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
-                compiled_functions: std::collections::HashMap::new(),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
@@ -912,6 +934,7 @@ fn run_statement(
                 lock_status_provider: None,
                 sequences: None,
                 large_objects: None,
+                stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -932,6 +955,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -942,8 +966,11 @@ fn run_statement(
                 catalog_effects: Vec::new(),
                 temp_effects: Vec::new(),
                 database: None,
+                pending_catalog_effects: Vec::new(),
+                pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
-                compiled_functions: std::collections::HashMap::new(),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
@@ -971,6 +998,7 @@ fn run_statement(
         | Statement::Call(_)
         | Statement::CreateFunction(_)
         | Statement::CreateProcedure(_)
+        | Statement::CreateCast(_)
         | Statement::CreateOperator(_)
         | Statement::CreateOperatorClass(_)
         | Statement::CreateRule(_)
@@ -984,6 +1012,7 @@ fn run_statement(
         | Statement::DropFunction(_)
         | Statement::DropProcedure(_)
         | Statement::DropRoutine(_)
+        | Statement::DropCast(_)
         | Statement::DropOperator(_)
         | Statement::DropDomain(_)
         | Statement::DropConversion(_)
@@ -1070,6 +1099,7 @@ fn run_statement(
                 lock_status_provider: None,
                 sequences: None,
                 large_objects: None,
+                stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -1090,6 +1120,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -1100,8 +1131,11 @@ fn run_statement(
                 catalog_effects: Vec::new(),
                 temp_effects: Vec::new(),
                 database: None,
+                pending_catalog_effects: Vec::new(),
+                pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
-                compiled_functions: std::collections::HashMap::new(),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
@@ -1125,6 +1159,7 @@ fn run_statement(
                 lock_status_provider: None,
                 sequences: None,
                 large_objects: None,
+                stats_import_runtime: None,
                 async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -1145,6 +1180,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -1155,8 +1191,11 @@ fn run_statement(
                 catalog_effects: Vec::new(),
                 temp_effects: Vec::new(),
                 database: None,
+                pending_catalog_effects: Vec::new(),
+                pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
-                compiled_functions: std::collections::HashMap::new(),
+                plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
@@ -1183,6 +1222,7 @@ fn run_statement(
                     lock_status_provider: None,
                     sequences: None,
                     large_objects: None,
+                    stats_import_runtime: None,
                     async_notify_runtime: None,
                     checkpoint_stats:
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -1203,6 +1243,7 @@ fn run_statement(
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,
+                    random_state: pgrust::backend::executor::PgPrngState::shared(),
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1213,8 +1254,11 @@ fn run_statement(
                     catalog_effects: Vec::new(),
                     temp_effects: Vec::new(),
                     database: None,
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: relcache.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
@@ -1252,6 +1296,7 @@ fn run_statement(
                     lock_status_provider: None,
                     sequences: None,
                     large_objects: None,
+                    stats_import_runtime: None,
                     async_notify_runtime: None,
                     checkpoint_stats:
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -1272,6 +1317,7 @@ fn run_statement(
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,
+                    random_state: pgrust::backend::executor::PgPrngState::shared(),
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1282,8 +1328,11 @@ fn run_statement(
                     catalog_effects: Vec::new(),
                     temp_effects: Vec::new(),
                     database: None,
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: relcache.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
@@ -1321,6 +1370,7 @@ fn run_statement(
                     lock_status_provider: None,
                     sequences: None,
                     large_objects: None,
+                    stats_import_runtime: None,
                     async_notify_runtime: None,
                     checkpoint_stats:
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -1341,6 +1391,7 @@ fn run_statement(
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,
+                    random_state: pgrust::backend::executor::PgPrngState::shared(),
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1351,8 +1402,11 @@ fn run_statement(
                     catalog_effects: Vec::new(),
                     temp_effects: Vec::new(),
                     database: None,
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
                     catalog: relcache.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
@@ -1383,7 +1437,8 @@ fn run_statement(
         | Statement::Fetch(_)
         | Statement::Move(_)
         | Statement::ClosePortal(_)
-        | Statement::Begin
+        | Statement::SetTransaction(_)
+        | Statement::Begin(_)
         | Statement::Commit
         | Statement::Rollback
         | Statement::Savepoint(_)

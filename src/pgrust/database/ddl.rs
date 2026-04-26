@@ -906,23 +906,29 @@ pub(super) fn reject_type_with_dependents(
         .filter_map(|row| match row.classid {
             PG_CLASS_RELATION_OID => {
                 let class = catcache.class_by_oid(row.objid)?;
-                Some(format!(
-                    "{} {}",
-                    relation_kind_name(class.relkind),
-                    format_name(class.relnamespace, &class.relname)
+                Some((
+                    row.objid,
+                    format!(
+                        "{} {}",
+                        relation_kind_name(class.relkind),
+                        format_name(class.relnamespace, &class.relname)
+                    ),
                 ))
             }
             PG_PROC_RELATION_OID => {
                 let proc_row = catcache.proc_by_oid(row.objid)?;
-                Some(format!(
-                    "function {}",
-                    format_name(proc_row.pronamespace, &proc_row.proname)
+                Some((
+                    row.objid,
+                    format!(
+                        "function {}()",
+                        format_name(proc_row.pronamespace, &proc_row.proname)
+                    ),
                 ))
             }
             _ => None,
         })
         .collect::<Vec<_>>();
-    dependents.sort();
+    dependents.sort_by_key(|(oid, _)| *oid);
     dependents.dedup();
     if dependents.is_empty() {
         return Ok(());
@@ -933,11 +939,11 @@ pub(super) fn reject_type_with_dependents(
         detail: Some(
             dependents
                 .into_iter()
-                .map(|name| format!("{name} depends on type {display_name}"))
+                .map(|(_, name)| format!("{name} depends on type {display_name}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
-        hint: None,
+        hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
         sqlstate: "2BP01",
     })
 }
@@ -1035,12 +1041,20 @@ pub(super) fn validate_alter_table_add_column(
     if column.identity.is_some()
         && (column.generated.is_some() || column.default_expr.is_some() || serial_kind.is_some())
     {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "identity column without DEFAULT, generated expression, or serial type",
-            actual: format!(
+        let actual = if column.generated.is_some() {
+            format!(
+                "both identity and generation expression specified for column \"{}\"",
+                column.name
+            )
+        } else {
+            format!(
                 "conflicting identity definition for column \"{}\"",
                 column.name
-            ),
+            )
+        };
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "identity column without DEFAULT, generated expression, or serial type",
+            actual,
         }));
     }
     if serial_kind.is_some() && column.generated.is_some() {
@@ -1064,8 +1078,8 @@ pub(super) fn validate_alter_table_add_column(
     if let Some(generated) = &column.generated {
         desc.default_expr = Some(generated.expr_sql.clone());
         desc.generated = Some(generated.kind);
-    } else if let Some(identity) = column.identity {
-        desc.identity = Some(identity);
+    } else if let Some(identity) = &column.identity {
+        desc.identity = Some(identity.kind);
     } else if serial_kind.is_none() {
         desc.default_expr = column.default_expr.clone();
         if let Some(sql) = desc.default_expr.as_deref() {
@@ -1082,20 +1096,27 @@ pub(super) fn validate_alter_table_add_column(
     let constraint_actions =
         normalize_alter_table_add_column_constraints(table_name, column, existing_constraints)
             .map_err(ExecError::Parse)?;
-    let owned_sequence_kind = if let Some(serial_kind) = serial_kind {
-        Some(serial_kind)
-    } else if column.identity.is_some() {
-        Some(serial_kind_for_identity_sql_type(sql_type).map_err(ExecError::Parse)?)
+    let owned_sequence = if let Some(serial_kind) = serial_kind {
+        Some((
+            serial_kind,
+            crate::backend::parser::SequenceOptionsSpec::default(),
+        ))
+    } else if let Some(identity) = &column.identity {
+        Some((
+            serial_kind_for_identity_sql_type(sql_type).map_err(ExecError::Parse)?,
+            identity.options.clone(),
+        ))
     } else {
         None
     };
     Ok(AlterTableAddColumnPlan {
         column: desc,
-        owned_sequence: owned_sequence_kind.map(|serial_kind| OwnedSequenceSpec {
+        owned_sequence: owned_sequence.map(|(serial_kind, options)| OwnedSequenceSpec {
             column_index: relation_desc.columns.len(),
             column_name: column.name.clone(),
             serial_kind,
             sql_type,
+            options,
         }),
         not_null_action: constraint_actions.not_null,
         check_actions: constraint_actions.checks,
@@ -1420,6 +1441,17 @@ pub(super) fn validate_alter_table_alter_column_default(
     if current_column.generated.is_some() {
         return Err(ExecError::DetailedError {
             message: format!("column \"{}\" is a generated column", current_column.name),
+            detail: None,
+            hint: None,
+            sqlstate: "428C9",
+        });
+    }
+    if current_column.identity.is_some() {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "column \"{}\" of relation is an identity column",
+                current_column.name
+            ),
             detail: None,
             hint: None,
             sqlstate: "428C9",

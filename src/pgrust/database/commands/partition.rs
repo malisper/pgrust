@@ -4,6 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use super::super::*;
+use super::typed_table::reject_typed_table_ddl;
 use crate::backend::commands::partition::{
     validate_default_partition_rows_for_new_bound, validate_new_partition_bound,
     validate_partition_relation_compatibility, validate_relation_rows_for_partition_bound,
@@ -166,6 +167,7 @@ fn ddl_executor_context(
         lock_status_provider: Some(std::sync::Arc::new(db.clone())),
         sequences: Some(db.sequences.clone()),
         large_objects: Some(db.large_objects.clone()),
+        stats_import_runtime: None,
         async_notify_runtime: Some(db.async_notify_runtime.clone()),
         advisory_locks: std::sync::Arc::clone(&db.advisory_locks),
         row_locks: std::sync::Arc::clone(&db.row_locks),
@@ -189,6 +191,7 @@ fn ddl_executor_context(
         transaction_lock_scope_id: None,
         next_command_id: cid,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+        random_state: crate::backend::executor::PgPrngState::shared(),
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
         system_bindings: Vec::new(),
@@ -199,8 +202,11 @@ fn ddl_executor_context(
         catalog_effects: Vec::new(),
         temp_effects: Vec::new(),
         database: Some(db.clone()),
+        pending_catalog_effects: Vec::new(),
+        pending_table_locks: Vec::new(),
         catalog: catalog.materialize_visible_catalog(),
-        compiled_functions: std::collections::HashMap::new(),
+        plpgsql_function_cache: db.plpgsql_function_cache(client_id),
+        pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
@@ -284,6 +290,8 @@ impl Database {
         let child = lookup_partition_alter_child(&catalog, &stmt.partition_table)?;
         ensure_relation_owner(self, client_id, &parent, &stmt.parent_table)?;
         ensure_relation_owner(self, client_id, &child, &stmt.partition_table)?;
+        reject_typed_table_ddl(&parent, "attach partition to")?;
+        reject_typed_table_ddl(&child, "attach a typed table as partition of")?;
         validate_partition_relation_compatibility(
             &catalog,
             &parent,

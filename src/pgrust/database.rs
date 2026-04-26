@@ -13,6 +13,7 @@ pub(crate) mod foreign_keys;
 mod large_objects;
 mod relation_refs;
 mod sequences;
+mod stats_import;
 mod temp;
 mod toast;
 mod txn;
@@ -89,11 +90,13 @@ use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_NAME, PUBLIC_NAMESPACE_OID, PgConstraintRow,
-    PgEnumRow, PgRangeRow, PgTypeRow, RangeCanonicalization, system_catalog_indexes,
+    PgEnumRow, PgRangeRow, PgTypeRow, RangeCanonicalization, annotate_catalog_type_io_procs,
+    builtin_type_row_by_oid, synthetic_type_output_proc_oid, system_catalog_indexes,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 pub use crate::pgrust::autovacuum::AutovacuumConfig;
 use crate::pgrust::cluster::{Cluster, ClusterShared, SessionActivityEntry, SessionActivityState};
+use crate::pl::plpgsql::PlpgsqlFunctionCache;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use ddl::{
     ensure_can_set_role, ensure_relation_owner, map_catalog_error,
@@ -151,6 +154,8 @@ pub(crate) use foreign_keys::{
     relation_foreign_key_lock_requests, table_lock_relations, update_foreign_key_lock_requests,
     validate_deferred_constraints, validate_immediate_constraints,
 };
+
+pub(crate) const LOGICAL_RELATION_LOCK_SPC_OID: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DatabaseOpenOptions {
@@ -210,6 +215,8 @@ pub struct Database {
     pub(crate) session_replication_role_states:
         Arc<RwLock<HashMap<ClientId, SessionReplicationRole>>>,
     pub(crate) session_stats_states: Arc<RwLock<HashMap<ClientId, Arc<RwLock<SessionStatsState>>>>>,
+    pub(crate) session_plpgsql_function_caches:
+        Arc<RwLock<HashMap<ClientId, Arc<RwLock<PlpgsqlFunctionCache>>>>>,
     pub(crate) session_temp_backend_ids: Arc<RwLock<HashMap<ClientId, TempBackendId>>>,
     pub(crate) database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
     pub(crate) temp_relations: Arc<RwLock<HashMap<TempBackendId, TempNamespace>>>,
@@ -408,7 +415,9 @@ fn domain_sql_type(domain: &DomainEntry) -> SqlType {
             .sql_type
             .with_identity(domain.oid, domain.sql_type.type_oid);
     }
-    domain.sql_type
+    domain
+        .sql_type
+        .with_identity(domain.oid, domain.sql_type.type_oid)
 }
 
 fn dynamic_range_array_type_names(
@@ -499,7 +508,7 @@ pub(crate) struct DatabaseCreateGrant {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub(crate) enum TempMutationEffect {
+pub enum TempMutationEffect {
     Create {
         name: String,
         entry: RelCacheEntry,
@@ -630,6 +639,16 @@ impl Database {
             .insert(client_id, stats_state);
     }
 
+    pub(crate) fn install_plpgsql_function_cache(
+        &self,
+        client_id: ClientId,
+        cache: Arc<RwLock<PlpgsqlFunctionCache>>,
+    ) {
+        self.session_plpgsql_function_caches
+            .write()
+            .insert(client_id, cache);
+    }
+
     pub(crate) fn install_temp_backend_id(
         &self,
         client_id: ClientId,
@@ -681,8 +700,25 @@ impl Database {
             .unwrap_or_else(|| Arc::new(RwLock::new(SessionStatsState::default())))
     }
 
+    pub(crate) fn plpgsql_function_cache(
+        &self,
+        client_id: ClientId,
+    ) -> Arc<RwLock<PlpgsqlFunctionCache>> {
+        self.session_plpgsql_function_caches
+            .read()
+            .get(&client_id)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(RwLock::new(PlpgsqlFunctionCache::default())))
+    }
+
     pub(crate) fn clear_stats_state(&self, client_id: ClientId) {
         self.session_stats_states.write().remove(&client_id);
+    }
+
+    pub(crate) fn clear_plpgsql_function_cache(&self, client_id: ClientId) {
+        self.session_plpgsql_function_caches
+            .write()
+            .remove(&client_id);
     }
 
     pub(crate) fn clear_temp_backend_id(&self, client_id: ClientId) {
@@ -810,7 +846,8 @@ impl Database {
         let mut rows = domains
             .values()
             .flat_map(|domain| {
-                let base = base_types.get(&domain.sql_type.type_oid);
+                let base_catalog = builtin_type_row_by_oid(domain.sql_type.type_oid);
+                let base_entry = base_types.get(&domain.sql_type.type_oid);
                 let domain_type = domain_sql_type(domain);
                 [
                     PgTypeRow {
@@ -819,22 +856,62 @@ impl Database {
                         typnamespace: domain.namespace_oid,
                         typowner: BOOTSTRAP_SUPERUSER_OID,
                         typacl: domain.typacl.clone(),
-                        typlen: if domain.sql_type.is_array { -1 } else { 0 },
-                        typalign: AttributeAlign::Int,
-                        typstorage: base
-                            .map(|entry| entry.typstorage)
+                        typlen: base_catalog
+                            .as_ref()
+                            .map(|row| row.typlen)
+                            .unwrap_or_else(|| if domain.sql_type.is_array { -1 } else { 0 }),
+                        typbyval: base_catalog.as_ref().is_some_and(|row| row.typbyval),
+                        typtype: 'd',
+                        typisdefined: true,
+                        typalign: base_catalog
+                            .as_ref()
+                            .map(|row| row.typalign)
+                            .unwrap_or(AttributeAlign::Int),
+                        typstorage: base_catalog
+                            .as_ref()
+                            .map(|row| row.typstorage)
+                            .or_else(|| base_entry.map(|entry| entry.typstorage))
                             .unwrap_or(AttributeStorage::Extended),
                         typrelid: 0,
+                        typsubscript: 0,
                         typelem: 0,
                         typarray: domain.array_oid,
                         typinput: DOMAIN_IN_PROC_OID,
-                        typoutput: base.map(|entry| entry.output_proc_oid).unwrap_or(0),
+                        typoutput: base_catalog
+                            .as_ref()
+                            .map(|row| row.typoutput)
+                            .or_else(|| base_entry.map(|entry| entry.output_proc_oid))
+                            .filter(|oid| *oid != 0)
+                            .unwrap_or_else(|| {
+                                synthetic_type_output_proc_oid(domain.sql_type.type_oid)
+                            }),
                         typreceive: DOMAIN_RECV_PROC_OID,
-                        typsend: base.map(|entry| entry.send_proc_oid).unwrap_or(0),
-                        typmodin: 0,
-                        typmodout: 0,
-                        typanalyze: base.map(|entry| entry.analyze_proc_oid).unwrap_or(0),
-                        typsubscript: 0,
+                        typsend: base_catalog
+                            .as_ref()
+                            .map(|row| row.typsend)
+                            .or_else(|| base_entry.map(|entry| entry.send_proc_oid))
+                            .unwrap_or(0),
+                        typmodin: base_catalog
+                            .as_ref()
+                            .map(|row| row.typmodin)
+                            .or_else(|| base_entry.map(|entry| entry.typmodin_proc_oid))
+                            .unwrap_or(0),
+                        typmodout: base_catalog
+                            .as_ref()
+                            .map(|row| row.typmodout)
+                            .or_else(|| base_entry.map(|entry| entry.typmodout_proc_oid))
+                            .unwrap_or(0),
+                        typdelim: base_catalog.as_ref().map(|row| row.typdelim).unwrap_or(','),
+                        typanalyze: base_catalog
+                            .as_ref()
+                            .map(|row| row.typanalyze)
+                            .or_else(|| base_entry.map(|entry| entry.analyze_proc_oid))
+                            .unwrap_or(0),
+                        typbasetype: domain.sql_type.type_oid,
+                        typcollation: base_catalog
+                            .as_ref()
+                            .map(|row| row.typcollation)
+                            .unwrap_or(0),
                         sql_type: domain_type,
                     },
                     PgTypeRow {
@@ -844,9 +921,13 @@ impl Database {
                         typowner: BOOTSTRAP_SUPERUSER_OID,
                         typacl: None,
                         typlen: -1,
+                        typbyval: false,
+                        typtype: 'b',
+                        typisdefined: true,
                         typalign: AttributeAlign::Int,
                         typstorage: AttributeStorage::Extended,
                         typrelid: 0,
+                        typsubscript: ARRAY_SUBSCRIPT_HANDLER_PROC_OID,
                         typelem: domain.oid,
                         typarray: 0,
                         typinput: ARRAY_IN_PROC_OID,
@@ -855,13 +936,16 @@ impl Database {
                         typsend: ARRAY_SEND_PROC_OID,
                         typmodin: 0,
                         typmodout: 0,
+                        typdelim: ',',
                         typanalyze: ARRAY_TYPANALYZE_PROC_OID,
-                        typsubscript: ARRAY_SUBSCRIPT_HANDLER_PROC_OID,
+                        typbasetype: 0,
+                        typcollation: 0,
                         sql_type: SqlType::array_of(domain_type),
                     },
                 ]
             })
             .collect::<Vec<_>>();
+        annotate_catalog_type_io_procs(&mut rows);
         rows.sort_by_key(|row| {
             let schema_rank = search_path
                 .iter()
@@ -889,9 +973,13 @@ impl Database {
                         typowner: BOOTSTRAP_SUPERUSER_OID,
                         typacl: entry.typacl.clone(),
                         typlen: 4,
+                        typbyval: true,
+                        typtype: 'e',
+                        typisdefined: true,
                         typalign: AttributeAlign::Int,
                         typstorage: AttributeStorage::Plain,
                         typrelid: 0,
+                        typsubscript: 0,
                         typelem: 0,
                         typarray: entry.array_oid,
                         typinput: 0,
@@ -900,8 +988,10 @@ impl Database {
                         typsend: 0,
                         typmodin: 0,
                         typmodout: 0,
+                        typdelim: ',',
                         typanalyze: 0,
-                        typsubscript: 0,
+                        typbasetype: 0,
+                        typcollation: 0,
                         // :HACK: User-defined enums are text-backed for now. This unlocks
                         // catalog/type resolution and basic storage flow, but does not yet
                         // enforce label membership or enum ordering semantics.
@@ -914,9 +1004,13 @@ impl Database {
                         typowner: BOOTSTRAP_SUPERUSER_OID,
                         typacl: entry.typacl.clone(),
                         typlen: -1,
+                        typbyval: false,
+                        typtype: 'b',
+                        typisdefined: true,
                         typalign: AttributeAlign::Int,
                         typstorage: AttributeStorage::Extended,
                         typrelid: 0,
+                        typsubscript: 0,
                         typelem: entry.oid,
                         typarray: 0,
                         typinput: 0,
@@ -925,14 +1019,17 @@ impl Database {
                         typsend: 0,
                         typmodin: 0,
                         typmodout: 0,
+                        typdelim: ',',
                         typanalyze: 0,
-                        typsubscript: 0,
+                        typbasetype: 0,
+                        typcollation: 0,
                         sql_type: SqlType::array_of(base_sql_type)
                             .with_identity(entry.array_oid, 0),
                     },
                 ]
             })
             .collect::<Vec<_>>();
+        annotate_catalog_type_io_procs(&mut rows);
         rows.sort_by_key(|row| {
             let schema_rank = search_path
                 .iter()
@@ -1124,6 +1221,15 @@ impl Database {
                     .with_identity(entry.multirange_oid, entry.subtype.typrelid)
                     .with_range_metadata(entry.subtype.type_oid, entry.multirange_oid, discrete)
                     .with_multirange_range_oid(entry.oid);
+                let range_align = builtin_type_row_by_oid(entry.subtype.type_oid)
+                    .map(|row| {
+                        if row.typalign == AttributeAlign::Double {
+                            AttributeAlign::Double
+                        } else {
+                            AttributeAlign::Int
+                        }
+                    })
+                    .unwrap_or(AttributeAlign::Int);
                 let array_name = array_type_names
                     .get(&entry.array_oid)
                     .cloned()
@@ -1140,9 +1246,13 @@ impl Database {
                         typowner: entry.owner_oid,
                         typacl: entry.typacl.clone(),
                         typlen: -1,
-                        typalign: AttributeAlign::Int,
+                        typbyval: false,
+                        typtype: 'r',
+                        typisdefined: true,
+                        typalign: range_align,
                         typstorage: AttributeStorage::Extended,
                         typrelid: 0,
+                        typsubscript: 0,
                         typelem: 0,
                         typarray: entry.array_oid,
                         typinput: 0,
@@ -1151,8 +1261,10 @@ impl Database {
                         typsend: 0,
                         typmodin: 0,
                         typmodout: 0,
+                        typdelim: ',',
                         typanalyze: 0,
-                        typsubscript: 0,
+                        typbasetype: 0,
+                        typcollation: 0,
                         sql_type: base_sql_type,
                     },
                     PgTypeRow {
@@ -1162,9 +1274,13 @@ impl Database {
                         typowner: entry.owner_oid,
                         typacl: entry.typacl.clone(),
                         typlen: -1,
-                        typalign: AttributeAlign::Int,
+                        typbyval: false,
+                        typtype: 'b',
+                        typisdefined: true,
+                        typalign: range_align,
                         typstorage: AttributeStorage::Extended,
                         typrelid: 0,
+                        typsubscript: 0,
                         typelem: entry.oid,
                         typarray: 0,
                         typinput: 0,
@@ -1173,8 +1289,10 @@ impl Database {
                         typsend: 0,
                         typmodin: 0,
                         typmodout: 0,
+                        typdelim: ',',
                         typanalyze: 0,
-                        typsubscript: 0,
+                        typbasetype: 0,
+                        typcollation: 0,
                         sql_type: SqlType::array_of(base_sql_type),
                     },
                     PgTypeRow {
@@ -1184,9 +1302,13 @@ impl Database {
                         typowner: entry.owner_oid,
                         typacl: entry.typacl.clone(),
                         typlen: -1,
-                        typalign: AttributeAlign::Int,
+                        typbyval: false,
+                        typtype: 'm',
+                        typisdefined: true,
+                        typalign: range_align,
                         typstorage: AttributeStorage::Extended,
                         typrelid: 0,
+                        typsubscript: 0,
                         typelem: 0,
                         typarray: entry.multirange_array_oid,
                         typinput: 0,
@@ -1195,8 +1317,10 @@ impl Database {
                         typsend: 0,
                         typmodin: 0,
                         typmodout: 0,
+                        typdelim: ',',
                         typanalyze: 0,
-                        typsubscript: 0,
+                        typbasetype: 0,
+                        typcollation: 0,
                         sql_type: multirange_sql_type,
                     },
                     PgTypeRow {
@@ -1206,9 +1330,13 @@ impl Database {
                         typowner: entry.owner_oid,
                         typacl: entry.typacl.clone(),
                         typlen: -1,
-                        typalign: AttributeAlign::Int,
+                        typbyval: false,
+                        typtype: 'b',
+                        typisdefined: true,
+                        typalign: range_align,
                         typstorage: AttributeStorage::Extended,
                         typrelid: 0,
+                        typsubscript: 0,
                         typelem: entry.multirange_oid,
                         typarray: 0,
                         typinput: 0,
@@ -1217,13 +1345,16 @@ impl Database {
                         typsend: 0,
                         typmodin: 0,
                         typmodout: 0,
+                        typdelim: ',',
                         typanalyze: 0,
-                        typsubscript: 0,
+                        typbasetype: 0,
+                        typcollation: 0,
                         sql_type: SqlType::array_of(multirange_sql_type),
                     },
                 ]
             })
             .collect::<Vec<_>>();
+        annotate_catalog_type_io_procs(&mut rows);
         rows.sort_by_key(|row| {
             let schema_rank = search_path
                 .iter()
@@ -1265,7 +1396,19 @@ impl Database {
                 rngtypid: entry.oid,
                 rngsubtype: entry.subtype.type_oid,
                 rngmultitypid: entry.multirange_oid,
-                rngcollation: 0,
+                rngcollation: crate::backend::catalog::catalog::default_column_collation_oid(
+                    entry.subtype,
+                ),
+                rngsubopc: crate::include::catalog::default_btree_opclass_oid(
+                    entry.subtype.type_oid,
+                )
+                .unwrap_or_else(|| {
+                    if entry.subtype.is_array {
+                        crate::include::catalog::ARRAY_BTREE_OPCLASS_OID
+                    } else {
+                        0
+                    }
+                }),
                 rngcanonical: None,
                 rngsubdiff: entry.subtype_diff.clone(),
                 canonicalization: match entry.subtype.kind {
@@ -1284,6 +1427,7 @@ impl Database {
         self.clear_row_security_enabled(client_id);
         self.clear_session_replication_role(client_id);
         self.clear_stats_state(client_id);
+        self.clear_plpgsql_function_cache(client_id);
         self.sequences.clear_currvals_for_client(client_id);
     }
 
@@ -1563,6 +1707,32 @@ impl Database {
     }
 
     fn resolve_relation_oid_for_lock(&self, rel: RelFileLocator) -> Option<u32> {
+        if rel.spc_oid == LOGICAL_RELATION_LOCK_SPC_OID {
+            if rel.db_oid == 0 {
+                return self
+                    .shared_catalog
+                    .read()
+                    .catcache()
+                    .ok()?
+                    .class_by_oid(rel.rel_number)
+                    .map(|row| row.oid);
+            }
+
+            let state = self
+                .cluster
+                .open_databases
+                .read()
+                .get(&rel.db_oid)
+                .cloned()?;
+
+            return state
+                .catalog
+                .read()
+                .catcache()
+                .ok()
+                .and_then(|catcache| catcache.class_by_oid(rel.rel_number).map(|row| row.oid));
+        }
+
         if rel.db_oid == 0 {
             return self
                 .shared_catalog

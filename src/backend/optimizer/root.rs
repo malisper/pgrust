@@ -446,27 +446,48 @@ fn prepare_set_returning_call_for_locking(
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::GenerateSubscripts {
+            func_oid,
+            func_variadic,
+            array,
+            dimension,
+            reverse,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::GenerateSubscripts {
+            func_oid,
+            func_variadic,
+            array: prepare_expr_for_locking(array)?,
+            dimension: prepare_expr_for_locking(dimension)?,
+            reverse: reverse.map(prepare_expr_for_locking).transpose()?,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::PartitionTree {
             func_oid,
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionTree {
             func_oid,
             func_variadic,
             relid: prepare_expr_for_locking(relid)?,
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid: prepare_expr_for_locking(relid)?,
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PgLockStatus {
             func_oid,
@@ -964,6 +985,7 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
         jointree: None,
         target_list,
         distinct: query.distinct,
+        distinct_on: query.distinct_on,
         where_qual: None,
         group_by: Vec::new(),
         accumulators: Vec::new(),
@@ -1326,6 +1348,7 @@ fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
         jointree: query.jointree.clone(),
         target_list: vec![target],
         distinct: false,
+        distinct_on: Vec::new(),
         where_qual,
         group_by: Vec::new(),
         accumulators: Vec::new(),
@@ -1941,7 +1964,7 @@ fn make_processed_tlist(parse: &Query) -> Vec<TargetEntry> {
         + 1;
     let mut next_resno = processed_tlist.len() + 1;
 
-    for clause in &parse.sort_clause {
+    for clause in parse.sort_clause.iter().chain(parse.distinct_on.iter()) {
         let matching_index = processed_tlist
             .iter()
             .position(|target| {
@@ -1993,7 +2016,7 @@ fn make_sort_input_target(
     processed_tlist: &[TargetEntry],
     final_target: &PathTarget,
 ) -> PathTarget {
-    if parse.sort_clause.is_empty() {
+    if parse.sort_clause.is_empty() && parse.distinct_on.is_empty() {
         return final_target.clone();
     }
 
@@ -2079,7 +2102,7 @@ fn build_scanjoin_target(
         group_input_target.exprs.clone()
     } else if has_windowing(parse) {
         window_input_target.exprs.clone()
-    } else if !parse.sort_clause.is_empty() {
+    } else if !parse.sort_clause.is_empty() || !parse.distinct_on.is_empty() {
         sort_input_target.exprs.clone()
     } else {
         final_target.exprs.clone()
@@ -2637,6 +2660,18 @@ fn collect_set_returning_call_outer_refs(
             collect_query_outer_refs_expr(step, levelsup, exprs);
             if let Some(timezone) = timezone {
                 collect_query_outer_refs_expr(timezone, levelsup, exprs);
+            }
+        }
+        SetReturningCall::GenerateSubscripts {
+            array,
+            dimension,
+            reverse,
+            ..
+        } => {
+            collect_query_outer_refs_expr(array, levelsup, exprs);
+            collect_query_outer_refs_expr(dimension, levelsup, exprs);
+            if let Some(reverse) = reverse {
+                collect_query_outer_refs_expr(reverse, levelsup, exprs);
             }
         }
         SetReturningCall::PartitionTree { relid, .. }

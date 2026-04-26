@@ -12,6 +12,7 @@ use std::fmt;
 pub enum UngroupedColumnClause {
     SelectTarget,
     Having,
+    OrderBy,
     Other,
 }
 
@@ -317,12 +318,14 @@ pub enum Statement {
     Analyze(AnalyzeStatement),
     Checkpoint(CheckpointStatement),
     Set(SetStatement),
+    SetTransaction(SetTransactionStatement),
     SetConstraints(SetConstraintsStatement),
     Reset(ResetStatement),
     Call(CallStatement),
     CreateFunction(CreateFunctionStatement),
     CreateProcedure(CreateProcedureStatement),
     CreateAggregate(CreateAggregateStatement),
+    CreateCast(CreateCastStatement),
     CreateTrigger(CreateTriggerStatement),
     CreateType(CreateTypeStatement),
     AlterType(AlterTypeStatement),
@@ -350,11 +353,13 @@ pub enum Statement {
     AlterSequenceOwner(AlterRelationOwnerStatement),
     AlterSequenceRename(AlterTableRenameStatement),
     AlterIndexRename(AlterTableRenameStatement),
+    AlterIndexSet(AlterIndexSetStatement),
     AlterViewRename(AlterTableRenameStatement),
     AlterViewRenameColumn(AlterTableRenameColumnStatement),
     AlterIndexAttachPartition(AlterIndexAttachPartitionStatement),
     AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
+    AlterTableMulti(Vec<String>),
     AlterTableAddConstraint(AlterTableAddConstraintStatement),
     AlterTableDropColumn(AlterTableDropColumnStatement),
     AlterTableDropConstraint(AlterTableDropConstraintStatement),
@@ -367,6 +372,7 @@ pub enum Statement {
     AlterTableAlterColumnStorage(AlterTableAlterColumnStorageStatement),
     AlterTableAlterColumnOptions(AlterTableAlterColumnOptionsStatement),
     AlterTableAlterColumnStatistics(AlterTableAlterColumnStatisticsStatement),
+    AlterTableAlterColumnIdentity(AlterTableAlterColumnIdentityStatement),
     AlterTableOwner(AlterRelationOwnerStatement),
     AlterTableRenameColumn(AlterTableRenameColumnStatement),
     AlterTableRename(AlterTableRenameStatement),
@@ -376,6 +382,7 @@ pub enum Statement {
     AlterViewOwner(AlterRelationOwnerStatement),
     AlterSchemaOwner(AlterSchemaOwnerStatement),
     AlterTableSet(AlterTableSetStatement),
+    AlterTableReplicaIdentity(AlterTableReplicaIdentityStatement),
     AlterTableSetRowSecurity(AlterTableSetRowSecurityStatement),
     AlterPolicy(AlterPolicyStatement),
     AlterTableSetNotNull(AlterTableSetNotNullStatement),
@@ -383,11 +390,14 @@ pub enum Statement {
     AlterTableValidateConstraint(AlterTableValidateConstraintStatement),
     AlterTableInherit(AlterTableInheritStatement),
     AlterTableNoInherit(AlterTableNoInheritStatement),
+    AlterTableOf(AlterTableOfStatement),
+    AlterTableNotOf(AlterTableNotOfStatement),
     AlterTableAttachPartition(AlterTableAttachPartitionStatement),
     AlterTableDetachPartition(AlterTableDetachPartitionStatement),
     AlterTableTriggerState(AlterTableTriggerStateStatement),
     AlterPublication(AlterPublicationStatement),
     AlterOperator(AlterOperatorStatement),
+    AlterAggregateRename(AlterAggregateRenameStatement),
     AlterTriggerRename(AlterTriggerRenameStatement),
     CommentOnTable(CommentOnTableStatement),
     CommentOnView(CommentOnViewStatement),
@@ -419,6 +429,7 @@ pub enum Statement {
     DropDatabase(DropDatabaseStatement),
     DropPublication(DropPublicationStatement),
     DropStatistics(DropStatisticsStatement),
+    DropCast(DropCastStatement),
     DropFunction(DropFunctionStatement),
     DropProcedure(DropProcedureStatement),
     DropRoutine(DropProcedureStatement),
@@ -463,7 +474,7 @@ pub enum Statement {
     Update(UpdateStatement),
     Delete(DeleteStatement),
     Unsupported(UnsupportedStatement),
-    Begin,
+    Begin(TransactionOptions),
     Commit,
     Rollback,
     Savepoint(String),
@@ -484,6 +495,7 @@ pub struct Query {
     pub jointree: Option<JoinTreeNode>,
     pub target_list: Vec<TargetEntry>,
     pub distinct: bool,
+    pub distinct_on: Vec<SortGroupClause>,
     pub where_qual: Option<Expr>,
     pub group_by: Vec<Expr>,
     pub accumulators: Vec<AggAccum>,
@@ -633,9 +645,22 @@ pub enum AggregateArgType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateSignatureArg {
+    pub name: Option<String>,
+    pub arg_type: AggregateArgType,
+    pub variadic: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateSignature {
+    pub args: Vec<AggregateSignatureArg>,
+    pub order_by: Vec<AggregateSignatureArg>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AggregateSignatureKind {
     Star,
-    Args(Vec<AggregateArgType>),
+    Args(AggregateSignature),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -643,6 +668,7 @@ pub struct CreateFunctionArg {
     pub mode: FunctionArgMode,
     pub name: Option<String>,
     pub ty: RawTypeName,
+    pub type_position: Option<usize>,
     pub default_expr: Option<String>,
     pub variadic: bool,
 }
@@ -710,6 +736,40 @@ pub struct RoutineSignature {
     pub schema_name: Option<String>,
     pub routine_name: String,
     pub arg_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastContext {
+    Explicit,
+    Assignment,
+    Implicit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateCastMethod {
+    Function {
+        schema_name: Option<String>,
+        function_name: String,
+        arg_types: Vec<RawTypeName>,
+    },
+    WithoutFunction,
+    InOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateCastStatement {
+    pub source_type: RawTypeName,
+    pub target_type: RawTypeName,
+    pub method: CreateCastMethod,
+    pub context: CastContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropCastStatement {
+    pub if_exists: bool,
+    pub source_type: RawTypeName,
+    pub target_type: RawTypeName,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -791,6 +851,7 @@ pub struct CreateAggregateStatement {
     pub mtransspace: i32,
     pub mfinalfunc_extra: bool,
     pub mfinalfunc_modify: char,
+    pub hypothetical: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -896,6 +957,7 @@ pub enum AlterTypeStatement {
     AddEnumValue(AlterTypeAddEnumValueStatement),
     RenameEnumValue(AlterTypeRenameEnumValueStatement),
     RenameType(AlterTypeRenameTypeStatement),
+    AlterComposite(AlterCompositeTypeStatement),
     SetOptions(AlterTypeSetOptionsStatement),
 }
 
@@ -927,6 +989,36 @@ pub struct AlterTypeRenameTypeStatement {
     pub schema_name: Option<String>,
     pub type_name: String,
     pub new_type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterCompositeTypeStatement {
+    pub schema_name: Option<String>,
+    pub type_name: String,
+    pub actions: Vec<AlterCompositeTypeAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterCompositeTypeAction {
+    AddAttribute {
+        attribute: CompositeTypeAttributeDef,
+        cascade: bool,
+    },
+    DropAttribute {
+        name: String,
+        if_exists: bool,
+        cascade: bool,
+    },
+    AlterAttributeType {
+        name: String,
+        ty: RawTypeName,
+        cascade: bool,
+    },
+    RenameAttribute {
+        old_name: String,
+        new_name: String,
+        cascade: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -965,6 +1057,67 @@ pub struct SetStatement {
     pub name: String,
     pub value: Option<String>,
     pub is_local: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionIsolationLevel {
+    ReadUncommitted,
+    ReadCommitted,
+    RepeatableRead,
+    Serializable,
+}
+
+impl TransactionIsolationLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TransactionIsolationLevel::ReadUncommitted => "read uncommitted",
+            TransactionIsolationLevel::ReadCommitted => "read committed",
+            TransactionIsolationLevel::RepeatableRead => "repeatable read",
+            TransactionIsolationLevel::Serializable => "serializable",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "read uncommitted" => Some(TransactionIsolationLevel::ReadUncommitted),
+            "read committed" => Some(TransactionIsolationLevel::ReadCommitted),
+            "repeatable read" => Some(TransactionIsolationLevel::RepeatableRead),
+            "serializable" => Some(TransactionIsolationLevel::Serializable),
+            _ => None,
+        }
+    }
+
+    pub fn uses_transaction_snapshot(self) -> bool {
+        matches!(
+            self,
+            TransactionIsolationLevel::RepeatableRead | TransactionIsolationLevel::Serializable
+        )
+    }
+}
+
+impl Default for TransactionIsolationLevel {
+    fn default() -> Self {
+        TransactionIsolationLevel::ReadCommitted
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TransactionOptions {
+    pub isolation_level: Option<TransactionIsolationLevel>,
+    pub read_only: Option<bool>,
+    pub deferrable: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetTransactionScope {
+    Transaction,
+    SessionCharacteristics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetTransactionStatement {
+    pub scope: SetTransactionScope,
+    pub options: TransactionOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1212,6 +1365,7 @@ pub struct SelectStatement {
     pub with_recursive: bool,
     pub with: Vec<CommonTableExpr>,
     pub distinct: bool,
+    pub distinct_on: Vec<SqlExpr>,
     pub from: Option<FromItem>,
     pub targets: Vec<SelectItem>,
     pub where_clause: Option<SqlExpr>,
@@ -1482,9 +1636,16 @@ pub struct InsertStatement {
     pub table_name: String,
     pub table_alias: Option<String>,
     pub columns: Option<Vec<AssignmentTarget>>,
+    pub overriding: Option<OverridingKind>,
     pub source: InsertSource,
     pub on_conflict: Option<OnConflictClause>,
     pub returning: Vec<SelectItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverridingKind {
+    System,
+    User,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1504,6 +1665,7 @@ pub struct MergeStatement {
     pub source: FromItem,
     pub join_condition: SqlExpr,
     pub when_clauses: Vec<MergeWhenClause>,
+    pub returning: Vec<SelectItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1576,6 +1738,7 @@ pub struct OnConflictInferenceElem {
 pub struct CreateTableStatement {
     pub schema_name: Option<String>,
     pub table_name: String,
+    pub of_type_name: Option<String>,
     pub persistence: TablePersistence,
     pub on_commit: OnCommitAction,
     pub elements: Vec<CreateTableElement>,
@@ -1590,7 +1753,8 @@ impl CreateTableStatement {
     pub fn columns(&self) -> impl Iterator<Item = &ColumnDef> {
         self.elements.iter().filter_map(|element| match element {
             CreateTableElement::Column(column) => Some(column),
-            CreateTableElement::PartitionColumnOverride(_)
+            CreateTableElement::TypedColumnOptions(_)
+            | CreateTableElement::PartitionColumnOverride(_)
             | CreateTableElement::Constraint(_)
             | CreateTableElement::Like(_) => None,
         })
@@ -1599,6 +1763,7 @@ impl CreateTableStatement {
     pub fn constraints(&self) -> impl Iterator<Item = &TableConstraint> {
         self.elements.iter().filter_map(|element| match element {
             CreateTableElement::Column(_)
+            | CreateTableElement::TypedColumnOptions(_)
             | CreateTableElement::PartitionColumnOverride(_)
             | CreateTableElement::Like(_) => None,
             CreateTableElement::Constraint(constraint) => Some(constraint),
@@ -1609,6 +1774,7 @@ impl CreateTableStatement {
         self.elements.iter().filter_map(|element| match element {
             CreateTableElement::PartitionColumnOverride(override_) => Some(override_),
             CreateTableElement::Column(_)
+            | CreateTableElement::TypedColumnOptions(_)
             | CreateTableElement::Constraint(_)
             | CreateTableElement::Like(_) => None,
         })
@@ -1977,6 +2143,14 @@ pub struct AlterTableSetStatement {
     pub options: Vec<RelOption>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableReplicaIdentityStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub index_name: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlterTableRowSecurityAction {
     Enable,
@@ -2021,6 +2195,7 @@ pub struct AlterTableDropColumnStatement {
     pub only: bool,
     pub table_name: String,
     pub column_name: String,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2129,11 +2304,39 @@ pub struct AlterTableAlterColumnStatisticsStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterColumnIdentityAction {
+    Add(ColumnIdentityDef),
+    Drop {
+        missing_ok: bool,
+    },
+    Set {
+        generation: Option<ColumnIdentityKind>,
+        options: SequenceOptionsPatchSpec,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAlterColumnIdentityStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub column_name: String,
+    pub action: AlterColumnIdentityAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterIndexAlterColumnStatisticsStatement {
     pub if_exists: bool,
     pub index_name: String,
     pub column_number: i16,
     pub statistics_target: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterIndexSetStatement {
+    pub if_exists: bool,
+    pub index_name: String,
+    pub options: Vec<RelOption>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2233,6 +2436,21 @@ pub struct AlterTableInheritStatement {
     pub only: bool,
     pub table_name: String,
     pub parent_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableOfStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableNotOfStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2606,6 +2824,14 @@ pub struct DropAggregateStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterAggregateRenameStatement {
+    pub schema_name: Option<String>,
+    pub aggregate_name: String,
+    pub signature: AggregateSignatureKind,
+    pub new_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetSessionAuthorizationStatement {
     pub role_name: String,
 }
@@ -2658,6 +2884,13 @@ pub enum GrantObjectPrivilege {
     AllPrivilegesOnTable,
     SelectOnTable,
     InsertOnTable,
+    UpdateOnTable,
+    DeleteOnTable,
+    TruncateOnTable,
+    ReferencesOnTable,
+    TriggerOnTable,
+    MaintainOnTable,
+    TablePrivileges(String),
     AllPrivilegesOnSchema,
     UsageOnSchema,
     UsageOnType,
@@ -2903,7 +3136,7 @@ pub struct ColumnDef {
     pub collation: Option<String>,
     pub default_expr: Option<String>,
     pub generated: Option<ColumnGeneratedDef>,
-    pub identity: Option<ColumnIdentityKind>,
+    pub identity: Option<ColumnIdentityDef>,
     pub storage: Option<crate::include::access::htup::AttributeStorage>,
     pub compression: Option<crate::include::access::htup::AttributeCompression>,
     pub constraints: Vec<ColumnConstraint>,
@@ -2936,6 +3169,12 @@ impl ColumnDef {
 pub struct ColumnGeneratedDef {
     pub expr_sql: String,
     pub kind: ColumnGeneratedKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnIdentityDef {
+    pub kind: ColumnIdentityKind,
+    pub options: SequenceOptionsSpec,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -3008,8 +3247,21 @@ pub struct PartitionColumnOverride {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedColumnOptions {
+    pub name: String,
+    pub collation: Option<String>,
+    pub default_expr: Option<String>,
+    pub generated: Option<ColumnGeneratedDef>,
+    pub identity: Option<ColumnIdentityDef>,
+    pub storage: Option<crate::include::access::htup::AttributeStorage>,
+    pub compression: Option<crate::include::access::htup::AttributeCompression>,
+    pub constraints: Vec<ColumnConstraint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateTableElement {
     Column(ColumnDef),
+    TypedColumnOptions(TypedColumnOptions),
     PartitionColumnOverride(PartitionColumnOverride),
     Constraint(TableConstraint),
     Like(CreateTableLikeClause),
@@ -3163,8 +3415,10 @@ pub enum TableConstraint {
     ForeignKey {
         attributes: ConstraintAttributes,
         columns: Vec<String>,
+        period: Option<String>,
         referenced_table: String,
         referenced_columns: Option<Vec<String>>,
+        referenced_period: Option<String>,
         match_type: ForeignKeyMatchType,
         on_delete: ForeignKeyAction,
         on_delete_set_columns: Option<Vec<String>>,
@@ -3821,6 +4075,7 @@ pub enum SqlExpr {
     IsNotNull(Box<SqlExpr>),
     IsDistinctFrom(Box<SqlExpr>, Box<SqlExpr>),
     IsNotDistinctFrom(Box<SqlExpr>, Box<SqlExpr>),
+    Overlaps(Box<SqlExpr>, Box<SqlExpr>),
     ArrayLiteral(Vec<SqlExpr>),
     Row(Vec<SqlExpr>),
     ArrayOverlap(Box<SqlExpr>, Box<SqlExpr>),

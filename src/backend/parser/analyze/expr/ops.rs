@@ -19,6 +19,15 @@ pub(super) fn bind_arithmetic_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
+    reject_arithmetic_quantified_array_call(
+        op,
+        right,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
     let raw_left_type =
         infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
     let raw_right_type =
@@ -136,6 +145,62 @@ pub(super) fn bind_arithmetic_expr(
             left_type: sql_type_name(left_type),
             right_type: sql_type_name(right_type),
         });
+    }
+    if !left_type.is_array
+        && !right_type.is_array
+        && op == "-"
+        && matches!(left_type.kind, SqlTypeKind::Date)
+        && matches!(right_type.kind, SqlTypeKind::TimeTz)
+    {
+        return Err(ParseError::UndefinedOperator {
+            op,
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        });
+    }
+    if !left_type.is_array && !right_type.is_array {
+        let result_type = match (op, left_type.kind, right_type.kind) {
+            ("+", SqlTypeKind::Date, SqlTypeKind::Time)
+            | ("+", SqlTypeKind::Time, SqlTypeKind::Date)
+            | ("-", SqlTypeKind::Date, SqlTypeKind::Time) => {
+                Some(SqlType::new(SqlTypeKind::Timestamp))
+            }
+            ("+", SqlTypeKind::Date, SqlTypeKind::TimeTz)
+            | ("+", SqlTypeKind::TimeTz, SqlTypeKind::Date) => {
+                Some(SqlType::new(SqlTypeKind::TimestampTz))
+            }
+            _ => None,
+        };
+        if let Some(result_type) = result_type {
+            return Ok(Expr::binary_op(
+                make,
+                result_type,
+                coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_left_type,
+                    left_type,
+                ),
+                coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_right_type,
+                    right_type,
+                ),
+            ));
+        }
     }
     if !left_type.is_array
         && !right_type.is_array
@@ -630,6 +695,61 @@ pub(super) fn bind_arithmetic_expr(
     Ok(Expr::op_auto(make, vec![left, right]))
 }
 
+fn reject_arithmetic_quantified_array_call(
+    op: &'static str,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<(), ParseError> {
+    let SqlExpr::FuncCall { name, args, .. } = right else {
+        return Ok(());
+    };
+    if !name.eq_ignore_ascii_case("any") && !name.eq_ignore_ascii_case("all") {
+        return Ok(());
+    }
+    let [arg] = args.args() else {
+        return Ok(());
+    };
+    if arg.name.is_some() {
+        return Ok(());
+    }
+    let arg_type = infer_sql_expr_type_with_ctes(
+        &arg.value,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    );
+    let string_literal = matches!(
+        arg.value,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    );
+    if !arg_type.is_array && !string_literal {
+        return Err(ParseError::DetailedError {
+            message: "op ANY/ALL (array) requires array on right side".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
+    // :HACK: The grammar only lowers comparison operators to QuantifiedArray today.
+    // Arithmetic operators followed by ANY/ALL parse as a function call on the
+    // right-hand side, so emit PostgreSQL's parse-analysis diagnostic here.
+    if matches!(op, "+" | "-" | "*" | "/" | "%") {
+        return Err(ParseError::DetailedError {
+            message: "op ANY/ALL (array) requires operator to yield boolean".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn bind_comparison_expr(
     op: &'static str,
     make: crate::include::nodes::primnodes::OpExprKind,
@@ -940,6 +1060,7 @@ pub(crate) fn bind_lowered_comparison_expr(
             if !left_type.is_array && !right_type.is_array {
                 if let Some(common) = resolve_common_scalar_type(left_type, right_type)
                     .filter(|ty| !is_numeric_family(*ty))
+                    .filter(|_| !is_mixed_date_timestamp_comparison(left_type, right_type))
                 {
                     (
                         coerce_bound_expr(left_bound, raw_left_type, common),
@@ -1269,16 +1390,29 @@ fn supports_array_comparison_operator(op: &str, left: SqlType, right: SqlType) -
 fn supports_builtin_datetime_comparison(op: &str, left: SqlType, right: SqlType) -> bool {
     !left.is_array
         && !right.is_array
-        && left.kind == right.kind
-        && matches!(
-            left.kind,
-            SqlTypeKind::Date
-                | SqlTypeKind::Time
-                | SqlTypeKind::TimeTz
-                | SqlTypeKind::Timestamp
-                | SqlTypeKind::TimestampTz
-        )
+        && (left.kind == right.kind
+            && matches!(
+                left.kind,
+                SqlTypeKind::Date
+                    | SqlTypeKind::Time
+                    | SqlTypeKind::TimeTz
+                    | SqlTypeKind::Timestamp
+                    | SqlTypeKind::TimestampTz
+            )
+            || is_mixed_date_timestamp_comparison(left, right))
         && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
+}
+
+fn is_mixed_date_timestamp_comparison(left: SqlType, right: SqlType) -> bool {
+    !left.is_array
+        && !right.is_array
+        && matches!(
+            (left.kind, right.kind),
+            (SqlTypeKind::Date, SqlTypeKind::Timestamp)
+                | (SqlTypeKind::Timestamp, SqlTypeKind::Date)
+                | (SqlTypeKind::Date, SqlTypeKind::TimestampTz)
+                | (SqlTypeKind::TimestampTz, SqlTypeKind::Date)
+        )
 }
 
 // :HACK: PostgreSQL exposes interval comparison operators through pg_operator.

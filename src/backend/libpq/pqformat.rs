@@ -347,9 +347,11 @@ pub(crate) fn infer_command_tag(sql: &str, affected: usize) -> String {
         ("DELETE", _) => format!("DELETE {affected}"),
         ("CREATE", "TRIGGER") => "CREATE TRIGGER".to_string(),
         ("CREATE", "TYPE") => "CREATE TYPE".to_string(),
+        ("CREATE", "CAST") => "CREATE CAST".to_string(),
         ("CREATE", _) => "CREATE TABLE".to_string(),
         ("DROP", "TRIGGER") => "DROP TRIGGER".to_string(),
         ("DROP", "TYPE") => "DROP TYPE".to_string(),
+        ("DROP", "CAST") => "DROP CAST".to_string(),
         ("DROP", _) => "DROP TABLE".to_string(),
         ("ANALYZE", _) => "ANALYZE".to_string(),
         ("COMMENT", _) => "COMMENT".to_string(),
@@ -367,6 +369,16 @@ pub(crate) fn infer_command_tag(sql: &str, affected: usize) -> String {
         ("ROLLBACK", _) => "ROLLBACK".to_string(),
         _ => format!("SELECT {affected}"),
     }
+}
+
+pub(crate) fn infer_dml_returning_command_tag(sql: &str, affected: usize) -> Option<String> {
+    let first_word = sql
+        .split_ascii_whitespace()
+        .next()
+        .map(|word| word.to_ascii_uppercase())
+        .unwrap_or_default();
+    matches!(first_word.as_str(), "INSERT" | "UPDATE" | "DELETE")
+        .then(|| infer_command_tag(sql, affected))
 }
 
 pub(crate) fn send_query_result(

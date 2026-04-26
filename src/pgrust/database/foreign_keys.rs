@@ -238,6 +238,7 @@ fn build_constraint_validation_context(
         lock_status_provider: Some(Arc::new(db.clone())),
         sequences: Some(db.sequences.clone()),
         large_objects: Some(db.large_objects.clone()),
+        stats_import_runtime: None,
         async_notify_runtime: Some(db.async_notify_runtime.clone()),
         advisory_locks: Arc::clone(&db.advisory_locks),
         row_locks: Arc::clone(&db.row_locks),
@@ -261,6 +262,7 @@ fn build_constraint_validation_context(
         transaction_lock_scope_id: None,
         next_command_id: cid,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+        random_state: crate::backend::executor::PgPrngState::shared(),
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
         system_bindings: Vec::new(),
@@ -271,8 +273,11 @@ fn build_constraint_validation_context(
         catalog_effects: Vec::new(),
         temp_effects: Vec::new(),
         database: None,
+        pending_catalog_effects: Vec::new(),
+        pending_table_locks: Vec::new(),
         catalog: catalog.materialize_visible_catalog(),
-        compiled_functions: std::collections::HashMap::new(),
+        plpgsql_function_cache: db.plpgsql_function_cache(client_id),
+        pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
@@ -399,14 +404,19 @@ fn validate_unique_constraints(
                     .unwrap_or_default()
                     .min(insert_ctx.index_desc.columns.len())
                     .min(pending.key_values.len());
+                let detail = crate::backend::executor::relation_values_visible_for_error_detail(
+                    insert_ctx.index_meta.indrelid,
+                    ctx,
+                )
+                .then(|| {
+                    crate::backend::executor::value_io::format_unique_key_detail(
+                        &insert_ctx.index_desc.columns[..key_count],
+                        &pending.key_values[..key_count],
+                    )
+                });
                 return Err(ExecError::UniqueViolation {
                     constraint: row.conname.clone(),
-                    detail: Some(
-                        crate::backend::executor::value_io::format_unique_key_detail(
-                            &insert_ctx.index_desc.columns[..key_count],
-                            &pending.key_values[..key_count],
-                        ),
-                    ),
+                    detail,
                 });
             }
         }

@@ -1113,6 +1113,7 @@ mod tests {
             index_meta: meta.clone(),
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             heap_tid: tid,
+            old_heap_tid: None,
             values: vec![Value::Int32(50)],
             unique_check: crate::include::access::amapi::IndexUniqueCheck::No,
         })
@@ -1176,6 +1177,7 @@ mod tests {
             index_meta: meta.clone(),
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             heap_tid: tid,
+            old_heap_tid: None,
             values: vec![Value::Int32(1000)],
             unique_check: crate::include::access::amapi::IndexUniqueCheck::No,
         })

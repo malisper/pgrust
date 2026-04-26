@@ -809,6 +809,70 @@ fn catalog_with_indexed_items() -> Catalog {
         .expect("seed test catalog index stats");
     catalog
 }
+
+fn catalog_with_distinct_on_tbl() -> Catalog {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "distinct_on_tbl",
+            RelationDesc {
+                columns: vec![
+                    column_desc("x", int4(), false),
+                    column_desc("y", int4(), false),
+                    column_desc("z", int4(), false),
+                ],
+            },
+        )
+        .expect("create distinct_on_tbl");
+    let index = catalog
+        .create_index(
+            "distinct_on_tbl_x_y_idx",
+            "distinct_on_tbl",
+            false,
+            &["x".into(), "y".into()],
+        )
+        .expect("create distinct_on_tbl index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark distinct_on_tbl index usable");
+    catalog
+        .set_relation_stats(table.relation_oid, 128, 10_000.0)
+        .expect("seed distinct_on_tbl stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 32, 10_000.0)
+        .expect("seed distinct_on_tbl index stats");
+    catalog
+}
+
+fn catalog_with_distinct_on_limit_tbl() -> Catalog {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "limit_tbl",
+            RelationDesc {
+                columns: vec![
+                    column_desc("four", int4(), false),
+                    column_desc("two", int4(), false),
+                    column_desc("hundred", int4(), false),
+                ],
+            },
+        )
+        .expect("create limit_tbl");
+    let index = catalog
+        .create_index("limit_tbl_hundred", "limit_tbl", false, &["hundred".into()])
+        .expect("create limit_tbl index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark limit_tbl index usable");
+    catalog
+        .set_relation_stats(table.relation_oid, 128, 10_000.0)
+        .expect("seed limit_tbl stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 32, 10_000.0)
+        .expect("seed limit_tbl index stats");
+    catalog
+}
+
 fn catalog_with_noncovering_indexed_items() -> Catalog {
     let mut catalog = Catalog::default();
     let table = catalog
@@ -1577,6 +1641,21 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
     }
 }
 
+fn strip_projections(plan: &Plan) -> &Plan {
+    let mut current = plan;
+    while let Plan::Projection { input, .. } = current {
+        current = input;
+    }
+    current
+}
+
+fn validate_planned_stmt_for_tests(planned: &PlannedStmt) {
+    super::setrefs::validate_executable_plan_for_tests_with_params(
+        &planned.plan_tree,
+        &planned.ext_params,
+    );
+}
+
 #[test]
 fn comma_join_with_equality_predicate_can_choose_hash_or_merge_join() {
     let planned = planned_stmt_for_sql(
@@ -2167,6 +2246,7 @@ fn aggregate_pathkeys_follow_strategy() {
         pathtarget: PathTarget::new(vec![var(10, 1)]),
         slot_id: 20,
         strategy: AggregateStrategy::Hashed,
+        disabled: false,
         pathkeys: vec![key.clone()],
         input: Box::new(values_path(10, 1.0, 1.0)),
         group_by: vec![var(10, 1)],
@@ -2186,6 +2266,7 @@ fn aggregate_pathkeys_follow_strategy() {
         pathtarget: PathTarget::new(vec![var(10, 1)]),
         slot_id: 20,
         strategy: AggregateStrategy::Sorted,
+        disabled: false,
         pathkeys: vec![key.clone()],
         input: Box::new(values_path(10, 1.0, 1.0)),
         group_by: vec![var(10, 1)],
@@ -2626,7 +2707,7 @@ fn planner_places_lock_rows_between_order_by_and_limit() {
         .expect("analyze");
     let planned = super::planner(query, &catalog).expect("plan");
 
-    let Plan::Limit { input, .. } = &planned.plan_tree else {
+    let Plan::Limit { input, .. } = strip_projections(&planned.plan_tree) else {
         panic!("expected limit at top, got {:?}", planned.plan_tree);
     };
     let Plan::LockRows {
@@ -2635,7 +2716,10 @@ fn planner_places_lock_rows_between_order_by_and_limit() {
     else {
         panic!("expected lock rows below limit, got {:?}", input);
     };
-    assert!(matches!(input.as_ref(), Plan::OrderBy { .. }));
+    assert!(matches!(
+        strip_projections(input.as_ref()),
+        Plan::OrderBy { .. }
+    ));
     assert_eq!(row_marks.len(), 1);
     assert_eq!(row_marks[0].rtindex, 1);
     assert_eq!(
@@ -2695,7 +2779,7 @@ fn planner_keeps_recursive_project_set_scalar_semantic_until_setrefs() {
 }
 
 #[test]
-fn planner_lowers_setop_children_with_their_own_roots() {
+fn planner_lowers_union_all_append_children_with_their_own_roots() {
     let planned = planned_stmt_for_sql(
         "select x
          from (values (1)) base(x)
@@ -2705,7 +2789,7 @@ fn planner_lowers_setop_children_with_their_own_roots() {
          join (values (2)) r(y) on true",
     );
 
-    assert!(matches!(planned.plan_tree, Plan::SetOp { .. }));
+    assert!(matches!(planned.plan_tree, Plan::Append { .. }));
 }
 
 #[test]
@@ -2875,6 +2959,70 @@ fn planner_uses_unique_for_simple_select_distinct() {
     assert!(!plan_contains(&planned.plan_tree, |plan| matches!(
         plan,
         Plan::SetOp { .. }
+    )));
+}
+
+#[test]
+fn planner_uses_index_order_for_distinct_on_reordered_keys() {
+    let catalog = catalog_with_distinct_on_tbl();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select distinct on (y, x) x, y from distinct_on_tbl",
+        &catalog,
+    );
+
+    assert_eq!(
+        count_plan_nodes(&planned.plan_tree, |plan| {
+            matches!(plan, Plan::Unique { key_indices, .. } if key_indices.len() == 2)
+        }),
+        1
+    );
+    assert!(matches!(
+        &planned.plan_tree,
+        Plan::Projection { input, .. }
+            if matches!(
+                input.as_ref(),
+                Plan::Unique { input, .. }
+                    if matches!(
+                        input.as_ref(),
+                        Plan::IndexOnlyScan { index_name, .. }
+                            if index_name == "distinct_on_tbl_x_y_idx"
+                    ) || matches!(
+                        input.as_ref(),
+                        Plan::IndexScan { index_name, .. }
+                            if index_name == "distinct_on_tbl_x_y_idx"
+                    )
+            )
+    ));
+}
+
+#[test]
+fn planner_lowers_constant_distinct_on_key_to_limit() {
+    let catalog = catalog_with_distinct_on_limit_tbl();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select distinct on (four) four, hundred from limit_tbl where four = 0 order by 1, 2",
+        &catalog,
+    );
+
+    assert_eq!(
+        count_plan_nodes(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Limit { .. }
+        )),
+        1
+    );
+    assert_eq!(
+        count_plan_nodes(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Unique { .. }
+        )),
+        0
+    );
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::IndexScan { index_name, .. } if index_name == "limit_tbl_hundred"
+    ) || matches!(
+        plan,
+        Plan::IndexOnlyScan { index_name, .. } if index_name == "limit_tbl_hundred"
     )));
 }
 
@@ -3178,9 +3326,7 @@ fn planner_uses_runtime_index_key_for_correlated_limit_subplan() {
                 _ => false,
             })
     }));
-    for subplan in &planned.subplans {
-        super::setrefs::validate_executable_plan_for_tests(subplan);
-    }
+    validate_planned_stmt_for_tests(&planned);
 }
 
 #[test]
@@ -3213,10 +3359,7 @@ fn planner_simplifies_outer_max_of_unique_scalar_sublink() {
         "expected the remaining scalar lookup subplan to use the unique index: {planned:#?}"
     );
 
-    super::setrefs::validate_executable_plan_for_tests(&planned.plan_tree);
-    for subplan in &planned.subplans {
-        super::setrefs::validate_executable_plan_for_tests(subplan);
-    }
+    validate_planned_stmt_for_tests(&planned);
 }
 
 #[test]
@@ -3230,10 +3373,7 @@ fn planner_lowers_outer_aggregate_refs_in_correlated_subqueries() {
         .expect("analyze");
     let planned = super::planner(query, &catalog).expect("plan");
 
-    super::setrefs::validate_executable_plan_for_tests(&planned.plan_tree);
-    for subplan in &planned.subplans {
-        super::setrefs::validate_executable_plan_for_tests(subplan);
-    }
+    validate_planned_stmt_for_tests(&planned);
 
     let debug = format!("{planned:#?}");
     assert!(debug.contains("paramkind: Exec"), "{debug}");

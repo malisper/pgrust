@@ -99,6 +99,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_create_function_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_cast_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_drop_function_statement(&sql)? {
         return Ok(stmt);
     }
@@ -126,9 +129,6 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_set_constraints_statement(&sql)? {
         return Ok(stmt);
     }
-    if let Some(stmt) = try_parse_set_transaction_statement(&sql)? {
-        return Ok(stmt);
-    }
     if let Some(stmt) = try_parse_publication_statement(&sql)? {
         return Ok(stmt);
     }
@@ -142,6 +142,9 @@ fn parse_statement_with_options_inner(
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_sequence_statement(&sql)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_alter_table_identity_statement(&sql)? {
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_copy_statement(&sql, options)? {
@@ -160,6 +163,12 @@ fn parse_statement_with_options_inner(
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_partition_statement(&sql, options)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_alter_table_multi_action_statement(&sql, options)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_alter_table_replica_identity_statement(&sql)? {
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_alter_table_add_unnamed_constraint_statement(&sql, options)? {
@@ -533,6 +542,155 @@ fn lexer_error(message: &'static str, token: &str) -> ParseError {
     }
 }
 
+fn try_parse_alter_table_multi_action_statement(
+    sql: &str,
+    options: ParseOptions,
+) -> Result<Option<Statement>, ParseError> {
+    // :HACK: Keep multi-action ALTER TABLE support as a splitter over the
+    // existing single-action parser until ALTER TABLE has a real action-list
+    // grammar node.
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(trimmed, "alter") {
+        return Ok(None);
+    }
+    let mut rest = consume_keyword(trimmed, "alter").trim_start();
+    if !keyword_at_start(rest, "table") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "table").trim_start();
+    let target_source = rest;
+
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        rest = next.trim_start();
+    }
+    if keyword_at_start(rest, "only") {
+        rest = consume_keyword(rest, "only").trim_start();
+    }
+    let (_, next) = parse_schema_qualified_name(rest)?;
+    rest = next.trim_start();
+    if rest.starts_with('*') {
+        rest = rest[1..].trim_start();
+    }
+    let consumed_target_len = target_source.len().saturating_sub(rest.len());
+    let target_sql = target_source[..consumed_target_len].trim();
+    let actions_sql = rest.trim();
+    if actions_sql.is_empty() {
+        return Ok(None);
+    }
+    let actions = split_top_level_commas(actions_sql)?;
+    if actions.len() <= 1 {
+        return Ok(None);
+    }
+    let mut statements = Vec::with_capacity(actions.len());
+    for action in actions {
+        let action = action.trim();
+        if action.is_empty() {
+            continue;
+        }
+        let sub_sql = format!("ALTER TABLE {target_sql} {action}");
+        parse_statement_with_options_inner(sub_sql.clone(), options)?;
+        statements.push(sub_sql);
+    }
+    Ok(Some(Statement::AlterTableMulti(statements)))
+}
+
+fn split_top_level_commas(input: &str) -> Result<Vec<String>, ParseError> {
+    let bytes = input.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => {
+                index = parse_delimited_token_end(bytes, index, b'\'');
+                continue;
+            }
+            b'"' => {
+                index = parse_delimited_token_end(bytes, index, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, index) {
+                    index = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                parts.push(input[start..index].trim().to_string());
+                start = index + 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    if depth != 0 {
+        return Err(ParseError::UnexpectedEof);
+    }
+    let trailing = input[start..].trim();
+    if !trailing.is_empty() {
+        parts.push(trailing.to_string());
+    }
+    Ok(parts)
+}
+
+fn try_parse_alter_table_replica_identity_statement(
+    sql: &str,
+) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(trimmed, "alter") {
+        return Ok(None);
+    }
+    let mut rest = consume_keyword(trimmed, "alter").trim_start();
+    if !keyword_at_start(rest, "table") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "table").trim_start();
+
+    let mut if_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        if_exists = true;
+        rest = next.trim_start();
+    }
+    let mut only = false;
+    if keyword_at_start(rest, "only") {
+        only = true;
+        rest = consume_keyword(rest, "only").trim_start();
+    }
+    let ((schema_name, table_name), next) = parse_schema_qualified_name(rest)?;
+    rest = next.trim_start();
+    if rest.starts_with('*') {
+        rest = rest[1..].trim_start();
+    }
+    if !consume_keywords(rest, &["replica", "identity", "using", "index"]).is_some() {
+        return Ok(None);
+    }
+    rest = consume_keywords(rest, &["replica", "identity", "using", "index"])
+        .expect("checked replica identity keywords")
+        .trim_start();
+    let (index_name, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER TABLE REPLICA IDENTITY statement",
+            actual: rest.trim().into(),
+        });
+    }
+    let table_name = match schema_name {
+        Some(schema_name) => format!("{schema_name}.{table_name}"),
+        None => table_name,
+    };
+    Ok(Some(Statement::AlterTableReplicaIdentity(
+        AlterTableReplicaIdentityStatement {
+            if_exists,
+            only,
+            table_name,
+            index_name,
+        },
+    )))
+}
+
 fn skip_single_quoted_sql(sql: &str, start: usize) -> usize {
     let bytes = sql.as_bytes();
     let mut i = start + 1;
@@ -856,6 +1014,10 @@ fn try_parse_aggregate_statement(sql: &str) -> Result<Option<Statement>, ParseEr
     if lowered.starts_with("drop aggregate ") {
         return build_drop_aggregate_statement(trimmed)
             .map(|stmt| Some(Statement::DropAggregate(stmt)));
+    }
+    if lowered.starts_with("alter aggregate ") {
+        return build_alter_aggregate_rename_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterAggregateRename(stmt)));
     }
     if lowered.starts_with("comment on aggregate ") {
         return build_comment_on_aggregate_statement(trimmed)
@@ -1184,12 +1346,30 @@ fn parse_partition_of_clause(
     rest = next.trim_start();
     let partition_spec = if rest.is_empty() {
         None
-    } else {
+    } else if keyword_at_start(rest, "partition") {
         let (partition_spec, next) = parse_partition_spec_clause(rest)?;
         rest = next.trim_start();
         Some(partition_spec)
+    } else {
+        None
     };
+    if !rest.is_empty() && (keyword_at_start(rest, "with") || keyword_at_start(rest, "without")) {
+        rest = parse_partition_of_table_storage_clause(rest)?;
+    }
     Ok((parts.join("."), elements, bound, partition_spec, rest))
+}
+
+fn parse_partition_of_table_storage_clause(
+    input: &str,
+) -> Result<&str, PartitionStatementParseError> {
+    let trimmed = input.trim_start();
+    let mut pairs = SqlParser::parse(Rule::table_storage_clause, trimmed)
+        .map_err(|_| PartitionStatementParseError::Unsupported)?;
+    let pair = pairs
+        .next()
+        .ok_or(PartitionStatementParseError::Unsupported)?;
+    validate_table_storage_clause(pair)?;
+    Ok("")
 }
 
 fn parse_partition_of_elements(
@@ -1672,30 +1852,6 @@ fn try_parse_alter_table_trigger_state_statement(
     }
     build_alter_table_trigger_state_statement(trimmed)
         .map(|stmt| Some(Statement::AlterTableTriggerState(stmt)))
-}
-
-fn try_parse_set_transaction_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
-    let trimmed = sql.trim().trim_end_matches(';').trim();
-    let lowered = trimmed.to_ascii_lowercase();
-    let prefix = "set transaction isolation level ";
-    if !lowered.starts_with(prefix) {
-        return Ok(None);
-    }
-    let Some(level) = trimmed.get(prefix.len()..) else {
-        return Err(ParseError::UnexpectedEof);
-    };
-    let level = level.trim();
-    if level.is_empty() {
-        return Err(ParseError::UnexpectedEof);
-    }
-    // :HACK: This only accepts the transaction-local spelling exercised by the
-    // regression tests. pgrust still executes at a single effective isolation
-    // level and stores the setting only as compatibility metadata.
-    Ok(Some(Statement::Set(SetStatement {
-        name: "transaction_isolation".into(),
-        value: Some(level.to_ascii_lowercase()),
-        is_local: true,
-    })))
 }
 
 fn try_parse_set_constraints_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -2922,13 +3078,27 @@ where
     // Keep executor/runtime checks tied to the GUC, but give parser-only work a
     // floor until those recursive builders are flattened.
     let max_stack_depth_kb = max_stack_depth_kb.max(PARSER_STACK_DEPTH_FLOOR_KB);
-    std::thread::Builder::new()
+    let (result, notices) = std::thread::Builder::new()
         .name("pgrust-parser".into())
         .stack_size(PARSER_THREAD_STACK_BYTES)
-        .spawn(move || StackDepthGuard::enter(max_stack_depth_kb).run(f))
+        .spawn(move || {
+            let result = StackDepthGuard::enter(max_stack_depth_kb).run(f);
+            let notices = crate::backend::utils::misc::notices::take_notices();
+            (result, notices)
+        })
         .expect("spawn parser thread")
         .join()
-        .expect("parser thread panicked")
+        .expect("parser thread panicked");
+    for notice in notices {
+        crate::backend::utils::misc::notices::push_backend_notice(
+            notice.severity,
+            notice.sqlstate,
+            notice.message,
+            notice.detail,
+            notice.position,
+        );
+    }
+    result
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -3650,6 +3820,10 @@ fn try_parse_index_statement(sql: &str) -> Result<Option<Statement>, ParseError>
         return build_alter_index_alter_column_statistics_statement(trimmed)
             .map(|stmt| Some(Statement::AlterIndexAlterColumnStatistics(stmt)));
     }
+    if lowered.contains(" set ") {
+        return build_alter_index_set_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterIndexSet(stmt)));
+    }
     Ok(None)
 }
 
@@ -4365,6 +4539,18 @@ fn try_parse_comment_on_type_or_column_statement(
     Ok(None)
 }
 
+fn try_parse_cast_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create cast ") {
+        return build_create_cast_statement(trimmed).map(|stmt| Some(Statement::CreateCast(stmt)));
+    }
+    if lowered.starts_with("drop cast ") {
+        return build_drop_cast_statement(trimmed).map(|stmt| Some(Statement::DropCast(stmt)));
+    }
+    Ok(None)
+}
+
 fn try_parse_create_operator_class_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -4472,19 +4658,8 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("grant execute on routine ") {
         return Ok(Statement::GrantObject(build_grant_routine_execute(sql)?));
     }
-    if lowered.starts_with("grant insert on ") {
-        return Ok(Statement::GrantObject(build_grant_table_insert(sql)?));
-    }
-    if lowered.starts_with("grant select on ") {
-        return Ok(Statement::GrantObject(build_grant_table_select(sql)?));
-    }
-    if lowered.starts_with("grant all on ") {
-        return Ok(Statement::GrantObject(build_grant_table_all(sql)?));
-    }
-    if lowered.starts_with("grant all privileges on ") {
-        return Ok(Statement::GrantObject(build_grant_table_all_privileges(
-            sql,
-        )?));
+    if let Some(stmt) = try_build_grant_table_acl_statement(sql)? {
+        return Ok(Statement::GrantObject(stmt));
     }
     Ok(Statement::GrantRoleMembership(build_grant_role_membership(
         sql,
@@ -4513,14 +4688,136 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("revoke execute on routine ") {
         return Ok(Statement::RevokeObject(build_revoke_routine_execute(sql)?));
     }
-    if lowered.starts_with("revoke all privileges on ") {
-        return Ok(Statement::RevokeObject(build_revoke_table_all_privileges(
-            sql,
-        )?));
+    if let Some(stmt) = try_build_revoke_table_acl_statement(sql)? {
+        return Ok(Statement::RevokeObject(stmt));
     }
     Ok(Statement::RevokeRoleMembership(
         build_revoke_role_membership(sql)?,
     ))
+}
+
+fn try_build_grant_table_acl_statement(
+    sql: &str,
+) -> Result<Option<GrantObjectStatement>, ParseError> {
+    let rest = sql
+        .get("grant ".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let Some((privileges, after_on)) = split_optional_keyword(rest, "on") else {
+        return Ok(None);
+    };
+    let Some(privilege) = parse_table_privilege_spec(privileges)? else {
+        return Ok(None);
+    };
+    let after_on = strip_optional_table_keyword(after_on.ok_or(ParseError::UnexpectedEof)?);
+    let (object_names, rest) = split_once_keyword(after_on, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(Some(GrantObjectStatement {
+        privilege,
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        with_grant_option,
+    }))
+}
+
+fn try_build_revoke_table_acl_statement(
+    sql: &str,
+) -> Result<Option<RevokeObjectStatement>, ParseError> {
+    let rest = sql
+        .get("revoke ".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (rest, cascade) = split_optional_cascade_restrict_clause(rest)?;
+    let Some((privileges, after_on)) = split_optional_keyword(rest, "on") else {
+        return Ok(None);
+    };
+    let Some(privilege) = parse_table_privilege_spec(privileges)? else {
+        return Ok(None);
+    };
+    let after_on = strip_optional_table_keyword(after_on.ok_or(ParseError::UnexpectedEof)?);
+    let (object_names, rest) = split_once_keyword(after_on, "from")?;
+    let (grantee_names, grantee_cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(Some(RevokeObjectStatement {
+        privilege,
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        cascade: cascade || grantee_cascade,
+    }))
+}
+
+fn strip_optional_table_keyword(input: &str) -> &str {
+    let trimmed = input.trim_start();
+    if keyword_at_start(trimmed, "table") {
+        consume_keyword(trimmed, "table").trim_start()
+    } else {
+        trimmed
+    }
+}
+
+fn parse_table_privilege_spec(input: &str) -> Result<Option<GrantObjectPrivilege>, ParseError> {
+    if input.contains('(') {
+        return Ok(None);
+    }
+
+    let mut chars = String::new();
+    let mut saw_table_privilege = false;
+    for item in split_comma_separated_sql(input)? {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let privilege_chars = match item.to_ascii_lowercase().as_str() {
+            "all" | "all privileges" => TABLE_ALL_PRIVILEGE_CHARS,
+            "select" => "r",
+            "insert" => "a",
+            "update" => "w",
+            "delete" => "d",
+            "truncate" => "D",
+            "references" => "x",
+            "trigger" => "t",
+            "maintain" => "m",
+            _ if saw_table_privilege => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "table privilege",
+                    actual: item.into(),
+                });
+            }
+            _ => return Ok(None),
+        };
+        saw_table_privilege = true;
+        chars.push_str(privilege_chars);
+    }
+
+    if !saw_table_privilege {
+        return Ok(None);
+    }
+    Ok(Some(table_privilege_from_chars(
+        canonicalize_table_privilege_chars(&chars),
+    )))
+}
+
+const TABLE_ALL_PRIVILEGE_CHARS: &str = "arwdDxtm";
+
+fn canonicalize_table_privilege_chars(chars: &str) -> String {
+    TABLE_ALL_PRIVILEGE_CHARS
+        .chars()
+        .filter(|ch| chars.contains(*ch))
+        .collect()
+}
+
+fn table_privilege_from_chars(chars: String) -> GrantObjectPrivilege {
+    match chars.as_str() {
+        TABLE_ALL_PRIVILEGE_CHARS => GrantObjectPrivilege::AllPrivilegesOnTable,
+        "r" => GrantObjectPrivilege::SelectOnTable,
+        "a" => GrantObjectPrivilege::InsertOnTable,
+        "w" => GrantObjectPrivilege::UpdateOnTable,
+        "d" => GrantObjectPrivilege::DeleteOnTable,
+        "D" => GrantObjectPrivilege::TruncateOnTable,
+        "x" => GrantObjectPrivilege::ReferencesOnTable,
+        "t" => GrantObjectPrivilege::TriggerOnTable,
+        "m" => GrantObjectPrivilege::MaintainOnTable,
+        _ => GrantObjectPrivilege::TablePrivileges(chars),
+    }
 }
 
 fn build_alter_type_owner_statement(sql: &str) -> Result<AlterTypeOwnerStatement, ParseError> {
@@ -4569,70 +4866,6 @@ fn build_grant_database_create(sql: &str) -> Result<GrantObjectStatement, ParseE
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::CreateOnDatabase,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        with_grant_option,
-    })
-}
-
-fn build_grant_table_all_privileges(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let prefix = "grant all privileges on ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "to")?;
-    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
-    Ok(GrantObjectStatement {
-        privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        with_grant_option,
-    })
-}
-
-fn build_grant_table_all(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let prefix = "grant all on ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "to")?;
-    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
-    Ok(GrantObjectStatement {
-        privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        with_grant_option,
-    })
-}
-
-fn build_grant_table_select(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let prefix = "grant select on ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "to")?;
-    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
-    Ok(GrantObjectStatement {
-        privilege: GrantObjectPrivilege::SelectOnTable,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        with_grant_option,
-    })
-}
-
-fn build_grant_table_insert(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let prefix = "grant insert on ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "to")?;
-    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
-    Ok(GrantObjectStatement {
-        privilege: GrantObjectPrivilege::InsertOnTable,
         object_names: vec![normalize_simple_identifier(object_name)?],
         grantee_names,
         with_grant_option,
@@ -4831,22 +5064,6 @@ fn build_revoke_routine_execute_with_prefix(
     })
 }
 
-fn build_revoke_table_all_privileges(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
-    let prefix = "revoke all privileges on ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "from")?;
-    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
-    Ok(RevokeObjectStatement {
-        privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        cascade,
-    })
-}
-
 fn build_grant_role_membership(sql: &str) -> Result<GrantRoleMembershipStatement, ParseError> {
     let prefix = "grant ";
     let rest = sql
@@ -4995,6 +5212,11 @@ fn strip_keyword_prefix<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
 }
 
 fn parse_grantees_with_optional_grant(input: &str) -> Result<(Vec<String>, bool), ParseError> {
+    // :HACK: pgrust does not yet model object-GRANT grantor selection, but
+    // PostgreSQL accepts GRANTED BY after the grantee list. Strip it so the
+    // clause does not get mistaken for part of the grantee role name.
+    let (input, _granted_by_clause) =
+        split_optional_keyword(input, "granted by").unwrap_or((input.trim(), None));
     let (grantees, suffix) = split_optional_keyword(input, "with")
         .map(|(grantees, suffix)| (grantees, suffix.unwrap_or_default()))
         .unwrap_or((input.trim(), ""));
@@ -5014,13 +5236,12 @@ fn parse_grantees_with_optional_grant(input: &str) -> Result<(Vec<String>, bool)
 fn parse_revokee_list_with_optional_cascade(
     input: &str,
 ) -> Result<(Vec<String>, bool), ParseError> {
-    let lowered = input.to_ascii_lowercase();
-    if let Some(stripped) = lowered.strip_suffix(" cascade") {
-        let grantees_len = stripped.len();
-        let grantees = input[..grantees_len].trim_end();
-        return Ok((parse_identifier_list(grantees)?, true));
-    }
-    Ok((parse_identifier_list(input)?, false))
+    let (input, cascade) = split_optional_cascade_restrict_clause(input)?;
+    // :HACK: see parse_grantees_with_optional_grant; object REVOKE grantor
+    // selection is not represented yet, so only keep the revokee list.
+    let (input, _granted_by_clause) =
+        split_optional_keyword(input, "granted by").unwrap_or((input.trim(), None));
+    Ok((parse_identifier_list(input)?, cascade))
 }
 
 fn parse_identifier_list(input: &str) -> Result<Vec<String>, ParseError> {
@@ -5074,6 +5295,268 @@ fn try_parse_sequence_statement(sql: &str) -> Result<Option<Statement>, ParseErr
             .map(|stmt| Some(Statement::AlterSequenceRename(stmt)));
     }
     build_alter_sequence_statement(trimmed).map(|stmt| Some(Statement::AlterSequence(stmt)))
+}
+
+fn try_parse_alter_table_identity_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("alter table ") {
+        return Ok(None);
+    }
+    if ![
+        " identity",
+        " generated",
+        " restart",
+        " increment",
+        " minvalue",
+        " maxvalue",
+        " cache",
+        " cycle",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
+    {
+        return Ok(None);
+    }
+
+    let mut rest = consume_keyword(trimmed, "alter").trim_start();
+    rest = consume_keyword(rest, "table").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        let after_not = consume_keyword(after_if, "not").trim_start();
+        rest = consume_keyword(after_not, "exists").trim_start();
+        if_exists = true;
+    }
+    let mut only = false;
+    if keyword_at_start(rest, "only") {
+        rest = consume_keyword(rest, "only").trim_start();
+        only = true;
+    }
+    let (table_parts, mut rest) = parse_qualified_identifier_parts(rest)?;
+    let table_name = table_parts.join(".");
+    rest = rest.trim_start();
+    if let Some(after_star) = rest.strip_prefix('*') {
+        rest = after_star.trim_start();
+    }
+    if !keyword_at_start(rest, "alter") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "alter").trim_start();
+    if keyword_at_start(rest, "column") {
+        rest = consume_keyword(rest, "column").trim_start();
+    }
+    let (column_name, rest) = parse_unqualified_identifier(rest, "ALTER TABLE column name")?;
+    let rest = rest.trim_start();
+    let Some(action) = parse_alter_column_identity_action(rest)? else {
+        return Ok(None);
+    };
+    Ok(Some(Statement::AlterTableAlterColumnIdentity(
+        AlterTableAlterColumnIdentityStatement {
+            if_exists,
+            only,
+            table_name,
+            column_name,
+            action,
+        },
+    )))
+}
+
+fn parse_alter_column_identity_action(
+    input: &str,
+) -> Result<Option<AlterColumnIdentityAction>, ParseError> {
+    let rest = input.trim_start();
+    if keyword_at_start(rest, "add") {
+        let mut rest = consume_keyword(rest, "add").trim_start();
+        rest = consume_keyword(rest, "generated").trim_start();
+        let (kind, next) = parse_identity_generation_kind(rest)?;
+        rest = consume_keyword(next.trim_start(), "as").trim_start();
+        rest = consume_keyword(rest, "identity").trim_start();
+        let (options, rest) = parse_optional_parenthesized_sequence_options(rest)?;
+        ensure_identity_action_consumed(rest)?;
+        return Ok(Some(AlterColumnIdentityAction::Add(ColumnIdentityDef {
+            kind,
+            options,
+        })));
+    }
+    if keyword_at_start(rest, "drop") {
+        let mut rest = consume_keyword(rest, "drop").trim_start();
+        rest = consume_keyword(rest, "identity").trim_start();
+        let mut missing_ok = false;
+        if keyword_at_start(rest, "if") {
+            let after_if = consume_keyword(rest, "if").trim_start();
+            rest = consume_keyword(after_if, "exists").trim_start();
+            missing_ok = true;
+        }
+        ensure_identity_action_consumed(rest)?;
+        return Ok(Some(AlterColumnIdentityAction::Drop { missing_ok }));
+    }
+    if keyword_at_start(rest, "set") {
+        let after_set = consume_keyword(rest, "set").trim_start();
+        if keyword_at_start(after_set, "generated") {
+            let after_generated = consume_keyword(after_set, "generated").trim_start();
+            let (kind, rest) = parse_identity_generation_kind(after_generated)?;
+            let (options, rest) = parse_identity_sequence_option_patch(rest)?;
+            ensure_identity_action_consumed(rest)?;
+            return Ok(Some(AlterColumnIdentityAction::Set {
+                generation: Some(kind),
+                options,
+            }));
+        }
+    }
+    if starts_identity_sequence_option_patch(rest) {
+        let (options, rest) = parse_identity_sequence_option_patch(rest)?;
+        ensure_identity_action_consumed(rest)?;
+        return Ok(Some(AlterColumnIdentityAction::Set {
+            generation: None,
+            options,
+        }));
+    }
+    Ok(None)
+}
+
+fn starts_identity_sequence_option_patch(input: &str) -> bool {
+    let trimmed = input.trim_start();
+    if keyword_at_start(trimmed, "restart") {
+        return true;
+    }
+    if !keyword_at_start(trimmed, "set") {
+        return false;
+    }
+    let after_set = consume_keyword(trimmed, "set").trim_start();
+    keyword_at_start(after_set, "increment")
+        || keyword_at_start(after_set, "minvalue")
+        || keyword_at_start(after_set, "no minvalue")
+        || keyword_at_start(after_set, "maxvalue")
+        || keyword_at_start(after_set, "no maxvalue")
+        || keyword_at_start(after_set, "start")
+        || keyword_at_start(after_set, "restart")
+        || keyword_at_start(after_set, "cache")
+        || keyword_at_start(after_set, "cycle")
+        || keyword_at_start(after_set, "no cycle")
+}
+
+fn parse_identity_generation_kind(input: &str) -> Result<(ColumnIdentityKind, &str), ParseError> {
+    let input = input.trim_start();
+    if keyword_at_start(input, "always") {
+        return Ok((
+            ColumnIdentityKind::Always,
+            consume_keyword(input, "always").trim_start(),
+        ));
+    }
+    if keyword_at_start(input, "by") {
+        let after_by = consume_keyword(input, "by").trim_start();
+        if keyword_at_start(after_by, "default") {
+            return Ok((
+                ColumnIdentityKind::ByDefault,
+                consume_keyword(after_by, "default").trim_start(),
+            ));
+        }
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "ALWAYS or BY DEFAULT",
+        actual: input.into(),
+    })
+}
+
+fn parse_optional_parenthesized_sequence_options(
+    input: &str,
+) -> Result<(SequenceOptionsSpec, &str), ParseError> {
+    let input = input.trim_start();
+    let Some(after_open) = input.strip_prefix('(') else {
+        return Ok((SequenceOptionsSpec::default(), input));
+    };
+    let Some(close_index) = after_open.find(')') else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "closing ')' for identity sequence options",
+            actual: input.into(),
+        });
+    };
+    let inner = &after_open[..close_index];
+    let rest = &after_open[close_index + 1..];
+    let (options, option_rest) = parse_sequence_option_spec(inner)?;
+    if !option_rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "identity sequence options",
+            actual: option_rest.trim().into(),
+        });
+    }
+    if options.owned_by.is_some() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "identity sequence options without OWNED BY",
+            actual: inner.into(),
+        });
+    }
+    Ok((options, rest))
+}
+
+fn parse_identity_sequence_option_patch(
+    input: &str,
+) -> Result<(SequenceOptionsPatchSpec, &str), ParseError> {
+    let mut rest = input;
+    let mut options = SequenceOptionsPatchSpec::default();
+    loop {
+        let trimmed = rest.trim_start();
+        if trimmed.is_empty() {
+            return Ok((options, trimmed));
+        }
+        let option_input = if keyword_at_start(trimmed, "set") {
+            consume_keyword(trimmed, "set").trim_start()
+        } else {
+            trimmed
+        };
+        let (patch, remainder) = parse_sequence_option_patch(option_input)?;
+        if remainder == option_input {
+            return Ok((options, trimmed));
+        }
+        merge_sequence_option_patch(&mut options, patch)?;
+        rest = remainder;
+    }
+}
+
+fn merge_sequence_option_patch(
+    target: &mut SequenceOptionsPatchSpec,
+    patch: SequenceOptionsPatchSpec,
+) -> Result<(), ParseError> {
+    if patch.increment.is_some() {
+        target.increment = patch.increment;
+    }
+    if patch.minvalue.is_some() {
+        target.minvalue = patch.minvalue;
+    }
+    if patch.maxvalue.is_some() {
+        target.maxvalue = patch.maxvalue;
+    }
+    if patch.start.is_some() {
+        target.start = patch.start;
+    }
+    if patch.restart.is_some() {
+        target.restart = patch.restart;
+    }
+    if patch.cache.is_some() {
+        target.cache = patch.cache;
+    }
+    if patch.cycle.is_some() {
+        target.cycle = patch.cycle;
+    }
+    if patch.owned_by.is_some() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "identity sequence options without OWNED BY",
+            actual: "OWNED BY".into(),
+        });
+    }
+    Ok(())
+}
+
+fn ensure_identity_action_consumed(rest: &str) -> Result<(), ParseError> {
+    if rest.trim().is_empty() {
+        Ok(())
+    } else {
+        Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER TABLE identity action",
+            actual: rest.trim().into(),
+        })
+    }
 }
 
 fn parse_schema_qualified_name(
@@ -5495,6 +5978,74 @@ fn build_alter_index_attach_partition_statement(
     })
 }
 
+fn build_alter_index_set_statement(sql: &str) -> Result<AlterIndexSetStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "index").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(after_if, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF EXISTS",
+                actual: sql.into(),
+            });
+        }
+        if_exists = true;
+        rest = consume_keyword(after_if, "exists").trim_start();
+    }
+    let (parts, rest_after_index) = parse_qualified_identifier_parts(rest)?;
+    let index_name = parts.join(".");
+    let mut rest = rest_after_index.trim_start();
+    if !keyword_at_start(rest, "set") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER INDEX SET",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "set").trim_start();
+    let (options_sql, tail) = take_parenthesized_segment(rest)?;
+    if !tail.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER INDEX SET statement",
+            actual: tail.trim().into(),
+        });
+    }
+    let options = parse_reloption_assignments(&options_sql)?;
+    Ok(AlterIndexSetStatement {
+        if_exists,
+        index_name,
+        options,
+    })
+}
+
+fn parse_reloption_assignments(input: &str) -> Result<Vec<RelOption>, ParseError> {
+    split_comma_separated_sql(input)?
+        .into_iter()
+        .map(|part| {
+            let (name_sql, value_sql) =
+                part.split_once('=')
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "reloption assignment",
+                        actual: part.trim().into(),
+                    })?;
+            let (name, tail) = parse_sql_identifier(name_sql)?;
+            if !tail.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "reloption name",
+                    actual: tail.trim().into(),
+                });
+            }
+            let value_sql = value_sql.trim();
+            let value = scan_string_literal_token_len(value_sql)
+                .filter(|len| value_sql[*len..].trim().is_empty())
+                .map(|len| decode_string_literal(&value_sql[..len]))
+                .transpose()?
+                .unwrap_or_else(|| value_sql.to_string());
+            Ok(RelOption { name, value })
+        })
+        .collect()
+}
+
 fn build_alter_view_rename_statement(sql: &str) -> Result<AlterTableRenameStatement, ParseError> {
     let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
     rest = consume_keyword(rest, "view").trim_start();
@@ -5663,8 +6214,9 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     };
     let rest = rest.trim_start();
     let ((schema_name, function_name), rest) = parse_qualified_sql_name(rest)?;
+    let arg_list_position = parenthesized_inner_position(sql, rest);
     let (arg_list, mut rest) = take_parenthesized_segment(rest)?;
-    let args = parse_create_function_args(&arg_list)?;
+    let args = parse_create_function_args_with_base(&arg_list, arg_list_position)?;
 
     let mut return_spec = None;
     let mut language = None;
@@ -6541,6 +7093,7 @@ fn parse_create_procedure_arg(input: &str) -> Result<CreateFunctionArg, ParseErr
                 mode,
                 name: Some(name),
                 ty: parse_type_name(type_sql.trim())?,
+                type_position: None,
                 default_expr: default_expr.map(str::to_string),
                 variadic,
             });
@@ -6584,6 +7137,7 @@ struct ParsedCreateAggregateOptions {
     mtransspace: i32,
     mfinalfunc_extra: bool,
     mfinalfunc_modify: char,
+    hypothetical: bool,
 }
 
 fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatement, ParseError> {
@@ -6619,6 +7173,14 @@ fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatemen
     }
 
     let parsed_options = parse_create_aggregate_options(&options_sql)?;
+    if signature.is_none() && parsed_options.basetype.is_none() && parsed_options.stype.is_some() {
+        return Err(ParseError::DetailedError {
+            message: "aggregate input type must be specified".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
     let signature = match signature {
         Some(signature) => {
             if parsed_options.basetype.is_some() {
@@ -6632,32 +7194,29 @@ fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatemen
         None => parsed_options
             .basetype
             .clone()
-            .ok_or_else(|| ParseError::DetailedError {
-                message: "aggregate input type must be specified".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "42601",
-            })?,
+            .unwrap_or(AggregateSignatureKind::Star),
     };
 
     let missing_actual = aggregate_name.clone();
+    let stype = parsed_options
+        .stype
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "STYPE or STYPE1 option",
+            actual: "aggregate stype must be specified".into(),
+        })?;
+    let sfunc_name = parsed_options
+        .sfunc_name
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "SFUNC or SFUNC1 option",
+            actual: missing_actual.clone(),
+        })?;
     Ok(CreateAggregateStatement {
         schema_name,
         aggregate_name,
         replace_existing,
         signature,
-        sfunc_name: parsed_options
-            .sfunc_name
-            .ok_or_else(|| ParseError::UnexpectedToken {
-                expected: "SFUNC or SFUNC1 option",
-                actual: missing_actual.clone(),
-            })?,
-        stype: parsed_options
-            .stype
-            .ok_or_else(|| ParseError::UnexpectedToken {
-                expected: "STYPE or STYPE1 option",
-                actual: missing_actual.clone(),
-            })?,
+        sfunc_name,
+        stype,
         finalfunc_name: parsed_options.finalfunc_name,
         initcond: parsed_options.initcond,
         parallel: parsed_options.parallel,
@@ -6675,6 +7234,7 @@ fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatemen
         mtransspace: parsed_options.mtransspace,
         mfinalfunc_extra: parsed_options.mfinalfunc_extra,
         mfinalfunc_modify: parsed_options.mfinalfunc_modify,
+        hypothetical: parsed_options.hypothetical,
     })
 }
 
@@ -6721,6 +7281,49 @@ fn build_drop_aggregate_statement(sql: &str) -> Result<DropAggregateStatement, P
         aggregate_name,
         signature: parse_aggregate_signature_kind(&signature_sql)?,
         cascade,
+    })
+}
+
+fn build_alter_aggregate_rename_statement(
+    sql: &str,
+) -> Result<AlterAggregateRenameStatement, ParseError> {
+    let prefix = "alter aggregate";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER AGGREGATE name(signature) RENAME TO new_name",
+            actual: sql.into(),
+        });
+    };
+    let rest = rest.trim_start();
+    let ((schema_name, aggregate_name), rest_after_name) = parse_schema_qualified_name(rest)?;
+    let (signature_sql, rest) = take_parenthesized_segment(rest_after_name.trim_start())?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "rename") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "RENAME TO",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "rename").trim_start();
+    if !keyword_at_start(rest, "to") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "TO",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "to").trim_start();
+    let (new_name, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER AGGREGATE RENAME statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(AlterAggregateRenameStatement {
+        schema_name,
+        aggregate_name,
+        signature: parse_aggregate_signature_kind(&signature_sql)?,
+        new_name,
     })
 }
 
@@ -6954,6 +7557,7 @@ fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOp
     for item in split_top_level_items(input, ',')? {
         let Some(eq_idx) = item.find('=') else {
             if item.trim().eq_ignore_ascii_case("hypothetical") {
+                parsed.hypothetical = true;
                 continue;
             }
             return Err(ParseError::UnexpectedToken {
@@ -6961,7 +7565,17 @@ fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOp
                 actual: item,
             });
         };
-        let key = item[..eq_idx].trim().to_ascii_lowercase();
+        let raw_key = item[..eq_idx].trim();
+        if raw_key.starts_with('"') {
+            let attr = parse_sql_identifier(raw_key)
+                .map(|(ident, _)| ident)
+                .unwrap_or_else(|_| raw_key.trim_matches('"').to_string());
+            crate::backend::utils::misc::notices::push_warning(format!(
+                "aggregate attribute \"{attr}\" not recognized"
+            ));
+            continue;
+        }
+        let key = raw_key.to_ascii_lowercase();
         let value = item[eq_idx + 1..].trim();
         match key.as_str() {
             "sfunc" | "sfunc1" => parsed.sfunc_name = Some(parse_aggregate_proc_name(value)?),
@@ -6984,7 +7598,7 @@ fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOp
             "msspace" => parsed.mtransspace = parse_aggregate_i32(value)?,
             "mfinalfunc_extra" => parsed.mfinalfunc_extra = parse_aggregate_bool(value)?,
             "mfinalfunc_modify" => parsed.mfinalfunc_modify = parse_aggregate_final_modify(value)?,
-            "sortop" | "hypothetical" => {
+            "sortop" => {
                 return Err(ParseError::FeatureNotSupported(format!(
                     "{key} aggregate option is not supported"
                 )));
@@ -7010,19 +7624,38 @@ fn parse_aggregate_signature_kind(input: &str) -> Result<AggregateSignatureKind,
             actual: "()".into(),
         });
     }
-    if keyword_boundary(trimmed, "order by").is_some() {
-        return Err(ParseError::FeatureNotSupported(
-            "ordered-set aggregate signatures are not supported".into(),
-        ));
-    }
-    let args = split_top_level_items(trimmed, ',')?
-        .into_iter()
-        .map(|item| parse_aggregate_signature_arg(&item))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(AggregateSignatureKind::Args(args))
+    let (arg_sql, order_by_sql) =
+        if let Some(order_by_idx) = find_next_top_level_keyword(trimmed, &["order by"]) {
+            (
+                trimmed[..order_by_idx].trim(),
+                Some(consume_keyword(&trimmed[order_by_idx..], "order by").trim()),
+            )
+        } else {
+            (trimmed, None)
+        };
+    let args = if arg_sql.is_empty() {
+        Vec::new()
+    } else {
+        split_top_level_items(arg_sql, ',')?
+            .into_iter()
+            .map(|item| parse_aggregate_signature_arg(&item))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let order_by = if let Some(order_by_sql) = order_by_sql {
+        split_top_level_items(order_by_sql, ',')?
+            .into_iter()
+            .map(|item| parse_aggregate_signature_arg(&item))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    Ok(AggregateSignatureKind::Args(AggregateSignature {
+        args,
+        order_by,
+    }))
 }
 
-fn parse_aggregate_signature_arg(input: &str) -> Result<AggregateArgType, ParseError> {
+fn parse_aggregate_signature_arg(input: &str) -> Result<AggregateSignatureArg, ParseError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(ParseError::UnexpectedToken {
@@ -7030,22 +7663,102 @@ fn parse_aggregate_signature_arg(input: &str) -> Result<AggregateArgType, ParseE
             actual: input.into(),
         });
     }
-    if keyword_at_start(trimmed, "variadic") {
-        return Err(ParseError::FeatureNotSupported(
-            "VARIADIC aggregate signatures are not supported".into(),
-        ));
+    let variadic = keyword_at_start(trimmed, "variadic");
+    let type_or_named = if variadic {
+        consume_keyword(trimmed, "variadic").trim_start()
+    } else {
+        trimmed
+    };
+    let named_candidate = parse_sql_identifier(type_or_named)
+        .ok()
+        .and_then(|(name, rest)| {
+            let rest = rest.trim();
+            (!rest.is_empty()
+                && !aggregate_type_phrase_starts_with_identifier(type_or_named)
+                && parse_aggregate_arg_type(rest).is_ok())
+            .then_some((name, rest))
+        });
+    let (name, type_sql) = if let Some((name, rest)) = named_candidate {
+        (Some(name), rest)
+    } else if let Ok(arg_type) = parse_aggregate_arg_type(type_or_named)
+        && aggregate_arg_type_consumes_all(type_or_named, &arg_type)
+    {
+        (None, type_or_named)
+    } else if let Ok((name, rest)) = parse_sql_identifier(type_or_named)
+        && !rest.trim().is_empty()
+    {
+        (Some(name), rest.trim())
+    } else {
+        (None, type_or_named)
+    };
+    Ok(AggregateSignatureArg {
+        name,
+        arg_type: parse_aggregate_arg_type(type_sql)?,
+        variadic,
+    })
+}
+
+fn aggregate_type_phrase_starts_with_identifier(input: &str) -> bool {
+    let lower = input.trim_start().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "double precision"
+            | "character varying"
+            | "bit varying"
+            | "time with time zone"
+            | "time without time zone"
+            | "timestamp with time zone"
+            | "timestamp without time zone"
+    ) || lower.starts_with("time(")
+        || lower.starts_with("time ")
+        || lower.starts_with("timestamp(")
+        || lower.starts_with("timestamp ")
+        || lower.starts_with("character(")
+        || lower.starts_with("character ")
+        || lower.starts_with("interval ")
+        || lower.starts_with("interval(")
+}
+
+fn aggregate_arg_type_consumes_all(input: &str, arg_type: &AggregateArgType) -> bool {
+    match arg_type {
+        AggregateArgType::AnyPseudo => parse_sql_identifier(input)
+            .is_ok_and(|(ident, rest)| ident.eq_ignore_ascii_case("any") && rest.trim().is_empty()),
+        AggregateArgType::Type(_) => parse_type_name(input).is_ok(),
     }
+}
+
+fn parse_aggregate_arg_type(input: &str) -> Result<AggregateArgType, ParseError> {
+    let trimmed = input.trim();
     if let Ok((ident, rest)) = parse_sql_identifier(trimmed)
         && rest.trim().is_empty()
         && ident.eq_ignore_ascii_case("any")
     {
         return Ok(AggregateArgType::AnyPseudo);
     }
-    parse_type_name(trimmed)
-        .map(AggregateArgType::Type)
-        .map_err(|_| {
-            ParseError::FeatureNotSupported("named aggregate parameters are not supported".into())
-        })
+    parse_type_name(trimmed).map(AggregateArgType::Type)
+}
+
+fn parse_aggregate_signature_type_only_arg(
+    input: &str,
+) -> Result<AggregateSignatureArg, ParseError> {
+    let arg = parse_aggregate_signature_arg(input)?;
+    if arg.name.is_some() {
+        return Err(ParseError::FeatureNotSupported(
+            "named aggregate parameters are not supported in BASETYPE".into(),
+        ));
+    }
+    Ok(arg)
+}
+
+fn parse_aggregate_signature_type_only(input: &str) -> Result<AggregateSignatureKind, ParseError> {
+    let args = split_top_level_items(input, ',')?
+        .into_iter()
+        .map(|item| parse_aggregate_signature_type_only_arg(&item))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AggregateSignatureKind::Args(AggregateSignature {
+        args,
+        order_by: Vec::new(),
+    }))
 }
 
 fn parse_legacy_aggregate_basetype(input: &str) -> Result<AggregateSignatureKind, ParseError> {
@@ -7064,9 +7777,7 @@ fn parse_legacy_aggregate_basetype(input: &str) -> Result<AggregateSignatureKind
     {
         return Ok(AggregateSignatureKind::Star);
     }
-    Ok(AggregateSignatureKind::Args(vec![
-        parse_aggregate_signature_arg(trimmed)?,
-    ]))
+    parse_aggregate_signature_type_only(trimmed)
 }
 
 fn parse_aggregate_proc_name(input: &str) -> Result<String, ParseError> {
@@ -7148,7 +7859,7 @@ fn parse_aggregate_parallel(input: &str) -> Result<FunctionParallel, ParseError>
         "unsafe" => Ok(FunctionParallel::Unsafe),
         _ => Err(ParseError::UnexpectedToken {
             expected: "SAFE, RESTRICTED, or UNSAFE",
-            actual: value,
+            actual: "parameter \"parallel\" must be SAFE, RESTRICTED, or UNSAFE".into(),
         }),
     }
 }
@@ -7219,7 +7930,9 @@ fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, P
         }
         if keyword_at_start(rest, "for") {
             let mut next = consume_keyword(rest, "for").trim_start();
-            next = consume_keyword(next, "each").trim_start();
+            if keyword_at_start(next, "each") {
+                next = consume_keyword(next, "each").trim_start();
+            }
             if keyword_at_start(next, "row") {
                 level = TriggerLevel::Row;
                 rest = consume_keyword(next, "row");
@@ -7706,6 +8419,20 @@ fn build_create_policy_statement(sql: &str) -> Result<CreatePolicyStatement, Par
                 rest = consume_keyword(rest, "restrictive").trim_start();
                 continue;
             }
+            if let Ok((policy_option, _)) = parse_sql_identifier(rest) {
+                return Err(ParseError::DetailedError {
+                    message: format!("unrecognized row security option \"{policy_option}\""),
+                    detail: None,
+                    hint: Some(
+                        "Only PERMISSIVE or RESTRICTIVE policies are supported currently.".into(),
+                    ),
+                    sqlstate: "42601",
+                }
+                .with_position(sql_position_from_byte_offset(
+                    sql,
+                    slice_byte_offset(sql, rest),
+                )));
+            }
             return Err(ParseError::UnexpectedToken {
                 expected: "PERMISSIVE or RESTRICTIVE",
                 actual: rest.into(),
@@ -8064,6 +8791,134 @@ fn build_create_type_statement(sql: &str) -> Result<CreateTypeStatement, ParseEr
             attributes,
         },
     ))
+}
+
+fn build_create_cast_statement(sql: &str) -> Result<CreateCastStatement, ParseError> {
+    let prefix = "create cast";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CREATE CAST (source AS target)",
+            actual: sql.into(),
+        });
+    };
+    let (type_pair, rest) = take_parenthesized_segment(rest.trim_start())?;
+    let (source_type, target_type) = parse_cast_type_pair(&type_pair)?;
+    let rest = rest.trim_start();
+    let (method, rest) = if keyword_at_start(rest, "with") {
+        let rest = consume_keyword(rest, "with").trim_start();
+        if keyword_at_start(rest, "function") {
+            let rest = consume_keyword(rest, "function").trim_start();
+            let ((schema_name, function_name), rest) = parse_qualified_sql_name(rest)?;
+            let (args_sql, rest) = take_parenthesized_segment(rest.trim_start())?;
+            let arg_types = parse_cast_function_arg_types(&args_sql)?;
+            (
+                CreateCastMethod::Function {
+                    schema_name,
+                    function_name,
+                    arg_types,
+                },
+                rest,
+            )
+        } else if keyword_at_start(rest, "inout") {
+            (CreateCastMethod::InOut, consume_keyword(rest, "inout"))
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "FUNCTION or INOUT",
+                actual: rest.into(),
+            });
+        }
+    } else if let Some(rest) = consume_keywords(rest, &["without", "function"]) {
+        (CreateCastMethod::WithoutFunction, rest)
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "WITH FUNCTION, WITHOUT FUNCTION, or WITH INOUT",
+            actual: rest.into(),
+        });
+    };
+    let (context, rest) = parse_cast_context(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of CREATE CAST statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CreateCastStatement {
+        source_type,
+        target_type,
+        method,
+        context,
+    })
+}
+
+fn build_drop_cast_statement(sql: &str) -> Result<DropCastStatement, ParseError> {
+    let prefix = "drop cast";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "DROP CAST (source AS target)",
+            actual: sql.into(),
+        });
+    };
+    let mut rest = rest.trim_start();
+    let mut if_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        if_exists = true;
+        rest = next.trim_start();
+    }
+    let (type_pair, rest) = take_parenthesized_segment(rest)?;
+    let (source_type, target_type) = parse_cast_type_pair(&type_pair)?;
+    let suffix = rest.trim();
+    let cascade = if suffix.is_empty() || keyword_at_start(suffix, "restrict") {
+        false
+    } else if keyword_at_start(suffix, "cascade") {
+        true
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CASCADE, RESTRICT, or end of statement",
+            actual: suffix.into(),
+        });
+    };
+    Ok(DropCastStatement {
+        if_exists,
+        source_type,
+        target_type,
+        cascade,
+    })
+}
+
+fn parse_cast_type_pair(input: &str) -> Result<(RawTypeName, RawTypeName), ParseError> {
+    let as_index =
+        find_next_top_level_keyword(input, &["as"]).ok_or(ParseError::UnexpectedToken {
+            expected: "source type AS target type",
+            actual: input.into(),
+        })?;
+    let source_sql = input[..as_index].trim();
+    let target_sql = input[as_index + "as".len()..].trim();
+    if source_sql.is_empty() || target_sql.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "source type AS target type",
+            actual: input.into(),
+        });
+    }
+    Ok((parse_type_name(source_sql)?, parse_type_name(target_sql)?))
+}
+
+fn parse_cast_function_arg_types(input: &str) -> Result<Vec<RawTypeName>, ParseError> {
+    split_top_level_items(input, ',')?
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .map(|item| parse_type_name(item.trim()))
+        .collect()
+}
+
+fn parse_cast_context(input: &str) -> Result<(CastContext, &str), ParseError> {
+    let rest = input.trim_start();
+    if let Some(rest) = consume_keywords(rest, &["as", "implicit"]) {
+        return Ok((CastContext::Implicit, rest));
+    }
+    if let Some(rest) = consume_keywords(rest, &["as", "assignment"]) {
+        return Ok((CastContext::Assignment, rest));
+    }
+    Ok((CastContext::Explicit, rest))
 }
 
 fn build_create_operator_class_statement(
@@ -8761,6 +9616,11 @@ fn build_alter_type_statement(sql: &str) -> Result<AlterTypeStatement, ParseErro
     };
     let ((schema_name, type_name), rest) = parse_qualified_sql_name(rest.trim_start())?;
     let mut rest = rest.trim_start();
+    if starts_composite_type_action(rest) {
+        return Ok(AlterTypeStatement::AlterComposite(
+            parse_alter_composite_type_statement(schema_name, type_name, rest)?,
+        ));
+    }
     if keyword_at_start(rest, "add") {
         rest = consume_keyword(rest, "add").trim_start();
         if !keyword_at_start(rest, "value") {
@@ -8905,6 +9765,153 @@ fn build_alter_type_statement(sql: &str) -> Result<AlterTypeStatement, ParseErro
     Err(ParseError::FeatureNotSupported(
         "unsupported ALTER TYPE form".into(),
     ))
+}
+
+fn starts_composite_type_action(rest: &str) -> bool {
+    (keyword_at_start(rest, "add")
+        && keyword_at_start(consume_keyword(rest, "add").trim_start(), "attribute"))
+        || (keyword_at_start(rest, "drop")
+            && keyword_at_start(consume_keyword(rest, "drop").trim_start(), "attribute"))
+        || (keyword_at_start(rest, "alter")
+            && keyword_at_start(consume_keyword(rest, "alter").trim_start(), "attribute"))
+        || (keyword_at_start(rest, "rename")
+            && keyword_at_start(consume_keyword(rest, "rename").trim_start(), "attribute"))
+}
+
+fn parse_alter_composite_type_statement(
+    schema_name: Option<String>,
+    type_name: String,
+    rest: &str,
+) -> Result<AlterCompositeTypeStatement, ParseError> {
+    let actions = split_top_level_items(rest, ',')?
+        .into_iter()
+        .map(|item| parse_alter_composite_type_action(item.trim()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AlterCompositeTypeStatement {
+        schema_name,
+        type_name,
+        actions,
+    })
+}
+
+fn parse_alter_composite_type_action(input: &str) -> Result<AlterCompositeTypeAction, ParseError> {
+    if keyword_at_start(input, "add") {
+        let rest = consume_keyword(input, "add").trim_start();
+        if !keyword_at_start(rest, "attribute") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "ATTRIBUTE",
+                actual: rest.into(),
+            });
+        }
+        let (body, cascade) =
+            split_optional_cascade_restrict_clause(consume_keyword(rest, "attribute"))?;
+        return Ok(AlterCompositeTypeAction::AddAttribute {
+            attribute: parse_create_type_attribute(body)?,
+            cascade,
+        });
+    }
+    if keyword_at_start(input, "drop") {
+        let rest = consume_keyword(input, "drop").trim_start();
+        if !keyword_at_start(rest, "attribute") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "ATTRIBUTE",
+                actual: rest.into(),
+            });
+        }
+        let (body, cascade) =
+            split_optional_cascade_restrict_clause(consume_keyword(rest, "attribute"))?;
+        let mut body = body.trim_start();
+        let if_exists = if keyword_at_start(body, "if") {
+            body = consume_keyword(body, "if").trim_start();
+            if !keyword_at_start(body, "exists") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "EXISTS",
+                    actual: body.into(),
+                });
+            }
+            body = consume_keyword(body, "exists").trim_start();
+            true
+        } else {
+            false
+        };
+        let (name, trailing) = parse_sql_identifier(body)?;
+        if !trailing.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER TYPE DROP ATTRIBUTE",
+                actual: trailing.trim().into(),
+            });
+        }
+        return Ok(AlterCompositeTypeAction::DropAttribute {
+            name,
+            if_exists,
+            cascade,
+        });
+    }
+    if keyword_at_start(input, "alter") {
+        let rest = consume_keyword(input, "alter").trim_start();
+        if !keyword_at_start(rest, "attribute") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "ATTRIBUTE",
+                actual: rest.into(),
+            });
+        }
+        let (body, cascade) =
+            split_optional_cascade_restrict_clause(consume_keyword(rest, "attribute"))?;
+        let (name, mut rest) = parse_sql_identifier(body.trim_start())?;
+        rest = rest.trim_start();
+        if keyword_at_start(rest, "set") {
+            rest = consume_keyword(rest, "set").trim_start();
+        }
+        if keyword_at_start(rest, "data") {
+            rest = consume_keyword(rest, "data").trim_start();
+        }
+        if !keyword_at_start(rest, "type") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "TYPE",
+                actual: rest.into(),
+            });
+        }
+        return Ok(AlterCompositeTypeAction::AlterAttributeType {
+            name,
+            ty: parse_type_name(consume_keyword(rest, "type").trim())?,
+            cascade,
+        });
+    }
+    if keyword_at_start(input, "rename") {
+        let rest = consume_keyword(input, "rename").trim_start();
+        if !keyword_at_start(rest, "attribute") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "ATTRIBUTE",
+                actual: rest.into(),
+            });
+        }
+        let (body, cascade) =
+            split_optional_cascade_restrict_clause(consume_keyword(rest, "attribute"))?;
+        let (old_name, rest) = parse_sql_identifier(body.trim_start())?;
+        let rest = rest.trim_start();
+        if !keyword_at_start(rest, "to") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "TO",
+                actual: rest.into(),
+            });
+        }
+        let (new_name, trailing) = parse_sql_identifier(consume_keyword(rest, "to").trim_start())?;
+        if !trailing.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER TYPE RENAME ATTRIBUTE",
+                actual: trailing.trim().into(),
+            });
+        }
+        return Ok(AlterCompositeTypeAction::RenameAttribute {
+            old_name,
+            new_name,
+            cascade,
+        });
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "ALTER TYPE composite action",
+        actual: input.into(),
+    })
 }
 
 fn parse_create_range_type_statement(
@@ -9181,18 +10188,34 @@ fn build_drop_type_statement(sql: &str) -> Result<DropTypeStatement, ParseError>
 }
 
 fn parse_create_function_args(input: &str) -> Result<Vec<CreateFunctionArg>, ParseError> {
-    let items = split_top_level_items(input, ',')?;
-    if items.len() == 1 && items[0].trim().is_empty() {
+    parse_create_function_args_with_base(input, None)
+}
+
+fn parse_create_function_args_with_base(
+    input: &str,
+    base_offset: Option<usize>,
+) -> Result<Vec<CreateFunctionArg>, ParseError> {
+    let items = split_top_level_items_with_spans(input, ',')?;
+    if items.len() == 1 && items[0].0.trim().is_empty() {
         return Ok(Vec::new());
     }
     items
         .into_iter()
-        .filter(|item| !item.trim().is_empty())
-        .map(|item| parse_create_function_arg(&item))
+        .filter(|(item, _)| !item.trim().is_empty())
+        .map(|(item, item_offset)| {
+            parse_create_function_arg_with_base(item, base_offset.map(|base| base + item_offset))
+        })
         .collect()
 }
 
 fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseError> {
+    parse_create_function_arg_with_base(input, None)
+}
+
+fn parse_create_function_arg_with_base(
+    input: &str,
+    arg_base_offset: Option<usize>,
+) -> Result<CreateFunctionArg, ParseError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(ParseError::UnexpectedToken {
@@ -9201,13 +10224,9 @@ fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseErro
         });
     }
     let lowered = trimmed.to_ascii_lowercase();
-    if lowered.contains(" default ")
-        || lowered.contains(":=")
-        || lowered.starts_with("variadic ")
-        || lowered.contains(" variadic ")
-    {
+    if lowered.contains(" default ") || lowered.contains(":=") {
         return Err(ParseError::FeatureNotSupported(
-            "default arguments and VARIADIC are not supported in CREATE FUNCTION".into(),
+            "default arguments are not supported in CREATE FUNCTION".into(),
         ));
     }
 
@@ -9220,34 +10239,49 @@ fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseErro
     } else {
         (FunctionArgMode::In, trimmed)
     };
-    let rest = rest.trim_start();
+    let mut variadic = false;
+    let mut rest = rest.trim_start();
+    if keyword_at_start(rest, "variadic") {
+        variadic = true;
+        rest = consume_keyword(rest, "variadic").trim_start();
+    }
     if !rest.chars().any(char::is_whitespace)
         && let Ok(ty) = parse_type_name(rest)
     {
+        let type_position = named_type_position(&ty, input, rest, arg_base_offset);
         return Ok(CreateFunctionArg {
             mode,
             name: None,
             ty,
+            type_position,
             default_expr: None,
-            variadic: false,
+            variadic,
         });
     }
     let (name, type_sql) = match parse_sql_identifier(rest) {
-        Ok((name, rest)) if !rest.trim().is_empty() => (Some(name), rest.trim()),
+        Ok((name, rest)) if !rest.trim().is_empty() => (Some(name), rest.trim_start()),
         _ => (None, rest),
     };
+    let mut type_sql = type_sql;
+    if keyword_at_start(type_sql, "variadic") {
+        variadic = true;
+        type_sql = consume_keyword(type_sql, "variadic").trim_start();
+    }
     if type_sql.trim().is_empty() {
         return Err(ParseError::UnexpectedToken {
             expected: "argument type name",
             actual: input.into(),
         });
     }
+    let ty = parse_type_name(type_sql.trim())?;
+    let type_position = named_type_position(&ty, input, type_sql, arg_base_offset);
     Ok(CreateFunctionArg {
         mode,
         name,
-        ty: parse_type_name(type_sql.trim())?,
+        ty,
+        type_position,
         default_expr: None,
-        variadic: false,
+        variadic,
     })
 }
 
@@ -9499,6 +10533,15 @@ fn take_parenthesized_segment(input: &str) -> Result<(String, &str), ParseError>
     Err(ParseError::UnexpectedEof)
 }
 
+fn parenthesized_inner_position(sql: &str, input: &str) -> Option<usize> {
+    let input_offset = sql.len().checked_sub(input.len())?;
+    let leading = input.len().checked_sub(input.trim_start().len())?;
+    input
+        .trim_start()
+        .starts_with('(')
+        .then_some(input_offset + leading + 1)
+}
+
 fn split_top_level_items(input: &str, separator: char) -> Result<Vec<String>, ParseError> {
     let mut items = Vec::new();
     let mut start = 0usize;
@@ -9534,6 +10577,75 @@ fn split_top_level_items(input: &str, separator: char) -> Result<Vec<String>, Pa
     }
     items.push(input[start..].trim().to_string());
     Ok(items)
+}
+
+fn split_top_level_items_with_spans(
+    input: &str,
+    separator: char,
+) -> Result<Vec<(&str, usize)>, ParseError> {
+    let mut items = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let bytes = input.as_bytes();
+    let sep = separator as u8;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = parse_delimited_token_end(bytes, i, b'\'');
+                continue;
+            }
+            b'"' => {
+                i = parse_delimited_token_end(bytes, i, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            byte if byte == sep && depth == 0 => {
+                items.push(trim_ascii_span(input, start, i));
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    items.push(trim_ascii_span(input, start, input.len()));
+    Ok(items)
+}
+
+fn trim_ascii_span(input: &str, mut start: usize, mut end: usize) -> (&str, usize) {
+    let bytes = input.as_bytes();
+    while start < end && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    (&input[start..end], start)
+}
+
+fn type_position(parent: &str, child: &str, base_offset: Option<usize>) -> Option<usize> {
+    let base = base_offset?;
+    let child = child.trim_start();
+    parent
+        .len()
+        .checked_sub(child.len())
+        .map(|relative| base + relative + 1)
+}
+
+fn named_type_position(
+    ty: &RawTypeName,
+    parent: &str,
+    child: &str,
+    base_offset: Option<usize>,
+) -> Option<usize> {
+    matches!(ty, RawTypeName::Named { .. }).then(|| type_position(parent, child, base_offset))?
 }
 
 fn split_top_level_once(input: &str, separator: char) -> Result<Option<(&str, &str)>, ParseError> {
@@ -10610,6 +11722,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         )),
         Rule::set_role_stmt => Ok(Statement::SetRole(build_set_role(inner)?)),
         Rule::reset_role_stmt => Ok(Statement::ResetRole(build_reset_role(inner)?)),
+        Rule::set_transaction_stmt => Ok(Statement::SetTransaction(build_set_transaction(inner)?)),
         Rule::set_stmt => Ok(Statement::Set(build_set(inner)?)),
         Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
         Rule::create_role_stmt => Ok(Statement::CreateRole(build_create_role(inner)?)),
@@ -10712,6 +11825,10 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_no_inherit_stmt => Ok(Statement::AlterTableNoInherit(
             build_alter_table_no_inherit(inner)?,
         )),
+        Rule::alter_table_of_stmt => Ok(Statement::AlterTableOf(build_alter_table_of(inner)?)),
+        Rule::alter_table_not_of_stmt => {
+            Ok(Statement::AlterTableNotOf(build_alter_table_not_of(inner)?))
+        }
         Rule::comment_on_role_stmt => Ok(Statement::CommentOnRole(build_comment_on_role(inner)?)),
         Rule::comment_on_table_stmt => {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
@@ -10758,7 +11875,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::merge_stmt => Ok(Statement::Merge(build_merge(inner)?)),
         Rule::update_stmt => Ok(Statement::Update(build_update(inner)?)),
         Rule::delete_stmt => Ok(Statement::Delete(build_delete(inner)?)),
-        Rule::begin_stmt => Ok(Statement::Begin),
+        Rule::begin_stmt => Ok(Statement::Begin(build_begin(inner)?)),
         Rule::commit_stmt => Ok(Statement::Commit),
         Rule::savepoint_stmt => Ok(Statement::Savepoint(build_transaction_marker_name(inner)?)),
         Rule::rollback_to_stmt => Ok(Statement::RollbackTo(build_transaction_marker_name(inner)?)),
@@ -10780,6 +11897,7 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
         with: Vec::new(),
         with_recursive: false,
         distinct: false,
+        distinct_on: Vec::new(),
         from: Some(FromItem::Table { name, only: false }),
         targets: vec![SelectItem {
             expr: SqlExpr::Column("*".into()),
@@ -10962,8 +12080,13 @@ fn build_set_guc_name(pair: Pair<'_, Rule>) -> String {
 fn build_show(pair: Pair<'_, Rule>) -> Result<ShowStatement, ParseError> {
     let mut name = None;
     for part in pair.into_inner() {
-        if part.as_rule() == Rule::identifier {
-            name = Some(build_identifier(part));
+        match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::show_transaction_isolation_clause => {
+                name = Some("transaction_isolation".to_string())
+            }
+            Rule::time_zone_guc_name => name = Some("timezone".to_string()),
+            _ => {}
         }
     }
     let name = name.ok_or(ParseError::UnexpectedEof)?;
@@ -11211,8 +12334,10 @@ fn build_reset_role(_pair: Pair<'_, Rule>) -> Result<ResetRoleStatement, ParseEr
 fn build_reset(pair: Pair<'_, Rule>) -> Result<ResetStatement, ParseError> {
     let mut name = None;
     for part in pair.into_inner() {
-        if part.as_rule() == Rule::identifier {
-            name = Some(build_identifier(part));
+        match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::time_zone_guc_name => name = Some("timezone".to_string()),
+            _ => {}
         }
     }
     Ok(ResetStatement { name })
@@ -11787,6 +12912,147 @@ fn build_simple_set_value_atom(pair: Pair<'_, Rule>) -> String {
     }
 }
 
+fn normalized_transaction_mode_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn parse_transaction_isolation_level_text(
+    value: &str,
+) -> Result<TransactionIsolationLevel, ParseError> {
+    TransactionIsolationLevel::parse(value).ok_or_else(|| ParseError::UnexpectedToken {
+        expected: "transaction isolation level",
+        actual: value.to_string(),
+    })
+}
+
+fn apply_transaction_mode(
+    options: &mut TransactionOptions,
+    mode: Pair<'_, Rule>,
+) -> Result<(), ParseError> {
+    let text = normalized_transaction_mode_text(mode.as_str());
+    if let Some(level) = text.strip_prefix("isolation level ") {
+        if options.isolation_level.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one isolation level",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.isolation_level = Some(parse_transaction_isolation_level_text(level)?);
+    } else if text == "read only" {
+        if options.read_only.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one transaction read mode",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.read_only = Some(true);
+    } else if text == "read write" {
+        if options.read_only.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one transaction read mode",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.read_only = Some(false);
+    } else if text == "deferrable" {
+        if options.deferrable.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one transaction deferrable mode",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.deferrable = Some(true);
+    } else if text == "not deferrable" {
+        if options.deferrable.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one transaction deferrable mode",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.deferrable = Some(false);
+    }
+    Ok(())
+}
+
+fn merge_transaction_options(
+    options: &mut TransactionOptions,
+    nested: TransactionOptions,
+) -> Result<(), ParseError> {
+    if let Some(level) = nested.isolation_level
+        && options.isolation_level.replace(level).is_some()
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "one isolation level",
+            actual: "duplicate isolation level".into(),
+        });
+    }
+    if let Some(read_only) = nested.read_only
+        && options.read_only.replace(read_only).is_some()
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "one transaction read mode",
+            actual: "duplicate transaction read mode".into(),
+        });
+    }
+    if let Some(deferrable) = nested.deferrable
+        && options.deferrable.replace(deferrable).is_some()
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "one transaction deferrable mode",
+            actual: "duplicate transaction deferrable mode".into(),
+        });
+    }
+    Ok(())
+}
+
+fn build_transaction_options(pair: Pair<'_, Rule>) -> Result<TransactionOptions, ParseError> {
+    let mut options = TransactionOptions::default();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::transaction_mode_item => apply_transaction_mode(&mut options, part)?,
+            Rule::transaction_mode_list => {
+                let nested = build_transaction_options(part)?;
+                merge_transaction_options(&mut options, nested)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(options)
+}
+
+fn build_begin(pair: Pair<'_, Rule>) -> Result<TransactionOptions, ParseError> {
+    for part in pair.into_inner() {
+        if part.as_rule() == Rule::transaction_mode_list {
+            return build_transaction_options(part);
+        }
+    }
+    Ok(TransactionOptions::default())
+}
+
+fn build_set_transaction(pair: Pair<'_, Rule>) -> Result<SetTransactionStatement, ParseError> {
+    let scope = if pair
+        .as_str()
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("set session characteristics")
+    {
+        SetTransactionScope::SessionCharacteristics
+    } else {
+        SetTransactionScope::Transaction
+    };
+    let options = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::transaction_mode_list)
+        .map(build_transaction_options)
+        .transpose()?
+        .unwrap_or_default();
+    Ok(SetTransactionStatement { scope, options })
+}
+
 fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
     let mut analyze = false;
     let mut buffers = false;
@@ -11869,6 +13135,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
                         with = ctes;
                     }
                     Rule::set_operation_stmt
+                    | Rule::parenthesized_select_stmt
                     | Rule::simple_select_stmt
                     | Rule::simple_select_core => nested = Some(build_select(part)?),
                     _ => {}
@@ -11882,6 +13149,14 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
             return Ok(stmt);
         }
         Rule::set_operation_stmt => return build_set_operation_select(pair),
+        Rule::parenthesized_select_stmt => {
+            return build_select(
+                pair.into_inner()
+                    .find(|part| matches!(part.as_rule(), Rule::select_stmt))
+                    .ok_or(ParseError::UnexpectedEof)?,
+            );
+        }
+        Rule::values_stmt => return Ok(wrap_values_as_select(build_values_statement(pair)?)),
         Rule::simple_select_stmt | Rule::simple_select_core => pair.into_inner().collect(),
         _ => {
             return Err(ParseError::UnexpectedToken {
@@ -11899,6 +13174,7 @@ fn build_simple_select_statement(
     let mut with_recursive = false;
     let mut with = Vec::new();
     let mut distinct = false;
+    let mut distinct_on = Vec::new();
     let mut targets = None;
     let mut from = None;
     let mut where_clause = None;
@@ -11916,11 +13192,17 @@ fn build_simple_select_statement(
                 with_recursive = recursive;
                 with = ctes;
             }
-            Rule::select_distinct_clause => distinct = true,
+            Rule::select_distinct_clause => {
+                distinct = true;
+                distinct_on = build_select_distinct_clause(part)?;
+            }
             Rule::simple_select_core => {
                 for inner in part.into_inner() {
                     match inner.as_rule() {
-                        Rule::select_distinct_clause => distinct = true,
+                        Rule::select_distinct_clause => {
+                            distinct = true;
+                            distinct_on = build_select_distinct_clause(inner)?;
+                        }
                         Rule::select_list => targets = Some(build_select_list(inner)?),
                         Rule::from_item => from = Some(build_from_item(inner)?),
                         Rule::expr => where_clause = Some(build_expr(inner)?),
@@ -11928,7 +13210,7 @@ fn build_simple_select_statement(
                         Rule::having_clause => having = Some(build_having_clause(inner)?),
                         Rule::window_clause => window_clauses = build_window_clause(inner)?,
                         Rule::order_by_clause => order_by = build_order_by_clause(inner)?,
-                        Rule::limit_clause => limit = Some(build_limit_clause(inner)?),
+                        Rule::limit_clause => limit = build_limit_clause(inner)?,
                         Rule::offset_clause => offset = Some(build_offset_clause(inner)?),
                         Rule::locking_clause => locking_clause = Some(build_locking_clause(inner)?),
                         _ => {}
@@ -11942,7 +13224,7 @@ fn build_simple_select_statement(
             Rule::having_clause => having = Some(build_having_clause(part)?),
             Rule::window_clause => window_clauses = build_window_clause(part)?,
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
-            Rule::limit_clause => limit = Some(build_limit_clause(part)?),
+            Rule::limit_clause => limit = build_limit_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
             Rule::locking_clause => locking_clause = Some(build_locking_clause(part)?),
             _ => {}
@@ -11952,6 +13234,7 @@ fn build_simple_select_statement(
         with_recursive,
         with,
         distinct,
+        distinct_on,
         from,
         targets: targets.unwrap_or_default(),
         where_clause,
@@ -11964,6 +13247,13 @@ fn build_simple_select_statement(
         locking_clause,
         set_operation: None,
     })
+}
+
+fn build_select_distinct_clause(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::expr)
+        .map(build_expr)
+        .collect()
 }
 
 fn build_select_into(pair: Pair<'_, Rule>) -> Result<CreateTableAsStatement, ParseError> {
@@ -12030,11 +13320,27 @@ fn build_set_operation_term(pair: Pair<'_, Rule>) -> Result<SelectStatement, Par
         Rule::set_operation_term => {
             build_set_operation_term(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
         }
-        Rule::parenthesized_set_operation_term => build_select(
+        Rule::parenthesized_set_operation_term => {
+            let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            match inner.as_rule() {
+                Rule::parenthesized_set_operation_term => build_set_operation_term(inner),
+                Rule::values_stmt => Ok(wrap_values_as_select(build_values_statement(inner)?)),
+                _ => build_select(inner),
+            }
+        }
+        Rule::parenthesized_select_stmt => build_select(
             pair.into_inner()
                 .find(|part| matches!(part.as_rule(), Rule::select_stmt))
                 .ok_or(ParseError::UnexpectedEof)?,
         ),
+        Rule::parenthesized_values_stmt => {
+            let values = pair
+                .into_inner()
+                .find(|part| matches!(part.as_rule(), Rule::values_stmt))
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(wrap_values_as_select(build_values_statement(values)?))
+        }
+        Rule::values_stmt => Ok(wrap_values_as_select(build_values_statement(pair)?)),
         Rule::simple_select_core
         | Rule::simple_select_stmt
         | Rule::set_operation_stmt
@@ -12080,7 +13386,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
             }
             Rule::window_clause => window_clauses = build_window_clause(part)?,
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
-            Rule::limit_clause => limit = Some(build_limit_clause(part)?),
+            Rule::limit_clause => limit = build_limit_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
             Rule::locking_clause => locking_clause = Some(build_locking_clause(part)?),
             _ => {}
@@ -12100,6 +13406,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
         with_recursive,
         with,
         distinct: false,
+        distinct_on: Vec::new(),
         from: None,
         targets: Vec::new(),
         where_clause: None,
@@ -12161,6 +13468,7 @@ fn select_statement_for_set_operation(
         with_recursive: false,
         with: Vec::new(),
         distinct: false,
+        distinct_on: Vec::new(),
         from: None,
         targets: Vec::new(),
         where_clause: None,
@@ -12194,7 +13502,7 @@ fn build_values_statement(pair: Pair<'_, Rule>) -> Result<ValuesStatement, Parse
             }
             Rule::values_row => rows.push(build_values_row(part)?),
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
-            Rule::limit_clause => limit = Some(build_limit_clause(part)?),
+            Rule::limit_clause => limit = build_limit_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
             _ => {}
         }
@@ -12214,6 +13522,7 @@ pub(crate) fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
         with_recursive: stmt.with_recursive,
         with: stmt.with,
         distinct: false,
+        distinct_on: Vec::new(),
         from: Some(FromItem::Values { rows: stmt.rows }),
         targets: vec![SelectItem {
             output_name: "*".into(),
@@ -12346,7 +13655,15 @@ fn build_order_by_clause(pair: Pair<'_, Rule>) -> Result<Vec<OrderByItem>, Parse
 }
 
 fn build_locking_clause(pair: Pair<'_, Rule>) -> Result<SelectLockingClause, ParseError> {
-    match pair.as_str().trim().to_ascii_lowercase().as_str() {
+    let raw = pair.as_str().trim().to_ascii_lowercase();
+    let strength = raw
+        .split_once(" of ")
+        .map(|(strength, _)| strength)
+        .unwrap_or(&raw);
+    // :HACK: Parse FOR UPDATE/SHARE OF relation lists so view definitions and
+    // regression inputs bind, but keep using the existing all-relation row-mark
+    // model until SelectLockingClause carries the relation-name list.
+    match strength {
         "for no key update" => Ok(SelectLockingClause::ForNoKeyUpdate),
         "for update" => Ok(SelectLockingClause::ForUpdate),
         "for key share" => Ok(SelectLockingClause::ForKeyShare),
@@ -12401,8 +13718,15 @@ fn order_by_using_operator_direction(operator: &str) -> Option<bool> {
     }
 }
 
-fn build_limit_clause(pair: Pair<'_, Rule>) -> Result<usize, ParseError> {
-    build_usize_clause(pair, "LIMIT")
+fn build_limit_clause(pair: Pair<'_, Rule>) -> Result<Option<usize>, ParseError> {
+    if pair
+        .clone()
+        .into_inner()
+        .any(|part| part.as_rule() == Rule::kw_null)
+    {
+        return Ok(None);
+    }
+    build_usize_clause(pair, "LIMIT").map(Some)
 }
 
 fn build_offset_clause(pair: Pair<'_, Rule>) -> Result<usize, ParseError> {
@@ -12741,6 +14065,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
     let mut table_name = None;
     let mut table_alias = None;
     let mut columns = None;
+    let mut overriding = None;
     let mut source = None;
     let mut on_conflict = None;
     let mut returning = Vec::new();
@@ -12764,6 +14089,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
                 table_alias = Some(build_identifier(alias));
             }
             Rule::assignment_target_list => columns = Some(build_assignment_target_list(part)?),
+            Rule::insert_overriding_clause => overriding = Some(build_insert_overriding(part)?),
             Rule::insert_values_source => {
                 source = Some(InsertSource::Values(
                     part.into_inner()
@@ -12785,9 +14111,24 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         table_alias,
         columns,
+        overriding,
         source: source.ok_or(ParseError::UnexpectedEof)?,
         on_conflict,
         returning,
+    })
+}
+
+fn build_insert_overriding(pair: Pair<'_, Rule>) -> Result<OverridingKind, ParseError> {
+    let raw = pair.as_str().to_ascii_lowercase();
+    if raw.contains(" system ") {
+        return Ok(OverridingKind::System);
+    }
+    if raw.contains(" user ") {
+        return Ok(OverridingKind::User);
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "OVERRIDING SYSTEM VALUE or OVERRIDING USER VALUE",
+        actual: raw,
     })
 }
 
@@ -12800,6 +14141,7 @@ fn build_merge(pair: Pair<'_, Rule>) -> Result<MergeStatement, ParseError> {
     let mut source = None;
     let mut join_condition = None;
     let mut when_clauses = Vec::new();
+    let mut returning = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -12825,6 +14167,7 @@ fn build_merge(pair: Pair<'_, Rule>) -> Result<MergeStatement, ParseError> {
                 join_condition = Some(build_expr(expr)?);
             }
             Rule::merge_when_clause => when_clauses.push(build_merge_when_clause(part)?),
+            Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
         }
     }
@@ -12837,6 +14180,7 @@ fn build_merge(pair: Pair<'_, Rule>) -> Result<MergeStatement, ParseError> {
         source: source.ok_or(ParseError::UnexpectedEof)?,
         join_condition: join_condition.ok_or(ParseError::UnexpectedEof)?,
         when_clauses,
+        returning,
     })
 }
 
@@ -13099,6 +14443,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     let mut persistence = TablePersistence::Permanent;
     let mut on_commit = OnCommitAction::PreserveRows;
     let mut elements = Vec::new();
+    let mut of_type_name = None;
     let mut inherits = Vec::new();
     let mut ctas_columns = Vec::new();
     let mut query = None;
@@ -13123,6 +14468,22 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                     match inner.as_rule() {
                         Rule::create_table_element => {
                             elements.push(build_create_table_element(inner)?)
+                        }
+                        Rule::on_commit_clause => on_commit = build_on_commit_action(inner)?,
+                        _ => {}
+                    }
+                }
+            }
+            Rule::create_table_of_form => {
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::identifier => of_type_name = Some(build_identifier(inner)),
+                        Rule::typed_table_column_form => {
+                            for element in inner.into_inner() {
+                                if element.as_rule() == Rule::typed_table_element {
+                                    elements.push(build_typed_table_element(element)?);
+                                }
+                            }
                         }
                         Rule::on_commit_clause => on_commit = build_on_commit_action(inner)?,
                         _ => {}
@@ -13190,6 +14551,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Ok(Statement::CreateTable(CreateTableStatement {
             schema_name,
             table_name,
+            of_type_name,
             persistence,
             on_commit,
             elements,
@@ -13563,6 +14925,111 @@ fn build_create_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement
     }
 }
 
+fn build_typed_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match inner.as_rule() {
+        Rule::typed_column_options => Ok(CreateTableElement::TypedColumnOptions(
+            build_typed_column_options(inner)?,
+        )),
+        Rule::table_constraint => Ok(CreateTableElement::Constraint(build_table_constraint(
+            inner,
+        )?)),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "typed column options or table constraint",
+            actual: inner.as_str().to_string(),
+        }),
+    }
+}
+
+fn build_typed_column_options(pair: Pair<'_, Rule>) -> Result<TypedColumnOptions, ParseError> {
+    let mut inner = pair.into_inner();
+    let name = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
+    let mut default_expr = None;
+    let mut collation = None;
+    let mut generated = None;
+    let mut identity = None;
+    let storage = None;
+    let mut compression = None;
+    let mut constraints = Vec::new();
+    for flag in inner {
+        let Some(flag) = (match flag.as_rule() {
+            Rule::column_modifier => flag.into_inner().next(),
+            Rule::kw_with | Rule::kw_options => None,
+            _ => Some(flag),
+        }) else {
+            continue;
+        };
+        match flag.as_rule() {
+            Rule::column_collation => {
+                collation = Some(build_collation_name(
+                    flag.into_inner()
+                        .find(|part| part.as_rule() == Rule::collation_name)
+                        .ok_or(ParseError::UnexpectedEof)?,
+                )?);
+            }
+            Rule::column_default => {
+                default_expr = flag
+                    .into_inner()
+                    .find(|part| matches!(part.as_rule(), Rule::expr | Rule::b_expr))
+                    .map(|expr| expr.as_str().trim().to_string());
+            }
+            Rule::column_generated => {
+                set_column_generated(&mut generated, build_column_generated(flag)?, &name)?;
+            }
+            Rule::column_identity => {
+                set_column_identity(&mut identity, build_column_identity(flag)?, &name)?;
+            }
+            Rule::column_compression => {
+                compression = Some(build_column_compression(flag)?);
+            }
+            Rule::nullable => {}
+            Rule::named_column_constraint => {
+                let generated_part = flag
+                    .clone()
+                    .into_inner()
+                    .find(|part| part.as_rule() == Rule::column_generated);
+                if let Some(generated_part) = generated_part {
+                    set_column_generated(
+                        &mut generated,
+                        build_column_generated(generated_part)?,
+                        &name,
+                    )?;
+                } else if let Some(identity_part) = flag
+                    .clone()
+                    .into_inner()
+                    .find(|part| part.as_rule() == Rule::column_identity)
+                {
+                    set_column_identity(
+                        &mut identity,
+                        build_column_identity(identity_part)?,
+                        &name,
+                    )?;
+                } else {
+                    constraints.push(build_column_constraint(flag)?)
+                }
+            }
+            Rule::not_null_column_constraint
+            | Rule::check_column_constraint
+            | Rule::primary_key_column_constraint
+            | Rule::unique_column_constraint
+            | Rule::references_column_constraint => {
+                constraints.push(build_column_constraint(flag)?)
+            }
+            _ => {}
+        }
+    }
+    Ok(TypedColumnOptions {
+        name,
+        collation,
+        default_expr,
+        generated,
+        identity,
+        storage,
+        compression,
+        constraints,
+    })
+}
+
 fn build_create_table_like_clause(
     pair: Pair<'_, Rule>,
 ) -> Result<CreateTableLikeClause, ParseError> {
@@ -13660,6 +15127,7 @@ fn build_table_constraint(pair: Pair<'_, Rule>) -> Result<TableConstraint, Parse
 struct ParsedReferencesClause {
     referenced_table: String,
     referenced_columns: Option<Vec<String>>,
+    referenced_period: Option<String>,
     match_type: ForeignKeyMatchType,
     on_delete: ForeignKeyAction,
     on_delete_set_columns: Option<Vec<String>>,
@@ -13770,11 +15238,14 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .find(|part| part.as_rule() == Rule::foreign_key_table_constraint_body)
                 .ok_or(ParseError::UnexpectedEof)?;
             let mut columns = None;
+            let mut period = None;
             let mut references = None;
             for part in body.into_inner() {
                 match part.as_rule() {
-                    Rule::ident_list if columns.is_none() => {
-                        columns = Some(part.into_inner().map(build_identifier).collect())
+                    Rule::foreign_key_column_list if columns.is_none() => {
+                        let (parsed_columns, parsed_period) = build_foreign_key_column_list(part)?;
+                        columns = Some(parsed_columns);
+                        period = parsed_period;
                     }
                     Rule::references_clause => references = Some(build_references_clause(part)?),
                     _ => {}
@@ -13784,8 +15255,10 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
             Ok(TableConstraint::ForeignKey {
                 attributes,
                 columns: columns.ok_or(ParseError::UnexpectedEof)?,
+                period,
                 referenced_table: references.referenced_table,
                 referenced_columns: references.referenced_columns,
+                referenced_period: references.referenced_period,
                 match_type: references.match_type,
                 on_delete: references.on_delete,
                 on_delete_set_columns: references.on_delete_set_columns,
@@ -14070,6 +15543,12 @@ fn build_column_constraint(pair: Pair<'_, Rule>) -> Result<ColumnConstraint, Par
                 .map(build_references_clause)
                 .transpose()?
                 .ok_or(ParseError::UnexpectedEof)?;
+            if references.referenced_period.is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "column REFERENCES column list",
+                    actual: "PERIOD in referenced column list".into(),
+                });
+            }
             Ok(ColumnConstraint::References {
                 attributes,
                 referenced_table: references.referenced_table,
@@ -14090,6 +15569,7 @@ fn build_column_constraint(pair: Pair<'_, Rule>) -> Result<ColumnConstraint, Par
 fn build_references_clause(pair: Pair<'_, Rule>) -> Result<ParsedReferencesClause, ParseError> {
     let mut referenced_table = None;
     let mut referenced_columns = None;
+    let mut referenced_period = None;
     let mut match_type = ForeignKeyMatchType::Simple;
     let mut on_delete = ForeignKeyAction::NoAction;
     let mut on_delete_set_columns = None;
@@ -14101,12 +15581,16 @@ fn build_references_clause(pair: Pair<'_, Rule>) -> Result<ParsedReferencesClaus
                 referenced_table = Some(build_identifier(part));
             }
             Rule::referenced_columns_clause => {
-                referenced_columns = Some(
-                    part.into_inner()
-                        .find(|inner| inner.as_rule() == Rule::ident_list)
-                        .map(|inner| inner.into_inner().map(build_identifier).collect())
-                        .unwrap_or_default(),
-                );
+                if let Some(list) = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::foreign_key_column_list)
+                {
+                    let (columns, period) = build_foreign_key_column_list(list)?;
+                    referenced_columns = Some(columns);
+                    referenced_period = period;
+                } else {
+                    referenced_columns = Some(Vec::new());
+                }
             }
             Rule::match_clause => {
                 let text = part.as_str();
@@ -14140,11 +15624,42 @@ fn build_references_clause(pair: Pair<'_, Rule>) -> Result<ParsedReferencesClaus
     Ok(ParsedReferencesClause {
         referenced_table: referenced_table.ok_or(ParseError::UnexpectedEof)?,
         referenced_columns,
+        referenced_period,
         match_type,
         on_delete,
         on_delete_set_columns,
         on_update,
     })
+}
+
+fn build_foreign_key_column_list(
+    pair: Pair<'_, Rule>,
+) -> Result<(Vec<String>, Option<String>), ParseError> {
+    let mut columns = Vec::new();
+    let mut period = None;
+    for item in pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::foreign_key_column)
+    {
+        let mut column = None;
+        let mut is_period = false;
+        for part in item.into_inner() {
+            match part.as_rule() {
+                Rule::identifier => column = Some(build_identifier(part)),
+                Rule::period_clause => is_period = true,
+                _ => {}
+            }
+        }
+        let column = column.ok_or(ParseError::UnexpectedEof)?;
+        if is_period && period.replace(column.clone()).is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one PERIOD column",
+                actual: "multiple PERIOD columns".into(),
+            });
+        }
+        columns.push(column);
+    }
+    Ok((columns, period))
 }
 
 fn build_reference_action(pair: Pair<'_, Rule>) -> Result<ForeignKeyAction, ParseError> {
@@ -15284,6 +16799,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::ArraySubscript { array, .. } => select_item_name(array, index),
         SqlExpr::FieldSelect { field, .. } => field.clone(),
         SqlExpr::Cast(inner, ty) => match inner.as_ref() {
+            SqlExpr::ArrayLiteral(_) | SqlExpr::ArraySubquery(_) => select_item_name(inner, index),
             SqlExpr::ArraySubscript { .. }
             | SqlExpr::Column(_)
             | SqlExpr::FieldSelect { .. }
@@ -15294,7 +16810,11 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
             _ => raw_type_output_name(ty).to_string(),
         },
         SqlExpr::Collate { expr, .. } => select_item_name(expr, index),
-        SqlExpr::Case { .. } => "case".to_string(),
+        SqlExpr::Case { defresult, .. } => defresult
+            .as_deref()
+            .map(|expr| select_item_name(expr, index))
+            .filter(|name| name != "?column?" && name != "case")
+            .unwrap_or_else(|| "case".to_string()),
         SqlExpr::Row(_) => "row".to_string(),
         SqlExpr::Random => "random".to_string(),
         SqlExpr::CurrentCatalog => "current_catalog".to_string(),
@@ -15303,7 +16823,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::SessionUser => "session_user".to_string(),
         SqlExpr::CurrentRole => "current_role".to_string(),
         SqlExpr::AtTimeZone { .. } => "timezone".to_string(),
-        SqlExpr::FuncCall { name, .. } => name.clone(),
+        SqlExpr::FuncCall { name, .. } => name.rsplit('.').next().unwrap_or(name).to_string(),
         _ => "?column?".to_string(),
     }
 }
@@ -15575,7 +17095,7 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
                 default_expr = flag
                     .into_inner()
                     .find(|part| matches!(part.as_rule(), Rule::expr | Rule::b_expr))
-                    .map(|expr| expr.as_str().to_string());
+                    .map(|expr| expr.as_str().trim().to_string());
             }
             Rule::column_generated => {
                 set_column_generated(&mut generated, build_column_generated(flag)?, &name)?;
@@ -15651,8 +17171,8 @@ fn set_column_generated(
 }
 
 fn set_column_identity(
-    target: &mut Option<ColumnIdentityKind>,
-    value: ColumnIdentityKind,
+    target: &mut Option<ColumnIdentityDef>,
+    value: ColumnIdentityDef,
     column_name: &str,
 ) -> Result<(), ParseError> {
     if target.is_some() {
@@ -15665,20 +17185,50 @@ fn set_column_identity(
     Ok(())
 }
 
-fn build_column_identity(pair: Pair<'_, Rule>) -> Result<ColumnIdentityKind, ParseError> {
-    let when = pair
-        .into_inner()
-        .find(|part| part.as_rule() == Rule::generated_when)
-        .map(|part| part.as_str().trim().to_ascii_lowercase())
-        .ok_or(ParseError::UnexpectedEof)?;
-    match when.as_str() {
+fn build_column_identity(pair: Pair<'_, Rule>) -> Result<ColumnIdentityDef, ParseError> {
+    let mut when = None;
+    let mut options = SequenceOptionsSpec::default();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::generated_when => when = Some(part.as_str().trim().to_ascii_lowercase()),
+            Rule::column_identity_options => {
+                let raw = part.as_str().trim();
+                let Some(inner) = raw
+                    .strip_prefix('(')
+                    .and_then(|value| value.strip_suffix(')'))
+                else {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "identity sequence options",
+                        actual: raw.into(),
+                    });
+                };
+                let (parsed, rest) = parse_sequence_option_spec(inner)?;
+                if !rest.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "identity sequence options",
+                        actual: rest.trim().into(),
+                    });
+                }
+                if parsed.owned_by.is_some() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "identity sequence options without OWNED BY",
+                        actual: raw.into(),
+                    });
+                }
+                options = parsed;
+            }
+            _ => {}
+        }
+    }
+    let kind = match when.as_deref().ok_or(ParseError::UnexpectedEof)? {
         "always" => Ok(ColumnIdentityKind::Always),
         "by default" => Ok(ColumnIdentityKind::ByDefault),
         other => Err(ParseError::UnexpectedToken {
             expected: "GENERATED ALWAYS or GENERATED BY DEFAULT",
             actual: other.into(),
         }),
-    }
+    }?;
+    Ok(ColumnIdentityDef { kind, options })
 }
 
 fn build_column_compression(
@@ -15861,6 +17411,7 @@ fn build_alter_table_drop_column(
 ) -> Result<AlterTableDropColumnStatement, ParseError> {
     let mut if_exists = false;
     let mut only = false;
+    let mut cascade = false;
     let mut parts = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -15872,6 +17423,7 @@ fn build_alter_table_drop_column(
                 parts.push(parsed_table_name);
             }
             Rule::identifier => parts.push(build_identifier(part)),
+            Rule::drop_behavior => cascade = part.as_str().eq_ignore_ascii_case("cascade"),
             _ => {}
         }
     }
@@ -15881,6 +17433,7 @@ fn build_alter_table_drop_column(
         only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         column_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        cascade,
     })
 }
 
@@ -16484,6 +18037,53 @@ fn build_alter_table_inherit(
         parent_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
 }
+
+fn build_alter_table_of(pair: Pair<'_, Rule>) -> Result<AlterTableOfStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut parts = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                parts.push(parsed_table_name);
+            }
+            Rule::identifier => parts.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    let mut parts = parts.into_iter();
+    Ok(AlterTableOfStatement {
+        if_exists,
+        only,
+        table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        type_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_not_of(pair: Pair<'_, Rule>) -> Result<AlterTableNotOfStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    for part in pair.into_inner() {
+        if part.as_rule() == Rule::alter_table_target {
+            let (parsed_if_exists, parsed_only, parsed_table_name) =
+                build_alter_table_target(part)?;
+            if_exists = parsed_if_exists;
+            only = parsed_only;
+            table_name = Some(parsed_table_name);
+        }
+    }
+    Ok(AlterTableNotOfStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
 fn build_alter_relation_owner(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterRelationOwnerStatement, ParseError> {
@@ -17280,25 +18880,72 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 }
                 Rule::between_suffix => {
                     let mut negated = false;
+                    let mut symmetric = false;
                     let mut bounds = Vec::new();
                     for part in next.into_inner() {
                         match part.as_rule() {
                             Rule::kw_not => negated = true,
+                            Rule::kw_symmetric => symmetric = true,
                             Rule::concat_expr => bounds.push(build_expr(part)?),
                             _ => {}
                         }
                     }
                     let low = bounds.first().cloned().ok_or(ParseError::UnexpectedEof)?;
                     let high = bounds.get(1).cloned().ok_or(ParseError::UnexpectedEof)?;
-                    let between = SqlExpr::And(
-                        Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(low))),
-                        Box::new(SqlExpr::LtEq(Box::new(left), Box::new(high))),
-                    );
-                    Ok(if negated {
-                        SqlExpr::Not(Box::new(between))
+                    let between = if symmetric && negated {
+                        SqlExpr::And(
+                            Box::new(SqlExpr::Or(
+                                Box::new(SqlExpr::Lt(
+                                    Box::new(left.clone()),
+                                    Box::new(low.clone()),
+                                )),
+                                Box::new(SqlExpr::Gt(
+                                    Box::new(left.clone()),
+                                    Box::new(high.clone()),
+                                )),
+                            )),
+                            Box::new(SqlExpr::Or(
+                                Box::new(SqlExpr::Lt(Box::new(left.clone()), Box::new(high))),
+                                Box::new(SqlExpr::Gt(Box::new(left), Box::new(low))),
+                            )),
+                        )
+                    } else if symmetric {
+                        SqlExpr::Or(
+                            Box::new(SqlExpr::And(
+                                Box::new(SqlExpr::GtEq(
+                                    Box::new(left.clone()),
+                                    Box::new(low.clone()),
+                                )),
+                                Box::new(SqlExpr::LtEq(
+                                    Box::new(left.clone()),
+                                    Box::new(high.clone()),
+                                )),
+                            )),
+                            Box::new(SqlExpr::And(
+                                Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(high))),
+                                Box::new(SqlExpr::LtEq(Box::new(left), Box::new(low))),
+                            )),
+                        )
+                    } else if negated {
+                        SqlExpr::Or(
+                            Box::new(SqlExpr::Lt(Box::new(left.clone()), Box::new(low))),
+                            Box::new(SqlExpr::Gt(Box::new(left), Box::new(high))),
+                        )
                     } else {
-                        between
-                    })
+                        SqlExpr::And(
+                            Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(low))),
+                            Box::new(SqlExpr::LtEq(Box::new(left), Box::new(high))),
+                        )
+                    };
+                    Ok(between)
+                }
+                Rule::overlaps_suffix => {
+                    let right = next
+                        .into_inner()
+                        .find(|part| part.as_rule() == Rule::implicit_row_expr)
+                        .ok_or(ParseError::UnexpectedEof)
+                        .and_then(build_expr)?;
+                    Ok(SqlExpr::Overlaps(Box::new(left), Box::new(right)))
                 }
                 Rule::in_expr_list_suffix => {
                     let mut negated = false;
@@ -17869,7 +19516,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::kw_current_date => Ok(SqlExpr::CurrentDate),
         Rule::kw_current_catalog => Ok(SqlExpr::CurrentCatalog),
         Rule::kw_current_schema => Ok(SqlExpr::CurrentSchema),
-        Rule::kw_current_user => Ok(SqlExpr::CurrentUser),
+        Rule::kw_current_user | Rule::kw_user_value => Ok(SqlExpr::CurrentUser),
         Rule::kw_session_user => Ok(SqlExpr::SessionUser),
         Rule::kw_current_role => Ok(SqlExpr::CurrentRole),
         Rule::kw_current_time => Ok(SqlExpr::CurrentTime {

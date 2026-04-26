@@ -29,6 +29,7 @@ pub(crate) mod expr_reg;
 mod expr_string;
 mod expr_txid;
 mod expr_xml;
+mod fmgr;
 mod foreign_keys;
 pub(crate) mod hashjoin;
 pub(crate) mod jsonb;
@@ -38,7 +39,9 @@ mod node_hash;
 mod node_hashjoin;
 mod node_mergejoin;
 mod nodes;
+mod permissions;
 mod pg_regex;
+mod random;
 mod sqlfunc;
 mod srf;
 mod startup;
@@ -116,6 +119,7 @@ pub(crate) use nodes::{
     render_index_order_by, render_index_scan_condition_with_key_names,
     render_verbose_range_support_expr,
 };
+pub use random::PgPrngState;
 pub(crate) use sqlfunc::{render_sql_literal, substitute_named_arg, substitute_positional_args};
 pub(crate) use srf::set_returning_call_label;
 pub use startup::executor_start;
@@ -146,6 +150,7 @@ use crate::backend::storage::lmgr::TableLockError;
 use crate::backend::storage::lmgr::{
     AdvisoryLockManager, RowLockError, RowLockManager, RowLockMode, RowLockOwner, RowLockTag,
 };
+use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
@@ -159,7 +164,7 @@ use crate::pgrust::database::{
     AsyncNotifyRuntime, Database, DatabaseStatsStore, LargeObjectRuntime, PendingNotification,
     SequenceRuntime, SessionStatsState, TempMutationEffect, TransactionWaiter,
 };
-use crate::pl::plpgsql::CompiledFunction;
+use crate::pl::plpgsql::PlpgsqlFunctionCache;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -172,7 +177,9 @@ use expr_ops::parse_numeric_text;
 pub(crate) use foreign_keys::{
     enforce_inbound_foreign_key_reference, enforce_inbound_foreign_keys_on_delete,
     enforce_inbound_foreign_keys_on_update, enforce_outbound_foreign_keys,
+    foreign_key_action_trigger_enabled_on_delete, foreign_key_action_trigger_enabled_on_update,
 };
+pub(crate) use permissions::relation_values_visible_for_error_detail;
 
 #[derive(Debug, Clone, Default)]
 pub struct ExprEvalBindings {
@@ -333,6 +340,42 @@ pub trait LockStatusProvider: Send + Sync {
     fn pg_lock_status_rows(&self, current_client_id: ClientId) -> Vec<Vec<Value>>;
 }
 
+#[derive(Debug, Clone)]
+pub struct TypedFunctionArg {
+    pub value: Value,
+    pub sql_type: Option<SqlType>,
+}
+
+pub trait StatsImportRuntime: Send + Sync {
+    fn pg_restore_relation_stats(
+        &self,
+        ctx: &mut ExecutorContext,
+        args: Vec<TypedFunctionArg>,
+    ) -> Result<Value, ExecError>;
+
+    fn pg_clear_relation_stats(
+        &self,
+        ctx: &mut ExecutorContext,
+        schemaname: Value,
+        relname: Value,
+    ) -> Result<Value, ExecError>;
+
+    fn pg_restore_attribute_stats(
+        &self,
+        ctx: &mut ExecutorContext,
+        args: Vec<TypedFunctionArg>,
+    ) -> Result<Value, ExecError>;
+
+    fn pg_clear_attribute_stats(
+        &self,
+        ctx: &mut ExecutorContext,
+        schemaname: Value,
+        relname: Value,
+        attname: Value,
+        inherited: Value,
+    ) -> Result<Value, ExecError>;
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SessionReplicationRole {
     #[default]
@@ -348,6 +391,7 @@ pub struct ExecutorContext {
     pub lock_status_provider: Option<std::sync::Arc<dyn LockStatusProvider>>,
     pub sequences: Option<std::sync::Arc<SequenceRuntime>>,
     pub large_objects: Option<std::sync::Arc<LargeObjectRuntime>>,
+    pub stats_import_runtime: Option<std::sync::Arc<dyn StatsImportRuntime>>,
     pub async_notify_runtime: Option<std::sync::Arc<AsyncNotifyRuntime>>,
     pub advisory_locks: std::sync::Arc<AdvisoryLockManager>,
     pub row_locks: std::sync::Arc<RowLockManager>,
@@ -370,6 +414,7 @@ pub struct ExecutorContext {
     pub transaction_lock_scope_id: Option<u64>,
     pub next_command_id: CommandId,
     pub default_toast_compression: crate::include::access::htup::AttributeCompression,
+    pub random_state: std::sync::Arc<parking_lot::Mutex<PgPrngState>>,
     pub expr_bindings: ExprEvalBindings,
     pub case_test_values: Vec<Value>,
     pub system_bindings: Vec<SystemVarBinding>,
@@ -381,8 +426,11 @@ pub struct ExecutorContext {
     pub catalog_effects: Vec<CatalogMutationEffect>,
     pub temp_effects: Vec<TempMutationEffect>,
     pub database: Option<Database>,
+    pub pending_catalog_effects: Vec<CatalogMutationEffect>,
+    pub pending_table_locks: Vec<RelFileLocator>,
     pub catalog: Option<VisibleCatalog>,
-    pub compiled_functions: HashMap<u32, Arc<CompiledFunction>>,
+    pub plpgsql_function_cache: Arc<parking_lot::RwLock<PlpgsqlFunctionCache>>,
+    pub pinned_cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,
     pub cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,
     pub cte_producers: HashMap<usize, Rc<RefCell<PlanState>>>,
     pub recursive_worktables: HashMap<usize, Rc<RefCell<RecursiveWorkTable>>>,
@@ -394,6 +442,7 @@ pub struct ExecutorContext {
 pub struct ExecutorTransactionState {
     pub xid: Option<TransactionId>,
     pub cid: CommandId,
+    pub transaction_snapshot: Option<Snapshot>,
 }
 
 pub type SharedExecutorTransactionState = Arc<parking_lot::Mutex<ExecutorTransactionState>>;
@@ -414,6 +463,12 @@ impl ExecutorContext {
         self.transaction_state
             .as_ref()
             .and_then(|state| state.lock().xid)
+    }
+
+    pub fn uses_transaction_snapshot(&self) -> bool {
+        self.transaction_state
+            .as_ref()
+            .is_some_and(|state| state.lock().transaction_snapshot.is_some())
     }
 
     pub fn constraint_timing(
@@ -459,14 +514,23 @@ impl ExecutorContext {
             }
         };
 
-        self.snapshot = self
-            .txns
-            .read()
+        if let Some(base_snapshot) = &state.transaction_snapshot {
+            self.snapshot = base_snapshot.clone();
+            self.snapshot.current_xid = xid;
             // :HACK: pgrust does not yet model PostgreSQL SPI command counters
             // inside PL/pgSQL, so keep existing same-statement read-your-writes
             // behavior after a lazy XID is assigned.
-            .snapshot_for_command(xid, CommandId::MAX)
-            .map_err(|e| ExecError::Heap(HeapError::Mvcc(e)))?;
+            self.snapshot.current_cid = CommandId::MAX;
+        } else {
+            self.snapshot = self
+                .txns
+                .read()
+                // :HACK: pgrust does not yet model PostgreSQL SPI command counters
+                // inside PL/pgSQL, so keep existing same-statement read-your-writes
+                // behavior after a lazy XID is assigned.
+                .snapshot_for_command(xid, CommandId::MAX)
+                .map_err(|e| ExecError::Heap(HeapError::Mvcc(e)))?;
+        }
         Ok(xid)
     }
 
@@ -500,6 +564,16 @@ impl ExecutorContext {
                 hint: None,
                 sqlstate: "40P01",
             }),
+        }
+    }
+
+    pub fn record_catalog_effect(&mut self, effect: CatalogMutationEffect) {
+        self.pending_catalog_effects.push(effect);
+    }
+
+    pub fn record_table_lock(&mut self, rel: RelFileLocator) {
+        if !self.pending_table_locks.contains(&rel) {
+            self.pending_table_locks.push(rel);
         }
     }
 }

@@ -326,10 +326,49 @@ impl BuiltinWindowFunction {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HashFunctionKind {
+    Bool,
+    Int2,
+    Int4,
+    Int8,
+    Oid,
+    InternalChar,
+    Name,
+    Text,
+    Varchar,
+    BpChar,
+    Float4,
+    Float8,
+    Numeric,
+    Timestamp,
+    TimestampTz,
+    Date,
+    Time,
+    TimeTz,
+    Bytea,
+    OidVector,
+    AclItem,
+    Inet,
+    MacAddr,
+    MacAddr8,
+    Array,
+    Interval,
+    Uuid,
+    PgLsn,
+    Enum,
+    Jsonb,
+    Range,
+    Multirange,
+    Record,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinScalarFunction {
     Random,
     RandomNormal,
+    SetSeed,
+    Pi,
     CurrentDatabase,
     Version,
     PgBackendPid,
@@ -351,6 +390,7 @@ pub enum BuiltinScalarFunction {
     PgRustTestInt44In,
     PgRustTestInt44Out,
     PgRustTestPtInWidget,
+    PgRustIsCatalogTextUniqueIndexOid,
     CurrentSetting,
     PgNotify,
     PgNotificationQueueUsage,
@@ -393,6 +433,10 @@ pub enum BuiltinScalarFunction {
     PgStatGetXactFunctionCalls,
     PgStatGetXactFunctionTotalTime,
     PgStatGetXactFunctionSelfTime,
+    PgRestoreRelationStats,
+    PgClearRelationStats,
+    PgRestoreAttributeStats,
+    PgClearAttributeStats,
     TextToRegClass,
     ToRegProc,
     ToRegProcedure,
@@ -469,6 +513,7 @@ pub enum BuiltinScalarFunction {
     RegexpSplitToArray,
     SimilarSubstring,
     Initcap,
+    TextCat,
     Concat,
     ConcatWs,
     Format,
@@ -495,8 +540,13 @@ pub enum BuiltinScalarFunction {
     ArrayPositions,
     ArrayRemove,
     ArrayReplace,
+    TrimArray,
+    ArrayShuffle,
+    ArraySample,
+    ArrayReverse,
     ArraySort,
     Lower,
+    Upper,
     Unistr,
     Ascii,
     Chr,
@@ -609,8 +659,11 @@ pub enum BuiltinScalarFunction {
     MakeTime,
     MakeTimestamp,
     MakeTimestampTz,
+    TimestampTzConstructor,
     ToTimestamp,
     IntervalHash,
+    HashValue(HashFunctionKind),
+    HashValueExtended(HashFunctionKind),
     Abs,
     Log,
     Log10,
@@ -932,6 +985,15 @@ pub enum SetReturningCall {
         output_columns: Vec<QueryColumn>,
         with_ordinality: bool,
     },
+    GenerateSubscripts {
+        func_oid: u32,
+        func_variadic: bool,
+        array: Expr,
+        dimension: Expr,
+        reverse: Option<Expr>,
+        output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
+    },
     Unnest {
         func_oid: u32,
         func_variadic: bool,
@@ -977,12 +1039,14 @@ pub enum SetReturningCall {
         func_variadic: bool,
         relid: Expr,
         output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
     },
     PartitionAncestors {
         func_oid: u32,
         func_variadic: bool,
         relid: Expr,
         output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
     },
     PgLockStatus {
         func_oid: u32,
@@ -1016,6 +1080,7 @@ impl SetReturningCall {
     pub fn output_columns(&self) -> &[QueryColumn] {
         match self {
             SetReturningCall::GenerateSeries { output_columns, .. }
+            | SetReturningCall::GenerateSubscripts { output_columns, .. }
             | SetReturningCall::Unnest { output_columns, .. }
             | SetReturningCall::JsonTableFunction { output_columns, .. }
             | SetReturningCall::JsonRecordFunction { output_columns, .. }
@@ -1033,6 +1098,10 @@ impl SetReturningCall {
     pub fn set_output_columns(&mut self, output_columns: Vec<QueryColumn>) {
         match self {
             SetReturningCall::GenerateSeries {
+                output_columns: existing,
+                ..
+            }
+            | SetReturningCall::GenerateSubscripts {
                 output_columns: existing,
                 ..
             }
@@ -1090,6 +1159,9 @@ impl SetReturningCall {
             SetReturningCall::GenerateSeries {
                 with_ordinality, ..
             }
+            | SetReturningCall::GenerateSubscripts {
+                with_ordinality, ..
+            }
             | SetReturningCall::Unnest {
                 with_ordinality, ..
             }
@@ -1105,6 +1177,12 @@ impl SetReturningCall {
             | SetReturningCall::StringTableFunction {
                 with_ordinality, ..
             }
+            | SetReturningCall::PartitionTree {
+                with_ordinality, ..
+            }
+            | SetReturningCall::PartitionAncestors {
+                with_ordinality, ..
+            }
             | SetReturningCall::PgLockStatus {
                 with_ordinality, ..
             }
@@ -1117,8 +1195,6 @@ impl SetReturningCall {
             | SetReturningCall::UserDefined {
                 with_ordinality, ..
             } => *with_ordinality,
-            SetReturningCall::PartitionTree { .. }
-            | SetReturningCall::PartitionAncestors { .. } => false,
         }
     }
 
@@ -1143,27 +1219,48 @@ impl SetReturningCall {
                 output_columns,
                 with_ordinality,
             },
+            SetReturningCall::GenerateSubscripts {
+                func_oid,
+                func_variadic,
+                array,
+                dimension,
+                reverse,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::GenerateSubscripts {
+                func_oid,
+                func_variadic,
+                array: map(array),
+                dimension: map(dimension),
+                reverse: reverse.map(&mut map),
+                output_columns,
+                with_ordinality,
+            },
             SetReturningCall::PartitionTree {
                 func_oid,
                 func_variadic,
                 relid,
                 output_columns,
+                with_ordinality,
             } => SetReturningCall::PartitionTree {
                 func_oid,
                 func_variadic,
                 relid: map(relid),
                 output_columns,
+                with_ordinality,
             },
             SetReturningCall::PartitionAncestors {
                 func_oid,
                 func_variadic,
                 relid,
                 output_columns,
+                with_ordinality,
             } => SetReturningCall::PartitionAncestors {
                 func_oid,
                 func_variadic,
                 relid: map(relid),
                 output_columns,
+                with_ordinality,
             },
             SetReturningCall::PgLockStatus {
                 func_oid,
@@ -1572,6 +1669,7 @@ pub enum SubLinkType {
     ExistsSubLink,
     AllSubLink(SubqueryComparisonOp),
     AnySubLink(SubqueryComparisonOp),
+    RowCompareSubLink(SubqueryComparisonOp),
     ExprSubLink,
     ArraySubLink,
 }
@@ -2059,6 +2157,7 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
                 sublink.sublink_type,
                 SubLinkType::ExistsSubLink
                     | SubLinkType::AnySubLink(_)
+                    | SubLinkType::RowCompareSubLink(_)
                     | SubLinkType::AllSubLink(_)
             ) =>
         {
@@ -2084,6 +2183,7 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
                 subplan.sublink_type,
                 SubLinkType::ExistsSubLink
                     | SubLinkType::AnySubLink(_)
+                    | SubLinkType::RowCompareSubLink(_)
                     | SubLinkType::AllSubLink(_)
             ) =>
         {
@@ -2124,6 +2224,18 @@ pub fn set_returning_call_exprs(call: &SetReturningCall) -> Vec<&Expr> {
             let mut exprs = vec![start, stop, step];
             if let Some(timezone) = timezone {
                 exprs.push(timezone);
+            }
+            exprs
+        }
+        SetReturningCall::GenerateSubscripts {
+            array,
+            dimension,
+            reverse,
+            ..
+        } => {
+            let mut exprs = vec![array, dimension];
+            if let Some(reverse) = reverse {
+                exprs.push(reverse);
             }
             exprs
         }

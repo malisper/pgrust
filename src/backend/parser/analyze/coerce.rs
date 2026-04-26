@@ -76,6 +76,28 @@ fn lower_special_cast(expr: &Expr, from: SqlType, to: SqlType) -> Option<Expr> {
             vec![expr.clone()],
         ));
     }
+    if matches!(from.element_type().kind, SqlTypeKind::Char)
+        && matches!(to.element_type().kind, SqlTypeKind::Varchar)
+        && !from.is_array
+        && !to.is_array
+    {
+        let trimmed = Expr::builtin_func(
+            BuiltinScalarFunction::BpcharToText,
+            Some(SqlType::new(SqlTypeKind::Text)),
+            false,
+            vec![expr.clone()],
+        );
+        return Some(if text_typmod_coercion_is_required(from, to) {
+            Expr::Cast(Box::new(trimmed), to)
+        } else {
+            Expr::builtin_func(
+                BuiltinScalarFunction::BpcharToText,
+                Some(to),
+                false,
+                vec![expr.clone()],
+            )
+        });
+    }
     if matches!(
         from.element_type().kind,
         SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
@@ -481,14 +503,19 @@ pub(super) fn coerce_unknown_string_literal_type(
             SqlTypeKind::TimeTz => return SqlType::new(SqlTypeKind::TimeTz),
             SqlTypeKind::Timestamp => return SqlType::new(SqlTypeKind::Timestamp),
             SqlTypeKind::TimestampTz => return SqlType::new(SqlTypeKind::TimestampTz),
+            SqlTypeKind::Interval => return SqlType::new(SqlTypeKind::Interval),
             SqlTypeKind::Jsonb => return SqlType::new(SqlTypeKind::Jsonb),
             SqlTypeKind::Bytea => return SqlType::new(SqlTypeKind::Bytea),
             SqlTypeKind::Uuid => return SqlType::new(SqlTypeKind::Uuid),
             SqlTypeKind::Enum if peer_type.type_oid != 0 => return peer_type,
-            SqlTypeKind::InternalChar => return SqlType::new(SqlTypeKind::Text),
+            SqlTypeKind::InternalChar => return SqlType::new(SqlTypeKind::InternalChar),
             SqlTypeKind::Name => return SqlType::new(SqlTypeKind::Name),
+            SqlTypeKind::Inet => return SqlType::new(SqlTypeKind::Inet),
+            SqlTypeKind::Cidr => return SqlType::new(SqlTypeKind::Cidr),
             SqlTypeKind::MacAddr => return SqlType::new(SqlTypeKind::MacAddr),
             SqlTypeKind::MacAddr8 => return SqlType::new(SqlTypeKind::MacAddr8),
+            SqlTypeKind::OidVector => return SqlType::new(SqlTypeKind::OidVector),
+            SqlTypeKind::Int2Vector => return SqlType::new(SqlTypeKind::Int2Vector),
             SqlTypeKind::TsQuery => return SqlType::new(SqlTypeKind::TsQuery),
             SqlTypeKind::TsVector => return SqlType::new(SqlTypeKind::TsVector),
             SqlTypeKind::Tid => return SqlType::new(SqlTypeKind::Tid),
@@ -576,6 +603,14 @@ pub(super) fn should_use_text_concat(
 }
 
 pub(super) fn resolve_common_scalar_type(left: SqlType, right: SqlType) -> Option<SqlType> {
+    if left.is_array || right.is_array {
+        if left.is_array && right.is_array {
+            let common_element =
+                resolve_common_scalar_type(left.element_type(), right.element_type())?;
+            return Some(SqlType::array_of(common_element));
+        }
+        return None;
+    }
     let left = left.element_type();
     let right = right.element_type();
     if left == right {
@@ -614,6 +649,19 @@ pub(super) fn resolve_common_scalar_type(left: SqlType, right: SqlType) -> Optio
         && matches!(right.kind, SqlTypeKind::Inet | SqlTypeKind::Cidr)
     {
         return Some(SqlType::new(SqlTypeKind::Inet));
+    }
+    match (left.kind, right.kind) {
+        (SqlTypeKind::Date, SqlTypeKind::Timestamp)
+        | (SqlTypeKind::Timestamp, SqlTypeKind::Date) => {
+            return Some(SqlType::new(SqlTypeKind::Timestamp));
+        }
+        (SqlTypeKind::Date, SqlTypeKind::TimestampTz)
+        | (SqlTypeKind::TimestampTz, SqlTypeKind::Date)
+        | (SqlTypeKind::Timestamp, SqlTypeKind::TimestampTz)
+        | (SqlTypeKind::TimestampTz, SqlTypeKind::Timestamp) => {
+            return Some(SqlType::new(SqlTypeKind::TimestampTz));
+        }
+        _ => {}
     }
     if is_numeric_family(left) && is_numeric_family(right) {
         return resolve_numeric_binary_type("+", left, right).ok();
@@ -677,9 +725,43 @@ pub(super) fn infer_arithmetic_sql_type(expr: &SqlExpr, left: SqlType, right: Sq
     let left = left.element_type();
     let right = right.element_type();
 
+    match expr {
+        SqlExpr::Add(_, _) if matches!((left.kind, right.kind), (Date, Time) | (Time, Date)) => {
+            return SqlType::new(Timestamp);
+        }
+        SqlExpr::Add(_, _)
+            if matches!((left.kind, right.kind), (Date, TimeTz) | (TimeTz, Date)) =>
+        {
+            return SqlType::new(TimestampTz);
+        }
+        SqlExpr::Sub(_, _) if matches!((left.kind, right.kind), (Date, Time)) => {
+            return SqlType::new(Timestamp);
+        }
+        _ => {}
+    }
+
     let has_interval = matches!(left.kind, Interval) || matches!(right.kind, Interval);
     if has_interval {
         return match expr {
+            SqlExpr::Add(_, _)
+                if matches!((left.kind, right.kind), (Time, Interval) | (Interval, Time)) =>
+            {
+                SqlType::new(Time)
+            }
+            SqlExpr::Sub(_, _) if matches!((left.kind, right.kind), (Time, Interval)) => {
+                SqlType::new(Time)
+            }
+            SqlExpr::Add(_, _)
+                if matches!(
+                    (left.kind, right.kind),
+                    (TimeTz, Interval) | (Interval, TimeTz)
+                ) =>
+            {
+                SqlType::new(TimeTz)
+            }
+            SqlExpr::Sub(_, _) if matches!((left.kind, right.kind), (TimeTz, Interval)) => {
+                SqlType::new(TimeTz)
+            }
             SqlExpr::Add(_, _) if matches!(left.kind, Date) || matches!(right.kind, Date) => {
                 SqlType::new(Timestamp)
             }
