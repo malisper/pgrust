@@ -5259,25 +5259,47 @@ impl Session {
             ))),
             Statement::GrantObject(ref grant_stmt) => {
                 let search_path = self.configured_search_path();
-                db.execute_grant_object_stmt_with_search_path(
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_grant_object_stmt_in_transaction_with_search_path(
                     client_id,
                     grant_stmt,
+                    xid,
+                    cid,
                     search_path.as_deref(),
+                    &mut txn.catalog_effects,
                 )
             }
             Statement::RevokeObject(ref revoke_stmt) => {
                 let search_path = self.configured_search_path();
-                db.execute_revoke_object_stmt_with_search_path(
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_revoke_object_stmt_in_transaction_with_search_path(
                     client_id,
                     revoke_stmt,
+                    xid,
+                    cid,
                     search_path.as_deref(),
+                    &mut txn.catalog_effects,
                 )
             }
             Statement::GrantRoleMembership(ref grant_stmt) => {
-                db.execute_grant_role_membership_stmt(client_id, grant_stmt)
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_grant_role_membership_stmt_in_transaction(
+                    client_id,
+                    grant_stmt,
+                    xid,
+                    cid,
+                    &mut txn.catalog_effects,
+                )
             }
             Statement::RevokeRoleMembership(ref revoke_stmt) => {
-                db.execute_revoke_role_membership_stmt(client_id, revoke_stmt)
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_revoke_role_membership_stmt_in_transaction(
+                    client_id,
+                    revoke_stmt,
+                    xid,
+                    cid,
+                    &mut txn.catalog_effects,
+                )
             }
             Statement::DropOwned(ref drop_stmt) => {
                 let txn = self.active_txn.as_mut().unwrap();
@@ -5366,7 +5388,9 @@ impl Session {
                 )
             }
             Statement::SetSessionAuthorization(ref set_stmt) => {
-                self.auth = db.execute_set_session_authorization_stmt(client_id, set_stmt)?;
+                self.auth = db.execute_set_session_authorization_stmt_in_transaction(
+                    client_id, set_stmt, xid, cid,
+                )?;
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::ResetSessionAuthorization(ref reset_stmt) => {
@@ -5374,7 +5398,8 @@ impl Session {
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::SetRole(ref set_stmt) => {
-                self.auth = db.execute_set_role_stmt(client_id, set_stmt)?;
+                self.auth =
+                    db.execute_set_role_stmt_in_transaction(client_id, set_stmt, xid, cid)?;
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::ResetRole(ref reset_stmt) => {
