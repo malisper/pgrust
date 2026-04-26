@@ -608,8 +608,8 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Oid => 1028,
             SqlTypeKind::RegProc => crate::include::catalog::REGPROC_ARRAY_TYPE_OID as i32,
             SqlTypeKind::RegClass => crate::include::catalog::REGCLASS_ARRAY_TYPE_OID as i32,
-            SqlTypeKind::RegType => unreachable!("regtype arrays are unsupported"),
-            SqlTypeKind::RegRole => unreachable!("regrole arrays are unsupported"),
+            SqlTypeKind::RegType => crate::include::catalog::REGTYPE_ARRAY_TYPE_OID as i32,
+            SqlTypeKind::RegRole => crate::include::catalog::REGROLE_ARRAY_TYPE_OID as i32,
             SqlTypeKind::RegNamespace => {
                 crate::include::catalog::REGNAMESPACE_ARRAY_TYPE_OID as i32
             }

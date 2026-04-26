@@ -1,13 +1,13 @@
 use super::{
     pg_am_desc, pg_amop_desc, pg_amproc_desc, pg_attrdef_desc, pg_auth_members_desc,
     pg_authid_desc, pg_cast_desc, pg_class_desc, pg_collation_desc, pg_constraint_desc,
-    pg_database_desc, pg_depend_desc, pg_index_desc, pg_inherits_desc, pg_language_desc,
-    pg_largeobject_metadata_desc, pg_namespace_desc, pg_opclass_desc, pg_operator_desc,
-    pg_opfamily_desc, pg_proc_desc, pg_publication_desc, pg_publication_namespace_desc,
-    pg_publication_rel_desc, pg_rewrite_desc, pg_statistic_desc, pg_statistic_ext_data_desc,
-    pg_statistic_ext_desc, pg_tablespace_desc, pg_type_desc,
+    pg_conversion_desc, pg_database_desc, pg_depend_desc, pg_index_desc, pg_inherits_desc,
+    pg_language_desc, pg_largeobject_metadata_desc, pg_namespace_desc, pg_opclass_desc,
+    pg_operator_desc, pg_opfamily_desc, pg_proc_desc, pg_publication_desc,
+    pg_publication_namespace_desc, pg_publication_rel_desc, pg_rewrite_desc, pg_statistic_desc,
+    pg_statistic_ext_data_desc, pg_statistic_ext_desc, pg_tablespace_desc, pg_type_desc,
 };
-use crate::backend::catalog::catalog::column_desc;
+use crate::backend::catalog::catalog::{catalog_attribute_collation_oid, column_desc};
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::SqlType;
 use crate::backend::parser::SqlTypeKind;
@@ -27,10 +27,10 @@ use crate::include::catalog::{
     PATH_TYPE_OID, PG_AM_RELATION_OID, PG_AMOP_RELATION_OID, PG_AMPROC_RELATION_OID,
     PG_ATTRDEF_RELATION_OID, PG_ATTRIBUTE_RELATION_OID, PG_AUTH_MEMBERS_RELATION_OID,
     PG_AUTHID_RELATION_OID, PG_CAST_RELATION_OID, PG_CLASS_RELATION_OID, PG_COLLATION_RELATION_OID,
-    PG_CONSTRAINT_RELATION_OID, PG_DATABASE_RELATION_OID, PG_DEPEND_RELATION_OID,
-    PG_INDEX_RELATION_OID, PG_INHERITS_RELATION_OID, PG_LANGUAGE_RELATION_OID,
-    PG_LARGEOBJECT_METADATA_RELATION_OID, PG_LSN_ARRAY_TYPE_OID, PG_LSN_TYPE_OID,
-    PG_NAMESPACE_RELATION_OID, PG_NODE_TREE_TYPE_OID, PG_OPCLASS_RELATION_OID,
+    PG_CONSTRAINT_RELATION_OID, PG_CONVERSION_RELATION_OID, PG_DATABASE_RELATION_OID,
+    PG_DEPEND_RELATION_OID, PG_INDEX_RELATION_OID, PG_INHERITS_RELATION_OID,
+    PG_LANGUAGE_RELATION_OID, PG_LARGEOBJECT_METADATA_RELATION_OID, PG_LSN_ARRAY_TYPE_OID,
+    PG_LSN_TYPE_OID, PG_NAMESPACE_RELATION_OID, PG_NODE_TREE_TYPE_OID, PG_OPCLASS_RELATION_OID,
     PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID, PG_PROC_RELATION_OID,
     PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
     PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_DATA_RELATION_OID,
@@ -180,6 +180,10 @@ pub fn bootstrap_pg_attribute_rows() -> Vec<PgAttributeRow> {
         &pg_constraint_desc(),
     ));
     rows.extend(attribute_rows_for_desc(
+        PG_CONVERSION_RELATION_OID,
+        &pg_conversion_desc(),
+    ));
+    rows.extend(attribute_rows_for_desc(
         PG_DEPEND_RELATION_OID,
         &pg_depend_desc(),
     ));
@@ -257,7 +261,7 @@ fn attribute_rows_for_desc(relid: u32, desc: &RelationDesc) -> Vec<PgAttributeRo
                 .generated
                 .map(|kind| kind.catalog_char())
                 .unwrap_or('\0'),
-            attcollation: column.collation_oid,
+            attcollation: catalog_attribute_collation_oid(relid, column.collation_oid),
             sql_type: column.sql_type,
         })
         .collect()
@@ -391,9 +395,9 @@ fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::RegClass, false) => crate::include::catalog::REGCLASS_TYPE_OID,
         (SqlTypeKind::RegClass, true) => crate::include::catalog::REGCLASS_ARRAY_TYPE_OID,
         (SqlTypeKind::RegType, false) => crate::include::catalog::REGTYPE_TYPE_OID,
-        (SqlTypeKind::RegType, true) => unreachable!("regtype arrays are unsupported"),
+        (SqlTypeKind::RegType, true) => crate::include::catalog::REGTYPE_ARRAY_TYPE_OID,
         (SqlTypeKind::RegRole, false) => crate::include::catalog::REGROLE_TYPE_OID,
-        (SqlTypeKind::RegRole, true) => unreachable!("regrole arrays are unsupported"),
+        (SqlTypeKind::RegRole, true) => crate::include::catalog::REGROLE_ARRAY_TYPE_OID,
         (SqlTypeKind::RegNamespace, false) => crate::include::catalog::REGNAMESPACE_TYPE_OID,
         (SqlTypeKind::RegNamespace, true) => crate::include::catalog::REGNAMESPACE_ARRAY_TYPE_OID,
         (SqlTypeKind::RegOper, false) => crate::include::catalog::REGOPER_TYPE_OID,

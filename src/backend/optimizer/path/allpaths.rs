@@ -1643,6 +1643,28 @@ fn exact_cross_join_relids(root: &PlannerInfo, target_relids: &[usize]) -> bool 
         .is_some_and(|jointree| walk(jointree, target_relids))
 }
 
+fn physical_join_kind_for_paths(
+    root: &PlannerInfo,
+    logical_kind: JoinType,
+    relids: &[usize],
+    join_restrict_clauses: &[RestrictInfo],
+) -> JoinType {
+    if matches!(logical_kind, JoinType::Cross) {
+        if join_restrict_clauses.is_empty() {
+            JoinType::Cross
+        } else {
+            JoinType::Inner
+        }
+    } else if matches!(logical_kind, JoinType::Inner)
+        && join_restrict_clauses.is_empty()
+        && exact_cross_join_relids(root, relids)
+    {
+        JoinType::Cross
+    } else {
+        logical_kind
+    }
+}
+
 fn jointree_relids(node: &JoinTreeNode) -> Vec<usize> {
     match node {
         JoinTreeNode::RangeTblRef(rtindex) => vec![*rtindex],
@@ -2080,6 +2102,84 @@ fn best_path(paths: Vec<Path>) -> Option<Path> {
     })
 }
 
+fn prune_dominated_paths(paths: &mut Vec<Path>) {
+    let mut pruned = Vec::with_capacity(paths.len());
+    for path in std::mem::take(paths) {
+        add_non_dominated_path(&mut pruned, path);
+    }
+    *paths = pruned;
+}
+
+fn add_non_dominated_path(paths: &mut Vec<Path>, candidate: Path) {
+    if paths
+        .iter()
+        .any(|existing| path_dominates(existing, &candidate))
+    {
+        return;
+    }
+    paths.retain(|existing| !path_dominates(&candidate, existing));
+    paths.push(candidate);
+}
+
+fn path_dominates(left: &Path, right: &Path) -> bool {
+    if bestpath::non_nested_join_nearly_as_cheap(right, left) {
+        return false;
+    }
+    let left_info = left.plan_info();
+    let right_info = right.plan_info();
+    let left_startup = left_info.startup_cost.as_f64();
+    let right_startup = right_info.startup_cost.as_f64();
+    let left_total = left_info.total_cost.as_f64();
+    let right_total = right_info.total_cost.as_f64();
+    if left_startup > right_startup || left_total > right_total {
+        return false;
+    }
+
+    let left_pathkeys = left.pathkeys();
+    let right_pathkeys = right.pathkeys();
+    if !bestpath::pathkeys_satisfy(&left_pathkeys, &right_pathkeys) {
+        return false;
+    }
+
+    let strictly_cheaper = left_startup < right_startup || left_total < right_total;
+    let strictly_better_pathkeys = !bestpath::pathkeys_satisfy(&right_pathkeys, &left_pathkeys);
+    strictly_cheaper
+        || strictly_better_pathkeys
+        || !path_tie_breaker_prefers(right, left, &right_pathkeys, &left_pathkeys)
+}
+
+fn path_tie_breaker_prefers(
+    left: &Path,
+    right: &Path,
+    left_pathkeys: &[PathKey],
+    right_pathkeys: &[PathKey],
+) -> bool {
+    if let (Some(left_relids), Some(right_relids)) = (
+        cross_join_left_relid_count(left),
+        cross_join_left_relid_count(right),
+    ) && left_relids != right_relids
+    {
+        return left_relids > right_relids;
+    }
+    left_pathkeys.len() > right_pathkeys.len()
+}
+
+fn cross_join_left_relid_count(path: &Path) -> Option<usize> {
+    match path {
+        Path::NestedLoopJoin {
+            left,
+            kind: JoinType::Cross,
+            ..
+        } => Some(path_relids(left).len()),
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => cross_join_left_relid_count(input),
+        _ => None,
+    }
+}
+
 fn left_oriented_join_path(path: &Path, left_relids: &[usize]) -> bool {
     match path {
         Path::NestedLoopJoin { left, .. } | Path::HashJoin { left, .. } => {
@@ -2266,11 +2366,7 @@ fn make_join_rel(
             &root.inner_join_clauses,
         );
         let path_kind =
-            if matches!(logical_kind, JoinType::Inner) && exact_cross_join_relids(root, &relids) {
-                JoinType::Cross
-            } else {
-                logical_kind
-            };
+            physical_join_kind_for_paths(root, logical_kind, &relids, &join_restrict_clauses);
         let mut join_restrict_clauses_for_rel = join_restrict_clauses.clone();
         let mut candidate_paths = collect_join_candidate_paths(
             root,
@@ -2283,12 +2379,12 @@ fn make_join_rel(
         );
         let mut partitionwise_left_rel = logical_left_rel.clone();
         let mut partitionwise_right_rel = logical_right_rel.clone();
-        let mut partitionwise_kind = logical_kind;
+        let mut partitionwise_kind = path_kind;
         if let Some(path) = collect_partitionwise_join_candidate_path(
             root,
             logical_left_rel,
             logical_right_rel,
-            logical_kind,
+            path_kind,
             &join_restrict_clauses,
             &reltarget,
             &output_columns,
@@ -2305,11 +2401,17 @@ fn make_join_rel(
                 &right_rel.relids,
                 &root.inner_join_clauses,
             );
+            let fallback_path_kind = physical_join_kind_for_paths(
+                root,
+                spec.kind,
+                &relids,
+                &fallback_join_restrict_clauses,
+            );
             candidate_paths = collect_join_candidate_paths(
                 root,
                 left_rel,
                 right_rel,
-                spec.kind,
+                fallback_path_kind,
                 &fallback_join_restrict_clauses,
                 &reltarget,
                 &output_columns,
@@ -2318,7 +2420,7 @@ fn make_join_rel(
                 root,
                 left_rel,
                 right_rel,
-                spec.kind,
+                fallback_path_kind,
                 &fallback_join_restrict_clauses,
                 &reltarget,
                 &output_columns,
@@ -2330,7 +2432,7 @@ fn make_join_rel(
                 join_restrict_clauses_for_rel = fallback_join_restrict_clauses;
                 partitionwise_left_rel = left_rel.clone();
                 partitionwise_right_rel = right_rel.clone();
-                partitionwise_kind = spec.kind;
+                partitionwise_kind = fallback_path_kind;
             }
         }
         (
@@ -2383,6 +2485,7 @@ fn make_join_rel(
     for path in candidate_paths {
         join_rel.add_path(path);
     }
+    prune_dominated_paths(&mut join_rel.pathlist);
     if let Some(partition_info) = partition_info_for_rel {
         join_rel.consider_partitionwise_join = true;
         join_rel.partition_info = Some(partition_info);

@@ -3,56 +3,22 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::SqlType;
 use crate::backend::parser::SqlTypeKind;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
-use crate::include::catalog::{
-    ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
-    ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID, ANYRANGEOID,
-    ARRAYMULTIRANGE_ARRAY_TYPE_OID, ARRAYMULTIRANGE_TYPE_OID, ARRAYRANGE_ARRAY_TYPE_OID,
-    ARRAYRANGE_TYPE_OID, BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
-    BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
-    BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID, CIDR_ARRAY_TYPE_OID, CIDR_TYPE_OID, CIRCLE_TYPE_OID,
-    CSTRING_ARRAY_TYPE_OID, CSTRING_TYPE_OID, DATE_ARRAY_TYPE_OID, DATE_TYPE_OID,
-    DATEMULTIRANGE_ARRAY_TYPE_OID, DATEMULTIRANGE_TYPE_OID, DATERANGE_ARRAY_TYPE_OID,
-    DATERANGE_TYPE_OID, FDW_HANDLER_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID,
-    FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INET_ARRAY_TYPE_OID, INET_TYPE_OID,
-    INT2_ARRAY_TYPE_OID, INT2_TYPE_OID, INT2VECTOR_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
-    INT4MULTIRANGE_ARRAY_TYPE_OID, INT4MULTIRANGE_TYPE_OID, INT4RANGE_ARRAY_TYPE_OID,
-    INT4RANGE_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INT8MULTIRANGE_ARRAY_TYPE_OID,
-    INT8MULTIRANGE_TYPE_OID, INT8RANGE_ARRAY_TYPE_OID, INT8RANGE_TYPE_OID,
-    INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, INTERNAL_TYPE_OID,
-    INTERVAL_ARRAY_TYPE_OID, INTERVAL_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
-    JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID,
-    LINE_TYPE_OID, LSEG_TYPE_OID, MACADDR_ARRAY_TYPE_OID, MACADDR_TYPE_OID,
-    MACADDR8_ARRAY_TYPE_OID, MACADDR8_TYPE_OID, MONEY_ARRAY_TYPE_OID, MONEY_TYPE_OID,
-    NAME_ARRAY_TYPE_OID, NAME_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID,
-    NUMMULTIRANGE_ARRAY_TYPE_OID, NUMMULTIRANGE_TYPE_OID, NUMRANGE_ARRAY_TYPE_OID,
-    NUMRANGE_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID, OIDVECTOR_TYPE_OID, PATH_TYPE_OID,
-    PG_ATTRIBUTE_RELATION_OID, PG_ATTRIBUTE_ROWTYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_CLASS_RELATION_OID, PG_CLASS_ROWTYPE_OID, PG_DATABASE_RELATION_OID, PG_DATABASE_ROWTYPE_OID,
-    PG_DEPENDENCIES_TYPE_OID, PG_LSN_ARRAY_TYPE_OID, PG_LSN_TYPE_OID, PG_MCV_LIST_TYPE_OID,
-    PG_NAMESPACE_RELATION_OID, PG_NAMESPACE_ROWTYPE_OID, PG_NDISTINCT_TYPE_OID,
-    PG_NODE_TREE_TYPE_OID, PG_PROC_RELATION_OID, PG_PROC_ROWTYPE_OID, PG_STATISTIC_ARRAY_TYPE_OID,
-    PG_STATISTIC_EXT_ARRAY_TYPE_OID, PG_STATISTIC_EXT_DATA_ARRAY_TYPE_OID,
-    PG_STATISTIC_EXT_DATA_RELATION_OID, PG_STATISTIC_EXT_DATA_ROWTYPE_OID,
-    PG_STATISTIC_EXT_RELATION_OID, PG_STATISTIC_EXT_ROWTYPE_OID, PG_STATISTIC_RELATION_OID,
-    PG_STATISTIC_ROWTYPE_OID, PG_TYPE_RELATION_OID, PG_TYPE_ROWTYPE_OID, POINT_TYPE_OID,
-    POLYGON_TYPE_OID, RECORD_ARRAY_TYPE_OID, RECORD_TYPE_OID, REFCURSOR_ARRAY_TYPE_OID,
-    REFCURSOR_TYPE_OID, REGCLASS_ARRAY_TYPE_OID, REGCLASS_TYPE_OID, REGCOLLATION_ARRAY_TYPE_OID,
-    REGCOLLATION_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
-    REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, REGNAMESPACE_ARRAY_TYPE_OID,
-    REGNAMESPACE_TYPE_OID, REGOPER_ARRAY_TYPE_OID, REGOPER_TYPE_OID, REGOPERATOR_ARRAY_TYPE_OID,
-    REGOPERATOR_TYPE_OID, REGPROC_ARRAY_TYPE_OID, REGPROC_TYPE_OID, REGPROCEDURE_ARRAY_TYPE_OID,
-    REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID, REGTYPE_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
-    TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIME_ARRAY_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
-    TIMESTAMP_TYPE_OID, TIMESTAMPTZ_ARRAY_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_ARRAY_TYPE_OID,
-    TIMETZ_TYPE_OID, TRIGGER_TYPE_OID, TSMULTIRANGE_ARRAY_TYPE_OID, TSMULTIRANGE_TYPE_OID,
-    TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_ARRAY_TYPE_OID, TSRANGE_TYPE_OID,
-    TSTZMULTIRANGE_ARRAY_TYPE_OID, TSTZMULTIRANGE_TYPE_OID, TSTZRANGE_ARRAY_TYPE_OID,
-    TSTZRANGE_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, TXID_SNAPSHOT_ARRAY_TYPE_OID,
-    TXID_SNAPSHOT_TYPE_OID, UUID_ARRAY_TYPE_OID, UUID_TYPE_OID, VARBIT_ARRAY_TYPE_OID,
-    VARBIT_TYPE_OID, VARBITMULTIRANGE_ARRAY_TYPE_OID, VARBITMULTIRANGE_TYPE_OID,
-    VARBITRANGE_ARRAY_TYPE_OID, VARBITRANGE_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
-    VOID_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID, XML_TYPE_OID,
-};
+use crate::include::catalog::*;
+
+const ARRAY_IN_PROC_OID: u32 = 750;
+const INTERNAL_IN_PROC_OID: u32 = 2304;
+const ANYARRAY_IN_PROC_OID: u32 = 2296;
+const ANYELEMENT_IN_PROC_OID: u32 = 2312;
+const ANYENUM_IN_PROC_OID: u32 = 3504;
+const ANYNONARRAY_IN_PROC_OID: u32 = 2777;
+const ANYRANGE_IN_PROC_OID: u32 = 3832;
+const RANGE_IN_PROC_OID: u32 = 3834;
+const ANYMULTIRANGE_IN_PROC_OID: u32 = 4229;
+const MULTIRANGE_IN_PROC_OID: u32 = 4231;
+const ANYCOMPATIBLE_IN_PROC_OID: u32 = 5086;
+const ANYCOMPATIBLEARRAY_IN_PROC_OID: u32 = 5088;
+const ANYCOMPATIBLENONARRAY_IN_PROC_OID: u32 = 5092;
+const ANYCOMPATIBLERANGE_IN_PROC_OID: u32 = 5094;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgTypeRow {
@@ -66,6 +32,9 @@ pub struct PgTypeRow {
     pub typrelid: u32,
     pub typelem: u32,
     pub typarray: u32,
+    pub typinput: u32,
+    pub typoutput: u32,
+    pub typmodout: u32,
     pub sql_type: SqlType,
 }
 
@@ -82,6 +51,9 @@ pub fn pg_type_desc() -> RelationDesc {
             column_desc("typrelid", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("typelem", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("typarray", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("typinput", SqlType::new(SqlTypeKind::RegProc), false),
+            column_desc("typoutput", SqlType::new(SqlTypeKind::RegProc), false),
+            column_desc("typmodout", SqlType::new(SqlTypeKind::RegProc), false),
         ],
     }
 }
@@ -89,9 +61,24 @@ pub fn pg_type_desc() -> RelationDesc {
 pub fn builtin_type_rows() -> Vec<PgTypeRow> {
     let mut rows = vec![
         builtin_type_row(
+            "any",
+            ANYOID,
+            SqlType::new(SqlTypeKind::AnyElement).with_identity(ANYOID, 0),
+        ),
+        builtin_type_row(
             "anyelement",
             ANYELEMENTOID,
             SqlType::new(SqlTypeKind::AnyElement),
+        ),
+        builtin_type_row(
+            "anyenum",
+            ANYENUMOID,
+            SqlType::new(SqlTypeKind::AnyElement).with_identity(ANYENUMOID, 0),
+        ),
+        builtin_type_row(
+            "anynonarray",
+            ANYNONARRAYOID,
+            SqlType::new(SqlTypeKind::AnyElement).with_identity(ANYNONARRAYOID, 0),
         ),
         builtin_type_row("anyarray", ANYARRAYOID, SqlType::new(SqlTypeKind::AnyArray)),
         builtin_type_row("anyrange", ANYRANGEOID, SqlType::new(SqlTypeKind::AnyRange)),
@@ -105,6 +92,11 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "anycompatible",
             ANYCOMPATIBLEOID,
             SqlType::new(SqlTypeKind::AnyCompatible),
+        ),
+        builtin_type_row(
+            "anycompatiblenonarray",
+            ANYCOMPATIBLENONARRAYOID,
+            SqlType::new(SqlTypeKind::AnyCompatible).with_identity(ANYCOMPATIBLENONARRAYOID, 0),
         ),
         builtin_type_row(
             "anycompatiblearray",
@@ -262,6 +254,30 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             4,
             AttributeAlign::Int,
         ),
+        fixed_builtin_type_row(
+            "index_am_handler",
+            INDEX_AM_HANDLER_TYPE_OID,
+            SqlType::new(SqlTypeKind::FdwHandler).with_identity(INDEX_AM_HANDLER_TYPE_OID, 0),
+            4,
+            AttributeAlign::Int,
+        ),
+        fixed_builtin_type_row(
+            "table_am_handler",
+            TABLE_AM_HANDLER_TYPE_OID,
+            SqlType::new(SqlTypeKind::FdwHandler).with_identity(TABLE_AM_HANDLER_TYPE_OID, 0),
+            4,
+            AttributeAlign::Int,
+        ),
+        {
+            let mut row = builtin_type_row(
+                "cstring",
+                CSTRING_TYPE_OID,
+                SqlType::new(SqlTypeKind::Text).with_identity(CSTRING_TYPE_OID, 0),
+            );
+            row.typinput = 2292;
+            row.typoutput = 2293;
+            row
+        },
         builtin_type_row("oid", OID_TYPE_OID, SqlType::new(SqlTypeKind::Oid)),
         builtin_type_row(
             "regproc",
@@ -321,6 +337,28 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::array_of(SqlType::new(SqlTypeKind::Xid)),
         ),
         builtin_type_row(
+            "cid",
+            CID_TYPE_OID,
+            SqlType::new(SqlTypeKind::Int4).with_identity(CID_TYPE_OID, 0),
+        ),
+        builtin_type_row(
+            "_cid",
+            CID_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Int4).with_identity(CID_TYPE_OID, 0))
+                .with_identity(CID_ARRAY_TYPE_OID, 0),
+        ),
+        builtin_type_row(
+            "xid8",
+            XID8_TYPE_OID,
+            SqlType::new(SqlTypeKind::Int8).with_identity(XID8_TYPE_OID, 0),
+        ),
+        builtin_type_row(
+            "_xid8",
+            XID8_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Int8).with_identity(XID8_TYPE_OID, 0))
+                .with_identity(XID8_ARRAY_TYPE_OID, 0),
+        ),
+        builtin_type_row(
             "txid_snapshot",
             TXID_SNAPSHOT_TYPE_OID,
             SqlType::new(SqlTypeKind::Text).with_identity(TXID_SNAPSHOT_TYPE_OID, 0),
@@ -332,6 +370,19 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
                 SqlType::new(SqlTypeKind::Text).with_identity(TXID_SNAPSHOT_TYPE_OID, 0),
             )
             .with_identity(TXID_SNAPSHOT_ARRAY_TYPE_OID, 0),
+        ),
+        builtin_type_row(
+            "pg_snapshot",
+            PG_SNAPSHOT_TYPE_OID,
+            SqlType::new(SqlTypeKind::Text).with_identity(PG_SNAPSHOT_TYPE_OID, 0),
+        ),
+        builtin_type_row(
+            "_pg_snapshot",
+            PG_SNAPSHOT_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::new(SqlTypeKind::Text).with_identity(PG_SNAPSHOT_TYPE_OID, 0),
+            )
+            .with_identity(PG_SNAPSHOT_ARRAY_TYPE_OID, 0),
         ),
         builtin_type_row(
             "oidvector",
@@ -347,6 +398,16 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "_regclass",
             REGCLASS_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::RegClass)),
+        ),
+        builtin_type_row(
+            "_regtype",
+            REGTYPE_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::RegType)),
+        ),
+        builtin_type_row(
+            "_regrole",
+            REGROLE_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::RegRole)),
         ),
         builtin_type_row(
             "_regproc",
@@ -395,6 +456,28 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "_money",
             MONEY_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::Money)),
+        ),
+        builtin_type_row(
+            "macaddr",
+            MACADDR_TYPE_OID,
+            SqlType::new(SqlTypeKind::Text).with_identity(MACADDR_TYPE_OID, 0),
+        ),
+        builtin_type_row(
+            "_macaddr",
+            MACADDR_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Text).with_identity(MACADDR_TYPE_OID, 0))
+                .with_identity(MACADDR_ARRAY_TYPE_OID, 0),
+        ),
+        builtin_type_row(
+            "macaddr8",
+            MACADDR8_TYPE_OID,
+            SqlType::new(SqlTypeKind::Text).with_identity(MACADDR8_TYPE_OID, 0),
+        ),
+        builtin_type_row(
+            "_macaddr8",
+            MACADDR8_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Text).with_identity(MACADDR8_TYPE_OID, 0))
+                .with_identity(MACADDR8_ARRAY_TYPE_OID, 0),
         ),
         builtin_type_row("cidr", CIDR_TYPE_OID, SqlType::new(SqlTypeKind::Cidr)),
         builtin_type_row(
@@ -458,6 +541,19 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "_bpchar",
             BPCHAR_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::Char)),
+        ),
+        fixed_builtin_type_row(
+            "aclitem",
+            ACLITEM_TYPE_OID,
+            SqlType::new(SqlTypeKind::Text).with_identity(ACLITEM_TYPE_OID, 0),
+            16,
+            AttributeAlign::Double,
+        ),
+        builtin_type_row(
+            "_aclitem",
+            ACLITEM_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Text).with_identity(ACLITEM_TYPE_OID, 0))
+                .with_identity(ACLITEM_ARRAY_TYPE_OID, 0),
         ),
         builtin_type_row("date", DATE_TYPE_OID, SqlType::new(SqlTypeKind::Date)),
         builtin_range_type_row(
@@ -873,6 +969,7 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
         ),
     ]);
     annotate_array_type_links(&mut rows);
+    annotate_type_io_procs(&mut rows);
     rows
 }
 
@@ -987,6 +1084,9 @@ fn builtin_type_row(name: &str, oid: u32, sql_type: SqlType) -> PgTypeRow {
         typrelid: 0,
         typelem: 0,
         typarray: 0,
+        typinput: 0,
+        typoutput: 0,
+        typmodout: 0,
         sql_type,
     }
 }
@@ -1009,6 +1109,9 @@ fn fixed_builtin_type_row(
         typrelid: 0,
         typelem: 0,
         typarray: 0,
+        typinput: 0,
+        typoutput: 0,
+        typmodout: 0,
         sql_type,
     }
 }
@@ -1061,6 +1164,9 @@ pub fn composite_type_row(
         typrelid: relid,
         typelem: 0,
         typarray: array_oid,
+        typinput: 0,
+        typoutput: 0,
+        typmodout: 0,
         sql_type: SqlType::named_composite(oid, relid),
     }
 }
@@ -1083,6 +1189,9 @@ pub fn composite_array_type_row(
         typrelid: 0,
         typelem: elem_oid,
         typarray: 0,
+        typinput: 0,
+        typoutput: 0,
+        typmodout: 0,
         sql_type: SqlType::array_of(SqlType::named_composite(elem_oid, relid)),
     }
 }
@@ -1106,6 +1215,37 @@ fn annotate_array_type_links(rows: &mut [PgTypeRow]) {
         {
             row.typarray = array_oid;
         }
+    }
+}
+
+fn annotate_type_io_procs(rows: &mut [PgTypeRow]) {
+    for row in rows.iter_mut() {
+        row.typinput = match row.oid {
+            INTERNAL_TYPE_OID => INTERNAL_IN_PROC_OID,
+            ANYARRAYOID => ANYARRAY_IN_PROC_OID,
+            ANYELEMENTOID => ANYELEMENT_IN_PROC_OID,
+            ANYENUMOID => ANYENUM_IN_PROC_OID,
+            ANYNONARRAYOID => ANYNONARRAY_IN_PROC_OID,
+            ANYRANGEOID => ANYRANGE_IN_PROC_OID,
+            ANYMULTIRANGEOID => ANYMULTIRANGE_IN_PROC_OID,
+            ANYCOMPATIBLEOID => ANYCOMPATIBLE_IN_PROC_OID,
+            ANYCOMPATIBLEARRAYOID => ANYCOMPATIBLEARRAY_IN_PROC_OID,
+            ANYCOMPATIBLENONARRAYOID => ANYCOMPATIBLENONARRAY_IN_PROC_OID,
+            ANYCOMPATIBLERANGEOID => ANYCOMPATIBLERANGE_IN_PROC_OID,
+            TIMESTAMP_TYPE_OID => 1312,
+            TIMESTAMPTZ_TYPE_OID => 1150,
+            TXID_SNAPSHOT_TYPE_OID => 2939,
+            PG_SNAPSHOT_TYPE_OID => 5055,
+            _ if row.sql_type.is_array => ARRAY_IN_PROC_OID,
+            _ if matches!(row.sql_type.kind, SqlTypeKind::Range) => RANGE_IN_PROC_OID,
+            _ if matches!(row.sql_type.kind, SqlTypeKind::Multirange) => MULTIRANGE_IN_PROC_OID,
+            _ => row.typinput,
+        };
+        row.typoutput = match row.oid {
+            TXID_SNAPSHOT_TYPE_OID => 2940,
+            PG_SNAPSHOT_TYPE_OID => 5056,
+            _ => row.typoutput,
+        };
     }
 }
 

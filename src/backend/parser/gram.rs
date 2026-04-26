@@ -2376,6 +2376,30 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "int2vector" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int2Vector))),
         "oidvector" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::OidVector))),
         "name" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Name))),
+        "any" | "pg_catalog.any" => {
+            return Ok(RawTypeName::Builtin(
+                SqlType::new(SqlTypeKind::AnyElement)
+                    .with_identity(crate::include::catalog::ANYOID, 0),
+            ));
+        }
+        "anyenum" | "pg_catalog.anyenum" => {
+            return Ok(RawTypeName::Builtin(
+                SqlType::new(SqlTypeKind::AnyElement)
+                    .with_identity(crate::include::catalog::ANYENUMOID, 0),
+            ));
+        }
+        "anynonarray" | "pg_catalog.anynonarray" => {
+            return Ok(RawTypeName::Builtin(
+                SqlType::new(SqlTypeKind::AnyElement)
+                    .with_identity(crate::include::catalog::ANYNONARRAYOID, 0),
+            ));
+        }
+        "anycompatiblenonarray" | "pg_catalog.anycompatiblenonarray" => {
+            return Ok(RawTypeName::Builtin(
+                SqlType::new(SqlTypeKind::AnyCompatible)
+                    .with_identity(crate::include::catalog::ANYCOMPATIBLENONARRAYOID, 0),
+            ));
+        }
         "refcursor" => {
             return Ok(RawTypeName::Builtin(
                 SqlType::new(SqlTypeKind::Text)
@@ -2399,7 +2423,7 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
                 SqlTypeKind::MacAddr8,
             ))));
         }
-        "bpchar" | "pg_catalog.bpchar" => {
+        "bpchar" | "pg_catalog.bpchar" | "character" | "pg_catalog.character" => {
             return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Char)));
         }
         "pg_node_tree" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::PgNodeTree))),
@@ -2409,6 +2433,18 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
             return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Cstring)));
         }
         "fdw_handler" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::FdwHandler))),
+        "index_am_handler" | "pg_catalog.index_am_handler" => {
+            return Ok(RawTypeName::Builtin(
+                SqlType::new(SqlTypeKind::FdwHandler)
+                    .with_identity(crate::include::catalog::INDEX_AM_HANDLER_TYPE_OID, 0),
+            ));
+        }
+        "table_am_handler" | "pg_catalog.table_am_handler" => {
+            return Ok(RawTypeName::Builtin(
+                SqlType::new(SqlTypeKind::FdwHandler)
+                    .with_identity(crate::include::catalog::TABLE_AM_HANDLER_TYPE_OID, 0),
+            ));
+        }
         "regrole" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegRole))),
         "regproc" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegProc))),
         "regprocedure" => {
@@ -13577,7 +13613,10 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::ArraySubscript { array, .. } => select_item_name(array, index),
         SqlExpr::FieldSelect { field, .. } => field.clone(),
         SqlExpr::Cast(inner, ty) => match inner.as_ref() {
-            SqlExpr::Column(_) | SqlExpr::FuncCall { .. } => select_item_name(inner, index),
+            SqlExpr::ArraySubscript { .. }
+            | SqlExpr::Column(_)
+            | SqlExpr::FieldSelect { .. }
+            | SqlExpr::FuncCall { .. } => select_item_name(inner, index),
             SqlExpr::Cast(grand_inner, _) if matches!(grand_inner.as_ref(), SqlExpr::Column(_)) => {
                 select_item_name(inner, index)
             }

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::backend::catalog::CatalogError;
-use crate::backend::catalog::catalog::Catalog;
+use crate::backend::catalog::catalog::{Catalog, catalog_attribute_collation_oid};
 use crate::backend::catalog::loader::load_physical_catalog_rows;
 use crate::backend::catalog::pg_aggregate::sort_pg_aggregate_rows;
 use crate::backend::catalog::pg_am::sort_pg_am_rows;
@@ -348,7 +348,10 @@ impl CatCache {
                         .generated
                         .map(|kind| kind.catalog_char())
                         .unwrap_or('\0'),
-                    attcollation: column.collation_oid,
+                    attcollation: catalog_attribute_collation_oid(
+                        entry.relation_oid,
+                        column.collation_oid,
+                    ),
                     sql_type: column.sql_type,
                 })
                 .collect::<Vec<_>>();
@@ -1181,9 +1184,9 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::RegClass, false) => crate::include::catalog::REGCLASS_TYPE_OID,
         (SqlTypeKind::RegClass, true) => crate::include::catalog::REGCLASS_ARRAY_TYPE_OID,
         (SqlTypeKind::RegType, false) => crate::include::catalog::REGTYPE_TYPE_OID,
-        (SqlTypeKind::RegType, true) => unreachable!("regtype arrays are unsupported"),
+        (SqlTypeKind::RegType, true) => crate::include::catalog::REGTYPE_ARRAY_TYPE_OID,
         (SqlTypeKind::RegRole, false) => crate::include::catalog::REGROLE_TYPE_OID,
-        (SqlTypeKind::RegRole, true) => unreachable!("regrole arrays are unsupported"),
+        (SqlTypeKind::RegRole, true) => crate::include::catalog::REGROLE_ARRAY_TYPE_OID,
         (SqlTypeKind::RegNamespace, false) => crate::include::catalog::REGNAMESPACE_TYPE_OID,
         (SqlTypeKind::RegNamespace, true) => crate::include::catalog::REGNAMESPACE_ARRAY_TYPE_OID,
         (SqlTypeKind::RegOper, false) => crate::include::catalog::REGOPER_TYPE_OID,
@@ -1333,6 +1336,22 @@ mod tests {
                 .class_by_name_exact("pg_catalog.pg_class")
                 .map(|row| row.oid),
             Some(PG_CLASS_RELATION_OID)
+        );
+        let pg_class_attrs = cache.attributes_by_relid(PG_CLASS_RELATION_OID).unwrap();
+        assert_eq!(
+            pg_class_attrs
+                .iter()
+                .find(|row| row.attname == "relname")
+                .map(|row| row.attcollation),
+            Some(C_COLLATION_OID)
+        );
+        let people_attrs = cache.attributes_by_relid(entry.relation_oid).unwrap();
+        assert_eq!(
+            people_attrs
+                .iter()
+                .find(|row| row.attname == "name")
+                .map(|row| row.attcollation),
+            Some(DEFAULT_COLLATION_OID)
         );
         assert_eq!(
             cache

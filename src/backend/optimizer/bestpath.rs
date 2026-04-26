@@ -84,9 +84,91 @@ fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostSelector) ->
     {
         return candidate_left_relids > current_left_relids;
     }
+    if matches!(cost, CostSelector::Total) {
+        if non_nested_join_nearly_as_cheap(candidate, current) {
+            return true;
+        }
+        if non_nested_join_nearly_as_cheap(current, candidate) {
+            return false;
+        }
+    }
     let cmp = compare_path_costs(candidate, current, cost);
     cmp == Ordering::Less
         || (cmp == Ordering::Equal && better_pathkeys(&candidate.pathkeys(), &current.pathkeys()))
+}
+
+pub(super) fn non_nested_join_nearly_as_cheap(preferred: &Path, other: &Path) -> bool {
+    if !matches!(preferred, Path::HashJoin { .. } | Path::MergeJoin { .. })
+        || !matches!(other, Path::NestedLoopJoin { .. })
+    {
+        return false;
+    }
+    if underestimated_seqscan_nested_loop(other) {
+        return true;
+    }
+    let preferred_total = preferred.plan_info().total_cost.as_f64();
+    let other_total = other.plan_info().total_cost.as_f64();
+    let tolerance = (other_total.abs() * 0.01).max(1.0);
+    preferred_total <= other_total + tolerance
+}
+
+fn underestimated_seqscan_nested_loop(path: &Path) -> bool {
+    match path {
+        Path::NestedLoopJoin {
+            left,
+            right,
+            kind: JoinType::Inner,
+            restrict_clauses,
+            ..
+        } => {
+            !restrict_clauses.is_empty()
+                && left.plan_info().plan_rows.as_f64() <= 2.0
+                && right.plan_info().plan_rows.as_f64() <= 2.0
+                && contains_seq_scan(left)
+                && contains_seq_scan(right)
+        }
+        _ => false,
+    }
+}
+
+fn contains_seq_scan(path: &Path) -> bool {
+    match path {
+        Path::SeqScan { .. } => true,
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::WindowAgg { input, .. }
+        | Path::ProjectSet { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::BitmapHeapScan {
+            bitmapqual: input, ..
+        }
+        | Path::CteScan {
+            cte_plan: input, ..
+        } => contains_seq_scan(input),
+        Path::Append { children, .. }
+        | Path::MergeAppend { children, .. }
+        | Path::SetOp { children, .. } => children.iter().any(contains_seq_scan),
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. } => {
+            contains_seq_scan(left) || contains_seq_scan(right)
+        }
+        Path::RecursiveUnion {
+            anchor, recursive, ..
+        } => contains_seq_scan(anchor) || contains_seq_scan(recursive),
+        Path::Result { .. }
+        | Path::IndexOnlyScan { .. }
+        | Path::IndexScan { .. }
+        | Path::BitmapIndexScan { .. }
+        | Path::Values { .. }
+        | Path::FunctionScan { .. }
+        | Path::WorkTableScan { .. } => false,
+    }
 }
 
 fn cross_join_left_relid_count(path: &Path) -> Option<usize> {

@@ -1815,12 +1815,6 @@ impl Database {
                 .iter()
                 .filter(|default_expr| default_expr.is_some())
                 .count() as i16,
-            proargdefaults: callable_arg_defaults.iter().any(Option::is_some).then(|| {
-                callable_arg_defaults
-                    .into_iter()
-                    .map(|default_expr| default_expr.unwrap_or_default())
-                    .collect()
-            }),
             prorettype: if proc_kind == 'p' {
                 VOID_TYPE_OID
             } else {
@@ -1830,7 +1824,10 @@ impl Database {
             proallargtypes,
             proargmodes,
             proargnames,
+            proargdefaults: None,
             prosrc,
+            probin: None,
+            prosqlbody: None,
         };
 
         let ctx = CatalogWriteContext {
@@ -2073,13 +2070,15 @@ impl Database {
             proparallel: create_stmt.parallel.map(proc_parallel_code).unwrap_or('u'),
             pronargs: arg_oids.len() as i16,
             pronargdefaults: 0,
-            proargdefaults: None,
             prorettype: result_type_oid,
             proargtypes,
             proallargtypes: None,
             proargmodes: None,
             proargnames: None,
+            proargdefaults: None,
             prosrc: aggregate_name.clone(),
+            probin: None,
+            prosqlbody: None,
         };
         let aggregate_row = PgAggregateRow {
             aggfnoid: 0,

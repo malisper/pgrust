@@ -1066,6 +1066,13 @@ pub fn default_opclass_for_am_and_type(
     {
         return Some(row.clone());
     }
+    if am_oid == crate::include::catalog::BTREE_AM_OID
+        && input_type_oid == crate::include::catalog::VARCHAR_TYPE_OID
+    {
+        return opclasses
+            .into_iter()
+            .find(|row| row.oid == crate::include::catalog::VARCHAR_BTREE_OPCLASS_OID);
+    }
     let input_type = type_row_by_oid(db, client_id, txn_ctx, input_type_oid)?;
     if input_type.sql_type.is_multirange() {
         return opclasses.into_iter().find(|row| {

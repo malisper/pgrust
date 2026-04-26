@@ -1,40 +1,7 @@
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::include::catalog::{
-    ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, BIT_TYPE_OID, BOOL_TYPE_OID,
-    BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID, BPCHAR_TYPE_OID, BRIN_AM_OID,
-    BRIN_BIT_MINMAX_FAMILY_OID, BRIN_BPCHAR_MINMAX_FAMILY_OID, BRIN_BYTEA_MINMAX_FAMILY_OID,
-    BRIN_CHAR_MINMAX_FAMILY_OID, BRIN_DATETIME_MINMAX_FAMILY_OID, BRIN_FLOAT_MINMAX_FAMILY_OID,
-    BRIN_INTEGER_MINMAX_FAMILY_OID, BRIN_MACADDR_BLOOM_FAMILY_OID, BRIN_MACADDR_MINMAX_FAMILY_OID,
-    BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID, BRIN_MACADDR8_BLOOM_FAMILY_OID,
-    BRIN_MACADDR8_MINMAX_FAMILY_OID, BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID,
-    BRIN_OID_MINMAX_FAMILY_OID, BRIN_TEXT_MINMAX_FAMILY_OID, BRIN_TIME_MINMAX_FAMILY_OID,
-    BRIN_TIMETZ_MINMAX_FAMILY_OID, BRIN_VARBIT_MINMAX_FAMILY_OID, BTREE_AM_OID,
-    BTREE_ARRAY_FAMILY_OID, BTREE_BIT_FAMILY_OID, BTREE_BOOL_FAMILY_OID, BTREE_BYTEA_FAMILY_OID,
-    BTREE_CHAR_FAMILY_OID, BTREE_DATETIME_FAMILY_OID, BTREE_FLOAT_FAMILY_OID,
-    BTREE_INTEGER_FAMILY_OID, BTREE_INTERVAL_FAMILY_OID, BTREE_MACADDR_FAMILY_OID,
-    BTREE_MACADDR8_FAMILY_OID, BTREE_MULTIRANGE_FAMILY_OID, BTREE_NETWORK_FAMILY_OID,
-    BTREE_NUMERIC_FAMILY_OID, BTREE_OID_FAMILY_OID, BTREE_OIDVECTOR_FAMILY_OID,
-    BTREE_TEXT_FAMILY_OID, BTREE_UUID_FAMILY_OID, BTREE_VARBIT_FAMILY_OID, BYTEA_TYPE_OID,
-    CIDR_TYPE_OID, DATE_TYPE_OID, DATEMULTIRANGE_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_TYPE_OID,
-    GIN_AM_OID, GIN_JSONB_FAMILY_OID, GIST_AM_OID, GIST_BOX_FAMILY_OID, GIST_MULTIRANGE_FAMILY_OID,
-    GIST_NETWORK_FAMILY_OID, GIST_POINT_FAMILY_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID,
-    HASH_BOOL_FAMILY_OID, HASH_BPCHAR_FAMILY_OID, HASH_BYTEA_FAMILY_OID, HASH_CHAR_FAMILY_OID,
-    HASH_DATE_FAMILY_OID, HASH_FLOAT_FAMILY_OID, HASH_INTEGER_FAMILY_OID, HASH_INTERVAL_FAMILY_OID,
-    HASH_MACADDR_FAMILY_OID, HASH_MACADDR8_FAMILY_OID, HASH_MULTIRANGE_FAMILY_OID,
-    HASH_NUMERIC_FAMILY_OID, HASH_OID_FAMILY_OID, HASH_TEXT_FAMILY_OID, HASH_TIME_FAMILY_OID,
-    HASH_TIMESTAMP_FAMILY_OID, HASH_TIMESTAMPTZ_FAMILY_OID, HASH_TIMETZ_FAMILY_OID,
-    HASH_UUID_FAMILY_OID, INET_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT4MULTIRANGE_TYPE_OID,
-    INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8MULTIRANGE_TYPE_OID, INTERNAL_CHAR_TYPE_OID,
-    INTERVAL_TYPE_OID, JSONB_TYPE_OID, MACADDR_TYPE_OID, MACADDR8_TYPE_OID, NAME_TYPE_OID,
-    NUMERIC_TYPE_OID, NUMMULTIRANGE_TYPE_OID, OID_TYPE_OID, OIDVECTOR_TYPE_OID,
-    PG_CATALOG_NAMESPACE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, SPGIST_AM_OID,
-    SPGIST_BOX_FAMILY_OID, SPGIST_NETWORK_FAMILY_OID, SPGIST_POLY_FAMILY_OID, TEXT_TYPE_OID,
-    TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID,
-    TSMULTIRANGE_TYPE_OID, TSTZMULTIRANGE_TYPE_OID, UUID_TYPE_OID, VARBIT_TYPE_OID,
-    VARCHAR_TYPE_OID,
-};
+use crate::include::catalog::*;
 
 pub const ARRAY_BTREE_OPCLASS_OID: u32 = 76012;
 pub const BOOL_BTREE_OPCLASS_OID: u32 = 424;
@@ -64,6 +31,25 @@ pub const MULTIRANGE_BTREE_OPCLASS_OID: u32 = 10033;
 pub const CIDR_BTREE_OPCLASS_OID: u32 = 10034;
 pub const INET_BTREE_OPCLASS_OID: u32 = 10035;
 pub const ENUM_BTREE_OPCLASS_OID: u32 = 76170;
+pub const JSONB_BTREE_OPCLASS_OID: u32 = 10054;
+pub const RANGE_BTREE_OPCLASS_OID: u32 = 10055;
+pub const RECORD_BTREE_OPCLASS_OID: u32 = 10037;
+pub const RECORD_IMAGE_BTREE_OPCLASS_OID: u32 = 10038;
+pub const TSQUERY_BTREE_OPCLASS_OID: u32 = 10039;
+pub const TSVECTOR_BTREE_OPCLASS_OID: u32 = 10040;
+pub const TEXT_PATTERN_BTREE_OPCLASS_OID: u32 = 4217;
+pub const VARCHAR_PATTERN_BTREE_OPCLASS_OID: u32 = 4218;
+pub const BPCHAR_PATTERN_BTREE_OPCLASS_OID: u32 = 4219;
+pub const TSVECTOR_GIST_OPCLASS_OID: u32 = 10043;
+pub const TSVECTOR_GIN_OPCLASS_OID: u32 = 10044;
+pub const RANGE_SPGIST_OPCLASS_OID: u32 = 10045;
+pub const TEXT_SPGIST_OPCLASS_OID: u32 = 10046;
+pub const INET_BRIN_INCLUSION_OPCLASS_OID: u32 = 10047;
+pub const RANGE_BRIN_INCLUSION_OPCLASS_OID: u32 = 10048;
+pub const BOX_BRIN_INCLUSION_OPCLASS_OID: u32 = 10049;
+pub const ARRAY_GIN_OPCLASS_OID: u32 = 10051;
+pub const POINT_SPGIST_OPCLASS_OID: u32 = 10052;
+pub const TEXT_BRIN_BLOOM_OPCLASS_OID: u32 = 10053;
 pub const BOX_GIST_OPCLASS_OID: u32 = 76010;
 pub const POINT_GIST_OPCLASS_OID: u32 = 76015;
 pub const RANGE_GIST_OPCLASS_OID: u32 = 76011;
@@ -178,7 +164,7 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             opcowner: BOOTSTRAP_SUPERUSER_OID,
             opcfamily: BTREE_OID_FAMILY_OID,
             opcintype: ANYENUMOID,
-            opcdefault: true,
+            opcdefault: false,
             opckeytype: 0,
         },
         row(
@@ -240,16 +226,39 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BTREE_TEXT_FAMILY_OID,
             TEXT_TYPE_OID,
         ),
-        row(
-            VARCHAR_BTREE_OPCLASS_OID,
-            "varchar_ops",
-            BTREE_TEXT_FAMILY_OID,
-            VARCHAR_TYPE_OID,
-        ),
+        PgOpclassRow {
+            oid: VARCHAR_BTREE_OPCLASS_OID,
+            opcmethod: BTREE_AM_OID,
+            opcname: "varchar_ops".into(),
+            opcnamespace: PG_CATALOG_NAMESPACE_OID,
+            opcowner: BOOTSTRAP_SUPERUSER_OID,
+            opcfamily: BTREE_TEXT_FAMILY_OID,
+            opcintype: TEXT_TYPE_OID,
+            opcdefault: false,
+            opckeytype: 0,
+        },
         row(
             BPCHAR_BTREE_OPCLASS_OID,
             "bpchar_ops",
-            BTREE_TEXT_FAMILY_OID,
+            BTREE_BPCHAR_FAMILY_OID,
+            BPCHAR_TYPE_OID,
+        ),
+        non_default_btree_row(
+            TEXT_PATTERN_BTREE_OPCLASS_OID,
+            "text_pattern_ops",
+            BTREE_TEXT_PATTERN_FAMILY_OID,
+            TEXT_TYPE_OID,
+        ),
+        non_default_btree_row(
+            VARCHAR_PATTERN_BTREE_OPCLASS_OID,
+            "varchar_pattern_ops",
+            BTREE_TEXT_PATTERN_FAMILY_OID,
+            TEXT_TYPE_OID,
+        ),
+        non_default_btree_row(
+            BPCHAR_PATTERN_BTREE_OPCLASS_OID,
+            "bpchar_pattern_ops",
+            BTREE_BPCHAR_PATTERN_FAMILY_OID,
             BPCHAR_TYPE_OID,
         ),
         row(
@@ -269,12 +278,6 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             "numeric_ops",
             BTREE_NUMERIC_FAMILY_OID,
             NUMERIC_TYPE_OID,
-        ),
-        row(
-            INTERVAL_BTREE_OPCLASS_OID,
-            "interval_ops",
-            BTREE_INTERVAL_FAMILY_OID,
-            INTERVAL_TYPE_OID,
         ),
         row(
             TIMESTAMP_BTREE_OPCLASS_OID,
@@ -342,6 +345,53 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             CIDR_TYPE_OID,
         ),
         row(
+            INTERVAL_BTREE_OPCLASS_OID,
+            "interval_ops",
+            BTREE_INTERVAL_FAMILY_OID,
+            INTERVAL_TYPE_OID,
+        ),
+        row(
+            JSONB_BTREE_OPCLASS_OID,
+            "jsonb_ops",
+            BTREE_JSONB_FAMILY_OID,
+            JSONB_TYPE_OID,
+        ),
+        row(
+            RANGE_BTREE_OPCLASS_OID,
+            "range_ops",
+            BTREE_RANGE_FAMILY_OID,
+            ANYRANGEOID,
+        ),
+        row(
+            RECORD_BTREE_OPCLASS_OID,
+            "record_ops",
+            BTREE_RECORD_FAMILY_OID,
+            RECORD_TYPE_OID,
+        ),
+        PgOpclassRow {
+            oid: RECORD_IMAGE_BTREE_OPCLASS_OID,
+            opcmethod: BTREE_AM_OID,
+            opcname: "record_image_ops".into(),
+            opcnamespace: PG_CATALOG_NAMESPACE_OID,
+            opcowner: BOOTSTRAP_SUPERUSER_OID,
+            opcfamily: BTREE_RECORD_IMAGE_FAMILY_OID,
+            opcintype: RECORD_TYPE_OID,
+            opcdefault: false,
+            opckeytype: 0,
+        },
+        row(
+            TSQUERY_BTREE_OPCLASS_OID,
+            "tsquery_ops",
+            BTREE_TSQUERY_FAMILY_OID,
+            TSQUERY_TYPE_OID,
+        ),
+        row(
+            TSVECTOR_BTREE_OPCLASS_OID,
+            "tsvector_ops",
+            BTREE_TSVECTOR_FAMILY_OID,
+            TSVECTOR_TYPE_OID,
+        ),
+        row(
             INET_BTREE_OPCLASS_OID,
             "inet_ops",
             BTREE_NETWORK_FAMILY_OID,
@@ -359,14 +409,17 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             GIST_POINT_FAMILY_OID,
             POINT_TYPE_OID,
         ),
-        // :HACK: PostgreSQL models this as a single anyrange opclass. pgrust does
-        // not have an anyrange pseudo-type yet, so keep one catalog row and use
-        // the concrete type only as a placeholder for lookup.
         gist_row(
             RANGE_GIST_OPCLASS_OID,
             "range_ops",
             GIST_RANGE_FAMILY_OID,
-            INT4RANGE_TYPE_OID,
+            ANYRANGEOID,
+        ),
+        gist_row(
+            TSVECTOR_GIST_OPCLASS_OID,
+            "tsvector_ops",
+            GIST_TSVECTOR_FAMILY_OID,
+            TSVECTOR_TYPE_OID,
         ),
         gist_row(
             INET_GIST_OPCLASS_OID,
@@ -392,10 +445,28 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BOX_TYPE_OID,
         ),
         spgist_row(
+            POINT_SPGIST_OPCLASS_OID,
+            "quad_point_ops",
+            SPGIST_QUAD_POINT_FAMILY_OID,
+            POINT_TYPE_OID,
+        ),
+        spgist_row(
             INET_SPGIST_OPCLASS_OID,
             "inet_ops",
             SPGIST_NETWORK_FAMILY_OID,
             INET_TYPE_OID,
+        ),
+        spgist_row(
+            RANGE_SPGIST_OPCLASS_OID,
+            "range_ops",
+            SPGIST_RANGE_FAMILY_OID,
+            ANYRANGEOID,
+        ),
+        spgist_row(
+            TEXT_SPGIST_OPCLASS_OID,
+            "text_ops",
+            SPGIST_TEXT_FAMILY_OID,
+            TEXT_TYPE_OID,
         ),
         PgOpclassRow {
             oid: POLY_SPGIST_OPCLASS_OID,
@@ -407,6 +478,28 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             opcintype: POLYGON_TYPE_OID,
             opcdefault: true,
             opckeytype: BOX_TYPE_OID,
+        },
+        PgOpclassRow {
+            oid: ARRAY_GIN_OPCLASS_OID,
+            opcmethod: GIN_AM_OID,
+            opcname: "array_ops".into(),
+            opcnamespace: PG_CATALOG_NAMESPACE_OID,
+            opcowner: BOOTSTRAP_SUPERUSER_OID,
+            opcfamily: GIN_ARRAY_FAMILY_OID,
+            opcintype: ANYARRAYOID,
+            opcdefault: true,
+            opckeytype: ANYELEMENTOID,
+        },
+        PgOpclassRow {
+            oid: TSVECTOR_GIN_OPCLASS_OID,
+            opcmethod: GIN_AM_OID,
+            opcname: "tsvector_ops".into(),
+            opcnamespace: PG_CATALOG_NAMESPACE_OID,
+            opcowner: BOOTSTRAP_SUPERUSER_OID,
+            opcfamily: GIN_TSVECTOR_FAMILY_OID,
+            opcintype: TSVECTOR_TYPE_OID,
+            opcdefault: true,
+            opckeytype: TEXT_TYPE_OID,
         },
         PgOpclassRow {
             oid: JSONB_GIN_OPCLASS_OID,
@@ -473,6 +566,17 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_TEXT_MINMAX_FAMILY_OID,
             TEXT_TYPE_OID,
         ),
+        PgOpclassRow {
+            oid: TEXT_BRIN_BLOOM_OPCLASS_OID,
+            opcmethod: BRIN_AM_OID,
+            opcname: "text_bloom_ops".into(),
+            opcnamespace: PG_CATALOG_NAMESPACE_OID,
+            opcowner: BOOTSTRAP_SUPERUSER_OID,
+            opcfamily: BRIN_TEXT_BLOOM_FAMILY_OID,
+            opcintype: TEXT_TYPE_OID,
+            opcdefault: false,
+            opckeytype: 0,
+        },
         brin_row(
             BPCHAR_BRIN_MINMAX_OPCLASS_OID,
             "bpchar_minmax_ops",
@@ -535,29 +639,47 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
         ),
         // :HACK: Generic BRIN minmax-multi and bloom runtime support is not
         // implemented yet; these rows expose PostgreSQL-compatible catalogs.
-        brin_row(
+        brin_non_default_row(
             MACADDR_BRIN_MINMAX_MULTI_OPCLASS_OID,
             "macaddr_minmax_multi_ops",
             BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID,
             MACADDR_TYPE_OID,
         ),
-        brin_row(
+        brin_non_default_row(
             MACADDR8_BRIN_MINMAX_MULTI_OPCLASS_OID,
             "macaddr8_minmax_multi_ops",
             BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID,
             MACADDR8_TYPE_OID,
         ),
-        brin_row(
+        brin_non_default_row(
             MACADDR_BRIN_BLOOM_OPCLASS_OID,
             "macaddr_bloom_ops",
             BRIN_MACADDR_BLOOM_FAMILY_OID,
             MACADDR_TYPE_OID,
         ),
-        brin_row(
+        brin_non_default_row(
             MACADDR8_BRIN_BLOOM_OPCLASS_OID,
             "macaddr8_bloom_ops",
             BRIN_MACADDR8_BLOOM_FAMILY_OID,
             MACADDR8_TYPE_OID,
+        ),
+        brin_row(
+            INET_BRIN_INCLUSION_OPCLASS_OID,
+            "inet_inclusion_ops",
+            BRIN_NETWORK_INCLUSION_FAMILY_OID,
+            INET_TYPE_OID,
+        ),
+        brin_row(
+            RANGE_BRIN_INCLUSION_OPCLASS_OID,
+            "range_inclusion_ops",
+            BRIN_RANGE_INCLUSION_FAMILY_OID,
+            ANYRANGEOID,
+        ),
+        brin_row(
+            BOX_BRIN_INCLUSION_OPCLASS_OID,
+            "box_inclusion_ops",
+            BRIN_BOX_INCLUSION_FAMILY_OID,
+            BOX_TYPE_OID,
         ),
         hash_row(
             BOOL_HASH_OPCLASS_OID,
@@ -685,12 +807,17 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             HASH_INTERVAL_FAMILY_OID,
             INTERVAL_TYPE_OID,
         ),
-        hash_row(
-            ENUM_HASH_OPCLASS_OID,
-            "enum_ops",
-            HASH_OID_FAMILY_OID,
-            ANYENUMOID,
-        ),
+        PgOpclassRow {
+            oid: ENUM_HASH_OPCLASS_OID,
+            opcmethod: HASH_AM_OID,
+            opcname: "enum_ops".into(),
+            opcnamespace: PG_CATALOG_NAMESPACE_OID,
+            opcowner: BOOTSTRAP_SUPERUSER_OID,
+            opcfamily: HASH_OID_FAMILY_OID,
+            opcintype: ANYENUMOID,
+            opcdefault: false,
+            opckeytype: 0,
+        },
         hash_row(
             MULTIRANGE_HASH_OPCLASS_OID,
             "multirange_ops",
@@ -722,6 +849,20 @@ fn row(oid: u32, opcname: &str, family: u32, input_type: u32) -> PgOpclassRow {
         opcfamily: family,
         opcintype: input_type,
         opcdefault: true,
+        opckeytype: 0,
+    }
+}
+
+fn non_default_btree_row(oid: u32, opcname: &str, family: u32, input_type: u32) -> PgOpclassRow {
+    PgOpclassRow {
+        oid,
+        opcmethod: BTREE_AM_OID,
+        opcname: opcname.into(),
+        opcnamespace: PG_CATALOG_NAMESPACE_OID,
+        opcowner: BOOTSTRAP_SUPERUSER_OID,
+        opcfamily: family,
+        opcintype: input_type,
+        opcdefault: false,
         opckeytype: 0,
     }
 }
@@ -765,6 +906,13 @@ fn brin_row(oid: u32, opcname: &str, family: u32, input_type: u32) -> PgOpclassR
         opcintype: input_type,
         opcdefault: true,
         opckeytype: 0,
+    }
+}
+
+fn brin_non_default_row(oid: u32, opcname: &str, family: u32, input_type: u32) -> PgOpclassRow {
+    PgOpclassRow {
+        opcdefault: false,
+        ..brin_row(oid, opcname, family, input_type)
     }
 }
 

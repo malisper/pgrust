@@ -135,6 +135,9 @@ const PG_TYPE_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::new("typrelid", SqlType::new(SqlTypeKind::Oid)),
     SyntheticSystemViewColumn::new("typelem", SqlType::new(SqlTypeKind::Oid)),
     SyntheticSystemViewColumn::new("typarray", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("typinput", SqlType::new(SqlTypeKind::RegProc)),
+    SyntheticSystemViewColumn::new("typoutput", SqlType::new(SqlTypeKind::RegProc)),
+    SyntheticSystemViewColumn::new("typmodout", SqlType::new(SqlTypeKind::RegProc)),
 ];
 
 const PG_VIEWS_COLUMNS: &[SyntheticSystemViewColumn] = &[

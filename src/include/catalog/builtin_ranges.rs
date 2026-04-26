@@ -853,13 +853,15 @@ fn range_proc_row(
         proparallel: 's',
         pronargs: arg_oids.len() as i16,
         pronargdefaults: 0,
-        proargdefaults: None,
         prorettype,
         proargtypes: oid_argtypes(arg_oids),
         proallargtypes: None,
         proargmodes: None,
         proargnames: None,
+        proargdefaults: None,
         prosrc: prosrc.into(),
+        probin: None,
+        prosqlbody: None,
     }
 }
 
@@ -883,6 +885,13 @@ fn range_variadic_proc_row(
         prokind,
     );
     row.provariadic = variadic_oid;
+    if !arg_oids.is_empty() {
+        let mut proargmodes = vec![b'i'; arg_oids.len()];
+        if let Some(mode) = proargmodes.last_mut() {
+            *mode = b'v';
+        }
+        row.proargmodes = Some(proargmodes);
+    }
     row
 }
 

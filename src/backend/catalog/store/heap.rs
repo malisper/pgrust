@@ -2960,6 +2960,9 @@ impl CatalogStore {
             typrelid: 0,
             typelem: 0,
             typarray: 0,
+            typinput: 0,
+            typoutput: 0,
+            typmodout: 0,
             sql_type: SqlType::new(SqlTypeKind::Shell).with_identity(oid, 0),
         };
         let kinds = [BootstrapCatalogKind::PgType];
@@ -3016,6 +3019,9 @@ impl CatalogStore {
             typrelid: 0,
             typelem,
             typarray: array_oid,
+            typinput: support_proc_oids.first().copied().unwrap_or(0),
+            typoutput: support_proc_oids.get(1).copied().unwrap_or(0),
+            typmodout: 0,
             sql_type: base_sql_type,
         };
         let array_row = PgTypeRow {
@@ -3029,6 +3035,9 @@ impl CatalogStore {
             typrelid: 0,
             typelem: type_oid,
             typarray: 0,
+            typinput: 0,
+            typoutput: 0,
+            typmodout: 0,
             sql_type: SqlType::array_of(base_sql_type),
         };
         let mut depends = vec![
@@ -6749,7 +6758,10 @@ fn rows_for_new_relation_entry(
                         .generated
                         .map(|kind| kind.catalog_char())
                         .unwrap_or('\0'),
-                    attcollation: column.collation_oid,
+                    attcollation: crate::backend::catalog::catalog::catalog_attribute_collation_oid(
+                        entry.relation_oid,
+                        column.collation_oid,
+                    ),
                     sql_type: column.sql_type,
                 })
             })

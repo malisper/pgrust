@@ -1939,8 +1939,44 @@ fn builtin_named_type_alias(name: &str) -> Option<SqlType> {
     }
     if name.eq_ignore_ascii_case("float") {
         Some(SqlType::new(SqlTypeKind::Float8))
+    } else if name.eq_ignore_ascii_case("any") {
+        Some(
+            SqlType::new(SqlTypeKind::AnyElement).with_identity(crate::include::catalog::ANYOID, 0),
+        )
+    } else if name.eq_ignore_ascii_case("anyenum") {
+        Some(
+            SqlType::new(SqlTypeKind::AnyElement)
+                .with_identity(crate::include::catalog::ANYENUMOID, 0),
+        )
+    } else if name.eq_ignore_ascii_case("anynonarray") {
+        Some(
+            SqlType::new(SqlTypeKind::AnyElement)
+                .with_identity(crate::include::catalog::ANYNONARRAYOID, 0),
+        )
+    } else if name.eq_ignore_ascii_case("anycompatiblenonarray") {
+        Some(
+            SqlType::new(SqlTypeKind::AnyCompatible)
+                .with_identity(crate::include::catalog::ANYCOMPATIBLENONARRAYOID, 0),
+        )
     } else if name.eq_ignore_ascii_case("bpchar") {
         Some(SqlType::new(SqlTypeKind::Char))
+    } else if name.eq_ignore_ascii_case("character") {
+        Some(SqlType::new(SqlTypeKind::Char))
+    } else if name.eq_ignore_ascii_case("index_am_handler") {
+        Some(
+            SqlType::new(SqlTypeKind::FdwHandler)
+                .with_identity(crate::include::catalog::INDEX_AM_HANDLER_TYPE_OID, 0),
+        )
+    } else if name.eq_ignore_ascii_case("table_am_handler") {
+        Some(
+            SqlType::new(SqlTypeKind::FdwHandler)
+                .with_identity(crate::include::catalog::TABLE_AM_HANDLER_TYPE_OID, 0),
+        )
+    } else if name.eq_ignore_ascii_case("cstring") {
+        Some(
+            SqlType::new(SqlTypeKind::Text)
+                .with_identity(crate::include::catalog::CSTRING_TYPE_OID, 0),
+        )
     } else if name.eq_ignore_ascii_case("regtype") {
         Some(SqlType::new(SqlTypeKind::RegType))
     } else if name.eq_ignore_ascii_case("regproc") {

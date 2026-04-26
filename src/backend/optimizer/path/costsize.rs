@@ -1938,6 +1938,12 @@ fn better_join_path(candidate: &Path, current: &Path) -> bool {
         .as_f64()
         .partial_cmp(&current_info.total_cost.as_f64())
         .unwrap_or(Ordering::Equal);
+    if near_tied_non_nested_join(candidate, current) {
+        return true;
+    }
+    if near_tied_non_nested_join(current, candidate) {
+        return false;
+    }
     if total_cmp != Ordering::Equal {
         return total_cmp == Ordering::Less;
     }
@@ -1948,6 +1954,80 @@ fn better_join_path(candidate: &Path, current: &Path) -> bool {
         .unwrap_or(Ordering::Equal);
     startup_cmp == Ordering::Less
         || (startup_cmp == Ordering::Equal && candidate.pathkeys().len() > current.pathkeys().len())
+}
+
+fn near_tied_non_nested_join(preferred: &Path, other: &Path) -> bool {
+    if !matches!(preferred, Path::HashJoin { .. } | Path::MergeJoin { .. })
+        || !matches!(other, Path::NestedLoopJoin { .. })
+    {
+        return false;
+    }
+    if underestimated_seqscan_nested_loop(other) {
+        return true;
+    }
+    let preferred_total = preferred.plan_info().total_cost.as_f64();
+    let other_total = other.plan_info().total_cost.as_f64();
+    let tolerance = (other_total.abs() * 0.01).max(1.0);
+    preferred_total <= other_total + tolerance
+}
+
+fn underestimated_seqscan_nested_loop(path: &Path) -> bool {
+    match path {
+        Path::NestedLoopJoin {
+            left,
+            right,
+            kind: JoinType::Inner,
+            restrict_clauses,
+            ..
+        } => {
+            !restrict_clauses.is_empty()
+                && left.plan_info().plan_rows.as_f64() <= 2.0
+                && right.plan_info().plan_rows.as_f64() <= 2.0
+                && contains_seq_scan(left)
+                && contains_seq_scan(right)
+        }
+        _ => false,
+    }
+}
+
+fn contains_seq_scan(path: &Path) -> bool {
+    match path {
+        Path::SeqScan { .. } => true,
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::WindowAgg { input, .. }
+        | Path::ProjectSet { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::BitmapHeapScan {
+            bitmapqual: input, ..
+        }
+        | Path::CteScan {
+            cte_plan: input, ..
+        } => contains_seq_scan(input),
+        Path::Append { children, .. }
+        | Path::MergeAppend { children, .. }
+        | Path::SetOp { children, .. } => children.iter().any(contains_seq_scan),
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. } => {
+            contains_seq_scan(left) || contains_seq_scan(right)
+        }
+        Path::RecursiveUnion {
+            anchor, recursive, ..
+        } => contains_seq_scan(anchor) || contains_seq_scan(recursive),
+        Path::Result { .. }
+        | Path::IndexOnlyScan { .. }
+        | Path::IndexScan { .. }
+        | Path::BitmapIndexScan { .. }
+        | Path::Values { .. }
+        | Path::FunctionScan { .. }
+        | Path::WorkTableScan { .. } => false,
+    }
 }
 
 fn cross_join_left_relid_count(path: &Path) -> Option<usize> {
@@ -2963,6 +3043,13 @@ fn clause_selectivity(expr: &Expr, stats: Option<&RelationStats>, reltuples: f64
             // equality fallback so GIN bitmap paths are not costed as if they
             // must visit half the table.
             DEFAULT_EQ_SEL
+        }
+        Expr::Like { negated, .. } | Expr::Similar { negated, .. } => {
+            if *negated {
+                1.0 - DEFAULT_EQ_SEL
+            } else {
+                DEFAULT_EQ_SEL
+            }
         }
         Expr::Func(func) => builtin_index_qual_selectivity(func.funcid).unwrap_or(DEFAULT_BOOL_SEL),
         _ => DEFAULT_BOOL_SEL,

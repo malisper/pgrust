@@ -5,8 +5,11 @@ use crate::backend::executor::{ColumnDesc, RelationDesc, ScalarType};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
-    DEFAULT_COLLATION_OID, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    C_COLLATION_OID, DEFAULT_COLLATION_OID, multirange_type_ref_for_sql_type,
+    range_type_ref_for_sql_type,
 };
+
+const FIRST_NORMAL_OBJECT_OID: u32 = 16_384;
 
 pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -> ColumnDesc {
     let name = name.into();
@@ -93,6 +96,14 @@ pub(crate) fn default_column_collation_oid(sql_type: SqlType) -> u32 {
             DEFAULT_COLLATION_OID
         }
         _ => 0,
+    }
+}
+
+pub(crate) fn catalog_attribute_collation_oid(relation_oid: u32, collation_oid: u32) -> u32 {
+    if relation_oid < FIRST_NORMAL_OBJECT_OID && collation_oid == DEFAULT_COLLATION_OID {
+        C_COLLATION_OID
+    } else {
+        collation_oid
     }
 }
 

@@ -6,7 +6,6 @@ use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
 use crate::backend::executor::value_io::{decode_value, missing_column_value};
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::backend::utils::cache::catcache::format_indkey;
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
     BootstrapCatalogKind, PG_STATISTIC_RELATION_OID, PG_STATISTIC_ROWTYPE_OID, PgAggregateRow,
@@ -19,7 +18,7 @@ use crate::include::catalog::{
     PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
     bootstrap_composite_type_rows, builtin_type_rows,
 };
-use crate::include::nodes::datum::{ArrayValue, RecordValue, Value};
+use crate::include::nodes::datum::{ArrayDimension, ArrayValue, RecordValue, Value};
 
 pub(crate) fn catalog_row_values_for_kind(
     rows: &PhysicalCatalogRows,
@@ -154,6 +153,7 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(pg_constraint_row_values)
             .collect(),
+        BootstrapCatalogKind::PgConversion => Vec::new(),
         BootstrapCatalogKind::PgDepend => rows
             .depends
             .iter()
@@ -280,17 +280,87 @@ pub(crate) fn decode_catalog_tuple_values(
 }
 
 pub(crate) fn parse_indkey(indkey: &str) -> Vec<i16> {
-    indkey
-        .split_ascii_whitespace()
+    vector_text_items(indkey)
+        .into_iter()
         .filter_map(|value| value.parse::<i16>().ok())
         .collect()
 }
 
 pub(crate) fn parse_oidvector(values: &str) -> Vec<u32> {
-    values
-        .split_ascii_whitespace()
+    vector_text_items(values)
+        .into_iter()
         .filter_map(|value| value.parse::<u32>().ok())
         .collect()
+}
+
+fn vector_text_items(text: &str) -> Vec<&str> {
+    let trimmed = text.trim();
+    let body = if let Some(equals) = trimmed.find('=')
+        && trimmed.starts_with('[')
+    {
+        trimmed[equals + 1..].trim()
+    } else {
+        trimmed
+    };
+    if let Some(inner) = body
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+    {
+        inner
+            .split(',')
+            .map(|value| value.trim().trim_matches('"'))
+            .filter(|value| !value.is_empty())
+            .collect()
+    } else {
+        body.split_ascii_whitespace().collect()
+    }
+}
+
+fn format_oidvector(values: &[u32]) -> String {
+    values
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parse_indkey_value(value: &Value) -> Result<Vec<i16>, CatalogError> {
+    match value {
+        Value::Text(text) => Ok(parse_indkey(text)),
+        Value::PgArray(array) => {
+            array
+                .elements
+                .iter()
+                .map(|value| match value {
+                    Value::Int16(v) => Ok(*v),
+                    Value::Int32(v) => i16::try_from(*v)
+                        .map_err(|_| CatalogError::Corrupt("invalid int2vector value")),
+                    Value::Int64(v) => i16::try_from(*v)
+                        .map_err(|_| CatalogError::Corrupt("invalid int2vector value")),
+                    _ => Err(CatalogError::Corrupt("expected int2vector value")),
+                })
+                .collect()
+        }
+        _ => Err(CatalogError::Corrupt("expected int2vector value")),
+    }
+}
+
+fn parse_oidvector_value(value: &Value) -> Result<Vec<u32>, CatalogError> {
+    match value {
+        Value::Text(text) => Ok(parse_oidvector(text)),
+        Value::PgArray(array) => array
+            .elements
+            .iter()
+            .map(|value| match value {
+                Value::Int32(v) if *v >= 0 => Ok(*v as u32),
+                Value::Int64(v) => {
+                    u32::try_from(*v).map_err(|_| CatalogError::Corrupt("invalid oidvector value"))
+                }
+                _ => Err(CatalogError::Corrupt("expected oidvector value")),
+            })
+            .collect(),
+        _ => Err(CatalogError::Corrupt("expected oidvector value")),
+    }
 }
 
 pub(crate) fn namespace_row_from_values(
@@ -344,9 +414,9 @@ pub(crate) fn pg_partitioned_table_row_from_values(
         partstrat: expect_char(&values[1], "partstrat")?,
         partnatts: expect_int16(&values[2])?,
         partdefid: expect_oid(&values[3])?,
-        partattrs: parse_indkey(&expect_text(&values[4])?),
-        partclass: parse_oidvector(&expect_text(&values[5])?),
-        partcollation: parse_oidvector(&expect_text(&values[6])?),
+        partattrs: parse_indkey_value(&values[4])?,
+        partclass: parse_oidvector_value(&values[5])?,
+        partcollation: parse_oidvector_value(&values[6])?,
         partexprs: nullable_text(&values[7])?,
     })
 }
@@ -411,7 +481,10 @@ pub(crate) fn pg_publication_rel_row_from_values(
         prpubid: expect_oid(&values[1])?,
         prrelid: expect_oid(&values[2])?,
         prqual: expect_nullable_text(&values[3])?,
-        prattrs: expect_nullable_text(&values[4])?.map(|text| parse_indkey(&text)),
+        prattrs: match values.get(4) {
+            Some(Value::Null) | None => None,
+            Some(value) => Some(parse_indkey_value(value)?),
+        },
     })
 }
 
@@ -595,6 +668,8 @@ pub(crate) fn pg_operator_row_from_values(
 }
 
 pub(crate) fn pg_proc_row_from_values(values: Vec<Value>) -> Result<PgProcRow, CatalogError> {
+    let has_added_proc_columns = values.len() > 24;
+    let prosrc_index = if has_added_proc_columns { 24 } else { 23 };
     Ok(PgProcRow {
         oid: expect_oid(&values[0])?,
         proname: expect_text(&values[1])?,
@@ -615,14 +690,24 @@ pub(crate) fn pg_proc_row_from_values(values: Vec<Value>) -> Result<PgProcRow, C
         pronargs: expect_int16(&values[16])?,
         pronargdefaults: expect_int16(&values[17])?,
         prorettype: expect_oid(&values[18])?,
-        proargtypes: expect_text(&values[19])?,
+        proargtypes: format_oidvector(&parse_oidvector_value(&values[19])?),
         proallargtypes: nullable_oid_array(&values[20])?,
         proargmodes: nullable_char_array(&values[21])?,
         proargnames: nullable_text_array(&values[22])?,
-        prosrc: expect_text(&values[23])?,
-        proargdefaults: values
-            .get(24)
-            .map(nullable_text_array)
+        proargdefaults: if has_added_proc_columns {
+            nullable_text(&values[23])?
+        } else {
+            None
+        },
+        prosrc: expect_text(&values[prosrc_index])?,
+        probin: values
+            .get(prosrc_index + 1)
+            .map(nullable_text)
+            .transpose()?
+            .flatten(),
+        prosqlbody: values
+            .get(prosrc_index + 2)
+            .map(nullable_text)
             .transpose()?
             .flatten(),
     })
@@ -913,10 +998,10 @@ pub(crate) fn pg_index_row_from_values(values: Vec<Value>) -> Result<PgIndexRow,
         indisready: expect_bool(&values[12])?,
         indislive: expect_bool(&values[13])?,
         indisreplident: expect_bool(&values[14])?,
-        indkey: parse_indkey(&expect_text(&values[15])?),
-        indcollation: parse_oidvector(&expect_text(&values[16])?),
-        indclass: parse_oidvector(&expect_text(&values[17])?),
-        indoption: parse_indkey(&expect_text(&values[18])?),
+        indkey: parse_indkey_value(&values[15])?,
+        indcollation: parse_oidvector_value(&values[16])?,
+        indclass: parse_oidvector_value(&values[17])?,
+        indoption: parse_indkey_value(&values[18])?,
         indexprs: expect_nullable_text(&values[19])?,
         indpred: expect_nullable_text(&values[20])?,
     })
@@ -931,6 +1016,24 @@ pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, C
         .ok_or(CatalogError::Corrupt("invalid typalign"))?;
     let typstorage = AttributeStorage::from_char(expect_char(&values[6], "typstorage")?)
         .ok_or(CatalogError::Corrupt("invalid typstorage"))?;
+    let typinput = values
+        .get(10)
+        .map(expect_nullable_oid)
+        .transpose()?
+        .flatten()
+        .unwrap_or(0);
+    let typoutput = values
+        .get(11)
+        .map(expect_nullable_oid)
+        .transpose()?
+        .flatten()
+        .unwrap_or(0);
+    let typmodout = values
+        .get(12)
+        .map(expect_nullable_oid)
+        .transpose()?
+        .flatten()
+        .unwrap_or(0);
     Ok(PgTypeRow {
         oid,
         typname: expect_text(&values[1])?,
@@ -942,6 +1045,9 @@ pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, C
         typrelid,
         typelem,
         typarray,
+        typinput,
+        typoutput,
+        typmodout,
         sql_type: decode_builtin_sql_type(oid).unwrap_or_else(|| {
             if typrelid != 0 {
                 SqlType::named_composite(oid, typrelid)
@@ -1024,7 +1130,7 @@ pub(crate) fn pg_statistic_ext_row_from_values(
         stxname: expect_text(&values[2])?,
         stxnamespace: expect_oid(&values[3])?,
         stxowner: expect_oid(&values[4])?,
-        stxkeys: parse_indkey(&expect_text(&values[5])?),
+        stxkeys: parse_indkey_value(&values[5])?,
         stxstattarget: expect_nullable_int16(&values[6])?,
         stxkind: nullable_char_array(&values[7])?
             .ok_or(CatalogError::Corrupt("expected stxkind array"))?,
@@ -1118,23 +1224,9 @@ fn pg_partitioned_table_row_values(row: PgPartitionedTableRow) -> Vec<Value> {
         Value::Text(row.partstrat.to_string().into()),
         Value::Int16(row.partnatts),
         Value::Int32(row.partdefid as i32),
-        Value::Text(format_indkey(&row.partattrs).into()),
-        Value::Text(
-            row.partclass
-                .iter()
-                .map(|value| value.to_string())
-                .collect::<Vec<_>>()
-                .join(" ")
-                .into(),
-        ),
-        Value::Text(
-            row.partcollation
-                .iter()
-                .map(|value| value.to_string())
-                .collect::<Vec<_>>()
-                .join(" ")
-                .into(),
-        ),
+        Value::PgArray(int16_vector_value(row.partattrs)),
+        Value::PgArray(oid_vector_value(row.partclass)),
+        Value::PgArray(oid_vector_value(row.partcollation)),
         nullable_text_value(row.partexprs),
     ]
 }
@@ -1321,7 +1413,7 @@ fn pg_proc_row_values(row: PgProcRow) -> Vec<Value> {
         Value::Int16(row.pronargs),
         Value::Int16(row.pronargdefaults),
         Value::Int32(row.prorettype as i32),
-        Value::Text(row.proargtypes.into()),
+        Value::PgArray(oid_vector_value(parse_oidvector(&row.proargtypes))),
         nullable_array_value(row.proallargtypes.map(|oids| {
             ArrayValue::from_1d(
                 oids.into_iter()
@@ -1348,16 +1440,10 @@ fn pg_proc_row_values(row: PgProcRow) -> Vec<Value> {
             )
             .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID)
         })),
+        nullable_text_value(row.proargdefaults),
         Value::Text(row.prosrc.into()),
-        nullable_array_value(row.proargdefaults.map(|defaults| {
-            ArrayValue::from_1d(
-                defaults
-                    .into_iter()
-                    .map(|default| Value::Text(default.into()))
-                    .collect(),
-            )
-            .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID)
-        })),
+        nullable_text_value(row.probin),
+        nullable_text_value(row.prosqlbody),
     ]
 }
 
@@ -1533,6 +1619,9 @@ fn pg_type_row_values(row: PgTypeRow) -> Vec<Value> {
         Value::Int32(row.typrelid as i32),
         Value::Int32(row.typelem as i32),
         Value::Int32(row.typarray as i32),
+        Value::Int32(row.typinput as i32),
+        Value::Int32(row.typoutput as i32),
+        Value::Int32(row.typmodout as i32),
     ]
 }
 
@@ -1599,7 +1688,7 @@ fn pg_publication_rel_row_values(row: PgPublicationRelRow) -> Vec<Value> {
         Value::Int32(row.prpubid as i32),
         Value::Int32(row.prrelid as i32),
         nullable_text_value(row.prqual),
-        nullable_text_value(row.prattrs.as_deref().map(format_indkey)),
+        nullable_array_value(row.prattrs.map(int16_vector_value)),
     ]
 }
 
@@ -1667,7 +1756,7 @@ fn pg_statistic_ext_row_values(row: PgStatisticExtRow) -> Vec<Value> {
         Value::Text(row.stxname.into()),
         Value::Int32(row.stxnamespace as i32),
         Value::Int32(row.stxowner as i32),
-        Value::Text(format_indkey(&row.stxkeys).into()),
+        Value::PgArray(int16_vector_value(row.stxkeys)),
         nullable_int16_value(row.stxstattarget),
         Value::PgArray(
             ArrayValue::from_1d(row.stxkind.into_iter().map(Value::InternalChar).collect())
@@ -1735,24 +1824,10 @@ fn pg_index_row_values(row: PgIndexRow) -> Vec<Value> {
         Value::Bool(row.indisready),
         Value::Bool(row.indislive),
         Value::Bool(row.indisreplident),
-        Value::Text(format_indkey(&row.indkey).into()),
-        Value::Text(
-            row.indcollation
-                .iter()
-                .map(|value| value.to_string())
-                .collect::<Vec<_>>()
-                .join(" ")
-                .into(),
-        ),
-        Value::Text(
-            row.indclass
-                .iter()
-                .map(|value| value.to_string())
-                .collect::<Vec<_>>()
-                .join(" ")
-                .into(),
-        ),
-        Value::Text(format_indkey(&row.indoption).into()),
+        Value::PgArray(int16_vector_value(row.indkey)),
+        Value::PgArray(oid_vector_value(row.indcollation)),
+        Value::PgArray(oid_vector_value(row.indclass)),
+        Value::PgArray(int16_vector_value(row.indoption)),
         row.indexprs.map_or(Value::Null, |v| Value::Text(v.into())),
         row.indpred.map_or(Value::Null, |v| Value::Text(v.into())),
     ]
@@ -1991,6 +2066,34 @@ fn oid_array_value(values: Vec<u32>) -> ArrayValue {
 fn int16_array_value(values: Vec<i16>) -> ArrayValue {
     ArrayValue::from_1d(values.into_iter().map(Value::Int16).collect())
         .with_element_type_oid(crate::include::catalog::INT2_TYPE_OID)
+}
+
+fn oid_vector_value(values: Vec<u32>) -> ArrayValue {
+    let length = values.len();
+    ArrayValue::from_dimensions(
+        vector_dimensions(length),
+        values
+            .into_iter()
+            .map(|oid| Value::Int32(oid as i32))
+            .collect(),
+    )
+    .with_element_type_oid(crate::include::catalog::OID_TYPE_OID)
+}
+
+fn int16_vector_value(values: Vec<i16>) -> ArrayValue {
+    let length = values.len();
+    ArrayValue::from_dimensions(
+        vector_dimensions(length),
+        values.into_iter().map(Value::Int16).collect(),
+    )
+    .with_element_type_oid(crate::include::catalog::INT2_TYPE_OID)
+}
+
+fn vector_dimensions(length: usize) -> Vec<ArrayDimension> {
+    vec![ArrayDimension {
+        lower_bound: 0,
+        length,
+    }]
 }
 
 fn text_array_value(values: Vec<String>) -> ArrayValue {

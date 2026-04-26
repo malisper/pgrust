@@ -335,6 +335,7 @@ pub enum BuiltinScalarFunction {
     PgBackendPid,
     PgPartitionRoot,
     GetDatabaseEncoding,
+    PgEncodingToChar,
     PgMyTempSchema,
     PgRustInternalBinaryCoercible,
     PgRustTestOpclassOptionsFunc,
@@ -519,6 +520,7 @@ pub enum BuiltinScalarFunction {
     BitCount,
     Encode,
     Decode,
+    Convert,
     ConvertFrom,
     Md5,
     Sha224,
@@ -604,6 +606,7 @@ pub enum BuiltinScalarFunction {
     Log10,
     Gcd,
     Lcm,
+    Greatest,
     Div,
     Mod,
     Scale,
@@ -817,6 +820,8 @@ pub enum BuiltinScalarFunction {
     PgInputErrorHint,
     PgInputErrorSqlState,
     PgRustDomainCheckUpperLessThan,
+    AmValidate,
+    BtEqualImage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

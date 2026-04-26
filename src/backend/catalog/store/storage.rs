@@ -19,7 +19,9 @@ use crate::backend::catalog::persistence::{
     apply_catalog_row_changes_subset_incremental, sync_catalog_rows_subset,
 };
 use crate::backend::catalog::rowcodec::{pg_aggregate_row_from_values, pg_proc_row_from_values};
-use crate::backend::catalog::rows::{PhysicalCatalogRows, physical_catalog_rows_from_catcache};
+use crate::backend::catalog::rows::{
+    PhysicalCatalogRows, add_builtin_description_rows, physical_catalog_rows_from_catcache,
+};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::backend::utils::cache::catcache::CatCache;
@@ -819,6 +821,7 @@ fn sync_physical_catalogs_scoped(
                 rows.descriptions = existing_rows.descriptions;
             }
         }
+        add_builtin_description_rows(&mut rows.descriptions, &catcache);
     }
     sync_catalog_rows_subset(base_dir, &rows, db_oid, kinds)
 }

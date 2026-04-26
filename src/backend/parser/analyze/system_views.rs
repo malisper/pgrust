@@ -141,6 +141,9 @@ pub(super) fn bind_builtin_system_view(
                     Value::Int64(i64::from(row.typrelid)),
                     Value::Int64(i64::from(row.typelem)),
                     Value::Int64(i64::from(row.typarray)),
+                    Value::Int64(i64::from(row.typinput)),
+                    Value::Int64(i64::from(row.typoutput)),
+                    Value::Int64(i64::from(row.typmodout)),
                 ]
             })
             .collect(),

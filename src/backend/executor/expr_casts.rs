@@ -3288,10 +3288,17 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             }
             other => match other.as_text() {
                 Some(text) => {
-                    if !text.trim_start().starts_with('{') {
+                    let trimmed = text.trim_start();
+                    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
                         match ty.element_type().kind {
                             SqlTypeKind::Int2 => parse_int2vector_array_text(text),
-                            SqlTypeKind::Oid => parse_oidvector_array_text(text),
+                            kind if is_oid_vector_array_element(kind) => {
+                                parse_oidvector_array_text(
+                                    text,
+                                    array_element_type_oid(ty.element_type())
+                                        .unwrap_or(OID_TYPE_OID),
+                                )
+                            }
                             _ => parse_text_array_literal_with_options_and_catalog(
                                 text,
                                 ty.element_type(),
@@ -4689,25 +4696,49 @@ fn parse_int2vector_array_text(text: &str) -> Result<Value, ExecError> {
         items.push(cast_text_to_int2(item)?);
     }
     Ok(Value::PgArray(
-        ArrayValue::from_1d(items).with_element_type_oid(INT2_TYPE_OID),
+        ArrayValue::from_dimensions(vector_array_dimensions(items.len()), items)
+            .with_element_type_oid(INT2_TYPE_OID),
     ))
 }
 
-fn parse_oidvector_array_text(text: &str) -> Result<Value, ExecError> {
+fn parse_oidvector_array_text(text: &str, element_type_oid: u32) -> Result<Value, ExecError> {
     let mut items = Vec::new();
     for item in text.split_ascii_whitespace() {
         items.push(cast_text_to_oid(item)?);
     }
     Ok(Value::PgArray(
-        ArrayValue::from_dimensions(
-            vec![ArrayDimension {
-                lower_bound: 0,
-                length: items.len(),
-            }],
-            items,
-        )
-        .with_element_type_oid(OID_TYPE_OID),
+        ArrayValue::from_dimensions(vector_array_dimensions(items.len()), items)
+            .with_element_type_oid(element_type_oid),
     ))
+}
+
+fn is_oid_vector_array_element(kind: SqlTypeKind) -> bool {
+    matches!(
+        kind,
+        SqlTypeKind::Oid
+            | SqlTypeKind::RegProc
+            | SqlTypeKind::RegClass
+            | SqlTypeKind::RegType
+            | SqlTypeKind::RegRole
+            | SqlTypeKind::RegNamespace
+            | SqlTypeKind::RegOper
+            | SqlTypeKind::RegOperator
+            | SqlTypeKind::RegProcedure
+            | SqlTypeKind::RegCollation
+            | SqlTypeKind::RegConfig
+            | SqlTypeKind::RegDictionary
+    )
+}
+
+fn vector_array_dimensions(length: usize) -> Vec<ArrayDimension> {
+    if length == 0 {
+        Vec::new()
+    } else {
+        vec![ArrayDimension {
+            lower_bound: 0,
+            length,
+        }]
+    }
 }
 
 fn array_element_type_oid(element_type: SqlType) -> Option<u32> {

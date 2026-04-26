@@ -5,10 +5,10 @@ use crate::backend::parser::{
 };
 use crate::include::catalog::{
     BIT_TYPE_OID, BOOL_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_TYPE_OID,
-    INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, NUMERIC_TYPE_OID, OID_TYPE_OID,
-    REGCOLLATION_TYPE_OID, REGOPER_TYPE_OID, REGOPERATOR_TYPE_OID, REGPROC_TYPE_OID,
-    REGPROCEDURE_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
-    VARCHAR_TYPE_OID,
+    INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, INTERNAL_CHAR_TYPE_OID, NUMERIC_TYPE_OID,
+    OID_TYPE_OID, REGCOLLATION_TYPE_OID, REGOPER_TYPE_OID, REGOPERATOR_TYPE_OID, REGPROC_TYPE_OID,
+    REGPROCEDURE_TYPE_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
+    TIMETZ_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID,
 };
 use crate::include::nodes::datum::Value;
 
@@ -555,6 +555,7 @@ pub(crate) fn format_type_text(
         FLOAT8_TYPE_OID => "double precision".into(),
         OID_TYPE_OID => "oid".into(),
         TEXT_TYPE_OID => "text".into(),
+        INTERNAL_CHAR_TYPE_OID => "\"char\"".into(),
         NUMERIC_TYPE_OID => "numeric".into(),
         VARCHAR_TYPE_OID => match typmod {
             Some(value) if value >= 4 => format!("character varying({})", value - 4),
@@ -569,6 +570,18 @@ pub(crate) fn format_type_text(
             Some(value) if value >= 0 => format!("bit({value})"),
             _ => "bit".into(),
         },
+        VARBIT_TYPE_OID => match typmod {
+            Some(value) if value >= 0 => format!("bit varying({value})"),
+            _ => "bit varying".into(),
+        },
+        TIME_TYPE_OID => match typmod {
+            Some(value) if value >= 0 => format!("time({value}) without time zone"),
+            _ => "time without time zone".into(),
+        },
+        TIMETZ_TYPE_OID => match typmod {
+            Some(value) if value >= 0 => format!("time({value}) with time zone"),
+            _ => "time with time zone".into(),
+        },
         TIMESTAMP_TYPE_OID => match typmod {
             Some(value) if value >= 0 => format!("timestamp({value}) without time zone"),
             _ => "timestamp without time zone".into(),
@@ -582,6 +595,7 @@ pub(crate) fn format_type_text(
         REGOPER_TYPE_OID => "regoper".into(),
         REGOPERATOR_TYPE_OID => "regoperator".into(),
         REGCOLLATION_TYPE_OID => "regcollation".into(),
+        crate::include::catalog::ANYOID => "\"any\"".into(),
         _ => catalog
             .type_by_oid(oid)
             .map(|row| quote_identifier_if_needed(&row.typname))
@@ -677,7 +691,16 @@ pub(crate) fn function_signature_text(
         .map(|oid| format_type_text(oid, None, catalog))
         .collect::<Vec<_>>()
         .join(",");
-    format!("{}({arg_types})", proc_row.proname)
+    format!("{}({arg_types})", function_name_text(&proc_row.proname))
+}
+
+fn function_name_text(proname: &str) -> String {
+    match proname {
+        "interval" | "numeric" | "varchar" => {
+            format!("\"{}\"", proname.replace('"', "\"\""))
+        }
+        _ => quote_identifier_if_needed(proname),
+    }
 }
 
 pub(crate) fn operator_signature_text(

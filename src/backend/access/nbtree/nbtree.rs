@@ -21,7 +21,9 @@ use crate::backend::access::transam::xlog::{
 };
 use crate::backend::catalog::CatalogError;
 use crate::backend::executor::render_datetime_value_text;
-use crate::backend::executor::value_io::{decode_value, encode_anyarray_bytes, encode_array_bytes};
+use crate::backend::executor::value_io::{
+    decode_value, encode_anyarray_bytes, encode_array_bytes, format_vector_array_storage_text,
+};
 use crate::backend::storage::fsm::get_free_index_page;
 use crate::backend::storage::page::bufpage::{MAX_HEAP_TUPLE_SIZE, max_align, page_header};
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
@@ -112,6 +114,15 @@ fn encode_index_value(
             if matches!(
                 sql_type.kind,
                 crate::backend::parser::SqlTypeKind::Oid
+                    | crate::backend::parser::SqlTypeKind::RegProc
+                    | crate::backend::parser::SqlTypeKind::RegClass
+                    | crate::backend::parser::SqlTypeKind::RegType
+                    | crate::backend::parser::SqlTypeKind::RegRole
+                    | crate::backend::parser::SqlTypeKind::RegNamespace
+                    | crate::backend::parser::SqlTypeKind::RegOper
+                    | crate::backend::parser::SqlTypeKind::RegOperator
+                    | crate::backend::parser::SqlTypeKind::RegProcedure
+                    | crate::backend::parser::SqlTypeKind::RegCollation
                     | crate::backend::parser::SqlTypeKind::RegConfig
                     | crate::backend::parser::SqlTypeKind::RegDictionary
             ) =>
@@ -183,6 +194,20 @@ fn encode_index_value(
         ))),
         Value::Multirange(v) => crate::backend::executor::encode_multirange_bytes(v)
             .map_err(|err| CatalogError::Io(format!("{err:?}"))),
+        Value::Array(_) | Value::PgArray(_)
+            if matches!(
+                sql_type.kind,
+                crate::backend::parser::SqlTypeKind::Int2Vector
+                    | crate::backend::parser::SqlTypeKind::OidVector
+            ) =>
+        {
+            let array = value
+                .as_array_value()
+                .ok_or_else(|| CatalogError::Io("vector index key must materialize".into()))?;
+            format_vector_array_storage_text(sql_type, &array)
+                .map(|text| text.into_bytes())
+                .map_err(|err| CatalogError::Io(format!("{err:?}")))
+        }
         Value::Array(_) | Value::PgArray(_)
             if sql_type.kind == crate::backend::parser::SqlTypeKind::AnyArray =>
         {
@@ -657,10 +682,27 @@ fn key_values_from_heap_row(
     let mut keys = Vec::with_capacity(index_desc.columns.len());
     for attnum in indkey {
         let idx = attnum.saturating_sub(1) as usize;
-        let value = row_values
+        let mut value = row_values
             .get(idx)
             .cloned()
             .ok_or(CatalogError::Corrupt("index key attnum out of range"))?;
+        let column = index_desc
+            .columns
+            .get(keys.len())
+            .ok_or(CatalogError::Corrupt("index key descriptor out of range"))?;
+        if let Some(array) = value.as_array_value()
+            && matches!(
+                column.sql_type.kind,
+                crate::backend::parser::SqlTypeKind::Int2Vector
+                    | crate::backend::parser::SqlTypeKind::OidVector
+            )
+        {
+            value = Value::Text(
+                format_vector_array_storage_text(column.sql_type, &array)
+                    .map_err(|err| CatalogError::Io(format!("{err:?}")))?
+                    .into(),
+            );
+        }
         keys.push(value);
     }
     Ok(keys)

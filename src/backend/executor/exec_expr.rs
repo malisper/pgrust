@@ -149,6 +149,7 @@ use crate::pl::plpgsql::execute_user_defined_scalar_function;
 mod arrays;
 mod subquery;
 
+pub(crate) use arrays::normalize_array_value;
 pub(crate) use arrays::{append_array_value, concatenate_arrays, eval_string_to_table_rows};
 use arrays::{
     eval_array_append_function, eval_array_cat_function, eval_array_contained, eval_array_contains,
@@ -1159,6 +1160,9 @@ fn eval_pg_rust_internal_binary_coercible(values: &[Value]) -> Result<Value, Exe
         [left, right] => {
             let left_oid = oid_arg_to_u32(left, "pg_rust_internal_binary_coercible")?;
             let right_oid = oid_arg_to_u32(right, "pg_rust_internal_binary_coercible")?;
+            if left_oid == 0 || right_oid == 0 {
+                return Ok(Value::Bool(false));
+            }
             let left_type =
                 sql_type_from_builtin_oid(left_oid).ok_or_else(|| ExecError::DetailedError {
                     message: format!("type with OID {left_oid} does not exist"),
@@ -1181,6 +1185,59 @@ fn eval_pg_rust_internal_binary_coercible(values: &[Value]) -> Result<Value, Exe
             right: values.get(1).cloned().unwrap_or(Value::Null),
         }),
     }
+}
+
+fn eval_pg_encoding_to_char(values: &[Value]) -> Result<Value, ExecError> {
+    let encoding = match values {
+        [Value::Int16(value)] => i32::from(*value),
+        [Value::Int32(value)] => *value,
+        [Value::Int64(value)] => i32::try_from(*value).unwrap_or(-1),
+        [Value::Null] => return Ok(Value::Null),
+        _ => {
+            return Err(ExecError::TypeMismatch {
+                op: "pg_encoding_to_char",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: Value::Int32(0),
+            });
+        }
+    };
+    let name = match encoding {
+        0 => "SQL_ASCII",
+        6 => "UTF8",
+        _ => "",
+    };
+    Ok(Value::Text(name.into()))
+}
+
+fn eval_convert(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
+        [Value::Bytea(bytes), _, _] => Ok(Value::Bytea(bytes.clone())),
+        _ => Err(ExecError::TypeMismatch {
+            op: "convert",
+            left: values.first().cloned().unwrap_or(Value::Null),
+            right: values.get(1).cloned().unwrap_or(Value::Null),
+        }),
+    }
+}
+
+fn eval_greatest(values: &[Value]) -> Result<Value, ExecError> {
+    let mut best: Option<Value> = None;
+    for value in values {
+        if matches!(value, Value::Null) {
+            continue;
+        }
+        let replace = match best.as_ref() {
+            None => true,
+            Some(current) => {
+                compare_order_values(current, value, None, None, false)? == std::cmp::Ordering::Less
+            }
+        };
+        if replace {
+            best = Some(value.clone());
+        }
+    }
+    Ok(best.unwrap_or(Value::Null))
 }
 
 fn lookup_system_binding(
@@ -4349,6 +4406,7 @@ fn eval_plpgsql_builtin_function(
         },
         BuiltinScalarFunction::GetByte => eval_get_byte(&values),
         BuiltinScalarFunction::SetByte => eval_set_byte(&values),
+        BuiltinScalarFunction::Convert => eval_convert(&values),
         BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
         BuiltinScalarFunction::Md5 => eval_md5_function(&values),
         BuiltinScalarFunction::Reverse => eval_reverse_function(&values),
@@ -4380,6 +4438,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Abs => eval_abs_function(&values),
         BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
+        BuiltinScalarFunction::Greatest => eval_greatest(&values),
         BuiltinScalarFunction::ArrayNdims => eval_array_ndims_function(&values),
         BuiltinScalarFunction::ArrayDims => eval_array_dims_function(&values),
         BuiltinScalarFunction::ArrayLower => eval_array_lower_function(&values),
@@ -4480,6 +4539,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::BitcastBigintToFloat8 => eval_bitcast_bigint_to_float8(&values),
         BuiltinScalarFunction::Random
         | BuiltinScalarFunction::GetDatabaseEncoding
+        | BuiltinScalarFunction::PgEncodingToChar
         | BuiltinScalarFunction::PgGetAcl
         | BuiltinScalarFunction::PgGetUserById
         | BuiltinScalarFunction::ObjDescription
@@ -4497,6 +4557,8 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::PgIndexAmHasProperty
         | BuiltinScalarFunction::PgIndexHasProperty
         | BuiltinScalarFunction::PgIndexColumnHasProperty
+        | BuiltinScalarFunction::AmValidate
+        | BuiltinScalarFunction::BtEqualImage
         | BuiltinScalarFunction::ToJson
         | BuiltinScalarFunction::ToJsonb
         | BuiltinScalarFunction::ArrayToJson
@@ -5514,6 +5576,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(&values),
         BuiltinScalarFunction::IntervalHash => eval_interval_hash_function(&values),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
+        BuiltinScalarFunction::PgEncodingToChar => eval_pg_encoding_to_char(&values),
         BuiltinScalarFunction::PgMyTempSchema => Ok(Value::Int64(i64::from(
             current_temp_namespace_oid(ctx).unwrap_or(0),
         ))),
@@ -5534,6 +5597,9 @@ fn eval_builtin_function(
         BuiltinScalarFunction::PgRustTestInt44In => eval_pg_rust_test_int44in(&values),
         BuiltinScalarFunction::PgRustTestInt44Out => eval_pg_rust_test_int44out(&values),
         BuiltinScalarFunction::PgRustTestPtInWidget => eval_pg_rust_test_pt_in_widget(&values),
+        BuiltinScalarFunction::AmValidate | BuiltinScalarFunction::BtEqualImage => {
+            Ok(Value::Bool(true))
+        }
         BuiltinScalarFunction::CurrentSetting => eval_current_setting(&values, ctx),
         BuiltinScalarFunction::PgNotify => unreachable!("pg_notify handled earlier"),
         BuiltinScalarFunction::PgNotificationQueueUsage => {
@@ -5888,6 +5954,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::BitcastBigintToFloat8 => eval_bitcast_bigint_to_float8(&values),
         BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
+        BuiltinScalarFunction::Greatest => eval_greatest(&values),
         BuiltinScalarFunction::Length => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
@@ -6030,6 +6097,7 @@ fn eval_builtin_function(
         },
         BuiltinScalarFunction::GetByte => eval_get_byte(&values),
         BuiltinScalarFunction::SetByte => eval_set_byte(&values),
+        BuiltinScalarFunction::Convert => eval_convert(&values),
         BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
         BuiltinScalarFunction::Encode => eval_encode_function(&values),
         BuiltinScalarFunction::Decode => eval_decode_function(&values),

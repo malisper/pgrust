@@ -1,36 +1,7 @@
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::include::catalog::{
-    ANYELEMENTOID, ANYMULTIRANGEOID, ANYRANGEOID, BIT_TYPE_OID, BOOL_TYPE_OID, BOX_TYPE_OID,
-    BPCHAR_TYPE_OID, BRIN_AM_OID, BRIN_BIT_MINMAX_FAMILY_OID, BRIN_BPCHAR_MINMAX_FAMILY_OID,
-    BRIN_BYTEA_MINMAX_FAMILY_OID, BRIN_CHAR_MINMAX_FAMILY_OID, BRIN_DATETIME_MINMAX_FAMILY_OID,
-    BRIN_FLOAT_MINMAX_FAMILY_OID, BRIN_INTEGER_MINMAX_FAMILY_OID, BRIN_MACADDR_BLOOM_FAMILY_OID,
-    BRIN_MACADDR_MINMAX_FAMILY_OID, BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID,
-    BRIN_MACADDR8_BLOOM_FAMILY_OID, BRIN_MACADDR8_MINMAX_FAMILY_OID,
-    BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID, BRIN_OID_MINMAX_FAMILY_OID, BRIN_TEXT_MINMAX_FAMILY_OID,
-    BRIN_TIME_MINMAX_FAMILY_OID, BRIN_TIMETZ_MINMAX_FAMILY_OID, BRIN_VARBIT_MINMAX_FAMILY_OID,
-    BTREE_AM_OID, BTREE_BIT_FAMILY_OID, BTREE_BOOL_FAMILY_OID, BTREE_BYTEA_FAMILY_OID,
-    BTREE_FLOAT_FAMILY_OID, BTREE_INTEGER_FAMILY_OID, BTREE_INTERVAL_FAMILY_OID,
-    BTREE_MACADDR_FAMILY_OID, BTREE_MACADDR8_FAMILY_OID, BTREE_TEXT_FAMILY_OID,
-    BTREE_UUID_FAMILY_OID, BTREE_VARBIT_FAMILY_OID, BYTEA_TYPE_OID, DATE_TYPE_OID,
-    DATERANGE_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIN_JSONB_FAMILY_OID,
-    GIST_AM_OID, GIST_BOX_FAMILY_OID, GIST_MULTIRANGE_FAMILY_OID, GIST_POINT_FAMILY_OID,
-    GIST_RANGE_FAMILY_OID, HASH_AM_OID, HASH_BOOL_FAMILY_OID, HASH_BPCHAR_FAMILY_OID,
-    HASH_BYTEA_FAMILY_OID, HASH_CHAR_FAMILY_OID, HASH_DATE_FAMILY_OID, HASH_FLOAT_FAMILY_OID,
-    HASH_INTEGER_FAMILY_OID, HASH_INTERVAL_FAMILY_OID, HASH_MACADDR_FAMILY_OID,
-    HASH_MACADDR8_FAMILY_OID, HASH_MULTIRANGE_FAMILY_OID, HASH_NUMERIC_FAMILY_OID,
-    HASH_OID_FAMILY_OID, HASH_TEXT_FAMILY_OID, HASH_TIME_FAMILY_OID, HASH_TIMESTAMP_FAMILY_OID,
-    HASH_TIMESTAMPTZ_FAMILY_OID, HASH_TIMETZ_FAMILY_OID, HASH_UUID_FAMILY_OID, INT2_TYPE_OID,
-    INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID, INTERNAL_CHAR_TYPE_OID,
-    INTERVAL_TYPE_OID, JSONB_CONTAINS_OPERATOR_OID, JSONB_EXISTS_ALL_OPERATOR_OID,
-    JSONB_EXISTS_ANY_OPERATOR_OID, JSONB_EXISTS_OPERATOR_OID, JSONB_TYPE_OID, MACADDR_TYPE_OID,
-    MACADDR8_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID,
-    POINT_TYPE_OID, POLYGON_TYPE_OID, SPGIST_AM_OID, SPGIST_BOX_FAMILY_OID, SPGIST_POLY_FAMILY_OID,
-    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
-    TIMETZ_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, UUID_TYPE_OID, VARBIT_TYPE_OID,
-    VARCHAR_TYPE_OID, bootstrap_pg_operator_rows,
-};
+use crate::include::catalog::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgAmopRow {
@@ -130,12 +101,84 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
                 amoppurpose: 's',
                 amopopr: operator_oid,
                 amopmethod: BTREE_AM_OID,
-                amopsortfamily: family,
+                amopsortfamily: 0,
             });
             oid = oid.saturating_add(1);
         }
     }
     let operators = bootstrap_pg_operator_rows();
+    for (family, type_oid) in [
+        (BTREE_ARRAY_FAMILY_OID, ANYARRAYOID),
+        (BTREE_CHAR_FAMILY_OID, INTERNAL_CHAR_TYPE_OID),
+        (BTREE_DATETIME_FAMILY_OID, TIMESTAMP_TYPE_OID),
+        (BTREE_DATETIME_FAMILY_OID, TIMESTAMPTZ_TYPE_OID),
+        (BTREE_FLOAT_FAMILY_OID, FLOAT4_TYPE_OID),
+        (BTREE_FLOAT_FAMILY_OID, FLOAT8_TYPE_OID),
+        (BTREE_INTEGER_FAMILY_OID, INT2_TYPE_OID),
+        (BTREE_INTEGER_FAMILY_OID, INT8_TYPE_OID),
+        (BTREE_NUMERIC_FAMILY_OID, NUMERIC_TYPE_OID),
+        (BTREE_OID_FAMILY_OID, OID_TYPE_OID),
+        (BTREE_OIDVECTOR_FAMILY_OID, OIDVECTOR_TYPE_OID),
+        (BTREE_BPCHAR_FAMILY_OID, BPCHAR_TYPE_OID),
+        (BTREE_TEXT_FAMILY_OID, NAME_TYPE_OID),
+        (BTREE_MULTIRANGE_FAMILY_OID, ANYMULTIRANGEOID),
+        (BTREE_RECORD_FAMILY_OID, RECORD_TYPE_OID),
+        (BTREE_TSVECTOR_FAMILY_OID, TSVECTOR_TYPE_OID),
+        (BTREE_TSQUERY_FAMILY_OID, TSQUERY_TYPE_OID),
+        (BTREE_RANGE_FAMILY_OID, ANYRANGEOID),
+        (BTREE_JSONB_FAMILY_OID, JSONB_TYPE_OID),
+        (BTREE_NETWORK_FAMILY_OID, INET_TYPE_OID),
+    ] {
+        for (strategy, name) in [(1_i16, "<"), (2, "<="), (3, "="), (4, ">="), (5, ">")] {
+            rows.push(PgAmopRow {
+                oid,
+                amopfamily: family,
+                amoplefttype: type_oid,
+                amoprighttype: type_oid,
+                amopstrategy: strategy,
+                amoppurpose: 's',
+                amopopr: operator_oid(&operators, name, type_oid, type_oid),
+                amopmethod: BTREE_AM_OID,
+                amopsortfamily: 0,
+            });
+            oid = oid.saturating_add(1);
+        }
+    }
+    for (family, type_oid, operators) in [
+        (
+            BTREE_RECORD_IMAGE_FAMILY_OID,
+            RECORD_TYPE_OID,
+            [3190_u32, 3192, 3188, 3193, 3191],
+        ),
+        (
+            BTREE_TEXT_PATTERN_FAMILY_OID,
+            TEXT_TYPE_OID,
+            [2314, 2315, 0, 2317, 2318],
+        ),
+        (
+            BTREE_BPCHAR_PATTERN_FAMILY_OID,
+            BPCHAR_TYPE_OID,
+            [2326, 2327, 0, 2329, 2330],
+        ),
+    ] {
+        for (strategy, operator_oid) in (1_i16..=5).zip(operators) {
+            if operator_oid == 0 {
+                continue;
+            }
+            rows.push(PgAmopRow {
+                oid,
+                amopfamily: family,
+                amoplefttype: type_oid,
+                amoprighttype: type_oid,
+                amopstrategy: strategy,
+                amoppurpose: 's',
+                amopopr: operator_oid,
+                amopmethod: BTREE_AM_OID,
+                amopsortfamily: 0,
+            });
+            oid = oid.saturating_add(1);
+        }
+    }
     for (strategy, name, righttype) in [
         (1_i16, "<<", BOX_TYPE_OID),
         (2, "&<", BOX_TYPE_OID),
@@ -168,11 +211,11 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         amopfamily: GIST_BOX_FAMILY_OID,
         amoplefttype: BOX_TYPE_OID,
         amoprighttype: BOX_TYPE_OID,
-        amopstrategy: 1,
+        amopstrategy: 15,
         amoppurpose: 'o',
         amopopr: operator_oid(&operators, "<->", BOX_TYPE_OID, BOX_TYPE_OID),
         amopmethod: GIST_AM_OID,
-        amopsortfamily: 0,
+        amopsortfamily: BTREE_FLOAT_FAMILY_OID,
     });
     oid = oid.saturating_add(1);
     for (strategy, name, righttype) in [
@@ -293,41 +336,69 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         amopsortfamily: BTREE_FLOAT_FAMILY_OID,
     });
     oid = oid.saturating_add(1);
-    for (range_type_oid, subtype_oid) in [
-        (INT4RANGE_TYPE_OID, INT4_TYPE_OID),
-        (INT8RANGE_TYPE_OID, crate::include::catalog::INT8_TYPE_OID),
-        (NUMRANGE_TYPE_OID, crate::include::catalog::NUMERIC_TYPE_OID),
-        (DATERANGE_TYPE_OID, crate::include::catalog::DATE_TYPE_OID),
-        (
-            TSRANGE_TYPE_OID,
-            crate::include::catalog::TIMESTAMP_TYPE_OID,
-        ),
-        (
-            TSTZRANGE_TYPE_OID,
-            crate::include::catalog::TIMESTAMPTZ_TYPE_OID,
-        ),
+    for (strategy, name, righttype) in [
+        (1_i16, "<<", ANYRANGEOID),
+        (2, "&<", ANYRANGEOID),
+        (3, "&&", ANYRANGEOID),
+        (4, "&>", ANYRANGEOID),
+        (5, ">>", ANYRANGEOID),
+        (6, "-|-", ANYRANGEOID),
+        (7, "@>", ANYRANGEOID),
+        (8, "<@", ANYRANGEOID),
+        (16, "@>", ANYELEMENTOID),
+        (18, "=", ANYRANGEOID),
     ] {
-        for (strategy, name, righttype) in [
-            (1_i16, "<<", range_type_oid),
-            (2, "&<", range_type_oid),
-            (3, "&&", range_type_oid),
-            (4, "&>", range_type_oid),
-            (5, ">>", range_type_oid),
-            (6, "-|-", range_type_oid),
-            (7, "@>", range_type_oid),
-            (8, "<@", range_type_oid),
-            (16, "@>", subtype_oid),
-            (18, "=", range_type_oid),
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: GIST_RANGE_FAMILY_OID,
+            amoplefttype: ANYRANGEOID,
+            amoprighttype: righttype,
+            amopstrategy: strategy,
+            amoppurpose: 's',
+            amopopr: operator_oid(&operators, name, ANYRANGEOID, righttype),
+            amopmethod: GIST_AM_OID,
+            amopsortfamily: 0,
+        });
+        oid = oid.saturating_add(1);
+    }
+    rows.push(PgAmopRow {
+        oid,
+        amopfamily: GIST_TSVECTOR_FAMILY_OID,
+        amoplefttype: TSVECTOR_TYPE_OID,
+        amoprighttype: TSQUERY_TYPE_OID,
+        amopstrategy: 1,
+        amoppurpose: 's',
+        amopopr: operator_oid(&operators, "@@", TSVECTOR_TYPE_OID, TSQUERY_TYPE_OID),
+        amopmethod: GIST_AM_OID,
+        amopsortfamily: 0,
+    });
+    oid = oid.saturating_add(1);
+    for (family, method) in [
+        (GIST_NETWORK_FAMILY_OID, GIST_AM_OID),
+        (SPGIST_NETWORK_FAMILY_OID, SPGIST_AM_OID),
+    ] {
+        for (strategy, name) in [
+            (3_i16, "&&"),
+            (18, "="),
+            (19, "<>"),
+            (20, "<"),
+            (21, "<="),
+            (22, ">"),
+            (23, ">="),
+            (24, "<<"),
+            (25, "<<="),
+            (26, ">>"),
+            (27, ">>="),
         ] {
             rows.push(PgAmopRow {
                 oid,
-                amopfamily: GIST_RANGE_FAMILY_OID,
-                amoplefttype: range_type_oid,
-                amoprighttype: righttype,
+                amopfamily: family,
+                amoplefttype: INET_TYPE_OID,
+                amoprighttype: INET_TYPE_OID,
                 amopstrategy: strategy,
                 amoppurpose: 's',
-                amopopr: operator_oid(&operators, name, range_type_oid, righttype),
-                amopmethod: GIST_AM_OID,
+                amopopr: operator_oid(&operators, name, INET_TYPE_OID, INET_TYPE_OID),
+                amopmethod: method,
                 amopsortfamily: 0,
             });
             oid = oid.saturating_add(1);
@@ -362,6 +433,70 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
             amoppurpose: 's',
             amopopr: operator_oid(&operators, name, ANYMULTIRANGEOID, righttype),
             amopmethod: GIST_AM_OID,
+            amopsortfamily: 0,
+        });
+        oid = oid.saturating_add(1);
+    }
+    for (strategy, name) in [
+        (1_i16, "~<~"),
+        (2, "~<=~"),
+        (3, "="),
+        (4, "~>=~"),
+        (5, "~>~"),
+        (11, "<"),
+        (12, "<="),
+        (14, ">="),
+        (15, ">"),
+        (28, "^@"),
+    ] {
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: SPGIST_TEXT_FAMILY_OID,
+            amoplefttype: TEXT_TYPE_OID,
+            amoprighttype: TEXT_TYPE_OID,
+            amopstrategy: strategy,
+            amoppurpose: 's',
+            amopopr: operator_oid(&operators, name, TEXT_TYPE_OID, TEXT_TYPE_OID),
+            amopmethod: SPGIST_AM_OID,
+            amopsortfamily: 0,
+        });
+        oid = oid.saturating_add(1);
+    }
+    for (strategy, name, righttype) in [
+        (1_i16, "<<", ANYRANGEOID),
+        (2, "&<", ANYRANGEOID),
+        (3, "&&", ANYRANGEOID),
+        (4, "&>", ANYRANGEOID),
+        (5, ">>", ANYRANGEOID),
+        (6, "-|-", ANYRANGEOID),
+        (7, "@>", ANYRANGEOID),
+        (8, "<@", ANYRANGEOID),
+        (16, "@>", ANYELEMENTOID),
+        (18, "=", ANYRANGEOID),
+    ] {
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: SPGIST_RANGE_FAMILY_OID,
+            amoplefttype: ANYRANGEOID,
+            amoprighttype: righttype,
+            amopstrategy: strategy,
+            amoppurpose: 's',
+            amopopr: operator_oid(&operators, name, ANYRANGEOID, righttype),
+            amopmethod: SPGIST_AM_OID,
+            amopsortfamily: 0,
+        });
+        oid = oid.saturating_add(1);
+    }
+    for (strategy, name) in [(29_i16, "<^"), (30, ">^")] {
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: SPGIST_QUAD_POINT_FAMILY_OID,
+            amoplefttype: POINT_TYPE_OID,
+            amoprighttype: POINT_TYPE_OID,
+            amopstrategy: strategy,
+            amoppurpose: 's',
+            amopopr: operator_oid(&operators, name, POINT_TYPE_OID, POINT_TYPE_OID),
+            amopmethod: SPGIST_AM_OID,
             amopsortfamily: 0,
         });
         oid = oid.saturating_add(1);
@@ -426,11 +561,139 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         });
         oid = oid.saturating_add(1);
     }
+    for (strategy, name, righttype) in [
+        (1_i16, "<<", BOX_TYPE_OID),
+        (2, "&<", BOX_TYPE_OID),
+        (3, "&&", BOX_TYPE_OID),
+        (4, "&>", BOX_TYPE_OID),
+        (5, ">>", BOX_TYPE_OID),
+        (6, "~=", BOX_TYPE_OID),
+        (7, "@>", BOX_TYPE_OID),
+        (8, "<@", BOX_TYPE_OID),
+        (9, "&<|", BOX_TYPE_OID),
+        (10, "<<|", BOX_TYPE_OID),
+        (11, "|>>", BOX_TYPE_OID),
+        (12, "|&>", BOX_TYPE_OID),
+        (7, "@>", POINT_TYPE_OID),
+    ] {
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: BRIN_BOX_INCLUSION_FAMILY_OID,
+            amoplefttype: BOX_TYPE_OID,
+            amoprighttype: righttype,
+            amopstrategy: strategy,
+            amoppurpose: 's',
+            amopopr: operator_oid(&operators, name, BOX_TYPE_OID, righttype),
+            amopmethod: BRIN_AM_OID,
+            amopsortfamily: 0,
+        });
+        oid = oid.saturating_add(1);
+    }
+    for (strategy, name, righttype) in [
+        (1_i16, "<<", ANYRANGEOID),
+        (2, "&<", ANYRANGEOID),
+        (3, "&&", ANYRANGEOID),
+        (4, "&>", ANYRANGEOID),
+        (5, ">>", ANYRANGEOID),
+        (7, "@>", ANYRANGEOID),
+        (8, "<@", ANYRANGEOID),
+        (16, "@>", ANYELEMENTOID),
+        (17, "-|-", ANYRANGEOID),
+        (18, "=", ANYRANGEOID),
+        (20, "<", ANYRANGEOID),
+        (21, "<=", ANYRANGEOID),
+        (22, ">", ANYRANGEOID),
+        (23, ">=", ANYRANGEOID),
+    ] {
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: BRIN_RANGE_INCLUSION_FAMILY_OID,
+            amoplefttype: ANYRANGEOID,
+            amoprighttype: righttype,
+            amopstrategy: strategy,
+            amoppurpose: 's',
+            amopopr: operator_oid(&operators, name, ANYRANGEOID, righttype),
+            amopmethod: BRIN_AM_OID,
+            amopsortfamily: 0,
+        });
+        oid = oid.saturating_add(1);
+    }
+    for (strategy, name) in [
+        (3_i16, "&&"),
+        (7, ">>="),
+        (8, "<<="),
+        (18, "="),
+        (24, ">>"),
+        (26, "<<"),
+    ] {
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: BRIN_NETWORK_INCLUSION_FAMILY_OID,
+            amoplefttype: INET_TYPE_OID,
+            amoprighttype: INET_TYPE_OID,
+            amopstrategy: strategy,
+            amoppurpose: 's',
+            amopopr: operator_oid(&operators, name, INET_TYPE_OID, INET_TYPE_OID),
+            amopmethod: BRIN_AM_OID,
+            amopsortfamily: 0,
+        });
+        oid = oid.saturating_add(1);
+    }
+    rows.push(PgAmopRow {
+        oid,
+        amopfamily: BRIN_TEXT_BLOOM_FAMILY_OID,
+        amoplefttype: TEXT_TYPE_OID,
+        amoprighttype: TEXT_TYPE_OID,
+        amopstrategy: 1,
+        amoppurpose: 's',
+        amopopr: operator_oid(&operators, "=", TEXT_TYPE_OID, TEXT_TYPE_OID),
+        amopmethod: BRIN_AM_OID,
+        amopsortfamily: 0,
+    });
+    oid = oid.saturating_add(1);
+    for (strategy, name) in [(1_i16, "&&"), (2, "@>"), (3, "<@"), (4, "=")] {
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: GIN_ARRAY_FAMILY_OID,
+            amoplefttype: ANYARRAYOID,
+            amoprighttype: ANYARRAYOID,
+            amopstrategy: strategy,
+            amoppurpose: 's',
+            amopopr: operator_oid(&operators, name, ANYARRAYOID, ANYARRAYOID),
+            amopmethod: GIN_AM_OID,
+            amopsortfamily: 0,
+        });
+        oid = oid.saturating_add(1);
+    }
+    for (strategy, name) in [(1_i16, "@@"), (2, "@@@")] {
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: GIN_TSVECTOR_FAMILY_OID,
+            amoplefttype: TSVECTOR_TYPE_OID,
+            amoprighttype: TSQUERY_TYPE_OID,
+            amopstrategy: strategy,
+            amoppurpose: 's',
+            amopopr: operator_oid(&operators, name, TSVECTOR_TYPE_OID, TSQUERY_TYPE_OID),
+            amopmethod: GIN_AM_OID,
+            amopsortfamily: 0,
+        });
+        oid = oid.saturating_add(1);
+    }
     for (strategy, righttype, operator_oid) in [
         (7_i16, JSONB_TYPE_OID, JSONB_CONTAINS_OPERATOR_OID),
         (9, TEXT_TYPE_OID, JSONB_EXISTS_OPERATOR_OID),
         (10, TEXT_ARRAY_TYPE_OID, JSONB_EXISTS_ANY_OPERATOR_OID),
         (11, TEXT_ARRAY_TYPE_OID, JSONB_EXISTS_ALL_OPERATOR_OID),
+        (
+            15,
+            JSONPATH_TYPE_OID,
+            operator_oid(&operators, "@?", JSONB_TYPE_OID, JSONPATH_TYPE_OID),
+        ),
+        (
+            16,
+            JSONPATH_TYPE_OID,
+            operator_oid(&operators, "@@", JSONB_TYPE_OID, JSONPATH_TYPE_OID),
+        ),
     ] {
         rows.push(PgAmopRow {
             oid,
