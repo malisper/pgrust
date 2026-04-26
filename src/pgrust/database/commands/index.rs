@@ -1512,21 +1512,13 @@ impl Database {
                 actual: "unsupported CREATE INDEX feature".into(),
             }));
         }
-        let mut storage_columns = index_columns.clone();
-        storage_columns.extend(
-            create_stmt
-                .include_columns
-                .iter()
-                .cloned()
-                .map(crate::backend::parser::IndexColumnDef::from),
-        );
         let index_name = if create_stmt.index_name.is_empty() {
             self.choose_available_relation_name(
                 client_id,
                 xid,
                 cid,
                 entry.namespace_oid,
-                &Self::default_index_base_name(&create_stmt.table_name, &storage_columns),
+                &Self::default_index_base_name(&create_stmt.table_name, &index_columns),
             )?
         } else {
             create_stmt.index_name.clone()
@@ -1536,7 +1528,7 @@ impl Database {
                 client_id,
                 &entry,
                 &index_name,
-                &storage_columns,
+                &index_columns,
                 create_stmt.predicate_sql.as_deref(),
                 create_stmt.unique,
                 create_stmt.nulls_not_distinct,
@@ -1565,7 +1557,7 @@ impl Database {
             &entry,
             &index_name,
             catalog.materialize_visible_catalog(),
-            &storage_columns,
+            &index_columns,
             create_stmt.predicate_sql.as_deref(),
             create_stmt.unique,
             false,
