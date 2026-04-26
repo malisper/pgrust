@@ -34,6 +34,10 @@ fn box_ty() -> SqlType {
     SqlType::new(SqlTypeKind::Box)
 }
 
+fn polygon_ty() -> SqlType {
+    SqlType::new(SqlTypeKind::Polygon)
+}
+
 fn oid() -> SqlType {
     SqlType::new(SqlTypeKind::Oid)
 }
@@ -683,6 +687,21 @@ fn box_spgist_options(num_keys: usize) -> CatalogIndexBuildOptions {
     CatalogIndexBuildOptions {
         am_oid: crate::include::catalog::SPGIST_AM_OID,
         indclass: vec![crate::include::catalog::BOX_SPGIST_OPCLASS_OID; num_keys],
+        indcollation: vec![0; num_keys],
+        indoption: vec![0; num_keys],
+        indnullsnotdistinct: false,
+        indisexclusion: false,
+        indimmediate: true,
+        brin_options: None,
+        gin_options: None,
+        hash_options: None,
+    }
+}
+
+fn polygon_spgist_options(num_keys: usize) -> CatalogIndexBuildOptions {
+    CatalogIndexBuildOptions {
+        am_oid: crate::include::catalog::SPGIST_AM_OID,
+        indclass: vec![crate::include::catalog::POLY_SPGIST_OPCLASS_OID; num_keys],
         indcollation: vec![0; num_keys],
         indoption: vec![0; num_keys],
         indnullsnotdistinct: false,
@@ -2928,6 +2947,81 @@ fn planner_uses_spgist_box_index_only_when_opclass_can_return_data() {
             .iter()
             .any(|line| line.contains("Index Only Scan using box_spgist on box_temp")),
         "expected SP-GiST box covering query to use index-only scan, got {lines:?}"
+    );
+}
+
+#[test]
+fn planner_uses_spgist_polygon_distance_ordering_for_window_input() {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "quad_poly_tbl",
+            RelationDesc {
+                columns: vec![
+                    column_desc("id", int4(), false),
+                    column_desc("p", polygon_ty(), true),
+                ],
+            },
+        )
+        .expect("create test catalog relation");
+    let index = catalog
+        .create_index_for_relation_with_options_and_flags(
+            "quad_poly_tbl_idx",
+            table.relation_oid,
+            false,
+            false,
+            &[IndexColumnDef::from("p")],
+            &polygon_spgist_options(1),
+            None,
+        )
+        .expect("create test catalog index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark test catalog index usable");
+    catalog
+        .set_relation_stats(table.relation_oid, 512, 11_003.0)
+        .expect("seed test catalog table stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 64, 11_003.0)
+        .expect("seed test catalog index stats");
+
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select rank() over (order by p <-> point '123,456') n, \
+                p <-> point '123,456' dist, id \
+         from quad_poly_tbl \
+         where p <@ polygon '((300,300),(400,600),(600,500),(700,200))'",
+        &catalog,
+        PlannerConfig {
+            enable_seqscan: false,
+            enable_bitmapscan: false,
+            ..PlannerConfig::default()
+        },
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::IndexScan {
+                index_name,
+                order_by_keys,
+                ..
+            } if index_name == "quad_poly_tbl_idx" && !order_by_keys.is_empty()
+        )),
+        "expected ordered polygon SP-GiST index scan, got {lines:?}"
+    );
+    assert!(
+        !plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::OrderBy { .. }
+        )),
+        "expected no explicit sort, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Order By: (p <-> '(123,456)'::point)")),
+        "expected distance operator in ordered index explain, got {lines:?}"
     );
 }
 

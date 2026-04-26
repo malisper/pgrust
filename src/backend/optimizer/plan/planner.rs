@@ -477,9 +477,16 @@ fn make_window_rel(
             );
         }
     }
+    let has_ordered_input_path = !ordered_input_paths.is_empty();
+    // When an index can deliver the required window order, keep that native
+    // ordering instead of adding a cheaper explicit sort on an unordered path.
     for path in input_rel
         .pathlist
         .into_iter()
+        .filter(|path| {
+            !has_ordered_input_path
+                || bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys)
+        })
         .chain(ordered_input_paths.into_iter())
     {
         let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
