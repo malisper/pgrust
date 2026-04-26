@@ -2155,6 +2155,11 @@ fn builtin_named_type_alias(name: &str) -> Option<SqlType> {
     }
     if name.eq_ignore_ascii_case("float") {
         Some(SqlType::new(SqlTypeKind::Float8))
+    } else if name.eq_ignore_ascii_case("xid8") {
+        Some(
+            SqlType::new(SqlTypeKind::Int8)
+                .with_identity(crate::include::catalog::XID8_TYPE_OID, 0),
+        )
     } else if name.eq_ignore_ascii_case("any") {
         Some(
             SqlType::new(SqlTypeKind::AnyElement).with_identity(crate::include::catalog::ANYOID, 0),

@@ -146,6 +146,7 @@ pub(crate) fn hash_value_extended(
         Value::Int32(value) => hash_uint32_extended(*value as u32, seed),
         Value::EnumOid(value) => hash_uint32_extended(*value, seed),
         Value::Int64(value) => hash_int8_extended(*value, seed),
+        Value::Xid8(value) => hash_int8_extended(*value as i64, seed),
         Value::Date(value) => hash_uint32_extended(value.0 as u32, seed),
         Value::Time(value) => hash_int8_extended(value.0, seed),
         Value::Timestamp(value) => hash_int8_extended(value.0, seed),

@@ -440,6 +440,7 @@ fn render_key_value(value: &Value, ctx: &ExecutorContext) -> String {
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
+        Value::Xid8(v) => v.to_string(),
         Value::PgLsn(v) => crate::backend::executor::render_pg_lsn_text(*v),
         Value::Money(v) => v.to_string(),
         Value::Float64(v) => v.to_string(),

@@ -2460,6 +2460,12 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         }
         "macaddr" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::MacAddr))),
         "macaddr8" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::MacAddr8))),
+        "xid8" | "pg_catalog.xid8" => {
+            return Ok(RawTypeName::Builtin(
+                SqlType::new(SqlTypeKind::Int8)
+                    .with_identity(crate::include::catalog::XID8_TYPE_OID, 0),
+            ));
+        }
         "_macaddr" => {
             return Ok(RawTypeName::Builtin(SqlType::array_of(SqlType::new(
                 SqlTypeKind::MacAddr,

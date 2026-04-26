@@ -1230,6 +1230,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::UuidGt
             | BuiltinScalarFunction::UuidGe
             | BuiltinScalarFunction::UuidCmp
+            | BuiltinScalarFunction::Xid8Cmp
             | BuiltinScalarFunction::UuidHashExtended => args.len() == 2,
             BuiltinScalarFunction::GenRandomUuid => args.is_empty(),
             BuiltinScalarFunction::UuidV7 => matches!(args.len(), 0 | 1),
@@ -2208,6 +2209,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("uuid_gt", BuiltinScalarFunction::UuidGt),
         ("uuid_ge", BuiltinScalarFunction::UuidGe),
         ("uuid_cmp", BuiltinScalarFunction::UuidCmp),
+        ("xid8cmp", BuiltinScalarFunction::Xid8Cmp),
         ("uuid_hash", BuiltinScalarFunction::UuidHash),
         (
             "uuid_hash_extended",
@@ -3599,6 +3601,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::UuidGt
             | BuiltinScalarFunction::UuidGe
             | BuiltinScalarFunction::UuidCmp
+            | BuiltinScalarFunction::Xid8Cmp
             | BuiltinScalarFunction::UuidHash
             | BuiltinScalarFunction::UuidHashExtended
             | BuiltinScalarFunction::GenRandomUuid

@@ -2668,6 +2668,7 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
         Value::Int16(_) => 2,
         Value::Int32(_) | Value::EnumOid(_) | Value::Date(_) | Value::InternalChar(_) => 4,
         Value::Int64(_)
+        | Value::Xid8(_)
         | Value::PgLsn(_)
         | Value::Money(_)
         | Value::Float64(_)
@@ -5640,6 +5641,52 @@ fn eval_builtin_function(
         | BuiltinScalarFunction::UuidV7
         | BuiltinScalarFunction::UuidExtractVersion
         | BuiltinScalarFunction::UuidExtractTimestamp => eval_uuid_function(func, &values),
+        BuiltinScalarFunction::Xid8Cmp => match values.as_slice() {
+            [Value::Xid8(left), Value::Xid8(right)] => Ok(Value::Int32(match left.cmp(right) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            })),
+            [left, right] if left.as_text().is_some() && right.as_text().is_some() => {
+                let left = cast_value_with_source_type_catalog_and_config(
+                    left.clone(),
+                    Some(SqlType::new(SqlTypeKind::Text)),
+                    SqlType::new(SqlTypeKind::Int8)
+                        .with_identity(crate::include::catalog::XID8_TYPE_OID, 0),
+                    catalog_lookup(Some(ctx)),
+                    &ctx.datetime_config,
+                )?;
+                let right = cast_value_with_source_type_catalog_and_config(
+                    right.clone(),
+                    Some(SqlType::new(SqlTypeKind::Text)),
+                    SqlType::new(SqlTypeKind::Int8)
+                        .with_identity(crate::include::catalog::XID8_TYPE_OID, 0),
+                    catalog_lookup(Some(ctx)),
+                    &ctx.datetime_config,
+                )?;
+                match (left, right) {
+                    (Value::Xid8(left), Value::Xid8(right)) => {
+                        Ok(Value::Int32(match left.cmp(&right) {
+                            std::cmp::Ordering::Less => -1,
+                            std::cmp::Ordering::Equal => 0,
+                            std::cmp::Ordering::Greater => 1,
+                        }))
+                    }
+                    (left, right) => Err(ExecError::TypeMismatch {
+                        op: "xid8cmp",
+                        left,
+                        right,
+                    }),
+                }
+            }
+            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+            [left, right] => Err(ExecError::TypeMismatch {
+                op: "xid8cmp",
+                left: left.clone(),
+                right: right.clone(),
+            }),
+            _ => Err(malformed_expr_error("xid8cmp")),
+        },
         BuiltinScalarFunction::CashLarger => match values.as_slice() {
             [Value::Money(left), Value::Money(right)] => {
                 Ok(Value::Money(money_larger(*left, *right)))

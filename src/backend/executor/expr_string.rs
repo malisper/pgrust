@@ -987,6 +987,7 @@ fn value_output_text_with_config(
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
+        Value::Xid8(v) => v.to_string(),
         Value::PgLsn(v) => crate::backend::executor::render_pg_lsn_text(*v),
         Value::Money(v) => crate::backend::executor::money_format_text(*v),
         Value::Float64(v) => v.to_string(),

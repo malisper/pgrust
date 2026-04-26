@@ -9305,6 +9305,7 @@ fn copy_value_to_field(
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
+        Value::Xid8(v) => v.to_string(),
         Value::Float64(v) => match sql_type.kind {
             crate::backend::parser::SqlTypeKind::Float4 => {
                 crate::backend::libpq::pqformat::format_float4_text(

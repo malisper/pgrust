@@ -799,6 +799,7 @@ pub enum BuiltinScalarFunction {
     UuidGt,
     UuidGe,
     UuidCmp,
+    Xid8Cmp,
     UuidHash,
     UuidHashExtended,
     GenRandomUuid,

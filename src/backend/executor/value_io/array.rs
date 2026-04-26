@@ -123,6 +123,7 @@ fn encode_array_element_payload(
             Ok(oid.to_le_bytes().to_vec())
         }
         Value::Int64(v) => Ok(v.to_le_bytes().to_vec()),
+        Value::Xid8(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Money(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Multirange(multirange) => {
             crate::backend::executor::encode_multirange_bytes(&multirange)
@@ -810,6 +811,10 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
         Value::Int32(_) => Some(SqlType::new(SqlTypeKind::Int4)),
         Value::EnumOid(_) => Some(SqlType::new(SqlTypeKind::Enum)),
         Value::Int64(_) => Some(SqlType::new(SqlTypeKind::Int8)),
+        Value::Xid8(_) => Some(
+            SqlType::new(SqlTypeKind::Int8)
+                .with_identity(crate::include::catalog::XID8_TYPE_OID, 0),
+        ),
         Value::Money(_) => Some(SqlType::new(SqlTypeKind::Money)),
         Value::Float64(_) => Some(SqlType::new(SqlTypeKind::Float8)),
         Value::Bool(_) => Some(SqlType::new(SqlTypeKind::Bool)),
@@ -1348,6 +1353,7 @@ fn format_array_values_nested(
             Value::Int32(v) => out.push_str(&v.to_string()),
             Value::EnumOid(v) => out.push_str(&v.to_string()),
             Value::Int64(v) => out.push_str(&v.to_string()),
+            Value::Xid8(v) => out.push_str(&v.to_string()),
             Value::Money(v) => out.push_str(&crate::backend::executor::money_format_text(*v)),
             Value::Float64(v) => out.push_str(&v.to_string()),
             Value::Numeric(v) => out.push_str(&v.render()),

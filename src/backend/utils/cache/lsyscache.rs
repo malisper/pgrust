@@ -949,7 +949,7 @@ fn opclass_rows_for_am(
     txn_ctx: Option<(TransactionId, CommandId)>,
     am_oid: u32,
 ) -> Vec<PgOpclassRow> {
-    search_sys_cache_list1_db(
+    let mut rows: Vec<PgOpclassRow> = search_sys_cache_list1_db(
         db,
         client_id,
         txn_ctx,
@@ -965,7 +965,14 @@ fn opclass_rows_for_am(
             })
             .collect()
     })
-    .unwrap_or_default()
+    .unwrap_or_default();
+    let seen = rows.iter().map(|row| row.oid).collect::<BTreeSet<_>>();
+    rows.extend(
+        crate::include::catalog::bootstrap_pg_opclass_rows()
+            .into_iter()
+            .filter(|row| row.opcmethod == am_oid && !seen.contains(&row.oid)),
+    );
+    rows
 }
 
 pub struct LazyCatalogLookup<'a> {

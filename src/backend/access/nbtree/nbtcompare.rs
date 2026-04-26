@@ -22,6 +22,7 @@ pub fn compare_bt_values(left: &Value, right: &Value) -> Ordering {
         (Value::Int64(a), Value::Int16(b)) => a.cmp(&i64::from(*b)),
         (Value::Int64(a), Value::Int32(b)) => a.cmp(&i64::from(*b)),
         (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
+        (Value::Xid8(a), Value::Xid8(b)) => a.cmp(b),
         (Value::Int16(a), Value::Float64(b)) => f64::from(*a).total_cmp(b),
         (Value::Int32(a), Value::Float64(b)) => f64::from(*a).total_cmp(b),
         (Value::Int64(a), Value::Float64(b)) => (*a as f64).total_cmp(b),
@@ -63,6 +64,7 @@ fn numeric_key_value(value: &Value) -> Option<NumericValue> {
         Value::Int16(value) => Some(NumericValue::from_i64(i64::from(*value))),
         Value::Int32(value) => Some(NumericValue::from_i64(i64::from(*value))),
         Value::Int64(value) => Some(NumericValue::from_i64(*value)),
+        Value::Xid8(value) => Some(NumericValue::finite((*value).into(), 0)),
         Value::Numeric(value) => Some(value.clone()),
         _ => None,
     }
