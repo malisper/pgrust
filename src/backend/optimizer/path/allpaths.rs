@@ -606,7 +606,8 @@ fn collect_relation_access_paths(
                 && !index.index_meta.indkey.is_empty()
         })
     {
-        let target_index_only = index_supports_index_only_attrs(index, required_index_only_attrs);
+        let target_index_only =
+            filter.is_none() && index_supports_index_only_attrs(index, required_index_only_attrs);
         if let Some(spec) = build_index_path_spec(filter.as_ref(), None, index) {
             if config.enable_indexscan && access_method_supports_index_scan(index.index_meta.am_oid)
             {
@@ -689,7 +690,7 @@ fn collect_relation_access_paths(
                     &stats,
                     spec,
                     Some(order_items.clone()),
-                    target_index_only,
+                    false,
                     config,
                     catalog,
                 )
@@ -712,7 +713,7 @@ fn collect_relation_ordered_index_paths(
     desc: RelationDesc,
     filter: Option<Expr>,
     order_items: &[OrderByEntry],
-    required_index_only_attrs: &[usize],
+    _required_index_only_attrs: &[usize],
     config: PlannerConfig,
     catalog: &dyn CatalogLookup,
 ) -> Vec<Path> {
@@ -733,7 +734,6 @@ fn collect_relation_ordered_index_paths(
         if !access_method_supports_index_scan(index.index_meta.am_oid) {
             continue;
         }
-        let target_index_only = index_supports_index_only_attrs(index, required_index_only_attrs);
         if let Some(spec) = build_index_path_spec(filter.as_ref(), Some(order_items), index) {
             if !spec.removes_order {
                 continue;
@@ -749,7 +749,7 @@ fn collect_relation_ordered_index_paths(
                     &stats,
                     spec,
                     Some(order_items.to_vec()),
-                    target_index_only,
+                    false,
                     config,
                     catalog,
                 )

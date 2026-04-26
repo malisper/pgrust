@@ -313,12 +313,21 @@ fn push_nonverbose_plan_details(
 ) -> bool {
     let prefix = explain_detail_prefix(indent);
     match plan {
-        Plan::OrderBy { input, items, .. } => {
-            let input_names = plan_join_output_exprs(input, ctx, true);
-            let sort_items = items
-                .iter()
-                .map(|item| render_nonverbose_order_by_item(item, &input_names, ctx))
-                .collect::<Vec<_>>();
+        Plan::OrderBy {
+            input,
+            items,
+            display_items,
+            ..
+        } => {
+            let sort_items = if display_items.is_empty() {
+                let input_names = plan_join_output_exprs(input, ctx, true);
+                items
+                    .iter()
+                    .map(|item| render_nonverbose_order_by_item(item, &input_names, ctx))
+                    .collect::<Vec<_>>()
+            } else {
+                display_items.clone()
+            };
             let sort_key = sort_items.join(", ");
             if !sort_key.is_empty() {
                 lines.push(format!("{prefix}Sort Key: {sort_key}"));
@@ -1244,7 +1253,7 @@ fn explain_plan_children_with_context(
             );
         }
         Plan::BitmapHeapScan { bitmapqual, .. } => {
-            let child_indent = if indent == 0 { 1 } else { indent + 3 };
+            let child_indent = indent + 1;
             format_explain_plan_with_subplans_inner(
                 bitmapqual,
                 subplans,
