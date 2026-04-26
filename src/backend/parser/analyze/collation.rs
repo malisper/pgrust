@@ -48,7 +48,11 @@ pub(crate) fn resolve_collation_oid(
 }
 
 pub(crate) fn is_collatable_type(ty: SqlType) -> bool {
-    !ty.is_array && is_text_like_type(ty)
+    if ty.is_array {
+        is_text_like_type(ty.element_type())
+    } else {
+        is_text_like_type(ty)
+    }
 }
 
 pub(crate) fn default_collation_oid_for_type(ty: SqlType) -> Option<u32> {
