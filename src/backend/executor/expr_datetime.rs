@@ -177,7 +177,8 @@ pub(crate) fn current_date_value_from_timestamp_with_config(
     config: &DateTimeConfig,
     timestamp_usecs: i64,
 ) -> Value {
-    let local = timestamp_usecs + i64::from(timezone_offset_seconds(config)) * 1_000_000;
+    let local = timestamp_usecs
+        + i64::from(timezone_offset_seconds_at_utc(config, timestamp_usecs)) * 1_000_000;
     let (days, _) = timestamp_parts_from_usecs(local);
     Value::Date(DateADT(days))
 }
