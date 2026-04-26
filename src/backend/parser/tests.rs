@@ -8063,6 +8063,21 @@ fn parse_insert_update_delete() {
             ..
         }) if matches!(statement.as_ref(), Statement::Insert(_))
     ));
+    assert!(matches!(
+        parse_statement(
+            "explain (costs off) create materialized view mv_items as select id, name from people with no data"
+        )
+        .unwrap(),
+        Statement::Explain(ExplainStatement {
+            costs: false,
+            statement,
+            ..
+        }) if matches!(statement.as_ref(), Statement::CreateTableAs(CreateTableAsStatement {
+            object_type: TableAsObjectType::MaterializedView,
+            skip_data: true,
+            ..
+        }))
+    ));
     assert!(
         matches!(parse_statement("analyze").unwrap(), Statement::Analyze(AnalyzeStatement { targets, .. }) if targets.is_empty())
     );

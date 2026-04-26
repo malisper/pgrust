@@ -11826,6 +11826,12 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
             Rule::merge_stmt => statement = Some(Statement::Merge(build_merge(part)?)),
             Rule::update_stmt => statement = Some(Statement::Update(build_update(part)?)),
             Rule::delete_stmt => statement = Some(Statement::Delete(build_delete(part)?)),
+            Rule::create_materialized_view_stmt => {
+                statement = Some(Statement::CreateTableAs(build_create_materialized_view(
+                    part,
+                )?));
+            }
+            Rule::create_table_stmt => statement = Some(build_create_table(part)?),
             _ => {}
         }
     }

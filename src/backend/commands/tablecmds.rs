@@ -22,11 +22,12 @@ use crate::backend::parser::{
     BoundIndexRelation, BoundInsertSource, BoundInsertStatement, BoundMergeAction,
     BoundMergeStatement, BoundMergeWhenClause, BoundModifyRowSource, BoundOnConflictAction,
     BoundReferencedByForeignKey, BoundRelation, BoundRelationConstraints, BoundTemporalConstraint,
-    BoundUpdateStatement, BoundUpdateTarget, Catalog, CatalogLookup, DropTableStatement,
-    ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement, ParseError,
-    SelectStatement, SqlType, SqlTypeKind, Statement, TruncateTableStatement, UpdateStatement,
-    VacuumStatement, bind_create_table, bind_generated_expr, bind_referenced_by_foreign_keys,
-    bind_relation_constraints, bind_scalar_expr_in_scope, bind_update,
+    BoundUpdateStatement, BoundUpdateTarget, Catalog, CatalogLookup, CreateTableAsStatement,
+    DropTableStatement, ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement,
+    ParseError, SelectStatement, SqlType, SqlTypeKind, Statement, TableAsObjectType,
+    TruncateTableStatement, UpdateStatement, VacuumStatement, bind_create_table,
+    bind_generated_expr, bind_referenced_by_foreign_keys, bind_relation_constraints,
+    bind_scalar_expr_in_scope, bind_update,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -348,6 +349,16 @@ pub(crate) fn execute_explain(
             )));
         }
         Statement::Merge(merge) => EitherExplainTarget::Merge(merge),
+        Statement::CreateTableAs(create_table_as) => {
+            if explain_create_table_as_relation_exists(&create_table_as, catalog)? {
+                return Ok(StatementResult::Query {
+                    columns: vec![QueryColumn::text("QUERY PLAN")],
+                    column_names: vec!["QUERY PLAN".into()],
+                    rows: Vec::new(),
+                });
+            }
+            EitherExplainTarget::CreateTableAs(create_table_as)
+        }
         _ => {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "SELECT, UPDATE, or MERGE statement after EXPLAIN",
@@ -377,6 +388,17 @@ pub(crate) fn execute_explain(
                 Some(bound.explain_target_name),
             )
         }
+        EitherExplainTarget::CreateTableAs(create_table_as) => (
+            create_query_desc(
+                crate::backend::parser::pg_plan_query_with_config(
+                    &create_table_as.query,
+                    catalog,
+                    planner_config,
+                )?,
+                None,
+            ),
+            None,
+        ),
     };
     let planning_elapsed = plan_start.elapsed();
     let planning_buffer_stats = ctx.pool.usage_stats();
@@ -457,6 +479,28 @@ pub(crate) fn execute_explain(
 enum EitherExplainTarget {
     Select(SelectStatement),
     Merge(MergeStatement),
+    CreateTableAs(CreateTableAsStatement),
+}
+
+fn explain_create_table_as_relation_exists(
+    stmt: &CreateTableAsStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<bool, ExecError> {
+    if !stmt.if_not_exists {
+        return Ok(false);
+    }
+    let name = match &stmt.schema_name {
+        Some(schema) => format!("{schema}.{}", stmt.table_name),
+        None => stmt.table_name.clone(),
+    };
+    let Some(relation) = catalog.lookup_any_relation(&name) else {
+        return Ok(false);
+    };
+    let expected_relkind = match stmt.object_type {
+        TableAsObjectType::Table => 'r',
+        TableAsObjectType::MaterializedView => 'm',
+    };
+    Ok(relation.relkind == expected_relkind)
 }
 
 fn execute_explain_update(
