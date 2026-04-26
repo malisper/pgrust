@@ -15262,7 +15262,11 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
             _ => raw_type_output_name(ty).to_string(),
         },
         SqlExpr::Collate { expr, .. } => select_item_name(expr, index),
-        SqlExpr::Case { .. } => "case".to_string(),
+        SqlExpr::Case { defresult, .. } => defresult
+            .as_deref()
+            .map(|expr| select_item_name(expr, index))
+            .filter(|name| name != "?column?" && name != "case")
+            .unwrap_or_else(|| "case".to_string()),
         SqlExpr::Row(_) => "row".to_string(),
         SqlExpr::Random => "random".to_string(),
         SqlExpr::CurrentCatalog => "current_catalog".to_string(),

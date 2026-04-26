@@ -408,7 +408,9 @@ fn domain_sql_type(domain: &DomainEntry) -> SqlType {
             .sql_type
             .with_identity(domain.oid, domain.sql_type.type_oid);
     }
-    domain.sql_type
+    domain
+        .sql_type
+        .with_identity(domain.oid, domain.sql_type.type_oid)
 }
 
 fn dynamic_range_array_type_names(
