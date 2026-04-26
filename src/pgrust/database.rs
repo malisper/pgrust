@@ -44,13 +44,14 @@ use crate::backend::parser::Statement;
 use crate::backend::parser::{
     AlterSequenceStatement, AlterTableAddColumnStatement, AlterTableDropColumnStatement,
     AlterTableRenameColumnStatement, AlterTableRenameStatement, AnalyzeStatement, CatalogLookup,
-    CommentOnConstraintStatement, CommentOnDomainStatement, CommentOnTableStatement,
-    CreateCompositeTypeStatement, CreateDomainStatement, CreateIndexStatement,
-    CreateSchemaStatement, CreateSequenceStatement, CreateTableAsStatement, CreateTableStatement,
-    CreateViewStatement, DropDomainStatement, DropSequenceStatement, DropViewStatement,
-    OnCommitAction, ParseError, SqlType, SqlTypeKind, TablePersistence, bind_delete, bind_insert,
-    bind_update, create_relation_desc, lower_create_table_with_catalog,
-    normalize_create_table_as_name, normalize_create_table_name, normalize_create_view_name,
+    CommentOnColumnStatement, CommentOnConstraintStatement, CommentOnDomainStatement,
+    CommentOnTableStatement, CommentOnTypeStatement, CreateCompositeTypeStatement,
+    CreateDomainStatement, CreateIndexStatement, CreateSchemaStatement, CreateSequenceStatement,
+    CreateTableAsStatement, CreateTableStatement, CreateViewStatement, DropDomainStatement,
+    DropSequenceStatement, DropViewStatement, OnCommitAction, ParseError, SqlType, SqlTypeKind,
+    TablePersistence, bind_delete, bind_insert, bind_update, create_relation_desc,
+    lower_create_table_with_catalog, normalize_create_table_as_name, normalize_create_table_name,
+    normalize_create_view_name,
 };
 use crate::backend::storage::lmgr::{
     AdvisoryLockKey, AdvisoryLockManager, AdvisoryLockSnapshotRow, RowLockManager,
@@ -258,6 +259,7 @@ pub(crate) struct CreatedTempRelation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DomainEntry {
     pub oid: u32,
+    pub array_oid: u32,
     pub name: String,
     pub namespace_oid: u32,
     pub sql_type: SqlType,
@@ -269,6 +271,15 @@ pub(crate) struct DomainEntry {
     pub comment: Option<String>,
 }
 
+const DOMAIN_IN_PROC_OID: u32 = 2597;
+const DOMAIN_RECV_PROC_OID: u32 = 2598;
+const ARRAY_IN_PROC_OID: u32 = 750;
+const ARRAY_OUT_PROC_OID: u32 = 751;
+const ARRAY_RECV_PROC_OID: u32 = 2400;
+const ARRAY_SEND_PROC_OID: u32 = 2401;
+const ARRAY_TYPANALYZE_PROC_OID: u32 = 3816;
+const ARRAY_SUBSCRIPT_HANDLER_PROC_OID: u32 = 6179;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DomainCheckEntry {
     pub name: String,
@@ -279,6 +290,15 @@ pub(crate) struct DomainCheckEntry {
 pub(crate) struct BaseTypeEntry {
     pub oid: u32,
     pub array_oid: u32,
+    pub input_proc_oid: u32,
+    pub output_proc_oid: u32,
+    pub receive_proc_oid: u32,
+    pub send_proc_oid: u32,
+    pub typmodin_proc_oid: u32,
+    pub typmodout_proc_oid: u32,
+    pub analyze_proc_oid: u32,
+    pub subscript_proc_oid: u32,
+    pub typstorage: AttributeStorage,
     pub default: Option<String>,
 }
 
@@ -786,24 +806,60 @@ impl Database {
         search_path: &[String],
     ) -> Vec<PgTypeRow> {
         let domains = self.domains.read();
+        let base_types = self.base_types.read();
         let mut rows = domains
             .values()
-            .map(|domain| PgTypeRow {
-                oid: domain.oid,
-                typname: domain.name.clone(),
-                typnamespace: domain.namespace_oid,
-                typowner: BOOTSTRAP_SUPERUSER_OID,
-                typacl: domain.typacl.clone(),
-                typlen: if domain.sql_type.is_array { -1 } else { 0 },
-                typalign: AttributeAlign::Int,
-                typstorage: AttributeStorage::Extended,
-                typrelid: 0,
-                typelem: 0,
-                typarray: 0,
-                typinput: 0,
-                typoutput: 0,
-                typmodout: 0,
-                sql_type: domain_sql_type(domain),
+            .flat_map(|domain| {
+                let base = base_types.get(&domain.sql_type.type_oid);
+                let domain_type = domain_sql_type(domain);
+                [
+                    PgTypeRow {
+                        oid: domain.oid,
+                        typname: domain.name.clone(),
+                        typnamespace: domain.namespace_oid,
+                        typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typacl: domain.typacl.clone(),
+                        typlen: if domain.sql_type.is_array { -1 } else { 0 },
+                        typalign: AttributeAlign::Int,
+                        typstorage: base
+                            .map(|entry| entry.typstorage)
+                            .unwrap_or(AttributeStorage::Extended),
+                        typrelid: 0,
+                        typelem: 0,
+                        typarray: domain.array_oid,
+                        typinput: DOMAIN_IN_PROC_OID,
+                        typoutput: base.map(|entry| entry.output_proc_oid).unwrap_or(0),
+                        typreceive: DOMAIN_RECV_PROC_OID,
+                        typsend: base.map(|entry| entry.send_proc_oid).unwrap_or(0),
+                        typmodin: 0,
+                        typmodout: 0,
+                        typanalyze: base.map(|entry| entry.analyze_proc_oid).unwrap_or(0),
+                        typsubscript: 0,
+                        sql_type: domain_type,
+                    },
+                    PgTypeRow {
+                        oid: domain.array_oid,
+                        typname: format!("_{}", domain.name),
+                        typnamespace: domain.namespace_oid,
+                        typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typacl: None,
+                        typlen: -1,
+                        typalign: AttributeAlign::Int,
+                        typstorage: AttributeStorage::Extended,
+                        typrelid: 0,
+                        typelem: domain.oid,
+                        typarray: 0,
+                        typinput: ARRAY_IN_PROC_OID,
+                        typoutput: ARRAY_OUT_PROC_OID,
+                        typreceive: ARRAY_RECV_PROC_OID,
+                        typsend: ARRAY_SEND_PROC_OID,
+                        typmodin: 0,
+                        typmodout: 0,
+                        typanalyze: ARRAY_TYPANALYZE_PROC_OID,
+                        typsubscript: ARRAY_SUBSCRIPT_HANDLER_PROC_OID,
+                        sql_type: SqlType::array_of(domain_type),
+                    },
+                ]
             })
             .collect::<Vec<_>>();
         rows.sort_by_key(|row| {
@@ -840,7 +896,12 @@ impl Database {
                         typarray: entry.array_oid,
                         typinput: 0,
                         typoutput: 0,
+                        typreceive: 0,
+                        typsend: 0,
+                        typmodin: 0,
                         typmodout: 0,
+                        typanalyze: 0,
+                        typsubscript: 0,
                         // :HACK: User-defined enums are text-backed for now. This unlocks
                         // catalog/type resolution and basic storage flow, but does not yet
                         // enforce label membership or enum ordering semantics.
@@ -860,7 +921,12 @@ impl Database {
                         typarray: 0,
                         typinput: 0,
                         typoutput: 0,
+                        typreceive: 0,
+                        typsend: 0,
+                        typmodin: 0,
                         typmodout: 0,
+                        typanalyze: 0,
+                        typsubscript: 0,
                         sql_type: SqlType::array_of(base_sql_type)
                             .with_identity(entry.array_oid, 0),
                     },
@@ -1081,7 +1147,12 @@ impl Database {
                         typarray: entry.array_oid,
                         typinput: 0,
                         typoutput: 0,
+                        typreceive: 0,
+                        typsend: 0,
+                        typmodin: 0,
                         typmodout: 0,
+                        typanalyze: 0,
+                        typsubscript: 0,
                         sql_type: base_sql_type,
                     },
                     PgTypeRow {
@@ -1098,7 +1169,12 @@ impl Database {
                         typarray: 0,
                         typinput: 0,
                         typoutput: 0,
+                        typreceive: 0,
+                        typsend: 0,
+                        typmodin: 0,
                         typmodout: 0,
+                        typanalyze: 0,
+                        typsubscript: 0,
                         sql_type: SqlType::array_of(base_sql_type),
                     },
                     PgTypeRow {
@@ -1115,7 +1191,12 @@ impl Database {
                         typarray: entry.multirange_array_oid,
                         typinput: 0,
                         typoutput: 0,
+                        typreceive: 0,
+                        typsend: 0,
+                        typmodin: 0,
                         typmodout: 0,
+                        typanalyze: 0,
+                        typsubscript: 0,
                         sql_type: multirange_sql_type,
                     },
                     PgTypeRow {
@@ -1132,7 +1213,12 @@ impl Database {
                         typarray: 0,
                         typinput: 0,
                         typoutput: 0,
+                        typreceive: 0,
+                        typsend: 0,
+                        typmodin: 0,
                         typmodout: 0,
+                        typanalyze: 0,
+                        typsubscript: 0,
                         sql_type: SqlType::array_of(multirange_sql_type),
                     },
                 ]

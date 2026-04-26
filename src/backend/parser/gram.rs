@@ -111,6 +111,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_comment_on_operator_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_comment_on_type_or_column_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_operator_class_statement(&sql)? {
         return Ok(stmt);
     }
@@ -4344,6 +4347,22 @@ fn try_parse_comment_on_operator_statement(sql: &str) -> Result<Option<Statement
     )))
 }
 
+fn try_parse_comment_on_type_or_column_statement(
+    sql: &str,
+) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("comment on type ") {
+        return build_comment_on_type_statement(trimmed)
+            .map(|stmt| Some(Statement::CommentOnType(stmt)));
+    }
+    if lowered.starts_with("comment on column ") {
+        return build_comment_on_column_statement(trimmed)
+            .map(|stmt| Some(Statement::CommentOnColumn(stmt)));
+    }
+    Ok(None)
+}
+
 fn try_parse_create_operator_class_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -6841,6 +6860,89 @@ fn build_comment_on_operator_statement(
     })
 }
 
+fn parse_comment_value(
+    rest: &str,
+    expected_end: &'static str,
+) -> Result<Option<String>, ParseError> {
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "is") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "IS",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "is").trim_start();
+    let (comment, rest) = if keyword_at_start(rest, "null") {
+        (None, consume_keyword(rest, "null"))
+    } else {
+        let len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+            expected: "quoted string or NULL",
+            actual: rest.into(),
+        })?;
+        (Some(decode_string_literal(&rest[..len])?), &rest[len..])
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: expected_end,
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(comment)
+}
+
+fn build_comment_on_type_statement(sql: &str) -> Result<CommentOnTypeStatement, ParseError> {
+    let Some(rest) = sql.get("comment on type".len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "COMMENT ON TYPE name IS ...",
+            actual: sql.into(),
+        });
+    };
+    let Some(is_index) = find_top_level_keyword(rest, "is") else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "IS",
+            actual: rest.trim().into(),
+        });
+    };
+    let type_name = rest[..is_index].trim();
+    if type_name.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "type name",
+            actual: sql.into(),
+        });
+    }
+    Ok(CommentOnTypeStatement {
+        type_name: type_name.to_string(),
+        comment: parse_comment_value(&rest[is_index..], "end of COMMENT ON TYPE")?,
+    })
+}
+
+fn build_comment_on_column_statement(sql: &str) -> Result<CommentOnColumnStatement, ParseError> {
+    let Some(rest) = sql.get("comment on column".len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "COMMENT ON COLUMN relation.column IS ...",
+            actual: sql.into(),
+        });
+    };
+    let Some(is_index) = find_top_level_keyword(rest, "is") else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "IS",
+            actual: rest.trim().into(),
+        });
+    };
+    let target = rest[..is_index].trim();
+    let Some((relation_name, column_name)) = target.rsplit_once('.') else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "relation.column",
+            actual: target.into(),
+        });
+    };
+    Ok(CommentOnColumnStatement {
+        relation_name: relation_name.trim().to_string(),
+        column_name: column_name.trim().to_string(),
+        comment: parse_comment_value(&rest[is_index..], "end of COMMENT ON COLUMN")?,
+    })
+}
+
 fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOptions, ParseError> {
     let mut parsed = ParsedCreateAggregateOptions {
         finalfunc_modify: 'r',
@@ -8778,6 +8880,23 @@ fn build_alter_type_statement(sql: &str) -> Result<AlterTypeStatement, ParseErro
                 type_name,
                 old_label,
                 new_label,
+            },
+        ));
+    }
+    if keyword_at_start(rest, "set") {
+        rest = consume_keyword(rest, "set").trim_start();
+        let (option_list, rest) = take_parenthesized_segment(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: rest.trim().into(),
+            });
+        }
+        return Ok(AlterTypeStatement::SetOptions(
+            AlterTypeSetOptionsStatement {
+                schema_name,
+                type_name,
+                options: parse_create_base_type_options(&option_list)?,
             },
         ));
     }
@@ -16783,11 +16902,28 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 None => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Varchar)),
             }
         }
-        Rule::named_type_name => RawTypeName::Named {
-            name: build_identifier(pair.into_inner().next().expect("named_type_name inner")),
-            array_bounds: 0,
-        },
+        Rule::named_type_name => build_named_type_name(pair),
         _ => unreachable!("unexpected type rule {:?}", pair.as_rule()),
+    }
+}
+
+fn build_named_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
+    let mut name = None;
+    let mut typmod = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::named_type_typmod => typmod = Some(part.as_str().trim().to_string()),
+            _ => {}
+        }
+    }
+    let mut name = name.expect("named_type_name always contains an identifier");
+    if let Some(typmod) = typmod {
+        name.push_str(&typmod);
+    }
+    RawTypeName::Named {
+        name,
+        array_bounds: 0,
     }
 }
 
@@ -17371,6 +17507,11 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         },
                         "-|-" => SqlExpr::BinaryOperator {
                             op: "-|-".into(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "<%" => SqlExpr::BinaryOperator {
+                            op: "<%".into(),
                             left: Box::new(left),
                             right: Box::new(right),
                         },

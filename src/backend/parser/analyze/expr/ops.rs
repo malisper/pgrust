@@ -1794,6 +1794,75 @@ pub(super) fn bind_overloaded_binary_expr(
     })
 }
 
+pub(super) fn bind_catalog_binary_operator_expr(
+    op: &'static str,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    let left_oid = catalog
+        .type_oid_for_sql_type(left_type)
+        .ok_or_else(|| ParseError::UnsupportedType(sql_type_name(left_type)))?;
+    let right_oid = catalog
+        .type_oid_for_sql_type(right_type)
+        .ok_or_else(|| ParseError::UnsupportedType(sql_type_name(right_type)))?;
+    let operator = catalog
+        .operator_by_name_left_right(op, left_oid, right_oid)
+        .ok_or_else(|| ParseError::UndefinedOperator {
+            op,
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        })?;
+    let result_type = catalog
+        .type_by_oid(operator.oprresult)
+        .map(|row| row.sql_type.with_identity(row.oid, row.typrelid))
+        .ok_or_else(|| ParseError::UnsupportedType(operator.oprresult.to_string()))?;
+    let left_bound =
+        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let right_bound =
+        bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let implementation = catalog
+        .proc_row_by_oid(operator.oprcode)
+        .and_then(|row| builtin_impl_for_catalog_proc(&row))
+        .map(ScalarFunctionImpl::Builtin)
+        .unwrap_or(ScalarFunctionImpl::UserDefined {
+            proc_oid: operator.oprcode,
+        });
+    Ok(Expr::func_with_impl(
+        operator.oprcode,
+        Some(result_type),
+        false,
+        implementation,
+        vec![
+            coerce_bound_expr(left_bound, raw_left_type, left_type),
+            coerce_bound_expr(right_bound, raw_right_type, right_type),
+        ],
+    ))
+}
+
+fn builtin_impl_for_catalog_proc(
+    row: &crate::include::catalog::PgProcRow,
+) -> Option<crate::include::nodes::primnodes::BuiltinScalarFunction> {
+    [row.prosrc.as_str(), row.proname.as_str()]
+        .into_iter()
+        .any(|name| {
+            ["pt_in_widget", "pg_rust_test_pt_in_widget"]
+                .into_iter()
+                .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        })
+        .then_some(crate::include::nodes::primnodes::BuiltinScalarFunction::PgRustTestPtInWidget)
+}
+
 pub(super) fn bind_prefix_operator_expr(
     op: &str,
     expr: &SqlExpr,

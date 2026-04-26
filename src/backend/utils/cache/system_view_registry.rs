@@ -137,7 +137,13 @@ const PG_TYPE_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::new("typarray", SqlType::new(SqlTypeKind::Oid)),
     SyntheticSystemViewColumn::new("typinput", SqlType::new(SqlTypeKind::RegProc)),
     SyntheticSystemViewColumn::new("typoutput", SqlType::new(SqlTypeKind::RegProc)),
+    SyntheticSystemViewColumn::new("typreceive", SqlType::new(SqlTypeKind::RegProc)),
+    SyntheticSystemViewColumn::new("typsend", SqlType::new(SqlTypeKind::RegProc)),
+    SyntheticSystemViewColumn::new("typmodin", SqlType::new(SqlTypeKind::RegProc)),
     SyntheticSystemViewColumn::new("typmodout", SqlType::new(SqlTypeKind::RegProc)),
+    SyntheticSystemViewColumn::new("typanalyze", SqlType::new(SqlTypeKind::RegProc)),
+    SyntheticSystemViewColumn::new("typsubscript", SqlType::new(SqlTypeKind::RegProc)),
+    SyntheticSystemViewColumn::new("typacl", SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
 ];
 
 const PG_VIEWS_COLUMNS: &[SyntheticSystemViewColumn] = &[

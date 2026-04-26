@@ -8,6 +8,11 @@ use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::*;
 
 const ARRAY_IN_PROC_OID: u32 = 750;
+const ARRAY_OUT_PROC_OID: u32 = 751;
+const ARRAY_RECV_PROC_OID: u32 = 2400;
+const ARRAY_SEND_PROC_OID: u32 = 2401;
+const ARRAY_TYPANALYZE_PROC_OID: u32 = 3816;
+const ARRAY_SUBSCRIPT_HANDLER_PROC_OID: u32 = 6179;
 const INTERNAL_IN_PROC_OID: u32 = 2304;
 const ANYARRAY_IN_PROC_OID: u32 = 2296;
 const ANYELEMENT_IN_PROC_OID: u32 = 2312;
@@ -37,7 +42,12 @@ pub struct PgTypeRow {
     pub typarray: u32,
     pub typinput: u32,
     pub typoutput: u32,
+    pub typreceive: u32,
+    pub typsend: u32,
+    pub typmodin: u32,
     pub typmodout: u32,
+    pub typanalyze: u32,
+    pub typsubscript: u32,
     pub sql_type: SqlType,
 }
 
@@ -56,7 +66,12 @@ pub fn pg_type_desc() -> RelationDesc {
             column_desc("typarray", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("typinput", SqlType::new(SqlTypeKind::RegProc), false),
             column_desc("typoutput", SqlType::new(SqlTypeKind::RegProc), false),
+            column_desc("typreceive", SqlType::new(SqlTypeKind::RegProc), false),
+            column_desc("typsend", SqlType::new(SqlTypeKind::RegProc), false),
+            column_desc("typmodin", SqlType::new(SqlTypeKind::RegProc), false),
             column_desc("typmodout", SqlType::new(SqlTypeKind::RegProc), false),
+            column_desc("typanalyze", SqlType::new(SqlTypeKind::RegProc), false),
+            column_desc("typsubscript", SqlType::new(SqlTypeKind::RegProc), false),
             column_desc(
                 "typacl",
                 SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
@@ -1093,7 +1108,12 @@ fn builtin_type_row(name: &str, oid: u32, sql_type: SqlType) -> PgTypeRow {
         typarray: 0,
         typinput: 0,
         typoutput: 0,
+        typreceive: 0,
+        typsend: 0,
+        typmodin: 0,
         typmodout: 0,
+        typanalyze: 0,
+        typsubscript: 0,
         sql_type,
     }
 }
@@ -1119,7 +1139,12 @@ fn fixed_builtin_type_row(
         typarray: 0,
         typinput: 0,
         typoutput: 0,
+        typreceive: 0,
+        typsend: 0,
+        typmodin: 0,
         typmodout: 0,
+        typanalyze: 0,
+        typsubscript: 0,
         sql_type,
     }
 }
@@ -1175,7 +1200,12 @@ pub fn composite_type_row(
         typarray: array_oid,
         typinput: 0,
         typoutput: 0,
+        typreceive: 0,
+        typsend: 0,
+        typmodin: 0,
         typmodout: 0,
+        typanalyze: 0,
+        typsubscript: 0,
         sql_type: SqlType::named_composite(oid, relid),
     }
 }
@@ -1201,7 +1231,12 @@ pub fn composite_array_type_row(
         typarray: 0,
         typinput: 0,
         typoutput: 0,
+        typreceive: 0,
+        typsend: 0,
+        typmodin: 0,
         typmodout: 0,
+        typanalyze: 0,
+        typsubscript: 0,
         sql_type: SqlType::array_of(SqlType::named_composite(elem_oid, relid)),
     }
 }
@@ -1253,6 +1288,13 @@ fn annotate_type_io_procs(rows: &mut [PgTypeRow]) {
             _ if matches!(row.sql_type.kind, SqlTypeKind::Multirange) => MULTIRANGE_IN_PROC_OID,
             _ => row.typinput,
         };
+        if row.sql_type.is_array {
+            row.typoutput = ARRAY_OUT_PROC_OID;
+            row.typreceive = ARRAY_RECV_PROC_OID;
+            row.typsend = ARRAY_SEND_PROC_OID;
+            row.typanalyze = ARRAY_TYPANALYZE_PROC_OID;
+            row.typsubscript = ARRAY_SUBSCRIPT_HANDLER_PROC_OID;
+        }
         row.typoutput = match row.oid {
             TXID_SNAPSHOT_TYPE_OID => 2940,
             PG_SNAPSHOT_TYPE_OID => 5056,

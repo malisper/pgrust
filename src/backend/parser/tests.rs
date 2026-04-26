@@ -12,8 +12,9 @@ use crate::include::catalog::{
 use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec,
     AlterColumnExpressionAction, AlterTableTriggerMode, AlterTableTriggerStateStatement,
-    AlterTableTriggerTarget, AlterTriggerRenameStatement, ColumnConstraint, ColumnGeneratedKind,
-    CommentOnAggregateStatement, CommentOnFunctionStatement, CommentOnOperatorStatement,
+    AlterTableTriggerTarget, AlterTriggerRenameStatement, AlterTypeSetOptionsStatement,
+    ColumnConstraint, ColumnGeneratedKind, CommentOnAggregateStatement, CommentOnColumnStatement,
+    CommentOnFunctionStatement, CommentOnOperatorStatement, CommentOnTypeStatement,
     CommentOnViewStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
     CreateBaseTypeOption, CreateBaseTypeStatement, CreateCompositeTypeStatement,
     CreateShellTypeStatement, CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement,
@@ -2139,6 +2140,25 @@ fn parse_comment_on_index_null_statement() {
         stmt,
         Statement::CommentOnIndex(CommentOnIndexStatement {
             index_name: "items_idx".into(),
+            comment: None,
+        })
+    );
+}
+
+#[test]
+fn parse_comment_on_type_and_column_statements() {
+    assert_eq!(
+        parse_statement("comment on type public.default_test_row is 'good comment'").unwrap(),
+        Statement::CommentOnType(CommentOnTypeStatement {
+            type_name: "public.default_test_row".into(),
+            comment: Some("good comment".into()),
+        })
+    );
+    assert_eq!(
+        parse_statement("comment on column default_test_row.f1 is null").unwrap(),
+        Statement::CommentOnColumn(CommentOnColumnStatement {
+            relation_name: "default_test_row".into(),
+            column_name: "f1".into(),
             comment: None,
         })
     );
@@ -4363,6 +4383,20 @@ fn parse_record_and_named_type_names() {
             array_bounds: 0,
         }
     );
+    assert_eq!(
+        parse_type_name("widget(42,13)").unwrap(),
+        RawTypeName::Named {
+            name: "widget(42,13)".into(),
+            array_bounds: 0,
+        }
+    );
+    assert_eq!(
+        parse_type_name("\"int4\"").unwrap(),
+        RawTypeName::Named {
+            name: "int4".into(),
+            array_bounds: 0,
+        }
+    );
 }
 
 #[test]
@@ -4730,6 +4764,9 @@ fn parse_create_trigger_statement_with_truncate_event() {
 fn parse_expression_entrypoint_reuses_sql_expression_grammar() {
     let expr = parse_expr("1 + 2 * 3").unwrap();
     assert!(matches!(expr, SqlExpr::Add(_, _)));
+
+    let expr = parse_expr("a <% b").unwrap();
+    assert!(matches!(expr, SqlExpr::BinaryOperator { ref op, .. } if op == "<%"));
 }
 
 #[test]
@@ -11030,6 +11067,37 @@ fn parse_alter_type_rename_to_statement() {
 }
 
 #[test]
+fn parse_alter_type_set_options_statement() {
+    let Statement::AlterType(AlterTypeStatement::SetOptions(stmt)) = parse_statement(
+        "alter type public.myvarchar set (storage = extended, send = myvarcharsend, typmod_in = varchartypmodin)",
+    )
+    .unwrap() else {
+        panic!("expected alter type set options");
+    };
+    assert_eq!(
+        stmt,
+        AlterTypeSetOptionsStatement {
+            schema_name: Some("public".into()),
+            type_name: "myvarchar".into(),
+            options: vec![
+                CreateBaseTypeOption {
+                    name: "storage".into(),
+                    value: Some("extended".into()),
+                },
+                CreateBaseTypeOption {
+                    name: "send".into(),
+                    value: Some("myvarcharsend".into()),
+                },
+                CreateBaseTypeOption {
+                    name: "typmod_in".into(),
+                    value: Some("varchartypmodin".into()),
+                },
+            ],
+        }
+    );
+}
+
+#[test]
 fn parse_create_drop_and_comment_on_conversion_statements() {
     let Statement::CreateConversion(create) = parse_statement(
         "create default conversion public.mydef for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",
@@ -11368,7 +11436,12 @@ fn lower_create_table_resolves_named_domain_types() {
             typarray: 0,
             typinput: 0,
             typoutput: 0,
+            typreceive: 0,
+            typsend: 0,
+            typmodin: 0,
             typmodout: 0,
+            typanalyze: 0,
+            typsubscript: 0,
             sql_type: SqlType::new(SqlTypeKind::Int4),
         }],
     };

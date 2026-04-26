@@ -939,7 +939,9 @@ fn run_statement(
             execute_readonly_statement(Statement::Analyze(stmt), &relcache, &mut ctx)
         }
         Statement::CommentOnConstraint(_)
+        | Statement::CommentOnColumn(_)
         | Statement::CommentOnDomain(_)
+        | Statement::CommentOnType(_)
         | Statement::CommentOnTrigger(_)
         | Statement::CommentOnView(_)
         | Statement::CreateConversion(_)

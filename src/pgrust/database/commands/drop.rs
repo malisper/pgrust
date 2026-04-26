@@ -7,7 +7,7 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
-    PG_REWRITE_RELATION_OID, PgConstraintRow, PgRewriteRow,
+    PG_REWRITE_RELATION_OID, PgConstraintRow, PgProcRow, PgRewriteRow,
 };
 use crate::include::nodes::parsenodes::{
     DropAggregateStatement, DropFunctionStatement, DropIndexStatement, DropProcedureStatement,
@@ -35,6 +35,52 @@ fn domain_has_range_dependents_error(type_name: &str, dependent_name: &str) -> E
         detail: Some(format!("type {dependent_name} depends on type {type_name}")),
         hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
         sqlstate: "2BP01",
+    }
+}
+
+fn drop_proc_rows_depending_on_type(
+    catcache: &CatCache,
+    type_oid: u32,
+    exclude_proc_oid: Option<u32>,
+) -> Vec<PgProcRow> {
+    let mut rows = catcache
+        .proc_rows()
+        .into_iter()
+        .filter(|row| Some(row.oid) != exclude_proc_oid)
+        .filter(|row| {
+            row.prorettype == type_oid
+                || drop_parse_proc_arg_oids(&row.proargtypes).contains(&type_oid)
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| (row.proname.clone(), row.oid));
+    rows.dedup_by_key(|row| row.oid);
+    rows
+}
+
+fn drop_parse_proc_arg_oids(argtypes: &str) -> Vec<u32> {
+    argtypes
+        .split_whitespace()
+        .filter_map(|part| part.parse::<u32>().ok())
+        .collect()
+}
+
+fn drop_proc_signature_text(row: &PgProcRow, catalog: &dyn CatalogLookup) -> String {
+    let args = drop_parse_proc_arg_oids(&row.proargtypes)
+        .into_iter()
+        .map(|oid| format_type_text(oid, None, catalog))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{}({args})", row.proname)
+}
+
+fn drop_format_name(catcache: &CatCache, namespace_oid: u32, object_name: &str) -> String {
+    let schema_name = catcache
+        .namespace_by_oid(namespace_oid)
+        .map(|row| row.nspname.clone())
+        .unwrap_or_else(|| "public".to_string());
+    match schema_name.as_str() {
+        "public" | "pg_catalog" => object_name.to_string(),
+        _ => format!("{schema_name}.{object_name}"),
     }
 }
 
@@ -1019,6 +1065,17 @@ impl Database {
                 });
             }
         };
+        if !drop_stmt.cascade
+            && let Some(err) = self.drop_function_dependency_error(
+                client_id,
+                txn_ctx,
+                &proc_row,
+                &catalog,
+                object_kind,
+            )?
+        {
+            return Err(err);
+        }
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -1036,6 +1093,71 @@ impl Database {
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn drop_function_dependency_error(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        proc_row: &PgProcRow,
+        catalog: &dyn CatalogLookup,
+        object_kind: &'static str,
+    ) -> Result<Option<ExecError>, ExecError> {
+        let catcache = self
+            .backend_catcache(client_id, txn_ctx)
+            .map_err(map_catalog_error)?;
+        let signature = drop_proc_signature_text(proc_row, catalog);
+        let mut details = Vec::new();
+        let type_rows = catcache
+            .type_rows()
+            .into_iter()
+            .filter(|row| {
+                [
+                    row.typinput,
+                    row.typoutput,
+                    row.typreceive,
+                    row.typsend,
+                    row.typmodin,
+                    row.typmodout,
+                    row.typanalyze,
+                    row.typsubscript,
+                ]
+                .contains(&proc_row.oid)
+            })
+            .collect::<Vec<_>>();
+        for type_row in &type_rows {
+            let type_name = drop_format_name(&catcache, type_row.typnamespace, &type_row.typname);
+            details.push(format!(
+                "type {type_name} depends on {object_kind} {signature}"
+            ));
+            for row in drop_proc_rows_depending_on_type(&catcache, type_row.oid, Some(proc_row.oid))
+            {
+                details.push(format!(
+                    "function {} depends on type {type_name}",
+                    drop_proc_signature_text(&row, catalog)
+                ));
+            }
+            for domain in self.domains.read().values() {
+                if domain.sql_type.type_oid == type_row.oid {
+                    details.push(format!(
+                        "type {} depends on {object_kind} {signature}",
+                        drop_format_name(&catcache, domain.namespace_oid, &domain.name)
+                    ));
+                }
+            }
+        }
+        details.dedup();
+        if details.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(ExecError::DetailedError {
+            message: format!(
+                "cannot drop {object_kind} {signature} because other objects depend on it"
+            ),
+            detail: Some(details.join("\n")),
+            hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+            sqlstate: "2BP01",
+        }))
     }
 
     fn drop_schema_owned_objects_in_transaction(

@@ -2,15 +2,17 @@ use super::super::*;
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::roles::find_role_by_name;
+use crate::backend::executor::expr_reg::format_type_text;
 use crate::backend::executor::{ColumnDesc, RelationDesc, StatementResult};
 use crate::backend::parser::{
     AlterEnumValuePosition, AlterTypeAddEnumValueStatement, AlterTypeOwnerStatement,
-    AlterTypeRenameEnumValueStatement, AlterTypeRenameTypeStatement, AlterTypeStatement,
-    CatalogLookup, CreateBaseTypeOption, CreateBaseTypeStatement, CreateCompositeTypeStatement,
-    CreateEnumTypeStatement, CreateRangeTypeStatement, CreateShellTypeStatement,
-    CreateTypeStatement, DropTypeStatement, ParseError, SqlTypeKind, parse_type_name,
-    resolve_raw_type_name,
+    AlterTypeRenameEnumValueStatement, AlterTypeRenameTypeStatement, AlterTypeSetOptionsStatement,
+    AlterTypeStatement, CatalogLookup, CreateBaseTypeOption, CreateBaseTypeStatement,
+    CreateCompositeTypeStatement, CreateEnumTypeStatement, CreateRangeTypeStatement,
+    CreateShellTypeStatement, CreateTypeStatement, DropTypeStatement, ParseError, SqlTypeKind,
+    parse_type_name, resolve_raw_type_name,
 };
+use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{CSTRING_TYPE_OID, FLOAT8_TYPE_OID, PgProcRow, builtin_range_specs};
@@ -39,6 +41,10 @@ enum ResolvedDropTypeTarget {
         display_name: String,
     },
     Shell {
+        type_oid: u32,
+        display_name: String,
+    },
+    Base {
         type_oid: u32,
         display_name: String,
     },
@@ -268,6 +274,48 @@ impl Database {
                                 range_types.remove(&key);
                             }
                         }
+                        let catcache = self
+                            .backend_catcache(client_id, Some((xid, cid)))
+                            .map_err(map_catalog_error)?;
+                        let proc_dependents =
+                            proc_rows_depending_on_type(&catcache, type_oid, None);
+                        let notices = proc_dependents
+                            .iter()
+                            .map(|row| {
+                                format!(
+                                    "drop cascades to function {}",
+                                    proc_signature_text(row, &catalog)
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        match notices.as_slice() {
+                            [] => {}
+                            [notice] => push_notice(notice.clone()),
+                            notices => {
+                                crate::backend::utils::misc::notices::push_notice_with_detail(
+                                    format!("drop cascades to {} other objects", notices.len()),
+                                    notices.join("\n"),
+                                )
+                            }
+                        }
+                        let ctx = CatalogWriteContext {
+                            pool: self.pool.clone(),
+                            txns: self.txns.clone(),
+                            xid,
+                            cid,
+                            client_id,
+                            waiter: Some(self.txn_waiter.clone()),
+                            interrupts: Arc::clone(&interrupts),
+                        };
+                        for row in &proc_dependents {
+                            let effect = self
+                                .catalog
+                                .write()
+                                .drop_proc_by_oid_mvcc(row.oid, &ctx)
+                                .map(|(_, effect)| effect)
+                                .map_err(map_catalog_error)?;
+                            catalog_effects.push(effect);
+                        }
                     } else {
                         reject_type_with_dependents(
                             self,
@@ -343,6 +391,106 @@ impl Database {
                         }
                         Err(err) => return Err(map_catalog_error(err)),
                     }
+                }
+                Some(ResolvedDropTypeTarget::Base {
+                    type_oid,
+                    display_name,
+                }) => {
+                    let catcache = self
+                        .backend_catcache(client_id, Some((xid, cid)))
+                        .map_err(map_catalog_error)?;
+                    let base_entry = self.base_types.read().get(&type_oid).cloned();
+                    let proc_dependents = base_type_proc_rows_depending_on_type(
+                        &catcache,
+                        type_oid,
+                        base_entry.as_ref(),
+                    );
+                    let domain_dependents =
+                        domain_names_depending_on_type(self, type_oid, &catcache);
+                    if !drop_stmt.cascade
+                        && (!proc_dependents.is_empty() || !domain_dependents.is_empty())
+                    {
+                        let mut detail = proc_dependents
+                            .iter()
+                            .map(|row| {
+                                format!(
+                                    "function {} depends on type {display_name}",
+                                    proc_signature_text(row, &catalog)
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        detail.extend(
+                            domain_dependents
+                                .iter()
+                                .map(|name| format!("type {name} depends on type {display_name}")),
+                        );
+                        return Err(ExecError::DetailedError {
+                            message: format!(
+                                "cannot drop type {display_name} because other objects depend on it"
+                            ),
+                            detail: Some(detail.join("\n")),
+                            hint: Some(
+                                "Use DROP ... CASCADE to drop the dependent objects too.".into(),
+                            ),
+                            sqlstate: "2BP01",
+                        });
+                    }
+                    let mut notices = proc_dependents
+                        .iter()
+                        .map(|row| {
+                            format!(
+                                "drop cascades to function {}",
+                                proc_signature_text(row, &catalog)
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    notices.extend(
+                        domain_dependents
+                            .iter()
+                            .map(|name| format!("drop cascades to type {name}")),
+                    );
+                    match notices.as_slice() {
+                        [] => {}
+                        [notice] => push_notice(notice.clone()),
+                        notices => crate::backend::utils::misc::notices::push_notice_with_detail(
+                            format!("drop cascades to {} other objects", notices.len()),
+                            notices.join("\n"),
+                        ),
+                    }
+
+                    let ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid,
+                        client_id,
+                        waiter: Some(self.txn_waiter.clone()),
+                        interrupts: Arc::clone(&interrupts),
+                    };
+                    for row in &proc_dependents {
+                        let effect = self
+                            .catalog
+                            .write()
+                            .drop_proc_by_oid_mvcc(row.oid, &ctx)
+                            .map(|(_, effect)| effect)
+                            .map_err(map_catalog_error)?;
+                        catalog_effects.push(effect);
+                    }
+                    if !domain_dependents.is_empty() {
+                        let mut domains = self.domains.write();
+                        domains.retain(|_, domain| domain.sql_type.type_oid != type_oid);
+                    }
+                    let effect = self
+                        .catalog
+                        .write()
+                        .drop_base_type_by_oid_mvcc(type_oid, &ctx)
+                        .map_err(map_catalog_error)?;
+                    self.base_types.write().remove(&type_oid);
+                    catalog_effects.push(effect);
+                    self.refresh_catalog_store_dynamic_type_rows(client_id, configured_search_path);
+                    self.invalidate_backend_cache_state(client_id);
+                    self.plan_cache.invalidate_all();
+                    dropped += 1;
                 }
                 Some(ResolvedDropTypeTarget::Enum {
                     type_oid,
@@ -486,14 +634,16 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
         let result = self.execute_alter_type_stmt_in_transaction_with_search_path(
             client_id,
             alter_stmt,
             xid,
             0,
             configured_search_path,
+            &mut catalog_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &[], &[], &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         result
     }
@@ -505,6 +655,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         match alter_stmt {
             AlterTypeStatement::AddEnumValue(stmt) => self.execute_alter_type_add_enum_value_stmt(
@@ -529,7 +680,155 @@ impl Database {
                 cid,
                 configured_search_path,
             ),
+            AlterTypeStatement::SetOptions(stmt) => self.execute_alter_type_set_options_stmt(
+                client_id,
+                stmt,
+                xid,
+                cid,
+                configured_search_path,
+                catalog_effects,
+            ),
         }
+    }
+
+    fn execute_alter_type_set_options_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &AlterTypeSetOptionsStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let lookup_name = match &stmt.schema_name {
+            Some(schema_name) => format!("{schema_name}.{}", stmt.type_name),
+            None => stmt.type_name.clone(),
+        };
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let row = catalog
+            .type_by_name(&lookup_name)
+            .ok_or_else(|| type_does_not_exist_error(&lookup_name))?;
+        if matches!(row.sql_type.kind, SqlTypeKind::Shell) {
+            return Err(type_is_only_shell_error(&lookup_name));
+        }
+        let old_entry = self
+            .base_types
+            .read()
+            .get(&row.oid)
+            .cloned()
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::WrongObjectType {
+                    name: lookup_name.clone(),
+                    expected: "base type",
+                })
+            })?;
+
+        let mut updated_row = row.clone();
+        let mut updated_entry = old_entry.clone();
+        for option in &stmt.options {
+            let option_name = option.name.as_str();
+            let normalized = option_name.to_ascii_lowercase();
+            if option_name != normalized {
+                push_warning(format!("type attribute \"{option_name}\" not recognized"));
+                continue;
+            }
+            match normalized.as_str() {
+                "storage" => {
+                    let storage = parse_base_type_storage(base_type_option_value(option)?)?;
+                    if storage == AttributeStorage::Plain && updated_row.typlen == -1 {
+                        return Err(ExecError::DetailedError {
+                            message: "cannot change type's storage to PLAIN".into(),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42P16",
+                        });
+                    }
+                    updated_row.typstorage = storage;
+                    updated_entry.typstorage = storage;
+                }
+                "send" => {
+                    let oid = resolve_required_proc_oid_by_name(
+                        &catalog,
+                        base_type_option_value(option)?,
+                    )?;
+                    updated_row.typsend = oid;
+                    updated_entry.send_proc_oid = oid;
+                }
+                "receive" => {
+                    let oid = resolve_required_proc_oid_by_name(
+                        &catalog,
+                        base_type_option_value(option)?,
+                    )?;
+                    updated_row.typreceive = oid;
+                    updated_entry.receive_proc_oid = oid;
+                }
+                "typmod_in" => {
+                    let oid = resolve_required_proc_oid_by_name(
+                        &catalog,
+                        base_type_option_value(option)?,
+                    )?;
+                    updated_row.typmodin = oid;
+                    updated_entry.typmodin_proc_oid = oid;
+                }
+                "typmod_out" => {
+                    let oid = resolve_required_proc_oid_by_name(
+                        &catalog,
+                        base_type_option_value(option)?,
+                    )?;
+                    updated_row.typmodout = oid;
+                    updated_entry.typmodout_proc_oid = oid;
+                }
+                "analyze" => {
+                    let oid = resolve_required_proc_oid_by_name(
+                        &catalog,
+                        base_type_option_value(option)?,
+                    )?;
+                    updated_row.typanalyze = oid;
+                    updated_entry.analyze_proc_oid = oid;
+                }
+                "subscript" => {
+                    let oid = resolve_required_proc_oid_by_name(
+                        &catalog,
+                        base_type_option_value(option)?,
+                    )?;
+                    updated_row.typsubscript = oid;
+                    updated_entry.subscript_proc_oid = oid;
+                }
+                _ => push_warning(format!("type attribute \"{option_name}\" not recognized")),
+            }
+        }
+
+        let mut replacement_rows = vec![updated_row.clone()];
+        if let Some(array_row) = catalog.type_by_oid(row.typarray) {
+            let mut updated_array = array_row;
+            updated_array.typstorage = AttributeStorage::Extended;
+            updated_array.typmodin = updated_row.typmodin;
+            updated_array.typmodout = updated_row.typmodout;
+            updated_array.typanalyze = 3816;
+            updated_array.typsubscript = 6179;
+            replacement_rows.push(updated_array);
+        }
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .replace_type_rows_mvcc(replacement_rows, &ctx)
+            .map_err(map_catalog_error)?;
+        self.base_types.write().insert(row.oid, updated_entry);
+        catalog_effects.push(effect);
+        self.refresh_catalog_store_dynamic_type_rows(client_id, configured_search_path);
+        self.invalidate_backend_cache_state(client_id);
+        self.plan_cache.invalidate_all();
+        Ok(StatementResult::AffectedRows(0))
     }
 
     fn resolve_drop_type_target(
@@ -674,6 +973,12 @@ impl Database {
                 display_name: format_name(type_row.typnamespace, &type_row.typname),
             }));
         }
+        if self.base_types.read().contains_key(&type_row.oid) {
+            return Ok(Some(ResolvedDropTypeTarget::Base {
+                type_oid: type_row.oid,
+                display_name: format_name(type_row.typnamespace, &type_row.typname),
+            }));
+        }
         let Some(class_row) = catcache.class_by_oid(type_row.typrelid) else {
             return Ok(Some(ResolvedDropTypeTarget::Other));
         };
@@ -695,6 +1000,94 @@ fn type_has_range_dependents_error(type_name: &str, dependent_name: &str) -> Exe
         detail: Some(format!("type {dependent_name} depends on type {type_name}")),
         hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
         sqlstate: "2BP01",
+    }
+}
+
+fn proc_rows_depending_on_type(
+    catcache: &CatCache,
+    type_oid: u32,
+    exclude_proc_oid: Option<u32>,
+) -> Vec<PgProcRow> {
+    let mut rows = catcache
+        .proc_rows()
+        .into_iter()
+        .filter(|row| Some(row.oid) != exclude_proc_oid)
+        .filter(|row| {
+            row.prorettype == type_oid || parse_proc_arg_oids(&row.proargtypes).contains(&type_oid)
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| (row.proname.clone(), row.oid));
+    rows.dedup_by_key(|row| row.oid);
+    rows
+}
+
+fn base_type_proc_rows_depending_on_type(
+    catcache: &CatCache,
+    type_oid: u32,
+    entry: Option<&BaseTypeEntry>,
+) -> Vec<PgProcRow> {
+    let mut rows = Vec::new();
+    if let Some(entry) = entry {
+        for oid in [
+            entry.input_proc_oid,
+            entry.output_proc_oid,
+            entry.send_proc_oid,
+            entry.receive_proc_oid,
+        ] {
+            if oid != 0
+                && let Some(row) = catcache.proc_by_oid(oid)
+                && (row.prorettype == type_oid
+                    || parse_proc_arg_oids(&row.proargtypes).contains(&type_oid))
+                && rows
+                    .iter()
+                    .all(|existing: &PgProcRow| existing.oid != row.oid)
+            {
+                rows.push(row.clone());
+            }
+        }
+    }
+    for row in proc_rows_depending_on_type(catcache, type_oid, None) {
+        if rows.iter().all(|existing| existing.oid != row.oid) {
+            rows.push(row);
+        }
+    }
+    rows
+}
+
+fn domain_names_depending_on_type(
+    db: &Database,
+    type_oid: u32,
+    catcache: &CatCache,
+) -> Vec<String> {
+    let mut names = db
+        .domains
+        .read()
+        .values()
+        .filter(|domain| domain.sql_type.type_oid == type_oid)
+        .map(|domain| format_name_for_namespace(catcache, domain.namespace_oid, &domain.name))
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn proc_signature_text(row: &PgProcRow, catalog: &dyn CatalogLookup) -> String {
+    let args = parse_proc_arg_oids(&row.proargtypes)
+        .into_iter()
+        .map(|oid| format_type_text(oid, None, catalog))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{}({args})", row.proname)
+}
+
+fn format_name_for_namespace(catcache: &CatCache, namespace_oid: u32, object_name: &str) -> String {
+    let schema_name = catcache
+        .namespace_by_oid(namespace_oid)
+        .map(|row| row.nspname.clone())
+        .unwrap_or_else(|| "public".to_string());
+    match schema_name.as_str() {
+        "public" | "pg_catalog" => object_name.to_string(),
+        _ => format!("{schema_name}.{object_name}"),
     }
 }
 
@@ -732,6 +1125,14 @@ struct ResolvedBaseTypeSpec {
     typstorage: AttributeStorage,
     typelem: u32,
     support_proc_oids: Vec<u32>,
+    input_proc_oid: u32,
+    output_proc_oid: u32,
+    receive_proc_oid: u32,
+    send_proc_oid: u32,
+    typmodin_proc_oid: u32,
+    typmodout_proc_oid: u32,
+    analyze_proc_oid: u32,
+    subscript_proc_oid: u32,
     default: Option<String>,
 }
 
@@ -746,6 +1147,12 @@ fn resolve_base_type_spec(
     let mut typelem = 0;
     let mut input_name = None;
     let mut output_name = None;
+    let mut receive_name = None;
+    let mut send_name = None;
+    let mut typmodin_name = None;
+    let mut typmodout_name = None;
+    let mut analyze_name = None;
+    let mut subscript_name = None;
     let mut default = None;
 
     for option in &stmt.options {
@@ -762,6 +1169,12 @@ fn resolve_base_type_spec(
             }
             "input" => input_name = Some(base_type_option_value(option)?.to_string()),
             "output" => output_name = Some(base_type_option_value(option)?.to_string()),
+            "receive" => receive_name = Some(base_type_option_value(option)?.to_string()),
+            "send" => send_name = Some(base_type_option_value(option)?.to_string()),
+            "typmod_in" => typmodin_name = Some(base_type_option_value(option)?.to_string()),
+            "typmod_out" => typmodout_name = Some(base_type_option_value(option)?.to_string()),
+            "analyze" => analyze_name = Some(base_type_option_value(option)?.to_string()),
+            "subscript" => subscript_name = Some(base_type_option_value(option)?.to_string()),
             "alignment" => {
                 typalign = parse_base_type_alignment(base_type_option_value(option)?)?;
             }
@@ -779,8 +1192,7 @@ fn resolve_base_type_spec(
             }
             "default" => default = Some(base_type_option_value(option)?.to_string()),
             "passedbyvalue" => {}
-            "category" | "preferred" | "receive" | "send" | "typmod_in" | "typmod_out"
-            | "analyze" | "subscript" => {
+            "category" | "preferred" => {
                 let _ = option.value.as_deref();
             }
             _ => push_warning(format!("type attribute \"{option_name}\" not recognized")),
@@ -806,14 +1218,69 @@ fn resolve_base_type_spec(
     if typlen >= 0 {
         typstorage = AttributeStorage::Plain;
     }
+    let receive_proc_oid = receive_name
+        .as_deref()
+        .and_then(|name| resolve_proc_oid_by_name(catalog, name));
+    let send_proc_oid = send_name
+        .as_deref()
+        .and_then(|name| resolve_proc_oid_by_name(catalog, name));
+    let typmodin_proc_oid = typmodin_name
+        .as_deref()
+        .and_then(|name| resolve_proc_oid_by_name(catalog, name));
+    let typmodout_proc_oid = typmodout_name
+        .as_deref()
+        .and_then(|name| resolve_proc_oid_by_name(catalog, name));
+    let analyze_proc_oid = analyze_name
+        .as_deref()
+        .and_then(|name| resolve_proc_oid_by_name(catalog, name));
+    let subscript_proc_oid = subscript_name
+        .as_deref()
+        .and_then(|name| resolve_proc_oid_by_name(catalog, name));
 
     Ok(ResolvedBaseTypeSpec {
         typlen,
         typalign,
         typstorage,
         typelem,
-        support_proc_oids: vec![input_proc.oid, output_proc.oid],
+        support_proc_oids: vec![
+            input_proc.oid,
+            output_proc.oid,
+            receive_proc_oid.unwrap_or(0),
+            send_proc_oid.unwrap_or(0),
+            typmodin_proc_oid.unwrap_or(0),
+            typmodout_proc_oid.unwrap_or(0),
+            analyze_proc_oid.unwrap_or(0),
+            subscript_proc_oid.unwrap_or(0),
+        ],
+        input_proc_oid: input_proc.oid,
+        output_proc_oid: output_proc.oid,
+        receive_proc_oid: receive_proc_oid.unwrap_or(0),
+        send_proc_oid: send_proc_oid.unwrap_or(0),
+        typmodin_proc_oid: typmodin_proc_oid.unwrap_or(0),
+        typmodout_proc_oid: typmodout_proc_oid.unwrap_or(0),
+        analyze_proc_oid: analyze_proc_oid.unwrap_or(0),
+        subscript_proc_oid: subscript_proc_oid.unwrap_or(0),
         default,
+    })
+}
+
+fn resolve_proc_oid_by_name(catalog: &dyn CatalogLookup, name: &str) -> Option<u32> {
+    let proc_name = base_type_proc_object_name(name);
+    catalog
+        .proc_rows_by_name(&proc_name)
+        .first()
+        .map(|row| row.oid)
+}
+
+fn resolve_required_proc_oid_by_name(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+) -> Result<u32, ExecError> {
+    resolve_proc_oid_by_name(catalog, name).ok_or_else(|| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "function name",
+            actual: name.to_string(),
+        })
     })
 }
 
@@ -1098,6 +1565,15 @@ impl Database {
             BaseTypeEntry {
                 oid: shell_row.oid,
                 array_oid,
+                input_proc_oid: spec.input_proc_oid,
+                output_proc_oid: spec.output_proc_oid,
+                receive_proc_oid: spec.receive_proc_oid,
+                send_proc_oid: spec.send_proc_oid,
+                typmodin_proc_oid: spec.typmodin_proc_oid,
+                typmodout_proc_oid: spec.typmodout_proc_oid,
+                analyze_proc_oid: spec.analyze_proc_oid,
+                subscript_proc_oid: spec.subscript_proc_oid,
+                typstorage: spec.typstorage,
                 default: spec.default,
             },
         );
@@ -2001,5 +2477,14 @@ fn type_does_not_exist_error(type_name: &str) -> ExecError {
         detail: None,
         hint: None,
         sqlstate: "42704",
+    }
+}
+
+fn type_is_only_shell_error(type_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("type \"{type_name}\" is only a shell"),
+        detail: None,
+        hint: None,
+        sqlstate: "42809",
     }
 }
