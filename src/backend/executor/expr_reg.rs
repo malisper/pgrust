@@ -565,6 +565,7 @@ pub(crate) fn format_type_text(
         },
         BPCHAR_TYPE_OID => match typmod {
             Some(value) if value >= 4 => format!("character({})", value - 4),
+            Some(-1) => "bpchar".into(),
             _ => "character".into(),
         },
         BIT_TYPE_OID => match typmod {
@@ -607,9 +608,37 @@ pub(crate) fn format_type_text(
                 {
                     return format!("{}[]", quote_identifier_if_needed(&element.typname));
                 }
-                quote_identifier_if_needed(&row.typname)
+                let name = quote_identifier_if_needed(&row.typname);
+                if let Some(typmod) = typmod
+                    && typmod >= 0
+                    && let Some(suffix) = format_user_type_typmod(row.typmodout, typmod, catalog)
+                {
+                    return format!("{name}{suffix}");
+                }
+                name
             })
             .unwrap_or_else(|| "???".into()),
+    }
+}
+
+fn format_user_type_typmod(
+    typmodout_oid: u32,
+    typmod: i32,
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
+    let proc_name = catalog.proc_row_by_oid(typmodout_oid)?.proname;
+    match proc_name.to_ascii_lowercase().as_str() {
+        "numerictypmodout" => {
+            let packed = typmod.checked_sub(SqlType::VARHDRSZ)?;
+            let precision = (packed >> 16) & 0xffff;
+            let scale = packed & 0xffff;
+            Some(format!("({precision},{scale})"))
+        }
+        "varchartypmodout" | "bpchartypmodout" => {
+            let len = typmod.checked_sub(SqlType::VARHDRSZ)?;
+            Some(format!("({len})"))
+        }
+        _ => None,
     }
 }
 

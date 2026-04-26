@@ -859,6 +859,50 @@ impl Database {
         result
     }
 
+    pub(crate) fn execute_comment_on_type_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnTypeStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_comment_on_type_stmt_in_transaction_with_search_path(
+            client_id,
+            comment_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_comment_on_column_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnColumnStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_comment_on_column_stmt_in_transaction_with_search_path(
+            client_id,
+            comment_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
     pub(crate) fn execute_comment_on_index_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -1680,6 +1724,103 @@ impl Database {
                 result.reltuples,
             );
         }
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_comment_on_type_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnTypeStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let type_row = catalog
+            .type_by_name(&comment_stmt.type_name)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("type \"{}\" does not exist", comment_stmt.type_name),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            })?;
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .comment_type_mvcc(type_row.oid, comment_stmt.comment.as_deref(), &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_comment_on_column_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnColumnStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation = catalog
+            .lookup_any_relation(&comment_stmt.relation_name)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("relation \"{}\" does not exist", comment_stmt.relation_name),
+                detail: None,
+                hint: None,
+                sqlstate: "42P01",
+            })?;
+        let Some((column_index, _)) =
+            relation
+                .desc
+                .columns
+                .iter()
+                .enumerate()
+                .find(|(_, column)| {
+                    !column.dropped && column.name.eq_ignore_ascii_case(&comment_stmt.column_name)
+                })
+        else {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "column \"{}\" of relation \"{}\" does not exist",
+                    comment_stmt.column_name, comment_stmt.relation_name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42703",
+            });
+        };
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .comment_column_mvcc(
+                relation.relation_oid,
+                (column_index + 1) as i32,
+                comment_stmt.comment.as_deref(),
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
     }
 

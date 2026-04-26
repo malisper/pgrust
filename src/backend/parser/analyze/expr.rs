@@ -33,10 +33,11 @@ pub(crate) use self::ops::bind_concat_operands;
 pub(super) use self::ops::bind_lowered_comparison_expr;
 use self::ops::bind_order_by_using_direction;
 use self::ops::{
-    bind_arithmetic_expr, bind_bitwise_expr, bind_comparison_expr, bind_concat_expr,
-    bind_maybe_network_arithmetic, bind_maybe_network_bitwise, bind_maybe_network_operator,
-    bind_overloaded_binary_expr, bind_prefix_operator_expr, bind_shift_expr,
-    bind_text_pattern_comparison_expr, bind_text_starts_with_expr, supports_comparison_operator,
+    bind_arithmetic_expr, bind_bitwise_expr, bind_catalog_binary_operator_expr,
+    bind_comparison_expr, bind_concat_expr, bind_maybe_network_arithmetic,
+    bind_maybe_network_bitwise, bind_maybe_network_operator, bind_overloaded_binary_expr,
+    bind_prefix_operator_expr, bind_shift_expr, bind_text_pattern_comparison_expr,
+    bind_text_starts_with_expr, supports_comparison_operator,
 };
 use self::subquery::{
     bind_array_subquery_expr, bind_exists_subquery_expr, bind_in_subquery_expr,
@@ -1415,6 +1416,16 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             )?,
             "-|-" => bind_overloaded_binary_expr(
                 "-|-",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
+            "<%" => bind_catalog_binary_operator_expr(
+                "<%",
                 left,
                 right,
                 scope,

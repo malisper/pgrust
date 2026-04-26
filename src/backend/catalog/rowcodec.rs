@@ -1070,8 +1070,38 @@ pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, C
         .transpose()?
         .flatten()
         .unwrap_or(0);
-    let typmodout = values
+    let typreceive = values
         .get(12)
+        .map(expect_nullable_oid)
+        .transpose()?
+        .flatten()
+        .unwrap_or(0);
+    let typsend = values
+        .get(13)
+        .map(expect_nullable_oid)
+        .transpose()?
+        .flatten()
+        .unwrap_or(0);
+    let typmodin = values
+        .get(14)
+        .map(expect_nullable_oid)
+        .transpose()?
+        .flatten()
+        .unwrap_or(0);
+    let typmodout = values
+        .get(15)
+        .map(expect_nullable_oid)
+        .transpose()?
+        .flatten()
+        .unwrap_or(0);
+    let typanalyze = values
+        .get(16)
+        .map(expect_nullable_oid)
+        .transpose()?
+        .flatten()
+        .unwrap_or(0);
+    let typsubscript = values
+        .get(17)
         .map(expect_nullable_oid)
         .transpose()?
         .flatten()
@@ -1089,12 +1119,17 @@ pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, C
         typarray,
         typinput,
         typoutput,
+        typreceive,
+        typsend,
+        typmodin,
         typmodout,
-        typacl: nullable_text_array(&values[13])?,
+        typanalyze,
+        typsubscript,
+        typacl: nullable_text_array(&values[18])?,
         sql_type: decode_builtin_sql_type(oid).unwrap_or_else(|| {
             if typrelid != 0 {
                 SqlType::named_composite(oid, typrelid)
-            } else if typelem != 0 {
+            } else if typelem != 0 && typarray == 0 {
                 // :HACK: Dynamic user base arrays and composite arrays both
                 // persist only typelem today. Use the array row alignment to
                 // keep existing composite arrays as records until pg_type rows
@@ -1107,6 +1142,11 @@ pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, C
                     }
                 });
                 SqlType::array_of(element)
+            } else if typelem != 0 {
+                // A user-defined base type can set typelem to advertise that
+                // its external syntax is array-like without being an array
+                // type itself. Real array rows have typelem set and typarray 0.
+                SqlType::new(SqlTypeKind::Text).with_identity(oid, 0)
             } else if typarray != 0 {
                 SqlType::new(SqlTypeKind::Text).with_identity(oid, 0)
             } else {
@@ -1697,7 +1737,12 @@ fn pg_type_row_values(row: PgTypeRow) -> Vec<Value> {
         Value::Int32(row.typarray as i32),
         Value::Int32(row.typinput as i32),
         Value::Int32(row.typoutput as i32),
+        Value::Int32(row.typreceive as i32),
+        Value::Int32(row.typsend as i32),
+        Value::Int32(row.typmodin as i32),
         Value::Int32(row.typmodout as i32),
+        Value::Int32(row.typanalyze as i32),
+        Value::Int32(row.typsubscript as i32),
         nullable_array_value(row.typacl.map(text_array_value)),
     ]
 }

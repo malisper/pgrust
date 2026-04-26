@@ -393,6 +393,8 @@ pub enum Statement {
     CommentOnTable(CommentOnTableStatement),
     CommentOnView(CommentOnViewStatement),
     CommentOnIndex(CommentOnIndexStatement),
+    CommentOnType(CommentOnTypeStatement),
+    CommentOnColumn(CommentOnColumnStatement),
     CommentOnConstraint(CommentOnConstraintStatement),
     CommentOnRule(CommentOnRuleStatement),
     CommentOnTrigger(CommentOnTriggerStatement),
@@ -896,6 +898,7 @@ pub enum AlterTypeStatement {
     RenameEnumValue(AlterTypeRenameEnumValueStatement),
     RenameType(AlterTypeRenameTypeStatement),
     AlterComposite(AlterCompositeTypeStatement),
+    SetOptions(AlterTypeSetOptionsStatement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -956,6 +959,13 @@ pub enum AlterCompositeTypeAction {
         new_name: String,
         cascade: bool,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTypeSetOptionsStatement {
+    pub schema_name: Option<String>,
+    pub type_name: String,
+    pub options: Vec<CreateBaseTypeOption>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2347,6 +2357,19 @@ pub struct CommentOnViewStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnIndexStatement {
     pub index_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnTypeStatement {
+    pub type_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnColumnStatement {
+    pub relation_name: String,
+    pub column_name: String,
     pub comment: Option<String>,
 }
 

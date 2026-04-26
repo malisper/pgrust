@@ -58,7 +58,9 @@ use crate::backend::executor::{
 use crate::include::access::amapi::IndexUniqueCheck;
 use crate::include::access::htup::HeapTuple;
 use crate::include::access::itemptr::ItemPointerData;
-use crate::include::catalog::{BOX_TYPE_OID, GIST_AM_OID, builtin_range_name_for_sql_type};
+use crate::include::catalog::{
+    BOX_TYPE_OID, GIST_AM_OID, PG_CATALOG_NAMESPACE_OID, builtin_range_name_for_sql_type,
+};
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
 };
@@ -4873,6 +4875,7 @@ pub(crate) fn execute_insert_rows(
         };
         capture_copy_to_dml_notices();
         materialize_generated_columns(desc, &mut values, ctx)?;
+        coerce_user_defined_base_assignments(desc, &mut values, ctx)?;
         enforce_exclusion_constraints_against_values(
             relation_name,
             desc,
@@ -4923,6 +4926,43 @@ pub(crate) fn execute_insert_rows(
     } else {
         Ok(inserted_rows)
     }
+}
+
+fn coerce_user_defined_base_assignments(
+    desc: &RelationDesc,
+    values: &mut [Value],
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    let Some(catalog) = ctx.catalog.clone() else {
+        return Ok(());
+    };
+    for (column, value) in desc.columns.iter().zip(values.iter_mut()) {
+        if !matches!(value, Value::Text(_) | Value::TextRef(_, _)) {
+            continue;
+        }
+        let target = column.sql_type;
+        if target.is_array || target.type_oid == 0 {
+            continue;
+        }
+        let Some(type_row) = catalog.type_by_oid(target.type_oid) else {
+            continue;
+        };
+        if type_row.typnamespace == PG_CATALOG_NAMESPACE_OID
+            || type_row.typinput == 0
+            || type_row.typrelid != 0
+            || type_row.sql_type.is_array
+        {
+            continue;
+        }
+        *value = cast_value_with_source_type_catalog_and_config(
+            value.clone(),
+            Some(SqlType::new(SqlTypeKind::Text)),
+            target,
+            Some(&catalog),
+            &ctx.datetime_config,
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn execute_insert_values(

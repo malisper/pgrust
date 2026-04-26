@@ -2135,7 +2135,8 @@ pub(crate) fn raw_type_name_hint(raw: &RawTypeName) -> SqlType {
         RawTypeName::Serial(SerialKind::Regular) => SqlType::new(SqlTypeKind::Int4),
         RawTypeName::Serial(SerialKind::Big) => SqlType::new(SqlTypeKind::Int8),
         RawTypeName::Named { array_bounds, .. } => {
-            let mut ty = builtin_named_type_alias(raw_type_name_name(raw))
+            let (base_name, _) = split_named_type_typmod(raw_type_name_name(raw));
+            let mut ty = builtin_named_type_alias(base_name)
                 .unwrap_or_else(|| SqlType::new(SqlTypeKind::Composite));
             for _ in 0..*array_bounds {
                 ty = SqlType::array_of(ty);
@@ -2162,20 +2163,57 @@ pub(crate) fn resolve_raw_type_name(
         ))),
         RawTypeName::Record => Ok(SqlType::record(RECORD_TYPE_OID)),
         RawTypeName::Named { name, array_bounds } => {
-            let mut ty = if let Some(alias) = builtin_named_type_alias(name) {
+            let (base_name, typmod_args) = split_named_type_typmod(name);
+            let mut ty = if let Some(alias) = builtin_named_type_alias(base_name) {
                 alias
             } else {
                 catalog
-                    .type_by_name(name)
+                    .type_by_name(base_name)
                     .map(|row| row.sql_type)
-                    .ok_or_else(|| ParseError::UnsupportedType(name.clone()))?
+                    .ok_or_else(|| ParseError::UnsupportedType(base_name.to_string()))?
             };
+            if let Some(args) = typmod_args {
+                ty = ty.with_typmod(resolve_named_type_typmod(base_name, args)?);
+            }
             for _ in 0..*array_bounds {
                 ty = SqlType::array_of(ty);
             }
             Ok(ty)
         }
     }
+}
+
+pub(crate) fn split_named_type_typmod(name: &str) -> (&str, Option<Vec<i32>>) {
+    let trimmed = name.trim();
+    let Some(open) = trimmed.find('(') else {
+        return (trimmed, None);
+    };
+    if !trimmed.ends_with(')') {
+        return (trimmed, None);
+    }
+    let base = trimmed[..open].trim();
+    let args = trimmed[open + 1..trimmed.len() - 1]
+        .split(',')
+        .filter_map(|item| item.trim().parse::<i32>().ok())
+        .collect::<Vec<_>>();
+    (base, Some(args))
+}
+
+fn resolve_named_type_typmod(type_name: &str, args: Vec<i32>) -> Result<i32, ParseError> {
+    match args.as_slice() {
+        [precision] => Ok(SqlType::VARHDRSZ + (*precision << 16)),
+        [precision, scale] => Ok(SqlType::VARHDRSZ + ((*precision << 16) | (*scale & 0xffff))),
+        _ => Err(ParseError::DetailedError {
+            message: "invalid NUMERIC type modifier".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        }),
+    }
+    .map_err(|err| match err {
+        ParseError::DetailedError { .. } => err,
+        _ => ParseError::UnsupportedType(type_name.to_string()),
+    })
 }
 
 fn builtin_named_type_alias(name: &str) -> Option<SqlType> {

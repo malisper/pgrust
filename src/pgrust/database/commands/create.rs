@@ -1539,19 +1539,22 @@ impl Database {
                 create_stmt.domain_name.clone(),
             )));
         }
-        let oid = {
+        let (oid, array_oid) = {
             let next_catalog_oid = self.catalog.read().next_oid();
-            domains
+            let oid = domains
                 .values()
-                .map(|domain| domain.oid.saturating_add(1))
+                .flat_map(|domain| [domain.oid, domain.array_oid])
+                .map(|oid| oid.saturating_add(1))
                 .max()
                 .unwrap_or(next_catalog_oid)
-                .max(next_catalog_oid)
+                .max(next_catalog_oid);
+            (oid, oid.saturating_add(1))
         };
         domains.insert(
             normalized,
             DomainEntry {
                 oid,
+                array_oid,
                 name: object_name,
                 namespace_oid,
                 sql_type,
