@@ -739,6 +739,24 @@ pub(crate) enum WriteUpdatedRowResult {
     AlreadyModified,
 }
 
+fn serialization_failure_due_to_concurrent_update() -> ExecError {
+    ExecError::DetailedError {
+        message: "could not serialize access due to concurrent update".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "40001",
+    }
+}
+
+fn serialization_failure_due_to_concurrent_delete() -> ExecError {
+    ExecError::DetailedError {
+        message: "could not serialize access due to concurrent delete".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "40001",
+    }
+}
+
 pub(crate) fn build_index_insert_context(
     heap_rel: crate::backend::storage::smgr::RelFileLocator,
     _heap_desc: &RelationDesc,
@@ -1262,10 +1280,16 @@ pub(crate) fn write_updated_row(
         }
         Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
             cleanup_toast_attempt(toast, &toasted, ctx, xid)?;
+            if ctx.uses_transaction_snapshot() {
+                return Err(serialization_failure_due_to_concurrent_update());
+            }
             Ok(WriteUpdatedRowResult::TupleUpdated(new_ctid))
         }
         Err(HeapError::TupleAlreadyModified(_)) => {
             cleanup_toast_attempt(toast, &toasted, ctx, xid)?;
+            if ctx.uses_transaction_snapshot() {
+                return Err(serialization_failure_due_to_concurrent_update());
+            }
             Ok(WriteUpdatedRowResult::AlreadyModified)
         }
         Err(err) => {
@@ -3442,8 +3466,18 @@ fn execute_merge_update_row(
                 .note_relation_update(stmt.relation_oid);
             Ok(true)
         }
-        Err(HeapError::TupleUpdated(_, _)) | Err(HeapError::TupleAlreadyModified(_)) => {
+        Err(HeapError::TupleUpdated(_, _)) => {
             cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
+            if ctx.uses_transaction_snapshot() {
+                return Err(serialization_failure_due_to_concurrent_update());
+            }
+            Ok(false)
+        }
+        Err(HeapError::TupleAlreadyModified(_)) => {
+            cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
+            if ctx.uses_transaction_snapshot() {
+                return Err(serialization_failure_due_to_concurrent_delete());
+            }
             Ok(false)
         }
         Err(err) => {
@@ -3493,7 +3527,18 @@ fn execute_merge_delete_row(
                 .note_relation_delete(stmt.relation_oid);
             Ok(true)
         }
-        Err(HeapError::TupleUpdated(_, _)) | Err(HeapError::TupleAlreadyModified(_)) => Ok(false),
+        Err(HeapError::TupleUpdated(_, _)) => {
+            if ctx.uses_transaction_snapshot() {
+                return Err(serialization_failure_due_to_concurrent_update());
+            }
+            Ok(false)
+        }
+        Err(HeapError::TupleAlreadyModified(_)) => {
+            if ctx.uses_transaction_snapshot() {
+                return Err(serialization_failure_due_to_concurrent_delete());
+            }
+            Ok(false)
+        }
         Err(err) => Err(err.into()),
     }
 }
@@ -5846,9 +5891,15 @@ pub fn execute_delete_with_waiter(
                             break;
                         }
                         Err(HeapError::TupleAlreadyModified(_)) => {
+                            if ctx.uses_transaction_snapshot() {
+                                return Err(serialization_failure_due_to_concurrent_delete());
+                            }
                             break;
                         }
                         Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
+                            if ctx.uses_transaction_snapshot() {
+                                return Err(serialization_failure_due_to_concurrent_update());
+                            }
                             let new_tuple =
                                 heap_fetch(&*ctx.pool, ctx.client_id, target.rel, new_ctid)?;
                             let mut new_slot = TupleSlot::from_heap_tuple(
@@ -6158,6 +6209,9 @@ pub(crate) fn apply_base_update_row(
             }
             Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
                 cleanup_toast_attempt(target.toast, &toasted, ctx, xid)?;
+                if ctx.uses_transaction_snapshot() {
+                    return Err(serialization_failure_due_to_concurrent_update());
+                }
                 let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, new_ctid)?;
                 let mut new_slot = TupleSlot::from_heap_tuple(
                     Rc::clone(&desc),
@@ -6198,6 +6252,9 @@ pub(crate) fn apply_base_update_row(
             }
             Err(HeapError::TupleAlreadyModified(_)) => {
                 cleanup_toast_attempt(target.toast, &toasted, ctx, xid)?;
+                if ctx.uses_transaction_snapshot() {
+                    return Err(serialization_failure_due_to_concurrent_delete());
+                }
                 return Ok(false);
             }
             Err(err) => {
@@ -6302,8 +6359,16 @@ pub(crate) fn apply_base_delete_row(
                 validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
                 return Ok(true);
             }
-            Err(HeapError::TupleAlreadyModified(_)) => return Ok(false),
+            Err(HeapError::TupleAlreadyModified(_)) => {
+                if ctx.uses_transaction_snapshot() {
+                    return Err(serialization_failure_due_to_concurrent_delete());
+                }
+                return Ok(false);
+            }
             Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
+                if ctx.uses_transaction_snapshot() {
+                    return Err(serialization_failure_due_to_concurrent_update());
+                }
                 let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, new_ctid)?;
                 let mut new_slot = TupleSlot::from_heap_tuple(
                     Rc::clone(&desc),

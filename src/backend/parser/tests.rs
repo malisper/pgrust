@@ -2032,7 +2032,7 @@ fn parse_is_document_expression() {
 fn parse_transaction_alias_statements() {
     assert_eq!(
         parse_statement("begin transaction").unwrap(),
-        Statement::Begin
+        Statement::Begin(TransactionOptions::default())
     );
     assert_eq!(
         parse_statement("commit transaction").unwrap(),
@@ -4117,6 +4117,35 @@ fn parse_grant_all_on_table_statement() {
 }
 
 #[test]
+fn parse_grant_update_on_table_statement() {
+    let stmt = parse_statement("grant update on atest2 to regress_priv_user3").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UpdateOnTable,
+            object_names: vec!["atest2".into()],
+            grantee_names: vec!["regress_priv_user3".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_multiple_table_privileges_statement() {
+    let stmt =
+        parse_statement("grant select, update on table grantor_test3 to regress_grantor3").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::TablePrivileges("rw".into()),
+            object_names: vec!["grantor_test3".into()],
+            grantee_names: vec!["regress_grantor3".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
 fn parse_grant_execute_on_function_statement() {
     let stmt = parse_statement("grant execute on function f_leak(text) to public").unwrap();
     assert_eq!(
@@ -4166,6 +4195,20 @@ fn parse_revoke_all_privileges_on_table_from_public_statement() {
             privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
             object_names: vec!["tenant_table".into()],
             grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_delete_on_table_statement() {
+    let stmt = parse_statement("revoke delete on atest3 from regress_priv_group2").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::DeleteOnTable,
+            object_names: vec!["atest3".into()],
+            grantee_names: vec!["regress_priv_group2".into()],
             cascade: false,
         })
     );
@@ -4773,10 +4816,52 @@ fn parse_enable_replica_trigger_requires_name() {
 fn parse_set_transaction_isolation_level_serializable() {
     assert_eq!(
         parse_statement("set transaction isolation level serializable").unwrap(),
-        Statement::Set(SetStatement {
+        Statement::SetTransaction(SetTransactionStatement {
+            scope: SetTransactionScope::Transaction,
+            options: TransactionOptions {
+                isolation_level: Some(TransactionIsolationLevel::Serializable),
+                ..TransactionOptions::default()
+            },
+        })
+    );
+}
+
+#[test]
+fn parse_set_session_transaction_characteristics() {
+    assert_eq!(
+        parse_statement(
+            "set session characteristics as transaction isolation level repeatable read",
+        )
+        .unwrap(),
+        Statement::SetTransaction(SetTransactionStatement {
+            scope: SetTransactionScope::SessionCharacteristics,
+            options: TransactionOptions {
+                isolation_level: Some(TransactionIsolationLevel::RepeatableRead),
+                ..TransactionOptions::default()
+            },
+        })
+    );
+}
+
+#[test]
+fn parse_transaction_mode_options() {
+    assert_eq!(
+        parse_statement("begin isolation level repeatable read, read only, not deferrable")
+            .unwrap(),
+        Statement::Begin(TransactionOptions {
+            isolation_level: Some(TransactionIsolationLevel::RepeatableRead),
+            read_only: Some(true),
+            deferrable: Some(false),
+        })
+    );
+}
+
+#[test]
+fn parse_show_transaction_isolation_level() {
+    assert_eq!(
+        parse_statement("show transaction isolation level").unwrap(),
+        Statement::Show(ShowStatement {
             name: "transaction_isolation".into(),
-            value: Some("serializable".into()),
-            is_local: true,
         })
     );
 }
@@ -13190,6 +13275,28 @@ fn parse_count_distinct() {
 }
 
 #[test]
+fn parse_select_distinct_on() {
+    let stmt = parse_select("select distinct on (name, note) name from people order by name, note")
+        .unwrap();
+    assert!(stmt.distinct);
+    assert_eq!(stmt.distinct_on.len(), 2);
+    assert!(matches!(&stmt.distinct_on[0], SqlExpr::Column(name) if name == "name"));
+    assert!(matches!(&stmt.distinct_on[1], SqlExpr::Column(name) if name == "note"));
+}
+
+#[test]
+fn select_distinct_on_rejects_non_prefix_order_by() {
+    let stmt =
+        parse_select("select distinct on (name, note) name from people order by name, id, note")
+            .unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::FeatureNotSupportedMessage(message))
+            if message == "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"
+    ));
+}
+
+#[test]
 fn parse_generate_series() {
     let stmt = parse_select("select * from generate_series(1, 10)").unwrap();
     assert!(
@@ -14362,7 +14469,10 @@ fn parse_insert_alias_and_begin_isolation_level() {
 
     assert!(matches!(
         parse_statement("begin transaction isolation level repeatable read").unwrap(),
-        Statement::Begin
+        Statement::Begin(TransactionOptions {
+            isolation_level: Some(TransactionIsolationLevel::RepeatableRead),
+            ..
+        })
     ));
 }
 

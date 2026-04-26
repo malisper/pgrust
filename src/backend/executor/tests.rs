@@ -5986,6 +5986,65 @@ fn count_distinct_counts_unique_values() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn select_distinct_on_keeps_first_ordered_row_per_key() {
+    let base = temp_dir("select_distinct_on");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'x'), (2, 'bob', 'x'), (3, 'carol', 'y'), (4, 'dave', 'y')").unwrap();
+    txns.commit(xid).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select distinct on (note) note, name from people order by note, id desc",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Text("x".into()), Value::Text("bob".into())],
+                    vec![Value::Text("y".into()), Value::Text("dave".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn select_distinct_on_key_can_be_hidden_from_output() {
+    let base = temp_dir("select_distinct_on_hidden");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'x'), (2, 'bob', 'x'), (3, 'carol', 'y')").unwrap();
+    txns.commit(xid).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select distinct on (note) name from people order by note, id desc",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { columns, rows, .. } => {
+            assert_eq!(columns.len(), 1);
+            assert_eq!(columns[0].name, "name");
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Text("bob".into())],
+                    vec![Value::Text("carol".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn count_distinct_skips_nulls() {
     let base = temp_dir("count_distinct_nulls");

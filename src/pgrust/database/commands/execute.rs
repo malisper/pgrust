@@ -1039,6 +1039,7 @@ impl Database {
                     Arc::new(parking_lot::Mutex::new(ExecutorTransactionState {
                         xid: None,
                         cid: 0,
+                        transaction_snapshot: None,
                     }));
                 let deferred_foreign_keys =
                     crate::backend::executor::DeferredForeignKeyTracker::default();
@@ -1850,7 +1851,8 @@ impl Database {
                 vacuum_stmt,
                 configured_search_path,
             ),
-            Statement::Begin
+            Statement::SetTransaction(_)
+            | Statement::Begin(_)
             | Statement::Commit
             | Statement::Rollback
             | Statement::Savepoint(_)
@@ -1918,6 +1920,7 @@ impl Database {
             transaction_lock_scope_id,
             configured_search_path,
             datetime_config,
+            None,
             PlannerConfig::default(),
         )
     }
@@ -1931,6 +1934,7 @@ impl Database {
         transaction_lock_scope_id: Option<u64>,
         configured_search_path: Option<&[String]>,
         datetime_config: &DateTimeConfig,
+        snapshot_override: Option<crate::backend::access::transam::xact::Snapshot>,
         planner_config: PlannerConfig,
     ) -> Result<SelectGuard, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
@@ -1955,9 +1959,14 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         lock_relations_interruptible(&self.table_locks, client_id, &rels, interrupts.as_ref())?;
 
-        let (snapshot, command_id) = match txn_ctx {
-            Some((xid, cid)) => (self.txns.read().snapshot_for_command(xid, cid)?, cid),
-            None => (self.txns.read().snapshot(INVALID_TRANSACTION_ID)?, 0),
+        let (snapshot, command_id) = match (snapshot_override, txn_ctx) {
+            (Some(snapshot), Some((_xid, cid))) => (snapshot, cid),
+            (Some(snapshot), None) => {
+                let cid = snapshot.current_cid;
+                (snapshot, cid)
+            }
+            (None, Some((xid, cid))) => (self.txns.read().snapshot_for_command(xid, cid)?, cid),
+            (None, None) => (self.txns.read().snapshot(INVALID_TRANSACTION_ID)?, 0),
         };
         let columns = query_desc.columns();
         let column_names = query_desc.column_names();

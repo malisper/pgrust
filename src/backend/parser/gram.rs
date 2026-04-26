@@ -129,9 +129,6 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_set_constraints_statement(&sql)? {
         return Ok(stmt);
     }
-    if let Some(stmt) = try_parse_set_transaction_statement(&sql)? {
-        return Ok(stmt);
-    }
     if let Some(stmt) = try_parse_publication_statement(&sql)? {
         return Ok(stmt);
     }
@@ -1693,30 +1690,6 @@ fn try_parse_alter_table_trigger_state_statement(
     }
     build_alter_table_trigger_state_statement(trimmed)
         .map(|stmt| Some(Statement::AlterTableTriggerState(stmt)))
-}
-
-fn try_parse_set_transaction_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
-    let trimmed = sql.trim().trim_end_matches(';').trim();
-    let lowered = trimmed.to_ascii_lowercase();
-    let prefix = "set transaction isolation level ";
-    if !lowered.starts_with(prefix) {
-        return Ok(None);
-    }
-    let Some(level) = trimmed.get(prefix.len()..) else {
-        return Err(ParseError::UnexpectedEof);
-    };
-    let level = level.trim();
-    if level.is_empty() {
-        return Err(ParseError::UnexpectedEof);
-    }
-    // :HACK: This only accepts the transaction-local spelling exercised by the
-    // regression tests. pgrust still executes at a single effective isolation
-    // level and stores the setting only as compatibility metadata.
-    Ok(Some(Statement::Set(SetStatement {
-        name: "transaction_isolation".into(),
-        value: Some(level.to_ascii_lowercase()),
-        is_local: true,
-    })))
 }
 
 fn try_parse_set_constraints_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -4503,19 +4476,8 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("grant execute on routine ") {
         return Ok(Statement::GrantObject(build_grant_routine_execute(sql)?));
     }
-    if lowered.starts_with("grant insert on ") {
-        return Ok(Statement::GrantObject(build_grant_table_insert(sql)?));
-    }
-    if lowered.starts_with("grant select on ") {
-        return Ok(Statement::GrantObject(build_grant_table_select(sql)?));
-    }
-    if lowered.starts_with("grant all on ") {
-        return Ok(Statement::GrantObject(build_grant_table_all(sql)?));
-    }
-    if lowered.starts_with("grant all privileges on ") {
-        return Ok(Statement::GrantObject(build_grant_table_all_privileges(
-            sql,
-        )?));
+    if let Some(stmt) = try_build_grant_table_acl_statement(sql)? {
+        return Ok(Statement::GrantObject(stmt));
     }
     Ok(Statement::GrantRoleMembership(build_grant_role_membership(
         sql,
@@ -4544,14 +4506,136 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("revoke execute on routine ") {
         return Ok(Statement::RevokeObject(build_revoke_routine_execute(sql)?));
     }
-    if lowered.starts_with("revoke all privileges on ") {
-        return Ok(Statement::RevokeObject(build_revoke_table_all_privileges(
-            sql,
-        )?));
+    if let Some(stmt) = try_build_revoke_table_acl_statement(sql)? {
+        return Ok(Statement::RevokeObject(stmt));
     }
     Ok(Statement::RevokeRoleMembership(
         build_revoke_role_membership(sql)?,
     ))
+}
+
+fn try_build_grant_table_acl_statement(
+    sql: &str,
+) -> Result<Option<GrantObjectStatement>, ParseError> {
+    let rest = sql
+        .get("grant ".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let Some((privileges, after_on)) = split_optional_keyword(rest, "on") else {
+        return Ok(None);
+    };
+    let Some(privilege) = parse_table_privilege_spec(privileges)? else {
+        return Ok(None);
+    };
+    let after_on = strip_optional_table_keyword(after_on.ok_or(ParseError::UnexpectedEof)?);
+    let (object_names, rest) = split_once_keyword(after_on, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(Some(GrantObjectStatement {
+        privilege,
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        with_grant_option,
+    }))
+}
+
+fn try_build_revoke_table_acl_statement(
+    sql: &str,
+) -> Result<Option<RevokeObjectStatement>, ParseError> {
+    let rest = sql
+        .get("revoke ".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (rest, cascade) = split_optional_cascade_restrict_clause(rest)?;
+    let Some((privileges, after_on)) = split_optional_keyword(rest, "on") else {
+        return Ok(None);
+    };
+    let Some(privilege) = parse_table_privilege_spec(privileges)? else {
+        return Ok(None);
+    };
+    let after_on = strip_optional_table_keyword(after_on.ok_or(ParseError::UnexpectedEof)?);
+    let (object_names, rest) = split_once_keyword(after_on, "from")?;
+    let (grantee_names, grantee_cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(Some(RevokeObjectStatement {
+        privilege,
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        cascade: cascade || grantee_cascade,
+    }))
+}
+
+fn strip_optional_table_keyword(input: &str) -> &str {
+    let trimmed = input.trim_start();
+    if keyword_at_start(trimmed, "table") {
+        consume_keyword(trimmed, "table").trim_start()
+    } else {
+        trimmed
+    }
+}
+
+fn parse_table_privilege_spec(input: &str) -> Result<Option<GrantObjectPrivilege>, ParseError> {
+    if input.contains('(') {
+        return Ok(None);
+    }
+
+    let mut chars = String::new();
+    let mut saw_table_privilege = false;
+    for item in split_comma_separated_sql(input)? {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let privilege_chars = match item.to_ascii_lowercase().as_str() {
+            "all" | "all privileges" => TABLE_ALL_PRIVILEGE_CHARS,
+            "select" => "r",
+            "insert" => "a",
+            "update" => "w",
+            "delete" => "d",
+            "truncate" => "D",
+            "references" => "x",
+            "trigger" => "t",
+            "maintain" => "m",
+            _ if saw_table_privilege => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "table privilege",
+                    actual: item.into(),
+                });
+            }
+            _ => return Ok(None),
+        };
+        saw_table_privilege = true;
+        chars.push_str(privilege_chars);
+    }
+
+    if !saw_table_privilege {
+        return Ok(None);
+    }
+    Ok(Some(table_privilege_from_chars(
+        canonicalize_table_privilege_chars(&chars),
+    )))
+}
+
+const TABLE_ALL_PRIVILEGE_CHARS: &str = "arwdDxtm";
+
+fn canonicalize_table_privilege_chars(chars: &str) -> String {
+    TABLE_ALL_PRIVILEGE_CHARS
+        .chars()
+        .filter(|ch| chars.contains(*ch))
+        .collect()
+}
+
+fn table_privilege_from_chars(chars: String) -> GrantObjectPrivilege {
+    match chars.as_str() {
+        TABLE_ALL_PRIVILEGE_CHARS => GrantObjectPrivilege::AllPrivilegesOnTable,
+        "r" => GrantObjectPrivilege::SelectOnTable,
+        "a" => GrantObjectPrivilege::InsertOnTable,
+        "w" => GrantObjectPrivilege::UpdateOnTable,
+        "d" => GrantObjectPrivilege::DeleteOnTable,
+        "D" => GrantObjectPrivilege::TruncateOnTable,
+        "x" => GrantObjectPrivilege::ReferencesOnTable,
+        "t" => GrantObjectPrivilege::TriggerOnTable,
+        "m" => GrantObjectPrivilege::MaintainOnTable,
+        _ => GrantObjectPrivilege::TablePrivileges(chars),
+    }
 }
 
 fn build_alter_type_owner_statement(sql: &str) -> Result<AlterTypeOwnerStatement, ParseError> {
@@ -4600,70 +4684,6 @@ fn build_grant_database_create(sql: &str) -> Result<GrantObjectStatement, ParseE
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::CreateOnDatabase,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        with_grant_option,
-    })
-}
-
-fn build_grant_table_all_privileges(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let prefix = "grant all privileges on ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "to")?;
-    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
-    Ok(GrantObjectStatement {
-        privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        with_grant_option,
-    })
-}
-
-fn build_grant_table_all(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let prefix = "grant all on ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "to")?;
-    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
-    Ok(GrantObjectStatement {
-        privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        with_grant_option,
-    })
-}
-
-fn build_grant_table_select(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let prefix = "grant select on ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "to")?;
-    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
-    Ok(GrantObjectStatement {
-        privilege: GrantObjectPrivilege::SelectOnTable,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        with_grant_option,
-    })
-}
-
-fn build_grant_table_insert(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let prefix = "grant insert on ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "to")?;
-    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
-    Ok(GrantObjectStatement {
-        privilege: GrantObjectPrivilege::InsertOnTable,
         object_names: vec![normalize_simple_identifier(object_name)?],
         grantee_names,
         with_grant_option,
@@ -4862,22 +4882,6 @@ fn build_revoke_routine_execute_with_prefix(
     })
 }
 
-fn build_revoke_table_all_privileges(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
-    let prefix = "revoke all privileges on ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "from")?;
-    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
-    Ok(RevokeObjectStatement {
-        privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        cascade,
-    })
-}
-
 fn build_grant_role_membership(sql: &str) -> Result<GrantRoleMembershipStatement, ParseError> {
     let prefix = "grant ";
     let rest = sql
@@ -5026,6 +5030,11 @@ fn strip_keyword_prefix<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
 }
 
 fn parse_grantees_with_optional_grant(input: &str) -> Result<(Vec<String>, bool), ParseError> {
+    // :HACK: pgrust does not yet model object-GRANT grantor selection, but
+    // PostgreSQL accepts GRANTED BY after the grantee list. Strip it so the
+    // clause does not get mistaken for part of the grantee role name.
+    let (input, _granted_by_clause) =
+        split_optional_keyword(input, "granted by").unwrap_or((input.trim(), None));
     let (grantees, suffix) = split_optional_keyword(input, "with")
         .map(|(grantees, suffix)| (grantees, suffix.unwrap_or_default()))
         .unwrap_or((input.trim(), ""));
@@ -5045,13 +5054,12 @@ fn parse_grantees_with_optional_grant(input: &str) -> Result<(Vec<String>, bool)
 fn parse_revokee_list_with_optional_cascade(
     input: &str,
 ) -> Result<(Vec<String>, bool), ParseError> {
-    let lowered = input.to_ascii_lowercase();
-    if let Some(stripped) = lowered.strip_suffix(" cascade") {
-        let grantees_len = stripped.len();
-        let grantees = input[..grantees_len].trim_end();
-        return Ok((parse_identifier_list(grantees)?, true));
-    }
-    Ok((parse_identifier_list(input)?, false))
+    let (input, cascade) = split_optional_cascade_restrict_clause(input)?;
+    // :HACK: see parse_grantees_with_optional_grant; object REVOKE grantor
+    // selection is not represented yet, so only keep the revokee list.
+    let (input, _granted_by_clause) =
+        split_optional_keyword(input, "granted by").unwrap_or((input.trim(), None));
+    Ok((parse_identifier_list(input)?, cascade))
 }
 
 fn parse_identifier_list(input: &str) -> Result<Vec<String>, ParseError> {
@@ -11022,6 +11030,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         )),
         Rule::set_role_stmt => Ok(Statement::SetRole(build_set_role(inner)?)),
         Rule::reset_role_stmt => Ok(Statement::ResetRole(build_reset_role(inner)?)),
+        Rule::set_transaction_stmt => Ok(Statement::SetTransaction(build_set_transaction(inner)?)),
         Rule::set_stmt => Ok(Statement::Set(build_set(inner)?)),
         Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
         Rule::create_role_stmt => Ok(Statement::CreateRole(build_create_role(inner)?)),
@@ -11171,7 +11180,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::merge_stmt => Ok(Statement::Merge(build_merge(inner)?)),
         Rule::update_stmt => Ok(Statement::Update(build_update(inner)?)),
         Rule::delete_stmt => Ok(Statement::Delete(build_delete(inner)?)),
-        Rule::begin_stmt => Ok(Statement::Begin),
+        Rule::begin_stmt => Ok(Statement::Begin(build_begin(inner)?)),
         Rule::commit_stmt => Ok(Statement::Commit),
         Rule::savepoint_stmt => Ok(Statement::Savepoint(build_transaction_marker_name(inner)?)),
         Rule::rollback_to_stmt => Ok(Statement::RollbackTo(build_transaction_marker_name(inner)?)),
@@ -11193,6 +11202,7 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
         with: Vec::new(),
         with_recursive: false,
         distinct: false,
+        distinct_on: Vec::new(),
         from: Some(FromItem::Table { name, only: false }),
         targets: vec![SelectItem {
             expr: SqlExpr::Column("*".into()),
@@ -11377,6 +11387,9 @@ fn build_show(pair: Pair<'_, Rule>) -> Result<ShowStatement, ParseError> {
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::identifier => name = Some(build_identifier(part)),
+            Rule::show_transaction_isolation_clause => {
+                name = Some("transaction_isolation".to_string())
+            }
             Rule::time_zone_guc_name => name = Some("timezone".to_string()),
             _ => {}
         }
@@ -12204,6 +12217,147 @@ fn build_simple_set_value_atom(pair: Pair<'_, Rule>) -> String {
     }
 }
 
+fn normalized_transaction_mode_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn parse_transaction_isolation_level_text(
+    value: &str,
+) -> Result<TransactionIsolationLevel, ParseError> {
+    TransactionIsolationLevel::parse(value).ok_or_else(|| ParseError::UnexpectedToken {
+        expected: "transaction isolation level",
+        actual: value.to_string(),
+    })
+}
+
+fn apply_transaction_mode(
+    options: &mut TransactionOptions,
+    mode: Pair<'_, Rule>,
+) -> Result<(), ParseError> {
+    let text = normalized_transaction_mode_text(mode.as_str());
+    if let Some(level) = text.strip_prefix("isolation level ") {
+        if options.isolation_level.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one isolation level",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.isolation_level = Some(parse_transaction_isolation_level_text(level)?);
+    } else if text == "read only" {
+        if options.read_only.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one transaction read mode",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.read_only = Some(true);
+    } else if text == "read write" {
+        if options.read_only.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one transaction read mode",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.read_only = Some(false);
+    } else if text == "deferrable" {
+        if options.deferrable.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one transaction deferrable mode",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.deferrable = Some(true);
+    } else if text == "not deferrable" {
+        if options.deferrable.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one transaction deferrable mode",
+                actual: mode.as_str().to_string(),
+            });
+        }
+        options.deferrable = Some(false);
+    }
+    Ok(())
+}
+
+fn merge_transaction_options(
+    options: &mut TransactionOptions,
+    nested: TransactionOptions,
+) -> Result<(), ParseError> {
+    if let Some(level) = nested.isolation_level
+        && options.isolation_level.replace(level).is_some()
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "one isolation level",
+            actual: "duplicate isolation level".into(),
+        });
+    }
+    if let Some(read_only) = nested.read_only
+        && options.read_only.replace(read_only).is_some()
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "one transaction read mode",
+            actual: "duplicate transaction read mode".into(),
+        });
+    }
+    if let Some(deferrable) = nested.deferrable
+        && options.deferrable.replace(deferrable).is_some()
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "one transaction deferrable mode",
+            actual: "duplicate transaction deferrable mode".into(),
+        });
+    }
+    Ok(())
+}
+
+fn build_transaction_options(pair: Pair<'_, Rule>) -> Result<TransactionOptions, ParseError> {
+    let mut options = TransactionOptions::default();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::transaction_mode_item => apply_transaction_mode(&mut options, part)?,
+            Rule::transaction_mode_list => {
+                let nested = build_transaction_options(part)?;
+                merge_transaction_options(&mut options, nested)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(options)
+}
+
+fn build_begin(pair: Pair<'_, Rule>) -> Result<TransactionOptions, ParseError> {
+    for part in pair.into_inner() {
+        if part.as_rule() == Rule::transaction_mode_list {
+            return build_transaction_options(part);
+        }
+    }
+    Ok(TransactionOptions::default())
+}
+
+fn build_set_transaction(pair: Pair<'_, Rule>) -> Result<SetTransactionStatement, ParseError> {
+    let scope = if pair
+        .as_str()
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("set session characteristics")
+    {
+        SetTransactionScope::SessionCharacteristics
+    } else {
+        SetTransactionScope::Transaction
+    };
+    let options = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::transaction_mode_list)
+        .map(build_transaction_options)
+        .transpose()?
+        .unwrap_or_default();
+    Ok(SetTransactionStatement { scope, options })
+}
+
 fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
     let mut analyze = false;
     let mut buffers = false;
@@ -12307,6 +12461,7 @@ fn build_simple_select_statement(
     let mut with_recursive = false;
     let mut with = Vec::new();
     let mut distinct = false;
+    let mut distinct_on = Vec::new();
     let mut targets = None;
     let mut from = None;
     let mut where_clause = None;
@@ -12325,18 +12480,15 @@ fn build_simple_select_statement(
                 with = ctes;
             }
             Rule::select_distinct_clause => {
-                // :HACK: DISTINCT ON currently lowers to the existing SELECT
-                // DISTINCT path. This is enough for the subselect regression
-                // IN/ANY cases, but it does not yet preserve PostgreSQL's
-                // first-row-per-DISTINCT-ON-key semantics.
                 distinct = true;
+                distinct_on = build_select_distinct_clause(part)?;
             }
             Rule::simple_select_core => {
                 for inner in part.into_inner() {
                     match inner.as_rule() {
                         Rule::select_distinct_clause => {
-                            // :HACK: See the outer select_distinct_clause arm.
                             distinct = true;
+                            distinct_on = build_select_distinct_clause(inner)?;
                         }
                         Rule::select_list => targets = Some(build_select_list(inner)?),
                         Rule::from_item => from = Some(build_from_item(inner)?),
@@ -12369,6 +12521,7 @@ fn build_simple_select_statement(
         with_recursive,
         with,
         distinct,
+        distinct_on,
         from,
         targets: targets.unwrap_or_default(),
         where_clause,
@@ -12381,6 +12534,13 @@ fn build_simple_select_statement(
         locking_clause,
         set_operation: None,
     })
+}
+
+fn build_select_distinct_clause(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::expr)
+        .map(build_expr)
+        .collect()
 }
 
 fn build_select_into(pair: Pair<'_, Rule>) -> Result<CreateTableAsStatement, ParseError> {
@@ -12520,6 +12680,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
         with_recursive,
         with,
         distinct: false,
+        distinct_on: Vec::new(),
         from: None,
         targets: Vec::new(),
         where_clause: None,
@@ -12581,6 +12742,7 @@ fn select_statement_for_set_operation(
         with_recursive: false,
         with: Vec::new(),
         distinct: false,
+        distinct_on: Vec::new(),
         from: None,
         targets: Vec::new(),
         where_clause: None,
@@ -12634,6 +12796,7 @@ fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
         with_recursive: stmt.with_recursive,
         with: stmt.with,
         distinct: false,
+        distinct_on: Vec::new(),
         from: Some(FromItem::Values { rows: stmt.rows }),
         targets: vec![SelectItem {
             output_name: "*".into(),

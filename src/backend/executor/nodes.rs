@@ -934,14 +934,28 @@ impl PlanNode for UniqueState {
                 return Ok(None);
             }
             let row = self.input.materialize_current_row()?;
+            let values = if self.key_indices.is_empty() {
+                row.slot.tts_values.clone()
+            } else {
+                self.key_indices
+                    .iter()
+                    .map(|index| {
+                        row.slot
+                            .tts_values
+                            .get(*index)
+                            .cloned()
+                            .unwrap_or(Value::Null)
+                    })
+                    .collect::<Vec<_>>()
+            };
             if self
                 .previous_values
                 .as_ref()
-                .is_some_and(|prev| *prev == row.slot.tts_values)
+                .is_some_and(|prev| *prev == values)
             {
                 continue;
             }
-            self.previous_values = Some(row.slot.tts_values.clone());
+            self.previous_values = Some(values);
             load_materialized_row(&mut self.slot, &row, &mut self.current_bindings, ctx);
             finish_row(&mut self.stats, start);
             return Ok(Some(&mut self.slot));
