@@ -44,7 +44,10 @@ env:
 jobs:
   regression:
     name: regression
-    runs-on: ubuntu-latest
+    # The full suite runs multiple isolated pgrust servers and copies staged
+    # database clusters. Standard private-repo runners have been too small and
+    # can lose contact with GitHub mid-run under this load.
+    runs-on: 32x
     timeout-minutes: 240
     steps:
       - name: Checkout pgrust
