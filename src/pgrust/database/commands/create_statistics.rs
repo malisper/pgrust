@@ -9,7 +9,7 @@ use crate::backend::parser::{
 use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::catalog::{BTREE_AM_OID, PG_CATALOG_NAMESPACE_OID, PgStatisticExtRow};
 use crate::pgrust::database::ddl::{
-    ensure_relation_owner, format_sql_type_name, is_system_column_name,
+    ensure_can_set_role, ensure_relation_owner, format_sql_type_name, is_system_column_name,
     normalize_statistics_target, relation_kind_name,
 };
 
@@ -202,9 +202,12 @@ impl Database {
             }
             return Err(statistics_does_not_exist_error(&stmt.statistics_name));
         };
-        if !auth.has_effective_membership(statistics.stxowner, &auth_catalog) {
+        if !auth.can_set_role(statistics.stxowner, &auth_catalog) {
             return Err(must_be_statistics_owner_error(&statistics.stxname));
         }
+        let catcache = self
+            .backend_catcache(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
 
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -222,11 +225,22 @@ impl Database {
                         new_name.clone(),
                     )));
                 }
+                let normalized = new_name.to_ascii_lowercase();
+                if catcache
+                    .statistic_ext_row_by_name_namespace(&normalized, statistics.stxnamespace)
+                    .is_some_and(|row| row.oid != statistics.oid)
+                {
+                    return Err(duplicate_statistics_in_schema_error(
+                        new_name,
+                        statistics.stxnamespace,
+                        &catcache,
+                    ));
+                }
                 self.catalog
                     .write()
                     .replace_statistics_row_mvcc(
                         PgStatisticExtRow {
-                            stxname: new_name.to_ascii_lowercase(),
+                            stxname: normalized,
                             ..statistics
                         },
                         &ctx,
@@ -243,6 +257,54 @@ impl Database {
                     .replace_statistics_row_mvcc(
                         PgStatisticExtRow {
                             stxstattarget: (normalized.value >= 0).then_some(normalized.value),
+                            ..statistics
+                        },
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?
+            }
+            AlterStatisticsAction::OwnerTo { new_owner } => {
+                let role = auth_catalog
+                    .role_by_name(new_owner)
+                    .cloned()
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("role \"{new_owner}\" does not exist"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42704",
+                    })?;
+                ensure_can_set_role(self, client_id, role.oid, &role.rolname)?;
+                self.catalog
+                    .write()
+                    .replace_statistics_row_mvcc(
+                        PgStatisticExtRow {
+                            stxowner: role.oid,
+                            ..statistics
+                        },
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?
+            }
+            AlterStatisticsAction::SetSchema { new_schema } => {
+                let schema_name = new_schema.to_ascii_lowercase();
+                let namespace_oid = self
+                    .visible_namespace_oid_by_name(client_id, Some((xid, cid)), &schema_name)
+                    .ok_or_else(|| schema_does_not_exist_error(&schema_name))?;
+                if catcache
+                    .statistic_ext_row_by_name_namespace(&statistics.stxname, namespace_oid)
+                    .is_some_and(|row| row.oid != statistics.oid)
+                {
+                    return Err(duplicate_statistics_in_schema_error(
+                        &statistics.stxname,
+                        namespace_oid,
+                        &catcache,
+                    ));
+                }
+                self.catalog
+                    .write()
+                    .replace_statistics_row_mvcc(
+                        PgStatisticExtRow {
+                            stxnamespace: namespace_oid,
                             ..statistics
                         },
                         &ctx,
@@ -944,6 +1006,27 @@ fn display_statistics_name(
 fn duplicate_statistics_error(statistics_name: &str) -> ExecError {
     ExecError::DetailedError {
         message: format!("statistics object \"{statistics_name}\" already exists"),
+        detail: None,
+        hint: None,
+        sqlstate: "42710",
+    }
+}
+
+fn duplicate_statistics_in_schema_error(
+    statistics_name: &str,
+    namespace_oid: u32,
+    catcache: &crate::backend::utils::cache::catcache::CatCache,
+) -> ExecError {
+    let schema_name = catcache
+        .namespace_by_oid(namespace_oid)
+        .map(|row| row.nspname.as_str())
+        .unwrap_or("public");
+    ExecError::DetailedError {
+        message: format!(
+            "statistics object \"{}\" already exists in schema \"{}\"",
+            statistics_name.to_ascii_lowercase(),
+            schema_name
+        ),
         detail: None,
         hint: None,
         sqlstate: "42710",

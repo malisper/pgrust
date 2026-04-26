@@ -3078,6 +3078,24 @@ impl Session {
                     )
                 }
             }
+            Statement::AlterConversion(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_conversion_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::AlterProcedure(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "ALTER PROCEDURE".into(),
             ))),
@@ -4944,6 +4962,18 @@ impl Session {
             Statement::CreateForeignServer(ref create_stmt) => {
                 db.execute_create_foreign_server_stmt(client_id, create_stmt)
             }
+            Statement::AlterForeignServerRename(ref alter_stmt) => {
+                db.execute_alter_foreign_server_rename_stmt(client_id, alter_stmt)
+            }
+            Statement::CreateLanguage(ref create_stmt) => {
+                db.execute_create_language_stmt(client_id, create_stmt)
+            }
+            Statement::AlterLanguage(ref alter_stmt) => {
+                db.execute_alter_language_stmt(client_id, alter_stmt)
+            }
+            Statement::DropLanguage(ref drop_stmt) => {
+                db.execute_drop_language_stmt(client_id, drop_stmt)
+            }
             Statement::CreateForeignTable(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
@@ -5094,6 +5124,78 @@ impl Session {
                 db.execute_create_operator_class_stmt_in_transaction_with_search_path(
                     client_id,
                     create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
+            }
+            Statement::CreateOperatorFamily(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_create_operator_family_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
+            }
+            Statement::AlterOperatorFamily(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_alter_operator_family_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
+            }
+            Statement::AlterOperatorClass(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_alter_operator_class_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
+            }
+            Statement::DropOperatorFamily(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_drop_operator_family_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
+            }
+            Statement::CreateTextSearch(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_create_text_search_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
+            }
+            Statement::AlterTextSearch(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_alter_text_search_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
                     xid,
                     cid,
                     search_path.as_deref(),
@@ -6973,6 +7075,18 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::AlterConversion(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_conversion_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::AlterProcedure(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "ALTER PROCEDURE".into(),
             ))),
@@ -7346,12 +7460,14 @@ impl Session {
                 )
             }
             Statement::DropSchema(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_drop_schema_stmt_in_transaction_with_search_path(
                     client_id,
                     drop_stmt,
                     xid,
                     cid,
+                    search_path.as_deref(),
                     &mut txn.catalog_effects,
                 )
             }

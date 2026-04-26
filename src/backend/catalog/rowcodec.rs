@@ -10,13 +10,13 @@ use crate::include::access::htup::{AttributeAlign, AttributeCompression, Attribu
 use crate::include::catalog::{
     BootstrapCatalogKind, PG_STATISTIC_RELATION_OID, PG_STATISTIC_ROWTYPE_OID, PgAggregateRow,
     PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
-    PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
-    PgDescriptionRow, PgForeignDataWrapperRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
-    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow,
-    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
-    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    bootstrap_composite_type_rows, builtin_type_rows, pg_type_desc,
+    PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow,
+    PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow, PgForeignServerRow, PgIndexRow,
+    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
+    PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows, pg_type_desc,
 };
 use crate::include::nodes::datetime::TimestampTzADT;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, RecordValue, Value};
@@ -156,7 +156,12 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(pg_constraint_row_values)
             .collect(),
-        BootstrapCatalogKind::PgConversion => Vec::new(),
+        BootstrapCatalogKind::PgConversion => rows
+            .conversions
+            .iter()
+            .cloned()
+            .map(pg_conversion_row_values)
+            .collect(),
         BootstrapCatalogKind::PgDepend => rows
             .depends
             .iter()
@@ -181,6 +186,12 @@ pub(crate) fn catalog_row_values_for_kind(
             .iter()
             .cloned()
             .map(pg_foreign_data_wrapper_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgForeignServer => rows
+            .foreign_servers
+            .iter()
+            .cloned()
+            .map(pg_foreign_server_row_values)
             .collect(),
         BootstrapCatalogKind::PgIndex => rows
             .indexes
@@ -810,6 +821,21 @@ pub(crate) fn pg_foreign_data_wrapper_row_from_values(
     })
 }
 
+pub(crate) fn pg_foreign_server_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgForeignServerRow, CatalogError> {
+    Ok(PgForeignServerRow {
+        oid: expect_oid(&values[0])?,
+        srvname: expect_text(&values[1])?,
+        srvowner: expect_oid(&values[2])?,
+        srvfdw: expect_oid(&values[3])?,
+        srvtype: nullable_text(&values[4])?,
+        srvversion: nullable_text(&values[5])?,
+        srvacl: nullable_text_array(&values[6])?,
+        srvoptions: nullable_text_array(&values[7])?,
+    })
+}
+
 pub(crate) fn pg_cast_row_from_values(values: Vec<Value>) -> Result<PgCastRow, CatalogError> {
     Ok(PgCastRow {
         oid: expect_oid(&values[0])?,
@@ -818,6 +844,21 @@ pub(crate) fn pg_cast_row_from_values(values: Vec<Value>) -> Result<PgCastRow, C
         castfunc: expect_oid(&values[3])?,
         castcontext: expect_char(&values[4], "castcontext")?,
         castmethod: expect_char(&values[5], "castmethod")?,
+    })
+}
+
+pub(crate) fn pg_conversion_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgConversionRow, CatalogError> {
+    Ok(PgConversionRow {
+        oid: expect_oid(&values[0])?,
+        conname: expect_text(&values[1])?,
+        connamespace: expect_oid(&values[2])?,
+        conowner: expect_oid(&values[3])?,
+        conforencoding: expect_int32(&values[4])?,
+        contoencoding: expect_int32(&values[5])?,
+        conproc: expect_oid(&values[6])?,
+        condefault: expect_bool(&values[7])?,
     })
 }
 
@@ -1535,6 +1576,27 @@ fn pg_foreign_data_wrapper_row_values(row: PgForeignDataWrapperRow) -> Vec<Value
     ]
 }
 
+fn pg_foreign_server_row_values(row: PgForeignServerRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.srvname.into()),
+        Value::Int32(row.srvowner as i32),
+        Value::Int32(row.srvfdw as i32),
+        row.srvtype
+            .map(|value| Value::Text(value.into()))
+            .unwrap_or(Value::Null),
+        row.srvversion
+            .map(|value| Value::Text(value.into()))
+            .unwrap_or(Value::Null),
+        row.srvacl
+            .map(|values| Value::PgArray(text_array_value(values)))
+            .unwrap_or(Value::Null),
+        row.srvoptions
+            .map(|values| Value::PgArray(text_array_value(values)))
+            .unwrap_or(Value::Null),
+    ]
+}
+
 fn pg_language_row_values(row: PgLanguageRow) -> Vec<Value> {
     vec![
         Value::Int32(row.oid as i32),
@@ -1660,6 +1722,19 @@ fn pg_proc_row_values(row: PgProcRow) -> Vec<Value> {
         nullable_text_value(row.probin),
         nullable_text_value(row.prosqlbody),
         nullable_array_value(row.proacl.map(text_array_value)),
+    ]
+}
+
+fn pg_conversion_row_values(row: PgConversionRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.conname.into()),
+        Value::Int32(row.connamespace as i32),
+        Value::Int32(row.conowner as i32),
+        Value::Int32(row.conforencoding),
+        Value::Int32(row.contoencoding),
+        Value::Int32(row.conproc as i32),
+        Value::Bool(row.condefault),
     ]
 }
 

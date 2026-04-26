@@ -4887,6 +4887,7 @@ fn eval_plpgsql_builtin_function(
             }),
         },
         BuiltinScalarFunction::Int4Pl
+        | BuiltinScalarFunction::Int4Mi
         | BuiltinScalarFunction::Int8Inc
         | BuiltinScalarFunction::Int8IncAny
         | BuiltinScalarFunction::Int4AvgAccum
@@ -6592,6 +6593,7 @@ pub(crate) fn eval_builtin_function(
             }),
         },
         BuiltinScalarFunction::Int4Pl
+        | BuiltinScalarFunction::Int4Mi
         | BuiltinScalarFunction::Int8Inc
         | BuiltinScalarFunction::Int8IncAny
         | BuiltinScalarFunction::Int4AvgAccum

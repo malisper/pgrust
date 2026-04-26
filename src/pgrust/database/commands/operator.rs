@@ -2,8 +2,9 @@ use super::super::*;
 use super::privilege::{acl_grants_privilege, effective_acl_grantee_names};
 use crate::backend::executor::expr_reg::format_type_text;
 use crate::backend::parser::{
-    AlterOperatorOption, AlterOperatorStatement, CatalogLookup, CreateOperatorStatement,
-    DropOperatorStatement, ParseError, QualifiedNameRef, resolve_raw_type_name,
+    AlterOperatorAction, AlterOperatorOption, AlterOperatorStatement, CatalogLookup,
+    CreateOperatorStatement, DropOperatorStatement, ParseError, QualifiedNameRef,
+    resolve_raw_type_name,
 };
 use crate::backend::utils::cache::syscache::backend_catcache;
 use crate::backend::utils::misc::notices::push_warning;
@@ -12,6 +13,7 @@ use crate::include::catalog::{
     PUBLIC_NAMESPACE_OID, PgOperatorRow,
 };
 use crate::include::nodes::parsenodes::RawTypeName;
+use crate::pgrust::database::ddl::ensure_can_set_role;
 
 const INTERNAL_TYPE_OID: u32 = 2281;
 const SCHEMA_CREATE_PRIVILEGE_CHAR: char = 'C';
@@ -263,6 +265,35 @@ fn owner_error(name: &str) -> ExecError {
         hint: None,
         sqlstate: "42501",
     })
+}
+
+fn replace_single_operator(
+    db: &Database,
+    client_id: ClientId,
+    xid: TransactionId,
+    cid: CommandId,
+    current: &PgOperatorRow,
+    updated: PgOperatorRow,
+    catalog_effects: &mut Vec<CatalogMutationEffect>,
+) -> Result<StatementResult, ExecError> {
+    let ctx = CatalogWriteContext {
+        pool: db.pool.clone(),
+        txns: db.txns.clone(),
+        xid,
+        cid,
+        client_id,
+        waiter: Some(db.txn_waiter.clone()),
+        interrupts: db.interrupt_state(client_id),
+    };
+    let effect = db
+        .catalog
+        .write()
+        .replace_operator_mvcc(current, updated, &ctx)
+        .map_err(map_catalog_error)?
+        .1;
+    db.apply_catalog_mutation_effect_immediate(&effect)?;
+    catalog_effects.push(effect);
+    Ok(StatementResult::AffectedRows(0))
 }
 
 fn attribute_already_set_error(name: &str) -> ExecError {
@@ -733,7 +764,7 @@ impl Database {
             oid: 0,
             oprname: stmt.operator_name.to_ascii_lowercase(),
             oprnamespace: namespace_oid,
-            oprowner: BOOTSTRAP_SUPERUSER_OID,
+            oprowner: self.auth_state(client_id).current_user_oid(),
             oprkind: if left_type == 0 {
                 'r'
             } else if right_type == 0 {
@@ -888,24 +919,6 @@ impl Database {
                 )
             })
             .transpose()?;
-        for option in &stmt.options {
-            match option {
-                AlterOperatorOption::Restrict { option_name, .. }
-                | AlterOperatorOption::Join { option_name, .. }
-                | AlterOperatorOption::Commutator { option_name, .. }
-                | AlterOperatorOption::Negator { option_name, .. }
-                | AlterOperatorOption::Merges { option_name, .. }
-                | AlterOperatorOption::Hashes { option_name, .. }
-                | AlterOperatorOption::Unrecognized { option_name, .. } => {
-                    if !matches!(
-                        option_name.as_str(),
-                        "restrict" | "join" | "commutator" | "negator" | "merges" | "hashes"
-                    ) {
-                        return Err(attribute_not_recognized_error(option_name));
-                    }
-                }
-            }
-        }
         let left_type = resolve_operator_type_oid(&catalog, &stmt.left_arg)?;
         let right_type = resolve_operator_type_oid(&catalog, &stmt.right_arg)?;
         let current = lookup_operator_row(
@@ -933,15 +946,84 @@ impl Database {
                 sqlstate: "42883",
             })
         })?;
-        if catalog.current_user_oid() != BOOTSTRAP_SUPERUSER_OID
-            && catalog.current_user_oid() != current.oprowner
-        {
+        let auth = self.auth_state(client_id);
+        let auth_catalog = self
+            .auth_catalog(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
+        if !auth.can_set_role(current.oprowner, &auth_catalog) {
             return Err(owner_error(&stmt.operator_name));
         }
 
         let mut updated = current.clone();
+        match &stmt.action {
+            AlterOperatorAction::OwnerTo { new_owner } => {
+                let role = auth_catalog
+                    .role_by_name(new_owner)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ExecError::Parse(crate::backend::commands::rolecmds::role_management_error(
+                            format!("role \"{new_owner}\" does not exist"),
+                        ))
+                    })?;
+                ensure_can_set_role(self, client_id, role.oid, &role.rolname)?;
+                updated.oprowner = role.oid;
+                return replace_single_operator(
+                    self,
+                    client_id,
+                    xid,
+                    cid,
+                    &current,
+                    updated,
+                    catalog_effects,
+                );
+            }
+            AlterOperatorAction::SetSchema { new_schema } => {
+                let new_namespace_oid = self
+                    .visible_namespace_oid_by_name(client_id, Some((xid, cid)), new_schema)
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("schema \"{new_schema}\" does not exist"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "3F000",
+                    })?;
+                let duplicate = lookup_operator_row(
+                    self,
+                    client_id,
+                    Some((xid, cid)),
+                    Some(new_namespace_oid),
+                    &stmt.operator_name,
+                    left_type,
+                    right_type,
+                )?;
+                if duplicate.is_some_and(|existing| existing.oid != current.oid) {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "operator {} already exists in schema \"{}\"",
+                            stmt.operator_name, new_schema
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42710",
+                    });
+                }
+                updated.oprnamespace = new_namespace_oid;
+                return replace_single_operator(
+                    self,
+                    client_id,
+                    xid,
+                    cid,
+                    &current,
+                    updated,
+                    catalog_effects,
+                );
+            }
+            AlterOperatorAction::SetOptions(_) => {}
+        }
         let mut partner_updates = Vec::new();
-        for option in &stmt.options {
+        let AlterOperatorAction::SetOptions(options) = &stmt.action else {
+            unreachable!("handled above");
+        };
+        for option in options {
             match option {
                 AlterOperatorOption::Restrict {
                     option_name,

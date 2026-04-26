@@ -312,6 +312,7 @@ pub const OIDVECTOR_CMP_LE_PROC_OID: u32 = 678;
 pub const OIDVECTOR_CMP_EQ_PROC_OID: u32 = 679;
 pub const OIDVECTOR_CMP_GE_PROC_OID: u32 = 680;
 pub const OIDVECTOR_CMP_GT_PROC_OID: u32 = 681;
+pub const INT4_MINUS_PROC_OID: u32 = 181;
 pub const INT4_PLUS_PROC_OID: u32 = 7004;
 pub const EQSEL_PROC_OID: u32 = 101;
 pub const EQJOINSEL_PROC_OID: u32 = 105;
@@ -4440,6 +4441,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             &oid_argtypes(&[ANYARRAYOID]),
             "unnest",
             1,
+        ),
+        proc_row(
+            INT4_MINUS_PROC_OID,
+            "int4mi",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[INT4_TYPE_OID, INT4_TYPE_OID]),
+            "int4mi",
+            2,
+            false,
+            true,
+            'f',
+            'i',
         ),
         proc_row(
             INT4_PLUS_PROC_OID,
@@ -9418,6 +9431,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("scale", BuiltinScalarFunction::Scale),
         ("min_scale", BuiltinScalarFunction::MinScale),
         ("numeric_inc", BuiltinScalarFunction::NumericInc),
+        ("int4mi", BuiltinScalarFunction::Int4Mi),
         ("int4pl", BuiltinScalarFunction::Int4Pl),
         ("int8inc", BuiltinScalarFunction::Int8Inc),
         ("int8inc_any", BuiltinScalarFunction::Int8IncAny),

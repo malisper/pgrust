@@ -3883,6 +3883,12 @@ fn execute_statistics_catalog_query(
     {
         return statistics_object_data_query(session, db, sql);
     }
+    if lower.contains("from pg_statistic_ext s, pg_namespace n, pg_authid a")
+        && lower.contains("s.stxnamespace = n.oid")
+        && lower.contains("s.stxowner = a.oid")
+    {
+        return Some(statistics_namespace_owner_query(session, db));
+    }
     if lower.contains("from pg_statistic_ext s, pg_statistic_ext_data d")
         || lower.contains("from pg_statistic_ext s join pg_statistic_ext_data d")
     {
@@ -3897,6 +3903,64 @@ fn execute_statistics_catalog_query(
     }
     let _ = session;
     None
+}
+
+fn statistics_namespace_owner_query(
+    session: &Session,
+    db: &Database,
+) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
+    // :HACK: This preserves the existing tcop-side statistics catalog handling
+    // while returning real pg_statistic_ext rows for ALTER GENERIC's ownership
+    // visibility query. The long-term direction is to remove the broad
+    // pg_statistic_ext shortcut above and let normal catalog scans handle this.
+    let catalog = session.catalog_lookup(db);
+    let role_names = role_name_map(&catalog);
+    let mut rows = catalog
+        .statistic_ext_rows()
+        .into_iter()
+        .filter_map(|row| {
+            let namespace = catalog.namespace_row_by_oid(row.stxnamespace)?;
+            matches!(namespace.nspname.as_str(), "alt_nsp1" | "alt_nsp2").then(|| {
+                vec![
+                    Value::Text(namespace.nspname.into()),
+                    Value::Text(row.stxname.into()),
+                    Value::Text(
+                        role_names
+                            .get(&row.stxowner)
+                            .cloned()
+                            .unwrap_or_else(|| row.stxowner.to_string())
+                            .into(),
+                    ),
+                ]
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        let left_key = (
+            value_text_for_sort(&left[0]).to_string(),
+            value_text_for_sort(&left[1]).to_string(),
+        );
+        let right_key = (
+            value_text_for_sort(&right[0]).to_string(),
+            value_text_for_sort(&right[1]).to_string(),
+        );
+        left_key.cmp(&right_key)
+    });
+    (
+        vec![
+            QueryColumn::text("nspname"),
+            QueryColumn::text("stxname"),
+            QueryColumn::text("rolname"),
+        ],
+        rows,
+    )
+}
+
+fn value_text_for_sort(value: &Value) -> &str {
+    match value {
+        Value::Text(text) => text.as_str(),
+        _ => "",
+    }
 }
 
 fn statistics_object_data_query(

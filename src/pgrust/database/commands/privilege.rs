@@ -296,6 +296,7 @@ pub(crate) fn routine_kind_matches(kind: RoutineKind, prokind: char) -> bool {
     match kind {
         RoutineKind::Function => prokind == 'f',
         RoutineKind::Procedure => prokind == 'p',
+        RoutineKind::Aggregate => prokind == 'a',
         RoutineKind::Routine => matches!(prokind, 'f' | 'p'),
     }
 }
@@ -304,6 +305,7 @@ pub(crate) fn routine_kind_name(kind: RoutineKind) -> &'static str {
     match kind {
         RoutineKind::Function => "function",
         RoutineKind::Procedure => "procedure",
+        RoutineKind::Aggregate => "aggregate",
         RoutineKind::Routine => "routine",
     }
 }

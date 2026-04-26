@@ -3,12 +3,17 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlTypeKind, parse_expr};
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
-    DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_ATTRDEF_RELATION_OID,
-    PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
-    PG_NAMESPACE_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID,
-    PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
+    DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_AM_RELATION_OID,
+    PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
+    PG_CONVERSION_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
+    PG_FOREIGN_SERVER_RELATION_OID, PG_LANGUAGE_RELATION_OID, PG_NAMESPACE_RELATION_OID,
+    PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
     PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_RELATION_OID,
-    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow, PgDependRow, PgStatisticExtRow,
+    PG_TRIGGER_RELATION_OID, PG_TS_CONFIG_RELATION_OID, PG_TS_DICT_RELATION_OID,
+    PG_TS_PARSER_RELATION_OID, PG_TS_TEMPLATE_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
+    PgDependRow, PgForeignServerRow, PgLanguageRow, PgOpclassRow, PgOpfamilyRow, PgStatisticExtRow,
+    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
 };
 use crate::include::nodes::parsenodes::{SqlExpr, function_arg_values};
 use std::collections::BTreeSet;
@@ -610,6 +615,222 @@ pub fn operator_depend_rows(row: &crate::include::catalog::PgOperatorRow) -> Vec
     rows
 }
 
+pub fn opfamily_depend_rows(row: &PgOpfamilyRow) -> Vec<PgDependRow> {
+    let mut rows = vec![
+        PgDependRow {
+            classid: PG_OPFAMILY_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_NAMESPACE_RELATION_OID,
+            refobjid: row.opfnamespace,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        },
+        PgDependRow {
+            classid: PG_OPFAMILY_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_AM_RELATION_OID,
+            refobjid: row.opfmethod,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        },
+    ];
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn opclass_depend_rows(row: &PgOpclassRow) -> Vec<PgDependRow> {
+    let mut rows = vec![
+        PgDependRow {
+            classid: PG_OPCLASS_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_OPFAMILY_RELATION_OID,
+            refobjid: row.opcfamily,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        },
+        PgDependRow {
+            classid: PG_OPCLASS_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_NAMESPACE_RELATION_OID,
+            refobjid: row.opcnamespace,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        },
+        PgDependRow {
+            classid: PG_OPCLASS_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_TYPE_RELATION_OID,
+            refobjid: row.opcintype,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        },
+        PgDependRow {
+            classid: PG_OPCLASS_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_AM_RELATION_OID,
+            refobjid: row.opcmethod,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        },
+    ];
+    if row.opckeytype != 0 {
+        rows.push(PgDependRow {
+            classid: PG_OPCLASS_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_TYPE_RELATION_OID,
+            refobjid: row.opckeytype,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        });
+    }
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn ts_dict_depend_rows(row: &PgTsDictRow) -> Vec<PgDependRow> {
+    let mut rows = vec![
+        PgDependRow {
+            classid: PG_TS_DICT_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_NAMESPACE_RELATION_OID,
+            refobjid: row.dictnamespace,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        },
+        PgDependRow {
+            classid: PG_TS_DICT_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_TS_TEMPLATE_RELATION_OID,
+            refobjid: row.dicttemplate,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        },
+    ];
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn ts_config_depend_rows(row: &PgTsConfigRow) -> Vec<PgDependRow> {
+    let mut rows = vec![
+        PgDependRow {
+            classid: PG_TS_CONFIG_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_NAMESPACE_RELATION_OID,
+            refobjid: row.cfgnamespace,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        },
+        PgDependRow {
+            classid: PG_TS_CONFIG_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_TS_PARSER_RELATION_OID,
+            refobjid: row.cfgparser,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        },
+    ];
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn ts_template_depend_rows(row: &PgTsTemplateRow) -> Vec<PgDependRow> {
+    let mut rows = vec![PgDependRow {
+        classid: PG_TS_TEMPLATE_RELATION_OID,
+        objid: row.oid,
+        objsubid: 0,
+        refclassid: PG_NAMESPACE_RELATION_OID,
+        refobjid: row.tmplnamespace,
+        refobjsubid: 0,
+        deptype: DEPENDENCY_NORMAL,
+    }];
+    for proc_oid in [row.tmplinit.unwrap_or(0), row.tmpllexize]
+        .into_iter()
+        .filter(|oid| *oid != 0)
+    {
+        rows.push(PgDependRow {
+            classid: PG_TS_TEMPLATE_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_PROC_RELATION_OID,
+            refobjid: proc_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        });
+    }
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn ts_parser_depend_rows(row: &PgTsParserRow) -> Vec<PgDependRow> {
+    let mut rows = vec![PgDependRow {
+        classid: PG_TS_PARSER_RELATION_OID,
+        objid: row.oid,
+        objsubid: 0,
+        refclassid: PG_NAMESPACE_RELATION_OID,
+        refobjid: row.prsnamespace,
+        refobjsubid: 0,
+        deptype: DEPENDENCY_NORMAL,
+    }];
+    for proc_oid in [
+        row.prsstart,
+        row.prstoken,
+        row.prsend,
+        row.prsheadline.unwrap_or(0),
+        row.prslextype,
+    ]
+    .into_iter()
+    .filter(|oid| *oid != 0)
+    {
+        rows.push(PgDependRow {
+            classid: PG_TS_PARSER_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_PROC_RELATION_OID,
+            refobjid: proc_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        });
+    }
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn conversion_depend_rows(row: &crate::include::catalog::PgConversionRow) -> Vec<PgDependRow> {
+    let mut rows = vec![PgDependRow {
+        classid: PG_CONVERSION_RELATION_OID,
+        objid: row.oid,
+        objsubid: 0,
+        refclassid: PG_NAMESPACE_RELATION_OID,
+        refobjid: row.connamespace,
+        refobjsubid: 0,
+        deptype: DEPENDENCY_NORMAL,
+    }];
+    if row.conproc != 0 {
+        rows.push(PgDependRow {
+            classid: PG_CONVERSION_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_PROC_RELATION_OID,
+            refobjid: row.conproc,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        });
+    }
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
 pub fn publication_rel_depend_rows(
     publication_rel_oid: u32,
     publication_oid: u32,
@@ -775,6 +996,38 @@ pub fn foreign_data_wrapper_depend_rows(
             deptype: DEPENDENCY_NORMAL,
         });
     }
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn foreign_server_depend_rows(row: &PgForeignServerRow) -> Vec<PgDependRow> {
+    let mut rows = vec![PgDependRow {
+        classid: PG_FOREIGN_SERVER_RELATION_OID,
+        objid: row.oid,
+        objsubid: 0,
+        refclassid: PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
+        refobjid: row.srvfdw,
+        refobjsubid: 0,
+        deptype: DEPENDENCY_NORMAL,
+    }];
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn language_depend_rows(row: &PgLanguageRow) -> Vec<PgDependRow> {
+    let mut rows = [row.lanplcallfoid, row.laninline, row.lanvalidator]
+        .into_iter()
+        .filter(|oid| *oid != 0)
+        .map(|proc_oid| PgDependRow {
+            classid: PG_LANGUAGE_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_PROC_RELATION_OID,
+            refobjid: proc_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        })
+        .collect::<Vec<_>>();
     sort_pg_depend_rows(&mut rows);
     rows
 }

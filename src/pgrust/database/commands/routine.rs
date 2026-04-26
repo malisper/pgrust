@@ -8,6 +8,7 @@ use crate::backend::parser::{
     resolve_raw_type_name,
 };
 use crate::include::catalog::PgProcRow;
+use crate::pgrust::database::ddl::ensure_can_set_role;
 
 fn normalize_ident(name: &str) -> String {
     name.trim().trim_matches('"').to_ascii_lowercase()
@@ -147,6 +148,50 @@ fn routine_signature_display(
     format!("{}({arg_types})", signature.routine_name)
 }
 
+fn routine_row_display(catalog: &dyn CatalogLookup, name: &str, row: &PgProcRow) -> String {
+    let arg_types = parse_proc_argtype_oids(&row.proargtypes)
+        .into_iter()
+        .map(|oid| format_type_text(oid, None, catalog))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({arg_types})")
+}
+
+fn namespace_name(catalog: &dyn CatalogLookup, namespace_oid: u32) -> String {
+    catalog
+        .namespace_row_by_oid(namespace_oid)
+        .map(|row| row.nspname)
+        .unwrap_or_else(|| namespace_oid.to_string())
+}
+
+fn duplicate_routine_error(catalog: &dyn CatalogLookup, row: &PgProcRow) -> ExecError {
+    let display = routine_row_display(catalog, &row.proname, row);
+    ExecError::DetailedError {
+        message: format!(
+            "function {display} already exists in schema \"{}\"",
+            namespace_name(catalog, row.pronamespace)
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42723",
+    }
+}
+
+fn routine_kind_article(kind: RoutineKind) -> &'static str {
+    match kind {
+        RoutineKind::Aggregate => "an",
+        RoutineKind::Function | RoutineKind::Procedure | RoutineKind::Routine => "a",
+    }
+}
+
+fn routine_prokind_name(prokind: char) -> &'static str {
+    match prokind {
+        'a' => "aggregate",
+        'p' => "procedure",
+        _ => "function",
+    }
+}
+
 fn resolve_routine(
     db: &Database,
     client_id: ClientId,
@@ -191,9 +236,14 @@ fn resolve_routine(
     match candidates.as_slice() {
         [row] => Ok((*row).clone()),
         [] if kind != RoutineKind::Routine && !all_signature_candidates.is_empty() => {
+            let candidate_kind = routine_prokind_name(all_signature_candidates[0].prokind);
             let signature = routine_signature_display(&catalog, signature, &arg_specs);
             Err(ExecError::DetailedError {
-                message: format!("{signature} is not a {}", routine_kind_name(kind)),
+                message: format!(
+                    "{candidate_kind} {signature} is not {} {}",
+                    routine_kind_article(kind),
+                    routine_kind_name(kind)
+                ),
                 detail: None,
                 hint: None,
                 sqlstate: "42809",
@@ -237,9 +287,30 @@ fn duplicate_routine_exists(
         .any(|candidate| {
             candidate.oid != row.oid
                 && candidate.pronamespace == new_namespace
-                && candidate.prokind == row.prokind
                 && candidate.proargtypes == row.proargtypes
         })
+}
+
+fn ensure_routine_owner(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    routine_name: &str,
+    owner_oid: u32,
+) -> Result<(), ExecError> {
+    let auth = db.auth_state(client_id);
+    let auth_catalog = db
+        .auth_catalog(client_id, txn_ctx)
+        .map_err(map_catalog_error)?;
+    if auth.can_set_role(owner_oid, &auth_catalog) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("must be owner of function {routine_name}"),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
 }
 
 fn apply_routine_options(
@@ -337,6 +408,14 @@ impl Database {
             stmt.kind,
             &stmt.signature,
         )?;
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        ensure_routine_owner(
+            self,
+            client_id,
+            Some((xid, cid)),
+            &old_row.proname,
+            old_row.proowner,
+        )?;
         let mut updated = old_row.clone();
         match &stmt.action {
             AlterRoutineAction::Options(options) => apply_routine_options(&mut updated, options)?,
@@ -365,22 +444,14 @@ impl Database {
                             format!("role \"{new_owner}\" does not exist"),
                         ))
                     })?;
+                ensure_can_set_role(self, client_id, updated.proowner, new_owner)?;
             }
             AlterRoutineAction::DependsOnExtension { .. } => {
                 return Ok(StatementResult::AffectedRows(0));
             }
         }
-        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         if duplicate_routine_exists(&catalog, &old_row, &updated.proname, updated.pronamespace) {
-            return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "unique routine signature",
-                actual: format!(
-                    "{} {}({}) already exists",
-                    routine_kind_name(stmt.kind),
-                    updated.proname,
-                    updated.proargtypes
-                ),
-            }));
+            return Err(duplicate_routine_error(&catalog, &updated));
         }
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -391,11 +462,42 @@ impl Database {
             waiter: Some(self.txn_waiter.clone()),
             interrupts: self.interrupt_state(client_id),
         };
-        let (_oid, effect) = self
-            .catalog
-            .write()
-            .replace_proc_mvcc(&old_row, updated, &ctx)
-            .map_err(map_catalog_error)?;
+        let updated_for_error = updated.clone();
+        let (_oid, effect) = if old_row.prokind == 'a' {
+            let old_aggregate = catalog.aggregate_by_fnoid(old_row.oid).ok_or_else(|| {
+                ExecError::DetailedError {
+                    message: format!("aggregate row for procedure {} does not exist", old_row.oid),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                }
+            })?;
+            self.catalog
+                .write()
+                .replace_aggregate_mvcc(
+                    &old_row,
+                    &old_aggregate,
+                    updated,
+                    old_aggregate.clone(),
+                    &ctx,
+                )
+                .map_err(|err| match err {
+                    crate::backend::catalog::CatalogError::UniqueViolation(_) => {
+                        duplicate_routine_error(&catalog, &updated_for_error)
+                    }
+                    other => map_catalog_error(other),
+                })?
+        } else {
+            self.catalog
+                .write()
+                .replace_proc_mvcc(&old_row, updated, &ctx)
+                .map_err(|err| match err {
+                    crate::backend::catalog::CatalogError::UniqueViolation(_) => {
+                        duplicate_routine_error(&catalog, &updated_for_error)
+                    }
+                    other => map_catalog_error(other),
+                })?
+        };
         catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
     }
