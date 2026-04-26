@@ -517,6 +517,7 @@ mod tests {
             pg_attrdef_desc().columns.len(),
             pg_cast_desc().columns.len(),
             pg_constraint_desc().columns.len(),
+            pg_conversion_desc().columns.len(),
             pg_depend_desc().columns.len(),
             pg_index_desc().columns.len(),
             pg_inherits_desc().columns.len(),

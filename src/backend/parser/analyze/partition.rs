@@ -11,9 +11,10 @@ use crate::backend::executor::{Value, cast_value};
 use crate::backend::parser::parse_expr;
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
-    ANYARRAYOID, ANYMULTIRANGEOID, BTREE_AM_OID, GIST_AM_OID, HASH_AM_OID, PgPartitionedTableRow,
-    RANGE_GIST_OPCLASS_OID, builtin_range_spec_by_multirange_oid, builtin_range_spec_by_oid,
-    default_btree_opclass_oid, default_hash_opclass_oid, range_type_ref_for_sql_type,
+    ANYARRAYOID, ANYMULTIRANGEOID, BPCHAR_TYPE_OID, BTREE_AM_OID, GIST_AM_OID, HASH_AM_OID,
+    PgPartitionedTableRow, RANGE_GIST_OPCLASS_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
+    builtin_range_spec_by_multirange_oid, builtin_range_spec_by_oid, default_btree_opclass_oid,
+    default_hash_opclass_oid, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{MultirangeTypeRef, MultirangeValue, RangeBound, RangeValue};
 use crate::include::nodes::primnodes::{Expr, RelationDesc, Var, attrno_index, user_attrno};
@@ -738,7 +739,14 @@ fn partition_access_method_oid(strategy: PartitionStrategy, sql_type: SqlType) -
 }
 
 fn opclass_accepts_type(opcintype: u32, type_oid: u32) -> bool {
-    opcintype == type_oid || opcintype == ANYARRAYOID || opcintype == ANYMULTIRANGEOID
+    opcintype == type_oid
+        || opcintype == ANYARRAYOID
+        || opcintype == ANYMULTIRANGEOID
+        || (is_text_opclass_type(opcintype) && is_text_opclass_type(type_oid))
+}
+
+fn is_text_opclass_type(type_oid: u32) -> bool {
+    matches!(type_oid, TEXT_TYPE_OID | VARCHAR_TYPE_OID | BPCHAR_TYPE_OID)
 }
 
 fn lower_partition_bound(

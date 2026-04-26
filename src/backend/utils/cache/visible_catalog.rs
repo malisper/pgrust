@@ -261,7 +261,6 @@ fn dedup_proc_rows(rows: &mut Vec<PgProcRow>) {
             row.proargtypes.clone(),
             row.prokind,
             row.proretset,
-            row.prosrc.clone(),
         ))
     });
 }

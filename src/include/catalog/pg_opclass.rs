@@ -1038,13 +1038,14 @@ mod tests {
     #[test]
     fn bootstrap_rows_include_macaddr_opclasses() {
         let rows = bootstrap_pg_opclass_rows();
-        for (oid, method, name, family, input_type) in [
+        for (oid, method, name, family, input_type, default) in [
             (
                 MACADDR_BTREE_OPCLASS_OID,
                 BTREE_AM_OID,
                 "macaddr_ops",
                 BTREE_MACADDR_FAMILY_OID,
                 MACADDR_TYPE_OID,
+                true,
             ),
             (
                 MACADDR8_BTREE_OPCLASS_OID,
@@ -1052,6 +1053,7 @@ mod tests {
                 "macaddr8_ops",
                 BTREE_MACADDR8_FAMILY_OID,
                 MACADDR8_TYPE_OID,
+                true,
             ),
             (
                 MACADDR_BRIN_MINMAX_OPCLASS_OID,
@@ -1059,6 +1061,7 @@ mod tests {
                 "macaddr_minmax_ops",
                 BRIN_MACADDR_MINMAX_FAMILY_OID,
                 MACADDR_TYPE_OID,
+                true,
             ),
             (
                 MACADDR8_BRIN_MINMAX_MULTI_OPCLASS_OID,
@@ -1066,6 +1069,7 @@ mod tests {
                 "macaddr8_minmax_multi_ops",
                 BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID,
                 MACADDR8_TYPE_OID,
+                false,
             ),
             (
                 MACADDR_BRIN_BLOOM_OPCLASS_OID,
@@ -1073,6 +1077,7 @@ mod tests {
                 "macaddr_bloom_ops",
                 BRIN_MACADDR_BLOOM_FAMILY_OID,
                 MACADDR_TYPE_OID,
+                false,
             ),
             (
                 MACADDR_HASH_OPCLASS_OID,
@@ -1080,6 +1085,7 @@ mod tests {
                 "macaddr_ops",
                 HASH_MACADDR_FAMILY_OID,
                 MACADDR_TYPE_OID,
+                true,
             ),
             (
                 MACADDR8_HASH_OPCLASS_OID,
@@ -1087,6 +1093,7 @@ mod tests {
                 "macaddr8_ops",
                 HASH_MACADDR8_FAMILY_OID,
                 MACADDR8_TYPE_OID,
+                true,
             ),
         ] {
             assert!(
@@ -1096,7 +1103,7 @@ mod tests {
                         && row.opcname == name
                         && row.opcfamily == family
                         && row.opcintype == input_type
-                        && row.opcdefault
+                        && row.opcdefault == default
                 }),
                 "missing opclass {name} ({oid})"
             );
