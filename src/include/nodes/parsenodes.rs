@@ -338,6 +338,9 @@ pub enum Statement {
     CreateTablespace(CreateTablespaceStatement),
     CreateTable(CreateTableStatement),
     CreateTableAs(CreateTableAsStatement),
+    Prepare(PrepareStatement),
+    Execute(ExecuteStatement),
+    Deallocate(DeallocateStatement),
     CreateSequence(CreateSequenceStatement),
     CreateView(CreateViewStatement),
     RefreshMaterializedView(RefreshMaterializedViewStatement),
@@ -383,6 +386,7 @@ pub enum Statement {
     AlterViewSetSchema(AlterRelationSetSchemaStatement),
     AlterViewOwner(AlterRelationOwnerStatement),
     AlterSchemaOwner(AlterSchemaOwnerStatement),
+    AlterTableSetPersistence(AlterTableSetPersistenceStatement),
     AlterTableSet(AlterTableSetStatement),
     AlterTableReset(AlterTableResetStatement),
     AlterTableReplicaIdentity(AlterTableReplicaIdentityStatement),
@@ -1054,6 +1058,7 @@ pub struct CreateRangeTypeStatement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TablePersistence {
     Permanent,
+    Unlogged,
     Temporary,
 }
 
@@ -1922,17 +1927,40 @@ pub struct CreateTableAsStatement {
     pub persistence: TablePersistence,
     pub on_commit: OnCommitAction,
     pub column_names: Vec<String>,
-    pub query: SelectStatement,
+    pub query: CreateTableAsQuery,
     pub query_sql: Option<String>,
     pub if_not_exists: bool,
     pub object_type: TableAsObjectType,
     pub skip_data: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateTableAsQuery {
+    Select(SelectStatement),
+    Execute(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableAsObjectType {
     Table,
     MaterializedView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrepareStatement {
+    pub name: String,
+    pub query: SelectStatement,
+    pub query_sql: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecuteStatement {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeallocateStatement {
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2171,6 +2199,14 @@ pub struct AlterTableReplicaIdentityStatement {
     pub only: bool,
     pub table_name: String,
     pub index_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableSetPersistenceStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub persistence: TablePersistence,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

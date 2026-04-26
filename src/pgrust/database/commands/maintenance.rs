@@ -13,7 +13,8 @@ use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_i
 use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
 use crate::backend::executor::{ExecutorContext, RelationDesc};
 use crate::backend::parser::{
-    BoundRelation, CatalogLookup, parse_type_name, resolve_raw_type_name,
+    AlterTableSetPersistenceStatement, BoundRelation, CatalogLookup, TablePersistence,
+    parse_type_name, resolve_raw_type_name,
 };
 use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::catalog::{
@@ -890,6 +891,45 @@ fn collect_add_column_targets(
 }
 
 impl Database {
+    pub(crate) fn execute_alter_table_set_persistence_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterTableSetPersistenceStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let table_name = alter_stmt.table_name.to_ascii_lowercase();
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let Some(relation) = catalog.lookup_any_relation(&table_name) else {
+            if alter_stmt.if_exists {
+                push_notice(format!(
+                    r#"relation "{table_name}" does not exist, skipping"#
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            return Err(ExecError::Parse(ParseError::TableDoesNotExist(table_name)));
+        };
+        if relation.relkind == 'p' {
+            let action = match alter_stmt.persistence {
+                TablePersistence::Permanent => "SET LOGGED",
+                TablePersistence::Unlogged => "SET UNLOGGED",
+                TablePersistence::Temporary => "SET",
+            };
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "ALTER action {action} cannot be performed on relation \"{}\"",
+                    table_name
+                ),
+                detail: Some("This operation is not supported for partitioned tables.".into()),
+                hint: None,
+                sqlstate: "42809",
+            });
+        }
+        Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+            "ALTER TABLE SET LOGGED/UNLOGGED is only supported for partitioned-table diagnostics"
+                .into(),
+        )))
+    }
+
     pub(crate) fn effective_analyze_targets_with_search_path(
         &self,
         client_id: ClientId,
@@ -2598,10 +2638,10 @@ impl Database {
                 client_id,
                 &alter_stmt.table_name,
                 relation.namespace_oid,
-                if relation.relpersistence == 't' {
-                    TablePersistence::Temporary
-                } else {
-                    TablePersistence::Permanent
+                match relation.relpersistence {
+                    't' => TablePersistence::Temporary,
+                    'u' => TablePersistence::Unlogged,
+                    _ => TablePersistence::Permanent,
                 },
                 serial_column,
                 xid,

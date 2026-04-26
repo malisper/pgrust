@@ -3249,6 +3249,28 @@ fn parse_not_null_constraint_no_inherit() {
 
 #[test]
 fn parse_alter_table_set_statement() {
+    let stmt = parse_statement("alter table unlogged1 set logged").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableSetPersistence(AlterTableSetPersistenceStatement {
+            if_exists: false,
+            only: false,
+            table_name: "unlogged1".into(),
+            persistence: TablePersistence::Permanent,
+        })
+    );
+
+    let stmt = parse_statement("alter table unlogged1 set unlogged").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableSetPersistence(AlterTableSetPersistenceStatement {
+            if_exists: false,
+            only: false,
+            table_name: "unlogged1".into(),
+            persistence: TablePersistence::Unlogged,
+        })
+    );
+
     let stmt = parse_statement("alter table num_variance set (parallel_workers = 4)").unwrap();
     assert_eq!(
         stmt,
@@ -9180,6 +9202,12 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create temp table tempy(id) as select 1").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, column_names, persistence: TablePersistence::Temporary, .. }) if table_name == "tempy" && column_names == vec!["id"])
     );
     assert!(
+        matches!(parse_statement("create unlogged table unlogged_items(id int4)").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, persistence: TablePersistence::Unlogged, .. }) if table_name == "unlogged_items")
+    );
+    assert!(
+        matches!(parse_statement("create table ctas_opts with (fillfactor=70) as select 1").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, .. }) if table_name == "ctas_opts")
+    );
+    assert!(
         matches!(
             parse_statement("create materialized view if not exists mv_items(id, name) as select id, name from people with no data").unwrap(),
             Statement::CreateTableAs(CreateTableAsStatement {
@@ -9196,7 +9224,16 @@ fn parse_insert_update_delete() {
         )
     );
     assert!(
-        matches!(parse_statement("select * into cmmove1 from cmdata").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { schema_name: None, table_name, persistence: TablePersistence::Permanent, column_names, query: SelectStatement { from: Some(FromItem::Table { name, .. }), .. }, .. }) if table_name == "cmmove1" && column_names.is_empty() && name == "cmdata")
+        matches!(parse_statement("select * into cmmove1 from cmdata").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { schema_name: None, table_name, persistence: TablePersistence::Permanent, column_names, query: CreateTableAsQuery::Select(SelectStatement { from: Some(FromItem::Table { name, .. }), .. }), .. }) if table_name == "cmmove1" && column_names.is_empty() && name == "cmdata")
+    );
+    assert!(
+        matches!(parse_statement("prepare q as select * from cmdata").unwrap(), Statement::Prepare(PrepareStatement { name, .. }) if name == "q")
+    );
+    assert!(
+        matches!(parse_statement("create table from_prep as execute q").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { query: CreateTableAsQuery::Execute(name), .. }) if name == "q")
+    );
+    assert!(
+        matches!(parse_statement("deallocate prepare q").unwrap(), Statement::Deallocate(DeallocateStatement { name: Some(name) }) if name == "q")
     );
     assert!(
         matches!(parse_statement("select * into temp table tempy from cmdata").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, persistence: TablePersistence::Temporary, .. }) if table_name == "tempy")

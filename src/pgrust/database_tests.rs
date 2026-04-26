@@ -28534,6 +28534,94 @@ fn pg_column_compression_reports_large_inserted_value() {
 }
 
 #[test]
+fn create_table_as_execute_uses_prepared_select() {
+    let base = temp_dir("ctas_execute_prepared_select");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table source_items (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "insert into source_items (id) values (1), (2)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "prepare copy_items as select id from source_items order by id",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session
+            .execute(&db, "create table copied_items as execute copy_items")
+            .unwrap(),
+        StatementResult::AffectedRows(2)
+    );
+
+    assert_eq!(
+        query_rows(&db, 1, "select id from copied_items order by id"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+
+    session.execute(&db, "deallocate copy_items").unwrap();
+}
+
+#[test]
+fn create_unlogged_table_sets_catalog_persistence() {
+    let base = temp_dir("create_unlogged_table_persistence");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create unlogged table unlogged_items (id int4)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relpersistence from pg_class where relname = 'unlogged_items'",
+        ),
+        vec![vec![Value::Text("u".into())]]
+    );
+
+    let err = db
+        .execute(
+            1,
+            "create unlogged table unlogged_parted (id int4) partition by range (id)",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError { message, .. })
+            if message == "partitioned tables cannot be unlogged"
+    ));
+}
+
+#[test]
+fn create_table_as_if_not_exists_skips_before_planning_query() {
+    let base = temp_dir("ctas_if_not_exists_skips_before_planning");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table copied_items (id int4)")
+        .unwrap();
+    clear_backend_notices();
+    assert_eq!(
+        db.execute(
+            1,
+            "create table if not exists copied_items as select missing_column from no_such_table",
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+    assert_eq!(
+        take_backend_notices()
+            .into_iter()
+            .map(|notice| notice.message)
+            .collect::<Vec<_>>(),
+        vec!["relation \"copied_items\" already exists, skipping"]
+    );
+}
+
+#[test]
 fn create_table_as_autocommit_publishes_permanent_catalog_rows() {
     let base = temp_dir("autocommit_ctas_permanent");
     let db = Database::open(&base, 16).unwrap();
@@ -28622,6 +28710,38 @@ fn create_table_as_is_visible_in_same_txn_before_commit() {
             assert_eq!(rows, vec![vec![Value::Int64(2)]]);
         }
         other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn rollback_to_savepoint_restores_catalog_effects() {
+    let base = temp_dir("rollback_to_savepoint_catalog_effects");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table preserved_items (id int4)")
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session.execute(&db, "savepoint s").unwrap();
+    session
+        .execute(&db, "create table rolled_back_items (id int4)")
+        .unwrap();
+    session.execute(&db, "drop table preserved_items").unwrap();
+    session.execute(&db, "rollback to s").unwrap();
+
+    match session
+        .execute(&db, "select count(*) from preserved_items")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected restored table, got {other:?}"),
+    }
+    match session.execute(&db, "select count(*) from rolled_back_items") {
+        Err(ExecError::Parse(ParseError::UnknownTable(name))) if name == "rolled_back_items" => {}
+        other => panic!("expected rolled-back table create to be hidden, got {other:?}"),
     }
 }
 
@@ -35918,6 +36038,30 @@ fn builtin_range_aliases_resolve_through_generic_range_catalog_rows() {
         query_rows(&db, 1, "select span::text, lower(span)::text from t"),
         vec![vec![Value::Text("[1,5)".into()), Value::Text("1".into())]],
     );
+}
+
+#[test]
+fn create_type_rejects_pseudotype_attributes() {
+    let dir = temp_dir("create_type_rejects_pseudotype_attributes");
+    let db = Database::open(&dir, 64).unwrap();
+
+    let err = db
+        .execute(1, "create type bad_unknown as (u unknown)")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "column \"u\" has pseudo-type unknown" && sqlstate == "42P16"
+    ));
+
+    let err = db
+        .execute(1, "create type bad_cstring as (u cstring)")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "column \"u\" has pseudo-type cstring" && sqlstate == "42P16"
+    ));
 }
 
 #[test]

@@ -7,10 +7,11 @@ use crate::backend::parser::analyze::{
 use crate::backend::parser::{
     AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
     AlterAggregateRenameStatement, CreateAggregateStatement, CreateFunctionArg,
-    CreateFunctionReturnSpec, CreateFunctionStatement, CreateProcedureStatement, FunctionArgMode,
-    FunctionParallel, FunctionVolatility, OwnedSequenceSpec, PartitionBoundSpec, RawTypeName,
-    RelOption, RoutineSignature, SqlType, SqlTypeKind, Statement, analyze_select_query_with_outer,
-    parse_statement, pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
+    CreateFunctionReturnSpec, CreateFunctionStatement, CreateProcedureStatement,
+    CreateTableAsQuery, FunctionArgMode, FunctionParallel, FunctionVolatility, OwnedSequenceSpec,
+    PartitionBoundSpec, RawTypeName, RelOption, RoutineSignature, SqlType, SqlTypeKind, Statement,
+    analyze_select_query_with_outer, parse_statement, pg_partitioned_table_row,
+    resolve_raw_type_name, serialize_partition_bound,
 };
 use crate::backend::rewrite::render_view_query_sql;
 use crate::backend::utils::cache::syscache::{
@@ -1766,7 +1767,7 @@ impl Database {
         };
 
         let sequence_oid = match persistence {
-            TablePersistence::Permanent => {
+            TablePersistence::Permanent | TablePersistence::Unlogged => {
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -3222,8 +3223,21 @@ impl Database {
         let table_cid = cid;
         let relation_relkind = created_relkind(&lowered);
         let reloptions = create_table_reloptions(&create_stmt.options)?;
+        if relation_relkind == 'p' && persistence == TablePersistence::Unlogged {
+            return Err(ExecError::Parse(ParseError::DetailedError {
+                message: "partitioned tables cannot be unlogged".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            }));
+        }
+        let relpersistence = match persistence {
+            TablePersistence::Permanent => 'p',
+            TablePersistence::Unlogged => 'u',
+            TablePersistence::Temporary => 't',
+        };
         match persistence {
-            TablePersistence::Permanent => {
+            TablePersistence::Permanent | TablePersistence::Unlogged => {
                 let mut catalog_guard = self.catalog.write();
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
@@ -3240,7 +3254,7 @@ impl Database {
                         desc.clone(),
                         namespace_oid,
                         self.database_oid,
-                        'p',
+                        relpersistence,
                         crate::include::catalog::PG_TOAST_NAMESPACE_OID,
                         crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                         self.auth_state(client_id).current_user_oid(),
@@ -3255,7 +3269,7 @@ impl Database {
                             desc.clone(),
                             namespace_oid,
                             self.database_oid,
-                            'p',
+                            relpersistence,
                             relation_relkind,
                             self.auth_state(client_id).current_user_oid(),
                             reloptions.clone(),
@@ -3273,6 +3287,9 @@ impl Database {
                 };
                 match result {
                     Err(CatalogError::TableAlreadyExists(_name)) if create_stmt.if_not_exists => {
+                        push_notice(format!(
+                            "relation \"{table_name}\" already exists, skipping"
+                        ));
                         Ok(StatementResult::AffectedRows(0))
                     }
                     Err(err) => Err(map_catalog_error(err)),
@@ -3850,6 +3867,11 @@ impl Database {
                     catalog_effects.push(create_effect);
                     entry.relation_oid
                 }
+                TablePersistence::Unlogged => {
+                    return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                        "unlogged views are not supported".into(),
+                    )));
+                }
                 TablePersistence::Temporary => {
                     let created = self.create_temp_relation_with_relkind_in_transaction(
                         client_id,
@@ -3954,8 +3976,36 @@ impl Database {
                 configured_search_path,
             )?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        if catalog
+            .lookup_any_relation(&table_name)
+            .is_some_and(|relation| relation.namespace_oid == namespace_oid)
+        {
+            if create_stmt.if_not_exists {
+                push_notice(format!(
+                    "relation \"{table_name}\" already exists, skipping"
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            return Err(ExecError::Parse(ParseError::DetailedError {
+                message: format!("relation \"{table_name}\" already exists"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P07",
+            }));
+        }
+        let select_query = match &create_stmt.query {
+            CreateTableAsQuery::Select(query) => query,
+            CreateTableAsQuery::Execute(name) => {
+                return Err(ExecError::Parse(ParseError::DetailedError {
+                    message: format!("prepared statement \"{name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "26000",
+                }));
+            }
+        };
         let planned_stmt = crate::backend::parser::pg_plan_query_with_config(
-            &create_stmt.query,
+            select_query,
             &catalog,
             planner_config,
         )?;
@@ -4015,7 +4065,7 @@ impl Database {
             trigger_depth: 0,
         };
         let query_result = crate::backend::executor::execute_readonly_statement_with_config(
-            Statement::Select(create_stmt.query.clone()),
+            Statement::Select(select_query.clone()),
             &catalog,
             &mut ctx,
             planner_config,
@@ -4045,7 +4095,12 @@ impl Database {
         };
 
         let (relation_oid, rel, toast, toast_index) = match persistence {
-            TablePersistence::Permanent => {
+            TablePersistence::Permanent | TablePersistence::Unlogged => {
+                let relpersistence = if persistence == TablePersistence::Unlogged {
+                    'u'
+                } else {
+                    'p'
+                };
                 let stmt = CreateTableStatement {
                     schema_name: None,
                     table_name: table_name.clone(),
@@ -4096,7 +4151,7 @@ impl Database {
                         create_relation_desc(&stmt, &catalog)?,
                         namespace_oid,
                         self.database_oid,
-                        'p',
+                        relpersistence,
                         crate::include::catalog::PG_TOAST_NAMESPACE_OID,
                         crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                         self.auth_state(client_id).current_user_oid(),

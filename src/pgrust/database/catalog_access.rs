@@ -103,6 +103,15 @@ impl Database {
                 )));
             }
             if is_temp_schema_name(&normalized_schema) {
+                if persistence == TablePersistence::Unlogged {
+                    return Err(ParseError::DetailedError {
+                        message: "only temporary relations may be created in temporary schemas"
+                            .into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P16",
+                    });
+                }
                 if !allow_temporary_namespace {
                     return Err(ParseError::UnexpectedToken {
                         expected: "permanent view",
@@ -150,7 +159,10 @@ impl Database {
             if schema_name.is_empty() || schema_name == "$user" || schema_name == "pg_catalog" {
                 continue;
             }
-            if allow_temporary_namespace && is_temp_schema_name(&schema_name) {
+            if allow_temporary_namespace
+                && persistence == TablePersistence::Temporary
+                && is_temp_schema_name(&schema_name)
+            {
                 return Ok((
                     lowered_name,
                     Self::temp_namespace_oid(temp_backend_id),
@@ -165,7 +177,7 @@ impl Database {
                 } else {
                     format!("{}.{}", namespace.nspname, lowered_name)
                 };
-                return Ok((storage_name, namespace.oid, TablePersistence::Permanent));
+                return Ok((storage_name, namespace.oid, persistence));
             }
         }
 

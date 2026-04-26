@@ -489,6 +489,9 @@ fn run_statement(
         Statement::Show(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::Set(_)
         | Statement::Reset(_)
+        | Statement::Prepare(_)
+        | Statement::Execute(_)
+        | Statement::Deallocate(_)
         | Statement::Checkpoint(_)
         | Statement::Notify(_)
         | Statement::Listen(_)
@@ -512,6 +515,7 @@ fn run_statement(
         | Statement::AlterTableSet(_)
         | Statement::AlterIndexSet(_)
         | Statement::AlterTableReset(_)
+        | Statement::AlterTableSetPersistence(_)
         | Statement::CreateStatistics(_)
         | Statement::AlterStatistics(_)
         | Statement::DropStatistics(_)

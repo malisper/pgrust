@@ -976,6 +976,7 @@ fn ensure_matching_partition_shape(
 fn relation_persistence_code(persistence: TablePersistence) -> char {
     match persistence {
         TablePersistence::Permanent => 'p',
+        TablePersistence::Unlogged => 'u',
         TablePersistence::Temporary => 't',
     }
 }
