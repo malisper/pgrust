@@ -187,6 +187,9 @@ fn execute_statement_with_source(
         // :HACK: ALTER TABLE ... SET (...) is accepted narrowly for numeric.sql and ignored
         // until table reloptions are modeled for real.
         | Statement::AlterTableSet(_)
+        // :HACK: ALTER INDEX ... SET (...) is accepted narrowly for hash_index.sql and ignored
+        // until mutable index reloptions are modeled for real.
+        | Statement::AlterIndexSet(_)
         | Statement::AlterTableSetRowSecurity(_)
         | Statement::CreateStatistics(_)
         | Statement::AlterStatistics(_)

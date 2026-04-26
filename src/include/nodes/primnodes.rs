@@ -510,6 +510,7 @@ pub enum BuiltinScalarFunction {
     RegexpSplitToArray,
     SimilarSubstring,
     Initcap,
+    TextCat,
     Concat,
     ConcatWs,
     Format,

@@ -86,6 +86,7 @@ pub struct IndexInsertContext {
     pub index_meta: IndexRelCacheEntry,
     pub default_toast_compression: AttributeCompression,
     pub heap_tid: ItemPointerData,
+    pub old_heap_tid: Option<ItemPointerData>,
     pub values: Vec<crate::include::nodes::datum::Value>,
     pub unique_check: IndexUniqueCheck,
 }

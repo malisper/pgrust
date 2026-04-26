@@ -768,6 +768,7 @@ pub(crate) fn build_index_insert_context(
         default_toast_compression: ctx.default_toast_compression,
         values: key_values,
         heap_tid,
+        old_heap_tid: None,
         unique_check: if index.index_meta.indisunique {
             if index.constraint_oid.is_some() && index.constraint_deferrable {
                 IndexUniqueCheck::Partial
@@ -823,10 +824,12 @@ pub(crate) fn insert_index_key_values(
     index: &BoundIndexRelation,
     key_values: Vec<Value>,
     heap_tid: ItemPointerData,
+    old_heap_tid: Option<ItemPointerData>,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
-    let insert_ctx =
+    let mut insert_ctx =
         build_index_insert_context(heap_rel, heap_desc, index, key_values, heap_tid, ctx);
+    insert_ctx.old_heap_tid = old_heap_tid;
     indexam::index_insert_stub(&insert_ctx, index.index_meta.am_oid).map_err(|err| match err {
         crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
             let key_count = usize::try_from(insert_ctx.index_meta.indnkeyatts.max(0))
@@ -874,6 +877,7 @@ pub(crate) fn insert_index_entry_for_row(
     index: &BoundIndexRelation,
     values: &[Value],
     heap_tid: ItemPointerData,
+    old_heap_tid: Option<ItemPointerData>,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     if !row_matches_index_predicate(
@@ -886,7 +890,55 @@ pub(crate) fn insert_index_entry_for_row(
         return Ok(());
     }
     let key_values = index_key_values_for_row(index, heap_desc, values, ctx)?;
-    insert_index_key_values(heap_rel, heap_desc, index, key_values, heap_tid, ctx)
+    insert_index_key_values(
+        heap_rel,
+        heap_desc,
+        index,
+        key_values,
+        heap_tid,
+        old_heap_tid,
+        ctx,
+    )
+}
+
+fn maintain_indexes_for_row_with_old_tid(
+    heap_rel: crate::backend::storage::smgr::RelFileLocator,
+    heap_desc: &RelationDesc,
+    indexes: &[BoundIndexRelation],
+    values: &[Value],
+    heap_tid: ItemPointerData,
+    old_heap_tid: Option<ItemPointerData>,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
+        for index in indexes.iter().filter(|index| {
+            index.index_meta.indisvalid
+                && index.index_meta.indisready
+                && !index.index_meta.indisexclusion
+        }) {
+            let new_matches = row_matches_index_predicate(
+                index,
+                values,
+                Some(heap_tid),
+                index.index_meta.indrelid,
+                ctx,
+            )?;
+            if !new_matches {
+                continue;
+            }
+            let key_values = index_key_values_for_row(index, heap_desc, values, ctx)?;
+            insert_index_key_values(
+                heap_rel,
+                heap_desc,
+                index,
+                key_values,
+                heap_tid,
+                old_heap_tid,
+                ctx,
+            )?;
+        }
+        Ok(())
+    })
 }
 
 pub(crate) fn maintain_indexes_for_row(
@@ -897,16 +949,7 @@ pub(crate) fn maintain_indexes_for_row(
     heap_tid: ItemPointerData,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
-    stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
-        for index in indexes.iter().filter(|index| {
-            index.index_meta.indisvalid
-                && index.index_meta.indisready
-                && !index.index_meta.indisexclusion
-        }) {
-            insert_index_entry_for_row(heap_rel, heap_desc, index, values, heap_tid, ctx)?;
-        }
-        Ok(())
-    })
+    maintain_indexes_for_row_with_old_tid(heap_rel, heap_desc, indexes, values, heap_tid, None, ctx)
 }
 fn map_index_insert_error(err: crate::backend::catalog::CatalogError) -> ExecError {
     match err {
@@ -1256,7 +1299,15 @@ pub(crate) fn write_updated_row(
             if let (Some(toast), Some(old_tuple)) = (toast, old_tuple.as_ref()) {
                 delete_external_from_tuple(ctx, toast, desc, old_tuple, xid)?;
             }
-            maintain_indexes_for_row(rel, desc, indexes, &current_values, new_tid, ctx)?;
+            maintain_indexes_for_row_with_old_tid(
+                rel,
+                desc,
+                indexes,
+                &current_values,
+                new_tid,
+                Some(current_tid),
+                ctx,
+            )?;
             validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
             Ok(WriteUpdatedRowResult::Updated(new_tid))
         }
@@ -3428,12 +3479,13 @@ fn execute_merge_update_row(
             if let Some(toast) = stmt.toast {
                 delete_external_from_tuple(ctx, toast, &stmt.desc, &old_tuple, xid)?;
             }
-            maintain_indexes_for_row(
+            maintain_indexes_for_row_with_old_tid(
                 stmt.rel,
                 &stmt.desc,
                 &stmt.indexes,
                 &updated_values,
                 new_tid,
+                Some(target_tid),
                 ctx,
             )?;
             validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
@@ -6145,12 +6197,13 @@ pub(crate) fn apply_base_update_row(
                 if let Some(toast) = target.toast {
                     delete_external_from_tuple(ctx, toast, &target.desc, &old_tuple, xid)?;
                 }
-                maintain_indexes_for_row(
+                maintain_indexes_for_row_with_old_tid(
                     target.rel,
                     &target.desc,
                     &target.indexes,
                     &current_values,
                     new_tid,
+                    Some(current_tid),
                     ctx,
                 )?;
                 validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;

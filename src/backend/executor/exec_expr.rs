@@ -4728,6 +4728,15 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::BTrim => eval_trim_function("btrim", &values),
         BuiltinScalarFunction::LTrim => eval_trim_function("ltrim", &values),
         BuiltinScalarFunction::RTrim => eval_trim_function("rtrim", &values),
+        BuiltinScalarFunction::TextCat => match values.as_slice() {
+            [left, right] => concat_values(left.clone(), right.clone()),
+            _ => Err(ExecError::DetailedError {
+                message: "textcat expects exactly two arguments".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42883",
+            }),
+        },
         BuiltinScalarFunction::Concat => eval_concat_function(
             &values,
             func_variadic,
@@ -6887,6 +6896,15 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Concat => {
             eval_concat_function(&values, func_variadic, &ctx.datetime_config)
         }
+        BuiltinScalarFunction::TextCat => match values.as_slice() {
+            [left, right] => concat_values(left.clone(), right.clone()),
+            _ => Err(ExecError::DetailedError {
+                message: "textcat expects exactly two arguments".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42883",
+            }),
+        },
         BuiltinScalarFunction::ConcatWs => {
             eval_concat_ws_function(&values, func_variadic, &ctx.datetime_config)
         }

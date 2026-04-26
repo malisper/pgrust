@@ -352,6 +352,7 @@ pub enum Statement {
     AlterSequenceOwner(AlterRelationOwnerStatement),
     AlterSequenceRename(AlterTableRenameStatement),
     AlterIndexRename(AlterTableRenameStatement),
+    AlterIndexSet(AlterIndexSetStatement),
     AlterViewRename(AlterTableRenameStatement),
     AlterViewRenameColumn(AlterTableRenameColumnStatement),
     AlterIndexAttachPartition(AlterIndexAttachPartitionStatement),
@@ -2207,6 +2208,13 @@ pub struct AlterIndexAlterColumnStatisticsStatement {
     pub index_name: String,
     pub column_number: i16,
     pub statistics_target: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterIndexSetStatement {
+    pub if_exists: bool,
+    pub index_name: String,
+    pub options: Vec<RelOption>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
