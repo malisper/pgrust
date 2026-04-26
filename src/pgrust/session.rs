@@ -30,9 +30,10 @@ use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::parser::{
     AlterTableAddColumnStatement, CallStatement, CatalogLookup, CopyFormat as ParserCopyFormat,
     CopyFromStatement, CopyOptions as ParserCopyOptions, CopySource, CopyToDestination,
-    CopyToSource, CopyToStatement, DetachPartitionMode, ParseError, ParseOptions, PreparedInsert,
-    SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared, bind_update,
-    pg_plan_query_with_config, plan_merge,
+    CopyToSource, CopyToStatement, CteBody, DetachPartitionMode, ParseError, ParseOptions,
+    PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared,
+    bind_insert_with_outer_scopes_and_ctes, bind_update, bound_cte_from_query_rows,
+    pg_plan_query_with_config, pg_plan_query_with_outer_scopes_and_ctes, plan_merge,
 };
 use crate::backend::rewrite::relation_has_row_security;
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
@@ -1929,7 +1930,40 @@ impl Session {
         self.active_txn.as_ref().map(|txn| txn.advisory_scope_id)
     }
 
+    fn cte_body_has_writable_insert(body: &CteBody) -> bool {
+        match body {
+            CteBody::Insert(_) => true,
+            CteBody::Select(select) => Self::select_has_writable_ctes(select),
+            CteBody::Values(values) => values
+                .with
+                .iter()
+                .any(|cte| Self::cte_body_has_writable_insert(&cte.body)),
+            CteBody::RecursiveUnion {
+                anchor, recursive, ..
+            } => {
+                Self::cte_body_has_writable_insert(anchor)
+                    || Self::select_has_writable_ctes(recursive)
+            }
+        }
+    }
+
+    fn select_has_writable_ctes(select: &SelectStatement) -> bool {
+        select
+            .with
+            .iter()
+            .any(|cte| Self::cte_body_has_writable_insert(&cte.body))
+            || select
+                .set_operation
+                .as_ref()
+                .is_some_and(|setop| setop.inputs.iter().any(Self::select_has_writable_ctes))
+    }
+
     fn statement_requires_xid_in_transaction(stmt: &Statement) -> bool {
+        if let Statement::Select(select) = stmt
+            && Self::select_has_writable_ctes(select)
+        {
+            return true;
+        }
         !matches!(
             stmt,
             Statement::Do(_)
@@ -2315,6 +2349,9 @@ impl Session {
         }
 
         match stmt {
+            Statement::Select(ref select) if Self::select_has_writable_ctes(select) => {
+                self.execute_call_stmt_autocommit(db, stmt, statement_lock_scope_id)
+            }
             Statement::Do(ref do_stmt) => execute_do_with_gucs(do_stmt, &self.gucs),
             Statement::Show(ref show_stmt) => self.apply_show(db, show_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(db, set_stmt),
@@ -4498,6 +4535,29 @@ impl Session {
         self.portals.cursor_view_rows()
     }
 
+    fn apply_writable_cte_column_aliases(
+        cte: &crate::backend::parser::CommonTableExpr,
+        mut columns: Vec<QueryColumn>,
+    ) -> Result<Vec<QueryColumn>, ExecError> {
+        if cte.column_names.is_empty() {
+            return Ok(columns);
+        }
+        if cte.column_names.len() != columns.len() {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "CTE column alias count matching query width",
+                actual: format!(
+                    "CTE query has {} columns but {} column aliases were specified",
+                    columns.len(),
+                    cte.column_names.len()
+                ),
+            }));
+        }
+        for (column, name) in columns.iter_mut().zip(cte.column_names.iter()) {
+            column.name = name.clone();
+        }
+        Ok(columns)
+    }
+
     fn take_portal(&mut self, name: &str) -> Result<Portal, ExecError> {
         self.portals
             .take(name)
@@ -6374,6 +6434,97 @@ impl Session {
                     None,
                 );
                 let result = match stmt {
+                    Statement::Select(select) if Self::select_has_writable_ctes(&select) => {
+                        if select.with_recursive {
+                            Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                                "WITH RECURSIVE containing data-modifying statements is not supported"
+                                    .into(),
+                            )))
+                        } else {
+                            let mut materialized_ctes = Vec::new();
+                            let mut outer_select = select.clone();
+                            outer_select.with.clear();
+
+                            let result = (|| {
+                                for cte in &select.with {
+                                    let CteBody::Insert(cte_insert) = &cte.body else {
+                                        outer_select.with.push(cte.clone());
+                                        continue;
+                                    };
+                                    if cte_insert.with_recursive
+                                        || cte_insert.with.iter().any(|nested| {
+                                            Self::cte_body_has_writable_insert(&nested.body)
+                                        })
+                                    {
+                                        return Err(ExecError::Parse(
+                                            ParseError::FeatureNotSupported(
+                                                "nested writable CTEs are not supported".into(),
+                                            ),
+                                        ));
+                                    }
+                                    if cte_insert.returning.is_empty() {
+                                        return Err(ExecError::Parse(
+                                            ParseError::FeatureNotSupported(
+                                                "writable CTE without RETURNING is not supported"
+                                                    .into(),
+                                            ),
+                                        ));
+                                    }
+
+                                    let bound = bind_insert_with_outer_scopes_and_ctes(
+                                        cte_insert,
+                                        &catalog,
+                                        &[],
+                                        &materialized_ctes,
+                                    )?;
+                                    let prepared =
+                                        crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
+                                            bound, &catalog,
+                                        )?;
+                                    let lock_requests = merge_table_lock_requests(
+                                        &insert_foreign_key_lock_requests(&prepared.stmt),
+                                        &prepared.extra_lock_requests,
+                                    );
+                                    self.lock_table_requests_if_needed(db, &lock_requests)?;
+                                    let result =
+                                        crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
+                                            prepared.stmt,
+                                            &catalog,
+                                            &mut ctx,
+                                            xid,
+                                            cid,
+                                        )?;
+                                    let StatementResult::Query { columns, rows, .. } = result
+                                    else {
+                                        return Err(ExecError::Parse(
+                                            ParseError::FeatureNotSupported(
+                                                "writable CTE without RETURNING is not supported"
+                                                    .into(),
+                                            ),
+                                        ));
+                                    };
+                                    let columns =
+                                        Self::apply_writable_cte_column_aliases(cte, columns)?;
+                                    materialized_ctes.push(bound_cte_from_query_rows(
+                                        cte.name.clone(),
+                                        columns,
+                                        &rows,
+                                    ));
+                                }
+
+                                execute_planned_stmt(
+                                    pg_plan_query_with_outer_scopes_and_ctes(
+                                        &outer_select,
+                                        &catalog,
+                                        &[],
+                                        &materialized_ctes,
+                                    )?,
+                                    &mut ctx,
+                                )
+                            })();
+                            result
+                        }
+                    }
                     Statement::Select(select) if select.locking_clause.is_some() => {
                         execute_planned_stmt(
                             pg_plan_query_with_config(&select, &catalog, self.planner_config())?,
@@ -6410,16 +6561,6 @@ impl Session {
             Statement::Insert(ref insert_stmt) => {
                 let snapshot = self.snapshot_for_command(db, xid, cid)?;
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                let bound = bind_insert(insert_stmt, &catalog)?;
-                let prepared =
-                    crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
-                        bound, &catalog,
-                    )?;
-                let lock_requests = merge_table_lock_requests(
-                    &insert_foreign_key_lock_requests(&prepared.stmt),
-                    &prepared.extra_lock_requests,
-                );
-                self.lock_table_requests_if_needed(db, &lock_requests)?;
                 let deferred_foreign_keys = self
                     .active_txn
                     .as_ref()
@@ -6434,14 +6575,122 @@ impl Session {
                     Some(deferred_foreign_keys),
                     None,
                 );
-                let result =
+                let result = (|| {
+                    let has_writable_ctes = insert_stmt
+                        .with
+                        .iter()
+                        .any(|cte| matches!(cte.body, CteBody::Insert(_)));
+                    if !has_writable_ctes {
+                        let bound = bind_insert(insert_stmt, &catalog)?;
+                        let prepared =
+                            crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
+                                bound, &catalog,
+                            )?;
+                        let lock_requests = merge_table_lock_requests(
+                            &insert_foreign_key_lock_requests(&prepared.stmt),
+                            &prepared.extra_lock_requests,
+                        );
+                        self.lock_table_requests_if_needed(db, &lock_requests)?;
+                        return crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
+                            prepared.stmt,
+                            &catalog,
+                            &mut ctx,
+                            xid,
+                            cid,
+                        );
+                    }
+
+                    if insert_stmt.with_recursive {
+                        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                            "WITH RECURSIVE containing data-modifying statements is not supported"
+                                .into(),
+                        )));
+                    }
+
+                    let mut materialized_ctes = Vec::new();
+                    let mut outer_insert = insert_stmt.clone();
+                    outer_insert.with.clear();
+
+                    for cte in &insert_stmt.with {
+                        let CteBody::Insert(cte_insert) = &cte.body else {
+                            outer_insert.with.push(cte.clone());
+                            continue;
+                        };
+                        if cte_insert.with_recursive
+                            || cte_insert
+                                .with
+                                .iter()
+                                .any(|nested| matches!(nested.body, CteBody::Insert(_)))
+                        {
+                            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                                "nested writable CTEs are not supported".into(),
+                            )));
+                        }
+                        if cte_insert.returning.is_empty() {
+                            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                                "writable CTE without RETURNING is not supported".into(),
+                            )));
+                        }
+
+                        let bound = bind_insert_with_outer_scopes_and_ctes(
+                            cte_insert,
+                            &catalog,
+                            &[],
+                            &materialized_ctes,
+                        )?;
+                        let prepared =
+                            crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
+                                bound, &catalog,
+                            )?;
+                        let lock_requests = merge_table_lock_requests(
+                            &insert_foreign_key_lock_requests(&prepared.stmt),
+                            &prepared.extra_lock_requests,
+                        );
+                        self.lock_table_requests_if_needed(db, &lock_requests)?;
+                        let result =
+                            crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
+                                prepared.stmt,
+                                &catalog,
+                                &mut ctx,
+                                xid,
+                                cid,
+                            )?;
+                        let StatementResult::Query { columns, rows, .. } = result else {
+                            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                                "writable CTE without RETURNING is not supported".into(),
+                            )));
+                        };
+                        let columns = Self::apply_writable_cte_column_aliases(cte, columns)?;
+                        materialized_ctes.push(bound_cte_from_query_rows(
+                            cte.name.clone(),
+                            columns,
+                            &rows,
+                        ));
+                    }
+
+                    let bound = bind_insert_with_outer_scopes_and_ctes(
+                        &outer_insert,
+                        &catalog,
+                        &[],
+                        &materialized_ctes,
+                    )?;
+                    let prepared =
+                        crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
+                            bound, &catalog,
+                        )?;
+                    let lock_requests = merge_table_lock_requests(
+                        &insert_foreign_key_lock_requests(&prepared.stmt),
+                        &prepared.extra_lock_requests,
+                    );
+                    self.lock_table_requests_if_needed(db, &lock_requests)?;
                     crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
                         prepared.stmt,
                         &catalog,
                         &mut ctx,
                         xid,
                         cid,
-                    );
+                    )
+                })();
                 self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
                 result
             }
@@ -10444,10 +10693,11 @@ mod tests {
         parse_default_toast_compression_guc_value, parse_max_stack_depth, parse_startup_options,
         parse_statement_timeout, validate_max_stack_depth,
     };
-    use crate::backend::executor::ExecError;
+    use crate::backend::executor::{ExecError, StatementResult, Value};
     use crate::backend::parser::ParseError;
     use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat};
     use crate::backend::utils::misc::stack_depth::max_stack_depth_limit_kb;
+    use crate::pgrust::database::Database;
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -10615,6 +10865,59 @@ mod tests {
             DateStyleFormat::Postgres
         );
         assert_eq!(session.datetime_config.date_order, DateOrder::Mdy);
+    }
+
+    #[test]
+    fn insert_with_writable_cte_materializes_returning_rows() {
+        let base = crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_insert");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        session.execute(&db, "create table dst (id int4)").unwrap();
+        let result = session
+            .execute(
+                &db,
+                "with moved as (insert into src values (1) returning id) \
+                 insert into dst select id from moved",
+            )
+            .unwrap();
+        assert!(matches!(result, StatementResult::AffectedRows(1)));
+
+        match session
+            .execute(
+                &db,
+                "select id from src union all select id from dst order by id",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_with_writable_cte_materializes_returning_rows() {
+        let base = crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_select");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        match session
+            .execute(
+                &db,
+                "with ins(id) as (insert into src values (1), (2) returning id) \
+                 select min(id), max(id) from ins",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1), Value::Int32(2)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
     }
 
     #[test]

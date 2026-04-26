@@ -2044,15 +2044,26 @@ pub(crate) fn bind_insert_with_outer_scopes(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
 ) -> Result<BoundInsertStatement, ParseError> {
+    bind_insert_with_outer_scopes_and_ctes(stmt, catalog, outer_scopes, &[])
+}
+
+pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
+    stmt: &InsertStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    outer_ctes: &[BoundCte],
+) -> Result<BoundInsertStatement, ParseError> {
     let local_ctes = bind_ctes(
         stmt.with_recursive,
         &stmt.with,
         catalog,
         outer_scopes,
         None,
-        &[],
+        outer_ctes,
         &[],
     )?;
+    let mut visible_ctes = local_ctes.clone();
+    visible_ctes.extend_from_slice(outer_ctes);
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
     if entry.relkind == 'p' && stmt.on_conflict.is_some() {
         return Err(ParseError::FeatureNotSupported(
@@ -2067,7 +2078,7 @@ pub(crate) fn bind_insert_with_outer_scopes(
             "INSERT ... ON CONFLICT DO UPDATE",
         ));
     }
-    let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &local_ctes)?;
+    let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &visible_ctes)?;
     let target_rls = build_target_relation_row_security(
         &stmt.table_name,
         entry.relation_oid,
@@ -2086,7 +2097,7 @@ pub(crate) fn bind_insert_with_outer_scopes(
         &target_scope,
         catalog,
         outer_scopes,
-        &local_ctes,
+        &visible_ctes,
     )?;
 
     let source = match &stmt.source {
@@ -2095,7 +2106,7 @@ pub(crate) fn bind_insert_with_outer_scopes(
                 columns
                     .iter()
                     .map(|column| {
-                        bind_assignment_target(column, &target_scope, catalog, &local_ctes)
+                        bind_assignment_target(column, &target_scope, catalog, &visible_ctes)
                     })
                     .collect::<Result<Vec<_>, _>>()?
             } else {
@@ -2143,7 +2154,7 @@ pub(crate) fn bind_insert_with_outer_scopes(
                                     catalog,
                                     outer_scopes,
                                     None,
-                                    &local_ctes,
+                                    &visible_ctes,
                                 ),
                             }
                         })
@@ -2170,7 +2181,7 @@ pub(crate) fn bind_insert_with_outer_scopes(
                 outer_scopes,
                 None,
                 None,
-                &local_ctes,
+                &visible_ctes,
                 &[],
             )?;
             let actual = query.columns().len();
@@ -2178,7 +2189,7 @@ pub(crate) fn bind_insert_with_outer_scopes(
                 columns
                     .iter()
                     .map(|column| {
-                        bind_assignment_target(column, &target_scope, catalog, &local_ctes)
+                        bind_assignment_target(column, &target_scope, catalog, &visible_ctes)
                     })
                     .collect::<Result<Vec<_>, _>>()?
             } else {
@@ -2259,7 +2270,7 @@ pub(crate) fn bind_insert_with_outer_scopes(
                     entry.relation_oid,
                     &entry.desc,
                     catalog,
-                    &local_ctes,
+                    &visible_ctes,
                 )
             })
             .transpose()?,

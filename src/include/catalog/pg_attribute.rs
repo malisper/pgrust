@@ -292,7 +292,7 @@ fn attribute_rows_for_desc(relid: u32, desc: &RelationDesc) -> Vec<PgAttributeRo
                 .map(|kind| kind.catalog_char())
                 .unwrap_or('\0'),
             attcollation: catalog_attribute_collation_oid(relid, column.collation_oid),
-            attacl: None,
+            attacl: column.attacl.clone(),
             attoptions: None,
             attfdwoptions: None,
             attmissingval: None,

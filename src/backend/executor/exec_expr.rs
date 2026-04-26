@@ -2483,24 +2483,53 @@ fn eval_pg_get_functiondef(values: &[Value], ctx: &ExecutorContext) -> Result<Va
     }
 }
 
-fn eval_pg_get_expr(values: &[Value]) -> Result<Value, ExecError> {
+fn eval_pg_get_expr(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
     match values {
         [Value::Null, _] | [Value::Null, _, _] | [_, Value::Null] | [_, Value::Null, _] => {
             Ok(Value::Null)
         }
-        [expr, _relation] => Ok(expr
-            .as_text()
-            .map(|text| Value::Text(text.into()))
-            .unwrap_or(Value::Null)),
-        [expr, _relation, _pretty] => Ok(expr
-            .as_text()
-            .map(|text| Value::Text(text.into()))
-            .unwrap_or(Value::Null)),
+        [expr, _relation] | [expr, _relation, _] => {
+            let Some(text) = expr.as_text() else {
+                return Ok(Value::Null);
+            };
+            if let Ok(bound) = crate::backend::parser::deserialize_partition_bound(text) {
+                return Ok(Value::Text(
+                    crate::backend::commands::partition::render_partition_bound(
+                        &bound,
+                        &ctx.datetime_config,
+                    )
+                    .into(),
+                ));
+            }
+            Ok(Value::Text(text.into()))
+        }
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "pg_get_expr(pg_node_tree, oid [, pretty])",
             actual: format!("PgGetExpr({} args)", values.len()),
         })),
     }
+}
+
+fn eval_pg_get_partkeydef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let catalog = executor_catalog(ctx)?;
+    let relation_oid = match values {
+        [Value::Null] => return Ok(Value::Null),
+        [value] => oid_arg_to_u32(value, "pg_get_partkeydef")?,
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "pg_get_partkeydef(oid)",
+                actual: format!("PgGetPartKeyDef({} args)", values.len()),
+            }));
+        }
+    };
+    let Some(relation) = catalog.relation_by_oid(relation_oid) else {
+        return Ok(Value::Null);
+    };
+    crate::backend::commands::partition::render_partition_keydef(&relation).map(|value| {
+        value
+            .map(|text| Value::Text(text.into()))
+            .unwrap_or(Value::Null)
+    })
 }
 
 fn eval_pg_get_constraintdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -5211,6 +5240,7 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::PgGetFunctionDef
         | BuiltinScalarFunction::PgGetFunctionResult
         | BuiltinScalarFunction::PgGetExpr
+        | BuiltinScalarFunction::PgGetPartKeyDef
         | BuiltinScalarFunction::PgGetStatisticsObjDef
         | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
         | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
@@ -6913,7 +6943,8 @@ fn eval_builtin_function(
         }
         BuiltinScalarFunction::PgGetFunctionDef => eval_pg_get_functiondef(&values, ctx),
         BuiltinScalarFunction::PgGetFunctionResult => eval_pg_get_function_result(&values, ctx),
-        BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values),
+        BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values, ctx),
+        BuiltinScalarFunction::PgGetPartKeyDef => eval_pg_get_partkeydef(&values, ctx),
         BuiltinScalarFunction::PgGetConstraintDef => eval_pg_get_constraintdef(&values, ctx),
         BuiltinScalarFunction::PgGetIndexDef => eval_pg_get_indexdef(&values, ctx),
         BuiltinScalarFunction::PgGetRuleDef => eval_pg_get_ruledef(&values, ctx),

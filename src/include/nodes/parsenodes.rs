@@ -1464,6 +1464,7 @@ pub struct SqlCaseWhen {
 pub enum CteBody {
     Select(Box<SelectStatement>),
     Values(ValuesStatement),
+    Insert(Box<InsertStatement>),
     RecursiveUnion {
         all: bool,
         anchor: Box<CteBody>,
@@ -2899,6 +2900,7 @@ pub enum GrantObjectPrivilege {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantObjectStatement {
     pub privilege: GrantObjectPrivilege,
+    pub columns: Vec<String>,
     pub object_names: Vec<String>,
     pub grantee_names: Vec<String>,
     pub with_grant_option: bool,
@@ -2907,6 +2909,7 @@ pub struct GrantObjectStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevokeObjectStatement {
     pub privilege: GrantObjectPrivilege,
+    pub columns: Vec<String>,
     pub object_names: Vec<String>,
     pub grantee_names: Vec<String>,
     pub cascade: bool,

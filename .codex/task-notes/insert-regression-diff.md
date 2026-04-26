@@ -39,3 +39,33 @@ Full follow-up insert regression did not reach `insert.sql`: the default run blo
 
 Follow-up 2026-04-26:
 Fixed multi-action `ALTER TABLE ... ADD ..., ADD ...`, allowed ADD COLUMN on partitioned tables, remapped partition-routed RETURNING rows back through the parent row layout, and made table GRANT/REVOKE lookup accept partitioned tables. Insert regression improved to 322/390 matched. The requested buckets no longer show `ALTER TABLE form`, `returningwrtest`, or partitioned-table GRANT/REVOKE object-missing failures. Remaining prominent groups are domain cascade/checks, `pg_get_partkeydef` and partition describe formatting, partition constraint rechecks after BEFORE triggers, writable CTE support, and partition detail expression formatting.
+
+Follow-up 2026-04-26 stuttgart-v2:
+Implemented the next insert-regression slice:
+- `DROP TYPE ... CASCADE` now removes dependent domains for composite/enum/range type drops.
+- Domain constraints are validated after final insert assignment values and after BEFORE trigger/generated-column mutation.
+- Partition no-match details use rendered key expressions; superuser/owner still see expression-key details while non-owners need table/column SELECT visibility.
+- Direct inserts into nested partitions recheck the full ancestor partition chain.
+- Added `pg_get_partkeydef`, minimal partition-bound `pg_get_expr` deparse, and psql partition describe rows.
+- Preserved column-level GRANT/REVOKE SELECT ACL metadata for partition detail checks.
+- Added limited writable CTE execution for `INSERT ... RETURNING` CTEs under outer INSERT and simple outer SELECTs.
+- Fixed a severe performance bug from cloning the whole visible catalog during per-column domain checks.
+
+Tests run:
+- `cargo fmt`
+- `scripts/cargo_isolated.sh check`
+- `scripts/cargo_isolated.sh test --lib --quiet parse_grant_column_select_and_insert_on_table_statements`
+- `scripts/cargo_isolated.sh test --lib --quiet parse_insert_with_writable_insert_cte`
+- `scripts/cargo_isolated.sh test --lib --quiet insert_with_writable_cte_materializes_returning_rows`
+- `scripts/cargo_isolated.sh test --lib --quiet select_with_writable_cte_materializes_returning_rows`
+- `CARGO_TARGET_DIR=/tmp/pgrust-target-stuttgart-v2-insert scripts/run_regression.sh --test insert --timeout 300 --port 56648 --results-dir /tmp/diffs/insert-stuttgart-v2-remaining-5`
+
+Current regression result:
+`insert` is 242/390 matched with 800 diff lines. Remaining failures are mostly:
+- domain-over-composite/array assignment and check evaluation still mis-handle array subscript typing, causing cascading table/type cleanup failures;
+- rule display still differs in case/spacing/casts;
+- SRF lowering for `INSERT ... VALUES(generate_series(...))` is missing;
+- exact writable CTE from upstream still fails parsing for the `RETURNING tableoid::regclass, *` case;
+- partition describe/deparse formatting is partial (`LIST ((lower(a)))`, missing/short partition bound text);
+- multi-level partition routing/attached-partition column layout is still incomplete in later `mlparted` cases;
+- later role/GRANT/detail and trigger sections cascade from earlier partition/table creation failures.

@@ -78,6 +78,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         not_null_constraint_inhcount: 0,
         not_null_constraint_no_inherit: false,
         not_null_primary_key_owned: false,
+        attacl: None,
         attrdef_oid: None,
         default_expr: None,
         default_sequence_oid: None,

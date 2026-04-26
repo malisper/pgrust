@@ -435,7 +435,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
                     entry.relation_oid,
                     column.collation_oid,
                 ),
-                attacl: None,
+                attacl: column.attacl.clone(),
                 attoptions: None,
                 attfdwoptions: None,
                 attmissingval: None,

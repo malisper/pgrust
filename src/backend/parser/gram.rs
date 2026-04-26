@@ -4501,6 +4501,11 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("grant execute on routine ") {
         return Ok(Statement::GrantObject(build_grant_routine_execute(sql)?));
     }
+    if lowered.starts_with("grant select (") {
+        return Ok(Statement::GrantObject(build_grant_table_column_select(
+            sql,
+        )?));
+    }
     if let Some(stmt) = try_build_grant_table_acl_statement(sql)? {
         return Ok(Statement::GrantObject(stmt));
     }
@@ -4531,6 +4536,11 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("revoke execute on routine ") {
         return Ok(Statement::RevokeObject(build_revoke_routine_execute(sql)?));
     }
+    if lowered.starts_with("revoke select (") {
+        return Ok(Statement::RevokeObject(build_revoke_table_column_select(
+            sql,
+        )?));
+    }
     if let Some(stmt) = try_build_revoke_table_acl_statement(sql)? {
         return Ok(Statement::RevokeObject(stmt));
     }
@@ -4557,6 +4567,7 @@ fn try_build_grant_table_acl_statement(
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(Some(GrantObjectStatement {
         privilege,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         with_grant_option,
@@ -4582,6 +4593,7 @@ fn try_build_revoke_table_acl_statement(
     let (grantee_names, grantee_cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(Some(RevokeObjectStatement {
         privilege,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade: cascade || grantee_cascade,
@@ -4663,6 +4675,68 @@ fn table_privilege_from_chars(chars: String) -> GrantObjectPrivilege {
     }
 }
 
+fn build_grant_table_column_select(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let after_privilege = sql
+        .get("grant select".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let close = after_privilege
+        .find(')')
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "column privilege list",
+            actual: after_privilege.into(),
+        })?;
+    let columns = parse_identifier_list(&after_privilege[1..close])?;
+    let rest = after_privilege[close + 1..].trim_start();
+    if !keyword_at_start(rest, "on") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "on").trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege: GrantObjectPrivilege::SelectOnTable,
+        columns,
+        object_names: vec![normalize_simple_identifier(object_name)?],
+        grantee_names,
+        with_grant_option,
+    })
+}
+
+fn build_revoke_table_column_select(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let after_privilege = sql
+        .get("revoke select".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let close = after_privilege
+        .find(')')
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "column privilege list",
+            actual: after_privilege.into(),
+        })?;
+    let columns = parse_identifier_list(&after_privilege[1..close])?;
+    let rest = after_privilege[close + 1..].trim_start();
+    if !keyword_at_start(rest, "on") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "on").trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege: GrantObjectPrivilege::SelectOnTable,
+        columns,
+        object_names: vec![normalize_simple_identifier(object_name)?],
+        grantee_names,
+        cascade,
+    })
+}
+
 fn build_alter_type_owner_statement(sql: &str) -> Result<AlterTypeOwnerStatement, ParseError> {
     let prefix = "alter type ";
     let rest = sql
@@ -4709,6 +4783,7 @@ fn build_grant_database_create(sql: &str) -> Result<GrantObjectStatement, ParseE
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::CreateOnDatabase,
+        columns: Vec::new(),
         object_names: vec![normalize_simple_identifier(object_name)?],
         grantee_names,
         with_grant_option,
@@ -4725,6 +4800,7 @@ fn build_grant_schema_all(sql: &str) -> Result<GrantObjectStatement, ParseError>
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::AllPrivilegesOnSchema,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         with_grant_option,
@@ -4741,6 +4817,7 @@ fn build_grant_schema_usage(sql: &str) -> Result<GrantObjectStatement, ParseErro
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnSchema,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         with_grant_option,
@@ -4757,6 +4834,7 @@ fn build_grant_type_usage(sql: &str) -> Result<GrantObjectStatement, ParseError>
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnType,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         with_grant_option,
@@ -4773,6 +4851,7 @@ fn build_grant_function_execute(sql: &str) -> Result<GrantObjectStatement, Parse
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::ExecuteOnFunction,
+        columns: Vec::new(),
         object_names: vec![object_name.trim().to_ascii_lowercase()],
         grantee_names,
         with_grant_option,
@@ -4805,6 +4884,7 @@ fn build_grant_routine_execute_with_prefix(
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege,
+        columns: Vec::new(),
         object_names: vec![object_name.trim().to_ascii_lowercase()],
         grantee_names,
         with_grant_option,
@@ -4821,6 +4901,7 @@ fn build_revoke_database_create(sql: &str) -> Result<RevokeObjectStatement, Pars
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::CreateOnDatabase,
+        columns: Vec::new(),
         object_names: vec![normalize_simple_identifier(object_name)?],
         grantee_names,
         cascade,
@@ -4837,6 +4918,7 @@ fn build_revoke_schema_usage(sql: &str) -> Result<RevokeObjectStatement, ParseEr
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnSchema,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade,
@@ -4853,6 +4935,7 @@ fn build_revoke_type_usage(sql: &str) -> Result<RevokeObjectStatement, ParseErro
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnType,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade,
@@ -4869,6 +4952,7 @@ fn build_revoke_function_execute(sql: &str) -> Result<RevokeObjectStatement, Par
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::ExecuteOnFunction,
+        columns: Vec::new(),
         object_names: vec![object_name.trim().to_ascii_lowercase()],
         grantee_names,
         cascade,
@@ -4901,6 +4985,7 @@ fn build_revoke_routine_execute_with_prefix(
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege,
+        columns: Vec::new(),
         object_names: vec![object_name.trim().to_ascii_lowercase()],
         grantee_names,
         cascade,

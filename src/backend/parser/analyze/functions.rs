@@ -1361,6 +1361,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgGetFunctionResult
             | BuiltinScalarFunction::PgFunctionIsVisible => args.len() == 1,
             BuiltinScalarFunction::PgGetExpr => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::PgGetPartKeyDef => args.len() == 1,
             BuiltinScalarFunction::PgGetConstraintDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgGetIndexDef => matches!(args.len(), 1 | 3),
             BuiltinScalarFunction::PgGetRuleDef => matches!(args.len(), 1 | 2),
@@ -2594,6 +2595,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("pg_get_expr", BuiltinScalarFunction::PgGetExpr),
         ("pg_get_expr_ext", BuiltinScalarFunction::PgGetExpr),
+        ("pg_get_partkeydef", BuiltinScalarFunction::PgGetPartKeyDef),
         ("pg_get_ruledef", BuiltinScalarFunction::PgGetRuleDef),
         ("pg_get_ruledef_ext", BuiltinScalarFunction::PgGetRuleDef),
         ("pg_get_viewdef", BuiltinScalarFunction::PgGetViewDef),
@@ -3646,6 +3648,7 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             BuiltinScalarFunction::PgGetFunctionDef,
             BuiltinScalarFunction::PgGetFunctionResult,
             BuiltinScalarFunction::PgGetExpr,
+            BuiltinScalarFunction::PgGetPartKeyDef,
             BuiltinScalarFunction::PgGetConstraintDef,
             BuiltinScalarFunction::PgGetIndexDef,
             BuiltinScalarFunction::PgGetRuleDef,
@@ -3872,6 +3875,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgGetFunctionDef
             | BuiltinScalarFunction::PgGetFunctionResult
             | BuiltinScalarFunction::PgGetExpr
+            | BuiltinScalarFunction::PgGetPartKeyDef
             | BuiltinScalarFunction::PgGetConstraintDef
             | BuiltinScalarFunction::PgGetIndexDef
             | BuiltinScalarFunction::PgGetRuleDef

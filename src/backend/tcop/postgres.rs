@@ -2684,6 +2684,7 @@ fn execute_query_statement(
     }
     if let Ok(Statement::Select(ref select_stmt)) = parsed
         && !raw_select_contains_pg_notify(select_stmt)
+        && !raw_select_contains_writable_cte(select_stmt)
         && !select_sql_requires_command_end_xid_handling(&sql)
     {
         let max_stack_depth_kb = state.session.datetime_config().max_stack_depth_kb;
@@ -3370,6 +3371,20 @@ fn execute_psql_describe_query(
             psql_describe_inherits_query_rows(db, session, sql, lower.contains("c.relkind")),
         ));
     }
+    if lower.contains("from pg_catalog.pg_class c")
+        && lower.contains("join pg_catalog.pg_inherits i")
+        && lower.contains("pg_get_expr(c.relpartbound")
+    {
+        return Some((
+            vec![
+                QueryColumn::text("regclass"),
+                QueryColumn::text("pg_get_expr"),
+                QueryColumn::text("inhdetachpending"),
+                QueryColumn::text("pg_get_partition_constraintdef"),
+            ],
+            psql_describe_partition_of_query_rows(db, session, sql),
+        ));
+    }
     None
 }
 
@@ -3668,6 +3683,50 @@ fn psql_describe_inherits_query_rows(
             }
         })
         .collect()
+}
+
+fn psql_describe_partition_of_query_rows(
+    db: &Database,
+    session: &Session,
+    sql: &str,
+) -> Vec<Vec<Value>> {
+    let Some(oid) = extract_single_quoted_literal_after(sql, "c.oid =")
+        .and_then(|value| value.parse::<u32>().ok())
+        .or_else(|| extract_quoted_oid(sql))
+    else {
+        return Vec::new();
+    };
+    let txn_ctx = session.catalog_txn_ctx();
+    let search_path = session.configured_search_path();
+    let catalog = session.catalog_lookup(db);
+    let Some(inherits) = catalog.inheritance_parents(oid).into_iter().next() else {
+        return Vec::new();
+    };
+    let parent_name = db
+        .relation_display_name(
+            session.client_id,
+            txn_ctx,
+            search_path.as_deref(),
+            inherits.inhparent,
+        )
+        .unwrap_or_else(|| inherits.inhparent.to_string());
+    let bound = db
+        .describe_relation_by_oid(session.client_id, txn_ctx, oid)
+        .and_then(|relation| relation.relpartbound)
+        .and_then(|text| crate::backend::parser::deserialize_partition_bound(&text).ok())
+        .map(|bound| {
+            crate::backend::commands::partition::render_partition_bound(
+                &bound,
+                &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            )
+        })
+        .unwrap_or_default();
+    vec![vec![
+        Value::Text(parent_name.into()),
+        Value::Text(bound.into()),
+        Value::Bool(inherits.inhdetachpending),
+        Value::Null,
+    ]]
 }
 
 fn psql_describe_statistics_query(
@@ -4041,7 +4100,7 @@ fn psql_describe_tableinfo_query(
             Value::Bool(relhasindex),
             Value::Bool(false),
             Value::Bool(entry.relhastriggers),
-            Value::Bool(false),
+            Value::Bool(entry.relispartition),
             Value::Bool(false),
             Value::Bool(false),
             Value::Bool(false),
@@ -6035,6 +6094,38 @@ fn raw_cte_contains_pg_notify(cte: &crate::backend::parser::CommonTableExpr) -> 
     raw_cte_body_contains_pg_notify(&cte.body)
 }
 
+fn raw_select_contains_writable_cte(select_stmt: &crate::backend::parser::SelectStatement) -> bool {
+    select_stmt
+        .with
+        .iter()
+        .any(|cte| raw_cte_body_is_writable(&cte.body))
+        || select_stmt
+            .set_operation
+            .as_ref()
+            .is_some_and(|set_operation| {
+                set_operation
+                    .inputs
+                    .iter()
+                    .any(raw_select_contains_writable_cte)
+            })
+}
+
+fn raw_cte_body_is_writable(body: &crate::backend::parser::CteBody) -> bool {
+    match body {
+        crate::backend::parser::CteBody::Insert(_) => true,
+        crate::backend::parser::CteBody::Select(select_stmt) => {
+            raw_select_contains_writable_cte(select_stmt)
+        }
+        crate::backend::parser::CteBody::Values(values_stmt) => values_stmt
+            .with
+            .iter()
+            .any(|cte| raw_cte_body_is_writable(&cte.body)),
+        crate::backend::parser::CteBody::RecursiveUnion {
+            anchor, recursive, ..
+        } => raw_cte_body_is_writable(anchor) || raw_select_contains_writable_cte(recursive),
+    }
+}
+
 fn raw_cte_body_contains_pg_notify(body: &crate::backend::parser::CteBody) -> bool {
     match body {
         crate::backend::parser::CteBody::Select(select_stmt) => {
@@ -6043,10 +6134,54 @@ fn raw_cte_body_contains_pg_notify(body: &crate::backend::parser::CteBody) -> bo
         crate::backend::parser::CteBody::Values(values_stmt) => {
             raw_values_statement_contains_pg_notify(values_stmt)
         }
+        crate::backend::parser::CteBody::Insert(insert_stmt) => {
+            raw_insert_statement_contains_pg_notify(insert_stmt)
+        }
         crate::backend::parser::CteBody::RecursiveUnion {
             anchor, recursive, ..
         } => raw_cte_body_contains_pg_notify(anchor) || raw_select_contains_pg_notify(recursive),
     }
+}
+
+fn raw_insert_statement_contains_pg_notify(
+    insert_stmt: &crate::backend::parser::InsertStatement,
+) -> bool {
+    insert_stmt.with.iter().any(raw_cte_contains_pg_notify)
+        || match &insert_stmt.source {
+            crate::backend::parser::InsertSource::Values(rows) => {
+                rows.iter().flatten().any(raw_expr_contains_pg_notify)
+            }
+            crate::backend::parser::InsertSource::DefaultValues => false,
+            crate::backend::parser::InsertSource::Select(select_stmt) => {
+                raw_select_contains_pg_notify(select_stmt)
+            }
+        }
+        || insert_stmt.on_conflict.as_ref().is_some_and(|on_conflict| {
+            on_conflict
+                .assignments
+                .iter()
+                .any(|assignment| raw_expr_contains_pg_notify(&assignment.expr))
+                || on_conflict
+                    .where_clause
+                    .as_ref()
+                    .is_some_and(raw_expr_contains_pg_notify)
+                || match &on_conflict.target {
+                    Some(crate::backend::parser::OnConflictTarget::Inference(spec)) => {
+                        spec.elements
+                            .iter()
+                            .any(|elem| raw_expr_contains_pg_notify(&elem.expr))
+                            || spec
+                                .predicate
+                                .as_ref()
+                                .is_some_and(raw_expr_contains_pg_notify)
+                    }
+                    Some(crate::backend::parser::OnConflictTarget::Constraint(_)) | None => false,
+                }
+        })
+        || insert_stmt
+            .returning
+            .iter()
+            .any(|item| raw_expr_contains_pg_notify(&item.expr))
 }
 
 fn raw_values_statement_contains_pg_notify(

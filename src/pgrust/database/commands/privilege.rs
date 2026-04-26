@@ -835,6 +835,74 @@ impl Database {
                     hint: None,
                     sqlstate: "XX000",
                 })?;
+            if !stmt.columns.is_empty() {
+                if stmt.privilege != GrantObjectPrivilege::SelectOnTable {
+                    return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                        "column privileges other than SELECT".into(),
+                    )));
+                }
+                for column_name in &stmt.columns {
+                    let Some((column_index, column)) =
+                        relation
+                            .desc
+                            .columns
+                            .iter()
+                            .enumerate()
+                            .find(|(_, column)| {
+                                !column.dropped && column.name.eq_ignore_ascii_case(column_name)
+                            })
+                    else {
+                        return Err(ExecError::Parse(ParseError::UnknownColumn(
+                            column_name.clone(),
+                        )));
+                    };
+                    let mut acl = column.attacl.clone().unwrap_or_default();
+                    for grantee_name in &stmt.grantee_names {
+                        let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
+                            String::new()
+                        } else {
+                            auth_catalog
+                                .role_by_name(grantee_name)
+                                .map(|row| row.rolname.clone())
+                                .ok_or_else(|| {
+                                    ExecError::Parse(role_management_error(format!(
+                                        "role \"{}\" does not exist",
+                                        grantee_name
+                                    )))
+                                })?
+                        };
+                        grant_table_acl_entry(
+                            &mut acl,
+                            &grantee_acl_name,
+                            &grantor_name,
+                            privilege_chars,
+                        );
+                    }
+                    let ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid: current_cid,
+                        client_id,
+                        waiter: None,
+                        interrupts: self.interrupt_state(client_id),
+                    };
+                    let effect = self
+                        .catalog
+                        .write()
+                        .alter_attribute_acl_mvcc(
+                            relation.relation_oid,
+                            column_index.saturating_add(1) as i16,
+                            (!acl.is_empty()).then_some(acl),
+                            &ctx,
+                        )
+                        .map_err(map_catalog_error)?;
+                    catalog_effects.push(effect);
+                    current_cid = current_cid.saturating_add(1);
+                }
+                continue;
+            }
+
             let catcache = self
                 .backend_catcache(client_id, Some((xid, current_cid)))
                 .map_err(map_catalog_error)?;
@@ -862,7 +930,6 @@ impl Database {
                 };
                 grant_table_acl_entry(&mut acl, &grantee_acl_name, &grantor_name, privilege_chars);
             }
-            let new_acl = collapse_relation_acl_defaults(acl, &owner_name, relation.relkind);
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),
@@ -875,7 +942,11 @@ impl Database {
             let effect = self
                 .catalog
                 .write()
-                .alter_relation_acl_mvcc(relation.relation_oid, new_acl, &ctx)
+                .alter_relation_acl_mvcc(
+                    relation.relation_oid,
+                    collapse_relation_acl_defaults(acl, &owner_name, relation.relkind),
+                    &ctx,
+                )
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
             current_cid = current_cid.saturating_add(1);
@@ -938,6 +1009,69 @@ impl Database {
                     hint: None,
                     sqlstate: "XX000",
                 })?;
+            if !stmt.columns.is_empty() {
+                if stmt.privilege != GrantObjectPrivilege::SelectOnTable {
+                    return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                        "column privileges other than SELECT".into(),
+                    )));
+                }
+                for column_name in &stmt.columns {
+                    let Some((column_index, column)) =
+                        relation
+                            .desc
+                            .columns
+                            .iter()
+                            .enumerate()
+                            .find(|(_, column)| {
+                                !column.dropped && column.name.eq_ignore_ascii_case(column_name)
+                            })
+                    else {
+                        return Err(ExecError::Parse(ParseError::UnknownColumn(
+                            column_name.clone(),
+                        )));
+                    };
+                    let mut acl = column.attacl.clone().unwrap_or_default();
+                    for grantee_name in &stmt.grantee_names {
+                        let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
+                            String::new()
+                        } else {
+                            auth_catalog
+                                .role_by_name(grantee_name)
+                                .map(|row| row.rolname.clone())
+                                .ok_or_else(|| {
+                                    ExecError::Parse(role_management_error(format!(
+                                        "role \"{}\" does not exist",
+                                        grantee_name
+                                    )))
+                                })?
+                        };
+                        revoke_table_acl_entry(&mut acl, &grantee_acl_name, privilege_chars);
+                    }
+                    let ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid: current_cid,
+                        client_id,
+                        waiter: None,
+                        interrupts: self.interrupt_state(client_id),
+                    };
+                    let effect = self
+                        .catalog
+                        .write()
+                        .alter_attribute_acl_mvcc(
+                            relation.relation_oid,
+                            column_index.saturating_add(1) as i16,
+                            (!acl.is_empty()).then_some(acl),
+                            &ctx,
+                        )
+                        .map_err(map_catalog_error)?;
+                    catalog_effects.push(effect);
+                    current_cid = current_cid.saturating_add(1);
+                }
+                continue;
+            }
+
             let catcache = self
                 .backend_catcache(client_id, Some((xid, current_cid)))
                 .map_err(map_catalog_error)?;
@@ -961,7 +1095,6 @@ impl Database {
                 };
                 revoke_table_acl_entry(&mut acl, &grantee_acl_name, privilege_chars);
             }
-            let new_acl = collapse_relation_acl_defaults(acl, &owner_name, relation.relkind);
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),
@@ -974,7 +1107,11 @@ impl Database {
             let effect = self
                 .catalog
                 .write()
-                .alter_relation_acl_mvcc(relation.relation_oid, new_acl, &ctx)
+                .alter_relation_acl_mvcc(
+                    relation.relation_oid,
+                    collapse_relation_acl_defaults(acl, &owner_name, relation.relkind),
+                    &ctx,
+                )
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
             current_cid = current_cid.saturating_add(1);

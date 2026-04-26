@@ -107,7 +107,8 @@ pub use modify::{
     plan_merge,
 };
 pub(crate) use modify::{
-    bind_delete_with_outer_scopes, bind_insert_with_outer_scopes, bind_update_with_outer_scopes,
+    bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
+    bind_insert_with_outer_scopes_and_ctes, bind_update_with_outer_scopes,
     rewrite_bound_delete_auto_view_target, rewrite_bound_insert_auto_view_target,
     rewrite_bound_update_auto_view_target,
 };
@@ -925,6 +926,10 @@ pub trait CatalogLookup {
         None
     }
 
+    fn domain_by_type_oid(&self, _domain_oid: u32) -> Option<DomainLookup> {
+        None
+    }
+
     fn type_default_sql(&self, _type_oid: u32) -> Option<String> {
         None
     }
@@ -1142,6 +1147,13 @@ pub trait CatalogLookup {
 
     fn class_row_by_oid(&self, _relation_oid: u32) -> Option<PgClassRow> {
         None
+    }
+
+    fn attribute_rows_for_relation(
+        &self,
+        _relation_oid: u32,
+    ) -> Vec<crate::include::catalog::PgAttributeRow> {
+        Vec::new()
     }
 
     fn partitioned_table_row(&self, _relation_oid: u32) -> Option<PgPartitionedTableRow> {
@@ -1369,6 +1381,10 @@ impl CatalogLookup for IndexExpressionCatalogLookup<'_> {
 
     fn domain_by_name(&self, name: &str) -> Option<DomainLookup> {
         self.inner.domain_by_name(name)
+    }
+
+    fn domain_by_type_oid(&self, domain_oid: u32) -> Option<DomainLookup> {
+        self.inner.domain_by_type_oid(domain_oid)
     }
 
     fn range_rows(&self) -> Vec<PgRangeRow> {
@@ -2158,6 +2174,7 @@ pub(crate) struct LiteralDefaultCatalog;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DomainLookup {
+    pub oid: u32,
     pub name: String,
     pub sql_type: SqlType,
     pub default: Option<String>,
@@ -2801,6 +2818,9 @@ fn analyze_non_recursive_cte_body(
             let desc = cte_query_desc(&query);
             Ok((query, desc))
         }
+        CteBody::Insert(_) => Err(ParseError::FeatureNotSupported(
+            "writable CTE must be materialized before binding".into(),
+        )),
         CteBody::RecursiveUnion { .. } => {
             let stmt = cte_body_as_select(body)?;
             let (query, _) = analyze_select_query_with_outer(
@@ -2843,6 +2863,9 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             locking_clause: None,
             set_operation: None,
         }),
+        CteBody::Insert(_) => Err(ParseError::FeatureNotSupported(
+            "writable CTE must be materialized before binding".into(),
+        )),
         CteBody::RecursiveUnion {
             all,
             anchor,
@@ -3074,6 +3097,7 @@ fn cte_body_references_table(body: &CteBody, table_name: &str) -> bool {
             .iter()
             .flatten()
             .any(|expr| sql_expr_references_table(expr, table_name)),
+        CteBody::Insert(insert) => insert_statement_references_table(insert, table_name),
         CteBody::RecursiveUnion {
             anchor, recursive, ..
         } => {
@@ -3154,6 +3178,22 @@ impl<'a> RecursiveReferenceChecker<'a> {
                     for expr in row {
                         self.visit_expr(expr, context)?;
                     }
+                }
+                Ok(())
+            }
+            CteBody::Insert(insert) => {
+                if let InsertSource::Select(select) = &insert.source {
+                    self.visit_select(select, context)?;
+                }
+                if let InsertSource::Values(rows) = &insert.source {
+                    for row in rows {
+                        for expr in row {
+                            self.visit_expr(expr, context)?;
+                        }
+                    }
+                }
+                for item in &insert.returning {
+                    self.visit_expr(&item.expr, context)?;
                 }
                 Ok(())
             }
@@ -3557,6 +3597,24 @@ fn select_statement_references_table(stmt: &SelectStatement, table_name: &str) -
             .is_some_and(|expr| sql_expr_references_table(expr, table_name))
         || stmt
             .order_by
+            .iter()
+            .any(|item| sql_expr_references_table(&item.expr, table_name))
+}
+
+fn insert_statement_references_table(stmt: &InsertStatement, table_name: &str) -> bool {
+    stmt.with
+        .iter()
+        .any(|cte| cte_body_references_table(&cte.body, table_name))
+        || match &stmt.source {
+            InsertSource::Values(rows) => rows
+                .iter()
+                .flatten()
+                .any(|expr| sql_expr_references_table(expr, table_name)),
+            InsertSource::Select(select) => select_statement_references_table(select, table_name),
+            InsertSource::DefaultValues => false,
+        }
+        || stmt
+            .returning
             .iter()
             .any(|item| sql_expr_references_table(&item.expr, table_name))
 }
@@ -3972,6 +4030,52 @@ pub(crate) fn bound_cte_from_materialized_rows(
             target_list: identity_target_list(&output_columns, &plan.output_exprs),
             distinct: false,
             distinct_on: Vec::new(),
+            where_qual: None,
+            group_by: Vec::new(),
+            accumulators: Vec::new(),
+            window_clauses: Vec::new(),
+            having_qual: None,
+            sort_clause: Vec::new(),
+            limit_count: None,
+            limit_offset: 0,
+            locking_clause: None,
+            row_marks: Vec::new(),
+            has_target_srfs: false,
+            recursive_union: None,
+            set_operation: None,
+        },
+        desc: RelationDesc {
+            columns: output_columns
+                .into_iter()
+                .map(|column| column_desc(column.name, column.sql_type, true))
+                .collect(),
+        },
+        self_reference: false,
+        worktable_id: 0,
+    }
+}
+
+pub(crate) fn bound_cte_from_query_rows(
+    name: String,
+    output_columns: Vec<QueryColumn>,
+    rows: &[Vec<Value>],
+) -> BoundCte {
+    let cte_id = NEXT_CTE_ID.fetch_add(1, Ordering::Relaxed);
+    let values_rows = rows
+        .iter()
+        .map(|row| row.iter().cloned().map(Expr::Const).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let plan = AnalyzedFrom::values(values_rows, output_columns.clone());
+    BoundCte {
+        name,
+        cte_id,
+        plan: Query {
+            command_type: crate::include::executor::execdesc::CommandType::Select,
+            depends_on_row_security: false,
+            rtable: plan.rtable,
+            jointree: plan.jointree,
+            target_list: identity_target_list(&output_columns, &plan.output_exprs),
+            distinct: false,
             where_qual: None,
             group_by: Vec::new(),
             accumulators: Vec::new(),

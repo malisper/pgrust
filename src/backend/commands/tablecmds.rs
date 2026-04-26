@@ -15,6 +15,7 @@ use crate::backend::access::index::indexam;
 use crate::backend::access::table::toast_helper::toast_tuple_values_for_write;
 use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
+use crate::backend::catalog::catalog::column_desc;
 use crate::backend::optimizer::{finalize_expr_subqueries, planner};
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
@@ -26,8 +27,9 @@ use crate::backend::parser::{
     Catalog, CatalogLookup, DropTableStatement, ExplainStatement, ForeignKeyAction,
     MaintenanceTarget, MergeStatement, OverridingKind, ParseError, SelectStatement, SqlType,
     SqlTypeKind, Statement, TruncateTableStatement, UpdateStatement, VacuumStatement,
-    bind_create_table, bind_generated_expr, bind_referenced_by_foreign_keys,
-    bind_relation_constraints, bind_scalar_expr_in_scope, bind_update,
+    bind_create_table, bind_expr_with_outer_and_ctes, bind_generated_expr,
+    bind_referenced_by_foreign_keys, bind_relation_constraints, bind_scalar_expr_in_scope,
+    bind_update, parse_expr, scope_for_relation,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -3869,6 +3871,68 @@ fn apply_overriding_user_identity_defaults(
     Ok(())
 }
 
+fn domain_constraint_violation(domain_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "value for domain {domain_name} violates check constraint \"{domain_name}_check\""
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "23514",
+    }
+}
+
+fn enforce_domain_constraint_for_value(
+    value: &Value,
+    ty: SqlType,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let Some(domain) = ctx
+        .catalog
+        .as_ref()
+        .and_then(|catalog| catalog.domain_by_type_oid(ty.type_oid))
+    else {
+        return Ok(());
+    };
+    if domain.not_null && matches!(value, Value::Null) {
+        return Err(domain_constraint_violation(&domain.name));
+    }
+    let Some(check) = domain.check.as_deref() else {
+        return Ok(());
+    };
+    let raw = parse_expr(check).map_err(ExecError::Parse)?;
+    let desc = RelationDesc {
+        columns: vec![column_desc("value", domain.sql_type, true)],
+    };
+    let scope = scope_for_relation(None, &desc);
+    let bound = {
+        let Some(catalog) = ctx.catalog.as_ref() else {
+            return Ok(());
+        };
+        bind_expr_with_outer_and_ctes(&raw, &scope, catalog, &[], None, &[])
+            .map_err(ExecError::Parse)?
+    };
+    let mut slot = TupleSlot::virtual_row(vec![value.clone()]);
+    match eval_expr(&bound, &mut slot, ctx)? {
+        Value::Bool(false) => Err(domain_constraint_violation(&domain.name)),
+        _ => Ok(()),
+    }
+}
+
+fn enforce_insert_domain_constraints(
+    desc: &RelationDesc,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for (column, value) in desc.columns.iter().zip(values.iter()) {
+        if column.dropped {
+            continue;
+        }
+        enforce_domain_constraint_for_value(value, column.sql_type, ctx)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn materialize_insert_rows(
     stmt: &BoundInsertStatement,
     catalog: &dyn CatalogLookup,
@@ -3895,6 +3959,8 @@ pub(crate) fn materialize_insert_rows(
                         ctx,
                     )?;
                 }
+                apply_overriding_user_identity_defaults(stmt, &mut values, ctx)?;
+                enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
                 Ok(values)
             })
             .collect::<Result<Vec<_>, ExecError>>(),
@@ -3905,6 +3971,8 @@ pub(crate) fn materialize_insert_rows(
                 let value = eval_expr(expr, &mut slot, ctx)?;
                 apply_assignment_target(&stmt.desc, &mut values, target, value, &mut slot, ctx)?;
             }
+            apply_overriding_user_identity_defaults(stmt, &mut values, ctx)?;
+            enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
             Ok(vec![values])
         }
         BoundInsertSource::Select(query) => {
@@ -3932,6 +4000,7 @@ pub(crate) fn materialize_insert_rows(
                         apply_assignment_target(&stmt.desc, &mut values, target, value, slot, ctx)?;
                     }
                     apply_overriding_user_identity_defaults(stmt, &mut values, ctx)?;
+                    enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
                     rows.push(values);
                 }
                 ctx.subplans = saved_subplans;
@@ -5274,6 +5343,8 @@ pub(crate) fn execute_insert_rows(
         capture_copy_to_dml_notices();
         materialize_generated_columns(desc, &mut values, ctx)?;
         coerce_user_defined_base_assignments(desc, &mut values, ctx)?;
+        enforce_insert_domain_constraints(desc, &values, ctx)?;
+        enforce_partition_constraint_after_before_insert(relation_oid, &values, ctx)?;
         enforce_exclusion_constraints_against_values(
             relation_name,
             desc,
@@ -5360,6 +5431,25 @@ fn coerce_user_defined_base_assignments(
             &ctx.datetime_config,
         )?;
     }
+    Ok(())
+}
+
+fn enforce_partition_constraint_after_before_insert(
+    relation_oid: u32,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let Some(catalog) = ctx.catalog.clone() else {
+        return Ok(());
+    };
+    let Some(target) = catalog.relation_by_oid(relation_oid) else {
+        return Ok(());
+    };
+    if !target.relispartition {
+        return Ok(());
+    }
+    let mut proute = exec_setup_partition_tuple_routing(&catalog, &target)?;
+    exec_find_partition(&catalog, &mut proute, &target, values, ctx)?;
     Ok(())
 }
 
