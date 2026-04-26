@@ -243,6 +243,18 @@ fn network_overlap(left: &InetValue, right: &InetValue) -> bool {
     network_contains(left, right, false) || network_contains(right, left, false)
 }
 
+const RT_OVERLAP_STRATEGY: u16 = 3;
+const RT_EQUAL_STRATEGY: u16 = 18;
+const RT_NOT_EQUAL_STRATEGY: u16 = 19;
+const RT_LESS_STRATEGY: u16 = 20;
+const RT_LESS_EQUAL_STRATEGY: u16 = 21;
+const RT_GREATER_STRATEGY: u16 = 22;
+const RT_GREATER_EQUAL_STRATEGY: u16 = 23;
+const RT_SUB_STRATEGY: u16 = 24;
+const RT_SUB_EQUAL_STRATEGY: u16 = 25;
+const RT_SUPER_STRATEGY: u16 = 26;
+const RT_SUPER_EQUAL_STRATEGY: u16 = 27;
+
 fn network_leaf_consistent(
     strategy: u16,
     key: &Value,
@@ -254,18 +266,75 @@ fn network_leaf_consistent(
     let key = expect_network(key)?;
     let query = expect_network(query)?;
     Ok(match strategy {
-        1 => network_contains(query, key, true),
-        2 => network_contains(query, key, false),
-        3 => network_contains(key, query, true),
-        4 => network_contains(key, query, false),
-        5 => network_overlap(key, query),
-        6 => compare_network_values(key, query) == Ordering::Equal,
+        RT_OVERLAP_STRATEGY => network_overlap(key, query),
+        RT_EQUAL_STRATEGY => compare_network_values(key, query) == Ordering::Equal,
+        RT_NOT_EQUAL_STRATEGY => compare_network_values(key, query) != Ordering::Equal,
+        RT_LESS_STRATEGY => compare_network_values(key, query) == Ordering::Less,
+        RT_LESS_EQUAL_STRATEGY => compare_network_values(key, query) != Ordering::Greater,
+        RT_GREATER_STRATEGY => compare_network_values(key, query) == Ordering::Greater,
+        RT_GREATER_EQUAL_STRATEGY => compare_network_values(key, query) != Ordering::Less,
+        RT_SUB_STRATEGY => network_contains(query, key, true),
+        RT_SUB_EQUAL_STRATEGY => network_contains(query, key, false),
+        RT_SUPER_STRATEGY => network_contains(key, query, true),
+        RT_SUPER_EQUAL_STRATEGY => network_contains(key, query, false),
         _ => {
             return Err(CatalogError::Corrupt(
                 "unsupported SP-GiST network strategy",
             ));
         }
     })
+}
+
+#[cfg(test)]
+mod network_tests {
+    use crate::backend::executor::{parse_cidr_text, parse_inet_text};
+    use crate::include::nodes::datum::Value;
+
+    use super::*;
+
+    fn inet(text: &str) -> Value {
+        Value::Inet(parse_inet_text(text).unwrap())
+    }
+
+    fn cidr(text: &str) -> Value {
+        Value::Cidr(parse_cidr_text(text).unwrap())
+    }
+
+    fn leaf_match(strategy: u16, key: Value, query: Value) -> bool {
+        network_leaf_consistent(strategy, &key, &query).unwrap()
+    }
+
+    #[test]
+    fn network_spgist_uses_catalog_strategy_numbers() {
+        let query = cidr("192.168.1.0/24");
+
+        assert!(leaf_match(
+            RT_SUB_STRATEGY,
+            inet("192.168.1.0/25"),
+            query.clone()
+        ));
+        assert!(leaf_match(
+            RT_SUB_EQUAL_STRATEGY,
+            inet("192.168.1.0/24"),
+            query.clone()
+        ));
+        assert!(leaf_match(
+            RT_OVERLAP_STRATEGY,
+            inet("192.168.1.255/25"),
+            query.clone()
+        ));
+        assert!(leaf_match(
+            RT_SUPER_EQUAL_STRATEGY,
+            inet("192.168.1.0/24"),
+            query.clone()
+        ));
+        assert!(!leaf_match(
+            RT_SUPER_STRATEGY,
+            inet("192.168.1.0/24"),
+            query.clone()
+        ));
+        assert!(leaf_match(RT_LESS_STRATEGY, inet("10.1.2.3/8"), query));
+    }
 }
 
 fn expect_range(value: &Value) -> Result<&RangeValue, CatalogError> {
