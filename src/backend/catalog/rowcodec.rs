@@ -422,15 +422,14 @@ pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow,
             _ => 'd',
         },
         reloftype: values
-            .get(
-                26 + offset
-                    + usize::from(matches!(
-                        values.get(26 + offset),
-                        Some(Value::InternalChar(_) | Value::Text(_))
-                    )),
-            )
+            .get(27 + offset)
             .map(expect_oid)
             .transpose()?
+            .or_else(|| {
+                values
+                    .get(26 + offset)
+                    .and_then(|value| expect_oid(value).ok())
+            })
             .unwrap_or(0),
     })
 }
