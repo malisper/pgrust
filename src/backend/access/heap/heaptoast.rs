@@ -112,6 +112,7 @@ pub(crate) fn store_external_value(
                     index_meta: index.index_meta.clone(),
                     default_toast_compression: ctx.default_toast_compression,
                     heap_tid: tid,
+                    old_heap_tid: None,
                     values: row,
                     unique_check: if index.index_meta.indisunique {
                         crate::include::access::amapi::IndexUniqueCheck::Yes

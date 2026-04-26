@@ -512,6 +512,7 @@ pub enum BuiltinScalarFunction {
     RegexpSplitToArray,
     SimilarSubstring,
     Initcap,
+    TextCat,
     Concat,
     ConcatWs,
     Format,
@@ -1619,6 +1620,7 @@ pub enum SubLinkType {
     ExistsSubLink,
     AllSubLink(SubqueryComparisonOp),
     AnySubLink(SubqueryComparisonOp),
+    RowCompareSubLink(SubqueryComparisonOp),
     ExprSubLink,
     ArraySubLink,
 }
@@ -2106,6 +2108,7 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
                 sublink.sublink_type,
                 SubLinkType::ExistsSubLink
                     | SubLinkType::AnySubLink(_)
+                    | SubLinkType::RowCompareSubLink(_)
                     | SubLinkType::AllSubLink(_)
             ) =>
         {
@@ -2131,6 +2134,7 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
                 subplan.sublink_type,
                 SubLinkType::ExistsSubLink
                     | SubLinkType::AnySubLink(_)
+                    | SubLinkType::RowCompareSubLink(_)
                     | SubLinkType::AllSubLink(_)
             ) =>
         {

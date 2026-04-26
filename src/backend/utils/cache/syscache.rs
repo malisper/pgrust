@@ -719,6 +719,7 @@ impl From<Option<(TransactionId, CommandId)>> for BackendCacheContext {
 pub struct BackendCacheState {
     pub catalog_snapshot: Option<Snapshot>,
     pub catalog_snapshot_ctx: Option<BackendCacheContext>,
+    pub transaction_snapshot_override: Option<(TransactionId, Snapshot)>,
     pub catcache: Option<CatCache>,
     pub relcache: Option<RelCache>,
     pub cache_ctx: Option<BackendCacheContext>,

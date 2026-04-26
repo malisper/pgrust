@@ -3598,10 +3598,12 @@ fn set_index_only_scan_references(
 fn set_unique_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
+    key_indices: Vec<usize>,
     input: Box<Path>,
 ) -> Plan {
     Plan::Unique {
         plan_info,
+        key_indices,
         input: Box::new(set_plan_refs(ctx, *input)),
     }
 }
@@ -4630,8 +4632,11 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             ..
         } => set_merge_append_references(ctx, plan_info, source_id, desc, items, children),
         Path::Unique {
-            plan_info, input, ..
-        } => set_unique_references(ctx, plan_info, input),
+            plan_info,
+            key_indices,
+            input,
+            ..
+        } => set_unique_references(ctx, plan_info, key_indices, input),
         Path::SetOp {
             plan_info,
             op,

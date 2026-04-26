@@ -437,6 +437,238 @@ fn txid_current_assigns_xid_in_autocommit_select() {
 }
 
 #[test]
+fn repeatable_read_reuses_first_snapshot() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+
+    db.execute(10, "create table rr_items (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rr_items values (1)").unwrap();
+
+    reader
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rr_items"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    db.execute(20, "insert into rr_items values (2)").unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rr_items"),
+        vec![vec![Value::Int64(1)]]
+    );
+    reader.execute(&db, "commit").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 30, "select count(*) from rr_items"),
+        vec![vec![Value::Int64(2)]]
+    );
+}
+
+#[test]
+fn repeatable_read_streaming_uses_transaction_snapshot() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+
+    db.execute(10, "create table rr_streaming (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rr_streaming values (1)")
+        .unwrap();
+
+    reader
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rr_streaming"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    db.execute(20, "insert into rr_streaming values (2)")
+        .unwrap();
+
+    let stmt = crate::backend::parser::parse_select("select count(*) from rr_streaming").unwrap();
+    let mut guard = reader.execute_streaming(&db, &stmt).unwrap();
+    let slot = crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx)
+        .unwrap()
+        .expect("streaming count row");
+    let values = slot.values().unwrap();
+    assert_eq!(values[0].to_owned_value(), Value::Int64(1));
+    assert!(
+        crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx)
+            .unwrap()
+            .is_none()
+    );
+    drop(guard);
+
+    reader.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn read_committed_uses_fresh_statement_snapshots() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+
+    db.execute(10, "create table rc_items (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rc_items values (1)").unwrap();
+
+    reader.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rc_items"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    db.execute(20, "insert into rc_items values (2)").unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rc_items"),
+        vec![vec![Value::Int64(2)]]
+    );
+    reader.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn repeatable_read_sees_own_writes_after_snapshot() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    db.execute(10, "create table rr_own_writes (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rr_own_writes values (1)")
+        .unwrap();
+
+    session
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from rr_own_writes"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    session
+        .execute(&db, "insert into rr_own_writes values (2)")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from rr_own_writes"),
+        vec![vec![Value::Int64(2)]]
+    );
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn set_transaction_isolation_after_query_errors() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session_query_rows(&mut session, &db, "select 1");
+
+    let err = session
+        .execute(&db, "set transaction isolation level repeatable read")
+        .unwrap_err();
+    assert_sqlstate(err, "25001", "must be called before any query");
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn set_session_characteristics_sets_default_transaction_isolation() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "set session characteristics as transaction isolation level repeatable read",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show default_transaction_isolation"),
+        vec![vec![Value::Text("repeatable read".into())]]
+    );
+
+    session.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show transaction isolation level"),
+        vec![vec![Value::Text("repeatable read".into())]]
+    );
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn repeatable_read_update_conflict_errors() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+    let mut writer = Session::new(2);
+
+    db.execute(
+        10,
+        "create table rr_update_conflict (id int4 not null, v int4 not null)",
+    )
+    .unwrap();
+    db.execute(10, "insert into rr_update_conflict values (1, 10)")
+        .unwrap();
+
+    reader
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut reader,
+            &db,
+            "select v from rr_update_conflict where id = 1"
+        ),
+        vec![vec![Value::Int32(10)]]
+    );
+
+    writer.execute(&db, "begin").unwrap();
+    writer
+        .execute(&db, "update rr_update_conflict set v = 20 where id = 1")
+        .unwrap();
+    writer.execute(&db, "commit").unwrap();
+
+    let err = reader
+        .execute(&db, "update rr_update_conflict set v = 30 where id = 1")
+        .unwrap_err();
+    assert_sqlstate(err, "40001", "concurrent update");
+    reader.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn repeatable_read_delete_conflict_errors() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut reader = Session::new(1);
+    let mut writer = Session::new(2);
+
+    db.execute(10, "create table rr_delete_conflict (id int4 not null)")
+        .unwrap();
+    db.execute(10, "insert into rr_delete_conflict values (1)")
+        .unwrap();
+
+    reader
+        .execute(&db, "begin isolation level repeatable read")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut reader, &db, "select count(*) from rr_delete_conflict"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    writer.execute(&db, "begin").unwrap();
+    writer
+        .execute(&db, "delete from rr_delete_conflict where id = 1")
+        .unwrap();
+    writer.execute(&db, "commit").unwrap();
+
+    let err = reader
+        .execute(&db, "delete from rr_delete_conflict where id = 1")
+        .unwrap_err();
+    assert_sqlstate(err, "40001", "concurrent delete");
+    reader.execute(&db, "rollback").unwrap();
+}
+
+#[test]
 fn txid_status_reports_recent_transaction_states() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -1627,6 +1859,24 @@ fn session_query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Ve
     match session.execute(db, sql).unwrap() {
         StatementResult::Query { rows, .. } => rows,
         other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+fn assert_sqlstate(err: ExecError, expected_sqlstate: &str, expected_message_part: &str) {
+    match err {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        }
+        | ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, expected_sqlstate);
+            assert!(
+                message.contains(expected_message_part),
+                "expected message to contain {expected_message_part:?}, got {message:?}"
+            );
+        }
+        other => panic!("expected SQLSTATE {expected_sqlstate}, got {other:?}"),
     }
 }
 
@@ -8278,6 +8528,28 @@ fn hash_index_build_sizes_initial_buckets_for_low_fillfactor() {
 }
 
 #[test]
+fn hash_index_fillfactor_out_of_range_uses_postgres_error_shape() {
+    let base = temp_dir("hash_index_fillfactor_range");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    match db.execute(
+        1,
+        "create index items_id_hash on items using hash (id) with (fillfactor = 9)",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        }) if message == "value 9 out of bounds for option \"fillfactor\""
+            && detail == "Valid values are between \"10\" and \"100\"."
+            && sqlstate == "22023" => {}
+        other => panic!("expected fillfactor range error, got {other:?}"),
+    }
+}
+
+#[test]
 fn hash_expression_partial_index_matches_equality_quals() {
     let base = temp_dir("hash_expression_partial_index");
     let db = Database::open(&base, 16).unwrap();
@@ -12114,6 +12386,51 @@ fn regoperator_literal_cast_resolves_operator_signature() {
             "select oprleft, oprright from pg_operator where oid = '===(boolean,boolean)'::regoperator"
         ),
         vec![vec![Value::Int64(16), Value::Int64(16)]]
+    );
+}
+
+#[test]
+fn case_and_nullif_preserve_array_domain_function_results() {
+    let base = temp_dir("case_array_domain_function_result");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create domain arrdomain as int[]").unwrap();
+    db.execute(
+        1,
+        "create function make_ad(int,int) returns arrdomain as \
+         'declare x arrdomain; begin x := array[$1,$2]; return x; end' \
+         language plpgsql volatile",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function ad_eq(arrdomain, arrdomain) returns boolean as \
+         'begin return array_eq($1, $2); end' language plpgsql",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create operator = (procedure = ad_eq, leftarg = arrdomain, rightarg = arrdomain)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select make_ad(1,2)"),
+        vec![vec![Value::Array(vec![Value::Int32(1), Value::Int32(2)])]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select case make_ad(1,2) \
+             when array[2,4]::arrdomain then 'wrong' \
+             when array[1,2]::arrdomain then 'right' end",
+        ),
+        vec![vec![Value::Text("right".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select nullif(make_ad(1,2), array[2,3]::arrdomain)"),
+        vec![vec![Value::Array(vec![Value::Int32(1), Value::Int32(2)])]]
     );
 }
 
@@ -16102,6 +16419,115 @@ fn create_table_like_copies_identity_only_when_requested() {
 }
 
 #[test]
+fn identity_sequence_options_drive_owned_sequence() {
+    let base = temp_dir("identity_sequence_options");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table identity_opts (a smallint generated by default as identity (start with 7 increment by 5), b text)",
+    )
+    .unwrap();
+    db.execute(1, "insert into identity_opts default values")
+        .unwrap();
+    db.execute(1, "insert into identity_opts default values")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select a from identity_opts order by a"),
+        vec![vec![Value::Int16(7)], vec![Value::Int16(12)]]
+    );
+}
+
+#[test]
+fn alter_identity_and_overriding_enforce_generated_always() {
+    let base = temp_dir("alter_identity_overriding");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table alter_id (a int not null, b text)")
+        .unwrap();
+    match db.execute(
+        1,
+        "alter table alter_id alter column a add generated always as identity",
+    ) {
+        Ok(_) => {}
+        other => panic!("expected ADD IDENTITY to succeed, got {other:?}"),
+    }
+    db.execute(1, "insert into alter_id default values")
+        .unwrap();
+    db.execute(1, "insert into alter_id default values")
+        .unwrap();
+
+    match db.execute(1, "insert into alter_id values (42, 'blocked')") {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. })) => {
+            assert_eq!(
+                message,
+                "cannot insert a non-DEFAULT value into column \"a\""
+            );
+        }
+        other => panic!("expected generated-always insert error, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "insert into alter_id overriding system value values (42, 'system')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into alter_id overriding user value values (99, 'user')",
+    )
+    .unwrap();
+
+    match db.execute(1, "update alter_id set a = 55 where b = 'system'") {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. })) => {
+            assert_eq!(message, "column \"a\" can only be updated to DEFAULT");
+        }
+        other => panic!("expected generated-always update error, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from alter_id order by a"),
+        vec![
+            vec![Value::Int32(1), Value::Null],
+            vec![Value::Int32(2), Value::Null],
+            vec![Value::Int32(3), Value::Text("user".into())],
+            vec![Value::Int32(42), Value::Text("system".into())],
+        ]
+    );
+
+    db.execute(
+        1,
+        "alter table alter_id alter column a set generated by default set increment by 10 restart with 100",
+    )
+    .unwrap();
+    db.execute(1, "insert into alter_id values (200, 'default-explicit')")
+        .unwrap();
+    db.execute(1, "insert into alter_id default values")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a from alter_id where b = 'default-explicit' or b is null order by a desc limit 2",
+        ),
+        vec![vec![Value::Int32(200)], vec![Value::Int32(100)]]
+    );
+
+    db.execute(1, "alter table alter_id alter column a drop identity")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select oid from pg_class where relname = 'alter_id_a_seq'"
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
 fn create_table_like_copies_storage_and_compression_only_when_requested() {
     let base = temp_dir("create_table_like_storage_compression");
     let db = Database::open(&base, 16).unwrap();
@@ -16674,6 +17100,109 @@ fn create_index_supports_expression_keys() {
             Value::Text("[\"d + e\"]".into()),
         ]]
     );
+}
+
+#[test]
+fn unique_expression_index_build_accepts_distinct_existing_rows() {
+    let base = temp_dir("unique_expression_index_build_distinct");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (value float8)").unwrap();
+    db.execute(
+        1,
+        "insert into items values (1935401906), (1345971420), (656473370)",
+    )
+    .unwrap();
+    db.execute(1, "create unique index items_abs_key on items (abs(value))")
+        .unwrap();
+}
+
+#[test]
+fn functional_textcat_index_builds_and_enforces_uniqueness() {
+    let base = temp_dir("functional_textcat_index");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table func_index_heap (f1 text, f2 text)")
+        .unwrap();
+    db.execute(1, "insert into func_index_heap values ('ABC', 'DEF')")
+        .unwrap();
+    db.execute(1, "insert into func_index_heap values ('AB', 'CDEFG')")
+        .unwrap();
+    db.execute(
+        1,
+        "create unique index func_index_index on func_index_heap (textcat(f1,f2))",
+    )
+    .unwrap();
+
+    match db.execute(1, "insert into func_index_heap values ('ABCD', 'EF')") {
+        Err(ExecError::UniqueViolation { constraint, .. }) if constraint == "func_index_index" => {}
+        other => panic!("expected textcat index unique violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn unique_expression_index_update_allows_unchanged_key() {
+    let base = temp_dir("unique_expression_index_update_unchanged_key");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, value float8)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 1234.1234), (2, 488912369)")
+        .unwrap();
+    db.execute(1, "create unique index items_abs_key on items (abs(value))")
+        .unwrap();
+
+    db.execute(1, "update items set value = -1234.1234 where id = 1")
+        .unwrap();
+    db.execute(1, "update items set id = 20 where value = 488912369")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id, value from items order by abs(value), id"
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Float64(-1234.1234)],
+            vec![Value::Int32(20), Value::Float64(488912369.0)],
+        ]
+    );
+}
+
+#[test]
+fn unique_abs_float_index_update_allows_new_distinct_key() {
+    let base = temp_dir("unique_abs_float_index_update_distinct_key");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table hash_f8_heap (seqno int4, random float8)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into hash_f8_heap values (8906, 1615625451), (8932, 488912369)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create unique index hash_f8_index_1 on hash_f8_heap(abs(random))",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select atttypid from pg_attribute where attrelid = 'hash_f8_index_1'::regclass and attnum = 1",
+        ),
+        vec![vec![Value::Int64(
+            crate::include::catalog::FLOAT8_TYPE_OID as i64
+        )]]
+    );
+
+    db.execute(
+        1,
+        "update hash_f8_heap set random = '-1234.1234'::float8 where seqno = 8906",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -29673,6 +30202,121 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
         ),
         vec![vec![Value::Int64(0)]]
     );
+}
+
+#[test]
+fn drop_policy_non_owner_uses_relation_wording() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut other = Session::new(2);
+
+    owner
+        .execute(&db, "create role policy_owner nologin")
+        .unwrap();
+    owner
+        .execute(&db, "create role policy_other nologin")
+        .unwrap();
+    owner
+        .execute(&db, "set session authorization policy_owner")
+        .unwrap();
+    owner.execute(&db, "create table items (a int4)").unwrap();
+    owner
+        .execute(&db, "create policy p1 on items using (true)")
+        .unwrap();
+
+    other
+        .execute(&db, "set session authorization policy_other")
+        .unwrap();
+    let err = other.execute(&db, "drop policy p1 on items").unwrap_err();
+    assert_eq!(
+        crate::backend::libpq::pqformat::format_exec_error(&err),
+        "must be owner of relation items"
+    );
+}
+
+#[test]
+fn rls_key_errors_hide_values_when_relation_rows_are_not_visible() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut bob = Session::new(2);
+
+    owner.execute(&db, "create role rls_owner nologin").unwrap();
+    owner.execute(&db, "create role rls_bob nologin").unwrap();
+    owner
+        .execute(&db, "set session authorization rls_owner")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table category (cid int4 primary key, cname text)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table document (did int4 primary key, cid int4 references category(cid), dauthor name)",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "grant all on category to public")
+        .unwrap();
+    owner
+        .execute(&db, "grant all on document to public")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "insert into category values (33, 'technology'), (44, 'manga')",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "insert into document values (7, 33, 'rls_carol'), (8, 44, 'rls_carol')",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "alter table category enable row level security")
+        .unwrap();
+    owner
+        .execute(&db, "alter table document enable row level security")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy category_bob on category to rls_bob using (cid = 33)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy document_bob_select on document for select to rls_bob using (dauthor = current_user)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy document_bob_insert on document for insert to rls_bob with check (true)",
+        )
+        .unwrap();
+
+    bob.execute(&db, "set session authorization rls_bob")
+        .unwrap();
+    match bob.execute(&db, "delete from category where cid = 33") {
+        Err(ExecError::ForeignKeyViolation { detail, .. }) => {
+            assert_eq!(
+                detail.as_deref(),
+                Some("Key is still referenced from table \"document\".")
+            );
+        }
+        other => panic!("expected redacted foreign key violation, got {other:?}"),
+    }
+    match bob.execute(&db, "insert into document values (8, 44, current_user)") {
+        Err(ExecError::UniqueViolation { detail, .. }) => {
+            assert_eq!(detail, None);
+        }
+        other => panic!("expected redacted unique violation, got {other:?}"),
+    }
 }
 
 #[test]

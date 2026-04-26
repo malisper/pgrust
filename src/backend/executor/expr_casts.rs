@@ -64,6 +64,8 @@ use num_traits::{Signed, ToPrimitive, Zero};
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
+const DOMAIN_IN_PROC_OID: u32 = 2597;
+
 pub(crate) struct InputErrorInfo {
     pub(crate) message: String,
     pub(crate) detail: Option<String>,
@@ -2980,6 +2982,9 @@ fn user_defined_base_type_row(
     }
     let row = catalog.type_by_oid(ty.type_oid)?;
     if row.typinput == 0 || row.typtype != 'b' || row.typrelid != 0 || row.sql_type.is_array {
+        return None;
+    }
+    if row.typinput == DOMAIN_IN_PROC_OID {
         return None;
     }
     if builtin_type_rows()

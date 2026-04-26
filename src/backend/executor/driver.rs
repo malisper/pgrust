@@ -173,6 +173,7 @@ fn execute_statement_with_source(
         Statement::Show(_)
         | Statement::Checkpoint(_)
         | Statement::Set(_)
+        | Statement::SetTransaction(_)
         | Statement::SetConstraints(_)
         | Statement::Reset(_)
         | Statement::SetRole(_)
@@ -184,9 +185,13 @@ fn execute_statement_with_source(
         | Statement::AlterTableAlterColumnStorage(_)
         | Statement::AlterTableAlterColumnDefault(_)
         | Statement::AlterTableAlterColumnExpression(_)
+        | Statement::AlterTableAlterColumnIdentity(_)
         // :HACK: ALTER TABLE ... SET (...) is accepted narrowly for numeric.sql and ignored
         // until table reloptions are modeled for real.
         | Statement::AlterTableSet(_)
+        // :HACK: ALTER INDEX ... SET (...) is accepted narrowly for hash_index.sql and ignored
+        // until mutable index reloptions are modeled for real.
+        | Statement::AlterIndexSet(_)
         | Statement::AlterTableSetRowSecurity(_)
         | Statement::CreateStatistics(_)
         | Statement::AlterStatistics(_)
@@ -376,6 +381,10 @@ fn execute_statement_with_source(
             expected: "CREATE AGGREGATE handled by database/session layer",
             actual: "CREATE AGGREGATE".into(),
         })),
+        Statement::AlterAggregateRename(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER AGGREGATE handled by database/session layer",
+            actual: "ALTER AGGREGATE".into(),
+        })),
         Statement::CreateCast(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE CAST handled by database/session layer",
             actual: "CREATE CAST".into(),
@@ -546,7 +555,7 @@ fn execute_statement_with_source(
         }
         Statement::Delete(stmt) => execute_delete(bind_delete(&stmt, catalog)?, catalog, ctx, xid),
         Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
-        Statement::Begin
+        Statement::Begin(_)
         | Statement::Commit
         | Statement::Rollback
         | Statement::Savepoint(_)
@@ -617,6 +626,7 @@ pub fn execute_readonly_statement_with_config(
         | Statement::AlterTableAlterColumnExpression(_)
         | Statement::AlterTableOf(_)
         | Statement::AlterTableNotOf(_)
+        | Statement::AlterTableAlterColumnIdentity(_)
         | Statement::AlterTableAttachPartition(_)
         | Statement::AlterTableDetachPartition(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableRename(_) | Statement::AlterViewRename(_) => {
@@ -704,6 +714,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::CreateAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE AGGREGATE".into(),
+        })),
+        Statement::AlterAggregateRename(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER AGGREGATE".into(),
         })),
         Statement::CreateCast(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

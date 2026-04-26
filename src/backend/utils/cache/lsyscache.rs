@@ -624,6 +624,12 @@ fn visible_type_oid_for_sql_type(
     search_path: &[String],
     sql_type: SqlType,
 ) -> Option<u32> {
+    if sql_type.type_oid != 0
+        && visible_type_row_by_oid(db, client_id, txn_ctx, search_path, sql_type.type_oid)
+            .is_some_and(|row| row.sql_type == sql_type)
+    {
+        return Some(sql_type.type_oid);
+    }
     if sql_type.is_array {
         let element = sql_type.element_type();
         let element_oid = if element.type_oid != 0 {

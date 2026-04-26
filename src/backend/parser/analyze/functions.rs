@@ -57,7 +57,7 @@ pub(super) enum ResolvedFunctionRowShape {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ResolvedFunctionCall {
+pub(crate) struct ResolvedFunctionCall {
     pub proc_oid: u32,
     pub proname: String,
     pub prokind: char,
@@ -83,7 +83,7 @@ struct CandidateMatch {
     vatype_oid: u32,
 }
 
-pub(super) fn resolve_function_call(
+pub(crate) fn resolve_function_call(
     catalog: &dyn CatalogLookup,
     name: &str,
     actual_types: &[SqlType],
@@ -1248,7 +1248,8 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::TsMatch
             | BuiltinScalarFunction::TsQueryAnd
             | BuiltinScalarFunction::TsQueryOr
-            | BuiltinScalarFunction::TsVectorConcat => args.len() == 2,
+            | BuiltinScalarFunction::TsVectorConcat
+            | BuiltinScalarFunction::TextCat => args.len() == 2,
             BuiltinScalarFunction::CashLarger | BuiltinScalarFunction::CashSmaller => {
                 args.len() == 2
             }
@@ -3034,6 +3035,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::JsonbPathQueryFirst,
         ),
         ("initcap", BuiltinScalarFunction::Initcap),
+        ("textcat", BuiltinScalarFunction::TextCat),
         ("concat", BuiltinScalarFunction::Concat),
         ("concat_ws", BuiltinScalarFunction::ConcatWs),
         ("format", BuiltinScalarFunction::Format),

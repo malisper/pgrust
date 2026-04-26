@@ -507,8 +507,10 @@ fn run_statement(
         | Statement::AlterTableTriggerState(_)
         | Statement::AlterTriggerRename(_)
         | Statement::CreateAggregate(_)
+        | Statement::AlterAggregateRename(_)
         | Statement::DropAggregate(_)
         | Statement::AlterTableSet(_)
+        | Statement::AlterIndexSet(_)
         | Statement::CreateStatistics(_)
         | Statement::AlterStatistics(_)
         | Statement::DropStatistics(_)
@@ -527,6 +529,7 @@ fn run_statement(
         | Statement::AlterTableAlterColumnStorage(_)
         | Statement::AlterTableAlterColumnDefault(_)
         | Statement::AlterTableAlterColumnExpression(_)
+        | Statement::AlterTableAlterColumnIdentity(_)
         | Statement::AlterTableSetNotNull(_)
         | Statement::AlterTableDropNotNull(_)
         | Statement::AlterTableValidateConstraint(_)
@@ -1378,7 +1381,8 @@ fn run_statement(
         | Statement::Fetch(_)
         | Statement::Move(_)
         | Statement::ClosePortal(_)
-        | Statement::Begin
+        | Statement::SetTransaction(_)
+        | Statement::Begin(_)
         | Statement::Commit
         | Statement::Rollback
         | Statement::Savepoint(_)

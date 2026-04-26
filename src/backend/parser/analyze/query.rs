@@ -354,6 +354,7 @@ pub(super) fn query_from_from_projection(input: AnalyzedFrom, targets: Vec<Targe
         jointree,
         target_list,
         distinct: false,
+        distinct_on: Vec::new(),
         where_qual: None,
         group_by: Vec::new(),
         accumulators: Vec::new(),

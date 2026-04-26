@@ -399,14 +399,19 @@ fn validate_unique_constraints(
                     .unwrap_or_default()
                     .min(insert_ctx.index_desc.columns.len())
                     .min(pending.key_values.len());
+                let detail = crate::backend::executor::relation_values_visible_for_error_detail(
+                    insert_ctx.index_meta.indrelid,
+                    ctx,
+                )
+                .then(|| {
+                    crate::backend::executor::value_io::format_unique_key_detail(
+                        &insert_ctx.index_desc.columns[..key_count],
+                        &pending.key_values[..key_count],
+                    )
+                });
                 return Err(ExecError::UniqueViolation {
                     constraint: row.conname.clone(),
-                    detail: Some(
-                        crate::backend::executor::value_io::format_unique_key_detail(
-                            &insert_ctx.index_desc.columns[..key_count],
-                            &pending.key_values[..key_count],
-                        ),
-                    ),
+                    detail,
                 });
             }
         }

@@ -39,6 +39,7 @@ mod node_hash;
 mod node_hashjoin;
 mod node_mergejoin;
 mod nodes;
+mod permissions;
 mod pg_regex;
 mod sqlfunc;
 mod srf;
@@ -175,6 +176,7 @@ pub(crate) use foreign_keys::{
     enforce_inbound_foreign_key_reference, enforce_inbound_foreign_keys_on_delete,
     enforce_inbound_foreign_keys_on_update, enforce_outbound_foreign_keys,
 };
+pub(crate) use permissions::relation_values_visible_for_error_detail;
 
 #[derive(Debug, Clone, Default)]
 pub struct ExprEvalBindings {
@@ -432,6 +434,7 @@ pub struct ExecutorContext {
 pub struct ExecutorTransactionState {
     pub xid: Option<TransactionId>,
     pub cid: CommandId,
+    pub transaction_snapshot: Option<Snapshot>,
 }
 
 pub type SharedExecutorTransactionState = Arc<parking_lot::Mutex<ExecutorTransactionState>>;
@@ -452,6 +455,12 @@ impl ExecutorContext {
         self.transaction_state
             .as_ref()
             .and_then(|state| state.lock().xid)
+    }
+
+    pub fn uses_transaction_snapshot(&self) -> bool {
+        self.transaction_state
+            .as_ref()
+            .is_some_and(|state| state.lock().transaction_snapshot.is_some())
     }
 
     pub fn constraint_timing(
@@ -497,14 +506,23 @@ impl ExecutorContext {
             }
         };
 
-        self.snapshot = self
-            .txns
-            .read()
+        if let Some(base_snapshot) = &state.transaction_snapshot {
+            self.snapshot = base_snapshot.clone();
+            self.snapshot.current_xid = xid;
             // :HACK: pgrust does not yet model PostgreSQL SPI command counters
             // inside PL/pgSQL, so keep existing same-statement read-your-writes
             // behavior after a lazy XID is assigned.
-            .snapshot_for_command(xid, CommandId::MAX)
-            .map_err(|e| ExecError::Heap(HeapError::Mvcc(e)))?;
+            self.snapshot.current_cid = CommandId::MAX;
+        } else {
+            self.snapshot = self
+                .txns
+                .read()
+                // :HACK: pgrust does not yet model PostgreSQL SPI command counters
+                // inside PL/pgSQL, so keep existing same-statement read-your-writes
+                // behavior after a lazy XID is assigned.
+                .snapshot_for_command(xid, CommandId::MAX)
+                .map_err(|e| ExecError::Heap(HeapError::Mvcc(e)))?;
+        }
         Ok(xid)
     }
 

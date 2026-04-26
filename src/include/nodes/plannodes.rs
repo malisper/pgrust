@@ -162,6 +162,7 @@ pub enum Plan {
     },
     Unique {
         plan_info: PlanEstimate,
+        key_indices: Vec<usize>,
         input: Box<Plan>,
     },
     SeqScan {

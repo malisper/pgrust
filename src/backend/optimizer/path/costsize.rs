@@ -78,7 +78,10 @@ pub(super) fn optimize_path_with_config(
                 pathtarget,
             },
             Path::Unique {
-                pathtarget, input, ..
+                pathtarget,
+                key_indices,
+                input,
+                ..
             } => {
                 let input = optimize_path_with_config(*input, catalog, config);
                 let input_info = input.plan_info();
@@ -91,6 +94,7 @@ pub(super) fn optimize_path_with_config(
                         input_info.plan_width,
                     ),
                     pathtarget,
+                    key_indices,
                     input: Box::new(input),
                 }
             }

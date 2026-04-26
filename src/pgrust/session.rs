@@ -7,7 +7,9 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use crate::backend::access::transam::xact::{CommandId, INVALID_TRANSACTION_ID, TransactionId};
+use crate::backend::access::transam::xact::{
+    CommandId, INVALID_TRANSACTION_ID, Snapshot, TransactionId,
+};
 use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::commands::copyfrom::parse_text_array_literal_with_catalog;
 use crate::backend::commands::copyto::{
@@ -469,6 +471,9 @@ struct ActiveTransaction {
     auth_at_start: AuthState,
     held_table_locks: BTreeMap<RelFileLocator, TableLockMode>,
     next_command_id: u32,
+    isolation_level: crate::backend::parser::TransactionIsolationLevel,
+    snapshot_taken: bool,
+    transaction_snapshot: Option<Snapshot>,
     catalog_effects: Vec<CatalogMutationEffect>,
     current_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
     prior_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
@@ -698,7 +703,7 @@ fn procedure_params(row: &PgProcRow) -> Vec<ProcedureParam> {
         .enumerate()
         .map(|(index, type_oid)| {
             let mode = modes.get(index).copied().unwrap_or(b'i');
-            let current_input_index = matches!(mode, b'i' | b'b').then(|| {
+            let current_input_index = matches!(mode, b'i' | b'b' | b'v').then(|| {
                 let index = input_index;
                 input_index += 1;
                 index
@@ -709,7 +714,9 @@ fn procedure_params(row: &PgProcRow) -> Vec<ProcedureParam> {
                 type_oid,
                 mode,
                 variadic: row.provariadic != 0
-                    && current_input_index == Some(row.pronargs.max(0).saturating_sub(1) as usize),
+                    && (mode == b'v'
+                        || current_input_index
+                            == Some(row.pronargs.max(0).saturating_sub(1) as usize)),
             }
         })
         .collect()
@@ -886,7 +893,7 @@ fn inline_sql_procedure_body(row: &PgProcRow, args: &[Value]) -> Result<String, 
         let input_arg_names = names
             .iter()
             .zip(row.proargmodes.as_deref().unwrap_or(&[]).iter().copied())
-            .filter(|(_, mode)| matches!(*mode, b'i' | b'b'))
+            .filter(|(_, mode)| matches!(*mode, b'i' | b'b' | b'v'))
             .map(|(name, _)| name)
             .collect::<Vec<_>>();
         let names = if input_arg_names.is_empty() {
@@ -1049,6 +1056,8 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
     }
     match name {
         "default_toast_compression" => Some("pglz"),
+        "default_transaction_isolation" => Some("read committed"),
+        "transaction_isolation" => Some("read committed"),
         "track_counts" => Some("on"),
         "track_functions" => Some("none"),
         "stats_fetch_consistency" => Some("cache"),
@@ -1457,9 +1466,13 @@ impl Session {
         let search_path = self.configured_search_path();
         db.lazy_catalog_lookup(
             self.client_id,
-            self.active_txn
-                .as_ref()
-                .and_then(|txn| txn.xid.map(|xid| (xid, txn.next_command_id))),
+            self.active_txn.as_ref().and_then(|txn| {
+                txn.xid.map(|xid| (xid, txn.next_command_id)).or_else(|| {
+                    txn.isolation_level
+                        .uses_transaction_snapshot()
+                        .then_some((INVALID_TRANSACTION_ID, txn.next_command_id))
+                })
+            }),
             search_path.as_deref(),
         )
     }
@@ -1538,7 +1551,7 @@ impl Session {
         cid: CommandId,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.catalog_lookup_for_command(db, xid, cid);
-        let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+        let snapshot = self.snapshot_for_command(db, xid, cid)?;
         let deferred_foreign_keys = self
             .active_txn
             .as_ref()
@@ -1579,7 +1592,7 @@ impl Session {
         cid: CommandId,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.catalog_lookup_for_command(db, xid, cid);
-        let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+        let snapshot = self.snapshot_for_command(db, xid, cid)?;
         let deferred_foreign_keys = self
             .active_txn
             .as_ref()
@@ -1671,6 +1684,17 @@ impl Session {
                 xid: (snapshot.current_xid != INVALID_TRANSACTION_ID)
                     .then_some(snapshot.current_xid),
                 cid,
+                transaction_snapshot: self
+                    .active_txn
+                    .as_ref()
+                    .filter(|txn| txn.isolation_level.uses_transaction_snapshot())
+                    .and_then(|txn| txn.transaction_snapshot.clone())
+                    .or_else(|| {
+                        self.active_txn
+                            .as_ref()
+                            .is_some_and(|txn| txn.isolation_level.uses_transaction_snapshot())
+                            .then_some(snapshot.clone())
+                    }),
             },
         )));
         let statement_timestamp_usecs =
@@ -1698,7 +1722,7 @@ impl Session {
             checkpoint_stats: db.checkpoint_stats_snapshot(),
             datetime_config,
             statement_timestamp_usecs,
-            gucs: self.gucs.clone(),
+            gucs: self.effective_gucs_for_execution(),
             interrupts: self.interrupts(),
             stats: Arc::clone(&db.stats),
             session_stats: Arc::clone(&self.stats_state),
@@ -1734,6 +1758,17 @@ impl Session {
     }
 
     fn active_transaction_without_xid(&self, db: &Database) -> ActiveTransaction {
+        self.active_transaction_without_xid_with_options(
+            db,
+            &crate::backend::parser::TransactionOptions::default(),
+        )
+    }
+
+    fn active_transaction_without_xid_with_options(
+        &self,
+        db: &Database,
+        options: &crate::backend::parser::TransactionOptions,
+    ) -> ActiveTransaction {
         ActiveTransaction {
             xid: None,
             started_at_usecs:
@@ -1743,6 +1778,11 @@ impl Session {
             auth_at_start: self.auth.clone(),
             held_table_locks: BTreeMap::new(),
             next_command_id: 0,
+            isolation_level: options
+                .isolation_level
+                .unwrap_or_else(|| self.default_transaction_isolation_level()),
+            snapshot_taken: false,
+            transaction_snapshot: None,
             catalog_effects: Vec::new(),
             current_cmd_catalog_invalidations: Vec::new(),
             prior_cmd_catalog_invalidations: Vec::new(),
@@ -1771,10 +1811,118 @@ impl Session {
         xid
     }
 
-    fn active_txn_ctx_for_command(&self, cid: CommandId) -> Option<(TransactionId, CommandId)> {
+    fn default_transaction_isolation_level(
+        &self,
+    ) -> crate::backend::parser::TransactionIsolationLevel {
+        self.gucs
+            .get("default_transaction_isolation")
+            .and_then(|value| crate::backend::parser::TransactionIsolationLevel::parse(value))
+            .unwrap_or_default()
+    }
+
+    fn current_transaction_isolation_level(
+        &self,
+    ) -> crate::backend::parser::TransactionIsolationLevel {
         self.active_txn
             .as_ref()
-            .and_then(|txn| txn.xid.map(|xid| (xid, cid)))
+            .map(|txn| txn.isolation_level)
+            .unwrap_or_else(|| self.default_transaction_isolation_level())
+    }
+
+    fn effective_gucs_for_execution(&self) -> HashMap<String, String> {
+        let mut gucs = self.gucs.clone();
+        gucs.insert(
+            "transaction_isolation".into(),
+            self.current_transaction_isolation_level().as_str().into(),
+        );
+        gucs.entry("default_transaction_isolation".into())
+            .or_insert_with(|| self.default_transaction_isolation_level().as_str().into());
+        gucs
+    }
+
+    fn set_active_transaction_isolation(
+        &mut self,
+        level: crate::backend::parser::TransactionIsolationLevel,
+    ) -> Result<(), ExecError> {
+        let Some(txn) = self.active_txn.as_mut() else {
+            return Ok(());
+        };
+        if txn.isolation_level == level {
+            return Ok(());
+        }
+        if txn.snapshot_taken {
+            return Err(ExecError::Parse(ParseError::DetailedError {
+                message: "SET TRANSACTION ISOLATION LEVEL must be called before any query".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "25001",
+            }));
+        }
+        txn.isolation_level = level;
+        txn.transaction_snapshot = None;
+        Ok(())
+    }
+
+    fn apply_transaction_options(
+        &mut self,
+        options: &crate::backend::parser::TransactionOptions,
+    ) -> Result<(), ExecError> {
+        // :HACK: READ ONLY and DEFERRABLE are parsed for compatibility, but
+        // enforcement belongs with broader transaction access-mode support.
+        if let Some(level) = options.isolation_level {
+            self.set_active_transaction_isolation(level)?;
+        }
+        Ok(())
+    }
+
+    fn snapshot_for_command(
+        &mut self,
+        db: &Database,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<Snapshot, ExecError> {
+        let Some(txn) = self.active_txn.as_mut() else {
+            return db
+                .txns
+                .read()
+                .snapshot_for_command(xid, cid)
+                .map_err(ExecError::from);
+        };
+        txn.snapshot_taken = true;
+        if !txn.isolation_level.uses_transaction_snapshot() {
+            return db
+                .txns
+                .read()
+                .snapshot_for_command(xid, cid)
+                .map_err(ExecError::from);
+        }
+        if txn.transaction_snapshot.is_none() {
+            let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+            txn.transaction_snapshot = Some(snapshot);
+        }
+        let mut snapshot = txn
+            .transaction_snapshot
+            .clone()
+            .expect("repeatable-read snapshot must be initialized");
+        snapshot.current_xid = xid;
+        snapshot.current_cid = cid;
+        crate::backend::utils::time::snapmgr::set_transaction_snapshot_override(
+            db,
+            self.client_id,
+            xid,
+            snapshot.clone(),
+        );
+        Ok(snapshot)
+    }
+
+    fn active_txn_ctx_for_command(&self, cid: CommandId) -> Option<(TransactionId, CommandId)> {
+        self.active_txn.as_ref().and_then(|txn| {
+            txn.xid.map(|xid| (xid, cid)).or_else(|| {
+                txn.isolation_level
+                    .uses_transaction_snapshot()
+                    .then_some((INVALID_TRANSACTION_ID, cid))
+            })
+        })
     }
 
     fn active_advisory_scope_id(&self) -> Option<u64> {
@@ -1787,6 +1935,7 @@ impl Session {
             Statement::Do(_)
                 | Statement::Show(_)
                 | Statement::Set(_)
+                | Statement::SetTransaction(_)
                 | Statement::SetConstraints(_)
                 | Statement::Reset(_)
                 | Statement::Checkpoint(_)
@@ -1804,7 +1953,7 @@ impl Session {
                 | Statement::Fetch(_)
                 | Statement::Move(_)
                 | Statement::ClosePortal(_)
-                | Statement::Begin
+                | Statement::Begin(_)
                 | Statement::Commit
                 | Statement::Rollback
                 | Statement::Savepoint(_)
@@ -1988,6 +2137,10 @@ impl Session {
             self.gucs = gucs;
             self.datetime_config = datetime_config;
         }
+        crate::backend::utils::time::snapmgr::clear_transaction_snapshot_override(
+            db,
+            self.client_id,
+        );
         result
     }
 
@@ -2014,6 +2167,10 @@ impl Session {
             .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
         db.row_locks
             .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
+        crate::backend::utils::time::snapmgr::clear_transaction_snapshot_override(
+            db,
+            self.client_id,
+        );
         if self.auth != txn.auth_at_start {
             self.auth = txn.auth_at_start.clone();
             db.install_auth_state(self.client_id, self.auth.clone());
@@ -2120,7 +2277,7 @@ impl Session {
         if self.active_txn.is_some()
             && !matches!(
                 stmt,
-                Statement::Begin
+                Statement::Begin(_)
                     | Statement::Commit
                     | Statement::Rollback
                     | Statement::Savepoint(_)
@@ -2161,6 +2318,7 @@ impl Session {
             Statement::Do(ref do_stmt) => execute_do_with_gucs(do_stmt, &self.gucs),
             Statement::Show(ref show_stmt) => self.apply_show(db, show_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(db, set_stmt),
+            Statement::SetTransaction(ref set_txn_stmt) => self.apply_set_transaction(set_txn_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(db, reset_stmt),
             Statement::Checkpoint(_) => self.apply_checkpoint(db),
             Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
@@ -2220,6 +2378,24 @@ impl Session {
                     db.execute_create_aggregate_stmt_with_search_path(
                         self.client_id,
                         create_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterAggregateRename(ref rename_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_aggregate_rename_stmt_with_search_path(
+                        self.client_id,
+                        rename_stmt,
                         search_path.as_deref(),
                     )
                 }
@@ -3018,6 +3194,24 @@ impl Session {
                     )
                 }
             }
+            Statement::AlterTableAlterColumnIdentity(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_alter_column_identity_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::AlterTableAddConstraint(ref alter_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -3474,6 +3668,7 @@ impl Session {
                 }
             }
             Statement::AlterTableSet(ref alter_stmt) => self.apply_alter_table_set(db, alter_stmt),
+            Statement::AlterIndexSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CommentOnTable(ref comment_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -3796,14 +3991,15 @@ impl Session {
                 }
                 result.map(|_| StatementResult::AffectedRows(0))
             }
-            Statement::Begin => {
+            Statement::Begin(ref options) => {
                 if self.active_txn.is_some() {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
                         expected: "no active transaction",
                         actual: "already in a transaction block".into(),
                     }));
                 }
-                self.active_txn = Some(self.active_transaction_without_xid(db));
+                self.active_txn =
+                    Some(self.active_transaction_without_xid_with_options(db, options));
                 self.stats_state.write().begin_top_level_xact();
                 Ok(StatementResult::AffectedRows(0))
             }
@@ -4061,9 +4257,27 @@ impl Session {
         let (txn_ctx, transaction_lock_scope_id) = if let Some(ref mut txn) = self.active_txn {
             let cid = txn.next_command_id;
             txn.next_command_id = txn.next_command_id.saturating_add(1);
-            (txn.xid.map(|xid| (xid, cid)), Some(txn.advisory_scope_id))
+            (
+                txn.xid.map(|xid| (xid, cid)).or_else(|| {
+                    txn.isolation_level
+                        .uses_transaction_snapshot()
+                        .then_some((INVALID_TRANSACTION_ID, cid))
+                }),
+                Some(txn.advisory_scope_id),
+            )
         } else {
             (None, None)
+        };
+        let snapshot_override = match txn_ctx {
+            Some((snapshot_xid, snapshot_cid))
+                if self
+                    .active_txn
+                    .as_ref()
+                    .is_some_and(|txn| txn.isolation_level.uses_transaction_snapshot()) =>
+            {
+                Some(self.snapshot_for_command(db, snapshot_xid, snapshot_cid)?)
+            }
+            _ => None,
         };
         let statement_lock_scope_id = txn_ctx
             .is_none()
@@ -4087,6 +4301,7 @@ impl Session {
             transaction_lock_scope_id,
             search_path.as_deref(),
             &datetime_config,
+            snapshot_override,
             self.planner_config(),
         )?;
         guard.interrupt_guard = Some(self.statement_interrupt_guard()?);
@@ -4415,6 +4630,7 @@ impl Session {
             Statement::Do(ref do_stmt) => self.execute_plpgsql_do(db, do_stmt, xid, cid),
             Statement::Show(ref show_stmt) => self.apply_show(db, show_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(db, set_stmt),
+            Statement::SetTransaction(ref set_txn_stmt) => self.apply_set_transaction(set_txn_stmt),
             Statement::SetConstraints(ref set_constraints_stmt) => {
                 let search_path = self.configured_search_path();
                 let catalog = if xid != INVALID_TRANSACTION_ID {
@@ -5175,6 +5391,29 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::AlterTableAlterColumnIdentity(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.table_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_table_alter_column_identity_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                    &mut txn.temp_effects,
+                    &mut txn.sequence_effects,
+                )
+            }
             Statement::AlterTableAddConstraint(ref alter_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relation = catalog
@@ -5594,6 +5833,7 @@ impl Session {
                 )
             }
             Statement::AlterTableSet(ref alter_stmt) => self.apply_alter_table_set(db, alter_stmt),
+            Statement::AlterIndexSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CreateRole(ref create_stmt) => {
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_create_role_stmt_in_transaction(
@@ -6053,9 +6293,9 @@ impl Session {
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::Merge(ref merge_stmt) => {
+                let snapshot = self.snapshot_for_command(db, xid, cid)?;
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = plan_merge(merge_stmt, &catalog)?;
-                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let mut ctx =
                     self.executor_context_for_catalog(db, snapshot, cid, &catalog, None, None);
                 let result = execute_merge(bound, &catalog, &mut ctx, xid, cid);
@@ -6066,11 +6306,10 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn_ctx = self.active_txn_ctx_for_command(cid);
                 let snapshot = match txn_ctx {
-                    Some((xid, cid)) => db.txns.read().snapshot_for_command(xid, cid)?,
-                    None => db
-                        .txns
-                        .read()
-                        .snapshot_for_command(INVALID_TRANSACTION_ID, cid)?,
+                    Some((snapshot_xid, snapshot_cid)) => {
+                        self.snapshot_for_command(db, snapshot_xid, snapshot_cid)?
+                    }
+                    None => self.snapshot_for_command(db, INVALID_TRANSACTION_ID, cid)?,
                 };
                 let catalog = db.lazy_catalog_lookup(client_id, txn_ctx, search_path.as_deref());
                 let deferred_foreign_keys = self
@@ -6105,11 +6344,24 @@ impl Session {
                     && let Some(txn) = self.active_txn.as_mut()
                 {
                     txn.xid = Some(xid);
+                    if txn.isolation_level.uses_transaction_snapshot()
+                        && let Some(mut snapshot) = txn.transaction_snapshot.clone()
+                    {
+                        snapshot.current_xid = xid;
+                        snapshot.current_cid = cid;
+                        crate::backend::utils::time::snapmgr::set_transaction_snapshot_override(
+                            db,
+                            self.client_id,
+                            xid,
+                            snapshot,
+                        );
+                    }
                 }
                 self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
                 result
             }
             Statement::Insert(ref insert_stmt) => {
+                let snapshot = self.snapshot_for_command(db, xid, cid)?;
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = bind_insert(insert_stmt, &catalog)?;
                 let prepared =
@@ -6121,7 +6373,6 @@ impl Session {
                     &prepared.extra_lock_requests,
                 );
                 self.lock_table_requests_if_needed(db, &lock_requests)?;
-                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let deferred_foreign_keys = self
                     .active_txn
                     .as_ref()
@@ -6148,6 +6399,7 @@ impl Session {
                 result
             }
             Statement::Update(ref update_stmt) => {
+                let snapshot = self.snapshot_for_command(db, xid, cid)?;
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = bind_update(update_stmt, &catalog)?;
                 let prepared =
@@ -6159,7 +6411,6 @@ impl Session {
                     &prepared.extra_lock_requests,
                 );
                 self.lock_table_requests_if_needed(db, &lock_requests)?;
-                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let interrupts = self.interrupts();
                 let deferred_foreign_keys = self
                     .active_txn
@@ -6189,6 +6440,7 @@ impl Session {
                 result
             }
             Statement::Delete(ref delete_stmt) => {
+                let snapshot = self.snapshot_for_command(db, xid, cid)?;
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = bind_delete(delete_stmt, &catalog)?;
                 let prepared =
@@ -6200,7 +6452,6 @@ impl Session {
                     &prepared.extra_lock_requests,
                 );
                 self.lock_table_requests_if_needed(db, &lock_requests)?;
-                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let interrupts = self.interrupts();
                 let deferred_foreign_keys = self
                     .active_txn
@@ -6258,6 +6509,18 @@ impl Session {
                 db.execute_create_aggregate_stmt_in_transaction_with_search_path(
                     client_id,
                     create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterAggregateRename(ref rename_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_aggregate_rename_stmt_in_transaction_with_search_path(
+                    client_id,
+                    rename_stmt,
                     xid,
                     cid,
                     search_path.as_deref(),
@@ -6752,7 +7015,7 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
-            Statement::Begin
+            Statement::Begin(_)
             | Statement::Commit
             | Statement::Rollback
             | Statement::Savepoint(_)
@@ -6802,6 +7065,26 @@ impl Session {
             self.reset_guc(&name);
         }
         self.after_guc_change(db, &name);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn apply_set_transaction(
+        &mut self,
+        stmt: &crate::backend::parser::SetTransactionStatement,
+    ) -> Result<StatementResult, ExecError> {
+        match stmt.scope {
+            crate::backend::parser::SetTransactionScope::Transaction => {
+                self.apply_transaction_options(&stmt.options)?;
+            }
+            crate::backend::parser::SetTransactionScope::SessionCharacteristics => {
+                if let Some(level) = stmt.options.isolation_level {
+                    self.gucs.insert(
+                        "default_transaction_isolation".into(),
+                        level.as_str().into(),
+                    );
+                }
+            }
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -6934,6 +7217,18 @@ impl Session {
                 "xmloption".to_string(),
                 format_xmloption(self.datetime_config.xml.option).to_string(),
             ),
+            "transaction_isolation" => (
+                "transaction_isolation".to_string(),
+                self.current_transaction_isolation_level()
+                    .as_str()
+                    .to_string(),
+            ),
+            "default_transaction_isolation" => (
+                "default_transaction_isolation".to_string(),
+                self.default_transaction_isolation_level()
+                    .as_str()
+                    .to_string(),
+            ),
             _ if is_checkpoint_guc(&name) => (
                 stmt.name.clone(),
                 db.checkpoint_config_value(&name)
@@ -7054,6 +7349,21 @@ impl Session {
             }
             "statement_timeout" => {
                 parse_statement_timeout(value)?;
+            }
+            "default_transaction_isolation" => {
+                let level = crate::backend::parser::TransactionIsolationLevel::parse(value)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
+                    })?;
+                stored_value = level.as_str().to_string();
+            }
+            "transaction_isolation" => {
+                let level = crate::backend::parser::TransactionIsolationLevel::parse(value)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
+                    })?;
+                self.set_active_transaction_isolation(level)?;
+                stored_value = level.as_str().to_string();
             }
             "xmlbinary" => {
                 let Some(binary) = parse_xmlbinary(value) else {
@@ -7188,7 +7498,7 @@ impl Session {
                 let lock_requests = prepared_insert_foreign_key_lock_requests(prepared);
                 self.lock_table_requests_if_needed(db, &lock_requests)?;
 
-                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+                let snapshot = self.snapshot_for_command(db, xid, cid)?;
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let interrupts = self.interrupts();
                 let deferred_foreign_keys = self
@@ -7895,7 +8205,7 @@ impl Session {
                         relation_foreign_key_lock_requests(rel, &relation_constraints);
                     self.lock_table_requests_if_needed(db, &lock_requests)?;
 
-                    let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+                    let snapshot = self.snapshot_for_command(db, xid, cid)?;
                     let interrupts = self.interrupts();
                     let deferred_foreign_keys = self
                         .active_txn

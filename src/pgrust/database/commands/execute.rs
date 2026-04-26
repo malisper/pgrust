@@ -541,6 +541,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableAlterColumnIdentity(ref alter_stmt) => self
+                .execute_alter_table_alter_column_identity_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableAddConstraint(ref alter_stmt) => self
                 .execute_alter_table_add_constraint_stmt_with_search_path(
                     client_id,
@@ -634,7 +640,8 @@ impl Database {
             Statement::Show(_)
             | Statement::Set(_)
             | Statement::Reset(_)
-            | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+            | Statement::AlterTableSet(_)
+            | Statement::AlterIndexSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CreateRole(ref create_stmt) => {
                 self.execute_create_role_stmt(client_id, create_stmt, None)
             }
@@ -725,6 +732,12 @@ impl Database {
                 .execute_create_aggregate_stmt_with_search_path(
                     client_id,
                     create_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterAggregateRename(ref rename_stmt) => self
+                .execute_alter_aggregate_rename_stmt_with_search_path(
+                    client_id,
+                    rename_stmt,
                     configured_search_path,
                 ),
             Statement::CreateCast(ref create_stmt) => self
@@ -1039,6 +1052,7 @@ impl Database {
                     Arc::new(parking_lot::Mutex::new(ExecutorTransactionState {
                         xid: None,
                         cid: 0,
+                        transaction_snapshot: None,
                     }));
                 let deferred_foreign_keys =
                     crate::backend::executor::DeferredForeignKeyTracker::default();
@@ -1850,7 +1864,8 @@ impl Database {
                 vacuum_stmt,
                 configured_search_path,
             ),
-            Statement::Begin
+            Statement::SetTransaction(_)
+            | Statement::Begin(_)
             | Statement::Commit
             | Statement::Rollback
             | Statement::Savepoint(_)
@@ -1918,6 +1933,7 @@ impl Database {
             transaction_lock_scope_id,
             configured_search_path,
             datetime_config,
+            None,
             PlannerConfig::default(),
         )
     }
@@ -1931,6 +1947,7 @@ impl Database {
         transaction_lock_scope_id: Option<u64>,
         configured_search_path: Option<&[String]>,
         datetime_config: &DateTimeConfig,
+        snapshot_override: Option<crate::backend::access::transam::xact::Snapshot>,
         planner_config: PlannerConfig,
     ) -> Result<SelectGuard, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
@@ -1955,9 +1972,14 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         lock_relations_interruptible(&self.table_locks, client_id, &rels, interrupts.as_ref())?;
 
-        let (snapshot, command_id) = match txn_ctx {
-            Some((xid, cid)) => (self.txns.read().snapshot_for_command(xid, cid)?, cid),
-            None => (self.txns.read().snapshot(INVALID_TRANSACTION_ID)?, 0),
+        let (snapshot, command_id) = match (snapshot_override, txn_ctx) {
+            (Some(snapshot), Some((_xid, cid))) => (snapshot, cid),
+            (Some(snapshot), None) => {
+                let cid = snapshot.current_cid;
+                (snapshot, cid)
+            }
+            (None, Some((xid, cid))) => (self.txns.read().snapshot_for_command(xid, cid)?, cid),
+            (None, None) => (self.txns.read().snapshot(INVALID_TRANSACTION_ID)?, 0),
         };
         let columns = query_desc.columns();
         let column_names = query_desc.column_names();

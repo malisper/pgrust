@@ -150,6 +150,9 @@ fn convert_any_sublink_to_join(
     if levels_to_parent != 0 || expr_contains_outer_var(&testexpr) {
         return false;
     }
+    if subquery.target_list.len() != 1 {
+        return false;
+    }
 
     let Some(subquery_target) = subquery
         .target_list

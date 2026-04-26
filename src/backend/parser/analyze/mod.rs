@@ -90,6 +90,7 @@ pub use create_table_inherits::*;
 pub(crate) use expr::bind_expr_with_outer_and_ctes;
 use expr::*;
 use functions::*;
+pub(crate) use functions::{ResolvedFunctionCall, resolve_function_call};
 pub(crate) use generated::{
     bind_generated_expr, expr_references_column, generated_relation_output_exprs,
     scope_for_base_relation_with_generated, scope_for_relation_with_generated,
@@ -296,6 +297,104 @@ fn build_sort_clause(
             }
         })
         .collect()
+}
+
+fn order_entry_matches_sort_clause(entry: &OrderByEntry, clause: &SortGroupClause) -> bool {
+    (entry.ressortgroupref != 0 && entry.ressortgroupref == clause.tle_sort_group_ref)
+        || entry.expr == clause.expr
+}
+
+fn sort_group_clause_for_order_entry(
+    entry: OrderByEntry,
+    next_sort_group_ref: &mut usize,
+) -> SortGroupClause {
+    let tle_sort_group_ref = if entry.ressortgroupref != 0 {
+        entry.ressortgroupref
+    } else {
+        let next = *next_sort_group_ref;
+        *next_sort_group_ref += 1;
+        next
+    };
+    SortGroupClause {
+        expr: entry.expr,
+        tle_sort_group_ref,
+        descending: entry.descending,
+        nulls_first: entry.nulls_first,
+        collation_oid: entry.collation_oid,
+    }
+}
+
+fn build_distinct_on_clause(
+    distinct_on: &[SqlExpr],
+    sort_clause: &[SortGroupClause],
+    target_list: &[TargetEntry],
+    catalog: &dyn CatalogLookup,
+    bind_expr: impl Fn(&SqlExpr) -> Result<Expr, ParseError>,
+) -> Result<Vec<SortGroupClause>, ParseError> {
+    if distinct_on.is_empty() {
+        return Ok(Vec::new());
+    }
+    let distinct_items = distinct_on
+        .iter()
+        .cloned()
+        .map(|expr| OrderByItem {
+            expr,
+            descending: false,
+            nulls_first: None,
+            using_operator: None,
+        })
+        .collect::<Vec<_>>();
+    let distinct_inputs = bind_order_by_items(&distinct_items, target_list, catalog, bind_expr)?;
+    let mut result = Vec::new();
+    let mut skipped_sortitem = false;
+
+    for sort_item in sort_clause {
+        if distinct_inputs
+            .iter()
+            .any(|entry| order_entry_matches_sort_clause(entry, sort_item))
+        {
+            if skipped_sortitem {
+                return Err(ParseError::FeatureNotSupportedMessage(
+                    "SELECT DISTINCT ON expressions must match initial ORDER BY expressions".into(),
+                ));
+            }
+            result.push(sort_item.clone());
+        } else {
+            skipped_sortitem = true;
+        }
+    }
+
+    let mut next_sort_group_ref = target_list
+        .iter()
+        .map(|target| target.ressortgroupref.max(target.resno))
+        .chain(sort_clause.iter().map(|clause| clause.tle_sort_group_ref))
+        .max()
+        .unwrap_or(0)
+        + 1;
+
+    for entry in distinct_inputs {
+        if result
+            .iter()
+            .any(|clause| order_entry_matches_sort_clause(&entry, clause))
+        {
+            continue;
+        }
+        if skipped_sortitem {
+            return Err(ParseError::FeatureNotSupportedMessage(
+                "SELECT DISTINCT ON expressions must match initial ORDER BY expressions".into(),
+            ));
+        }
+        if result.iter().any(|clause| {
+            clause.expr == entry.expr || clause.tle_sort_group_ref == entry.ressortgroupref
+        }) {
+            continue;
+        }
+        result.push(sort_group_clause_for_order_entry(
+            entry,
+            &mut next_sort_group_ref,
+        ));
+    }
+    Ok(result)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2690,6 +2789,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             with_recursive: values.with_recursive,
             with: values.with.clone(),
             distinct: false,
+            distinct_on: Vec::new(),
             from: Some(FromItem::Values {
                 rows: values.rows.clone(),
             }),
@@ -2715,6 +2815,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             with_recursive: false,
             with: Vec::new(),
             distinct: false,
+            distinct_on: Vec::new(),
             from: None,
             targets: Vec::new(),
             where_clause: None,
@@ -2809,6 +2910,7 @@ fn bind_ctes(
                             &worktable_plan.output_exprs,
                         ),
                         distinct: false,
+                        distinct_on: Vec::new(),
                         where_qual: None,
                         group_by: Vec::new(),
                         accumulators: Vec::new(),
@@ -2879,6 +2981,7 @@ fn bind_ctes(
                         jointree: recursive_plan.jointree,
                         target_list,
                         distinct: false,
+                        distinct_on: Vec::new(),
                         where_qual: None,
                         group_by: Vec::new(),
                         accumulators: Vec::new(),
@@ -3832,6 +3935,7 @@ pub(crate) fn bound_cte_from_materialized_rows(
             jointree: plan.jointree,
             target_list: identity_target_list(&output_columns, &plan.output_exprs),
             distinct: false,
+            distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
             accumulators: Vec::new(),
@@ -3924,6 +4028,7 @@ fn bind_values_query_with_outer(
             jointree,
             target_list,
             distinct: false,
+            distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
             accumulators: Vec::new(),
@@ -4040,6 +4145,7 @@ fn bind_select_query_with_outer(
             reject_window_clause(predicate, "WHERE")?;
         }
         let lower_distinct_to_grouping = stmt.distinct
+            && stmt.distinct_on.is_empty()
             && stmt.group_by.is_empty()
             && target_aggs.is_empty()
             && stmt.having.is_none()
@@ -4601,6 +4707,26 @@ fn bind_select_query_with_outer(
                     let targets = targets;
                     let sort_inputs = sort_inputs;
                     let sort_clause = build_sort_clause(sort_inputs, &targets);
+                    let distinct_on = build_distinct_on_clause(
+                        &stmt.distinct_on,
+                        &sort_clause,
+                        &targets,
+                        catalog,
+                        |expr| {
+                            bind_agg_output_expr_in_clause(
+                                expr,
+                                UngroupedColumnClause::SelectTarget,
+                                &effective_group_by,
+                                &group_keys,
+                                &scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer.as_ref(),
+                                &aggs,
+                                n_keys,
+                            )
+                        },
+                    )?;
                     let target_list = normalize_target_list(targets);
                     let has_target_srfs = target_list
                         .iter()
@@ -4614,6 +4740,7 @@ fn bind_select_query_with_outer(
                         jointree: base.jointree,
                         target_list,
                         distinct: false,
+                        distinct_on: Vec::new(),
                         where_qual,
                         group_by: rewritten_group_keys,
                         accumulators,
@@ -4628,8 +4755,11 @@ fn bind_select_query_with_outer(
                         recursive_union: None,
                         set_operation: None,
                     };
-                    let query =
-                        apply_select_distinct(query, stmt.distinct && !lower_distinct_to_grouping);
+                    let query = apply_select_distinct(
+                        query,
+                        stmt.distinct && !lower_distinct_to_grouping,
+                        distinct_on,
+                    );
                     Ok((query, scope))
                 });
             } else {
@@ -4662,6 +4792,22 @@ fn bind_select_query_with_outer(
                     }
                 })?;
                 let sort_clause = build_sort_clause(sort_inputs, &targets);
+                let distinct_on = build_distinct_on_clause(
+                    &stmt.distinct_on,
+                    &sort_clause,
+                    &targets,
+                    catalog,
+                    |expr| {
+                        bind_expr_with_outer_and_ctes(
+                            expr,
+                            &scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer.as_ref(),
+                            &visible_ctes,
+                        )
+                    },
+                )?;
                 let window_clauses = take_window_clauses(&window_state);
 
                 let is_identity = targets.len() == base.output_columns.len()
@@ -4687,6 +4833,7 @@ fn bind_select_query_with_outer(
                     jointree: base.jointree,
                     target_list,
                     distinct: false,
+                    distinct_on: Vec::new(),
                     where_qual,
                     group_by: Vec::new(),
                     accumulators: Vec::new(),
@@ -4701,15 +4848,31 @@ fn bind_select_query_with_outer(
                     recursive_union: None,
                     set_operation: None,
                 };
-                let query = apply_select_distinct(query, stmt.distinct);
+                let query = apply_select_distinct(query, stmt.distinct, distinct_on);
                 Ok((query, scope))
             }
         })
     })
 }
 
-fn apply_select_distinct(query: Query, distinct: bool) -> Query {
-    Query { distinct, ..query }
+fn apply_select_distinct(query: Query, distinct: bool, distinct_on: Vec<SortGroupClause>) -> Query {
+    Query {
+        distinct,
+        distinct_on: if distinct { distinct_on } else { Vec::new() },
+        ..query
+    }
+}
+
+fn set_operation_target_is_unknown_string_literal(stmt: &SelectStatement, index: usize) -> bool {
+    if stmt.set_operation.is_some() {
+        return false;
+    }
+    stmt.targets.get(index).is_some_and(|target| {
+        matches!(
+            target.expr,
+            SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+        )
+    })
 }
 
 fn bind_set_operation_query_with_outer(
@@ -4767,14 +4930,24 @@ fn bind_set_operation_query_with_outer(
     let mut output_types = Vec::with_capacity(width);
     for index in 0..width {
         let mut common = None;
-        for query in &inputs {
+        let mut common_is_unknown = false;
+        for (input_stmt, query) in set_operation.inputs.iter().zip(inputs.iter()) {
             let target = &query.target_list[index];
             if matches!(target.expr, Expr::Const(Value::Null)) {
                 continue;
             }
             let next = target.sql_type;
+            let next_is_unknown = set_operation_target_is_unknown_string_literal(input_stmt, index);
             common = Some(match common {
-                None => next,
+                None => {
+                    common_is_unknown = next_is_unknown;
+                    next
+                }
+                Some(_) if next_is_unknown => continue,
+                Some(_) if common_is_unknown => {
+                    common_is_unknown = false;
+                    next
+                }
                 Some(current) => resolve_common_scalar_type(current, next).ok_or_else(|| {
                     ParseError::UnexpectedToken {
                         expected: "set-operation column types with a common type",
@@ -4856,6 +5029,7 @@ fn bind_set_operation_query_with_outer(
             jointree: None,
             target_list,
             distinct: false,
+            distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
             accumulators: Vec::new(),

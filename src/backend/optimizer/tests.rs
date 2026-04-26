@@ -809,6 +809,70 @@ fn catalog_with_indexed_items() -> Catalog {
         .expect("seed test catalog index stats");
     catalog
 }
+
+fn catalog_with_distinct_on_tbl() -> Catalog {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "distinct_on_tbl",
+            RelationDesc {
+                columns: vec![
+                    column_desc("x", int4(), false),
+                    column_desc("y", int4(), false),
+                    column_desc("z", int4(), false),
+                ],
+            },
+        )
+        .expect("create distinct_on_tbl");
+    let index = catalog
+        .create_index(
+            "distinct_on_tbl_x_y_idx",
+            "distinct_on_tbl",
+            false,
+            &["x".into(), "y".into()],
+        )
+        .expect("create distinct_on_tbl index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark distinct_on_tbl index usable");
+    catalog
+        .set_relation_stats(table.relation_oid, 128, 10_000.0)
+        .expect("seed distinct_on_tbl stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 32, 10_000.0)
+        .expect("seed distinct_on_tbl index stats");
+    catalog
+}
+
+fn catalog_with_distinct_on_limit_tbl() -> Catalog {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "limit_tbl",
+            RelationDesc {
+                columns: vec![
+                    column_desc("four", int4(), false),
+                    column_desc("two", int4(), false),
+                    column_desc("hundred", int4(), false),
+                ],
+            },
+        )
+        .expect("create limit_tbl");
+    let index = catalog
+        .create_index("limit_tbl_hundred", "limit_tbl", false, &["hundred".into()])
+        .expect("create limit_tbl index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark limit_tbl index usable");
+    catalog
+        .set_relation_stats(table.relation_oid, 128, 10_000.0)
+        .expect("seed limit_tbl stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 32, 10_000.0)
+        .expect("seed limit_tbl index stats");
+    catalog
+}
+
 fn catalog_with_noncovering_indexed_items() -> Catalog {
     let mut catalog = Catalog::default();
     let table = catalog
@@ -2875,6 +2939,70 @@ fn planner_uses_unique_for_simple_select_distinct() {
     assert!(!plan_contains(&planned.plan_tree, |plan| matches!(
         plan,
         Plan::SetOp { .. }
+    )));
+}
+
+#[test]
+fn planner_uses_index_order_for_distinct_on_reordered_keys() {
+    let catalog = catalog_with_distinct_on_tbl();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select distinct on (y, x) x, y from distinct_on_tbl",
+        &catalog,
+    );
+
+    assert_eq!(
+        count_plan_nodes(&planned.plan_tree, |plan| {
+            matches!(plan, Plan::Unique { key_indices, .. } if key_indices.len() == 2)
+        }),
+        1
+    );
+    assert!(matches!(
+        &planned.plan_tree,
+        Plan::Projection { input, .. }
+            if matches!(
+                input.as_ref(),
+                Plan::Unique { input, .. }
+                    if matches!(
+                        input.as_ref(),
+                        Plan::IndexOnlyScan { index_name, .. }
+                            if index_name == "distinct_on_tbl_x_y_idx"
+                    ) || matches!(
+                        input.as_ref(),
+                        Plan::IndexScan { index_name, .. }
+                            if index_name == "distinct_on_tbl_x_y_idx"
+                    )
+            )
+    ));
+}
+
+#[test]
+fn planner_lowers_constant_distinct_on_key_to_limit() {
+    let catalog = catalog_with_distinct_on_limit_tbl();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select distinct on (four) four, hundred from limit_tbl where four = 0 order by 1, 2",
+        &catalog,
+    );
+
+    assert_eq!(
+        count_plan_nodes(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Limit { .. }
+        )),
+        1
+    );
+    assert_eq!(
+        count_plan_nodes(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Unique { .. }
+        )),
+        0
+    );
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::IndexScan { index_name, .. } if index_name == "limit_tbl_hundred"
+    ) || matches!(
+        plan,
+        Plan::IndexOnlyScan { index_name, .. } if index_name == "limit_tbl_hundred"
     )));
 }
 

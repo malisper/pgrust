@@ -23,10 +23,11 @@ use crate::backend::parser::{
     BoundMergeStatement, BoundMergeWhenClause, BoundModifyRowSource, BoundOnConflictAction,
     BoundReferencedByForeignKey, BoundRelation, BoundRelationConstraints, BoundTemporalConstraint,
     BoundUpdateStatement, BoundUpdateTarget, Catalog, CatalogLookup, DropTableStatement,
-    ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement, ParseError,
-    SelectStatement, SqlType, SqlTypeKind, Statement, TruncateTableStatement, UpdateStatement,
-    VacuumStatement, bind_create_table, bind_generated_expr, bind_referenced_by_foreign_keys,
-    bind_relation_constraints, bind_scalar_expr_in_scope, bind_update,
+    ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement, OverridingKind,
+    ParseError, SelectStatement, SqlType, SqlTypeKind, Statement, TruncateTableStatement,
+    UpdateStatement, VacuumStatement, bind_create_table, bind_generated_expr,
+    bind_referenced_by_foreign_keys, bind_relation_constraints, bind_scalar_expr_in_scope,
+    bind_update,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -739,6 +740,24 @@ pub(crate) enum WriteUpdatedRowResult {
     AlreadyModified,
 }
 
+fn serialization_failure_due_to_concurrent_update() -> ExecError {
+    ExecError::DetailedError {
+        message: "could not serialize access due to concurrent update".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "40001",
+    }
+}
+
+fn serialization_failure_due_to_concurrent_delete() -> ExecError {
+    ExecError::DetailedError {
+        message: "could not serialize access due to concurrent delete".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "40001",
+    }
+}
+
 pub(crate) fn build_index_insert_context(
     heap_rel: crate::backend::storage::smgr::RelFileLocator,
     _heap_desc: &RelationDesc,
@@ -768,6 +787,7 @@ pub(crate) fn build_index_insert_context(
         default_toast_compression: ctx.default_toast_compression,
         values: key_values,
         heap_tid,
+        old_heap_tid: None,
         unique_check: if index.index_meta.indisunique {
             if index.constraint_oid.is_some() && index.constraint_deferrable {
                 IndexUniqueCheck::Partial
@@ -823,25 +843,29 @@ pub(crate) fn insert_index_key_values(
     index: &BoundIndexRelation,
     key_values: Vec<Value>,
     heap_tid: ItemPointerData,
+    old_heap_tid: Option<ItemPointerData>,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
-    let insert_ctx =
+    let mut insert_ctx =
         build_index_insert_context(heap_rel, heap_desc, index, key_values, heap_tid, ctx);
+    insert_ctx.old_heap_tid = old_heap_tid;
     indexam::index_insert_stub(&insert_ctx, index.index_meta.am_oid).map_err(|err| match err {
         crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
             let key_count = usize::try_from(insert_ctx.index_meta.indnkeyatts.max(0))
                 .unwrap_or_default()
                 .min(insert_ctx.index_desc.columns.len())
                 .min(insert_ctx.values.len());
-            ExecError::UniqueViolation {
-                constraint,
-                detail: Some(
-                    crate::backend::executor::value_io::format_unique_key_detail(
-                        &insert_ctx.index_desc.columns[..key_count],
-                        &insert_ctx.values[..key_count],
-                    ),
-                ),
-            }
+            let detail = crate::backend::executor::relation_values_visible_for_error_detail(
+                insert_ctx.index_meta.indrelid,
+                ctx,
+            )
+            .then(|| {
+                crate::backend::executor::value_io::format_unique_key_detail(
+                    &insert_ctx.index_desc.columns[..key_count],
+                    &insert_ctx.values[..key_count],
+                )
+            });
+            ExecError::UniqueViolation { constraint, detail }
         }
         other => map_index_insert_error(other),
     })?;
@@ -874,6 +898,7 @@ pub(crate) fn insert_index_entry_for_row(
     index: &BoundIndexRelation,
     values: &[Value],
     heap_tid: ItemPointerData,
+    old_heap_tid: Option<ItemPointerData>,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     if !row_matches_index_predicate(
@@ -886,7 +911,55 @@ pub(crate) fn insert_index_entry_for_row(
         return Ok(());
     }
     let key_values = index_key_values_for_row(index, heap_desc, values, ctx)?;
-    insert_index_key_values(heap_rel, heap_desc, index, key_values, heap_tid, ctx)
+    insert_index_key_values(
+        heap_rel,
+        heap_desc,
+        index,
+        key_values,
+        heap_tid,
+        old_heap_tid,
+        ctx,
+    )
+}
+
+fn maintain_indexes_for_row_with_old_tid(
+    heap_rel: crate::backend::storage::smgr::RelFileLocator,
+    heap_desc: &RelationDesc,
+    indexes: &[BoundIndexRelation],
+    values: &[Value],
+    heap_tid: ItemPointerData,
+    old_heap_tid: Option<ItemPointerData>,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
+        for index in indexes.iter().filter(|index| {
+            index.index_meta.indisvalid
+                && index.index_meta.indisready
+                && !index.index_meta.indisexclusion
+        }) {
+            let new_matches = row_matches_index_predicate(
+                index,
+                values,
+                Some(heap_tid),
+                index.index_meta.indrelid,
+                ctx,
+            )?;
+            if !new_matches {
+                continue;
+            }
+            let key_values = index_key_values_for_row(index, heap_desc, values, ctx)?;
+            insert_index_key_values(
+                heap_rel,
+                heap_desc,
+                index,
+                key_values,
+                heap_tid,
+                old_heap_tid,
+                ctx,
+            )?;
+        }
+        Ok(())
+    })
 }
 
 pub(crate) fn maintain_indexes_for_row(
@@ -897,16 +970,7 @@ pub(crate) fn maintain_indexes_for_row(
     heap_tid: ItemPointerData,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
-    stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
-        for index in indexes.iter().filter(|index| {
-            index.index_meta.indisvalid
-                && index.index_meta.indisready
-                && !index.index_meta.indisexclusion
-        }) {
-            insert_index_entry_for_row(heap_rel, heap_desc, index, values, heap_tid, ctx)?;
-        }
-        Ok(())
-    })
+    maintain_indexes_for_row_with_old_tid(heap_rel, heap_desc, indexes, values, heap_tid, None, ctx)
 }
 fn map_index_insert_error(err: crate::backend::catalog::CatalogError) -> ExecError {
     match err {
@@ -1256,16 +1320,30 @@ pub(crate) fn write_updated_row(
             if let (Some(toast), Some(old_tuple)) = (toast, old_tuple.as_ref()) {
                 delete_external_from_tuple(ctx, toast, desc, old_tuple, xid)?;
             }
-            maintain_indexes_for_row(rel, desc, indexes, &current_values, new_tid, ctx)?;
+            maintain_indexes_for_row_with_old_tid(
+                rel,
+                desc,
+                indexes,
+                &current_values,
+                new_tid,
+                Some(current_tid),
+                ctx,
+            )?;
             validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
             Ok(WriteUpdatedRowResult::Updated(new_tid))
         }
         Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
             cleanup_toast_attempt(toast, &toasted, ctx, xid)?;
+            if ctx.uses_transaction_snapshot() {
+                return Err(serialization_failure_due_to_concurrent_update());
+            }
             Ok(WriteUpdatedRowResult::TupleUpdated(new_ctid))
         }
         Err(HeapError::TupleAlreadyModified(_)) => {
             cleanup_toast_attempt(toast, &toasted, ctx, xid)?;
+            if ctx.uses_transaction_snapshot() {
+                return Err(serialization_failure_due_to_concurrent_update());
+            }
             Ok(WriteUpdatedRowResult::AlreadyModified)
         }
         Err(err) => {
@@ -3428,12 +3506,13 @@ fn execute_merge_update_row(
             if let Some(toast) = stmt.toast {
                 delete_external_from_tuple(ctx, toast, &stmt.desc, &old_tuple, xid)?;
             }
-            maintain_indexes_for_row(
+            maintain_indexes_for_row_with_old_tid(
                 stmt.rel,
                 &stmt.desc,
                 &stmt.indexes,
                 &updated_values,
                 new_tid,
+                Some(target_tid),
                 ctx,
             )?;
             validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
@@ -3442,8 +3521,18 @@ fn execute_merge_update_row(
                 .note_relation_update(stmt.relation_oid);
             Ok(true)
         }
-        Err(HeapError::TupleUpdated(_, _)) | Err(HeapError::TupleAlreadyModified(_)) => {
+        Err(HeapError::TupleUpdated(_, _)) => {
             cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
+            if ctx.uses_transaction_snapshot() {
+                return Err(serialization_failure_due_to_concurrent_update());
+            }
+            Ok(false)
+        }
+        Err(HeapError::TupleAlreadyModified(_)) => {
+            cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
+            if ctx.uses_transaction_snapshot() {
+                return Err(serialization_failure_due_to_concurrent_delete());
+            }
             Ok(false)
         }
         Err(err) => {
@@ -3493,7 +3582,18 @@ fn execute_merge_delete_row(
                 .note_relation_delete(stmt.relation_oid);
             Ok(true)
         }
-        Err(HeapError::TupleUpdated(_, _)) | Err(HeapError::TupleAlreadyModified(_)) => Ok(false),
+        Err(HeapError::TupleUpdated(_, _)) => {
+            if ctx.uses_transaction_snapshot() {
+                return Err(serialization_failure_due_to_concurrent_update());
+            }
+            Ok(false)
+        }
+        Err(HeapError::TupleAlreadyModified(_)) => {
+            if ctx.uses_transaction_snapshot() {
+                return Err(serialization_failure_due_to_concurrent_delete());
+            }
+            Ok(false)
+        }
         Err(err) => Err(err.into()),
     }
 }
@@ -3643,6 +3743,24 @@ fn eval_implicit_insert_defaults(
     Ok((slot, values))
 }
 
+fn apply_overriding_user_identity_defaults(
+    stmt: &BoundInsertStatement,
+    values: &mut [Value],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    if !matches!(stmt.overriding, Some(OverridingKind::User)) {
+        return Ok(());
+    }
+    let mut slot = TupleSlot::virtual_row(values.to_vec());
+    for target in &stmt.target_columns {
+        if stmt.desc.columns[target.column_index].identity.is_some() {
+            values[target.column_index] =
+                eval_expr(&stmt.column_defaults[target.column_index], &mut slot, ctx)?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn materialize_insert_rows(
     stmt: &BoundInsertStatement,
     catalog: &dyn CatalogLookup,
@@ -3705,6 +3823,7 @@ pub(crate) fn materialize_insert_rows(
                     for (target, value) in stmt.target_columns.iter().zip(row_values.into_iter()) {
                         apply_assignment_target(&stmt.desc, &mut values, target, value, slot, ctx)?;
                     }
+                    apply_overriding_user_identity_defaults(stmt, &mut values, ctx)?;
                     rows.push(values);
                 }
                 ctx.subplans = saved_subplans;
@@ -5846,9 +5965,15 @@ pub fn execute_delete_with_waiter(
                             break;
                         }
                         Err(HeapError::TupleAlreadyModified(_)) => {
+                            if ctx.uses_transaction_snapshot() {
+                                return Err(serialization_failure_due_to_concurrent_delete());
+                            }
                             break;
                         }
                         Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
+                            if ctx.uses_transaction_snapshot() {
+                                return Err(serialization_failure_due_to_concurrent_update());
+                            }
                             let new_tuple =
                                 heap_fetch(&*ctx.pool, ctx.client_id, target.rel, new_ctid)?;
                             let mut new_slot = TupleSlot::from_heap_tuple(
@@ -6145,12 +6270,13 @@ pub(crate) fn apply_base_update_row(
                 if let Some(toast) = target.toast {
                     delete_external_from_tuple(ctx, toast, &target.desc, &old_tuple, xid)?;
                 }
-                maintain_indexes_for_row(
+                maintain_indexes_for_row_with_old_tid(
                     target.rel,
                     &target.desc,
                     &target.indexes,
                     &current_values,
                     new_tid,
+                    Some(current_tid),
                     ctx,
                 )?;
                 validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
@@ -6158,6 +6284,9 @@ pub(crate) fn apply_base_update_row(
             }
             Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
                 cleanup_toast_attempt(target.toast, &toasted, ctx, xid)?;
+                if ctx.uses_transaction_snapshot() {
+                    return Err(serialization_failure_due_to_concurrent_update());
+                }
                 let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, new_ctid)?;
                 let mut new_slot = TupleSlot::from_heap_tuple(
                     Rc::clone(&desc),
@@ -6198,6 +6327,9 @@ pub(crate) fn apply_base_update_row(
             }
             Err(HeapError::TupleAlreadyModified(_)) => {
                 cleanup_toast_attempt(target.toast, &toasted, ctx, xid)?;
+                if ctx.uses_transaction_snapshot() {
+                    return Err(serialization_failure_due_to_concurrent_delete());
+                }
                 return Ok(false);
             }
             Err(err) => {
@@ -6302,8 +6434,16 @@ pub(crate) fn apply_base_delete_row(
                 validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
                 return Ok(true);
             }
-            Err(HeapError::TupleAlreadyModified(_)) => return Ok(false),
+            Err(HeapError::TupleAlreadyModified(_)) => {
+                if ctx.uses_transaction_snapshot() {
+                    return Err(serialization_failure_due_to_concurrent_delete());
+                }
+                return Ok(false);
+            }
             Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
+                if ctx.uses_transaction_snapshot() {
+                    return Err(serialization_failure_due_to_concurrent_update());
+                }
                 let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, new_ctid)?;
                 let mut new_slot = TupleSlot::from_heap_tuple(
                     Rc::clone(&desc),

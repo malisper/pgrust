@@ -28,6 +28,7 @@ pub struct BoundInsertStatement {
     pub indexes: Vec<BoundIndexRelation>,
     pub column_defaults: Vec<Expr>,
     pub target_columns: Vec<BoundAssignmentTarget>,
+    pub overriding: Option<OverridingKind>,
     pub source: BoundInsertSource,
     pub on_conflict: Option<BoundOnConflictClause>,
     pub returning: Vec<TargetEntry>,
@@ -403,6 +404,11 @@ fn bind_merge_when_clause(
                         &target,
                         Some(&assignment.expr),
                     )?;
+                    ensure_identity_update_assignment_allowed(
+                        target_desc,
+                        &target,
+                        &assignment.expr,
+                    )?;
                     Ok(BoundAssignment {
                         column_index,
                         subscripts: target.subscripts,
@@ -466,6 +472,40 @@ fn bind_merge_when_clause(
                                     target,
                                     Some(expr),
                                 )?;
+                                let normalized = normalize_identity_insert_expr(
+                                    target_desc,
+                                    target,
+                                    expr,
+                                    None,
+                                )?;
+                                if matches!(normalized, NormalizedInsertExpr::Default) {
+                                    return Ok(target_desc.columns[target.column_index]
+                                        .default_sequence_oid
+                                        .map(|sequence_oid| {
+                                            let expr = Expr::builtin_func(
+                                                BuiltinScalarFunction::NextVal,
+                                                Some(SqlType::new(SqlTypeKind::Int8)),
+                                                false,
+                                                vec![Expr::Const(Value::Int64(i64::from(
+                                                    sequence_oid,
+                                                )))],
+                                            );
+                                            if target_desc.columns[target.column_index]
+                                                .sql_type
+                                                .kind
+                                                == SqlTypeKind::Int8
+                                            {
+                                                expr
+                                            } else {
+                                                Expr::Cast(
+                                                    Box::new(expr),
+                                                    target_desc.columns[target.column_index]
+                                                        .sql_type,
+                                                )
+                                            }
+                                        })
+                                        .unwrap_or(Expr::Const(Value::Null)));
+                                }
                                 if matches!(expr, SqlExpr::Default)
                                     && target_desc.columns[target.column_index].generated.is_some()
                                 {
@@ -687,6 +727,7 @@ fn query_from_projection_with_qual(input: AnalyzedFrom, where_qual: Option<Expr>
         jointree,
         target_list: normalize_target_list(identity_target_list(&output_columns, &output_exprs)),
         distinct: false,
+        distinct_on: Vec::new(),
         where_qual,
         group_by: Vec::new(),
         accumulators: Vec::new(),
@@ -1289,6 +1330,7 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         column_defaults: bind_insert_column_defaults(&resolved.base_relation.desc, catalog, &[])
             .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?,
         target_columns,
+        overriding: stmt.overriding,
         source: stmt.source,
         on_conflict: None,
         returning: rewrite_auto_view_returning_targets(
@@ -1647,6 +1689,97 @@ pub(super) fn ensure_generated_assignment_allowed(
     Ok(())
 }
 
+enum NormalizedInsertExpr<'a> {
+    Default,
+    Expr(&'a SqlExpr),
+}
+
+fn identity_insert_error(column_name: &str) -> ParseError {
+    ParseError::DetailedError {
+        message: format!("cannot insert a non-DEFAULT value into column \"{column_name}\""),
+        detail: Some(format!(
+            "Column \"{column_name}\" is an identity column defined as GENERATED ALWAYS."
+        )),
+        hint: Some("Use OVERRIDING SYSTEM VALUE to override.".into()),
+        sqlstate: "428C9",
+    }
+}
+
+fn identity_update_error(column_name: &str) -> ParseError {
+    ParseError::DetailedError {
+        message: format!("column \"{column_name}\" can only be updated to DEFAULT"),
+        detail: Some(format!(
+            "Column \"{column_name}\" is an identity column defined as GENERATED ALWAYS."
+        )),
+        hint: None,
+        sqlstate: "428C9",
+    }
+}
+
+fn normalize_identity_insert_expr<'a>(
+    desc: &RelationDesc,
+    target: &BoundAssignmentTarget,
+    expr: &'a SqlExpr,
+    overriding: Option<OverridingKind>,
+) -> Result<NormalizedInsertExpr<'a>, ParseError> {
+    let Some(column) = desc.columns.get(target.column_index) else {
+        return Ok(NormalizedInsertExpr::Expr(expr));
+    };
+    let Some(identity) = column.identity else {
+        return Ok(NormalizedInsertExpr::Expr(expr));
+    };
+    if !target.subscripts.is_empty() || !target.field_path.is_empty() {
+        return Err(identity_insert_error(&column.name));
+    }
+    if matches!(expr, SqlExpr::Default) || matches!(overriding, Some(OverridingKind::User)) {
+        return Ok(NormalizedInsertExpr::Default);
+    }
+    if identity == ColumnIdentityKind::Always && !matches!(overriding, Some(OverridingKind::System))
+    {
+        return Err(identity_insert_error(&column.name));
+    }
+    Ok(NormalizedInsertExpr::Expr(expr))
+}
+
+fn ensure_identity_select_insert_allowed(
+    desc: &RelationDesc,
+    target: &BoundAssignmentTarget,
+    overriding: Option<OverridingKind>,
+) -> Result<(), ParseError> {
+    let Some(column) = desc.columns.get(target.column_index) else {
+        return Ok(());
+    };
+    if column.identity == Some(ColumnIdentityKind::Always)
+        && !matches!(
+            overriding,
+            Some(OverridingKind::System | OverridingKind::User)
+        )
+    {
+        return Err(identity_insert_error(&column.name));
+    }
+    Ok(())
+}
+
+fn ensure_identity_update_assignment_allowed(
+    desc: &RelationDesc,
+    target: &BoundAssignmentTarget,
+    expr: &SqlExpr,
+) -> Result<(), ParseError> {
+    let Some(column) = desc.columns.get(target.column_index) else {
+        return Ok(());
+    };
+    if column.identity != Some(ColumnIdentityKind::Always) {
+        return Ok(());
+    }
+    if !target.subscripts.is_empty()
+        || !target.field_path.is_empty()
+        || !matches!(expr, SqlExpr::Default)
+    {
+        return Err(identity_update_error(&column.name));
+    }
+    Ok(())
+}
+
 pub fn bind_insert_prepared(
     table_name: &str,
     columns: Option<&[String]>,
@@ -1678,6 +1811,16 @@ pub fn bind_insert_prepared(
                     Some(&SqlExpr::Const(Value::Null)),
                 )?;
             }
+            ensure_identity_select_insert_allowed(
+                &entry.desc,
+                &BoundAssignmentTarget {
+                    column_index: *column_index,
+                    subscripts: Vec::new(),
+                    field_path: Vec::new(),
+                    target_sql_type: entry.desc.columns[*column_index].sql_type,
+                },
+                None,
+            )?;
         }
         target_columns
     } else {
@@ -1704,6 +1847,16 @@ pub fn bind_insert_prepared(
                 Some(&SqlExpr::Const(Value::Null)),
             )?;
         }
+        ensure_identity_select_insert_allowed(
+            &entry.desc,
+            &BoundAssignmentTarget {
+                column_index: *column_index,
+                subscripts: Vec::new(),
+                field_path: Vec::new(),
+                target_sql_type: entry.desc.columns[*column_index].sql_type,
+            },
+            None,
+        )?;
     }
 
     if target_columns.len() != num_params {
@@ -1826,11 +1979,19 @@ pub(crate) fn bind_insert_with_outer_scopes(
                         .zip(target_columns.iter())
                         .map(|(expr, target)| {
                             ensure_generated_assignment_allowed(&entry.desc, target, Some(expr))?;
-                            match expr {
-                                SqlExpr::Default => {
+                            if matches!(expr, SqlExpr::Default) {
+                                return Ok(column_defaults[target.column_index].clone());
+                            }
+                            match normalize_identity_insert_expr(
+                                &entry.desc,
+                                target,
+                                expr,
+                                stmt.overriding,
+                            )? {
+                                NormalizedInsertExpr::Default => {
                                     Ok(column_defaults[target.column_index].clone())
                                 }
-                                _ => bind_expr_with_outer_and_ctes(
+                                NormalizedInsertExpr::Expr(expr) => bind_expr_with_outer_and_ctes(
                                     expr,
                                     &expr_scope,
                                     catalog,
@@ -1898,6 +2059,7 @@ pub(crate) fn bind_insert_with_outer_scopes(
                         Some(&SqlExpr::Const(Value::Null)),
                     )?;
                 }
+                ensure_identity_select_insert_allowed(&entry.desc, target, stmt.overriding)?;
             }
             for (target_entry, target_column) in
                 query.target_list.iter_mut().zip(target_columns.iter())
@@ -1934,6 +2096,7 @@ pub(crate) fn bind_insert_with_outer_scopes(
         indexes: catalog.index_relations_for_heap(entry.relation_oid),
         column_defaults,
         target_columns,
+        overriding: stmt.overriding,
         source,
         referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
             entry.relation_oid,
@@ -2063,6 +2226,7 @@ fn bind_simple_update(
                 )?,
             };
             ensure_generated_assignment_allowed(&entry.desc, &target, Some(&assignment.expr))?;
+            ensure_identity_update_assignment_allowed(&entry.desc, &target, &assignment.expr)?;
             Ok(BoundAssignment {
                 column_index,
                 subscripts: target.subscripts,
@@ -2221,6 +2385,7 @@ fn bind_update_from(
                 )?,
             };
             ensure_generated_assignment_allowed(&entry.desc, &target, Some(&assignment.expr))?;
+            ensure_identity_update_assignment_allowed(&entry.desc, &target, &assignment.expr)?;
             Ok(BoundAssignment {
                 column_index,
                 subscripts: target.subscripts,

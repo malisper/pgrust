@@ -216,9 +216,12 @@ pub(crate) fn compare_values(
         (Value::Int16(l), Value::Int16(r)) => Ok(Value::Bool(l == r)),
         (Value::Int16(l), Value::Int32(r)) => Ok(Value::Bool((*l as i32) == *r)),
         (Value::Int16(l), Value::Int64(r)) => Ok(Value::Bool((*l as i64) == *r)),
+        (Value::Int16(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(f64::from(*l), *r))),
         (Value::Int32(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i32))),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(l == r)),
         (Value::EnumOid(l), Value::EnumOid(r)) => Ok(Value::Bool(l == r)),
+        (Value::Int32(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(f64::from(*l), *r))),
+        (Value::Int64(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(*l as f64, *r))),
         (Value::InternalChar(l), Value::InternalChar(r)) => Ok(Value::Bool(l == r)),
         (Value::InternalChar(l), r) if r.as_text().is_some() => Ok(Value::Bool(
             render_internal_char_text(*l) == r.as_text().unwrap(),
@@ -248,6 +251,9 @@ pub(crate) fn compare_values(
         (Value::MacAddr(l), Value::MacAddr(r)) => Ok(Value::Bool(l == r)),
         (Value::MacAddr8(l), Value::MacAddr8(r)) => Ok(Value::Bool(l == r)),
         (Value::Bit(l), Value::Bit(r)) => Ok(Value::Bool(l == r)),
+        (Value::Float64(l), Value::Int16(r)) => Ok(Value::Bool(pg_float_eq(*l, f64::from(*r)))),
+        (Value::Float64(l), Value::Int32(r)) => Ok(Value::Bool(pg_float_eq(*l, f64::from(*r)))),
+        (Value::Float64(l), Value::Int64(r)) => Ok(Value::Bool(pg_float_eq(*l, *r as f64))),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(*l, *r))),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             Ok(Value::Bool(
@@ -1424,13 +1430,28 @@ pub(crate) fn order_values(
         (Value::Int16(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Int16(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l as i32, *r, op))),
         (Value::Int16(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l as i64, *r, op))),
+        (Value::Int16(l), Value::Float64(r)) => Ok(Value::Bool(compare_ord(
+            pg_float_cmp(f64::from(*l), *r),
+            Ordering::Equal,
+            op,
+        ))),
         (Value::Int32(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r as i32, op))),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::EnumOid(l), Value::EnumOid(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Int32(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l as i64, *r, op))),
+        (Value::Int32(l), Value::Float64(r)) => Ok(Value::Bool(compare_ord(
+            pg_float_cmp(f64::from(*l), *r),
+            Ordering::Equal,
+            op,
+        ))),
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::Int64(l), Value::Float64(r)) => Ok(Value::Bool(compare_ord(
+            pg_float_cmp(*l as f64, *r),
+            Ordering::Equal,
+            op,
+        ))),
         (Value::Xid8(l), Value::Xid8(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::PgLsn(l), Value::PgLsn(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Money(l), Value::Money(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
@@ -1461,6 +1482,21 @@ pub(crate) fn order_values(
         }
         (Value::MacAddr(l), Value::MacAddr(r)) => Ok(Value::Bool(compare_ord(l, r, op))),
         (Value::MacAddr8(l), Value::MacAddr8(r)) => Ok(Value::Bool(compare_ord(l, r, op))),
+        (Value::Float64(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(
+            pg_float_cmp(*l, f64::from(*r)),
+            Ordering::Equal,
+            op,
+        ))),
+        (Value::Float64(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(
+            pg_float_cmp(*l, f64::from(*r)),
+            Ordering::Equal,
+            op,
+        ))),
+        (Value::Float64(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(
+            pg_float_cmp(*l, *r as f64),
+            Ordering::Equal,
+            op,
+        ))),
         (Value::Date(l), Value::Date(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Time(l), Value::Time(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::TimeTz(l), Value::TimeTz(r)) => Ok(Value::Bool(compare_ord(

@@ -1371,19 +1371,19 @@ impl CatalogStore {
             BootstrapCatalogKind::PgAggregate,
             BootstrapCatalogKind::PgDepend,
         ];
+        let aggregate_row = PgAggregateRow {
+            aggfnoid: proc_row.oid,
+            ..aggregate_row
+        };
         let rows = PhysicalCatalogRows {
             procs: vec![proc_row.clone()],
-            aggregates: vec![PgAggregateRow {
-                aggfnoid: proc_row.oid,
-                ..aggregate_row
-            }],
+            aggregates: vec![aggregate_row.clone()],
             depends: aggregate_depend_rows(
                 proc_row.oid,
                 proc_row.pronamespace,
                 proc_row.prorettype,
                 &arg_type_oids,
-                aggregate_row.aggtransfn,
-                aggregate_row.aggfinalfn,
+                &aggregate_row,
             ),
             ..PhysicalCatalogRows::default()
         };
@@ -1411,8 +1411,7 @@ impl CatalogStore {
                 old_proc_row.pronamespace,
                 old_proc_row.prorettype,
                 &old_arg_type_oids,
-                old_aggregate_row.aggtransfn,
-                old_aggregate_row.aggfinalfn,
+                old_aggregate_row,
             ),
             ..PhysicalCatalogRows::default()
         };
@@ -1425,19 +1424,19 @@ impl CatalogStore {
 
         proc_row.oid = old_proc_row.oid;
         let arg_type_oids = parse_proc_argtype_oids(&proc_row.proargtypes);
+        let aggregate_row = PgAggregateRow {
+            aggfnoid: proc_row.oid,
+            ..aggregate_row
+        };
         let new_rows = PhysicalCatalogRows {
             procs: vec![proc_row.clone()],
-            aggregates: vec![PgAggregateRow {
-                aggfnoid: proc_row.oid,
-                ..aggregate_row
-            }],
+            aggregates: vec![aggregate_row.clone()],
             depends: aggregate_depend_rows(
                 proc_row.oid,
                 proc_row.pronamespace,
                 proc_row.prorettype,
                 &arg_type_oids,
-                aggregate_row.aggtransfn,
-                aggregate_row.aggfinalfn,
+                &aggregate_row,
             ),
             ..PhysicalCatalogRows::default()
         };
@@ -1482,8 +1481,7 @@ impl CatalogStore {
                             proc_row.pronamespace,
                             proc_row.prorettype,
                             &referenced_type_oids,
-                            agg.aggtransfn,
-                            agg.aggfinalfn,
+                            agg,
                         )
                     })
                     .unwrap_or_else(|| {
@@ -5279,6 +5277,52 @@ impl CatalogStore {
                 column.default_expr = default_expr;
                 column.default_sequence_oid = None;
                 column.generated = generated;
+                if column.default_expr.is_some() {
+                    if column.attrdef_oid.is_none() {
+                        column.attrdef_oid = Some(control.next_oid);
+                        control.next_oid = control.next_oid.saturating_add(1);
+                    }
+                } else {
+                    column.attrdef_oid = None;
+                    column.missing_default_value = None;
+                }
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgAttribute,
+                        BootstrapCatalogKind::PgDepend,
+                        BootstrapCatalogKind::PgAttrdef,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
+    pub fn alter_table_set_column_identity_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        identity: Option<crate::include::nodes::parsenodes::ColumnIdentityKind>,
+        default_expr: Option<String>,
+        default_sequence_oid: Option<u32>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, control| {
+                if !matches!(entry.relkind, 'r' | 'p') {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                let column_index = relation_column_index_visible(&entry.desc, column_name)?;
+                let column = &mut entry.desc.columns[column_index];
+                column.identity = identity;
+                column.generated = None;
+                column.default_expr = default_expr;
+                column.default_sequence_oid = default_sequence_oid;
                 if column.default_expr.is_some() {
                     if column.attrdef_oid.is_none() {
                         column.attrdef_oid = Some(control.next_oid);

@@ -231,7 +231,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation = lookup_heap_relation_for_ddl(&catalog, &stmt.table_name)?;
-        ensure_relation_owner(self, client_id, &relation, &stmt.table_name)?;
+        ensure_drop_policy_relation_owner(self, client_id, &relation, &stmt.table_name)?;
         let Some(_existing) = catalog
             .policy_rows_for_relation(relation.relation_oid)
             .into_iter()
@@ -300,6 +300,30 @@ fn resolve_policy_roles(
                 })
         })
         .collect()
+}
+
+fn ensure_drop_policy_relation_owner(
+    db: &Database,
+    client_id: ClientId,
+    relation: &crate::backend::parser::BoundRelation,
+    display_name: &str,
+) -> Result<(), ExecError> {
+    let auth = db.auth_state(client_id);
+    let auth_catalog = db.auth_catalog(client_id, None).map_err(|err| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "authorization catalog",
+            actual: format!("{err:?}"),
+        })
+    })?;
+    if auth.has_effective_membership(relation.owner_oid, &auth_catalog) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("must be owner of relation {display_name}"),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
 }
 
 fn validate_policy_stmt(
