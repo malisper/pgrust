@@ -13,16 +13,17 @@ use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec,
     AlterColumnExpressionAction, AlterTableTriggerMode, AlterTableTriggerStateStatement,
     AlterTableTriggerTarget, AlterTriggerRenameStatement, ColumnConstraint, ColumnGeneratedKind,
-    CommentOnAggregateStatement, CommentOnFunctionStatement, CommentOnViewStatement,
-    CompositeTypeAttributeDef, CreateAggregateStatement, CreateBaseTypeOption,
-    CreateBaseTypeStatement, CreateCompositeTypeStatement, CreateShellTypeStatement,
-    CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement, DropTriggerStatement,
-    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef,
-    InsertSource, InsertStatement, JoinTreeNode, PartitionStrategy, PublicationObjectSpec,
-    PublicationOption, PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec,
-    RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
-    SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec,
-    TriggerLevel, TriggerReferencingSpec, TriggerTiming, ViewCheckOption,
+    CommentOnAggregateStatement, CommentOnFunctionStatement, CommentOnOperatorStatement,
+    CommentOnViewStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
+    CreateBaseTypeOption, CreateBaseTypeStatement, CreateCompositeTypeStatement,
+    CreateShellTypeStatement, CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement,
+    DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType,
+    GrantObjectPrivilege, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
+    PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
+    RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
+    RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint,
+    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerReferencingSpec, TriggerTiming,
+    ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -2148,6 +2149,37 @@ fn parse_comment_on_function_null_statement() {
 }
 
 #[test]
+fn parse_comment_on_operator_statement() {
+    let stmt =
+        parse_statement("comment on operator public.@#@ (none, int8) is 'prefix op'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnOperator(CommentOnOperatorStatement {
+            schema_name: Some("public".into()),
+            operator_name: "@#@".into(),
+            left_arg: None,
+            right_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int8))),
+            comment: Some("prefix op".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_comment_on_operator_null_statement() {
+    let stmt = parse_statement("comment on operator ## (path, path) is null").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnOperator(CommentOnOperatorStatement {
+            schema_name: None,
+            operator_name: "##".into(),
+            left_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Path))),
+            right_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Path))),
+            comment: None,
+        })
+    );
+}
+
+#[test]
 fn parse_comment_on_constraint_statement() {
     let stmt =
         parse_statement("comment on constraint items_pkey on public.items is 'hello'").unwrap();
@@ -3836,6 +3868,34 @@ fn parse_grant_all_on_multiple_schemas_statement() {
 }
 
 #[test]
+fn parse_grant_usage_on_schema_statement() {
+    let stmt = parse_statement("grant usage on schema public to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnSchema,
+            object_names: vec!["public".into()],
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_usage_on_type_statement() {
+    let stmt = parse_statement("grant usage on type custom_t to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnType,
+            object_names: vec!["custom_t".into()],
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
 fn parse_grant_select_on_table_statement() {
     let stmt = parse_statement("grant select on uaccount to public").unwrap();
     assert_eq!(
@@ -3897,6 +3957,48 @@ fn parse_revoke_all_privileges_on_table_from_public_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
             object_names: vec!["tenant_table".into()],
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_usage_on_schema_statement() {
+    let stmt = parse_statement("revoke usage on schema public from public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnSchema,
+            object_names: vec!["public".into()],
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_usage_on_type_statement() {
+    let stmt = parse_statement("revoke usage on type custom_t from public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnType,
+            object_names: vec!["custom_t".into()],
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_execute_on_function_statement() {
+    let stmt = parse_statement("revoke execute on function f_leak(text) from public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::ExecuteOnFunction,
+            object_names: vec!["f_leak(text)".into()],
             grantee_names: vec!["public".into()],
             cascade: false,
         })
@@ -6008,6 +6110,45 @@ fn parse_prefix_float_operator_sugar() {
         &stmt.targets[2].expr,
         SqlExpr::FuncCall { name, args, .. } if name == "cbrt" && args.args().len() == 1
     ));
+}
+
+#[test]
+fn parse_custom_prefix_operator_uses_full_token() {
+    let stmt = parse_select("select @#@ 24, !=- 10").unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::PrefixOperator { op, .. } if op == "@#@"
+    ));
+    assert!(matches!(
+        &stmt.targets[1].expr,
+        SqlExpr::PrefixOperator { op, .. } if op == "!=-"
+    ));
+}
+
+#[test]
+fn parse_postgres_operator_edge_cases() {
+    match parse_statement("create operator => (rightarg = int8, procedure = factorial)") {
+        Err(ParseError::UnexpectedToken { actual, .. }) => {
+            assert_eq!(actual, "syntax error at or near \"=>\"");
+        }
+        other => panic!("expected => syntax error, got {other:?}"),
+    }
+
+    match parse_statement("select 10 !=-;") {
+        Err(ParseError::UnexpectedToken { actual, .. }) => {
+            assert_eq!(actual, "syntax error at or near \";\"");
+        }
+        other => panic!("expected postfix operator syntax error, got {other:?}"),
+    }
+
+    for sql in [
+        "select true<>-1 between 1 and 1",
+        "select false<>1 between 1 and 1",
+        "select false<=-1 between 1 and 1",
+        "select false>=-1 between 1 and 1",
+    ] {
+        parse_select(sql).unwrap_or_else(|err| panic!("{sql}: {err:?}"));
+    }
 }
 
 #[test]
@@ -10747,6 +10888,7 @@ fn lower_create_table_resolves_named_domain_types() {
             typname: "dom_int".into(),
             typnamespace: PUBLIC_NAMESPACE_OID,
             typowner: BOOTSTRAP_SUPERUSER_OID,
+            typacl: None,
             typlen: 4,
             typalign: AttributeAlign::Int,
             typstorage: AttributeStorage::Plain,

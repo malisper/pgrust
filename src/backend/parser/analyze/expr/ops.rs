@@ -1797,6 +1797,16 @@ pub(super) fn bind_prefix_operator_expr(
         infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes);
     let bound =
         bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    if let Some((operator, declared_type, result_type)) =
+        resolve_prefix_operator(catalog, op, raw_type)
+    {
+        return Ok(Expr::func(
+            operator.oprcode,
+            Some(result_type),
+            false,
+            vec![coerce_bound_expr(bound, raw_type, declared_type)],
+        ));
+    }
     match op {
         "!!" if matches!(raw_type.kind, SqlTypeKind::TsQuery) => Ok(Expr::builtin_func(
             BuiltinScalarFunction::TsQueryNot,
@@ -1813,6 +1823,67 @@ pub(super) fn bind_prefix_operator_expr(
             actual: op.into(),
         }),
     }
+}
+
+fn resolve_prefix_operator(
+    catalog: &dyn CatalogLookup,
+    op: &str,
+    actual_type: SqlType,
+) -> Option<(crate::include::catalog::PgOperatorRow, SqlType, SqlType)> {
+    let mut best: Option<(
+        crate::include::catalog::PgOperatorRow,
+        SqlType,
+        SqlType,
+        usize,
+    )> = None;
+    let mut ambiguous = false;
+
+    for operator in catalog
+        .operator_rows()
+        .into_iter()
+        .filter(|row| row.oprname.eq_ignore_ascii_case(op) && row.oprleft == 0 && row.oprright != 0)
+    {
+        let declared_type = catalog.type_by_oid(operator.oprright)?.sql_type;
+        let result_type = catalog.type_by_oid(operator.oprresult)?.sql_type;
+        let cost = prefix_operator_match_cost(actual_type, declared_type)?;
+        match &best {
+            None => {
+                best = Some((operator, declared_type, result_type, cost));
+                ambiguous = false;
+            }
+            Some((_, _, _, best_cost)) if cost < *best_cost => {
+                best = Some((operator, declared_type, result_type, cost));
+                ambiguous = false;
+            }
+            Some((_, _, _, best_cost)) if cost == *best_cost => ambiguous = true,
+            _ => {}
+        }
+    }
+
+    if ambiguous {
+        None
+    } else {
+        best.map(|(operator, declared_type, result_type, _)| (operator, declared_type, result_type))
+    }
+}
+
+fn prefix_operator_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usize> {
+    if actual_type == target_type {
+        return Some(0);
+    }
+    if actual_type.is_array != target_type.is_array {
+        return None;
+    }
+    if is_numeric_family(actual_type) && is_numeric_family(target_type) {
+        return Some(1);
+    }
+    if is_text_like_type(actual_type) && is_text_like_type(target_type) {
+        return Some(1);
+    }
+    if is_bit_string_type(actual_type) && is_bit_string_type(target_type) {
+        return Some(1);
+    }
+    None
 }
 
 pub(crate) fn bind_concat_operands(

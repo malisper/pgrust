@@ -937,6 +937,7 @@ impl CatalogStore {
                 oid: namespace_oid,
                 nspname: namespace_name.to_string(),
                 nspowner: owner_oid,
+                nspacl: None,
             }],
             ..PhysicalCatalogRows::default()
         };
@@ -1131,6 +1132,15 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         self.comment_shared_object_mvcc(proc_oid, PG_PROC_RELATION_OID, comment, ctx)
+    }
+
+    pub fn comment_operator_mvcc(
+        &mut self,
+        operator_oid: u32,
+        comment: Option<&str>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.comment_shared_object_mvcc(operator_oid, PG_OPERATOR_RELATION_OID, comment, ctx)
     }
 
     pub fn replace_proc_mvcc(
@@ -2744,6 +2754,7 @@ impl CatalogStore {
                 oid: namespace_oid,
                 nspname: namespace_name.to_string(),
                 nspowner: owner_oid,
+                nspacl: None,
             }],
             publication_namespaces,
             depends,
@@ -2954,6 +2965,7 @@ impl CatalogStore {
             typname: object_name,
             typnamespace: namespace_oid,
             typowner: owner_oid,
+            typacl: None,
             typlen: -1,
             typalign: AttributeAlign::Int,
             typstorage: AttributeStorage::Plain,
@@ -3010,6 +3022,7 @@ impl CatalogStore {
             typname: old_row.typname.clone(),
             typnamespace: old_row.typnamespace,
             typowner: old_row.typowner,
+            typacl: old_row.typacl.clone(),
             typlen,
             typalign,
             typstorage,
@@ -3023,6 +3036,7 @@ impl CatalogStore {
             typname: array_name,
             typnamespace: old_row.typnamespace,
             typowner: old_row.typowner,
+            typacl: old_row.typacl.clone(),
             typlen: -1,
             typalign: AttributeAlign::Int,
             typstorage: AttributeStorage::Extended,
@@ -5969,6 +5983,112 @@ impl CatalogStore {
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgNamespace]);
         effect_record_oid(&mut effect.namespace_oids, namespace_oid);
+        Ok(effect)
+    }
+
+    pub fn alter_namespace_acl_mvcc(
+        &mut self,
+        namespace_oid: u32,
+        nspacl: Option<Vec<String>>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let snapshot = ctx
+            .txns
+            .read()
+            .snapshot_for_command(ctx.xid, ctx.cid)
+            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let existing_row = probe_system_catalog_rows_visible_in_db(
+            &ctx.pool,
+            &ctx.txns,
+            &snapshot,
+            ctx.client_id,
+            self.scope_db_oid(),
+            PG_NAMESPACE_OID_INDEX_OID,
+            vec![crate::include::access::scankey::ScanKeyData {
+                attribute_number: 1,
+                strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                argument: Value::Int64(i64::from(namespace_oid)),
+            }],
+        )?
+        .into_iter()
+        .map(crate::backend::catalog::rowcodec::namespace_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .next()
+        .ok_or_else(|| CatalogError::UnknownTable(namespace_oid.to_string()))?;
+
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                namespaces: vec![existing_row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            1,
+            &[BootstrapCatalogKind::PgNamespace],
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                namespaces: vec![PgNamespaceRow {
+                    nspacl,
+                    ..existing_row
+                }],
+                ..PhysicalCatalogRows::default()
+            },
+            1,
+            &[BootstrapCatalogKind::PgNamespace],
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgNamespace]);
+        effect_record_oid(&mut effect.namespace_oids, namespace_oid);
+        Ok(effect)
+    }
+
+    pub fn alter_proc_acl_mvcc(
+        &mut self,
+        proc_oid: u32,
+        proacl: Option<Vec<String>>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let existing = proc_row_by_oid_mvcc(self, ctx, proc_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(proc_oid.to_string()))?;
+        let mut updated = existing.clone();
+        updated.proacl = proacl;
+        let (_, effect) = self.replace_proc_mvcc(&existing, updated, ctx)?;
+        Ok(effect)
+    }
+
+    pub fn alter_type_acl_mvcc(
+        &mut self,
+        type_oid: u32,
+        typacl: Option<Vec<String>>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let existing = type_row_by_oid_mvcc(self, ctx, type_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(type_oid.to_string()))?;
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                types: vec![existing.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &[BootstrapCatalogKind::PgType],
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                types: vec![PgTypeRow { typacl, ..existing }],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &[BootstrapCatalogKind::PgType],
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgType]);
+        effect_record_oid(&mut effect.type_oids, type_oid);
         Ok(effect)
     }
 }

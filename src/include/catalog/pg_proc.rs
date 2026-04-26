@@ -222,6 +222,7 @@ pub struct PgProcRow {
     pub proname: String,
     pub pronamespace: u32,
     pub proowner: u32,
+    pub proacl: Option<Vec<String>>,
     pub prolang: u32,
     pub procost: f64,
     pub prorows: f64,
@@ -296,6 +297,11 @@ pub fn pg_proc_desc() -> RelationDesc {
             column_desc("prosrc", SqlType::new(SqlTypeKind::Text), false),
             column_desc(
                 "proargdefaults",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                true,
+            ),
+            column_desc(
+                "proacl",
                 SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
                 true,
             ),
@@ -2900,6 +2906,18 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             TEXT_TYPE_OID,
             &oid_argtypes(&[INT8_TYPE_OID]),
             "to_hex64",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1376,
+            "factorial",
+            NUMERIC_TYPE_OID,
+            &oid_argtypes(&[INT8_TYPE_OID]),
+            "numeric_fac",
             1,
             false,
             true,
@@ -9386,6 +9404,7 @@ fn proc_row_with_parallel(
         proname: proname.into(),
         pronamespace: PG_CATALOG_NAMESPACE_OID,
         proowner: BOOTSTRAP_SUPERUSER_OID,
+        proacl: None,
         prolang: PG_LANGUAGE_INTERNAL_OID,
         procost: 1.0,
         prorows: if proretset { 1000.0 } else { 0.0 },
@@ -9661,6 +9680,7 @@ mod tests {
                 "proargnames",
                 "prosrc",
                 "proargdefaults",
+                "proacl",
             ]
         );
     }
@@ -9879,6 +9899,22 @@ mod tests {
         assert_eq!(
             builtin_scalar_function_for_proc_oid(row.oid),
             Some(BuiltinScalarFunction::PgBackendPid)
+        );
+    }
+
+    #[test]
+    fn bootstrap_rows_include_factorial_int8() {
+        let row = bootstrap_pg_proc_rows()
+            .into_iter()
+            .find(|row| {
+                row.proname == "factorial" && row.proargtypes == oid_argtypes(&[INT8_TYPE_OID])
+            })
+            .expect("factorial(int8) row");
+        assert_eq!(row.oid, 1376);
+        assert_eq!(row.prorettype, NUMERIC_TYPE_OID);
+        assert_eq!(
+            builtin_scalar_function_for_proc_oid(row.oid),
+            Some(BuiltinScalarFunction::Factorial)
         );
     }
 

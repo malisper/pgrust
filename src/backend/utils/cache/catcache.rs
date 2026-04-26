@@ -234,6 +234,7 @@ impl CatCache {
                     oid: entry.namespace_oid,
                     nspname: namespace.to_string(),
                     nspowner: entry.owner_oid,
+                    nspacl: None,
                 };
                 cache.namespaces_by_name.insert(
                     namespace_row.nspname.to_ascii_lowercase(),

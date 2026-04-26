@@ -247,8 +247,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
             actual, ..
         }) if actual.starts_with("syntax error at or near \"") => {
-            return extract_syntax_error_token(actual)
-                .and_then(|token| sql.rfind(token).map(|index| index + 1));
+            return extract_syntax_error_token(actual).and_then(|token| {
+                sql.rfind(token)
+                    .map(|index| index + 1)
+                    .or_else(|| (token == ";").then_some(sql.len() + 1))
+            });
         }
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. })
             if message == "duplicate trigger events specified at or near \"ON\"" =>

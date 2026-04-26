@@ -1,4 +1,5 @@
 use super::super::*;
+use super::privilege::{acl_grants_privilege, effective_acl_grantee_names, type_owner_default_acl};
 use crate::backend::commands::partition::validate_new_partition_bound;
 use crate::backend::parser::{
     AggregateArgType, AggregateSignatureKind, CreateAggregateStatement, CreateFunctionReturnSpec,
@@ -1404,6 +1405,7 @@ impl Database {
                 check: create_stmt.check.clone(),
                 not_null: create_stmt.not_null,
                 enum_check,
+                typacl: None,
                 comment: None,
             },
         );
@@ -1814,6 +1816,7 @@ impl Database {
             proname: function_name.clone(),
             pronamespace: namespace_oid,
             proowner: BOOTSTRAP_SUPERUSER_OID,
+            proacl: None,
             prolang: language_row.oid,
             procost: create_stmt
                 .cost
@@ -2086,6 +2089,7 @@ impl Database {
             proname: aggregate_name.clone(),
             pronamespace: namespace_oid,
             proowner: BOOTSTRAP_SUPERUSER_OID,
+            proacl: None,
             prolang: PG_LANGUAGE_INTERNAL_OID,
             procost: 1.0,
             prorows: 0.0,
@@ -2646,7 +2650,11 @@ impl Database {
         client_id: ClientId,
         desc: &RelationDesc,
     ) -> Result<(), ExecError> {
-        let current_user_oid = self.auth_state(client_id).current_user_oid();
+        let auth = self.auth_state(client_id);
+        let auth_catalog = self
+            .auth_catalog(client_id, None)
+            .map_err(map_catalog_error)?;
+        let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
         let range_types = self.range_types.read();
         for column in &desc.columns {
             let ty = column.sql_type.element_type();
@@ -2656,12 +2664,15 @@ impl Database {
             else {
                 continue;
             };
-            let allowed = if current_user_oid == entry.owner_oid {
-                entry.owner_usage
-            } else {
-                entry.public_usage
-            };
-            if !allowed {
+            let owner_name = auth_catalog
+                .role_by_oid(entry.owner_oid)
+                .map(|entry| entry.rolname.clone())
+                .unwrap_or_else(|| entry.owner_oid.to_string());
+            let acl = entry
+                .typacl
+                .clone()
+                .unwrap_or_else(|| type_owner_default_acl(&owner_name));
+            if !acl_grants_privilege(&acl, &effective_names, 'U') {
                 let type_name = if ty.type_oid == entry.multirange_oid {
                     &entry.multirange_name
                 } else {
