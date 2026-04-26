@@ -7,8 +7,8 @@ use crate::backend::utils::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
 };
 use crate::include::catalog::{
-    ANYOID, builtin_type_name_for_oid, multirange_type_ref_for_sql_type,
-    range_type_ref_for_sql_type,
+    ANYOID, PG_LANGUAGE_INTERNAL_OID, builtin_scalar_function_for_proc_oid,
+    builtin_type_name_for_oid, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::primnodes::{
     BoolExprType, CaseExpr as BoundCaseExpr, CaseTestExpr as BoundCaseTestExpr,
@@ -4232,12 +4232,11 @@ fn bind_explicit_cast_expr(
         return Ok(coerce_bound_expr(bound_inner, source_type, target_type));
     };
     let Some(cast_row) = catalog.cast_by_source_target(source_oid, target_oid) else {
-        let coerced = coerce_bound_expr(bound_inner, source_type, target_type);
-        return Ok(if expr_sql_type_hint(&coerced) == Some(target_type) {
-            coerced
-        } else {
-            Expr::Cast(Box::new(coerced), target_type)
-        });
+        return Ok(fallback_explicit_cast_expr(
+            bound_inner,
+            source_type,
+            target_type,
+        ));
     };
     if cast_row.castmethod != 'f' || cast_row.castfunc == 0 {
         return Ok(coerce_bound_expr(bound_inner, source_type, target_type));
@@ -4248,6 +4247,16 @@ fn bind_explicit_cast_expr(
             actual: format!("function OID {}", cast_row.castfunc),
         });
     };
+    let builtin_impl = builtin_scalar_function_for_proc_oid(cast_row.castfunc);
+    // Built-in pg_cast rows can point at internal C functions that pgrust's
+    // generic cast executor already handles.
+    if proc_row.prolang == PG_LANGUAGE_INTERNAL_OID && builtin_impl.is_none() {
+        return Ok(fallback_explicit_cast_expr(
+            bound_inner,
+            source_type,
+            target_type,
+        ));
+    }
     let first_arg_oid = proc_row
         .proargtypes
         .split_whitespace()
@@ -4266,7 +4275,17 @@ fn bind_explicit_cast_expr(
         .map(|row| row.sql_type)
         .ok_or_else(|| ParseError::UnsupportedType(proc_row.prorettype.to_string()))?;
     let arg = coerce_bound_expr(bound_inner, source_type, first_arg_type);
-    let func_expr = Expr::func(cast_row.castfunc, Some(result_type), false, vec![arg]);
+    let func_expr = Expr::func_with_impl(
+        cast_row.castfunc,
+        Some(result_type),
+        false,
+        builtin_impl
+            .map(ScalarFunctionImpl::Builtin)
+            .unwrap_or(ScalarFunctionImpl::UserDefined {
+                proc_oid: cast_row.castfunc,
+            }),
+        vec![arg],
+    );
     Ok(
         if proc_row.prorettype == target_oid || result_type == target_type {
             func_expr
@@ -4274,6 +4293,19 @@ fn bind_explicit_cast_expr(
             coerce_bound_expr(func_expr, result_type, target_type)
         },
     )
+}
+
+fn fallback_explicit_cast_expr(
+    bound_inner: Expr,
+    source_type: SqlType,
+    target_type: SqlType,
+) -> Expr {
+    let coerced = coerce_bound_expr(bound_inner, source_type, target_type);
+    if expr_sql_type_hint(&coerced) == Some(target_type) {
+        coerced
+    } else {
+        Expr::Cast(Box::new(coerced), target_type)
+    }
 }
 
 fn catalog_backed_explicit_cast_allowed(
@@ -4325,6 +4357,7 @@ fn is_user_defined_base_type_oid(type_oid: u32, catalog: &dyn CatalogLookup) -> 
             !row.sql_type.is_array
                 && !row.sql_type.is_range()
                 && !row.sql_type.is_multirange()
+                && matches!(row.sql_type.kind, SqlTypeKind::Text)
                 && row.typrelid == 0
         })
 }
