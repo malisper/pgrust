@@ -1293,7 +1293,7 @@ pub fn format_array_value_text_with_config(
     let mut out = String::new();
     if array.dimensions.iter().any(|dim| dim.lower_bound != 1) {
         for dim in &array.dimensions {
-            let upper = dim.lower_bound + dim.length as i32 - 1;
+            let upper = i64::from(dim.lower_bound) + dim.length as i64 - 1;
             out.push('[');
             out.push_str(&dim.lower_bound.to_string());
             out.push(':');

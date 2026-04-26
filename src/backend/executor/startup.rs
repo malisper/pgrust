@@ -170,6 +170,16 @@ fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
                 || expr_uses_outer_columns(step)
                 || timezone.as_ref().is_some_and(expr_uses_outer_columns)
         }
+        SetReturningCall::GenerateSubscripts {
+            array,
+            dimension,
+            reverse,
+            ..
+        } => {
+            expr_uses_outer_columns(array)
+                || expr_uses_outer_columns(dimension)
+                || reverse.as_ref().is_some_and(expr_uses_outer_columns)
+        }
         SetReturningCall::PartitionTree { relid, .. }
         | SetReturningCall::PartitionAncestors { relid, .. } => expr_uses_outer_columns(relid),
         SetReturningCall::PgLockStatus { .. } => false,

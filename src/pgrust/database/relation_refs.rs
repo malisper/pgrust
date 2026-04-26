@@ -242,6 +242,18 @@ fn collect_rels_from_set_returning_call(
                 collect_rels_from_expr(timezone, rels);
             }
         }
+        crate::include::nodes::primnodes::SetReturningCall::GenerateSubscripts {
+            array,
+            dimension,
+            reverse,
+            ..
+        } => {
+            collect_rels_from_expr(array, rels);
+            collect_rels_from_expr(dimension, rels);
+            if let Some(reverse) = reverse {
+                collect_rels_from_expr(reverse, rels);
+            }
+        }
         crate::include::nodes::primnodes::SetReturningCall::PartitionTree { relid, .. }
         | crate::include::nodes::primnodes::SetReturningCall::PartitionAncestors {
             relid, ..
@@ -454,6 +466,18 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                     collect_rels_from_expr(timezone, rels);
                 }
             }
+            crate::include::nodes::primnodes::SetReturningCall::GenerateSubscripts {
+                array,
+                dimension,
+                reverse,
+                ..
+            } => {
+                collect_rels_from_expr(array, rels);
+                collect_rels_from_expr(dimension, rels);
+                if let Some(reverse) = reverse {
+                    collect_rels_from_expr(reverse, rels);
+                }
+            }
             crate::include::nodes::primnodes::SetReturningCall::PartitionTree { relid, .. }
             | crate::include::nodes::primnodes::SetReturningCall::PartitionAncestors {
                 relid,
@@ -529,6 +553,18 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                                 collect_rels_from_expr(step, rels);
                                 if let Some(timezone) = timezone {
                                     collect_rels_from_expr(timezone, rels);
+                                }
+                            }
+                            crate::include::nodes::primnodes::SetReturningCall::GenerateSubscripts {
+                                array,
+                                dimension,
+                                reverse,
+                                ..
+                            } => {
+                                collect_rels_from_expr(array, rels);
+                                collect_rels_from_expr(dimension, rels);
+                                if let Some(reverse) = reverse {
+                                    collect_rels_from_expr(reverse, rels);
                                 }
                             }
                             crate::include::nodes::primnodes::SetReturningCall::PartitionTree {

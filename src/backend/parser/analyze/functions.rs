@@ -1583,11 +1583,17 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::ArrayPrepend
             | BuiltinScalarFunction::ArrayCat
             | BuiltinScalarFunction::ArrayPosition
-            | BuiltinScalarFunction::ArraySort => matches!(args.len(), 2 | 3),
+            | BuiltinScalarFunction::ArraySort => matches!(args.len(), 1 | 2 | 3),
             BuiltinScalarFunction::ArrayPositions | BuiltinScalarFunction::ArrayRemove => {
                 args.len() == 2
             }
             BuiltinScalarFunction::ArrayReplace => args.len() == 3,
+            BuiltinScalarFunction::TrimArray | BuiltinScalarFunction::ArraySample => {
+                args.len() == 2
+            }
+            BuiltinScalarFunction::ArrayShuffle | BuiltinScalarFunction::ArrayReverse => {
+                args.len() == 1
+            }
             BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,
             BuiltinScalarFunction::Greatest | BuiltinScalarFunction::Least => !args.is_empty(),
             BuiltinScalarFunction::BTrim
@@ -3053,6 +3059,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("array_positions", BuiltinScalarFunction::ArrayPositions),
         ("array_remove", BuiltinScalarFunction::ArrayRemove),
         ("array_replace", BuiltinScalarFunction::ArrayReplace),
+        ("trim_array", BuiltinScalarFunction::TrimArray),
+        ("array_shuffle", BuiltinScalarFunction::ArrayShuffle),
+        ("array_sample", BuiltinScalarFunction::ArraySample),
+        ("array_reverse", BuiltinScalarFunction::ArrayReverse),
         ("array_sort", BuiltinScalarFunction::ArraySort),
         ("enum_first", BuiltinScalarFunction::EnumFirst),
         ("enum_last", BuiltinScalarFunction::EnumLast),
@@ -4155,7 +4165,12 @@ fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) 
         if matches!(row.sql_type.kind, SqlTypeKind::Enum) {
             return true;
         }
-        if is_builtin_text_like_type(row.sql_type) {
+        if is_builtin_text_like_type(row.sql_type)
+            || matches!(
+                row.sql_type.kind,
+                SqlTypeKind::Int2Vector | SqlTypeKind::OidVector
+            )
+        {
             return true;
         }
         if matches!(

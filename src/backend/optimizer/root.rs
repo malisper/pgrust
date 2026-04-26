@@ -418,6 +418,23 @@ fn prepare_set_returning_call_for_locking(
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::GenerateSubscripts {
+            func_oid,
+            func_variadic,
+            array,
+            dimension,
+            reverse,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::GenerateSubscripts {
+            func_oid,
+            func_variadic,
+            array: prepare_expr_for_locking(array)?,
+            dimension: prepare_expr_for_locking(dimension)?,
+            reverse: reverse.map(prepare_expr_for_locking).transpose()?,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::PartitionTree {
             func_oid,
             func_variadic,
@@ -2611,6 +2628,18 @@ fn collect_set_returning_call_outer_refs(
             collect_query_outer_refs_expr(step, levelsup, exprs);
             if let Some(timezone) = timezone {
                 collect_query_outer_refs_expr(timezone, levelsup, exprs);
+            }
+        }
+        SetReturningCall::GenerateSubscripts {
+            array,
+            dimension,
+            reverse,
+            ..
+        } => {
+            collect_query_outer_refs_expr(array, levelsup, exprs);
+            collect_query_outer_refs_expr(dimension, levelsup, exprs);
+            if let Some(reverse) = reverse {
+                collect_query_outer_refs_expr(reverse, levelsup, exprs);
             }
         }
         SetReturningCall::PartitionTree { relid, .. }

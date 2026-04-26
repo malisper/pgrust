@@ -1079,6 +1079,10 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     | BuiltinScalarFunction::ArrayCat
                     | BuiltinScalarFunction::ArrayRemove
                     | BuiltinScalarFunction::ArrayReplace
+                    | BuiltinScalarFunction::TrimArray
+                    | BuiltinScalarFunction::ArrayShuffle
+                    | BuiltinScalarFunction::ArraySample
+                    | BuiltinScalarFunction::ArrayReverse
                     | BuiltinScalarFunction::ArraySort,
                 ) => function_arg_values(args).next().map_or(
                     SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
@@ -1576,9 +1580,13 @@ pub(super) fn infer_array_literal_type(
         });
     }
     let Some(common) = common else {
-        return Err(ParseError::UnexpectedToken {
-            expected: "ARRAY[...] with a typed element or explicit cast",
-            actual: "ARRAY[]".into(),
+        return Err(ParseError::DetailedError {
+            message: "cannot determine type of empty array".into(),
+            detail: None,
+            hint: Some(
+                "Explicitly cast to the desired type, for example ARRAY[]::integer[].".into(),
+            ),
+            sqlstate: "42P18",
         });
     };
     Ok(SqlType::array_of(common))
