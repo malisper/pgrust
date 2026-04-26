@@ -7928,7 +7928,9 @@ fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, P
         }
         if keyword_at_start(rest, "for") {
             let mut next = consume_keyword(rest, "for").trim_start();
-            next = consume_keyword(next, "each").trim_start();
+            if keyword_at_start(next, "each") {
+                next = consume_keyword(next, "each").trim_start();
+            }
             if keyword_at_start(next, "row") {
                 level = TriggerLevel::Row;
                 rest = consume_keyword(next, "row");
@@ -17355,6 +17357,7 @@ fn build_alter_table_drop_column(
 ) -> Result<AlterTableDropColumnStatement, ParseError> {
     let mut if_exists = false;
     let mut only = false;
+    let mut cascade = false;
     let mut parts = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -17366,6 +17369,7 @@ fn build_alter_table_drop_column(
                 parts.push(parsed_table_name);
             }
             Rule::identifier => parts.push(build_identifier(part)),
+            Rule::drop_behavior => cascade = part.as_str().eq_ignore_ascii_case("cascade"),
             _ => {}
         }
     }
@@ -17375,6 +17379,7 @@ fn build_alter_table_drop_column(
         only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         column_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        cascade,
     })
 }
 

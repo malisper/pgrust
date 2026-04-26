@@ -12,7 +12,7 @@ use crate::include::nodes::plannodes::{AggregateStrategy, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, Expr, ParamKind, ProjectSetTarget, ScalarFunctionImpl,
     SetReturningCall, SubPlan, TargetEntry, WindowClause, WindowFrameBound, WindowFuncKind,
-    set_returning_call_exprs,
+    attrno_index, set_returning_call_exprs,
 };
 use crate::include::storage::buf_internals::BufferUsageStats;
 
@@ -500,11 +500,30 @@ fn render_nonverbose_aggregate_group_key(
 ) -> String {
     let input_names = input.column_names();
     let rendered = render_explain_expr(expr, &input_names);
-    if !rendered.contains("?column?") {
+    if !rendered.contains("?column?") && !group_key_refs_computed_projection(expr, input, &rendered)
+    {
         return rendered;
     }
     let input_names = nonverbose_aggregate_input_names(input, ctx);
     render_verbose_expr(expr, &input_names, ctx)
+}
+
+fn group_key_refs_computed_projection(expr: &Expr, input: &Plan, rendered: &str) -> bool {
+    let Expr::Var(var) = expr else {
+        return false;
+    };
+    let Plan::Projection { targets, .. } = input else {
+        return false;
+    };
+    let Some(index) = attrno_index(var.varattno) else {
+        return false;
+    };
+    let Some(target) = targets.get(index) else {
+        return false;
+    };
+    target.input_resno.is_none()
+        && !matches!(target.expr, Expr::Var(_))
+        && (target.name == rendered || rendered == format!("({})", target.name))
 }
 
 fn nonverbose_aggregate_input_names(input: &Plan, ctx: &VerboseExplainContext) -> Vec<String> {

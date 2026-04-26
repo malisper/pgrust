@@ -8,11 +8,18 @@ use crate::backend::access::heap::heapam::{
 };
 use crate::backend::access::index::indexam;
 use crate::backend::access::transam::xact::{CommandId, Snapshot};
+use crate::backend::commands::trigger::trigger_is_enabled_for_session;
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::parser::{
     BoundForeignKeyConstraint, BoundReferencedByForeignKey, ForeignKeyMatchType,
 };
 use crate::include::access::scankey::ScanKeyData;
+use crate::include::catalog::{
+    RI_FKEY_CASCADE_DEL_PROC_OID, RI_FKEY_CASCADE_UPD_PROC_OID, RI_FKEY_CHECK_INS_PROC_OID,
+    RI_FKEY_CHECK_UPD_PROC_OID, RI_FKEY_NOACTION_DEL_PROC_OID, RI_FKEY_NOACTION_UPD_PROC_OID,
+    RI_FKEY_RESTRICT_DEL_PROC_OID, RI_FKEY_RESTRICT_UPD_PROC_OID, RI_FKEY_SETDEFAULT_DEL_PROC_OID,
+    RI_FKEY_SETDEFAULT_UPD_PROC_OID, RI_FKEY_SETNULL_DEL_PROC_OID, RI_FKEY_SETNULL_UPD_PROC_OID,
+};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{SlotKind, ToastRelationRef, TupleSlot};
 
@@ -42,6 +49,108 @@ fn maybe_defer_constraint(
     true
 }
 
+fn foreign_key_check_trigger_enabled(
+    constraint: &BoundForeignKeyConstraint,
+    is_update: bool,
+    ctx: &ExecutorContext,
+) -> bool {
+    let proc_oid = if is_update {
+        RI_FKEY_CHECK_UPD_PROC_OID
+    } else {
+        RI_FKEY_CHECK_INS_PROC_OID
+    };
+    foreign_key_trigger_enabled(constraint.constraint_oid, proc_oid, None, ctx)
+}
+
+pub(crate) fn foreign_key_action_trigger_enabled_on_update(
+    constraint: &BoundReferencedByForeignKey,
+    ctx: &ExecutorContext,
+) -> bool {
+    foreign_key_trigger_enabled(
+        constraint.constraint_oid,
+        foreign_key_update_proc_oid(constraint.on_update),
+        Some(constraint.child_relation_oid),
+        ctx,
+    )
+}
+
+pub(crate) fn foreign_key_action_trigger_enabled_on_delete(
+    constraint: &BoundReferencedByForeignKey,
+    ctx: &ExecutorContext,
+) -> bool {
+    foreign_key_trigger_enabled(
+        constraint.constraint_oid,
+        foreign_key_delete_proc_oid(constraint.on_delete),
+        Some(constraint.child_relation_oid),
+        ctx,
+    )
+}
+
+fn foreign_key_trigger_enabled(
+    constraint_oid: u32,
+    proc_oid: u32,
+    constrrelid: Option<u32>,
+    ctx: &ExecutorContext,
+) -> bool {
+    let Some(catalog) = ctx.catalog.as_ref() else {
+        return true;
+    };
+    let trigger = catalog.relcache().entries().find_map(|(_, relation)| {
+        catalog
+            .trigger_rows_for_relation(relation.relation_oid)
+            .into_iter()
+            .find(|row| {
+                row.tgisinternal
+                    && row.tgconstraint == constraint_oid
+                    && row.tgfoid == proc_oid
+                    && constrrelid.is_none_or(|oid| row.tgconstrrelid == oid)
+            })
+    });
+    trigger
+        .as_ref()
+        .is_none_or(|row| trigger_is_enabled_for_session(row, ctx.session_replication_role))
+}
+
+fn foreign_key_delete_proc_oid(action: crate::include::nodes::parsenodes::ForeignKeyAction) -> u32 {
+    match action {
+        crate::include::nodes::parsenodes::ForeignKeyAction::Cascade => {
+            RI_FKEY_CASCADE_DEL_PROC_OID
+        }
+        crate::include::nodes::parsenodes::ForeignKeyAction::Restrict => {
+            RI_FKEY_RESTRICT_DEL_PROC_OID
+        }
+        crate::include::nodes::parsenodes::ForeignKeyAction::SetNull => {
+            RI_FKEY_SETNULL_DEL_PROC_OID
+        }
+        crate::include::nodes::parsenodes::ForeignKeyAction::SetDefault => {
+            RI_FKEY_SETDEFAULT_DEL_PROC_OID
+        }
+        crate::include::nodes::parsenodes::ForeignKeyAction::NoAction => {
+            RI_FKEY_NOACTION_DEL_PROC_OID
+        }
+    }
+}
+
+fn foreign_key_update_proc_oid(action: crate::include::nodes::parsenodes::ForeignKeyAction) -> u32 {
+    match action {
+        crate::include::nodes::parsenodes::ForeignKeyAction::Cascade => {
+            RI_FKEY_CASCADE_UPD_PROC_OID
+        }
+        crate::include::nodes::parsenodes::ForeignKeyAction::Restrict => {
+            RI_FKEY_RESTRICT_UPD_PROC_OID
+        }
+        crate::include::nodes::parsenodes::ForeignKeyAction::SetNull => {
+            RI_FKEY_SETNULL_UPD_PROC_OID
+        }
+        crate::include::nodes::parsenodes::ForeignKeyAction::SetDefault => {
+            RI_FKEY_SETDEFAULT_UPD_PROC_OID
+        }
+        crate::include::nodes::parsenodes::ForeignKeyAction::NoAction => {
+            RI_FKEY_NOACTION_UPD_PROC_OID
+        }
+    }
+}
+
 pub(crate) fn enforce_outbound_foreign_keys(
     relation_name: &str,
     constraints: &[BoundForeignKeyConstraint],
@@ -51,6 +160,9 @@ pub(crate) fn enforce_outbound_foreign_keys(
 ) -> Result<(), ExecError> {
     for constraint in constraints {
         if !constraint.enforced {
+            continue;
+        }
+        if !foreign_key_check_trigger_enabled(constraint, previous_values.is_some(), ctx) {
             continue;
         }
         if previous_values.is_some_and(|previous| {
@@ -126,6 +238,9 @@ pub(crate) fn enforce_inbound_foreign_keys_on_update(
         if !constraint.enforced {
             continue;
         }
+        if !foreign_key_action_trigger_enabled_on_update(constraint, ctx) {
+            continue;
+        }
         if !key_columns_changed(
             previous_values,
             values,
@@ -172,6 +287,9 @@ pub(crate) fn enforce_inbound_foreign_keys_on_delete(
 ) -> Result<(), ExecError> {
     for constraint in constraints {
         if !constraint.enforced {
+            continue;
+        }
+        if !foreign_key_action_trigger_enabled_on_delete(constraint, ctx) {
             continue;
         }
         if maybe_defer_constraint(

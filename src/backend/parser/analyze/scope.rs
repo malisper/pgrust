@@ -1627,11 +1627,6 @@ fn bind_function_from_item_with_ctes(
                     | ResolvedSrfImpl::PartitionAncestors),
                 ) = resolved.srf_impl
                 {
-                    if with_ordinality {
-                        return Err(ParseError::FeatureNotSupported(format!(
-                            "WITH ORDINALITY on {other}"
-                        )));
-                    }
                     let bound_args = bind_user_defined_table_function_args(
                         &args,
                         &call_scope,
@@ -1675,11 +1670,18 @@ fn bind_function_from_item_with_ctes(
                                     "partition SRF branch only handles partition builtins"
                                 ),
                             });
+                    let mut output_columns = output_columns;
+                    let mut desc_columns = output_columns
+                        .iter()
+                        .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                        .collect::<Vec<_>>();
+                    maybe_append_function_ordinality(
+                        with_ordinality,
+                        &mut output_columns,
+                        &mut desc_columns,
+                    );
                     let desc = RelationDesc {
-                        columns: output_columns
-                            .iter()
-                            .map(|col| column_desc(col.name.clone(), col.sql_type, true))
-                            .collect(),
+                        columns: desc_columns,
                     };
                     let scope = scope_for_relation(Some(name), &desc);
                     let relid = bound_args.into_iter().next().ok_or_else(|| {
@@ -1694,6 +1696,7 @@ fn bind_function_from_item_with_ctes(
                             func_variadic: resolved.func_variadic,
                             relid,
                             output_columns,
+                            with_ordinality,
                         },
                         ResolvedSrfImpl::PartitionAncestors => {
                             SetReturningCall::PartitionAncestors {
@@ -1701,6 +1704,7 @@ fn bind_function_from_item_with_ctes(
                                 func_variadic: resolved.func_variadic,
                                 relid,
                                 output_columns,
+                                with_ordinality,
                             }
                         }
                         _ => unreachable!("partition SRF branch only handles partition builtins"),

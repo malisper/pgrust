@@ -545,22 +545,26 @@ fn rewrite_set_returning_call(
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionTree {
             func_oid,
             func_variadic,
             relid: rewrite_semantic_expr(relid, catalog, expanded_views, active_policy_relations)?,
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid: rewrite_semantic_expr(relid, catalog, expanded_views, active_policy_relations)?,
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PgLockStatus {
             func_oid,

@@ -118,7 +118,8 @@ pub(super) fn create_plan_with_param_base(
     };
     validate_planner_path(&path);
     let plan = set_plan_refs(&mut ctx, path);
-    validate_executable_plan(&plan);
+    let allowed_params = exec_param_sources(&ctx.ext_params);
+    validate_executable_plan_with_params(&plan, &allowed_params);
     (plan, ctx.ext_params, ctx.next_param_id)
 }
 
@@ -1768,22 +1769,26 @@ fn lower_set_returning_call(
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionTree {
             func_oid,
             func_variadic,
             relid: lower_expr(ctx, relid, mode),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid: lower_expr(ctx, relid, mode),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PgLockStatus {
             func_oid,
@@ -1984,22 +1989,26 @@ fn fix_set_returning_call_upper_exprs(
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionTree {
             func_oid,
             func_variadic,
             relid: fix_upper_expr_for_input(root, relid, path, input_tlist),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid: fix_upper_expr_for_input(root, relid, path, input_tlist),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PgLockStatus {
             func_oid,
@@ -2676,19 +2685,40 @@ fn expr_array_subscript_uses_only_index_keys(
             .is_none_or(|expr| expr_uses_only_index_keys(expr, source_id, covered_columns))
 }
 
-fn validate_executable_index_scan_keys(keys: &[IndexScanKey], plan_node: &str, field: &str) {
+fn exec_param_sources(params: &[ExecParamSource]) -> BTreeSet<usize> {
+    params.iter().map(|param| param.paramid).collect()
+}
+
+fn validate_executable_index_scan_keys(
+    keys: &[IndexScanKey],
+    plan_node: &str,
+    field: &str,
+    allowed_exec_params: &BTreeSet<usize>,
+) {
     for key in keys {
         if let IndexScanKeyArgument::Runtime(expr) = &key.argument {
-            validate_executable_expr(expr, plan_node, field);
+            validate_executable_expr(expr, plan_node, field, allowed_exec_params);
         }
     }
 }
 
-fn validate_executable_expr(expr: &Expr, plan_node: &str, field: &str) {
+fn validate_executable_expr(
+    expr: &Expr,
+    plan_node: &str,
+    field: &str,
+    allowed_exec_params: &BTreeSet<usize>,
+) {
     match expr {
         Expr::Var(var) if var.varlevelsup > 0 => {
             panic!("executable plan contains outer-level Var in {plan_node}.{field}: {var:?}")
         }
+        Expr::Param(Param {
+            paramkind: ParamKind::Exec,
+            paramid,
+            ..
+        }) if !allowed_exec_params.contains(paramid) => panic!(
+            "executable plan contains unbound PARAM_EXEC {paramid} in {plan_node}.{field}: {expr:?}"
+        ),
         Expr::Aggref(aggref) => {
             panic!("executable plan contains unresolved Aggref in {plan_node}.{field}: {aggref:?}")
         }
@@ -2704,40 +2734,39 @@ fn validate_executable_expr(expr: &Expr, plan_node: &str, field: &str) {
         Expr::Op(op) => op
             .args
             .iter()
-            .for_each(|arg| validate_executable_expr(arg, plan_node, field)),
+            .for_each(|arg| validate_executable_expr(arg, plan_node, field, allowed_exec_params)),
         Expr::Bool(bool_expr) => bool_expr
             .args
             .iter()
-            .for_each(|arg| validate_executable_expr(arg, plan_node, field)),
+            .for_each(|arg| validate_executable_expr(arg, plan_node, field, allowed_exec_params)),
         Expr::Case(case_expr) => {
             if let Some(arg) = &case_expr.arg {
-                validate_executable_expr(arg, plan_node, field);
+                validate_executable_expr(arg, plan_node, field, allowed_exec_params);
             }
             for arm in &case_expr.args {
-                validate_executable_expr(&arm.expr, plan_node, field);
-                validate_executable_expr(&arm.result, plan_node, field);
+                validate_executable_expr(&arm.expr, plan_node, field, allowed_exec_params);
+                validate_executable_expr(&arm.result, plan_node, field, allowed_exec_params);
             }
-            validate_executable_expr(&case_expr.defresult, plan_node, field);
+            validate_executable_expr(&case_expr.defresult, plan_node, field, allowed_exec_params);
         }
         Expr::Func(func) => func
             .args
             .iter()
-            .for_each(|arg| validate_executable_expr(arg, plan_node, field)),
+            .for_each(|arg| validate_executable_expr(arg, plan_node, field, allowed_exec_params)),
         Expr::SubPlan(subplan) => {
             if let Some(testexpr) = &subplan.testexpr {
-                validate_executable_expr(testexpr, plan_node, field);
+                validate_executable_expr(testexpr, plan_node, field, allowed_exec_params);
             }
-            subplan
-                .args
-                .iter()
-                .for_each(|arg| validate_executable_expr(arg, plan_node, field));
+            subplan.args.iter().for_each(|arg| {
+                validate_executable_expr(arg, plan_node, field, allowed_exec_params)
+            });
         }
         Expr::ScalarArrayOp(saop) => {
-            validate_executable_expr(&saop.left, plan_node, field);
-            validate_executable_expr(&saop.right, plan_node, field);
+            validate_executable_expr(&saop.left, plan_node, field, allowed_exec_params);
+            validate_executable_expr(&saop.right, plan_node, field, allowed_exec_params);
         }
         Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
-            validate_executable_expr(inner, plan_node, field)
+            validate_executable_expr(inner, plan_node, field, allowed_exec_params)
         }
         Expr::Like {
             expr,
@@ -2751,42 +2780,44 @@ fn validate_executable_expr(expr: &Expr, plan_node: &str, field: &str) {
             escape,
             ..
         } => {
-            validate_executable_expr(expr, plan_node, field);
-            validate_executable_expr(pattern, plan_node, field);
+            validate_executable_expr(expr, plan_node, field, allowed_exec_params);
+            validate_executable_expr(pattern, plan_node, field, allowed_exec_params);
             if let Some(escape) = escape {
-                validate_executable_expr(escape, plan_node, field);
+                validate_executable_expr(escape, plan_node, field, allowed_exec_params);
             }
         }
         Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
-            validate_executable_expr(inner, plan_node, field);
+            validate_executable_expr(inner, plan_node, field, allowed_exec_params);
         }
         Expr::IsDistinctFrom(left, right)
         | Expr::IsNotDistinctFrom(left, right)
         | Expr::Coalesce(left, right) => {
-            validate_executable_expr(left, plan_node, field);
-            validate_executable_expr(right, plan_node, field);
+            validate_executable_expr(left, plan_node, field, allowed_exec_params);
+            validate_executable_expr(right, plan_node, field, allowed_exec_params);
         }
-        Expr::ArrayLiteral { elements, .. } => elements
-            .iter()
-            .for_each(|element| validate_executable_expr(element, plan_node, field)),
-        Expr::Row { fields, .. } => fields
-            .iter()
-            .for_each(|(_, expr)| validate_executable_expr(expr, plan_node, field)),
-        Expr::FieldSelect { expr, .. } => validate_executable_expr(expr, plan_node, field),
+        Expr::ArrayLiteral { elements, .. } => elements.iter().for_each(|element| {
+            validate_executable_expr(element, plan_node, field, allowed_exec_params)
+        }),
+        Expr::Row { fields, .. } => fields.iter().for_each(|(_, expr)| {
+            validate_executable_expr(expr, plan_node, field, allowed_exec_params)
+        }),
+        Expr::FieldSelect { expr, .. } => {
+            validate_executable_expr(expr, plan_node, field, allowed_exec_params)
+        }
         Expr::ArraySubscript { array, subscripts } => {
-            validate_executable_expr(array, plan_node, field);
+            validate_executable_expr(array, plan_node, field, allowed_exec_params);
             for subscript in subscripts {
                 if let Some(lower) = &subscript.lower {
-                    validate_executable_expr(lower, plan_node, field);
+                    validate_executable_expr(lower, plan_node, field, allowed_exec_params);
                 }
                 if let Some(upper) = &subscript.upper {
-                    validate_executable_expr(upper, plan_node, field);
+                    validate_executable_expr(upper, plan_node, field, allowed_exec_params);
                 }
             }
         }
-        Expr::Xml(xml) => xml
-            .child_exprs()
-            .for_each(|child| validate_executable_expr(child, plan_node, field)),
+        Expr::Xml(xml) => xml.child_exprs().for_each(|child| {
+            validate_executable_expr(child, plan_node, field, allowed_exec_params)
+        }),
         Expr::Var(_)
         | Expr::Param(_)
         | Expr::Const(_)
@@ -2809,6 +2840,7 @@ fn validate_set_returning_call(
     call: &crate::include::nodes::primnodes::SetReturningCall,
     plan_node: &str,
     field: &str,
+    allowed_exec_params: &BTreeSet<usize>,
 ) {
     use crate::include::nodes::primnodes::SetReturningCall;
 
@@ -2820,11 +2852,11 @@ fn validate_set_returning_call(
             timezone,
             ..
         } => {
-            validate_executable_expr(start, plan_node, field);
-            validate_executable_expr(stop, plan_node, field);
-            validate_executable_expr(step, plan_node, field);
+            validate_executable_expr(start, plan_node, field, allowed_exec_params);
+            validate_executable_expr(stop, plan_node, field, allowed_exec_params);
+            validate_executable_expr(step, plan_node, field, allowed_exec_params);
             if let Some(timezone) = timezone {
-                validate_executable_expr(timezone, plan_node, field);
+                validate_executable_expr(timezone, plan_node, field, allowed_exec_params);
             }
         }
         SetReturningCall::GenerateSubscripts {
@@ -2833,19 +2865,19 @@ fn validate_set_returning_call(
             reverse,
             ..
         } => {
-            validate_executable_expr(array, plan_node, field);
-            validate_executable_expr(dimension, plan_node, field);
+            validate_executable_expr(array, plan_node, field, allowed_exec_params);
+            validate_executable_expr(dimension, plan_node, field, allowed_exec_params);
             if let Some(reverse) = reverse {
-                validate_executable_expr(reverse, plan_node, field);
+                validate_executable_expr(reverse, plan_node, field, allowed_exec_params);
             }
         }
         SetReturningCall::PartitionTree { relid, .. }
         | SetReturningCall::PartitionAncestors { relid, .. } => {
-            validate_executable_expr(relid, plan_node, field);
+            validate_executable_expr(relid, plan_node, field, allowed_exec_params);
         }
         SetReturningCall::PgLockStatus { .. } => {}
         SetReturningCall::TxidSnapshotXip { arg, .. } => {
-            validate_executable_expr(arg, plan_node, field);
+            validate_executable_expr(arg, plan_node, field, allowed_exec_params);
         }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
@@ -2855,7 +2887,7 @@ fn validate_set_returning_call(
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => args
             .iter()
-            .for_each(|arg| validate_executable_expr(arg, plan_node, field)),
+            .for_each(|arg| validate_executable_expr(arg, plan_node, field, allowed_exec_params)),
     }
 }
 
@@ -2863,50 +2895,72 @@ fn validate_agg_accum(
     accum: &crate::include::nodes::primnodes::AggAccum,
     plan_node: &str,
     field: &str,
+    allowed_exec_params: &BTreeSet<usize>,
 ) {
     accum
         .args
         .iter()
-        .for_each(|arg| validate_executable_expr(arg, plan_node, field));
+        .for_each(|arg| validate_executable_expr(arg, plan_node, field, allowed_exec_params));
 }
 
 fn validate_executable_plan(plan: &Plan) {
+    validate_executable_plan_with_params(plan, &BTreeSet::new());
+}
+
+fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTreeSet<usize>) {
     match plan {
         Plan::Result { .. } | Plan::SeqScan { .. } => {}
         Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
             for child in children {
-                validate_executable_plan(child);
+                validate_executable_plan_with_params(child, allowed_exec_params);
             }
         }
         Plan::MergeAppend {
             children, items, ..
         } => {
             for item in items {
-                validate_executable_expr(&item.expr, "MergeAppend", "items");
+                validate_executable_expr(&item.expr, "MergeAppend", "items", allowed_exec_params);
             }
             for child in children {
-                validate_executable_plan(child);
+                validate_executable_plan_with_params(child, allowed_exec_params);
             }
         }
-        Plan::Unique { input, .. } => validate_executable_plan(input),
+        Plan::Unique { input, .. } => {
+            validate_executable_plan_with_params(input, allowed_exec_params)
+        }
         Plan::IndexOnlyScan {
             keys,
             order_by_keys,
             ..
         } => {
-            validate_executable_index_scan_keys(keys, "IndexOnlyScan", "keys");
-            validate_executable_index_scan_keys(order_by_keys, "IndexOnlyScan", "order_by_keys");
+            validate_executable_index_scan_keys(keys, "IndexOnlyScan", "keys", allowed_exec_params);
+            validate_executable_index_scan_keys(
+                order_by_keys,
+                "IndexOnlyScan",
+                "order_by_keys",
+                allowed_exec_params,
+            );
         }
         Plan::IndexScan {
             keys,
             order_by_keys,
             ..
         } => {
-            validate_executable_index_scan_keys(keys, "IndexScan", "keys");
-            validate_executable_index_scan_keys(order_by_keys, "IndexScan", "order_by_keys");
+            validate_executable_index_scan_keys(keys, "IndexScan", "keys", allowed_exec_params);
+            validate_executable_index_scan_keys(
+                order_by_keys,
+                "IndexScan",
+                "order_by_keys",
+                allowed_exec_params,
+            );
         }
         Plan::BitmapIndexScan { keys, .. } => {
-            validate_executable_index_scan_keys(keys, "BitmapIndexScan", "keys");
+            validate_executable_index_scan_keys(
+                keys,
+                "BitmapIndexScan",
+                "keys",
+                allowed_exec_params,
+            );
         }
         Plan::BitmapHeapScan {
             bitmapqual,
@@ -2914,21 +2968,26 @@ fn validate_executable_plan(plan: &Plan) {
             filter_qual,
             ..
         } => {
-            recheck_qual
-                .iter()
-                .for_each(|expr| validate_executable_expr(expr, "BitmapHeapScan", "recheck_qual"));
-            filter_qual
-                .iter()
-                .for_each(|expr| validate_executable_expr(expr, "BitmapHeapScan", "filter_qual"));
-            validate_executable_plan(bitmapqual);
+            recheck_qual.iter().for_each(|expr| {
+                validate_executable_expr(
+                    expr,
+                    "BitmapHeapScan",
+                    "recheck_qual",
+                    allowed_exec_params,
+                )
+            });
+            filter_qual.iter().for_each(|expr| {
+                validate_executable_expr(expr, "BitmapHeapScan", "filter_qual", allowed_exec_params)
+            });
+            validate_executable_plan_with_params(bitmapqual, allowed_exec_params);
         }
         Plan::Hash {
             input, hash_keys, ..
         } => {
-            hash_keys
-                .iter()
-                .for_each(|expr| validate_executable_expr(expr, "Hash", "hash_keys"));
-            validate_executable_plan(input);
+            hash_keys.iter().for_each(|expr| {
+                validate_executable_expr(expr, "Hash", "hash_keys", allowed_exec_params)
+            });
+            validate_executable_plan_with_params(input, allowed_exec_params);
         }
         Plan::NestedLoopJoin {
             left,
@@ -2939,15 +2998,23 @@ fn validate_executable_plan(plan: &Plan) {
             ..
         } => {
             for param in nest_params {
-                validate_executable_expr(&param.expr, "NestedLoopJoin", "nest_params");
+                validate_executable_expr(
+                    &param.expr,
+                    "NestedLoopJoin",
+                    "nest_params",
+                    allowed_exec_params,
+                );
             }
-            join_qual
-                .iter()
-                .for_each(|expr| validate_executable_expr(expr, "NestedLoopJoin", "join_qual"));
-            qual.iter()
-                .for_each(|expr| validate_executable_expr(expr, "NestedLoopJoin", "qual"));
-            validate_executable_plan(left);
-            validate_executable_plan(right);
+            join_qual.iter().for_each(|expr| {
+                validate_executable_expr(expr, "NestedLoopJoin", "join_qual", allowed_exec_params)
+            });
+            qual.iter().for_each(|expr| {
+                validate_executable_expr(expr, "NestedLoopJoin", "qual", allowed_exec_params)
+            });
+            validate_executable_plan_with_params(left, allowed_exec_params);
+            let mut right_allowed = allowed_exec_params.clone();
+            right_allowed.extend(nest_params.iter().map(|param| param.paramid));
+            validate_executable_plan_with_params(right, &right_allowed);
         }
         Plan::HashJoin {
             left,
@@ -2958,19 +3025,20 @@ fn validate_executable_plan(plan: &Plan) {
             qual,
             ..
         } => {
-            hash_clauses
-                .iter()
-                .for_each(|expr| validate_executable_expr(expr, "HashJoin", "hash_clauses"));
-            hash_keys
-                .iter()
-                .for_each(|expr| validate_executable_expr(expr, "HashJoin", "hash_keys"));
-            join_qual
-                .iter()
-                .for_each(|expr| validate_executable_expr(expr, "HashJoin", "join_qual"));
-            qual.iter()
-                .for_each(|expr| validate_executable_expr(expr, "HashJoin", "qual"));
-            validate_executable_plan(left);
-            validate_executable_plan(right);
+            hash_clauses.iter().for_each(|expr| {
+                validate_executable_expr(expr, "HashJoin", "hash_clauses", allowed_exec_params)
+            });
+            hash_keys.iter().for_each(|expr| {
+                validate_executable_expr(expr, "HashJoin", "hash_keys", allowed_exec_params)
+            });
+            join_qual.iter().for_each(|expr| {
+                validate_executable_expr(expr, "HashJoin", "join_qual", allowed_exec_params)
+            });
+            qual.iter().for_each(|expr| {
+                validate_executable_expr(expr, "HashJoin", "qual", allowed_exec_params)
+            });
+            validate_executable_plan_with_params(left, allowed_exec_params);
+            validate_executable_plan_with_params(right, allowed_exec_params);
         }
         Plan::MergeJoin {
             left,
@@ -2982,47 +3050,55 @@ fn validate_executable_plan(plan: &Plan) {
             qual,
             ..
         } => {
-            merge_clauses
-                .iter()
-                .for_each(|expr| validate_executable_expr(expr, "MergeJoin", "merge_clauses"));
-            outer_merge_keys
-                .iter()
-                .for_each(|expr| validate_executable_expr(expr, "MergeJoin", "outer_merge_keys"));
-            inner_merge_keys
-                .iter()
-                .for_each(|expr| validate_executable_expr(expr, "MergeJoin", "inner_merge_keys"));
-            join_qual
-                .iter()
-                .for_each(|expr| validate_executable_expr(expr, "MergeJoin", "join_qual"));
-            qual.iter()
-                .for_each(|expr| validate_executable_expr(expr, "MergeJoin", "qual"));
-            validate_executable_plan(left);
-            validate_executable_plan(right);
+            merge_clauses.iter().for_each(|expr| {
+                validate_executable_expr(expr, "MergeJoin", "merge_clauses", allowed_exec_params)
+            });
+            outer_merge_keys.iter().for_each(|expr| {
+                validate_executable_expr(expr, "MergeJoin", "outer_merge_keys", allowed_exec_params)
+            });
+            inner_merge_keys.iter().for_each(|expr| {
+                validate_executable_expr(expr, "MergeJoin", "inner_merge_keys", allowed_exec_params)
+            });
+            join_qual.iter().for_each(|expr| {
+                validate_executable_expr(expr, "MergeJoin", "join_qual", allowed_exec_params)
+            });
+            qual.iter().for_each(|expr| {
+                validate_executable_expr(expr, "MergeJoin", "qual", allowed_exec_params)
+            });
+            validate_executable_plan_with_params(left, allowed_exec_params);
+            validate_executable_plan_with_params(right, allowed_exec_params);
         }
         Plan::Filter {
             input, predicate, ..
         } => {
-            validate_executable_expr(predicate, "Filter", "predicate");
-            validate_executable_plan(input);
+            validate_executable_expr(predicate, "Filter", "predicate", allowed_exec_params);
+            validate_executable_plan_with_params(input, allowed_exec_params);
         }
         Plan::OrderBy { input, items, .. } => {
-            items
-                .iter()
-                .for_each(|item| validate_executable_expr(&item.expr, "OrderBy", "items"));
-            validate_executable_plan(input);
+            items.iter().for_each(|item| {
+                validate_executable_expr(&item.expr, "OrderBy", "items", allowed_exec_params)
+            });
+            validate_executable_plan_with_params(input, allowed_exec_params);
         }
         Plan::IncrementalSort { input, items, .. } => {
-            items
-                .iter()
-                .for_each(|item| validate_executable_expr(&item.expr, "IncrementalSort", "items"));
-            validate_executable_plan(input);
+            items.iter().for_each(|item| {
+                validate_executable_expr(
+                    &item.expr,
+                    "IncrementalSort",
+                    "items",
+                    allowed_exec_params,
+                )
+            });
+            validate_executable_plan_with_params(input, allowed_exec_params);
         }
-        Plan::Limit { input, .. } | Plan::LockRows { input, .. } => validate_executable_plan(input),
+        Plan::Limit { input, .. } | Plan::LockRows { input, .. } => {
+            validate_executable_plan_with_params(input, allowed_exec_params);
+        }
         Plan::Projection { input, targets, .. } => {
-            targets
-                .iter()
-                .for_each(|target| validate_executable_expr(&target.expr, "Projection", "targets"));
-            validate_executable_plan(input);
+            targets.iter().for_each(|target| {
+                validate_executable_expr(&target.expr, "Projection", "targets", allowed_exec_params)
+            });
+            validate_executable_plan_with_params(input, allowed_exec_params);
         }
         Plan::Aggregate {
             input,
@@ -3032,73 +3108,97 @@ fn validate_executable_plan(plan: &Plan) {
             having,
             ..
         } => {
-            group_by
-                .iter()
-                .for_each(|expr| validate_executable_expr(expr, "Aggregate", "group_by"));
-            passthrough_exprs
-                .iter()
-                .for_each(|expr| validate_executable_expr(expr, "Aggregate", "passthrough_exprs"));
-            accumulators
-                .iter()
-                .for_each(|accum| validate_agg_accum(accum, "Aggregate", "accumulators"));
+            group_by.iter().for_each(|expr| {
+                validate_executable_expr(expr, "Aggregate", "group_by", allowed_exec_params)
+            });
+            passthrough_exprs.iter().for_each(|expr| {
+                validate_executable_expr(
+                    expr,
+                    "Aggregate",
+                    "passthrough_exprs",
+                    allowed_exec_params,
+                )
+            });
+            accumulators.iter().for_each(|accum| {
+                validate_agg_accum(accum, "Aggregate", "accumulators", allowed_exec_params)
+            });
             if let Some(having) = having {
-                validate_executable_expr(having, "Aggregate", "having");
+                validate_executable_expr(having, "Aggregate", "having", allowed_exec_params);
             }
-            validate_executable_plan(input);
+            validate_executable_plan_with_params(input, allowed_exec_params);
         }
         Plan::WindowAgg { input, clause, .. } => {
             for expr in &clause.spec.partition_by {
-                validate_executable_expr(expr, "WindowAgg", "partition_by");
+                validate_executable_expr(expr, "WindowAgg", "partition_by", allowed_exec_params);
             }
             for item in &clause.spec.order_by {
-                validate_executable_expr(&item.expr, "WindowAgg", "order_by");
+                validate_executable_expr(&item.expr, "WindowAgg", "order_by", allowed_exec_params);
             }
             for func in &clause.functions {
                 for arg in &func.args {
-                    validate_executable_expr(arg, "WindowAgg", "functions");
+                    validate_executable_expr(arg, "WindowAgg", "functions", allowed_exec_params);
                 }
                 if let WindowFuncKind::Aggregate(aggref) = &func.kind {
-                    aggref
-                        .args
-                        .iter()
-                        .for_each(|arg| validate_executable_expr(arg, "WindowAgg", "functions"));
+                    aggref.args.iter().for_each(|arg| {
+                        validate_executable_expr(arg, "WindowAgg", "functions", allowed_exec_params)
+                    });
                     if let Some(filter) = aggref.aggfilter.as_ref() {
-                        validate_executable_expr(filter, "WindowAgg", "functions");
+                        validate_executable_expr(
+                            filter,
+                            "WindowAgg",
+                            "functions",
+                            allowed_exec_params,
+                        );
                     }
                 }
             }
-            validate_executable_plan(input);
+            validate_executable_plan_with_params(input, allowed_exec_params);
         }
         Plan::FunctionScan { call, .. } => {
-            validate_set_returning_call(call, "FunctionScan", "call");
+            validate_set_returning_call(call, "FunctionScan", "call", allowed_exec_params);
         }
-        Plan::SubqueryScan { input, .. } => validate_executable_plan(input),
-        Plan::CteScan { cte_plan, .. } => validate_executable_plan(cte_plan),
+        Plan::SubqueryScan { input, .. } => {
+            validate_executable_plan_with_params(input, allowed_exec_params);
+        }
+        Plan::CteScan { cte_plan, .. } => {
+            validate_executable_plan_with_params(cte_plan, allowed_exec_params);
+        }
         Plan::WorkTableScan { .. } => {}
         Plan::RecursiveUnion {
             anchor, recursive, ..
         } => {
-            validate_executable_plan(anchor);
-            validate_executable_plan(recursive);
+            validate_executable_plan_with_params(anchor, allowed_exec_params);
+            validate_executable_plan_with_params(recursive, allowed_exec_params);
         }
         Plan::Values { rows, .. } => {
             for row in rows {
-                row.iter()
-                    .for_each(|expr| validate_executable_expr(expr, "Values", "rows"));
+                row.iter().for_each(|expr| {
+                    validate_executable_expr(expr, "Values", "rows", allowed_exec_params)
+                });
             }
         }
         Plan::ProjectSet { input, targets, .. } => {
             for target in targets {
                 match target {
                     crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
-                        validate_executable_expr(&entry.expr, "ProjectSet", "targets");
+                        validate_executable_expr(
+                            &entry.expr,
+                            "ProjectSet",
+                            "targets",
+                            allowed_exec_params,
+                        );
                     }
                     crate::include::nodes::primnodes::ProjectSetTarget::Set { call, .. } => {
-                        validate_set_returning_call(call, "ProjectSet", "targets");
+                        validate_set_returning_call(
+                            call,
+                            "ProjectSet",
+                            "targets",
+                            allowed_exec_params,
+                        );
                     }
                 }
             }
-            validate_executable_plan(input);
+            validate_executable_plan_with_params(input, allowed_exec_params);
         }
     }
 }
@@ -3541,6 +3641,15 @@ fn validate_planner_path(path: &Path) {
 #[cfg(test)]
 pub(super) fn validate_executable_plan_for_tests(plan: &Plan) {
     validate_executable_plan(plan);
+}
+
+#[cfg(test)]
+pub(super) fn validate_executable_plan_for_tests_with_params(
+    plan: &Plan,
+    params: &[ExecParamSource],
+) {
+    let allowed_params = exec_param_sources(params);
+    validate_executable_plan_with_params(plan, &allowed_params);
 }
 
 #[cfg(test)]

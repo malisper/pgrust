@@ -1642,11 +1642,12 @@ fn make_distinct_rel(
             let Some(path) = order_path_for_distinct(root, path.clone(), &pathkeys, catalog) else {
                 continue;
             };
+            let key_indices = unique_key_indices(&path, &pathkeys);
             rel.add_path(optimize_path_with_config(
                 Path::Unique {
                     plan_info: PlanEstimate::default(),
                     pathtarget: path.semantic_output_target(),
-                    key_indices: (0..targets.len()).collect(),
+                    key_indices,
                     input: Box::new(path),
                 },
                 catalog,
@@ -2217,11 +2218,16 @@ pub(super) fn grouping_planner(
             projection_done = current_rel.reltarget == root.final_target;
         } else {
             if current_rel.reltarget != root.final_target {
-                current_rel =
-                    make_projection_rel(root, current_rel, &final_targets, catalog, false);
+                current_rel = make_pathtarget_projection_rel(
+                    root,
+                    current_rel,
+                    &root.final_target,
+                    catalog,
+                    false,
+                );
             }
             current_rel = make_distinct_rel(root, current_rel, &final_targets, catalog);
-            projection_done = current_rel.reltarget == root.final_target;
+            projection_done = false;
         }
     }
 
@@ -2231,6 +2237,23 @@ pub(super) fn grouping_planner(
             root,
             &sort_group_pathkeys(&root.parse.distinct_on, &root.processed_tlist),
         );
+    if !has_grouping
+        && !has_windowing(root)
+        && !has_target_srfs
+        && !root.query_pathkeys.is_empty()
+        && !distinct_on_constant
+        && current_rel.reltarget != root.sort_input_target
+    {
+        current_rel = make_pathtarget_projection_rel(
+            root,
+            current_rel,
+            &root.sort_input_target,
+            catalog,
+            false,
+        );
+        projection_done = current_rel.reltarget == root.final_target;
+    }
+
     if !root.query_pathkeys.is_empty() && !distinct_on_constant {
         current_rel = make_ordered_rel(root, current_rel, catalog);
     }

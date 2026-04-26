@@ -3662,6 +3662,19 @@ fn parse_alter_table_drop_column_statement() {
             only: false,
             table_name: "items".into(),
             column_name: "note".into(),
+            cascade: false,
+        })
+    );
+
+    let stmt = parse_statement("alter table items drop column note cascade").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableDropColumn(AlterTableDropColumnStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            column_name: "note".into(),
+            cascade: true,
         })
     );
 }
@@ -4873,6 +4886,20 @@ fn parse_create_instead_of_trigger_statement() {
             func_args: Vec::new(),
         })
     );
+}
+
+#[test]
+fn parse_create_trigger_statement_for_statement_without_each() {
+    let stmt = parse_statement(
+        "create trigger audit_stmt after insert on public.people for statement execute function public.audit_people()",
+    )
+    .unwrap();
+    match stmt {
+        Statement::CreateTrigger(CreateTriggerStatement { level, .. }) => {
+            assert_eq!(level, TriggerLevel::Statement);
+        }
+        other => panic!("expected create trigger, got {other:?}"),
+    }
 }
 
 #[test]
@@ -8559,11 +8586,11 @@ fn build_plan_wraps_order_by_and_limit() {
                 } => {
                     assert_eq!(limit, Some(2));
                     assert_eq!(offset, 1);
-                    match *input {
+                    match strip_projections(input.as_ref()) {
                         Plan::OrderBy { input, items, .. } => {
                             assert_eq!(items.len(), 1);
                             assert!(items[0].descending);
-                            assert!(matches!(*input, Plan::Filter { .. }));
+                            assert!(matches!(input.as_ref(), Plan::Filter { .. }));
                         }
                         other => panic!("expected order by, got {:?}", other),
                     }
@@ -8580,7 +8607,7 @@ fn build_plan_resolves_order_by_ordinal_against_target_list() {
     let stmt = parse_select("select name, id from people order by 2 desc").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
-        Plan::Projection { input, .. } => match *input {
+        Plan::Projection { input, .. } => match strip_projections(input.as_ref()) {
             Plan::OrderBy { items, .. } => {
                 assert_eq!(items.len(), 1);
                 assert!(items[0].descending);

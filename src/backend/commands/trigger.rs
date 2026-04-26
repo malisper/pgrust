@@ -83,6 +83,7 @@ impl RuntimeTriggers {
         let mut triggers = catalog
             .trigger_rows_for_relation(relation_oid)
             .into_iter()
+            .filter(|row| !row.tgisinternal)
             .filter(|row| trigger_is_enabled_for_session(row, session_replication_role))
             .filter(|row| trigger_matches_event(row, event, modified_attnums))
             .map(|row| {
