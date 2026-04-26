@@ -56,6 +56,7 @@ struct RelationStats {
 enum IndexStrategyLookup {
     Operator { oid: u32, kind: OpExprKind },
     Proc(u32),
+    RegexPrefix { exact: bool },
 }
 
 #[derive(Debug, Clone)]
