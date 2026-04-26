@@ -4390,6 +4390,13 @@ fn parse_record_and_named_type_names() {
             array_bounds: 0,
         }
     );
+    assert_eq!(
+        parse_type_name("\"int4\"").unwrap(),
+        RawTypeName::Named {
+            name: "int4".into(),
+            array_bounds: 0,
+        }
+    );
 }
 
 #[test]

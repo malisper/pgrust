@@ -16718,11 +16718,28 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 None => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Varchar)),
             }
         }
-        Rule::named_type_name => RawTypeName::Named {
-            name: pair.as_str().trim().to_string(),
-            array_bounds: 0,
-        },
+        Rule::named_type_name => build_named_type_name(pair),
         _ => unreachable!("unexpected type rule {:?}", pair.as_rule()),
+    }
+}
+
+fn build_named_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
+    let mut name = None;
+    let mut typmod = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::named_type_typmod => typmod = Some(part.as_str().trim().to_string()),
+            _ => {}
+        }
+    }
+    let mut name = name.expect("named_type_name always contains an identifier");
+    if let Some(typmod) = typmod {
+        name.push_str(&typmod);
+    }
+    RawTypeName::Named {
+        name,
+        array_bounds: 0,
     }
 }
 
