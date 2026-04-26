@@ -108,7 +108,7 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
                 amoppurpose: 's',
                 amopopr: operator_oid,
                 amopmethod: BTREE_AM_OID,
-                amopsortfamily: family,
+                amopsortfamily: 0,
             });
             oid = oid.saturating_add(1);
         }
@@ -125,6 +125,7 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         (BTREE_INTEGER_FAMILY_OID, INT8_TYPE_OID),
         (BTREE_NUMERIC_FAMILY_OID, NUMERIC_TYPE_OID),
         (BTREE_OID_FAMILY_OID, OID_TYPE_OID),
+        (BTREE_ENUM_FAMILY_OID, ANYENUMOID),
         (BTREE_OIDVECTOR_FAMILY_OID, OIDVECTOR_TYPE_OID),
         (BTREE_BPCHAR_FAMILY_OID, BPCHAR_TYPE_OID),
         (BTREE_TEXT_FAMILY_OID, NAME_TYPE_OID),
@@ -752,6 +753,7 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         (HASH_INTEGER_FAMILY_OID, INT4_TYPE_OID),
         (HASH_INTEGER_FAMILY_OID, INT8_TYPE_OID),
         (HASH_OID_FAMILY_OID, OID_TYPE_OID),
+        (HASH_ENUM_FAMILY_OID, ANYENUMOID),
         (HASH_CHAR_FAMILY_OID, INTERNAL_CHAR_TYPE_OID),
         (HASH_TEXT_FAMILY_OID, NAME_TYPE_OID),
         (HASH_TEXT_FAMILY_OID, TEXT_TYPE_OID),
@@ -768,6 +770,7 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         (HASH_BYTEA_FAMILY_OID, BYTEA_TYPE_OID),
         (HASH_UUID_FAMILY_OID, UUID_TYPE_OID),
         (HASH_MULTIRANGE_FAMILY_OID, ANYMULTIRANGEOID),
+        (HASH_JSONB_FAMILY_OID, JSONB_TYPE_OID),
         (HASH_MACADDR_FAMILY_OID, MACADDR_TYPE_OID),
         (HASH_MACADDR8_FAMILY_OID, MACADDR8_TYPE_OID),
         (HASH_INTERVAL_FAMILY_OID, INTERVAL_TYPE_OID),
@@ -792,7 +795,7 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         amoprighttype: ANYRANGEOID,
         amopstrategy: 1,
         amoppurpose: 's',
-        amopopr: 0,
+        amopopr: operator_oid(&operators, "=", ANYRANGEOID, ANYRANGEOID),
         amopmethod: HASH_AM_OID,
         amopsortfamily: 0,
     });
@@ -847,7 +850,7 @@ mod tests {
                 && row.amopstrategy == 3
                 && row.amopopr == 1220
                 && row.amopmethod == BTREE_AM_OID
-                && row.amopsortfamily == BTREE_MACADDR_FAMILY_OID
+                && row.amopsortfamily == 0
         }));
         assert!(rows.iter().any(|row| {
             row.amopfamily == BTREE_MACADDR8_FAMILY_OID

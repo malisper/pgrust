@@ -79,6 +79,7 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
             INET_TYPE_OID,
             TEXT_CMP_EQ_PROC_OID,
         ),
+        (BTREE_ENUM_FAMILY_OID, ANYENUMOID, ENUM_CMP_PROC_OID),
     ] {
         rows.push(PgAmprocRow {
             oid,
@@ -111,6 +112,22 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         (
             BTREE_VARBIT_FAMILY_OID,
             VARBIT_TYPE_OID,
+            BTEQUALIMAGE_PROC_OID,
+        ),
+        (BTREE_ENUM_FAMILY_OID, ANYENUMOID, BTEQUALIMAGE_PROC_OID),
+        (
+            BTREE_MACADDR_FAMILY_OID,
+            MACADDR_TYPE_OID,
+            BTEQUALIMAGE_PROC_OID,
+        ),
+        (
+            BTREE_MACADDR8_FAMILY_OID,
+            MACADDR8_TYPE_OID,
+            BTEQUALIMAGE_PROC_OID,
+        ),
+        (
+            BTREE_NETWORK_FAMILY_OID,
+            CIDR_TYPE_OID,
             BTEQUALIMAGE_PROC_OID,
         ),
         (
@@ -408,10 +425,10 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
     }
     for (procnum, proc_oid) in [
         (1_i16, MULTIRANGE_GIST_CONSISTENT_PROC_OID),
-        (2, MULTIRANGE_GIST_UNION_PROC_OID),
-        (5, MULTIRANGE_GIST_PENALTY_PROC_OID),
-        (6, MULTIRANGE_GIST_PICKSPLIT_PROC_OID),
-        (7, MULTIRANGE_GIST_SAME_PROC_OID),
+        (2, RANGE_GIST_UNION_PROC_OID),
+        (5, RANGE_GIST_PENALTY_PROC_OID),
+        (6, RANGE_GIST_PICKSPLIT_PROC_OID),
+        (7, RANGE_GIST_SAME_PROC_OID),
         (11, MULTIRANGE_SORTSUPPORT_PROC_OID),
     ] {
         rows.push(PgAmprocRow {
@@ -505,6 +522,7 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         (HASH_INTEGER_FAMILY_OID, INT4_TYPE_OID, HASH_INT4_PROC_OID),
         (HASH_INTEGER_FAMILY_OID, INT8_TYPE_OID, HASH_INT8_PROC_OID),
         (HASH_OID_FAMILY_OID, OID_TYPE_OID, HASH_OID_PROC_OID),
+        (HASH_ENUM_FAMILY_OID, ANYENUMOID, HASH_ENUM_PROC_OID),
         (
             HASH_CHAR_FAMILY_OID,
             INTERNAL_CHAR_TYPE_OID,
@@ -554,6 +572,7 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
             ANYMULTIRANGEOID,
             HASH_MULTIRANGE_PROC_OID,
         ),
+        (HASH_JSONB_FAMILY_OID, JSONB_TYPE_OID, HASH_JSONB_PROC_OID),
         (
             HASH_MACADDR_FAMILY_OID,
             MACADDR_TYPE_OID,
@@ -579,6 +598,28 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
             amproc: proc_oid,
         });
         oid = oid.saturating_add(1);
+        if family == HASH_ENUM_FAMILY_OID {
+            rows.push(PgAmprocRow {
+                oid,
+                amprocfamily: family,
+                amproclefttype: type_oid,
+                amprocrighttype: type_oid,
+                amprocnum: 2,
+                amproc: HASH_ENUM_EXTENDED_PROC_OID,
+            });
+            oid = oid.saturating_add(1);
+        }
+        if family == HASH_JSONB_FAMILY_OID {
+            rows.push(PgAmprocRow {
+                oid,
+                amprocfamily: family,
+                amproclefttype: type_oid,
+                amprocrighttype: type_oid,
+                amprocnum: 2,
+                amproc: HASH_JSONB_EXTENDED_PROC_OID,
+            });
+            oid = oid.saturating_add(1);
+        }
     }
     rows
 }

@@ -50,6 +50,12 @@ pub(crate) struct GistColumnPickSplit {
 
 pub(crate) type GistSortComparator = fn(&Value, &Value) -> Ordering;
 
+fn has_multirange_value(values: &[Value]) -> bool {
+    values
+        .iter()
+        .any(|value| matches!(value, Value::Multirange(_)))
+}
+
 pub(crate) fn consistent(
     proc_oid: u32,
     strategy: u16,
@@ -75,6 +81,11 @@ pub(crate) fn union(proc_oid: u32, values: &[Value]) -> Result<Value, CatalogErr
     match proc_oid {
         GIST_BOX_UNION_PROC_OID => box_ops::union(values),
         GIST_POINT_UNION_PROC_OID => point_ops::union(values),
+        // :HACK: PostgreSQL catalogs expose the range union/penalty/picksplit/same
+        // support procs for the multirange GiST opfamily. Dispatch by runtime
+        // value shape until pgrust's range and multirange support procs share
+        // one implementation.
+        RANGE_GIST_UNION_PROC_OID if has_multirange_value(values) => multirange_ops::union(values),
         RANGE_GIST_UNION_PROC_OID => range_ops::union(values),
         GIST_NETWORK_UNION_PROC_OID => network_ops::union(values),
         MULTIRANGE_GIST_UNION_PROC_OID => multirange_ops::union(values),
@@ -92,6 +103,12 @@ pub(crate) fn penalty(
     match proc_oid {
         GIST_BOX_PENALTY_PROC_OID => box_ops::penalty(original, candidate),
         GIST_POINT_PENALTY_PROC_OID => point_ops::penalty(original, candidate),
+        RANGE_GIST_PENALTY_PROC_OID
+            if matches!(original, Value::Multirange(_))
+                || matches!(candidate, Value::Multirange(_)) =>
+        {
+            multirange_ops::penalty(original, candidate)
+        }
         RANGE_GIST_PENALTY_PROC_OID => range_ops::penalty(original, candidate),
         GIST_NETWORK_PENALTY_PROC_OID => network_ops::penalty(original, candidate),
         MULTIRANGE_GIST_PENALTY_PROC_OID => multirange_ops::penalty(original, candidate),
@@ -108,6 +125,9 @@ pub(crate) fn picksplit(
     match proc_oid {
         GIST_BOX_PICKSPLIT_PROC_OID => box_ops::picksplit(values),
         GIST_POINT_PICKSPLIT_PROC_OID => point_ops::picksplit(values),
+        RANGE_GIST_PICKSPLIT_PROC_OID if has_multirange_value(values) => {
+            multirange_ops::picksplit(values)
+        }
         RANGE_GIST_PICKSPLIT_PROC_OID => range_ops::picksplit(values),
         GIST_NETWORK_PICKSPLIT_PROC_OID => network_ops::picksplit(values),
         MULTIRANGE_GIST_PICKSPLIT_PROC_OID => multirange_ops::picksplit(values),
@@ -121,6 +141,11 @@ pub(crate) fn same(proc_oid: u32, left: &Value, right: &Value) -> Result<bool, C
     match proc_oid {
         GIST_BOX_SAME_PROC_OID => box_ops::same(left, right),
         GIST_POINT_SAME_PROC_OID => point_ops::same(left, right),
+        RANGE_GIST_SAME_PROC_OID
+            if matches!(left, Value::Multirange(_)) || matches!(right, Value::Multirange(_)) =>
+        {
+            multirange_ops::same(left, right)
+        }
         RANGE_GIST_SAME_PROC_OID => range_ops::same(left, right),
         GIST_NETWORK_SAME_PROC_OID => network_ops::same(left, right),
         MULTIRANGE_GIST_SAME_PROC_OID => multirange_ops::same(left, right),

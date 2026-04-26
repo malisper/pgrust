@@ -165,7 +165,18 @@ pub const HASH_BYTEA_PROC_OID: u32 = 76518;
 pub const HASH_MULTIRANGE_PROC_OID: u32 = 76519;
 pub const HASH_UUID_PROC_OID: u32 = 2963;
 pub const HASH_RANGE_PROC_OID: u32 = 76520;
+pub const HASH_JSONB_PROC_OID: u32 = 76521;
+pub const HASH_JSONB_EXTENDED_PROC_OID: u32 = 76522;
 pub const HASH_INTERVAL_PROC_OID: u32 = 1697;
+pub const ENUM_EQ_PROC_OID: u32 = 3508;
+pub const ENUM_NE_PROC_OID: u32 = 3509;
+pub const ENUM_LT_PROC_OID: u32 = 3510;
+pub const ENUM_GT_PROC_OID: u32 = 3511;
+pub const ENUM_LE_PROC_OID: u32 = 3512;
+pub const ENUM_GE_PROC_OID: u32 = 3513;
+pub const ENUM_CMP_PROC_OID: u32 = 3514;
+pub const HASH_ENUM_PROC_OID: u32 = 3515;
+pub const HASH_ENUM_EXTENDED_PROC_OID: u32 = 3414;
 pub const MACADDR_EQ_PROC_OID: u32 = 830;
 pub const MACADDR_LT_PROC_OID: u32 = 831;
 pub const MACADDR_LE_PROC_OID: u32 = 832;
@@ -457,7 +468,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "extract",
             NUMERIC_TYPE_OID,
             &oid_argtypes(&[TEXT_TYPE_OID, DATE_TYPE_OID]),
-            "extract",
+            "extract_date",
             2,
             false,
             true,
@@ -493,7 +504,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "extract",
             NUMERIC_TYPE_OID,
             &oid_argtypes(&[TEXT_TYPE_OID, TIME_TYPE_OID]),
-            "extract",
+            "extract_time",
             2,
             false,
             true,
@@ -505,7 +516,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "extract",
             NUMERIC_TYPE_OID,
             &oid_argtypes(&[TEXT_TYPE_OID, TIMETZ_TYPE_OID]),
-            "extract",
+            "extract_timetz",
             2,
             false,
             true,
@@ -541,7 +552,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "extract",
             NUMERIC_TYPE_OID,
             &oid_argtypes(&[TEXT_TYPE_OID, TIMESTAMP_TYPE_OID]),
-            "extract",
+            "extract_timestamp",
             2,
             false,
             true,
@@ -553,7 +564,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "extract",
             NUMERIC_TYPE_OID,
             &oid_argtypes(&[TEXT_TYPE_OID, TIMESTAMPTZ_TYPE_OID]),
-            "extract",
+            "extract_timestamptz",
             2,
             false,
             true,
@@ -608,7 +619,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "age",
             INTERVAL_TYPE_OID,
             &oid_argtypes(&[TIMESTAMP_TYPE_OID]),
-            "age",
+            "timestamp_age_from_today",
             1,
             false,
             true,
@@ -692,7 +703,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "age",
             INTERVAL_TYPE_OID,
             &oid_argtypes(&[TIMESTAMP_TYPE_OID, TIMESTAMP_TYPE_OID]),
-            "age",
+            "timestamp_age",
             2,
             false,
             true,
@@ -5079,6 +5090,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
     rows.extend(geometry_proc_rows());
     rows.extend(macaddr_proc_rows());
     rows.extend(range_proc_rows());
+    rows.extend(multirange_relation_proc_rows());
     rows.extend(generic_btree_comparison_proc_rows());
     rows.extend(gist_support_proc_rows());
     rows.extend(spgist_support_proc_rows());
@@ -5086,6 +5098,8 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
     rows.extend(brin_support_proc_rows());
     rows.extend(hash_equality_proc_rows());
     rows.extend(hash_support_proc_rows());
+    rows.extend(hash_extended_proc_rows());
+    rows.extend(enum_proc_rows());
     rows.extend(operator_catalog_proc_rows());
     rows.extend(missing_leakproof_proc_rows());
     mark_catalog_leakproof_rows(&mut rows);
@@ -9474,6 +9488,276 @@ fn generic_btree_comparison_proc_rows() -> Vec<PgProcRow> {
     rows
 }
 
+fn enum_proc_rows() -> Vec<PgProcRow> {
+    [
+        (
+            ENUM_EQ_PROC_OID,
+            "enum_eq",
+            BOOL_TYPE_OID,
+            vec![ANYENUMOID, ANYENUMOID],
+        ),
+        (
+            ENUM_NE_PROC_OID,
+            "enum_ne",
+            BOOL_TYPE_OID,
+            vec![ANYENUMOID, ANYENUMOID],
+        ),
+        (
+            ENUM_LT_PROC_OID,
+            "enum_lt",
+            BOOL_TYPE_OID,
+            vec![ANYENUMOID, ANYENUMOID],
+        ),
+        (
+            ENUM_GT_PROC_OID,
+            "enum_gt",
+            BOOL_TYPE_OID,
+            vec![ANYENUMOID, ANYENUMOID],
+        ),
+        (
+            ENUM_LE_PROC_OID,
+            "enum_le",
+            BOOL_TYPE_OID,
+            vec![ANYENUMOID, ANYENUMOID],
+        ),
+        (
+            ENUM_GE_PROC_OID,
+            "enum_ge",
+            BOOL_TYPE_OID,
+            vec![ANYENUMOID, ANYENUMOID],
+        ),
+        (
+            ENUM_CMP_PROC_OID,
+            "enum_cmp",
+            INT4_TYPE_OID,
+            vec![ANYENUMOID, ANYENUMOID],
+        ),
+        (
+            HASH_ENUM_PROC_OID,
+            "hashenum",
+            INT4_TYPE_OID,
+            vec![ANYENUMOID],
+        ),
+        (
+            HASH_ENUM_EXTENDED_PROC_OID,
+            "hashenumextended",
+            INT8_TYPE_OID,
+            vec![ANYENUMOID, INT8_TYPE_OID],
+        ),
+    ]
+    .into_iter()
+    .map(|(oid, proname, prorettype, argtypes)| {
+        proc_row(
+            oid,
+            proname,
+            prorettype,
+            &oid_argtypes(&argtypes),
+            proname,
+            argtypes.len() as i16,
+            false,
+            true,
+            'f',
+            'i',
+        )
+    })
+    .collect()
+}
+
+fn multirange_relation_proc_rows() -> Vec<PgProcRow> {
+    [
+        (
+            4246,
+            "range_overlaps_multirange",
+            BOOL_TYPE_OID,
+            vec![ANYRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4247,
+            "multirange_overlaps_range",
+            BOOL_TYPE_OID,
+            vec![ANYMULTIRANGEOID, ANYRANGEOID],
+        ),
+        (
+            4248,
+            "multirange_overlaps_multirange",
+            BOOL_TYPE_OID,
+            vec![ANYMULTIRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4249,
+            "multirange_contains_elem",
+            BOOL_TYPE_OID,
+            vec![ANYMULTIRANGEOID, ANYELEMENTOID],
+        ),
+        (
+            4250,
+            "multirange_contains_range",
+            BOOL_TYPE_OID,
+            vec![ANYMULTIRANGEOID, ANYRANGEOID],
+        ),
+        (
+            4251,
+            "multirange_contains_multirange",
+            BOOL_TYPE_OID,
+            vec![ANYMULTIRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4252,
+            "elem_contained_by_multirange",
+            BOOL_TYPE_OID,
+            vec![ANYELEMENTOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4253,
+            "range_contained_by_multirange",
+            BOOL_TYPE_OID,
+            vec![ANYRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4541,
+            "range_contains_multirange",
+            BOOL_TYPE_OID,
+            vec![ANYRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4542,
+            "multirange_contained_by_range",
+            BOOL_TYPE_OID,
+            vec![ANYMULTIRANGEOID, ANYRANGEOID],
+        ),
+        (
+            4254,
+            "multirange_contained_by_multirange",
+            BOOL_TYPE_OID,
+            vec![ANYMULTIRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4255,
+            "range_adjacent_multirange",
+            BOOL_TYPE_OID,
+            vec![ANYRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4256,
+            "multirange_adjacent_multirange",
+            BOOL_TYPE_OID,
+            vec![ANYMULTIRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4257,
+            "multirange_adjacent_range",
+            BOOL_TYPE_OID,
+            vec![ANYMULTIRANGEOID, ANYRANGEOID],
+        ),
+        (
+            4258,
+            "range_before_multirange",
+            BOOL_TYPE_OID,
+            vec![ANYRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4259,
+            "multirange_before_range",
+            BOOL_TYPE_OID,
+            vec![ANYMULTIRANGEOID, ANYRANGEOID],
+        ),
+        (
+            4260,
+            "multirange_before_multirange",
+            BOOL_TYPE_OID,
+            vec![ANYMULTIRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4261,
+            "range_after_multirange",
+            BOOL_TYPE_OID,
+            vec![ANYRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4262,
+            "multirange_after_range",
+            BOOL_TYPE_OID,
+            vec![ANYMULTIRANGEOID, ANYRANGEOID],
+        ),
+        (
+            4263,
+            "multirange_after_multirange",
+            BOOL_TYPE_OID,
+            vec![ANYMULTIRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4264,
+            "range_overleft_multirange",
+            BOOL_TYPE_OID,
+            vec![ANYRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4265,
+            "multirange_overleft_range",
+            BOOL_TYPE_OID,
+            vec![ANYMULTIRANGEOID, ANYRANGEOID],
+        ),
+        (
+            4266,
+            "multirange_overleft_multirange",
+            BOOL_TYPE_OID,
+            vec![ANYMULTIRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4267,
+            "range_overright_multirange",
+            BOOL_TYPE_OID,
+            vec![ANYRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4268,
+            "multirange_overright_range",
+            BOOL_TYPE_OID,
+            vec![ANYMULTIRANGEOID, ANYRANGEOID],
+        ),
+        (
+            4269,
+            "multirange_overright_multirange",
+            BOOL_TYPE_OID,
+            vec![ANYMULTIRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4270,
+            "multirange_union",
+            ANYMULTIRANGEOID,
+            vec![ANYMULTIRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4271,
+            "multirange_minus",
+            ANYMULTIRANGEOID,
+            vec![ANYMULTIRANGEOID, ANYMULTIRANGEOID],
+        ),
+        (
+            4272,
+            "multirange_intersect",
+            ANYMULTIRANGEOID,
+            vec![ANYMULTIRANGEOID, ANYMULTIRANGEOID],
+        ),
+    ]
+    .into_iter()
+    .map(|(oid, proname, prorettype, argtypes)| {
+        proc_row(
+            oid,
+            proname,
+            prorettype,
+            &oid_argtypes(&argtypes),
+            proname,
+            argtypes.len() as i16,
+            false,
+            true,
+            'f',
+            'i',
+        )
+    })
+    .collect()
+}
+
 fn gist_support_proc_rows() -> Vec<PgProcRow> {
     vec![
         proc_row(
@@ -9783,18 +10067,6 @@ fn gist_support_proc_rows() -> Vec<PgProcRow> {
             ]),
             "multirange_gist_consistent",
             5,
-            false,
-            false,
-            'f',
-            'i',
-        ),
-        proc_row(
-            MULTIRANGE_GIST_UNION_PROC_OID,
-            "multirange_gist_union",
-            ANYMULTIRANGEOID,
-            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
-            "multirange_gist_union",
-            2,
             false,
             false,
             'f',
@@ -10319,6 +10591,7 @@ fn hash_support_proc_rows() -> Vec<PgProcRow> {
             "hash_multirange",
             ANYMULTIRANGEOID,
         ),
+        (HASH_JSONB_PROC_OID, "jsonb_hash", JSONB_TYPE_OID),
         (HASH_INTERVAL_PROC_OID, "interval_hash", INTERVAL_TYPE_OID),
     ]
     .into_iter()
@@ -10339,8 +10612,23 @@ fn hash_support_proc_rows() -> Vec<PgProcRow> {
     .collect()
 }
 
+fn hash_extended_proc_rows() -> Vec<PgProcRow> {
+    vec![proc_row(
+        HASH_JSONB_EXTENDED_PROC_OID,
+        "jsonb_hash_extended",
+        INT8_TYPE_OID,
+        &oid_argtypes(&[JSONB_TYPE_OID, INT8_TYPE_OID]),
+        "jsonb_hash_extended",
+        2,
+        false,
+        true,
+        'f',
+        'i',
+    )]
+}
+
 fn macaddr_proc_rows() -> Vec<PgProcRow> {
-    let mut rows = vec![
+    let rows = vec![
         comparison_proc_row(
             MACADDR_EQ_PROC_OID,
             "macaddr_eq",
@@ -10371,18 +10659,21 @@ fn macaddr_proc_rows() -> Vec<PgProcRow> {
             "macaddr_ge",
             &[MACADDR_TYPE_OID, MACADDR_TYPE_OID],
         ),
-        proc_row(
-            MACADDR_CMP_PROC_OID,
-            "macaddr_cmp",
-            INT4_TYPE_OID,
-            &oid_argtypes(&[MACADDR_TYPE_OID, MACADDR_TYPE_OID]),
-            "macaddr_cmp",
-            2,
-            false,
-            true,
-            'f',
-            'i',
-        ),
+        PgProcRow {
+            proleakproof: true,
+            ..proc_row(
+                MACADDR_CMP_PROC_OID,
+                "macaddr_cmp",
+                INT4_TYPE_OID,
+                &oid_argtypes(&[MACADDR_TYPE_OID, MACADDR_TYPE_OID]),
+                "macaddr_cmp",
+                2,
+                false,
+                true,
+                'f',
+                'i',
+            )
+        },
         proc_row(
             MACADDR_TRUNC_PROC_OID,
             "trunc",
@@ -10455,18 +10746,21 @@ fn macaddr_proc_rows() -> Vec<PgProcRow> {
             'f',
             'i',
         ),
-        proc_row(
-            MACADDR_TO_MACADDR8_PROC_OID,
-            "macaddr8",
-            MACADDR8_TYPE_OID,
-            &oid_argtypes(&[MACADDR_TYPE_OID]),
-            "macaddrtomacaddr8",
-            1,
-            false,
-            true,
-            'f',
-            'i',
-        ),
+        PgProcRow {
+            proleakproof: true,
+            ..proc_row(
+                MACADDR_TO_MACADDR8_PROC_OID,
+                "macaddr8",
+                MACADDR8_TYPE_OID,
+                &oid_argtypes(&[MACADDR_TYPE_OID]),
+                "macaddrtomacaddr8",
+                1,
+                false,
+                true,
+                'f',
+                'i',
+            )
+        },
         comparison_proc_row(
             MACADDR8_EQ_PROC_OID,
             "macaddr8_eq",
@@ -10497,18 +10791,21 @@ fn macaddr_proc_rows() -> Vec<PgProcRow> {
             "macaddr8_ge",
             &[MACADDR8_TYPE_OID, MACADDR8_TYPE_OID],
         ),
-        proc_row(
-            MACADDR8_CMP_PROC_OID,
-            "macaddr8_cmp",
-            INT4_TYPE_OID,
-            &oid_argtypes(&[MACADDR8_TYPE_OID, MACADDR8_TYPE_OID]),
-            "macaddr8_cmp",
-            2,
-            false,
-            true,
-            'f',
-            'i',
-        ),
+        PgProcRow {
+            proleakproof: true,
+            ..proc_row(
+                MACADDR8_CMP_PROC_OID,
+                "macaddr8_cmp",
+                INT4_TYPE_OID,
+                &oid_argtypes(&[MACADDR8_TYPE_OID, MACADDR8_TYPE_OID]),
+                "macaddr8_cmp",
+                2,
+                false,
+                true,
+                'f',
+                'i',
+            )
+        },
         proc_row(
             MACADDR8_TRUNC_PROC_OID,
             "trunc",
@@ -10606,12 +10903,6 @@ fn macaddr_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
     ];
-
-    for row in &mut rows {
-        if row.proname.starts_with("macaddr") || row.proname.starts_with("hashmacaddr") {
-            row.proleakproof = true;
-        }
-    }
 
     rows
 }
