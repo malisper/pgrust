@@ -1215,11 +1215,13 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
         Plan::SetOp {
             plan_info,
             op,
+            strategy,
             output_columns,
             children,
         } => Plan::SetOp {
             plan_info,
             op,
+            strategy,
             output_columns,
             children: children
                 .into_iter()
@@ -1401,6 +1403,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
         Plan::Aggregate {
             plan_info,
             strategy,
+            disabled,
             input,
             group_by,
             passthrough_exprs,
@@ -1410,6 +1413,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
         } => Plan::Aggregate {
             plan_info,
             strategy,
+            disabled,
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
             group_by: group_by
                 .into_iter()
@@ -1632,11 +1636,13 @@ pub(super) fn finalize_plan_subqueries(
         Plan::SetOp {
             plan_info,
             op,
+            strategy,
             output_columns,
             children,
         } => Plan::SetOp {
             plan_info,
             op,
+            strategy,
             output_columns,
             children: children
                 .into_iter()
@@ -1823,6 +1829,7 @@ pub(super) fn finalize_plan_subqueries(
         Plan::Aggregate {
             plan_info,
             strategy,
+            disabled,
             input,
             group_by,
             passthrough_exprs,
@@ -1832,6 +1839,7 @@ pub(super) fn finalize_plan_subqueries(
         } => Plan::Aggregate {
             plan_info,
             strategy,
+            disabled,
             input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
             group_by: group_by
                 .into_iter()

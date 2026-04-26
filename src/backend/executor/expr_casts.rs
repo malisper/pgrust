@@ -3712,6 +3712,22 @@ pub(crate) fn cast_value_with_source_type_and_config(
     cast_value_with_source_type_catalog_and_config(value, source_type, ty, None, config)
 }
 
+fn cast_text_input_for_source_type(
+    text: &str,
+    source_type: Option<SqlType>,
+    target_type: SqlType,
+) -> &str {
+    let source_is_bpchar =
+        source_type.is_some_and(|ty| !ty.is_array && matches!(ty.kind, SqlTypeKind::Char));
+    let target_trims_bpchar = !target_type.is_array
+        && matches!(target_type.kind, SqlTypeKind::Text | SqlTypeKind::Varchar);
+    if source_is_bpchar && target_trims_bpchar {
+        text.trim_end_matches(' ')
+    } else {
+        text
+    }
+}
+
 fn enforce_domain_check(
     value: Value,
     ty: SqlType,
@@ -4567,18 +4583,20 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             }),
         },
         Value::Text(text) => {
+            let text = cast_text_input_for_source_type(text.as_str(), source_type, ty);
             if matches!(ty.kind, SqlTypeKind::Enum) {
-                cast_text_to_enum(text.as_str(), ty, catalog)
+                cast_text_to_enum(text, ty, catalog)
             } else if matches!(ty.kind, SqlTypeKind::RegType) {
-                cast_text_to_regtype(text.as_str(), catalog)
+                cast_text_to_regtype(text, catalog)
             } else {
-                cast_text_value_with_config(text.as_str(), ty, true, config)
+                cast_text_value_with_config(text, ty, true, config)
             }
         }
         Value::TextRef(ptr, len) => {
             let text = unsafe {
                 std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize))
             };
+            let text = cast_text_input_for_source_type(text, source_type, ty);
             if matches!(ty.kind, SqlTypeKind::Enum) {
                 cast_text_to_enum(text, ty, catalog)
             } else if matches!(ty.kind, SqlTypeKind::RegType) {
@@ -6725,6 +6743,31 @@ mod tests {
             )
             .unwrap(),
             Value::Text("WS".into())
+        );
+    }
+
+    #[test]
+    fn bpchar_to_varchar_and_text_trims_padding() {
+        let source = Some(SqlType::with_char_len(SqlTypeKind::Char, 4));
+        assert_eq!(
+            cast_value_with_source_type_and_config(
+                Value::Text("a   ".into()),
+                source,
+                SqlType::new(SqlTypeKind::Varchar),
+                &DateTimeConfig::default(),
+            )
+            .unwrap(),
+            Value::Text("a".into())
+        );
+        assert_eq!(
+            cast_value_with_source_type_and_config(
+                Value::Text("ab  ".into()),
+                source,
+                SqlType::new(SqlTypeKind::Text),
+                &DateTimeConfig::default(),
+            )
+            .unwrap(),
+            Value::Text("ab".into())
         );
     }
 

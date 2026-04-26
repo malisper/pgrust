@@ -55,7 +55,7 @@ use crate::include::nodes::primnodes::{
     ParamKind, RelationDesc, ScalarFunctionImpl, Var, attrno_index,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 const EMPTY_SYSTEM_BINDINGS: [SystemVarBinding; 0] = [];
@@ -576,6 +576,7 @@ fn set_op_result_rows(
     let child_count = children.len();
     let mut child_rows = Vec::with_capacity(children.len());
     let mut buckets: Vec<Bucket> = Vec::new();
+    let mut bucket_by_values: HashMap<Vec<Value>, usize> = HashMap::new();
 
     for (child_index, child) in children.iter_mut().enumerate() {
         let mut rows = Vec::new();
@@ -584,14 +585,13 @@ fn set_op_result_rows(
             let values = row.slot.tts_values.clone();
             rows.push(row.clone());
 
-            if let Some(bucket) = buckets
-                .iter_mut()
-                .find(|bucket| bucket.row.slot.tts_values == values)
-            {
-                bucket.counts[child_index] += 1;
+            if let Some(bucket_index) = bucket_by_values.get(&values).copied() {
+                buckets[bucket_index].counts[child_index] += 1;
             } else {
+                let bucket_index = buckets.len();
                 let mut counts = vec![0; child_count];
                 counts[child_index] = 1;
+                bucket_by_values.insert(values, bucket_index);
                 buckets.push(Bucket { row, counts });
             }
         }
@@ -1919,11 +1919,7 @@ fn render_index_scan_key(
                 &default_column_names
             }
         };
-        return Some(render_explain_expr_inner_with_qualifier(
-            display_expr,
-            None,
-            column_names,
-        ));
+        return Some(render_index_display_expr(display_expr, column_names));
     }
     let index_attno = usize::try_from(key.attribute_number.checked_sub(1)?).ok()?;
     let index_key_attno = *index_meta.indkey.get(index_attno)?;
@@ -1954,6 +1950,8 @@ fn render_index_scan_key(
         && column_type.kind == SqlTypeKind::Char
     {
         format!("({column_name})::bpchar")
+    } else if index_key_attno == 0 && expression_index_key_needs_parens(&column_name) {
+        format!("({column_name})")
     } else {
         column_name
     };
@@ -1994,6 +1992,41 @@ fn render_index_scan_key(
         IndexScanKeyArgument::Runtime(expr) => render_explain_expr(expr, &[]),
     };
     Some(format!("{left_sql} {operator_name} {value_sql}"))
+}
+
+fn expression_index_key_needs_parens(expr: &str) -> bool {
+    [" || ", " + ", " - ", " * ", " / ", " % ", " = "]
+        .iter()
+        .any(|operator| expr.contains(operator))
+}
+
+fn render_index_display_expr(expr: &Expr, column_names: &[String]) -> String {
+    let Expr::Op(op) = expr else {
+        return render_explain_expr_inner_with_qualifier(expr, None, column_names);
+    };
+    if !matches!(
+        op.op,
+        crate::include::nodes::primnodes::OpExprKind::Eq
+            | crate::include::nodes::primnodes::OpExprKind::NotEq
+            | crate::include::nodes::primnodes::OpExprKind::Lt
+            | crate::include::nodes::primnodes::OpExprKind::LtEq
+            | crate::include::nodes::primnodes::OpExprKind::Gt
+            | crate::include::nodes::primnodes::OpExprKind::GtEq
+    ) {
+        return render_explain_expr_inner_with_qualifier(expr, None, column_names);
+    }
+    let [left, right] = op.args.as_slice() else {
+        return render_explain_expr_inner_with_qualifier(expr, None, column_names);
+    };
+    let op_text = infix_operator_text(op.opno, op.op).unwrap_or("=");
+    let left_sql = render_explain_expr_inner_with_qualifier(left, None, column_names);
+    let left_sql = if matches!(left, Expr::Op(_)) {
+        format!("({left_sql})")
+    } else {
+        left_sql
+    };
+    let right_sql = render_explain_infix_operand(right, None, column_names);
+    format!("{left_sql} {op_text} {right_sql}")
 }
 
 fn lookup_index_scan_operator_name(
@@ -2625,6 +2658,23 @@ fn render_explain_expr_inner_with_qualifier(
         Expr::Const(value) => render_explain_const(value),
         Expr::Cast(inner, ty) => render_explain_cast(inner, *ty, qualifier, column_names),
         Expr::Op(op) => match op.op {
+            crate::include::nodes::primnodes::OpExprKind::UnaryPlus
+            | crate::include::nodes::primnodes::OpExprKind::Negate
+            | crate::include::nodes::primnodes::OpExprKind::BitNot => {
+                let [inner] = op.args.as_slice() else {
+                    return format!("{expr:?}");
+                };
+                let op_text = match op.op {
+                    crate::include::nodes::primnodes::OpExprKind::UnaryPlus => "+",
+                    crate::include::nodes::primnodes::OpExprKind::Negate => "-",
+                    crate::include::nodes::primnodes::OpExprKind::BitNot => "~",
+                    _ => unreachable!(),
+                };
+                format!(
+                    "({op_text} {})",
+                    render_explain_expr_inner_with_qualifier(inner, qualifier, column_names)
+                )
+            }
             crate::include::nodes::primnodes::OpExprKind::Add
             | crate::include::nodes::primnodes::OpExprKind::Sub
             | crate::include::nodes::primnodes::OpExprKind::Mul
@@ -5297,11 +5347,16 @@ impl PlanNode for AggregateState {
         lines: &mut Vec<String>,
     ) {
         let prefix = explain_detail_prefix(indent);
+        if self.disabled {
+            lines.push(format!("{prefix}Disabled: true"));
+        }
         if !self.group_by.is_empty() {
             let group_key = self
                 .group_by
                 .iter()
-                .map(|expr| render_explain_expr(expr, self.input.column_names()))
+                .map(|expr| {
+                    render_aggregate_group_key_expr(expr, self.input.column_names(), self.disabled)
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             lines.push(format!("{prefix}Group Key: {group_key}"));
@@ -5321,6 +5376,45 @@ impl PlanNode for AggregateState {
         lines: &mut Vec<String>,
     ) {
         format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
+    }
+}
+
+fn render_aggregate_group_key_expr(
+    expr: &Expr,
+    input_names: &[String],
+    force_xid_const: bool,
+) -> String {
+    if force_xid_const && let Some(rendered) = render_xid_group_key_expr(expr) {
+        return rendered;
+    }
+    let rendered = render_explain_expr(expr, input_names);
+    if force_xid_const && rendered.chars().all(|ch| ch.is_ascii_digit()) {
+        return format!("('{rendered}'::xid)");
+    }
+    if (matches!(expr, Expr::Op(_)) || rendered.contains(" || "))
+        && rendered.starts_with('(')
+        && rendered.ends_with(')')
+    {
+        return format!("({rendered})");
+    }
+    rendered
+}
+
+fn render_xid_group_key_expr(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Const(Value::Int16(value)) => Some(format!("('{value}'::xid)")),
+        Expr::Const(Value::Int32(value)) => Some(format!("('{value}'::xid)")),
+        Expr::Const(Value::Int64(value)) => Some(format!("('{value}'::xid)")),
+        Expr::Const(Value::Xid8(value)) => Some(format!("('{value}'::xid)")),
+        Expr::Const(Value::EnumOid(value)) => Some(format!("('{value}'::xid)")),
+        Expr::Const(Value::Text(value)) => Some(format!("('{}'::xid)", value.replace('\'', "''"))),
+        Expr::Const(value @ Value::TextRef(_, _)) => value
+            .as_text()
+            .map(|value| format!("('{}'::xid)", value.replace('\'', "''"))),
+        Expr::Cast(inner, ty) if matches!(ty.kind, SqlTypeKind::Xid) => {
+            render_xid_group_key_expr(inner)
+        }
+        _ => None,
     }
 }
 
@@ -5959,26 +6053,21 @@ impl PlanNode for SetOpState {
     }
 
     fn node_label(&self) -> String {
-        match self.op {
-            crate::include::nodes::parsenodes::SetOperator::Union { all: true } => {
-                "SetOp Union All".into()
-            }
-            crate::include::nodes::parsenodes::SetOperator::Union { all: false } => {
-                "SetOp Union".into()
-            }
+        let op_name = match self.op {
+            crate::include::nodes::parsenodes::SetOperator::Union { all: true } => "Union All",
+            crate::include::nodes::parsenodes::SetOperator::Union { all: false } => "Union",
             crate::include::nodes::parsenodes::SetOperator::Intersect { all: true } => {
-                "SetOp Intersect All".into()
+                "Intersect All"
             }
-            crate::include::nodes::parsenodes::SetOperator::Intersect { all: false } => {
-                "SetOp Intersect".into()
-            }
-            crate::include::nodes::parsenodes::SetOperator::Except { all: true } => {
-                "SetOp Except All".into()
-            }
-            crate::include::nodes::parsenodes::SetOperator::Except { all: false } => {
-                "SetOp Except".into()
-            }
-        }
+            crate::include::nodes::parsenodes::SetOperator::Intersect { all: false } => "Intersect",
+            crate::include::nodes::parsenodes::SetOperator::Except { all: true } => "Except All",
+            crate::include::nodes::parsenodes::SetOperator::Except { all: false } => "Except",
+        };
+        let prefix = match self.strategy {
+            crate::include::nodes::plannodes::SetOpStrategy::Hashed => "HashSetOp",
+            crate::include::nodes::plannodes::SetOpStrategy::Sorted => "SetOp",
+        };
+        format!("{prefix} {op_name}")
     }
 
     fn explain_children(

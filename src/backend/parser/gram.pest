@@ -29,7 +29,8 @@ explain_stmt = { kw_explain ~ (kw_analyze | "(" ~ explain_option ~ ("," ~ explai
 explain_option = { explain_option_name ~ explain_option_value? }
 explain_option_name = { kw_analyze | kw_buffers | kw_costs | kw_timing | kw_verbose | kw_summary | kw_format }
 explain_option_value = { kw_off | kw_true | kw_false | kw_text | kw_json | kw_yaml | kw_xml | kw_on_value }
-select_stmt = { set_operation_stmt | simple_select_stmt }
+select_stmt = { set_operation_stmt | parenthesized_select_stmt | simple_select_stmt }
+parenthesized_select_stmt = { "(" ~ select_stmt ~ ")" }
 select_into_stmt = {
     cte_clause? ~ select_into_core ~ window_clause? ~ order_by_clause? ~ limit_clause? ~ offset_clause? ~ locking_clause?
   | cte_clause? ~ select_into_core ~ window_clause? ~ order_by_clause? ~ locking_clause ~ limit_clause? ~ offset_clause?
@@ -46,17 +47,19 @@ set_operation_stmt = {
     cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause? ~ order_by_clause? ~ limit_clause? ~ offset_clause? ~ locking_clause?
   | cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause? ~ order_by_clause? ~ locking_clause ~ limit_clause? ~ offset_clause?
 }
-set_operation_term = { parenthesized_set_operation_term | simple_select_core }
-parenthesized_set_operation_term = { "(" ~ (select_stmt | parenthesized_set_operation_term) ~ ")" }
+set_operation_term = { parenthesized_select_stmt | parenthesized_values_stmt | parenthesized_set_operation_term | values_stmt | simple_select_core }
+parenthesized_set_operation_term = { "(" ~ (select_stmt | parenthesized_set_operation_term | values_stmt) ~ ")" }
+parenthesized_values_stmt = { "(" ~ values_stmt ~ ")" }
 set_operation_clause = { (kw_union | kw_intersect | kw_except) ~ kw_all? }
 values_stmt = { cte_clause? ~ kw_values ~ values_row ~ ("," ~ values_row)* ~ order_by_clause? ~ limit_clause? ~ offset_clause? }
 copy_stmt = { ^"copy" ~ identifier ~ ("(" ~ ident_list ~ ")")? ~ kw_from ~ quoted_string_literal }
 cte_clause = { kw_with ~ kw_recursive? ~ common_table_expr ~ ("," ~ common_table_expr)* }
-common_table_expr = { identifier ~ cte_column_list? ~ kw_as ~ "(" ~ cte_body ~ ")" }
+common_table_expr = { identifier ~ cte_column_list? ~ kw_as ~ cte_materialization? ~ "(" ~ cte_body ~ ")" }
 cte_column_list = { "(" ~ ident_list ~ ")" }
+cte_materialization = { kw_not? ~ kw_materialized }
 cte_body = { recursive_union_cte_body | select_stmt | values_stmt }
 recursive_union_cte_body = { (simple_select_stmt | values_stmt) ~ kw_union ~ kw_all? ~ (parenthesized_set_operation_term | select_stmt) }
-empty_select_list = { &kw_from }
+empty_select_list = { &(kw_from | kw_union | kw_intersect | kw_except) }
 group_by_clause = { kw_group ~ kw_by ~ expr ~ ("," ~ expr)* }
 having_clause = { kw_having ~ expr }
 order_by_clause = { kw_order ~ kw_by ~ order_by_item ~ ("," ~ order_by_item)* }

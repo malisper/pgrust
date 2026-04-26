@@ -384,7 +384,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::Parse(crate::backend::parser::ParseError::MissingKeyColumn(_)) => {
             return find_without_overlaps_constraint_position(sql);
         }
-        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. }) => {
+        ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message,
+            detail,
+            ..
+        }) => {
             if message == "cannot determine type of empty array" {
                 return find_case_insensitive_token_position(sql, "array[]");
             }
@@ -394,6 +398,14 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             }
             if let Some(position) = publication_where_error_position(sql, message, None) {
                 return Some(position);
+            }
+            if detail.as_deref().is_some_and(|detail| {
+                detail.contains("cannot be referenced from this part of the query")
+            }) && message.starts_with("column \"")
+                && message.ends_with("\" does not exist")
+                && let Some(name) = extract_missing_column_name(message)
+            {
+                return find_last_case_insensitive_token_position(sql, name);
             }
             if let Some(position) = routine_definition_error_position(sql, message) {
                 return Some(position);
@@ -921,6 +933,12 @@ fn extract_quoted_error_value(message: &str) -> Option<&str> {
 
     let (_, rest) = message.rsplit_once(": \"")?;
     rest.strip_suffix('"')
+}
+
+fn extract_missing_column_name(message: &str) -> Option<&str> {
+    message
+        .strip_prefix("column \"")?
+        .strip_suffix("\" does not exist")
 }
 
 fn extract_at_or_near_token(message: &str) -> Option<&str> {

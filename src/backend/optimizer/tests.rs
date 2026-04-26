@@ -2231,6 +2231,7 @@ fn aggregate_pathkeys_follow_strategy() {
         pathtarget: PathTarget::new(vec![var(10, 1)]),
         slot_id: 20,
         strategy: AggregateStrategy::Hashed,
+        disabled: false,
         pathkeys: vec![key.clone()],
         input: Box::new(values_path(10, 1.0, 1.0)),
         group_by: vec![var(10, 1)],
@@ -2250,6 +2251,7 @@ fn aggregate_pathkeys_follow_strategy() {
         pathtarget: PathTarget::new(vec![var(10, 1)]),
         slot_id: 20,
         strategy: AggregateStrategy::Sorted,
+        disabled: false,
         pathkeys: vec![key.clone()],
         input: Box::new(values_path(10, 1.0, 1.0)),
         group_by: vec![var(10, 1)],
@@ -2759,7 +2761,7 @@ fn planner_keeps_recursive_project_set_scalar_semantic_until_setrefs() {
 }
 
 #[test]
-fn planner_lowers_setop_children_with_their_own_roots() {
+fn planner_lowers_union_all_append_children_with_their_own_roots() {
     let planned = planned_stmt_for_sql(
         "select x
          from (values (1)) base(x)
@@ -2769,7 +2771,7 @@ fn planner_lowers_setop_children_with_their_own_roots() {
          join (values (2)) r(y) on true",
     );
 
-    assert!(matches!(planned.plan_tree, Plan::SetOp { .. }));
+    assert!(matches!(planned.plan_tree, Plan::Append { .. }));
 }
 
 #[test]
