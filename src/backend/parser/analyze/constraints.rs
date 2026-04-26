@@ -55,6 +55,7 @@ pub struct CheckConstraintAction {
 pub struct ForeignKeyConstraintAction {
     pub constraint_name: String,
     pub columns: Vec<String>,
+    pub period: Option<String>,
     pub referenced_table: String,
     pub referenced_relation_oid: u32,
     pub referenced_index_oid: u32,
@@ -62,6 +63,7 @@ pub struct ForeignKeyConstraintAction {
     // indexes exist, matching PostgreSQL's post-create FK installation order.
     pub self_referential: bool,
     pub referenced_columns: Vec<String>,
+    pub referenced_period: Option<String>,
     pub match_type: ForeignKeyMatchType,
     pub on_delete: ForeignKeyAction,
     pub on_delete_set_columns: Option<Vec<String>>,
@@ -101,12 +103,15 @@ pub struct BoundForeignKeyConstraint {
     pub relation_name: String,
     pub column_names: Vec<String>,
     pub column_indexes: Vec<usize>,
+    pub period_column_index: Option<usize>,
     pub match_type: ForeignKeyMatchType,
     pub referenced_relation_name: String,
     pub referenced_relation_oid: u32,
     pub referenced_rel: crate::backend::storage::smgr::RelFileLocator,
+    pub referenced_toast: Option<crate::include::nodes::execnodes::ToastRelationRef>,
     pub referenced_desc: RelationDesc,
     pub referenced_column_indexes: Vec<usize>,
+    pub referenced_period_column_index: Option<usize>,
     pub referenced_index: super::BoundIndexRelation,
     pub deferrable: bool,
     pub initially_deferred: bool,
@@ -146,8 +151,13 @@ pub struct BoundReferencedByForeignKey {
     pub child_toast: Option<crate::include::nodes::execnodes::ToastRelationRef>,
     pub child_desc: RelationDesc,
     pub child_column_indexes: Vec<usize>,
+    pub child_period_column_index: Option<usize>,
+    pub referenced_rel: crate::backend::storage::smgr::RelFileLocator,
+    pub referenced_toast: Option<crate::include::nodes::execnodes::ToastRelationRef>,
+    pub referenced_desc: RelationDesc,
     pub referenced_column_names: Vec<String>,
     pub referenced_column_indexes: Vec<usize>,
+    pub referenced_period_column_index: Option<usize>,
     pub child_index: Option<super::BoundIndexRelation>,
     pub on_delete: ForeignKeyAction,
     pub on_delete_set_column_indexes: Option<Vec<usize>>,
@@ -222,8 +232,10 @@ struct PendingForeignKeyConstraint {
     explicit_name: Option<String>,
     generated_base: String,
     columns: Vec<String>,
+    period: Option<String>,
     referenced_table: String,
     referenced_columns: Option<Vec<String>>,
+    referenced_period: Option<String>,
     match_type: ForeignKeyMatchType,
     on_delete: ForeignKeyAction,
     on_delete_set_columns: Option<Vec<String>>,
@@ -238,7 +250,14 @@ struct PendingForeignKeyConstraint {
 struct ResolvedReferencedKey {
     relation: super::BoundRelation,
     columns: Vec<String>,
+    period: Option<String>,
     index_oid: u32,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedPendingReferencedKey {
+    columns: Vec<String>,
+    period: Option<String>,
 }
 
 fn table_persistence_code(persistence: TablePersistence) -> char {
@@ -370,8 +389,10 @@ pub fn normalize_create_table_constraints(
                         explicit_name: attributes.name.clone(),
                         generated_base: format!("{}_{}_fkey", stmt.table_name, column.name),
                         columns: vec![column.name.clone()],
+                        period: None,
                         referenced_table: referenced_table.clone(),
                         referenced_columns: referenced_columns.clone(),
+                        referenced_period: None,
                         match_type: *match_type,
                         on_delete: *on_delete,
                         on_delete_set_columns: on_delete_set_columns.clone(),
@@ -553,8 +574,10 @@ pub fn normalize_create_table_constraints(
             TableConstraint::ForeignKey {
                 attributes,
                 columns: key_columns,
+                period,
                 referenced_table,
                 referenced_columns,
+                referenced_period,
                 match_type,
                 on_delete,
                 on_delete_set_columns,
@@ -568,13 +591,20 @@ pub fn normalize_create_table_constraints(
                     *on_update,
                 )?;
                 let (deferrable, initially_deferred) = foreign_key_deferrability(attributes);
-                let resolved = resolve_constraint_columns(key_columns, &columns, &column_lookup)?;
+                let resolved = resolve_foreign_key_columns(
+                    key_columns,
+                    period.as_deref(),
+                    &columns,
+                    &column_lookup,
+                )?;
                 foreign_keys.push(PendingForeignKeyConstraint {
                     explicit_name: attributes.name.clone(),
                     generated_base: format!("{}_{}_fkey", stmt.table_name, resolved.join("_")),
                     columns: resolved,
+                    period: period.clone(),
                     referenced_table: referenced_table.clone(),
                     referenced_columns: referenced_columns.clone(),
+                    referenced_period: referenced_period.clone(),
                     match_type: *match_type,
                     on_delete: *on_delete,
                     on_delete_set_columns: on_delete_set_columns.clone(),
@@ -698,8 +728,7 @@ pub fn normalize_create_table_constraints(
     let finalized_foreign_keys = foreign_keys
         .into_iter()
         .map(|constraint| {
-            let local_columns =
-                resolve_constraint_columns(&constraint.columns, &columns, &column_lookup)?;
+            let local_columns = constraint.columns.clone();
             let child_types = local_columns
                 .iter()
                 .map(|column| {
@@ -715,6 +744,7 @@ pub fn normalize_create_table_constraints(
                 referenced_index_oid,
                 self_referential,
                 referenced_columns,
+                referenced_period,
                 constraint_name,
             ) = if constraint
                 .referenced_table
@@ -723,12 +753,14 @@ pub fn normalize_create_table_constraints(
                 let constraint_name = constraint.explicit_name.clone().unwrap_or_else(|| {
                     choose_generated_constraint_name(&constraint.generated_base, &mut used_names)
                 });
-                let referenced_columns = resolve_pending_self_referenced_key(
+                let referenced = resolve_pending_self_referenced_key(
                     &stmt.table_name,
                     &columns,
                     &column_lookup,
                     &finalized_index_backed,
                     constraint.referenced_columns.as_deref(),
+                    constraint.period.as_deref(),
+                    constraint.referenced_period.as_deref(),
                     &constraint_name,
                     &local_columns,
                     &child_types,
@@ -739,7 +771,8 @@ pub fn normalize_create_table_constraints(
                     0,
                     0,
                     true,
-                    referenced_columns,
+                    referenced.columns,
+                    referenced.period,
                     constraint_name,
                 )
             } else {
@@ -752,6 +785,8 @@ pub fn normalize_create_table_constraints(
                     table_persistence_code(stmt.persistence),
                     &constraint.referenced_table,
                     constraint.referenced_columns.as_deref(),
+                    constraint.period.as_deref(),
+                    constraint.referenced_period.as_deref(),
                     &constraint_name,
                     &local_columns,
                     &child_types,
@@ -767,17 +802,20 @@ pub fn normalize_create_table_constraints(
                     referenced.index_oid,
                     false,
                     referenced.columns,
+                    referenced.period,
                     constraint_name,
                 )
             };
             Ok(ForeignKeyConstraintAction {
                 constraint_name,
                 columns: local_columns,
+                period: constraint.period,
                 referenced_table,
                 referenced_relation_oid,
                 referenced_index_oid,
                 self_referential,
                 referenced_columns,
+                referenced_period,
                 match_type: constraint.match_type,
                 on_delete: constraint.on_delete,
                 on_delete_set_columns: resolve_foreign_key_delete_set_columns(
@@ -1338,8 +1376,10 @@ pub fn normalize_alter_table_add_constraint(
         TableConstraint::ForeignKey {
             attributes,
             columns,
+            period,
             referenced_table,
             referenced_columns,
+            referenced_period,
             match_type,
             on_delete,
             on_delete_set_columns,
@@ -1353,7 +1393,12 @@ pub fn normalize_alter_table_add_constraint(
                 *on_update,
             )?;
             let (deferrable, initially_deferred) = foreign_key_deferrability(attributes);
-            let resolved = resolve_relation_constraint_columns(columns, desc, &column_lookup)?;
+            let resolved = resolve_relation_foreign_key_columns(
+                columns,
+                period.as_deref(),
+                desc,
+                &column_lookup,
+            )?;
             let child_types = resolved
                 .iter()
                 .map(|column| {
@@ -1374,6 +1419,8 @@ pub fn normalize_alter_table_add_constraint(
                 relpersistence,
                 referenced_table,
                 referenced_columns.as_deref(),
+                period.as_deref(),
+                referenced_period.as_deref(),
                 &constraint_name,
                 &resolved,
                 &child_types,
@@ -1383,6 +1430,7 @@ pub fn normalize_alter_table_add_constraint(
                 ForeignKeyConstraintAction {
                     constraint_name,
                     columns: resolved,
+                    period: period.clone(),
                     referenced_table: relation_display_name(
                         catalog,
                         referenced.relation.relation_oid,
@@ -1392,6 +1440,7 @@ pub fn normalize_alter_table_add_constraint(
                     referenced_index_oid: referenced.index_oid,
                     self_referential: false,
                     referenced_columns: referenced.columns,
+                    referenced_period: referenced.period,
                     match_type: *match_type,
                     on_delete: *on_delete,
                     on_delete_set_columns: resolve_foreign_key_delete_set_columns(
@@ -1802,49 +1851,104 @@ fn resolve_pending_self_referenced_key(
     column_lookup: &BTreeMap<String, usize>,
     index_constraints: &[IndexBackedConstraintAction],
     referenced_columns: Option<&[String]>,
+    period: Option<&str>,
+    referenced_period: Option<&str>,
     constraint_name: &str,
     child_columns: &[String],
     child_types: &[SqlType],
     catalog: &dyn super::CatalogLookup,
-) -> Result<Vec<String>, ParseError> {
-    let referenced_columns = if let Some(referenced_columns) = referenced_columns {
-        let referenced_columns =
-            resolve_constraint_columns(referenced_columns, column_defs, column_lookup)?;
-        let referenced_key = referenced_columns
-            .iter()
-            .map(|column| column.to_ascii_lowercase())
-            .collect::<Vec<_>>();
-        let matched = index_constraints.iter().find(|constraint| {
-            constraint
-                .columns
+) -> Result<ResolvedPendingReferencedKey, ParseError> {
+    if referenced_columns.is_some_and(has_duplicate_column) {
+        return Err(foreign_key_referenced_columns_duplicate_error());
+    }
+
+    let explicit_referenced_columns = referenced_columns.is_some();
+    let explicit_referenced_period = referenced_period.is_some();
+    let (referenced_columns, matched_period, matched_primary) =
+        if let Some(referenced_columns) = referenced_columns {
+            let referenced_columns = resolve_foreign_key_columns(
+                referenced_columns,
+                referenced_period,
+                column_defs,
+                column_lookup,
+            )?;
+            let referenced_key = referenced_columns
                 .iter()
                 .map(|column| column.to_ascii_lowercase())
-                .collect::<Vec<_>>()
-                == referenced_key
-        });
-        if matched.is_none() {
-            return Err(ParseError::UnexpectedToken {
-                expected: "referenced UNIQUE or PRIMARY KEY index",
-                actual: format!("table \"{table_name}\" lacks an exact matching unique key"),
+                .collect::<Vec<_>>();
+            let matched = index_constraints.iter().find(|constraint| {
+                constraint
+                    .columns
+                    .iter()
+                    .map(|column| column.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+                    == referenced_key
             });
+            let Some(matched) = matched else {
+                if period.is_some() && referenced_period.is_none() {
+                    return Err(foreign_key_period_on_child_only_error());
+                }
+                if period.is_none() && referenced_period.is_some() {
+                    return Err(foreign_key_period_on_parent_only_error());
+                }
+                return Err(ParseError::UnexpectedToken {
+                    expected: "referenced UNIQUE or PRIMARY KEY index",
+                    actual: format!("table \"{table_name}\" lacks an exact matching unique key"),
+                });
+            };
+            (
+                referenced_columns,
+                matched.without_overlaps.clone(),
+                matched.primary,
+            )
+        } else {
+            let primary = index_constraints
+                .iter()
+                .filter(|constraint| constraint.primary)
+                .collect::<Vec<_>>();
+            if primary.len() != 1 {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "referenced PRIMARY KEY",
+                    actual: if primary.is_empty() {
+                        format!("table \"{table_name}\" has no PRIMARY KEY")
+                    } else {
+                        format!("table \"{table_name}\" has multiple PRIMARY KEY constraints")
+                    },
+                });
+            }
+            (
+                primary[0].columns.clone(),
+                primary[0].without_overlaps.clone(),
+                true,
+            )
+        };
+
+    let resolved_period = if let Some(matched_period) = matched_period {
+        if explicit_referenced_columns && !explicit_referenced_period {
+            if period.is_none() && matched_primary {
+                return Err(foreign_key_must_use_period_for_temporal_key_error(true));
+            }
+            if period.is_none() {
+                return Err(foreign_key_must_use_period_for_temporal_key_error(false));
+            }
+            return Err(foreign_key_period_on_child_only_error());
         }
-        referenced_columns
+        if period.is_none() {
+            return Err(foreign_key_period_on_parent_only_error());
+        }
+        Some(
+            referenced_period
+                .map(str::to_string)
+                .unwrap_or(matched_period),
+        )
     } else {
-        let primary = index_constraints
-            .iter()
-            .filter(|constraint| constraint.primary)
-            .collect::<Vec<_>>();
-        if primary.len() != 1 {
-            return Err(ParseError::UnexpectedToken {
-                expected: "referenced PRIMARY KEY",
-                actual: if primary.is_empty() {
-                    format!("table \"{table_name}\" has no PRIMARY KEY")
-                } else {
-                    format!("table \"{table_name}\" has multiple PRIMARY KEY constraints")
-                },
-            });
+        if period.is_some() {
+            return Err(foreign_key_period_on_child_only_error());
         }
-        primary[0].columns.clone()
+        if referenced_period.is_some() {
+            return Err(foreign_key_period_on_parent_only_error());
+        }
+        None
     };
 
     if child_types.len() != referenced_columns.len() {
@@ -1878,7 +1982,10 @@ fn resolve_pending_self_referenced_key(
         ));
     }
 
-    Ok(referenced_columns)
+    Ok(ResolvedPendingReferencedKey {
+        columns: referenced_columns,
+        period: resolved_period,
+    })
 }
 
 fn foreign_key_types_compatible(child_types: &[SqlType], parent_types: &[SqlType]) -> bool {
@@ -1886,6 +1993,58 @@ fn foreign_key_types_compatible(child_types: &[SqlType], parent_types: &[SqlType
         .iter()
         .zip(parent_types)
         .all(|(&child, &parent)| foreign_key_type_compatible(child, parent))
+}
+
+fn has_duplicate_column(columns: &[String]) -> bool {
+    let mut seen = BTreeSet::new();
+    columns
+        .iter()
+        .any(|column| !seen.insert(column.to_ascii_lowercase()))
+}
+
+fn foreign_key_referenced_columns_duplicate_error() -> ParseError {
+    ParseError::DetailedError {
+        message: "foreign key referenced-columns list must not contain duplicates".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "42701",
+    }
+}
+
+fn foreign_key_period_on_child_only_error() -> ParseError {
+    ParseError::DetailedError {
+        message: "foreign key uses PERIOD on the referencing table but not the referenced table"
+            .into(),
+        detail: None,
+        hint: None,
+        sqlstate: "42830",
+    }
+}
+
+fn foreign_key_period_on_parent_only_error() -> ParseError {
+    ParseError::DetailedError {
+        message: "foreign key uses PERIOD on the referenced table but not the referencing table"
+            .into(),
+        detail: None,
+        hint: None,
+        sqlstate: "42830",
+    }
+}
+
+fn foreign_key_must_use_period_for_temporal_key_error(primary: bool) -> ParseError {
+    let key_kind = if primary {
+        "primary key"
+    } else {
+        "unique constraint"
+    };
+    ParseError::DetailedError {
+        message: format!(
+            "foreign key must use PERIOD when referencing a {key_kind} using WITHOUT OVERLAPS"
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42830",
+    }
 }
 
 fn foreign_key_type_mismatch_error(
@@ -1896,18 +2055,46 @@ fn foreign_key_type_mismatch_error(
     parent_types: &[SqlType],
     catalog: &dyn super::CatalogLookup,
 ) -> ParseError {
-    let child_names = quoted_column_list(child_columns);
-    let parent_names = quoted_column_list(parent_columns);
-    let child_type_names = child_types
+    let mismatches = child_types
         .iter()
-        .copied()
-        .map(|ty| foreign_key_type_name(ty, catalog))
+        .zip(parent_types)
+        .enumerate()
+        .filter(|&(_, (&child, &parent))| !foreign_key_type_compatible(child, parent))
+        .map(|(index, (&child, &parent))| {
+            (
+                child_columns
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| "?column?".into()),
+                parent_columns
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| "?column?".into()),
+                child,
+                parent,
+            )
+        })
+        .collect::<Vec<_>>();
+    let child_names = quoted_column_list(
+        &mismatches
+            .iter()
+            .map(|(column, _, _, _)| column.clone())
+            .collect::<Vec<_>>(),
+    );
+    let parent_names = quoted_column_list(
+        &mismatches
+            .iter()
+            .map(|(_, column, _, _)| column.clone())
+            .collect::<Vec<_>>(),
+    );
+    let child_type_names = mismatches
+        .iter()
+        .map(|(_, _, ty, _)| foreign_key_type_name(*ty, catalog))
         .collect::<Vec<_>>()
         .join(", ");
-    let parent_type_names = parent_types
+    let parent_type_names = mismatches
         .iter()
-        .copied()
-        .map(|ty| foreign_key_type_name(ty, catalog))
+        .map(|(_, _, _, ty)| foreign_key_type_name(*ty, catalog))
         .collect::<Vec<_>>()
         .join(", ");
     ParseError::DetailedError {
@@ -1988,6 +2175,8 @@ fn resolve_referenced_key(
     child_persistence: char,
     referenced_table: &str,
     referenced_columns: Option<&[String]>,
+    period: Option<&str>,
+    referenced_period: Option<&str>,
     constraint_name: &str,
     child_columns: &[String],
     child_types: &[SqlType],
@@ -2009,48 +2198,109 @@ fn resolve_referenced_key(
     validate_foreign_key_persistence(child_persistence, relation.relpersistence)?;
 
     let relation_lookup = relation_column_lookup(&relation.desc);
-    let (columns, referenced_attnums, index_oid) = if let Some(referenced_columns) =
-        referenced_columns
-    {
-        let columns = resolve_relation_constraint_columns(
-            referenced_columns,
-            &relation.desc,
-            &relation_lookup,
-        )?;
-        let attnums = column_attnums_for_names(&relation.desc, &columns)?;
-        let index = find_exact_index_for_attnums(catalog, relation.relation_oid, &attnums, true)
-            .ok_or_else(|| ParseError::UnexpectedToken {
-                expected: "referenced UNIQUE or PRIMARY KEY index",
-                actual: format!(
-                    "table \"{}\" lacks an exact matching unique key",
-                    referenced_table
-                ),
-            })?;
-        (columns, attnums, index.relation_oid)
-    } else {
-        let primary = catalog
-            .constraint_rows_for_relation(relation.relation_oid)
-            .into_iter()
-            .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_PRIMARY)
-            .collect::<Vec<_>>();
-        if primary.len() != 1 {
-            return Err(ParseError::UnexpectedToken {
-                expected: "referenced PRIMARY KEY",
-                actual: if primary.is_empty() {
-                    format!("table \"{}\" has no PRIMARY KEY", referenced_table)
-                } else {
-                    format!(
-                        "table \"{}\" has multiple PRIMARY KEY constraints",
-                        referenced_table
+    if referenced_columns.is_some_and(has_duplicate_column) {
+        return Err(foreign_key_referenced_columns_duplicate_error());
+    }
+    let explicit_referenced_columns = referenced_columns.is_some();
+    let explicit_referenced_period = referenced_period.is_some();
+    let (columns, referenced_attnums, index_oid, referenced_period, temporal_key, primary_key) =
+        if let Some(referenced_columns) = referenced_columns {
+            let columns = resolve_relation_foreign_key_columns(
+                referenced_columns,
+                referenced_period,
+                &relation.desc,
+                &relation_lookup,
+            )?;
+            let attnums = column_attnums_for_names(&relation.desc, &columns)?;
+            if let Some(row) =
+                exact_referenced_constraint_for_attnums(catalog, relation.relation_oid, &attnums)
+            {
+                let resolved_period = if row.conperiod {
+                    Some(
+                        referenced_period
+                            .map(str::to_string)
+                            .or_else(|| columns.last().cloned())
+                            .ok_or(ParseError::UnexpectedEof)?,
                     )
-                },
-            });
+                } else {
+                    None
+                };
+                (
+                    columns,
+                    attnums,
+                    row.conindid,
+                    resolved_period,
+                    row.conperiod,
+                    row.contype == crate::include::catalog::CONSTRAINT_PRIMARY,
+                )
+            } else if period.is_some() && referenced_period.is_none() {
+                return Err(foreign_key_period_on_child_only_error());
+            } else if period.is_none() && referenced_period.is_some() {
+                return Err(foreign_key_period_on_parent_only_error());
+            } else {
+                let index =
+                    find_exact_index_for_attnums(catalog, relation.relation_oid, &attnums, true)
+                        .ok_or_else(|| ParseError::UnexpectedToken {
+                            expected: "referenced UNIQUE or PRIMARY KEY index",
+                            actual: format!(
+                                "table \"{}\" lacks an exact matching unique key",
+                                referenced_table
+                            ),
+                        })?;
+                (columns, attnums, index.relation_oid, None, false, false)
+            }
+        } else {
+            let primary = catalog
+                .constraint_rows_for_relation(relation.relation_oid)
+                .into_iter()
+                .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_PRIMARY)
+                .collect::<Vec<_>>();
+            if primary.len() != 1 {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "referenced PRIMARY KEY",
+                    actual: if primary.is_empty() {
+                        format!("table \"{}\" has no PRIMARY KEY", referenced_table)
+                    } else {
+                        format!(
+                            "table \"{}\" has multiple PRIMARY KEY constraints",
+                            referenced_table
+                        )
+                    },
+                });
+            }
+            let row = &primary[0];
+            let attnums = constraint_attnums(row, "PRIMARY KEY")?;
+            let columns = attnums_to_column_names(&relation.desc, &attnums)?;
+            (
+                columns.clone(),
+                attnums,
+                row.conindid,
+                row.conperiod.then(|| columns.last().cloned()).flatten(),
+                row.conperiod,
+                true,
+            )
+        };
+
+    if temporal_key {
+        if explicit_referenced_columns && !explicit_referenced_period {
+            if period.is_none() {
+                return Err(foreign_key_must_use_period_for_temporal_key_error(
+                    primary_key,
+                ));
+            }
+            return Err(foreign_key_period_on_child_only_error());
         }
-        let row = &primary[0];
-        let attnums = constraint_attnums(row, "PRIMARY KEY")?;
-        let columns = attnums_to_column_names(&relation.desc, &attnums)?;
-        (columns, attnums, row.conindid)
-    };
+        if period.is_none() {
+            return Err(foreign_key_period_on_parent_only_error());
+        }
+    } else {
+        if period.is_some() {
+            return Err(foreign_key_period_on_child_only_error());
+        }
+        if referenced_period.is_some() {
+            return Err(foreign_key_period_on_parent_only_error());
+        }
+    }
 
     if child_types.len() != referenced_attnums.len() {
         return Err(ParseError::UnexpectedToken {
@@ -2084,8 +2334,27 @@ fn resolve_referenced_key(
     Ok(ResolvedReferencedKey {
         relation,
         columns,
+        period: referenced_period,
         index_oid,
     })
+}
+
+fn exact_referenced_constraint_for_attnums(
+    catalog: &dyn super::CatalogLookup,
+    relation_oid: u32,
+    attnums: &[i16],
+) -> Option<PgConstraintRow> {
+    catalog
+        .constraint_rows_for_relation(relation_oid)
+        .into_iter()
+        .find(|row| {
+            matches!(
+                row.contype,
+                crate::include::catalog::CONSTRAINT_PRIMARY
+                    | crate::include::catalog::CONSTRAINT_UNIQUE
+            ) && row.conindid != 0
+                && row.conkey.as_deref() == Some(attnums)
+        })
 }
 
 fn bind_outbound_foreign_key_constraint(
@@ -2123,12 +2392,25 @@ fn bind_outbound_foreign_key_constraint(
             expected: "referenced foreign-key index",
             actual: format!("missing referenced index {}", row.conindid),
         })?;
+    let constraint_name = row.conname.clone();
     Ok(BoundForeignKeyConstraint {
         constraint_oid: row.oid,
-        constraint_name: row.conname,
+        constraint_name: constraint_name.clone(),
         relation_name: relation_display_name(catalog, relation_oid, &relation_oid.to_string()),
         column_names: attnums_to_column_names(desc, &local_attnums)?,
         column_indexes: attnums_to_column_indexes(desc, &local_attnums)?,
+        period_column_index: if row.conperiod {
+            Some(
+                *attnums_to_column_indexes(desc, &local_attnums)?
+                    .last()
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "foreign-key period column",
+                        actual: format!("missing period column for constraint {constraint_name}"),
+                    })?,
+            )
+        } else {
+            None
+        },
         match_type: foreign_key_match_from_code(row.confmatchtype)?,
         referenced_relation_name: relation_display_name(
             catalog,
@@ -2137,11 +2419,24 @@ fn bind_outbound_foreign_key_constraint(
         ),
         referenced_relation_oid: referenced_relation.relation_oid,
         referenced_rel: referenced_relation.rel,
+        referenced_toast: referenced_relation.toast,
         referenced_desc: referenced_relation.desc.clone(),
         referenced_column_indexes: attnums_to_column_indexes(
             &referenced_relation.desc,
             &referenced_attnums,
         )?,
+        referenced_period_column_index: if row.conperiod {
+            Some(
+                *attnums_to_column_indexes(&referenced_relation.desc, &referenced_attnums)?
+                    .last()
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "referenced foreign-key period column",
+                        actual: format!("missing referenced period column for {constraint_name}"),
+                    })?,
+            )
+        } else {
+            None
+        },
         referenced_index,
         deferrable: row.condeferrable,
         initially_deferred: row.condeferred,
@@ -2155,6 +2450,10 @@ fn bind_inbound_foreign_key_constraint(
     row: PgConstraintRow,
     catalog: &dyn super::CatalogLookup,
 ) -> Result<BoundReferencedByForeignKey, ParseError> {
+    let referenced_relation = catalog
+        .lookup_relation_by_oid(relation_oid)
+        .or_else(|| catalog.relation_by_oid(relation_oid))
+        .ok_or_else(|| ParseError::UnknownTable(relation_oid.to_string()))?;
     let child_relation = catalog
         .lookup_relation_by_oid(row.conrelid)
         .or_else(|| catalog.relation_by_oid(row.conrelid))
@@ -2168,9 +2467,10 @@ fn bind_inbound_foreign_key_constraint(
             expected: "referenced foreign-key columns",
             actual: format!("missing confkey for constraint {}", row.conname),
         })?;
+    let constraint_name = row.conname.clone();
     Ok(BoundReferencedByForeignKey {
         constraint_oid: row.oid,
-        constraint_name: row.conname,
+        constraint_name: constraint_name.clone(),
         referenced_relation_oid: relation_oid,
         child_relation_name: relation_display_name(catalog, child_relation.relation_oid, "<child>"),
         child_relation_oid: child_relation.relation_oid,
@@ -2178,8 +2478,35 @@ fn bind_inbound_foreign_key_constraint(
         child_toast: child_relation.toast,
         child_desc: child_relation.desc.clone(),
         child_column_indexes: attnums_to_column_indexes(&child_relation.desc, &child_attnums)?,
+        child_period_column_index: if row.conperiod {
+            Some(
+                *attnums_to_column_indexes(&child_relation.desc, &child_attnums)?
+                    .last()
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "child foreign-key period column",
+                        actual: format!("missing child period column for {constraint_name}"),
+                    })?,
+            )
+        } else {
+            None
+        },
+        referenced_rel: referenced_relation.rel,
+        referenced_toast: referenced_relation.toast,
+        referenced_desc: desc.clone(),
         referenced_column_names: attnums_to_column_names(desc, &referenced_attnums)?,
         referenced_column_indexes: attnums_to_column_indexes(desc, &referenced_attnums)?,
+        referenced_period_column_index: if row.conperiod {
+            Some(
+                *attnums_to_column_indexes(desc, &referenced_attnums)?
+                    .last()
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "referenced foreign-key period column",
+                        actual: format!("missing referenced period column for {constraint_name}"),
+                    })?,
+            )
+        } else {
+            None
+        },
         child_index: find_exact_index_for_attnums(
             catalog,
             child_relation.relation_oid,
@@ -2266,6 +2593,60 @@ fn resolve_constraint_columns(
             .get(&normalized)
             .ok_or_else(|| ParseError::UnknownColumn(column.clone()))?;
         resolved.push(columns[*index].name.clone());
+    }
+    Ok(resolved)
+}
+
+fn resolve_foreign_key_columns(
+    referenced: &[String],
+    period: Option<&str>,
+    columns: &[crate::backend::parser::ColumnDef],
+    column_lookup: &BTreeMap<String, usize>,
+) -> Result<Vec<String>, ParseError> {
+    let period = period.map(str::to_ascii_lowercase);
+    let mut seen = BTreeSet::new();
+    let mut resolved = Vec::with_capacity(referenced.len());
+    for column in referenced {
+        let normalized = column.to_ascii_lowercase();
+        if !seen.insert(normalized.clone()) && period.as_deref() != Some(normalized.as_str()) {
+            return Err(ParseError::UnexpectedToken {
+                expected: "unique column names in foreign key",
+                actual: format!("duplicate column in constraint: {column}"),
+            });
+        }
+        let index = column_lookup
+            .get(&normalized)
+            .ok_or_else(|| ParseError::UnknownColumn(column.clone()))?;
+        resolved.push(columns[*index].name.clone());
+    }
+    Ok(resolved)
+}
+
+fn resolve_relation_foreign_key_columns(
+    referenced: &[String],
+    period: Option<&str>,
+    desc: &RelationDesc,
+    column_lookup: &BTreeMap<String, usize>,
+) -> Result<Vec<String>, ParseError> {
+    let period = period.map(str::to_ascii_lowercase);
+    let mut seen = BTreeSet::new();
+    let mut resolved = Vec::with_capacity(referenced.len());
+    for column in referenced {
+        let normalized = column.to_ascii_lowercase();
+        if !seen.insert(normalized.clone()) && period.as_deref() != Some(normalized.as_str()) {
+            return Err(ParseError::UnexpectedToken {
+                expected: "unique column names in foreign key",
+                actual: format!("duplicate column in constraint: {column}"),
+            });
+        }
+        let index = column_lookup
+            .get(&normalized)
+            .ok_or_else(|| ParseError::UnknownColumn(column.clone()))?;
+        let desc_column = &desc.columns[*index];
+        if desc_column.dropped {
+            return Err(ParseError::UnknownColumn(column.clone()));
+        }
+        resolved.push(desc_column.name.clone());
     }
     Ok(resolved)
 }
@@ -2417,9 +2798,13 @@ fn index_columns_for_existing_index(
             actual: format!("index \"{index_name}\" does not exist for table \"{table_name}\""),
         })?;
     if !index.index_meta.indisunique {
-        return Err(ParseError::UnexpectedToken {
-            expected: "unique index",
-            actual: format!("index \"{index_name}\" is not unique"),
+        return Err(ParseError::DetailedError {
+            message: format!("\"{index_name}\" is not a unique index"),
+            detail: Some(
+                "Cannot create a primary key or unique constraint using such an index.".into(),
+            ),
+            hint: None,
+            sqlstate: "42809",
         });
     }
     let mut all_columns = Vec::with_capacity(index.index_meta.indkey.len());

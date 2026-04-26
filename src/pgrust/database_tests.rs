@@ -16109,6 +16109,70 @@ fn without_overlaps_primary_key_records_catalog_metadata_and_enforces_overlaps()
 }
 
 #[test]
+fn without_overlaps_accepts_custom_range_period_column() {
+    let base = temp_dir("without_overlaps_custom_range");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create type textrange2 as range (subtype=text, collation=\"C\")",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table temporal_custom_range (\
+             id int4range, \
+             valid_at textrange2, \
+             constraint temporal_custom_range_pk primary key (id, valid_at without overlaps)\
+         )",
+    )
+    .unwrap();
+
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("temporal_custom_range").unwrap();
+    let constraint = lookup
+        .constraint_rows_for_relation(relation.relation_oid)
+        .into_iter()
+        .find(|row| row.conname == "temporal_custom_range_pk")
+        .unwrap();
+    assert!(constraint.conperiod);
+    assert_eq!(constraint.conexclop.as_deref(), Some(&[72_000, 3888][..]));
+}
+
+#[test]
+fn without_overlaps_replica_identity_using_index_marks_pg_index() {
+    let base = temp_dir("without_overlaps_replica_identity");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table temporal_rng (\
+             id int4range, \
+             valid_at daterange, \
+             constraint temporal_rng_pk primary key (id, valid_at without overlaps)\
+         )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table temporal_rng replica identity using index temporal_rng_pk",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select i.indisreplident \
+             from pg_index i \
+             join pg_class c on c.oid = i.indexrelid \
+             where c.relname = 'temporal_rng_pk'",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
 fn without_overlaps_unique_handles_nulls_empty_ranges_and_updates() {
     let base = temp_dir("without_overlaps_unique_runtime");
     let db = Database::open(&base, 16).unwrap();
@@ -18384,6 +18448,36 @@ fn alter_table_add_unique_using_index_include_derives_key_conkey() {
         ),
         vec![vec![Value::Text("UNIQUE (a) INCLUDE (payload)".into())]]
     );
+}
+
+#[test]
+fn alter_table_add_constraint_using_nonunique_index_matches_postgres_error() {
+    let base = temp_dir("alter_using_nonunique_index");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(1, "create table using_items (a int4)").unwrap();
+    db.execute(1, "create index using_items_idx on using_items (a)")
+        .unwrap();
+
+    match db.execute(
+        1,
+        "alter table using_items add constraint using_items_key unique using index using_items_idx",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        })) => {
+            assert_eq!(message, "\"using_items_idx\" is not a unique index");
+            assert_eq!(
+                detail.as_deref(),
+                Some("Cannot create a primary key or unique constraint using such an index.")
+            );
+            assert_eq!(sqlstate, "42809");
+        }
+        other => panic!("expected nonunique USING INDEX error, got {other:?}"),
+    }
 }
 
 #[test]
