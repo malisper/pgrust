@@ -4503,19 +4503,8 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("grant execute on routine ") {
         return Ok(Statement::GrantObject(build_grant_routine_execute(sql)?));
     }
-    if lowered.starts_with("grant insert on ") {
-        return Ok(Statement::GrantObject(build_grant_table_insert(sql)?));
-    }
-    if lowered.starts_with("grant select on ") {
-        return Ok(Statement::GrantObject(build_grant_table_select(sql)?));
-    }
-    if lowered.starts_with("grant all on ") {
-        return Ok(Statement::GrantObject(build_grant_table_all(sql)?));
-    }
-    if lowered.starts_with("grant all privileges on ") {
-        return Ok(Statement::GrantObject(build_grant_table_all_privileges(
-            sql,
-        )?));
+    if let Some(stmt) = try_build_grant_table_acl_statement(sql)? {
+        return Ok(Statement::GrantObject(stmt));
     }
     Ok(Statement::GrantRoleMembership(build_grant_role_membership(
         sql,
@@ -4544,14 +4533,136 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("revoke execute on routine ") {
         return Ok(Statement::RevokeObject(build_revoke_routine_execute(sql)?));
     }
-    if lowered.starts_with("revoke all privileges on ") {
-        return Ok(Statement::RevokeObject(build_revoke_table_all_privileges(
-            sql,
-        )?));
+    if let Some(stmt) = try_build_revoke_table_acl_statement(sql)? {
+        return Ok(Statement::RevokeObject(stmt));
     }
     Ok(Statement::RevokeRoleMembership(
         build_revoke_role_membership(sql)?,
     ))
+}
+
+fn try_build_grant_table_acl_statement(
+    sql: &str,
+) -> Result<Option<GrantObjectStatement>, ParseError> {
+    let rest = sql
+        .get("grant ".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let Some((privileges, after_on)) = split_optional_keyword(rest, "on") else {
+        return Ok(None);
+    };
+    let Some(privilege) = parse_table_privilege_spec(privileges)? else {
+        return Ok(None);
+    };
+    let after_on = strip_optional_table_keyword(after_on.ok_or(ParseError::UnexpectedEof)?);
+    let (object_names, rest) = split_once_keyword(after_on, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(Some(GrantObjectStatement {
+        privilege,
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        with_grant_option,
+    }))
+}
+
+fn try_build_revoke_table_acl_statement(
+    sql: &str,
+) -> Result<Option<RevokeObjectStatement>, ParseError> {
+    let rest = sql
+        .get("revoke ".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (rest, cascade) = split_optional_cascade_restrict_clause(rest)?;
+    let Some((privileges, after_on)) = split_optional_keyword(rest, "on") else {
+        return Ok(None);
+    };
+    let Some(privilege) = parse_table_privilege_spec(privileges)? else {
+        return Ok(None);
+    };
+    let after_on = strip_optional_table_keyword(after_on.ok_or(ParseError::UnexpectedEof)?);
+    let (object_names, rest) = split_once_keyword(after_on, "from")?;
+    let (grantee_names, grantee_cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(Some(RevokeObjectStatement {
+        privilege,
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        cascade: cascade || grantee_cascade,
+    }))
+}
+
+fn strip_optional_table_keyword(input: &str) -> &str {
+    let trimmed = input.trim_start();
+    if keyword_at_start(trimmed, "table") {
+        consume_keyword(trimmed, "table").trim_start()
+    } else {
+        trimmed
+    }
+}
+
+fn parse_table_privilege_spec(input: &str) -> Result<Option<GrantObjectPrivilege>, ParseError> {
+    if input.contains('(') {
+        return Ok(None);
+    }
+
+    let mut chars = String::new();
+    let mut saw_table_privilege = false;
+    for item in split_comma_separated_sql(input)? {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let privilege_chars = match item.to_ascii_lowercase().as_str() {
+            "all" | "all privileges" => TABLE_ALL_PRIVILEGE_CHARS,
+            "select" => "r",
+            "insert" => "a",
+            "update" => "w",
+            "delete" => "d",
+            "truncate" => "D",
+            "references" => "x",
+            "trigger" => "t",
+            "maintain" => "m",
+            _ if saw_table_privilege => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "table privilege",
+                    actual: item.into(),
+                });
+            }
+            _ => return Ok(None),
+        };
+        saw_table_privilege = true;
+        chars.push_str(privilege_chars);
+    }
+
+    if !saw_table_privilege {
+        return Ok(None);
+    }
+    Ok(Some(table_privilege_from_chars(
+        canonicalize_table_privilege_chars(&chars),
+    )))
+}
+
+const TABLE_ALL_PRIVILEGE_CHARS: &str = "arwdDxtm";
+
+fn canonicalize_table_privilege_chars(chars: &str) -> String {
+    TABLE_ALL_PRIVILEGE_CHARS
+        .chars()
+        .filter(|ch| chars.contains(*ch))
+        .collect()
+}
+
+fn table_privilege_from_chars(chars: String) -> GrantObjectPrivilege {
+    match chars.as_str() {
+        TABLE_ALL_PRIVILEGE_CHARS => GrantObjectPrivilege::AllPrivilegesOnTable,
+        "r" => GrantObjectPrivilege::SelectOnTable,
+        "a" => GrantObjectPrivilege::InsertOnTable,
+        "w" => GrantObjectPrivilege::UpdateOnTable,
+        "d" => GrantObjectPrivilege::DeleteOnTable,
+        "D" => GrantObjectPrivilege::TruncateOnTable,
+        "x" => GrantObjectPrivilege::ReferencesOnTable,
+        "t" => GrantObjectPrivilege::TriggerOnTable,
+        "m" => GrantObjectPrivilege::MaintainOnTable,
+        _ => GrantObjectPrivilege::TablePrivileges(chars),
+    }
 }
 
 fn build_alter_type_owner_statement(sql: &str) -> Result<AlterTypeOwnerStatement, ParseError> {
@@ -4600,70 +4711,6 @@ fn build_grant_database_create(sql: &str) -> Result<GrantObjectStatement, ParseE
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::CreateOnDatabase,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        with_grant_option,
-    })
-}
-
-fn build_grant_table_all_privileges(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let prefix = "grant all privileges on ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "to")?;
-    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
-    Ok(GrantObjectStatement {
-        privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        with_grant_option,
-    })
-}
-
-fn build_grant_table_all(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let prefix = "grant all on ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "to")?;
-    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
-    Ok(GrantObjectStatement {
-        privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        with_grant_option,
-    })
-}
-
-fn build_grant_table_select(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let prefix = "grant select on ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "to")?;
-    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
-    Ok(GrantObjectStatement {
-        privilege: GrantObjectPrivilege::SelectOnTable,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        with_grant_option,
-    })
-}
-
-fn build_grant_table_insert(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let prefix = "grant insert on ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "to")?;
-    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
-    Ok(GrantObjectStatement {
-        privilege: GrantObjectPrivilege::InsertOnTable,
         object_names: vec![normalize_simple_identifier(object_name)?],
         grantee_names,
         with_grant_option,
@@ -4862,22 +4909,6 @@ fn build_revoke_routine_execute_with_prefix(
     })
 }
 
-fn build_revoke_table_all_privileges(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
-    let prefix = "revoke all privileges on ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "from")?;
-    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
-    Ok(RevokeObjectStatement {
-        privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        cascade,
-    })
-}
-
 fn build_grant_role_membership(sql: &str) -> Result<GrantRoleMembershipStatement, ParseError> {
     let prefix = "grant ";
     let rest = sql
@@ -5026,6 +5057,11 @@ fn strip_keyword_prefix<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
 }
 
 fn parse_grantees_with_optional_grant(input: &str) -> Result<(Vec<String>, bool), ParseError> {
+    // :HACK: pgrust does not yet model object-GRANT grantor selection, but
+    // PostgreSQL accepts GRANTED BY after the grantee list. Strip it so the
+    // clause does not get mistaken for part of the grantee role name.
+    let (input, _granted_by_clause) =
+        split_optional_keyword(input, "granted by").unwrap_or((input.trim(), None));
     let (grantees, suffix) = split_optional_keyword(input, "with")
         .map(|(grantees, suffix)| (grantees, suffix.unwrap_or_default()))
         .unwrap_or((input.trim(), ""));
@@ -5045,13 +5081,12 @@ fn parse_grantees_with_optional_grant(input: &str) -> Result<(Vec<String>, bool)
 fn parse_revokee_list_with_optional_cascade(
     input: &str,
 ) -> Result<(Vec<String>, bool), ParseError> {
-    let lowered = input.to_ascii_lowercase();
-    if let Some(stripped) = lowered.strip_suffix(" cascade") {
-        let grantees_len = stripped.len();
-        let grantees = input[..grantees_len].trim_end();
-        return Ok((parse_identifier_list(grantees)?, true));
-    }
-    Ok((parse_identifier_list(input)?, false))
+    let (input, cascade) = split_optional_cascade_restrict_clause(input)?;
+    // :HACK: see parse_grantees_with_optional_grant; object REVOKE grantor
+    // selection is not represented yet, so only keep the revokee list.
+    let (input, _granted_by_clause) =
+        split_optional_keyword(input, "granted by").unwrap_or((input.trim(), None));
+    Ok((parse_identifier_list(input)?, cascade))
 }
 
 fn parse_identifier_list(input: &str) -> Result<Vec<String>, ParseError> {
