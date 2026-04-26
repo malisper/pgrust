@@ -7,6 +7,15 @@ use crate::include::nodes::execnodes::{
     HashState, MaterializedRow, PlanNode, SystemVarBinding, TupleSlot,
 };
 
+fn canonical_hash_key_value(value: Value) -> Value {
+    match value {
+        Value::Int16(value) => Value::Int64(value as i64),
+        Value::Int32(value) => Value::Int64(value as i64),
+        Value::Int64(value) => Value::Int64(value),
+        other => other,
+    }
+}
+
 pub(crate) fn eval_hash_key_exprs(
     exprs: &[crate::include::nodes::primnodes::Expr],
     slot: &mut TupleSlot,
@@ -18,7 +27,7 @@ pub(crate) fn eval_hash_key_exprs(
         if matches!(value, Value::Null) {
             return Ok(None);
         }
-        key.push(value);
+        key.push(canonical_hash_key_value(value));
     }
     Ok(Some(key))
 }

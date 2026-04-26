@@ -800,6 +800,9 @@ impl Database {
                 typrelid: 0,
                 typelem: 0,
                 typarray: 0,
+                typinput: 0,
+                typoutput: 0,
+                typmodout: 0,
                 sql_type: domain_sql_type(domain),
             })
             .collect::<Vec<_>>();
@@ -835,6 +838,12 @@ impl Database {
                         typrelid: 0,
                         typelem: 0,
                         typarray: entry.array_oid,
+                        typinput: 0,
+                        typoutput: 0,
+                        typmodout: 0,
+                        // :HACK: User-defined enums are text-backed for now. This unlocks
+                        // catalog/type resolution and basic storage flow, but does not yet
+                        // enforce label membership or enum ordering semantics.
                         sql_type: base_sql_type,
                     },
                     PgTypeRow {
@@ -849,6 +858,9 @@ impl Database {
                         typrelid: 0,
                         typelem: entry.oid,
                         typarray: 0,
+                        typinput: 0,
+                        typoutput: 0,
+                        typmodout: 0,
                         sql_type: SqlType::array_of(base_sql_type)
                             .with_identity(entry.array_oid, 0),
                     },
@@ -1067,6 +1079,9 @@ impl Database {
                         typrelid: 0,
                         typelem: 0,
                         typarray: entry.array_oid,
+                        typinput: 0,
+                        typoutput: 0,
+                        typmodout: 0,
                         sql_type: base_sql_type,
                     },
                     PgTypeRow {
@@ -1081,6 +1096,9 @@ impl Database {
                         typrelid: 0,
                         typelem: entry.oid,
                         typarray: 0,
+                        typinput: 0,
+                        typoutput: 0,
+                        typmodout: 0,
                         sql_type: SqlType::array_of(base_sql_type),
                     },
                     PgTypeRow {
@@ -1095,6 +1113,9 @@ impl Database {
                         typrelid: 0,
                         typelem: 0,
                         typarray: entry.multirange_array_oid,
+                        typinput: 0,
+                        typoutput: 0,
+                        typmodout: 0,
                         sql_type: multirange_sql_type,
                     },
                     PgTypeRow {
@@ -1109,6 +1130,9 @@ impl Database {
                         typrelid: 0,
                         typelem: entry.multirange_oid,
                         typarray: 0,
+                        typinput: 0,
+                        typoutput: 0,
+                        typmodout: 0,
                         sql_type: SqlType::array_of(multirange_sql_type),
                     },
                 ]

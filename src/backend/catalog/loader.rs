@@ -878,6 +878,7 @@ fn append_catalog_kind_rows(
                 .map(pg_constraint_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
+        BootstrapCatalogKind::PgConversion => {}
         BootstrapCatalogKind::PgDepend => {
             rows.depends = values
                 .into_iter()

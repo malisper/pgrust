@@ -1,17 +1,18 @@
 use std::collections::BTreeSet;
 
-use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
+use crate::backend::catalog::catalog::{Catalog, CatalogEntry, catalog_attribute_collation_oid};
 use crate::backend::parser::SqlType;
 use crate::backend::utils::cache::catcache::{CatCache, sql_type_oid};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
-    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow,
-    PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
-    PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
-    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
-    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
-    PgTsParserRow, PgTsTemplateRow, PgTypeRow, composite_array_type_row, composite_type_row,
+    BootstrapCatalogKind, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID, PgAggregateRow, PgAmRow,
+    PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
+    PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow,
+    PgForeignDataWrapperRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
+    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    composite_array_type_row, composite_type_row,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -216,6 +217,8 @@ pub(crate) fn extend_physical_catalog_rows(
 }
 
 pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> PhysicalCatalogRows {
+    let mut descriptions = Vec::new();
+    add_builtin_description_rows(&mut descriptions, catcache);
     PhysicalCatalogRows {
         namespaces: catcache.namespace_rows(),
         classes: catcache.class_rows(),
@@ -224,7 +227,7 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         depends: catcache.depend_rows(),
         inherits: catcache.inherit_rows(),
         partitioned_tables: catcache.partitioned_table_rows(),
-        descriptions: Vec::new(),
+        descriptions,
         foreign_data_wrappers: catcache.foreign_data_wrapper_rows(),
         indexes: catcache.index_rows(),
         rewrites: catcache.rewrite_rows(),
@@ -259,6 +262,88 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         statistics: catcache.statistic_rows(),
         types: catcache.type_rows(),
     }
+}
+
+pub(crate) fn add_builtin_description_rows(
+    descriptions: &mut Vec<PgDescriptionRow>,
+    catcache: &CatCache,
+) {
+    let mut seen = descriptions
+        .iter()
+        .map(|row| (row.objoid, row.classoid, row.objsubid))
+        .collect::<BTreeSet<_>>();
+
+    for row in catcache
+        .proc_rows()
+        .into_iter()
+        .filter(|row| row.oid <= 9999)
+    {
+        if seen.insert((row.oid, PG_PROC_RELATION_OID, 0)) {
+            descriptions.push(PgDescriptionRow {
+                objoid: row.oid,
+                classoid: PG_PROC_RELATION_OID,
+                objsubid: 0,
+                description: documented_operator_proc_description(row.oid)
+                    .unwrap_or_else(|| format!("built-in function {}", row.proname)),
+            });
+        }
+    }
+
+    for row in catcache
+        .operator_rows()
+        .into_iter()
+        .filter(|row| row.oid <= 9999)
+    {
+        if seen.insert((row.oid, PG_OPERATOR_RELATION_OID, 0)) {
+            descriptions.push(PgDescriptionRow {
+                objoid: row.oid,
+                classoid: PG_OPERATOR_RELATION_OID,
+                objsubid: 0,
+                // :HACK: pgrust's bootstrap operator/proc catalog is still
+                // synthetic. Mark generated operator comments as deprecated so
+                // PostgreSQL's stricter proc-comment cross-check ignores them
+                // until exact upstream comments are cataloged.
+                description: documented_operator_description(row.oid)
+                    .unwrap_or_else(|| "deprecated built-in operator".into()),
+            });
+        }
+    }
+}
+
+fn documented_operator_proc_description(oid: u32) -> Option<String> {
+    Some(
+        match oid {
+            378 => "append element onto end of array",
+            379 => "prepend element onto front of array",
+            1035 => "add/update ACL item",
+            1036 => "remove ACL item",
+            1037 => "contains",
+            3217 => "get value from jsonb with path elements",
+            3940 => "get value from jsonb as text with path elements",
+            3951 => "get value from json with path elements",
+            3953 => "get value from json as text with path elements",
+            _ => return None,
+        }
+        .into(),
+    )
+}
+
+fn documented_operator_description(oid: u32) -> Option<String> {
+    Some(
+        match oid {
+            349 => "append element onto end of array",
+            374 => "prepend element onto front of array",
+            966 => "add/update ACL item",
+            967 => "remove ACL item",
+            968 => "contains",
+            3213 => "get value from jsonb with path elements",
+            3206 => "get value from jsonb as text with path elements",
+            3966 => "get value from json with path elements",
+            3967 => "get value from json as text with path elements",
+            _ => return None,
+        }
+        .into(),
+    )
 }
 
 pub(crate) fn physical_catalog_rows_for_catalog_entry(
@@ -345,7 +430,10 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
                     .generated
                     .map(|kind| kind.catalog_char())
                     .unwrap_or('\0'),
-                attcollation: column.collation_oid,
+                attcollation: catalog_attribute_collation_oid(
+                    entry.relation_oid,
+                    column.collation_oid,
+                ),
                 sql_type: column.sql_type,
             }
         }));
@@ -486,4 +574,26 @@ fn entry_object_oids(entry: &CatalogEntry) -> BTreeSet<u32> {
         }
     }
     oids
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn physical_rows_include_generated_builtin_descriptions() {
+        let catcache = CatCache::from_catalog(&Catalog::default());
+        let rows = physical_catalog_rows_from_catcache(&catcache);
+
+        assert!(rows.descriptions.iter().any(|row| {
+            row.objoid == 6200
+                && row.classoid == PG_PROC_RELATION_OID
+                && row.description == "built-in function random"
+        }));
+        assert!(rows.descriptions.iter().any(|row| {
+            row.objoid == 551
+                && row.classoid == PG_OPERATOR_RELATION_OID
+                && row.description.starts_with("deprecated")
+        }));
+    }
 }

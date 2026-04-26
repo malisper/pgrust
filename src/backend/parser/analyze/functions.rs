@@ -627,6 +627,9 @@ fn match_proc_arg_type(
             .then_some((2, actual_type));
     }
     let declared_type = catalog.type_by_oid(declared_oid)?.sql_type;
+    if let Some(cost) = arg_type_match_cost(actual_type, declared_type) {
+        return Some((cost, declared_type));
+    }
     if is_text_like_type(actual_type) && catalog_text_input_cast_exists(catalog, declared_oid) {
         return Some((3, declared_type));
     }
@@ -637,7 +640,7 @@ fn match_proc_arg_type(
     {
         return Some((3, declared_type));
     }
-    arg_type_match_cost(actual_type, declared_type).map(|cost| (cost, declared_type))
+    None
 }
 
 fn resolve_proc_result_type(
@@ -1247,6 +1250,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::ToTimestamp => args.len() == 1,
             BuiltinScalarFunction::IntervalHash => args.len() == 1,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
+            BuiltinScalarFunction::PgEncodingToChar => args.len() == 1,
             BuiltinScalarFunction::PgMyTempSchema => args.is_empty(),
             BuiltinScalarFunction::PgRustInternalBinaryCoercible => args.len() == 2,
             BuiltinScalarFunction::PgRustDomainCheckUpperLessThan => args.len() == 3,
@@ -1260,6 +1264,9 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgRustTestInt44Out => args.len() == 1,
             BuiltinScalarFunction::PgRustTestPtInWidget => args.len() == 2,
             BuiltinScalarFunction::CurrentSetting => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::AmValidate | BuiltinScalarFunction::BtEqualImage => {
+                args.len() == 1
+            }
             BuiltinScalarFunction::PgNotify => args.len() == 2,
             BuiltinScalarFunction::PgNotificationQueueUsage => args.is_empty(),
             BuiltinScalarFunction::PgTypeof
@@ -1501,6 +1508,7 @@ pub(super) fn validate_scalar_function_arity(
             }
             BuiltinScalarFunction::ArrayReplace => args.len() == 3,
             BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,
+            BuiltinScalarFunction::Greatest => !args.is_empty(),
             BuiltinScalarFunction::BTrim
             | BuiltinScalarFunction::LTrim
             | BuiltinScalarFunction::RTrim => matches!(args.len(), 1 | 2),
@@ -1536,7 +1544,8 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::RegexpMatch => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::Replace
             | BuiltinScalarFunction::Translate
-            | BuiltinScalarFunction::SplitPart => args.len() == 3,
+            | BuiltinScalarFunction::SplitPart
+            | BuiltinScalarFunction::Convert => args.len() == 3,
             BuiltinScalarFunction::LPad | BuiltinScalarFunction::RPad => {
                 matches!(args.len(), 2 | 3)
             }
@@ -2090,6 +2099,56 @@ fn builtin_scalar_function_for_proc_src(proc_src: &str) -> Option<BuiltinScalarF
     legacy_scalar_function_entries()
         .iter()
         .find_map(|(name, func)| proc_src.eq_ignore_ascii_case(name).then_some(*func))
+        .or_else(|| {
+            range_prefixed_proc_src(proc_src).and_then(builtin_scalar_function_for_proc_src)
+        })
+        .or_else(|| {
+            proc_src
+                .rsplit_once('_')
+                .filter(|(_, suffix)| suffix.chars().all(|ch| ch.is_ascii_digit()))
+                .and_then(|(base, _)| builtin_scalar_function_for_proc_src(base))
+        })
+}
+
+fn range_prefixed_proc_src(proc_src: &str) -> Option<&str> {
+    let stripped = [
+        "int4range_",
+        "int8range_",
+        "numrange_",
+        "daterange_",
+        "tsrange_",
+        "tstzrange_",
+        "arrayrange_",
+        "varbitrange_",
+    ]
+    .into_iter()
+    .find_map(|prefix| proc_src.strip_prefix(prefix))?;
+
+    [
+        "range_constructor2",
+        "range_constructor3",
+        "range_isempty",
+        "range_lower_inc",
+        "range_upper_inc",
+        "range_lower_inf",
+        "range_upper_inf",
+        "range_lower",
+        "range_upper",
+        "range_merge",
+        "range_adjacent",
+        "range_difference",
+        "range_contains",
+        "range_contained_by",
+        "range_strict_left",
+        "range_over_left",
+        "range_strict_right",
+        "range_over_right",
+        "range_overlap",
+        "range_union",
+        "range_intersect",
+    ]
+    .into_iter()
+    .find(|base| stripped == *base || stripped.starts_with(&format!("{base}_")))
 }
 
 fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFunction)] {
@@ -2101,6 +2160,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("numeric_random", BuiltinScalarFunction::Random),
         ("random_normal", BuiltinScalarFunction::RandomNormal),
         ("drandom_normal", BuiltinScalarFunction::RandomNormal),
+        ("drandom_normal_noargs", BuiltinScalarFunction::RandomNormal),
         ("uuid_in", BuiltinScalarFunction::UuidIn),
         ("uuid_out", BuiltinScalarFunction::UuidOut),
         ("uuid_recv", BuiltinScalarFunction::UuidRecv),
@@ -2190,6 +2250,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
         ),
+        (
+            "pg_encoding_to_char",
+            BuiltinScalarFunction::PgEncodingToChar,
+        ),
         ("pg_partition_root", BuiltinScalarFunction::PgPartitionRoot),
         ("pg_my_temp_schema", BuiltinScalarFunction::PgMyTempSchema),
         (
@@ -2241,6 +2305,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_rust_test_pt_in_widget",
             BuiltinScalarFunction::PgRustTestPtInWidget,
         ),
+        ("amvalidate", BuiltinScalarFunction::AmValidate),
+        ("btequalimage", BuiltinScalarFunction::BtEqualImage),
         ("pg_notify", BuiltinScalarFunction::PgNotify),
         (
             "pg_notification_queue_usage",
@@ -2256,6 +2322,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),
         ("setval", BuiltinScalarFunction::SetVal),
+        ("setval_oid", BuiltinScalarFunction::SetVal),
+        ("setval_text", BuiltinScalarFunction::SetVal),
+        ("setval3_oid", BuiltinScalarFunction::SetVal),
+        ("setval3_text", BuiltinScalarFunction::SetVal),
         (
             "pg_get_serial_sequence",
             BuiltinScalarFunction::PgGetSerialSequence,
@@ -2267,6 +2337,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("pg_size_bytes", BuiltinScalarFunction::PgSizeBytes),
         ("parse_ident", BuiltinScalarFunction::ParseIdent),
+        ("parse_ident_text", BuiltinScalarFunction::ParseIdent),
         ("pg_get_userbyid", BuiltinScalarFunction::PgGetUserById),
         ("obj_description", BuiltinScalarFunction::ObjDescription),
         (
@@ -2326,7 +2397,23 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("pg_advisory_lock", BuiltinScalarFunction::PgAdvisoryLock),
         (
+            "pg_advisory_lock_int8",
+            BuiltinScalarFunction::PgAdvisoryLock,
+        ),
+        (
+            "pg_advisory_lock_int4",
+            BuiltinScalarFunction::PgAdvisoryLock,
+        ),
+        (
             "pg_advisory_xact_lock",
+            BuiltinScalarFunction::PgAdvisoryXactLock,
+        ),
+        (
+            "pg_advisory_xact_lock_int8",
+            BuiltinScalarFunction::PgAdvisoryXactLock,
+        ),
+        (
+            "pg_advisory_xact_lock_int4",
             BuiltinScalarFunction::PgAdvisoryXactLock,
         ),
         (
@@ -2334,7 +2421,23 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgAdvisoryLockShared,
         ),
         (
+            "pg_advisory_lock_shared_int8",
+            BuiltinScalarFunction::PgAdvisoryLockShared,
+        ),
+        (
+            "pg_advisory_lock_shared_int4",
+            BuiltinScalarFunction::PgAdvisoryLockShared,
+        ),
+        (
             "pg_advisory_xact_lock_shared",
+            BuiltinScalarFunction::PgAdvisoryXactLockShared,
+        ),
+        (
+            "pg_advisory_xact_lock_shared_int8",
+            BuiltinScalarFunction::PgAdvisoryXactLockShared,
+        ),
+        (
+            "pg_advisory_xact_lock_shared_int4",
             BuiltinScalarFunction::PgAdvisoryXactLockShared,
         ),
         (
@@ -2342,7 +2445,23 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgTryAdvisoryLock,
         ),
         (
+            "pg_try_advisory_lock_int8",
+            BuiltinScalarFunction::PgTryAdvisoryLock,
+        ),
+        (
+            "pg_try_advisory_lock_int4",
+            BuiltinScalarFunction::PgTryAdvisoryLock,
+        ),
+        (
             "pg_try_advisory_xact_lock",
+            BuiltinScalarFunction::PgTryAdvisoryXactLock,
+        ),
+        (
+            "pg_try_advisory_xact_lock_int8",
+            BuiltinScalarFunction::PgTryAdvisoryXactLock,
+        ),
+        (
+            "pg_try_advisory_xact_lock_int4",
             BuiltinScalarFunction::PgTryAdvisoryXactLock,
         ),
         (
@@ -2350,7 +2469,23 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgTryAdvisoryLockShared,
         ),
         (
+            "pg_try_advisory_lock_shared_int8",
+            BuiltinScalarFunction::PgTryAdvisoryLockShared,
+        ),
+        (
+            "pg_try_advisory_lock_shared_int4",
+            BuiltinScalarFunction::PgTryAdvisoryLockShared,
+        ),
+        (
             "pg_try_advisory_xact_lock_shared",
+            BuiltinScalarFunction::PgTryAdvisoryXactLockShared,
+        ),
+        (
+            "pg_try_advisory_xact_lock_shared_int8",
+            BuiltinScalarFunction::PgTryAdvisoryXactLockShared,
+        ),
+        (
+            "pg_try_advisory_xact_lock_shared_int4",
             BuiltinScalarFunction::PgTryAdvisoryXactLockShared,
         ),
         (
@@ -2358,7 +2493,23 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgAdvisoryUnlock,
         ),
         (
+            "pg_advisory_unlock_int8",
+            BuiltinScalarFunction::PgAdvisoryUnlock,
+        ),
+        (
+            "pg_advisory_unlock_int4",
+            BuiltinScalarFunction::PgAdvisoryUnlock,
+        ),
+        (
             "pg_advisory_unlock_shared",
+            BuiltinScalarFunction::PgAdvisoryUnlockShared,
+        ),
+        (
+            "pg_advisory_unlock_shared_int8",
+            BuiltinScalarFunction::PgAdvisoryUnlockShared,
+        ),
+        (
+            "pg_advisory_unlock_shared_int4",
             BuiltinScalarFunction::PgAdvisoryUnlockShared,
         ),
         (
@@ -2509,6 +2660,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("to_jsonb", BuiltinScalarFunction::ToJsonb),
         ("to_tsvector", BuiltinScalarFunction::ToTsVector),
         ("jsonb_to_tsvector", BuiltinScalarFunction::JsonbToTsVector),
+        (
+            "jsonb_to_tsvector_byid",
+            BuiltinScalarFunction::JsonbToTsVector,
+        ),
         ("to_tsquery", BuiltinScalarFunction::ToTsQuery),
         ("plainto_tsquery", BuiltinScalarFunction::PlainToTsQuery),
         ("phraseto_tsquery", BuiltinScalarFunction::PhraseToTsQuery),
@@ -2518,6 +2673,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("ts_lexize", BuiltinScalarFunction::TsLexize),
         ("array_to_json", BuiltinScalarFunction::ArrayToJson),
+        ("row_to_json", BuiltinScalarFunction::RowToJson),
+        ("row_to_json_pretty", BuiltinScalarFunction::RowToJson),
         ("json_build_array", BuiltinScalarFunction::JsonBuildArray),
         ("json_build_object", BuiltinScalarFunction::JsonBuildObject),
         ("json_object", BuiltinScalarFunction::JsonObject),
@@ -2552,6 +2709,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::JsonbExtractPathText,
         ),
         ("jsonb_object", BuiltinScalarFunction::JsonbObject),
+        ("jsonb_object_two_arg", BuiltinScalarFunction::JsonbObject),
         (
             "jsonb_populate_record",
             BuiltinScalarFunction::JsonbPopulateRecord,
@@ -2759,6 +2917,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("bit_count", BuiltinScalarFunction::BitCount),
         ("encode", BuiltinScalarFunction::Encode),
         ("decode", BuiltinScalarFunction::Decode),
+        ("convert", BuiltinScalarFunction::Convert),
+        ("pg_convert", BuiltinScalarFunction::Convert),
         ("convert_from", BuiltinScalarFunction::ConvertFrom),
         ("md5", BuiltinScalarFunction::Md5),
         ("sha224", BuiltinScalarFunction::Sha224),
@@ -2776,9 +2936,13 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("to_timestamp", BuiltinScalarFunction::ToTimestamp),
         ("abs", BuiltinScalarFunction::Abs),
         ("log", BuiltinScalarFunction::Log),
+        ("dlog10", BuiltinScalarFunction::Log),
+        ("numeric_log", BuiltinScalarFunction::Log),
+        ("numeric_log10", BuiltinScalarFunction::Log),
         ("log10", BuiltinScalarFunction::Log10),
         ("gcd", BuiltinScalarFunction::Gcd),
         ("lcm", BuiltinScalarFunction::Lcm),
+        ("greatest", BuiltinScalarFunction::Greatest),
         ("div", BuiltinScalarFunction::Div),
         ("mod", BuiltinScalarFunction::Mod),
         ("scale", BuiltinScalarFunction::Scale),
@@ -2835,16 +2999,24 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::HashMacAddr8Extended,
         ),
         ("round", BuiltinScalarFunction::Round),
+        ("numeric_round", BuiltinScalarFunction::Round),
         ("width_bucket", BuiltinScalarFunction::WidthBucket),
         ("ceil", BuiltinScalarFunction::Ceil),
         ("ceiling", BuiltinScalarFunction::Ceiling),
         ("floor", BuiltinScalarFunction::Floor),
         ("sign", BuiltinScalarFunction::Sign),
         ("sqrt", BuiltinScalarFunction::Sqrt),
+        ("dsqrt", BuiltinScalarFunction::Sqrt),
+        ("numeric_sqrt", BuiltinScalarFunction::Sqrt),
         ("cbrt", BuiltinScalarFunction::Cbrt),
+        ("dcbrt", BuiltinScalarFunction::Cbrt),
         ("power", BuiltinScalarFunction::Power),
+        ("dpow", BuiltinScalarFunction::Power),
+        ("numeric_power", BuiltinScalarFunction::Power),
         ("exp", BuiltinScalarFunction::Exp),
+        ("numeric_exp", BuiltinScalarFunction::Exp),
         ("ln", BuiltinScalarFunction::Ln),
+        ("numeric_ln", BuiltinScalarFunction::Ln),
         ("sinh", BuiltinScalarFunction::Sinh),
         ("cosh", BuiltinScalarFunction::Cosh),
         ("tanh", BuiltinScalarFunction::Tanh),
@@ -2873,27 +3045,57 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("gamma", BuiltinScalarFunction::Gamma),
         ("lgamma", BuiltinScalarFunction::Lgamma),
         ("point", BuiltinScalarFunction::GeoPoint),
+        ("construct_point", BuiltinScalarFunction::GeoPoint),
+        ("circle_center", BuiltinScalarFunction::GeoPoint),
+        ("lseg_center", BuiltinScalarFunction::GeoPoint),
+        ("box_center", BuiltinScalarFunction::GeoPoint),
+        ("poly_center", BuiltinScalarFunction::GeoPoint),
         ("box", BuiltinScalarFunction::GeoBox),
+        ("points_box", BuiltinScalarFunction::GeoBox),
+        ("point_box", BuiltinScalarFunction::GeoBox),
+        ("poly_box", BuiltinScalarFunction::GeoBox),
+        ("circle_box", BuiltinScalarFunction::GeoBox),
         ("line", BuiltinScalarFunction::GeoLine),
         ("lseg", BuiltinScalarFunction::GeoLseg),
+        ("lseg_construct", BuiltinScalarFunction::GeoLseg),
+        ("box_diagonal", BuiltinScalarFunction::GeoLseg),
         ("path", BuiltinScalarFunction::GeoPath),
         ("polygon", BuiltinScalarFunction::GeoPolygon),
+        ("box_poly", BuiltinScalarFunction::GeoPolygon),
+        ("path_poly", BuiltinScalarFunction::GeoPolygon),
+        ("circle_poly", BuiltinScalarFunction::GeoPolygon),
+        ("circle_poly_12", BuiltinScalarFunction::GeoPolygon),
         ("circle", BuiltinScalarFunction::GeoCircle),
+        ("cr_circle", BuiltinScalarFunction::GeoCircle),
+        ("poly_circle", BuiltinScalarFunction::GeoCircle),
+        ("box_circle", BuiltinScalarFunction::GeoCircle),
         ("area", BuiltinScalarFunction::GeoArea),
+        ("box_area", BuiltinScalarFunction::GeoArea),
+        ("path_area", BuiltinScalarFunction::GeoArea),
+        ("circle_area", BuiltinScalarFunction::GeoArea),
         ("center", BuiltinScalarFunction::GeoCenter),
         ("poly_center", BuiltinScalarFunction::GeoPolyCenter),
+        ("poly_path", BuiltinScalarFunction::GeoPath),
         ("bound_box", BuiltinScalarFunction::GeoBoundBox),
         ("diagonal", BuiltinScalarFunction::GeoDiagonal),
         ("radius", BuiltinScalarFunction::GeoRadius),
         ("diameter", BuiltinScalarFunction::GeoDiameter),
         ("npoints", BuiltinScalarFunction::GeoNpoints),
+        ("path_npoints", BuiltinScalarFunction::GeoNpoints),
+        ("poly_npoints", BuiltinScalarFunction::GeoNpoints),
         ("pclose", BuiltinScalarFunction::GeoPclose),
         ("popen", BuiltinScalarFunction::GeoPopen),
         ("isopen", BuiltinScalarFunction::GeoIsOpen),
         ("isclosed", BuiltinScalarFunction::GeoIsClosed),
         ("slope", BuiltinScalarFunction::GeoSlope),
         ("isvertical", BuiltinScalarFunction::GeoIsVertical),
+        ("point_vert", BuiltinScalarFunction::GeoIsVertical),
+        ("lseg_vertical", BuiltinScalarFunction::GeoIsVertical),
+        ("line_vertical", BuiltinScalarFunction::GeoIsVertical),
         ("ishorizontal", BuiltinScalarFunction::GeoIsHorizontal),
+        ("point_horiz", BuiltinScalarFunction::GeoIsHorizontal),
+        ("lseg_horizontal", BuiltinScalarFunction::GeoIsHorizontal),
+        ("line_horizontal", BuiltinScalarFunction::GeoIsHorizontal),
         ("height", BuiltinScalarFunction::GeoHeight),
         ("width", BuiltinScalarFunction::GeoWidth),
         ("booleq", BuiltinScalarFunction::BoolEq),
@@ -2936,6 +3138,14 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgInputErrorSqlState,
         ),
         ("range_constructor", BuiltinScalarFunction::RangeConstructor),
+        (
+            "range_constructor2",
+            BuiltinScalarFunction::RangeConstructor,
+        ),
+        (
+            "range_constructor3",
+            BuiltinScalarFunction::RangeConstructor,
+        ),
         ("range_isempty", BuiltinScalarFunction::RangeIsEmpty),
         ("range_lower", BuiltinScalarFunction::RangeLower),
         ("range_upper", BuiltinScalarFunction::RangeUpper),
@@ -2944,12 +3154,20 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("range_lower_inf", BuiltinScalarFunction::RangeLowerInf),
         ("range_upper_inf", BuiltinScalarFunction::RangeUpperInf),
         ("range_contains", BuiltinScalarFunction::RangeContains),
+        ("range_contains_elem", BuiltinScalarFunction::RangeContains),
         (
             "range_contained_by",
             BuiltinScalarFunction::RangeContainedBy,
         ),
+        (
+            "elem_contained_by_range",
+            BuiltinScalarFunction::RangeContainedBy,
+        ),
+        ("range_overlaps", BuiltinScalarFunction::RangeOverlap),
         ("range_overlap", BuiltinScalarFunction::RangeOverlap),
+        ("range_before", BuiltinScalarFunction::RangeStrictLeft),
         ("range_strict_left", BuiltinScalarFunction::RangeStrictLeft),
+        ("range_after", BuiltinScalarFunction::RangeStrictRight),
         (
             "range_strict_right",
             BuiltinScalarFunction::RangeStrictRight,
@@ -3366,8 +3584,11 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgAdvisoryUnlockShared
             | BuiltinScalarFunction::PgAdvisoryUnlockAll
             | BuiltinScalarFunction::GetDatabaseEncoding
+            | BuiltinScalarFunction::PgEncodingToChar
             | BuiltinScalarFunction::PgMyTempSchema
             | BuiltinScalarFunction::PgRustTestFdwHandler
+            | BuiltinScalarFunction::AmValidate
+            | BuiltinScalarFunction::BtEqualImage
             | BuiltinScalarFunction::PgNotify
             | BuiltinScalarFunction::PgNotificationQueueUsage
             | BuiltinScalarFunction::PgStatGetCheckpointerNumTimed
@@ -3431,6 +3652,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::LTrim
             | BuiltinScalarFunction::RTrim
             | BuiltinScalarFunction::Reverse
+            | BuiltinScalarFunction::Convert
             | BuiltinScalarFunction::ConvertFrom
             | BuiltinScalarFunction::Encode
             | BuiltinScalarFunction::Decode
@@ -3620,6 +3842,12 @@ fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) 
         }
         if matches!(
             row.sql_type.kind,
+            SqlTypeKind::Text | SqlTypeKind::Char | SqlTypeKind::Varchar
+        ) {
+            return true;
+        }
+        if matches!(
+            row.sql_type.kind,
             SqlTypeKind::RegProc
                 | SqlTypeKind::RegClass
                 | SqlTypeKind::RegRole
@@ -3782,7 +4010,7 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(resolved.proc_oid, 6243);
+        assert_eq!(resolved.proc_oid, 3951);
         assert_eq!(resolved.vatype_oid, TEXT_TYPE_OID);
         assert_eq!(resolved.nvargs, 2);
         assert!(resolved.func_variadic);

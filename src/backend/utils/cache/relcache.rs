@@ -18,7 +18,7 @@ use crate::include::catalog::{
     ANYELEMENTOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
     PG_CATALOG_NAMESPACE_OID, PG_CONSTRAINT_RELATION_OID, PgPartitionedTableRow,
     bootstrap_catalog_kinds, builtin_range_spec_by_multirange_oid, builtin_range_spec_by_oid,
-    system_catalog_index_by_oid,
+    builtin_scalar_function_for_proc_oid, system_catalog_index_by_oid,
 };
 use crate::include::nodes::primnodes::Expr;
 
@@ -306,6 +306,7 @@ impl IndexRelCacheEntry {
         self.amop_strategy_matching(desc, column_index, right_type_oid, Some('o'), |entry| {
             entry.operator_oid == operator_oid
         })
+        .map(normalize_ordering_strategy)
     }
 
     pub fn amop_strategy_for_proc(
@@ -316,7 +317,7 @@ impl IndexRelCacheEntry {
         right_type_oid: Option<u32>,
     ) -> Option<u16> {
         self.amop_strategy_matching(desc, column_index, right_type_oid, Some('s'), |entry| {
-            entry.operator_proc_oid == operator_proc_oid
+            proc_oids_match(entry.operator_proc_oid, operator_proc_oid)
         })
     }
 
@@ -328,8 +329,9 @@ impl IndexRelCacheEntry {
         right_type_oid: Option<u32>,
     ) -> Option<u16> {
         self.amop_strategy_matching(desc, column_index, right_type_oid, Some('o'), |entry| {
-            entry.operator_proc_oid == operator_proc_oid
+            proc_oids_match(entry.operator_proc_oid, operator_proc_oid)
         })
+        .map(normalize_ordering_strategy)
     }
 
     fn amop_strategy_matching(
@@ -360,6 +362,17 @@ impl IndexRelCacheEntry {
         }
         best.and_then(|(_, strategy)| u16::try_from(strategy).ok())
     }
+}
+
+fn proc_oids_match(left: u32, right: u32) -> bool {
+    left == right
+        || builtin_scalar_function_for_proc_oid(left)
+            .zip(builtin_scalar_function_for_proc_oid(right))
+            .is_some_and(|(left, right)| left == right)
+}
+
+fn normalize_ordering_strategy(strategy: u16) -> u16 {
+    if strategy == 15 { 1 } else { strategy }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

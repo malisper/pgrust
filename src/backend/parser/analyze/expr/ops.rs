@@ -1079,6 +1079,8 @@ pub(super) fn supports_comparison_operator(
                 | SqlTypeKind::RegProcedure
                 | SqlTypeKind::RegConfig
                 | SqlTypeKind::RegDictionary
+                | SqlTypeKind::Int2Vector
+                | SqlTypeKind::OidVector
         )
         && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
     {
@@ -1386,11 +1388,15 @@ fn is_oid_integer_comparison(left: SqlType, right: SqlType) -> bool {
                 | SqlTypeKind::Int2
                 | SqlTypeKind::Int4
                 | SqlTypeKind::Int8
+                | SqlTypeKind::RegProc
                 | SqlTypeKind::RegClass
                 | SqlTypeKind::RegType
                 | SqlTypeKind::RegRole
+                | SqlTypeKind::RegNamespace
+                | SqlTypeKind::RegOper
                 | SqlTypeKind::RegOperator
                 | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegCollation
                 | SqlTypeKind::RegConfig
                 | SqlTypeKind::RegDictionary
         )
@@ -1400,11 +1406,15 @@ fn is_oid_integer_comparison(left: SqlType, right: SqlType) -> bool {
                 | SqlTypeKind::Int2
                 | SqlTypeKind::Int4
                 | SqlTypeKind::Int8
+                | SqlTypeKind::RegProc
                 | SqlTypeKind::RegClass
                 | SqlTypeKind::RegType
                 | SqlTypeKind::RegRole
+                | SqlTypeKind::RegNamespace
+                | SqlTypeKind::RegOper
                 | SqlTypeKind::RegOperator
                 | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegCollation
                 | SqlTypeKind::RegConfig
                 | SqlTypeKind::RegDictionary
         )

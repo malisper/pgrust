@@ -19,7 +19,8 @@ use crate::include::catalog::{
     MACADDR_TYPE_OID, MACADDR8_ARRAY_TYPE_OID, MACADDR8_TO_MACADDR_PROC_OID, MACADDR8_TYPE_OID,
     MONEY_ARRAY_TYPE_OID, MONEY_TYPE_OID, NAME_ARRAY_TYPE_OID, NAME_TYPE_OID,
     NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, NUMMULTIRANGE_TYPE_OID, NUMRANGE_TYPE_OID,
-    OID_ARRAY_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, PG_LSN_TYPE_OID, POINT_TYPE_OID,
+    OID_ARRAY_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, PG_DEPENDENCIES_TYPE_OID, PG_LSN_TYPE_OID,
+    PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID, PG_NODE_TREE_TYPE_OID, POINT_TYPE_OID,
     POLYGON_TYPE_OID, REGCLASS_TYPE_OID, REGCOLLATION_ARRAY_TYPE_OID, REGCOLLATION_TYPE_OID,
     REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
     REGDICTIONARY_TYPE_OID, REGNAMESPACE_TYPE_OID, REGOPER_ARRAY_TYPE_OID, REGOPER_TYPE_OID,
@@ -155,7 +156,6 @@ pub fn bootstrap_pg_cast_rows() -> Vec<PgCastRow> {
             'f',
         ),
         cast_row(4110, OID_TYPE_OID, INT4_TYPE_OID, 0, 'a', 'b'),
-        cast_row(4111, VARCHAR_TYPE_OID, TEXT_TYPE_OID, 0, 'i', 'b'),
         cast_row(
             4112,
             BPCHAR_TYPE_OID,
@@ -164,6 +164,8 @@ pub fn bootstrap_pg_cast_rows() -> Vec<PgCastRow> {
             'i',
             'f',
         ),
+        cast_row(4111_0, VARCHAR_TYPE_OID, BPCHAR_TYPE_OID, 0, 'i', 'b'),
+        cast_row(4111, VARCHAR_TYPE_OID, TEXT_TYPE_OID, 0, 'i', 'b'),
         cast_row(
             4112_1,
             INT2VECTOR_TYPE_OID,
@@ -188,6 +190,14 @@ pub fn bootstrap_pg_cast_rows() -> Vec<PgCastRow> {
             'a',
             'f',
         ),
+        cast_row(69000, PG_NODE_TREE_TYPE_OID, TEXT_TYPE_OID, 0, 'i', 'b'),
+        cast_row(69001, PG_NDISTINCT_TYPE_OID, BYTEA_TYPE_OID, 0, 'i', 'b'),
+        cast_row(69002, PG_DEPENDENCIES_TYPE_OID, BYTEA_TYPE_OID, 0, 'i', 'b'),
+        cast_row(69003, PG_MCV_LIST_TYPE_OID, BYTEA_TYPE_OID, 0, 'i', 'b'),
+        cast_row(69004, CIDR_TYPE_OID, INET_TYPE_OID, 0, 'i', 'b'),
+        cast_row(69005, XML_TYPE_OID, TEXT_TYPE_OID, 0, 'a', 'b'),
+        cast_row(69006, XML_TYPE_OID, VARCHAR_TYPE_OID, 0, 'a', 'b'),
+        cast_row(69007, XML_TYPE_OID, BPCHAR_TYPE_OID, 0, 'a', 'b'),
     ];
     let text_input_rows = text_input_cast_rows(4113);
     let geometry_rows = geometry_cast_rows(4113 + text_input_rows.len() as u32);
@@ -291,7 +301,21 @@ fn text_input_cast_rows(first_oid: u32) -> Vec<PgCastRow> {
     targets
         .into_iter()
         .enumerate()
-        .map(|(idx, target)| cast_row(first_oid + idx as u32, TEXT_TYPE_OID, target, 0, 'e', 'i'))
+        .map(|(idx, target)| {
+            let (context, method) = if matches!(target, BPCHAR_TYPE_OID | VARCHAR_TYPE_OID) {
+                ('i', 'b')
+            } else {
+                ('e', 'i')
+            };
+            cast_row(
+                first_oid + idx as u32,
+                TEXT_TYPE_OID,
+                target,
+                0,
+                context,
+                method,
+            )
+        })
         .collect()
 }
 
@@ -313,7 +337,7 @@ fn geometry_cast_rows(first_oid: u32) -> Vec<PgCastRow> {
         .into_iter()
         .enumerate()
         .map(|(idx, (source, target, context))| {
-            cast_row(first_oid + idx as u32, source, target, 0, context, 'f')
+            cast_row(first_oid + idx as u32, source, target, 0, context, 'i')
         })
         .collect()
 }
@@ -518,6 +542,23 @@ mod tests {
                 && row.castfunc == MACADDR8_TO_MACADDR_PROC_OID
                 && row.castcontext == 'a'
                 && row.castmethod == 'f'
+        }));
+    }
+
+    #[test]
+    fn geometry_casts_without_proc_use_inout_method() {
+        let rows = bootstrap_pg_cast_rows();
+        assert!(rows.iter().any(|row| {
+            row.castsource == POINT_TYPE_OID
+                && row.casttarget == BOX_TYPE_OID
+                && row.castfunc == 0
+                && row.castmethod == 'i'
+        }));
+        assert!(rows.iter().all(|row| {
+            !(row.castsource == POINT_TYPE_OID
+                && row.casttarget == BOX_TYPE_OID
+                && row.castmethod == 'f'
+                && row.castfunc == 0)
         }));
     }
 }

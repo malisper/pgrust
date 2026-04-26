@@ -279,7 +279,7 @@ fn linear_index_to_coords(offset: usize, dimensions: &[ArrayDimension]) -> Vec<i
     coords
 }
 
-fn normalize_array_value(value: &Value) -> Option<ArrayValue> {
+pub(crate) fn normalize_array_value(value: &Value) -> Option<ArrayValue> {
     match value {
         Value::PgArray(array) => Some(array.clone()),
         Value::Array(items) => Some(ArrayValue::from_1d(items.clone())),
@@ -291,8 +291,20 @@ fn normalize_array_value(value: &Value) -> Option<ArrayValue> {
 
 fn parse_vector_array_text(text: &str) -> Option<ArrayValue> {
     let trimmed = text.trim();
-    if trimmed.is_empty() || trimmed.starts_with('{') {
+    if let Some(array) = parse_bounded_vector_array_text(trimmed) {
+        return Some(array);
+    }
+    if trimmed.starts_with('{') {
         return None;
+    }
+    if trimmed.is_empty() {
+        return Some(ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound: 0,
+                length: 0,
+            }],
+            Vec::new(),
+        ));
     }
     let mut items = Vec::new();
     for item in trimmed.split_whitespace() {
@@ -306,6 +318,45 @@ fn parse_vector_array_text(text: &str) -> Option<ArrayValue> {
         }],
         items,
     ))
+}
+
+fn parse_bounded_vector_array_text(text: &str) -> Option<ArrayValue> {
+    if !text.starts_with('[') {
+        return None;
+    }
+    let equals = text.find('=')?;
+    let mut dimensions = Vec::new();
+    let mut remaining = &text[..equals];
+    while let Some(rest) = remaining.strip_prefix('[') {
+        let end = rest.find(']')?;
+        let (lower, upper) = rest[..end].split_once(':')?;
+        let lower = lower.trim().parse::<i32>().ok()?;
+        let upper = upper.trim().parse::<i32>().ok()?;
+        if upper < lower {
+            return None;
+        }
+        dimensions.push(ArrayDimension {
+            lower_bound: lower,
+            length: (upper - lower + 1) as usize,
+        });
+        remaining = &rest[end + 1..];
+    }
+    if !remaining.is_empty() || dimensions.is_empty() {
+        return None;
+    }
+
+    let body = text[equals + 1..].trim();
+    let inner = body.strip_prefix('{')?.strip_suffix('}')?.trim();
+    if inner.is_empty() {
+        return Some(ArrayValue::empty());
+    }
+    let mut items = Vec::new();
+    for item in inner.split(',') {
+        let item = item.trim().trim_matches('"');
+        let value = item.parse::<u32>().ok()?;
+        items.push(Value::Int64(value as i64));
+    }
+    Some(ArrayValue::from_dimensions(dimensions, items))
 }
 
 pub(super) fn eval_array_ndims_function(values: &[Value]) -> Result<Value, ExecError> {

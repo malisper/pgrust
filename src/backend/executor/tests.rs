@@ -9286,10 +9286,13 @@ fn int2vector_casts_to_int2_array() {
         )
         .unwrap(),
         Value::PgArray(
-            crate::include::nodes::datum::ArrayValue::from_1d(vec![
-                Value::Int16(1),
-                Value::Int16(2),
-            ])
+            crate::include::nodes::datum::ArrayValue::from_dimensions(
+                vec![crate::include::nodes::datum::ArrayDimension {
+                    lower_bound: 0,
+                    length: 2,
+                }],
+                vec![Value::Int16(1), Value::Int16(2)]
+            )
             .with_element_type_oid(crate::include::catalog::INT2_TYPE_OID)
         ),
     );
@@ -9344,6 +9347,56 @@ fn oidvector_text_values_support_array_functions() {
         )
         .unwrap(),
         vec![vec![Value::Int32(0), Value::Int32(0), Value::Bool(false)]],
+    );
+}
+
+#[test]
+fn select_list_unnest_accepts_catalog_vector_columns() {
+    let base = temp_dir("select_list_unnest_catalog_vectors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select count(*) from (select unnest(proargtypes) from pg_proc where pronargs = 1 limit 1) s",
+        )
+        .unwrap(),
+        vec![vec![Value::Int64(1)]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select count(*) from (select unnest(indkey) from pg_index where indnatts = 1 limit 1) s",
+        )
+        .unwrap(),
+        vec![vec![Value::Int64(1)]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select pg_typeof(unnest(indkey)), pg_typeof(unnest(indclass)) from pg_index where indnatts = 1 limit 1",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("smallint".into()),
+            Value::Text("oid".into()),
+        ]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select count(*) from (select indexrelid::regclass, indrelid::regclass, attname, atttypid::regtype, opcname from (select indexrelid, indrelid, unnest(indkey) as ikey, unnest(indclass) as iclass, unnest(indcollation) as icoll from pg_index where indrelid < 16384) ss, pg_attribute a, pg_opclass opc where a.attrelid = indrelid and a.attnum = ikey and opc.oid = iclass and (opcintype != atttypid or icoll != attcollation)) q",
+        )
+        .unwrap(),
+        vec![vec![Value::Int64(1)]],
     );
 }
 

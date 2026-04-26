@@ -10944,6 +10944,9 @@ fn lower_create_table_resolves_named_domain_types() {
             typrelid: 0,
             typelem: 0,
             typarray: 0,
+            typinput: 0,
+            typoutput: 0,
+            typmodout: 0,
             sql_type: SqlType::new(SqlTypeKind::Int4),
         }],
     };

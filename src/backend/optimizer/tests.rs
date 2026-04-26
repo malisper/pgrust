@@ -1542,6 +1542,71 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
     }
 }
 
+#[test]
+fn comma_join_with_equality_predicate_can_choose_hash_or_merge_join() {
+    let planned = planned_stmt_for_sql(
+        "select * \
+         from (values (1), (2)) a(id), (values (1), (3)) b(id) \
+         where a.id = b.id",
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::HashJoin { .. } | Plan::MergeJoin { .. }
+        )),
+        "expected comma join with equality predicate to choose hash or merge join, got {:?}",
+        planned.plan_tree
+    );
+}
+
+#[test]
+fn cross_join_with_where_equality_predicate_can_choose_hash_or_merge_join() {
+    let planned = planned_stmt_for_sql(
+        "select * \
+         from (values (1), (2)) a(id) cross join (values (1), (3)) b(id) \
+         where a.id = b.id",
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::HashJoin { .. } | Plan::MergeJoin { .. }
+        )),
+        "expected cross join with equality predicate to choose hash or merge join, got {:?}",
+        planned.plan_tree
+    );
+}
+
+#[test]
+fn pg_proc_alias_sanity_self_join_can_choose_hash_or_merge_join() {
+    let catalog = Catalog::default();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select distinct p1.prorettype::regtype, p2.prorettype::regtype \
+         from pg_proc as p1, pg_proc as p2 \
+         where p1.oid != p2.oid \
+           and p1.prosrc = p2.prosrc \
+           and p1.prolang = 12 and p2.prolang = 12 \
+           and p1.prokind != 'a' and p2.prokind != 'a' \
+           and p1.prosrc not like E'range\\\\_constructor_' \
+           and p2.prosrc not like E'range\\\\_constructor_' \
+           and p1.prosrc not like E'multirange\\\\_constructor_' \
+           and p2.prosrc not like E'multirange\\\\_constructor_' \
+           and p1.prorettype < p2.prorettype \
+         order by 1, 2",
+        &catalog,
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::HashJoin { .. } | Plan::MergeJoin { .. }
+        )),
+        "expected pg_proc alias sanity self-join to choose hash or merge join, got {:?}",
+        planned.plan_tree
+    );
+}
+
 fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
     match plan {
         Plan::Aggregate { .. } => Some(plan),

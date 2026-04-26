@@ -11,7 +11,9 @@ use crate::backend::access::index::indexam::{
 };
 use crate::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
 use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
-use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError, CatalogIndexMeta};
+use crate::backend::catalog::catalog::{
+    Catalog, CatalogEntry, CatalogError, CatalogIndexMeta, catalog_attribute_collation_oid,
+};
 use crate::backend::catalog::store::CatalogWriteContext;
 use crate::backend::executor::RelationDesc;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
@@ -136,12 +138,36 @@ pub fn system_catalog_index_desc(
         })
         .collect::<Result<Vec<_>, _>>()
         .expect("valid system catalog index descriptors");
-    RelationDesc { columns }
+    RelationDesc {
+        columns: columns
+            .into_iter()
+            .map(|mut column| {
+                column.collation_oid =
+                    catalog_attribute_collation_oid(descriptor.relation_oid, column.collation_oid);
+                column
+            })
+            .collect(),
+    }
 }
 
 pub fn system_catalog_index_meta(
     descriptor: crate::include::catalog::CatalogIndexDescriptor,
 ) -> CatalogIndexMeta {
+    let heap_desc = crate::include::catalog::bootstrap_relation_desc(descriptor.heap_kind);
+    let indcollation = descriptor
+        .key_attnums
+        .iter()
+        .map(|attnum| {
+            let column = heap_desc
+                .columns
+                .get(attnum.saturating_sub(1) as usize)
+                .expect("valid system catalog index descriptors");
+            catalog_attribute_collation_oid(
+                descriptor.heap_kind.relation_oid(),
+                column.collation_oid,
+            )
+        })
+        .collect();
     CatalogIndexMeta {
         indrelid: descriptor.heap_kind.relation_oid(),
         indkey: descriptor.key_attnums.to_vec(),
@@ -154,7 +180,7 @@ pub fn system_catalog_index_meta(
         indisready: true,
         indislive: true,
         indclass: descriptor.opclass_oids.to_vec(),
-        indcollation: vec![0; descriptor.key_attnums.len()],
+        indcollation,
         indoption: vec![0; descriptor.key_attnums.len()],
         indexprs: None,
         indpred: None,
@@ -531,6 +557,7 @@ mod tests {
 
     use crate::backend::catalog::store::CatalogStore;
     use crate::backend::storage::smgr::segment_path;
+    use crate::include::catalog::C_COLLATION_OID;
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
@@ -576,5 +603,19 @@ mod tests {
             !shadow_path.exists(),
             "successful retry should consume the stale shadow relfile"
         );
+    }
+
+    #[test]
+    fn system_catalog_name_indexes_use_c_collation() {
+        let descriptor = *system_catalog_indexes()
+            .iter()
+            .find(|descriptor| descriptor.relation_name == "pg_class_relname_nsp_index")
+            .unwrap();
+
+        let desc = system_catalog_index_desc(descriptor);
+        assert_eq!(desc.columns[0].collation_oid, C_COLLATION_OID);
+
+        let meta = system_catalog_index_meta(descriptor);
+        assert_eq!(meta.indcollation, vec![C_COLLATION_OID, 0]);
     }
 }

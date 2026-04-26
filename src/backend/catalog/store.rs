@@ -1240,7 +1240,7 @@ mod tests {
                         crate::include::catalog::VARBIT_TYPE_OID
                     )
                 && row.prorettype == crate::include::catalog::BOOL_TYPE_OID
-                && row.prosrc == "varbitlt"
+                && row.prosrc == "bitlt"
         }));
         assert!(rows.procs.iter().any(|row| {
             row.proname == "byteaeq"

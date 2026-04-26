@@ -1634,6 +1634,16 @@ pub(crate) fn encode_value_with_config(
             Ok(TupleValue::Bytes(value.to_le_bytes().to_vec()))
         }
         (ScalarType::Text, value) => {
+            if let Some(array) = value.as_array_value()
+                && matches!(
+                    column.sql_type.kind,
+                    SqlTypeKind::Int2Vector | SqlTypeKind::OidVector
+                )
+            {
+                return Ok(TupleValue::Bytes(
+                    format_vector_array_storage_text(column.sql_type, &array)?.into_bytes(),
+                ));
+            }
             let text = text_value_for_storage(&value)?;
             Ok(TupleValue::Bytes(text.into_bytes()))
         }
@@ -1688,6 +1698,55 @@ fn text_value_for_storage(value: &Value) -> Result<String, ExecError> {
             right: Value::Text("".into()),
         }),
     }
+}
+
+pub(crate) fn format_vector_array_storage_text(
+    sql_type: SqlType,
+    array: &ArrayValue,
+) -> Result<String, ExecError> {
+    let mut parts = Vec::with_capacity(array.elements.len());
+    for element in &array.elements {
+        let text = match sql_type.kind {
+            SqlTypeKind::Int2Vector => match element {
+                Value::Int16(value) => value.to_string(),
+                Value::Int32(value) => i16::try_from(*value)
+                    .map_err(|_| ExecError::Int2OutOfRange)?
+                    .to_string(),
+                Value::Int64(value) => i16::try_from(*value)
+                    .map_err(|_| ExecError::Int2OutOfRange)?
+                    .to_string(),
+                _ => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "int2vector storage",
+                        left: element.clone(),
+                        right: Value::Null,
+                    });
+                }
+            },
+            SqlTypeKind::OidVector => match element {
+                Value::Int32(value) if *value >= 0 => (*value as u32).to_string(),
+                Value::Int64(value) => u32::try_from(*value)
+                    .map_err(|_| ExecError::OidOutOfRange)?
+                    .to_string(),
+                _ => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "oidvector storage",
+                        left: element.clone(),
+                        right: Value::Null,
+                    });
+                }
+            },
+            _ => {
+                return Err(ExecError::TypeMismatch {
+                    op: "vector storage",
+                    left: Value::PgArray(array.clone()),
+                    right: Value::Null,
+                });
+            }
+        };
+        parts.push(text);
+    }
+    Ok(parts.join(" "))
 }
 
 pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, ExecError> {

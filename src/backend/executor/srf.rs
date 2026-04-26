@@ -1,4 +1,4 @@
-use super::exec_expr::eval_string_to_table_rows;
+use super::exec_expr::{eval_string_to_table_rows, normalize_array_value};
 use super::expr_date::add_interval_to_local_timestamp;
 use super::expr_json::{eval_json_record_set_returning_function, eval_json_table_function};
 use super::pg_regex::{eval_regexp_matches_rows, eval_regexp_split_to_table_rows};
@@ -16,6 +16,7 @@ use crate::include::nodes::datetime::{
     TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT, USECS_PER_DAY,
 };
 use crate::include::nodes::datum::{IntervalValue, NumericValue, RecordValue};
+use crate::include::nodes::primnodes::expr_sql_type_hint;
 use crate::pl::plpgsql::execute_user_defined_set_returning_function;
 
 const MAX_UNBOUNDED_TIMESTAMP_SERIES_ROWS: usize = 10_000;
@@ -672,7 +673,8 @@ fn eval_unnest(
     let mut arrays = Vec::with_capacity(args.len());
     let mut max_len = 0usize;
     for arg in args {
-        match eval_expr(arg, slot, ctx)? {
+        let arg_value = eval_expr(arg, slot, ctx)?;
+        match arg_value {
             Value::Null => arrays.push(None),
             Value::Multirange(multirange) => {
                 let values = multirange
@@ -693,6 +695,16 @@ fn eval_unnest(
                 arrays.push(Some(values));
             }
             other => {
+                if expr_sql_type_hint(arg).is_some_and(|ty| {
+                    !ty.is_array
+                        && matches!(ty.kind, SqlTypeKind::Int2Vector | SqlTypeKind::OidVector)
+                }) && let Some(array) = normalize_array_value(&other)
+                {
+                    let values = array.to_nested_values();
+                    max_len = max_len.max(values.len());
+                    arrays.push(Some(values));
+                    continue;
+                }
                 return Err(ExecError::TypeMismatch {
                     op: "unnest",
                     left: other,

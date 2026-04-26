@@ -24,6 +24,7 @@ pub const PG_AMPROC_RELATION_OID: u32 = 2603;
 pub const PG_ATTRDEF_RELATION_OID: u32 = 2604;
 pub const PG_CAST_RELATION_OID: u32 = 2605;
 pub const PG_CONSTRAINT_RELATION_OID: u32 = 2606;
+pub const PG_CONVERSION_RELATION_OID: u32 = 2607;
 pub const PG_AGGREGATE_RELATION_OID: u32 = 2600;
 pub const PG_DEPEND_RELATION_OID: u32 = 2608;
 pub const PG_DESCRIPTION_RELATION_OID: u32 = 2609;
@@ -97,6 +98,7 @@ pub const REGCLASS_TYPE_OID: u32 = 2205;
 pub const REGCOLLATION_TYPE_OID: u32 = 4191;
 pub const TID_TYPE_OID: u32 = 27;
 pub const XID_TYPE_OID: u32 = 28;
+pub const CID_TYPE_OID: u32 = 29;
 pub const TXID_SNAPSHOT_TYPE_OID: u32 = 2970;
 pub const OIDVECTOR_TYPE_OID: u32 = 30;
 pub const REGTYPE_TYPE_OID: u32 = 2206;
@@ -107,11 +109,14 @@ pub const REGPROC_ARRAY_TYPE_OID: u32 = 1008;
 pub const REGOPER_ARRAY_TYPE_OID: u32 = 2208;
 pub const REGOPERATOR_ARRAY_TYPE_OID: u32 = 2209;
 pub const REGCLASS_ARRAY_TYPE_OID: u32 = 2210;
+pub const REGTYPE_ARRAY_TYPE_OID: u32 = 2211;
+pub const REGROLE_ARRAY_TYPE_OID: u32 = 4097;
 pub const REGCOLLATION_ARRAY_TYPE_OID: u32 = 4192;
 pub const REGNAMESPACE_ARRAY_TYPE_OID: u32 = 4090;
 pub const REGPROCEDURE_ARRAY_TYPE_OID: u32 = 2207;
 pub const ANYOID: u32 = 2276;
 pub const ANYELEMENTOID: u32 = 2283;
+pub const ANYNONARRAYOID: u32 = 2776;
 pub const ANYARRAYOID: u32 = 2277;
 pub const CSTRING_TYPE_OID: u32 = 2275;
 pub const CSTRING_ARRAY_TYPE_OID: u32 = 1263;
@@ -119,6 +124,8 @@ pub const VOID_TYPE_OID: u32 = 2278;
 pub const TRIGGER_TYPE_OID: u32 = 2279;
 pub const INTERNAL_TYPE_OID: u32 = 2281;
 pub const FDW_HANDLER_TYPE_OID: u32 = 3115;
+pub const INDEX_AM_HANDLER_TYPE_OID: u32 = 325;
+pub const TABLE_AM_HANDLER_TYPE_OID: u32 = 269;
 pub const RECORD_TYPE_OID: u32 = 2249;
 pub const RECORD_ARRAY_TYPE_OID: u32 = 2287;
 pub const PG_STATISTIC_ARRAY_TYPE_OID: u32 = 10028;
@@ -127,6 +134,7 @@ pub const PG_STATISTIC_EXT_DATA_ARRAY_TYPE_OID: u32 = 10032;
 pub const TEXT_ARRAY_TYPE_OID: u32 = 1009;
 pub const TID_ARRAY_TYPE_OID: u32 = 1010;
 pub const XID_ARRAY_TYPE_OID: u32 = 1011;
+pub const CID_ARRAY_TYPE_OID: u32 = 1012;
 pub const TXID_SNAPSHOT_ARRAY_TYPE_OID: u32 = 2949;
 pub const BPCHAR_ARRAY_TYPE_OID: u32 = 1014;
 pub const VARCHAR_ARRAY_TYPE_OID: u32 = 1015;
@@ -135,12 +143,12 @@ pub const FLOAT4_TYPE_OID: u32 = 700;
 pub const FLOAT8_TYPE_OID: u32 = 701;
 pub const MONEY_TYPE_OID: u32 = 790;
 pub const MONEY_ARRAY_TYPE_OID: u32 = 791;
-pub const CIDR_TYPE_OID: u32 = 650;
-pub const CIDR_ARRAY_TYPE_OID: u32 = 651;
 pub const MACADDR8_TYPE_OID: u32 = 774;
 pub const MACADDR8_ARRAY_TYPE_OID: u32 = 775;
 pub const MACADDR_TYPE_OID: u32 = 829;
 pub const MACADDR_ARRAY_TYPE_OID: u32 = 1040;
+pub const CIDR_TYPE_OID: u32 = 650;
+pub const CIDR_ARRAY_TYPE_OID: u32 = 651;
 pub const INET_TYPE_OID: u32 = 869;
 pub const INET_ARRAY_TYPE_OID: u32 = 1041;
 pub const POINT_TYPE_OID: u32 = 600;
@@ -154,6 +162,8 @@ pub const FLOAT4_ARRAY_TYPE_OID: u32 = 1021;
 pub const FLOAT8_ARRAY_TYPE_OID: u32 = 1022;
 pub const VARCHAR_TYPE_OID: u32 = 1043;
 pub const BPCHAR_TYPE_OID: u32 = 1042;
+pub const ACLITEM_TYPE_OID: u32 = 1033;
+pub const ACLITEM_ARRAY_TYPE_OID: u32 = 1034;
 pub const DATE_TYPE_OID: u32 = 1082;
 pub const DATE_ARRAY_TYPE_OID: u32 = 1182;
 pub const TIME_TYPE_OID: u32 = 1083;
@@ -181,6 +191,7 @@ pub const DATERANGE_ARRAY_TYPE_OID: u32 = 3913;
 pub const INT8RANGE_TYPE_OID: u32 = 3926;
 pub const INT8RANGE_ARRAY_TYPE_OID: u32 = 3927;
 pub const ANYRANGEOID: u32 = 3831;
+pub const ANYENUMOID: u32 = 3500;
 pub const INT4MULTIRANGE_TYPE_OID: u32 = 4451;
 pub const NUMMULTIRANGE_TYPE_OID: u32 = 4532;
 pub const TSMULTIRANGE_TYPE_OID: u32 = 4533;
@@ -188,9 +199,9 @@ pub const TSTZMULTIRANGE_TYPE_OID: u32 = 4534;
 pub const DATEMULTIRANGE_TYPE_OID: u32 = 4535;
 pub const INT8MULTIRANGE_TYPE_OID: u32 = 4536;
 pub const ANYMULTIRANGEOID: u32 = 4537;
-pub const ANYENUMOID: u32 = 3500;
 pub const ANYCOMPATIBLEOID: u32 = 5077;
 pub const ANYCOMPATIBLEARRAYOID: u32 = 5078;
+pub const ANYCOMPATIBLENONARRAYOID: u32 = 5079;
 pub const ANYCOMPATIBLERANGEOID: u32 = 5080;
 pub const ANYCOMPATIBLEMULTIRANGEOID: u32 = 4538;
 pub const INT4MULTIRANGE_ARRAY_TYPE_OID: u32 = 6150;
@@ -212,6 +223,10 @@ pub const JSON_ARRAY_TYPE_OID: u32 = 199;
 pub const XML_TYPE_OID: u32 = 142;
 pub const XML_ARRAY_TYPE_OID: u32 = 143;
 pub const PG_NODE_TREE_TYPE_OID: u32 = 194;
+pub const PG_SNAPSHOT_TYPE_OID: u32 = 5038;
+pub const PG_SNAPSHOT_ARRAY_TYPE_OID: u32 = 5039;
+pub const XID8_ARRAY_TYPE_OID: u32 = 271;
+pub const XID8_TYPE_OID: u32 = 5069;
 pub const PG_NDISTINCT_TYPE_OID: u32 = 3361;
 pub const PG_DEPENDENCIES_TYPE_OID: u32 = 3402;
 pub const PG_MCV_LIST_TYPE_OID: u32 = 5017;
@@ -263,6 +278,7 @@ pub enum BootstrapCatalogKind {
     PgAttrdef,
     PgCast,
     PgConstraint,
+    PgConversion,
     PgDepend,
     PgDescription,
     PgForeignDataWrapper,
@@ -316,6 +332,7 @@ impl BootstrapCatalogKind {
             Self::PgAttrdef => PG_ATTRDEF_RELATION_OID,
             Self::PgCast => PG_CAST_RELATION_OID,
             Self::PgConstraint => PG_CONSTRAINT_RELATION_OID,
+            Self::PgConversion => PG_CONVERSION_RELATION_OID,
             Self::PgAggregate => PG_AGGREGATE_RELATION_OID,
             Self::PgDepend => PG_DEPEND_RELATION_OID,
             Self::PgDescription => PG_DESCRIPTION_RELATION_OID,
@@ -363,6 +380,7 @@ impl BootstrapCatalogKind {
             Self::PgAttrdef => "pg_attrdef",
             Self::PgCast => "pg_cast",
             Self::PgConstraint => "pg_constraint",
+            Self::PgConversion => "pg_conversion",
             Self::PgAggregate => "pg_aggregate",
             Self::PgDepend => "pg_depend",
             Self::PgDescription => "pg_description",
@@ -410,6 +428,7 @@ impl BootstrapCatalogKind {
             Self::PgAttrdef => PG_ATTRDEF_ROWTYPE_OID,
             Self::PgCast => 0,
             Self::PgConstraint => 0,
+            Self::PgConversion => 0,
             Self::PgAggregate => 0,
             Self::PgDepend => PG_DEPEND_ROWTYPE_OID,
             Self::PgDescription => 0,
@@ -452,7 +471,7 @@ impl BootstrapCatalogKind {
     }
 }
 
-pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 42] = [
+pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 43] = [
     BootstrapCatalogKind::PgNamespace,
     BootstrapCatalogKind::PgType,
     BootstrapCatalogKind::PgProc,
@@ -479,6 +498,7 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 42] = [
     BootstrapCatalogKind::PgAttrdef,
     BootstrapCatalogKind::PgCast,
     BootstrapCatalogKind::PgConstraint,
+    BootstrapCatalogKind::PgConversion,
     BootstrapCatalogKind::PgDepend,
     BootstrapCatalogKind::PgDescription,
     BootstrapCatalogKind::PgForeignDataWrapper,
@@ -497,7 +517,7 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 42] = [
     BootstrapCatalogKind::PgAggregate,
 ];
 
-pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 42] {
+pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 43] {
     CORE_BOOTSTRAP_KINDS
 }
 
@@ -527,6 +547,7 @@ pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
         BootstrapCatalogKind::PgAttrdef => pg_attrdef_desc(),
         BootstrapCatalogKind::PgCast => pg_cast_desc(),
         BootstrapCatalogKind::PgConstraint => pg_constraint_desc(),
+        BootstrapCatalogKind::PgConversion => pg_conversion_desc(),
         BootstrapCatalogKind::PgAggregate => pg_aggregate_desc(),
         BootstrapCatalogKind::PgDepend => pg_depend_desc(),
         BootstrapCatalogKind::PgDescription => pg_description_desc(),
@@ -552,7 +573,7 @@ pub const fn bootstrap_namespace_oid() -> u32 {
     PG_CATALOG_NAMESPACE_OID
 }
 
-pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 42] = [
+pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 43] = [
     BootstrapCatalogRelation {
         oid: PG_NAMESPACE_RELATION_OID,
         name: "pg_namespace",
@@ -656,6 +677,10 @@ pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 42] = [
     BootstrapCatalogRelation {
         oid: PG_CONSTRAINT_RELATION_OID,
         name: "pg_constraint",
+    },
+    BootstrapCatalogRelation {
+        oid: PG_CONVERSION_RELATION_OID,
+        name: "pg_conversion",
     },
     BootstrapCatalogRelation {
         oid: PG_DEPEND_RELATION_OID,
@@ -764,46 +789,47 @@ mod tests {
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[23].oid, PG_ATTRDEF_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[24].oid, PG_CAST_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[25].oid, PG_CONSTRAINT_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[26].oid, PG_DEPEND_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[26].oid, PG_CONVERSION_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[27].oid, PG_DEPEND_RELATION_OID);
         assert_eq!(
-            CORE_BOOTSTRAP_RELATIONS[27].oid,
+            CORE_BOOTSTRAP_RELATIONS[28].oid,
             PG_DESCRIPTION_RELATION_OID
         );
         assert_eq!(
-            CORE_BOOTSTRAP_RELATIONS[28].oid,
+            CORE_BOOTSTRAP_RELATIONS[29].oid,
             PG_FOREIGN_DATA_WRAPPER_RELATION_OID
         );
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[29].oid, PG_INDEX_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[30].oid, PG_INHERITS_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[30].oid, PG_INDEX_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[31].oid, PG_INHERITS_RELATION_OID);
         assert_eq!(
-            CORE_BOOTSTRAP_RELATIONS[31].oid,
+            CORE_BOOTSTRAP_RELATIONS[32].oid,
             PG_PARTITIONED_TABLE_RELATION_OID
         );
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[32].oid, PG_REWRITE_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[33].oid, PG_STATISTIC_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[33].oid, PG_REWRITE_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[34].oid, PG_STATISTIC_RELATION_OID);
         assert_eq!(
-            CORE_BOOTSTRAP_RELATIONS[34].oid,
+            CORE_BOOTSTRAP_RELATIONS[35].oid,
             PG_STATISTIC_EXT_RELATION_OID
         );
         assert_eq!(
-            CORE_BOOTSTRAP_RELATIONS[35].oid,
+            CORE_BOOTSTRAP_RELATIONS[36].oid,
             PG_STATISTIC_EXT_DATA_RELATION_OID
         );
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[36].oid, PG_TRIGGER_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[37].oid, PG_POLICY_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[37].oid, PG_TRIGGER_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[38].oid, PG_POLICY_RELATION_OID);
         assert_eq!(
-            CORE_BOOTSTRAP_RELATIONS[38].oid,
+            CORE_BOOTSTRAP_RELATIONS[39].oid,
             PG_PUBLICATION_RELATION_OID
         );
         assert_eq!(
-            CORE_BOOTSTRAP_RELATIONS[39].oid,
+            CORE_BOOTSTRAP_RELATIONS[40].oid,
             PG_PUBLICATION_REL_RELATION_OID
         );
         assert_eq!(
-            CORE_BOOTSTRAP_RELATIONS[40].oid,
+            CORE_BOOTSTRAP_RELATIONS[41].oid,
             PG_PUBLICATION_NAMESPACE_RELATION_OID
         );
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[41].oid, PG_AGGREGATE_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[42].oid, PG_AGGREGATE_RELATION_OID);
     }
 
     #[test]
@@ -841,6 +867,7 @@ mod tests {
                 "pg_attrdef",
                 "pg_cast",
                 "pg_constraint",
+                "pg_conversion",
                 "pg_depend",
                 "pg_description",
                 "pg_foreign_data_wrapper",
@@ -877,13 +904,13 @@ mod tests {
 use super::{
     pg_aggregate_desc, pg_am_desc, pg_amop_desc, pg_amproc_desc, pg_attrdef_desc,
     pg_attribute_desc, pg_auth_members_desc, pg_authid_desc, pg_cast_desc, pg_class_desc,
-    pg_collation_desc, pg_constraint_desc, pg_database_desc, pg_depend_desc, pg_description_desc,
-    pg_foreign_data_wrapper_desc, pg_index_desc, pg_inherits_desc, pg_language_desc,
-    pg_largeobject_metadata_desc, pg_namespace_desc, pg_opclass_desc, pg_operator_desc,
-    pg_opfamily_desc, pg_partitioned_table_desc, pg_policy_desc, pg_proc_desc, pg_publication_desc,
-    pg_publication_namespace_desc, pg_publication_rel_desc, pg_rewrite_desc, pg_statistic_desc,
-    pg_statistic_ext_data_desc, pg_statistic_ext_desc, pg_tablespace_desc, pg_trigger_desc,
-    pg_ts_config_desc, pg_ts_config_map_desc, pg_ts_dict_desc, pg_ts_parser_desc,
+    pg_collation_desc, pg_constraint_desc, pg_conversion_desc, pg_database_desc, pg_depend_desc,
+    pg_description_desc, pg_foreign_data_wrapper_desc, pg_index_desc, pg_inherits_desc,
+    pg_language_desc, pg_largeobject_metadata_desc, pg_namespace_desc, pg_opclass_desc,
+    pg_operator_desc, pg_opfamily_desc, pg_partitioned_table_desc, pg_policy_desc, pg_proc_desc,
+    pg_publication_desc, pg_publication_namespace_desc, pg_publication_rel_desc, pg_rewrite_desc,
+    pg_statistic_desc, pg_statistic_ext_data_desc, pg_statistic_ext_desc, pg_tablespace_desc,
+    pg_trigger_desc, pg_ts_config_desc, pg_ts_config_map_desc, pg_ts_dict_desc, pg_ts_parser_desc,
     pg_ts_template_desc, pg_type_desc,
 };
 use crate::backend::executor::RelationDesc;

@@ -24,6 +24,22 @@ pub fn is_binary_coercible_type(from: SqlType, to: SqlType) -> bool {
         return true;
     }
 
+    if matches!(
+        from.kind,
+        SqlTypeKind::AnyRange | SqlTypeKind::AnyCompatibleRange
+    ) && to.is_range()
+    {
+        return true;
+    }
+
+    if matches!(
+        from.kind,
+        SqlTypeKind::AnyMultirange | SqlTypeKind::AnyCompatibleMultirange
+    ) && to.is_multirange()
+    {
+        return true;
+    }
+
     let from_oid = sql_type_oid(from);
     let to_oid = sql_type_oid(to);
 
@@ -355,12 +371,15 @@ pub(super) fn is_numeric_family(ty: SqlType) -> bool {
                 | SqlTypeKind::Int4
                 | SqlTypeKind::Int8
                 | SqlTypeKind::Oid
+                | SqlTypeKind::RegProc
                 | SqlTypeKind::RegClass
                 | SqlTypeKind::RegType
                 | SqlTypeKind::RegRole
                 | SqlTypeKind::RegNamespace
+                | SqlTypeKind::RegOper
                 | SqlTypeKind::RegOperator
                 | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegCollation
                 | SqlTypeKind::RegConfig
                 | SqlTypeKind::RegDictionary
                 | SqlTypeKind::Float4
@@ -377,12 +396,15 @@ pub(super) fn is_integer_family(ty: SqlType) -> bool {
                 | SqlTypeKind::Int4
                 | SqlTypeKind::Int8
                 | SqlTypeKind::Oid
+                | SqlTypeKind::RegProc
                 | SqlTypeKind::RegClass
                 | SqlTypeKind::RegType
                 | SqlTypeKind::RegRole
                 | SqlTypeKind::RegNamespace
+                | SqlTypeKind::RegOper
                 | SqlTypeKind::RegOperator
                 | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegCollation
                 | SqlTypeKind::RegConfig
                 | SqlTypeKind::RegDictionary
         )
@@ -449,6 +471,7 @@ pub(super) fn coerce_unknown_string_literal_type(
             SqlTypeKind::Timestamp => return SqlType::new(SqlTypeKind::Timestamp),
             SqlTypeKind::TimestampTz => return SqlType::new(SqlTypeKind::TimestampTz),
             SqlTypeKind::Jsonb => return SqlType::new(SqlTypeKind::Jsonb),
+            SqlTypeKind::Bytea => return SqlType::new(SqlTypeKind::Bytea),
             SqlTypeKind::Uuid => return SqlType::new(SqlTypeKind::Uuid),
             SqlTypeKind::Enum if peer_type.type_oid != 0 => return peer_type,
             SqlTypeKind::InternalChar => return SqlType::new(SqlTypeKind::Text),

@@ -656,7 +656,11 @@ fn parse_proc_argtype_oids(argtypes: &str) -> Vec<u32> {
 fn match_call_candidate(row: &PgProcRow, actuals: &[CallActualArg]) -> Option<CallCandidateMatch> {
     let params = procedure_params(row);
     let input_count = row.pronargs.max(0) as usize;
-    let defaults = row.proargdefaults.as_deref().unwrap_or(&[]);
+    let defaults = row
+        .proargdefaults
+        .as_deref()
+        .map(|defaults| defaults.split_whitespace().collect::<Vec<_>>())
+        .unwrap_or_default();
     let uses_all_slots = params.iter().any(|param| param.input_index.is_none())
         && actuals.len() > input_count.saturating_sub(row.pronargdefaults.max(0) as usize);
     let mut assigned = vec![None::<String>; input_count];
@@ -724,8 +728,11 @@ fn match_call_candidate(row: &PgProcRow, actuals: &[CallActualArg]) -> Option<Ca
         if slot.is_some() {
             continue;
         }
-        let default = defaults.get(index).filter(|default| !default.is_empty())?;
-        *slot = Some(default.clone());
+        let default = defaults
+            .get(index)
+            .copied()
+            .filter(|default| !default.is_empty())?;
+        *slot = Some(default.to_string());
         cost += 2;
     }
 

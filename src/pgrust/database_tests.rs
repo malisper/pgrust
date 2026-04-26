@@ -23417,8 +23417,16 @@ fn lazy_index_catalog_helpers_resolve_am_and_opclass_metadata() {
         None,
         int4_opclass.opcfamily,
     );
-    assert_eq!(int4_amops.len(), 5);
-    assert!(int4_amops.iter().any(|row| row.amopstrategy == 3));
+    let int4_exact_amops = int4_amops
+        .iter()
+        .filter(|row| {
+            row.amoplefttype == crate::include::catalog::INT4_TYPE_OID
+                && row.amoprighttype == crate::include::catalog::INT4_TYPE_OID
+                && row.amopmethod == crate::include::catalog::BTREE_AM_OID
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(int4_exact_amops.len(), 5);
+    assert!(int4_exact_amops.iter().any(|row| row.amopstrategy == 3));
     let int4_amprocs = crate::backend::utils::cache::lsyscache::amproc_rows_for_family(
         &db,
         1,

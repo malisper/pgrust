@@ -19,6 +19,24 @@ fn array_subscript_element_type(array_type: SqlType) -> SqlType {
     }
 }
 
+fn unnest_element_type(arg_type: SqlType) -> Option<SqlType> {
+    if arg_type.is_array {
+        return Some(arg_type.element_type());
+    }
+    if arg_type.is_multirange() {
+        return Some(
+            crate::include::catalog::range_type_ref_for_multirange_sql_type(arg_type)
+                .map(|range_type| range_type.sql_type)
+                .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+        );
+    }
+    match arg_type.kind {
+        SqlTypeKind::Int2Vector => Some(SqlType::new(SqlTypeKind::Int2)),
+        SqlTypeKind::OidVector => Some(SqlType::new(SqlTypeKind::Oid)),
+        _ => None,
+    }
+}
+
 pub(super) fn infer_sql_expr_type(
     expr: &SqlExpr,
     scope: &BoundScope,
@@ -603,6 +621,22 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             if name.eq_ignore_ascii_case("xmlconcat") {
                 return SqlType::new(SqlTypeKind::Xml);
             }
+            if name.eq_ignore_ascii_case("unnest")
+                && args.args().len() == 1
+                && let Some(arg) = args.args().first()
+            {
+                let arg_type = infer_sql_expr_type_with_ctes(
+                    &arg.value,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                if let Some(element_type) = unnest_element_type(arg_type) {
+                    return element_type;
+                }
+            }
             let actual_types = args
                 .args()
                 .iter()
@@ -650,6 +684,23 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 && range_type_ref_for_sql_type(target_type).is_some()
             {
                 return target_type;
+            }
+            if let Some(BuiltinScalarFunction::Greatest) = resolved {
+                let values = args
+                    .args()
+                    .iter()
+                    .map(|arg| arg.value.clone())
+                    .collect::<Vec<_>>();
+                return infer_common_scalar_expr_type_with_ctes(
+                    &values,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                    "GREATEST arguments with a common type",
+                )
+                .unwrap_or(SqlType::new(SqlTypeKind::Text));
             }
             if let Some(func) = resolved
                 && let Some(sql_type) = fixed_scalar_return_type(func)
