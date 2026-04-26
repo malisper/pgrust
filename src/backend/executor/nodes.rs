@@ -2481,6 +2481,11 @@ pub(crate) fn render_explain_expr_with_qualifier(
     ) {
         return render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
     }
+    if let Expr::Func(func) = expr
+        && !render_explain_func_expr_is_infix(func)
+    {
+        return render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
+    }
     format!(
         "({})",
         render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
@@ -2677,6 +2682,21 @@ fn render_explain_expr_inner_with_qualifier(
         Expr::CurrentRole => "CURRENT_ROLE".into(),
         Expr::SessionUser => "SESSION_USER".into(),
         Expr::Random => "random()".into(),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+            ..
+        } => render_like_explain_expr(
+            expr,
+            pattern,
+            escape.as_deref(),
+            *case_insensitive,
+            *negated,
+            |expr| render_explain_expr_inner_with_qualifier(expr, qualifier, column_names),
+        ),
         Expr::Similar {
             expr,
             pattern,
@@ -2688,6 +2708,17 @@ fn render_explain_expr_inner_with_qualifier(
         }),
         other => format!("{other:?}"),
     }
+}
+
+fn render_explain_func_expr_is_infix(func: &FuncExpr) -> bool {
+    let render_as_named_call = matches!(
+        (&func.implementation, func.funcname.as_deref()),
+        (
+            ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TextStartsWith),
+            Some("starts_with")
+        )
+    );
+    !render_as_named_call && builtin_scalar_function_infix_operator(func.implementation).is_some()
 }
 
 fn render_explain_func_expr(
@@ -2707,14 +2738,7 @@ fn render_explain_func_expr(
     {
         return rendered;
     }
-    let render_as_named_call = matches!(
-        (&func.implementation, func.funcname.as_deref()),
-        (
-            ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TextStartsWith),
-            Some("starts_with")
-        )
-    );
-    if !render_as_named_call
+    if render_explain_func_expr_is_infix(func)
         && let Some(operator) = builtin_scalar_function_infix_operator(func.implementation)
     {
         if let [left, right] = func.args.as_slice() {
@@ -3495,12 +3519,23 @@ fn render_explain_infix_operand(
     qualifier: Option<&str>,
     column_names: &[String],
 ) -> String {
-    match expr {
-        Expr::Const(_) | Expr::Cast(_, _) => {
-            render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
-        }
-        _ => render_explain_expr_inner_with_qualifier(expr, qualifier, column_names),
+    let rendered = render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
+    if explain_expr_needs_infix_operand_parens(expr) {
+        format!("({rendered})")
+    } else {
+        rendered
     }
+}
+
+fn explain_expr_needs_infix_operand_parens(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Op(_)
+            | Expr::Bool(_)
+            | Expr::ScalarArrayOp(_)
+            | Expr::Like { .. }
+            | Expr::Similar { .. }
+    ) || matches!(expr, Expr::Func(func) if render_explain_func_expr_is_infix(func))
 }
 
 pub(crate) fn render_explain_join_expr_inner(
@@ -3609,6 +3644,21 @@ pub(crate) fn render_explain_join_expr_inner(
             "{} IS NOT NULL",
             render_explain_join_expr_inner(inner, outer_names, inner_names)
         ),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+            ..
+        } => render_like_explain_expr(
+            expr,
+            pattern,
+            escape.as_deref(),
+            *case_insensitive,
+            *negated,
+            |expr| render_explain_join_expr_inner(expr, outer_names, inner_names),
+        ),
         Expr::Similar {
             expr,
             pattern,
@@ -3633,6 +3683,31 @@ fn render_explain_join_bool_arg(
     } else {
         format!("({rendered})")
     }
+}
+
+fn render_like_explain_expr<F>(
+    expr: &Expr,
+    pattern: &Expr,
+    escape: Option<&Expr>,
+    case_insensitive: bool,
+    negated: bool,
+    render: F,
+) -> String
+where
+    F: Fn(&Expr) -> String,
+{
+    let op = match (case_insensitive, negated) {
+        (false, false) => "~~",
+        (false, true) => "!~~",
+        (true, false) => "~~*",
+        (true, true) => "!~~*",
+    };
+    let mut out = format!("{} {op} {}", render(expr), render(pattern));
+    if let Some(escape) = escape {
+        out.push_str(" ESCAPE ");
+        out.push_str(&render(escape));
+    }
+    out
 }
 
 fn render_similar_explain_expr<F>(

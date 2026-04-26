@@ -1223,7 +1223,7 @@ fn plan_join_output_exprs(
             relation_name,
             desc,
             ..
-        } => qualified_scan_output_exprs(relation_name, desc),
+        } => qualified_base_scan_output_exprs(relation_name, desc),
         Plan::BitmapIndexScan { .. } => Vec::new(),
         Plan::Hash { input, .. }
         | Plan::Unique { input, .. }

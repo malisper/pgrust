@@ -29638,6 +29638,121 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
 }
 
 #[test]
+fn drop_policy_non_owner_uses_relation_wording() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut other = Session::new(2);
+
+    owner
+        .execute(&db, "create role policy_owner nologin")
+        .unwrap();
+    owner
+        .execute(&db, "create role policy_other nologin")
+        .unwrap();
+    owner
+        .execute(&db, "set session authorization policy_owner")
+        .unwrap();
+    owner.execute(&db, "create table items (a int4)").unwrap();
+    owner
+        .execute(&db, "create policy p1 on items using (true)")
+        .unwrap();
+
+    other
+        .execute(&db, "set session authorization policy_other")
+        .unwrap();
+    let err = other.execute(&db, "drop policy p1 on items").unwrap_err();
+    assert_eq!(
+        crate::backend::libpq::pqformat::format_exec_error(&err),
+        "must be owner of relation items"
+    );
+}
+
+#[test]
+fn rls_key_errors_hide_values_when_relation_rows_are_not_visible() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut bob = Session::new(2);
+
+    owner.execute(&db, "create role rls_owner nologin").unwrap();
+    owner.execute(&db, "create role rls_bob nologin").unwrap();
+    owner
+        .execute(&db, "set session authorization rls_owner")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table category (cid int4 primary key, cname text)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table document (did int4 primary key, cid int4 references category(cid), dauthor name)",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "grant all on category to public")
+        .unwrap();
+    owner
+        .execute(&db, "grant all on document to public")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "insert into category values (33, 'technology'), (44, 'manga')",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "insert into document values (7, 33, 'rls_carol'), (8, 44, 'rls_carol')",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "alter table category enable row level security")
+        .unwrap();
+    owner
+        .execute(&db, "alter table document enable row level security")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy category_bob on category to rls_bob using (cid = 33)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy document_bob_select on document for select to rls_bob using (dauthor = current_user)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy document_bob_insert on document for insert to rls_bob with check (true)",
+        )
+        .unwrap();
+
+    bob.execute(&db, "set session authorization rls_bob")
+        .unwrap();
+    match bob.execute(&db, "delete from category where cid = 33") {
+        Err(ExecError::ForeignKeyViolation { detail, .. }) => {
+            assert_eq!(
+                detail.as_deref(),
+                Some("Key is still referenced from table \"document\".")
+            );
+        }
+        other => panic!("expected redacted foreign key violation, got {other:?}"),
+    }
+    match bob.execute(&db, "insert into document values (8, 44, current_user)") {
+        Err(ExecError::UniqueViolation { detail, .. }) => {
+            assert_eq!(detail, None);
+        }
+        other => panic!("expected redacted unique violation, got {other:?}"),
+    }
+}
+
+#[test]
 fn pg_policies_exposes_public_and_named_role_policies() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

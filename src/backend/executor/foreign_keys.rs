@@ -16,6 +16,7 @@ use crate::include::access::scankey::ScanKeyData;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{SlotKind, ToastRelationRef, TupleSlot};
 
+use super::relation_values_visible_for_error_detail;
 use super::{ConstraintTiming, ExecError, ExecutorContext, compare_order_values};
 
 fn maybe_defer_constraint(
@@ -194,18 +195,27 @@ fn inbound_foreign_key_violation(
     key_values: &[Value],
     ctx: &ExecutorContext,
 ) -> ExecError {
+    let detail =
+        if relation_values_visible_for_error_detail(constraint.referenced_relation_oid, ctx) {
+            format!(
+                "Key ({})=({}) is still referenced from table \"{}\".",
+                constraint.referenced_column_names.join(", "),
+                render_key_values(key_values, ctx),
+                constraint.child_relation_name
+            )
+        } else {
+            format!(
+                "Key is still referenced from table \"{}\".",
+                constraint.child_relation_name
+            )
+        };
     ExecError::ForeignKeyViolation {
         constraint: constraint.constraint_name.clone(),
         message: format!(
             "update or delete on table \"{relation_name}\" violates foreign key constraint \"{}\" on table \"{}\"",
             constraint.constraint_name, constraint.child_relation_name
         ),
-        detail: Some(format!(
-            "Key ({})=({}) is still referenced from table \"{}\".",
-            constraint.referenced_column_names.join(", "),
-            render_key_values(key_values, ctx),
-            constraint.child_relation_name
-        )),
+        detail: Some(detail),
     }
 }
 
