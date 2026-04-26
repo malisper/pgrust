@@ -8657,6 +8657,11 @@ fn parse_insert_update_delete() {
             if table_name == "people" && values.len() == 2
     ));
     assert!(matches!(
+        parse_statement("insert into people (select 1, 'alice')").unwrap(),
+        Statement::Insert(InsertStatement { table_name, source: InsertSource::Select(_), .. })
+            if table_name == "people"
+    ));
+    assert!(matches!(
         parse_statement("insert into people (id, name) values (1, 'alice') on conflict do nothing")
             .unwrap(),
         Statement::Insert(InsertStatement {

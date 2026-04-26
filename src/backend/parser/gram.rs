@@ -13906,7 +13906,16 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
                 ))
             }
             Rule::insert_default_values_source => source = Some(InsertSource::DefaultValues),
-            Rule::select_stmt => source = Some(InsertSource::Select(Box::new(build_select(part)?))),
+            Rule::insert_select_source | Rule::select_stmt => {
+                let select = match part.as_rule() {
+                    Rule::select_stmt => part,
+                    _ => part
+                        .into_inner()
+                        .find(|inner| inner.as_rule() == Rule::select_stmt)
+                        .ok_or(ParseError::UnexpectedEof)?,
+                };
+                source = Some(InsertSource::Select(Box::new(build_select(select)?)));
+            }
             Rule::on_conflict_clause => on_conflict = Some(build_on_conflict_clause(part)?),
             Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}

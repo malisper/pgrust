@@ -339,6 +339,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         {
             return find_last_case_insensitive_token_position(sql, "ON");
         }
+        ExecError::Parse(crate::backend::parser::ParseError::InvalidInsertTargetCount {
+            expected,
+            actual,
+        }) => {
+            return find_insert_arity_error_position(sql, *expected, *actual);
+        }
         ExecError::Parse(crate::backend::parser::ParseError::UngroupedColumn {
             token,
             clause,
@@ -439,6 +445,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupportedMessage(
             message,
         )) => {
+            if matches!(
+                message.as_str(),
+                "cannot set an array element to DEFAULT" | "cannot set a subfield to DEFAULT"
+            ) {
+                return find_insert_default_indirection_position(sql);
+            }
             if matches!(
                 message.as_str(),
                 "a column list with SET NULL is only supported for ON DELETE actions"
@@ -1063,6 +1075,214 @@ fn find_subscripted_assignment_position(sql: &str, target: &str) -> Option<usize
         }
     }
     None
+}
+
+fn find_insert_arity_error_position(sql: &str, expected: usize, actual: usize) -> Option<usize> {
+    if expected > actual {
+        find_insert_target_item_position(sql, actual + 1)
+    } else if actual > expected {
+        find_insert_values_item_position(sql, expected + 1)
+    } else {
+        None
+    }
+}
+
+fn find_insert_default_indirection_position(sql: &str) -> Option<usize> {
+    let ordinal = find_insert_values_default_ordinal(sql)?;
+    find_insert_target_item_position(sql, ordinal)
+}
+
+fn find_insert_target_item_position(sql: &str, ordinal: usize) -> Option<usize> {
+    let source_index = find_ascii_keyword(sql, "values", 0)
+        .or_else(|| find_ascii_keyword(sql, "select", 0))
+        .or_else(|| find_ascii_keyword(sql, "default", 0))?;
+    let open = sql[..source_index].rfind('(')?;
+    let close = find_matching_delimiter(sql, open, b'(', b')')?;
+    if close > source_index {
+        return None;
+    }
+    find_top_level_item_start(sql, open + 1, close, ordinal)
+}
+
+fn find_insert_values_item_position(sql: &str, ordinal: usize) -> Option<usize> {
+    let values_index = find_ascii_keyword(sql, "values", 0)?;
+    let open = sql[values_index..].find('(')? + values_index;
+    let close = find_matching_delimiter(sql, open, b'(', b')')?;
+    find_top_level_item_start(sql, open + 1, close, ordinal)
+}
+
+fn find_insert_values_default_ordinal(sql: &str) -> Option<usize> {
+    let values_index = find_ascii_keyword(sql, "values", 0)?;
+    let open = sql[values_index..].find('(')? + values_index;
+    let close = find_matching_delimiter(sql, open, b'(', b')')?;
+    let mut ordinal = 1;
+    let mut item_start = open + 1;
+    for comma in top_level_commas(sql, open + 1, close) {
+        if sql[item_start..comma]
+            .trim()
+            .eq_ignore_ascii_case("default")
+        {
+            return Some(ordinal);
+        }
+        ordinal += 1;
+        item_start = comma + 1;
+    }
+    sql[item_start..close]
+        .trim()
+        .eq_ignore_ascii_case("default")
+        .then_some(ordinal)
+}
+
+fn find_top_level_item_start(
+    sql: &str,
+    list_start: usize,
+    list_end: usize,
+    ordinal: usize,
+) -> Option<usize> {
+    if ordinal == 0 {
+        return None;
+    }
+    let mut current_ordinal = 1;
+    let mut item_start = list_start;
+    for comma in top_level_commas(sql, list_start, list_end) {
+        if current_ordinal == ordinal {
+            return Some(skip_ascii_whitespace(sql, item_start, comma) + 1);
+        }
+        current_ordinal += 1;
+        item_start = comma + 1;
+    }
+    if current_ordinal == ordinal {
+        return Some(skip_ascii_whitespace(sql, item_start, list_end) + 1);
+    }
+    None
+}
+
+fn top_level_commas(sql: &str, start: usize, end: usize) -> Vec<usize> {
+    let bytes = sql.as_bytes();
+    let mut commas = Vec::new();
+    let mut index = start;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    while index < end {
+        match bytes[index] {
+            b'\'' => index = skip_single_quoted_sql_string(bytes, index, end),
+            b'"' => index = skip_double_quoted_sql_identifier(bytes, index, end),
+            b'(' => {
+                paren_depth += 1;
+                index += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                index += 1;
+            }
+            b'[' => {
+                bracket_depth += 1;
+                index += 1;
+            }
+            b']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                index += 1;
+            }
+            b',' if paren_depth == 0 && bracket_depth == 0 => {
+                commas.push(index);
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    commas
+}
+
+fn find_matching_delimiter(sql: &str, open: usize, open_byte: u8, close_byte: u8) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    if bytes.get(open) != Some(&open_byte) {
+        return None;
+    }
+    let mut depth = 1usize;
+    let mut index = open + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => index = skip_single_quoted_sql_string(bytes, index, bytes.len()),
+            b'"' => index = skip_double_quoted_sql_identifier(bytes, index, bytes.len()),
+            byte if byte == open_byte => {
+                depth += 1;
+                index += 1;
+            }
+            byte if byte == close_byte => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn skip_single_quoted_sql_string(bytes: &[u8], mut index: usize, end: usize) -> usize {
+    index += 1;
+    while index < end {
+        if bytes[index] == b'\'' {
+            index += 1;
+            if index < end && bytes[index] == b'\'' {
+                index += 1;
+                continue;
+            }
+            return index;
+        }
+        index += 1;
+    }
+    end
+}
+
+fn skip_double_quoted_sql_identifier(bytes: &[u8], mut index: usize, end: usize) -> usize {
+    index += 1;
+    while index < end {
+        if bytes[index] == b'"' {
+            index += 1;
+            if index < end && bytes[index] == b'"' {
+                index += 1;
+                continue;
+            }
+            return index;
+        }
+        index += 1;
+    }
+    end
+}
+
+fn find_ascii_keyword(sql: &str, keyword: &str, start: usize) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let keyword = keyword.as_bytes();
+    let mut index = start;
+    while index + keyword.len() <= bytes.len() {
+        if &bytes[index..index + keyword.len()] == keyword
+            && is_ascii_keyword_start_boundary(bytes, index)
+            && is_ascii_keyword_end_boundary(bytes, index + keyword.len())
+        {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_ascii_keyword_start_boundary(bytes: &[u8], index: usize) -> bool {
+    index == 0 || !matches!(bytes[index - 1], b'a'..=b'z' | b'0'..=b'9' | b'_')
+}
+
+fn is_ascii_keyword_end_boundary(bytes: &[u8], index: usize) -> bool {
+    index == bytes.len() || !matches!(bytes[index], b'a'..=b'z' | b'0'..=b'9' | b'_')
+}
+
+fn skip_ascii_whitespace(sql: &str, mut start: usize, end: usize) -> usize {
+    while start < end && sql.as_bytes()[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    start
 }
 
 fn find_subscript_expression_position(sql: &str) -> Option<usize> {
@@ -9704,6 +9924,50 @@ ORDER BY 1, 2;";
     }
 
     #[test]
+    fn exec_error_position_points_at_insert_arity_mismatch() {
+        let too_few_values = "insert into inserttest (col1, col2, col3) values (DEFAULT, DEFAULT)";
+        let err = ExecError::Parse(
+            crate::backend::parser::ParseError::InvalidInsertTargetCount {
+                expected: 3,
+                actual: 2,
+            },
+        );
+
+        assert_eq!(
+            exec_error_position(too_few_values, &err),
+            too_few_values.find("col3").map(|index| index + 1)
+        );
+
+        let too_many_values = "insert into inserttest (col1) values (1, 2)";
+        let err = ExecError::Parse(
+            crate::backend::parser::ParseError::InvalidInsertTargetCount {
+                expected: 1,
+                actual: 2,
+            },
+        );
+
+        assert_eq!(
+            exec_error_position(too_many_values, &err),
+            too_many_values.rfind('2').map(|index| index + 1)
+        );
+    }
+
+    #[test]
+    fn exec_error_position_points_at_default_indirection_target() {
+        let sql = "insert into inserttest (f3.if1, f3.if2) values (1, default)";
+        let err = ExecError::Parse(
+            crate::backend::parser::ParseError::FeatureNotSupportedMessage(
+                "cannot set a subfield to DEFAULT".into(),
+            ),
+        );
+
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.find("f3.if2").map(|index| index + 1)
+        );
+    }
+
+    #[test]
     fn exec_error_position_points_at_single_quoted_json_literal_start() {
         let sql = "SELECT '\"abc'::jsonb;";
         let err = ExecError::JsonInput {
@@ -9845,6 +10109,49 @@ ORDER BY 1, 2;";
         .unwrap();
 
         assert_eq!(first_error_response_position(&output), Some(22));
+    }
+
+    #[test]
+    fn simple_query_reports_position_for_insert_arity_error() {
+        let db = Database::open(temp_dir("insert_arity_error_position"), 16).unwrap();
+        db.execute(1, "create table inserttest (col1 int, col2 int, col3 int)")
+            .unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+        let sql = "insert into inserttest (col1, col2, col3) values (DEFAULT, DEFAULT)";
+
+        handle_query(&mut output, &db, &mut state, sql).unwrap();
+
+        assert_eq!(
+            first_error_response_position(&output),
+            sql.find("col3").map(|index| index + 1)
+        );
+    }
+
+    #[test]
+    fn simple_query_reports_position_for_default_indirection_error() {
+        let db = Database::open(temp_dir("insert_default_indirection_position"), 16).unwrap();
+        db.execute(1, "create table inserttest (f2 int[])").unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+        let sql = "insert into inserttest (f2[1], f2[2]) values (1, default)";
+
+        handle_query(&mut output, &db, &mut state, sql).unwrap();
+
+        assert_eq!(
+            first_error_response_position(&output),
+            sql.find("f2[2]").map(|index| index + 1)
+        );
     }
 
     #[test]
