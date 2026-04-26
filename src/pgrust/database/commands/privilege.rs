@@ -468,20 +468,17 @@ impl Database {
                     false,
                 )
             }
-            GrantObjectPrivilege::UsageOnType => {
-                self.execute_grant_type_acl_stmt_with_search_path(
+            GrantObjectPrivilege::UsageOnType => self.execute_grant_type_acl_stmt_with_search_path(
+                client_id,
+                stmt,
+                configured_search_path,
+            ),
+            GrantObjectPrivilege::ExecuteOnFunction => self
+                .execute_grant_function_acl_stmt_with_search_path(
                     client_id,
                     stmt,
                     configured_search_path,
-                )
-            }
-            GrantObjectPrivilege::ExecuteOnFunction => {
-                self.execute_grant_function_acl_stmt_with_search_path(
-                    client_id,
-                    stmt,
-                    configured_search_path,
-                )
-            }
+                ),
         }
     }
 

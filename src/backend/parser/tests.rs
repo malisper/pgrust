@@ -16,13 +16,12 @@ use crate::include::nodes::parsenodes::{
     CommentOnAggregateStatement, CommentOnFunctionStatement, CommentOnOperatorStatement,
     CompositeTypeAttributeDef, CreateAggregateStatement, CreateCompositeTypeStatement,
     CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement, DropTriggerStatement,
-    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege,
-    IndexColumnDef, InsertSource,
-    InsertStatement, JoinTreeNode, PartitionStrategy, PublicationObjectSpec, PublicationOption,
-    PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
-    RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
-    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
-    TriggerReferencingSpec, TriggerTiming, ViewCheckOption,
+    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef,
+    InsertSource, InsertStatement, JoinTreeNode, PartitionStrategy, PublicationObjectSpec,
+    PublicationOption, PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec,
+    RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
+    SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec,
+    TriggerLevel, TriggerReferencingSpec, TriggerTiming, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 

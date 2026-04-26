@@ -14,8 +14,8 @@ use crate::backend::parser::{
 };
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, relkind_is_analyzable,
-    PG_TOAST_NAMESPACE_OID,
+    BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
+    relkind_is_analyzable,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
