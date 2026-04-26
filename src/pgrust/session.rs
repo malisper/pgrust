@@ -10,7 +10,10 @@ use std::time::Duration;
 use crate::backend::access::transam::xact::{CommandId, INVALID_TRANSACTION_ID, TransactionId};
 use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::commands::copyfrom::parse_text_array_literal_with_catalog;
-use crate::backend::commands::copyto::{CopyToSink, IoCopyToSink, write_copy_to};
+use crate::backend::commands::copyto::{
+    CopyToDmlEvent, CopyToSink, IoCopyToSink, begin_copy_to, begin_copy_to_dml_capture,
+    finish_copy_to, finish_copy_to_dml_capture, write_copy_to, write_copy_to_row,
+};
 use crate::backend::commands::tablecmds::{execute_merge, execute_prepared_insert_row};
 use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
@@ -6930,6 +6933,157 @@ impl Session {
         }
     }
 
+    pub(crate) fn copy_command_needs_interleaved_stdout(
+        &self,
+        db: &Database,
+        copy: &CopyCommand,
+    ) -> Result<bool, ExecError> {
+        if !matches!(copy.direction, CopyDirection::To(CopyEndpoint::Stdout)) {
+            return Ok(false);
+        }
+        let CopyRelation::Query(query) = &copy.relation else {
+            return Ok(false);
+        };
+        let stmt = self.parse_copy_query_statement(db, query.trim())?;
+        Ok(match stmt {
+            Statement::Insert(insert) => !insert.returning.is_empty(),
+            Statement::Update(update) => !update.returning.is_empty(),
+            Statement::Delete(delete) => !delete.returning.is_empty(),
+            _ => false,
+        })
+    }
+
+    pub(crate) fn execute_copy_command_to_stdout_sink(
+        &mut self,
+        db: &Database,
+        copy: &CopyCommand,
+        sink: &mut dyn CopyToSink,
+    ) -> Result<usize, ExecError> {
+        if matches!(copy.options.header, CopyHeader::Match) {
+            return Err(ExecError::DetailedError {
+                message: "cannot use \"match\" with HEADER in COPY TO".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            });
+        }
+        if self.copy_command_needs_interleaved_stdout(db, copy)? {
+            let CopyRelation::Query(query) = &copy.relation else {
+                unreachable!("COPY DML stdout path requires a query source");
+            };
+            return self.execute_copy_query_dml_to_stdout_sink(
+                db,
+                query.trim(),
+                &copy.options,
+                sink,
+            );
+        }
+        let (columns, rows) = self.copy_query_rows(db, &copy.relation)?;
+        self.write_copy_command_rows_to_stdout_sink(db, &copy.options, &columns, &rows, sink)
+    }
+
+    fn execute_copy_query_dml_to_stdout_sink(
+        &mut self,
+        db: &Database,
+        query: &str,
+        options: &CopyOptions,
+        sink: &mut dyn CopyToSink,
+    ) -> Result<usize, ExecError> {
+        let stmt = self.parse_copy_query_statement(db, query)?;
+        self.validate_copy_to_query(db, &stmt, query)?;
+        begin_copy_to_dml_capture();
+        let result = self.execute(db, query);
+        let events = finish_copy_to_dml_capture();
+        let (columns, rows) = match result? {
+            StatementResult::Query { columns, rows, .. } => (columns, rows),
+            StatementResult::AffectedRows(_) => {
+                return Err(copy_to_feature_error(
+                    "COPY query must have a RETURNING clause",
+                ));
+            }
+        };
+        let catalog = self.catalog_lookup(db);
+        let enum_labels = copy_enum_label_map(&catalog);
+        let row_options = CopyOptions {
+            header: CopyHeader::None,
+            ..options.clone()
+        };
+        let first_row_index = events
+            .iter()
+            .position(|event| matches!(event, CopyToDmlEvent::Row(_)))
+            .unwrap_or(events.len());
+
+        for event in events.iter().take(first_row_index) {
+            if let CopyToDmlEvent::Notice(notice) = event {
+                sink.notice(
+                    notice.severity,
+                    notice.sqlstate,
+                    &notice.message,
+                    notice.detail.as_deref(),
+                    notice.position,
+                )?;
+            }
+        }
+        sink.begin(copy_command_output_format(options.format), columns.len())?;
+        if !matches!(options.header, CopyHeader::None) {
+            let header = render_copy_output(&columns, &[], options, Some(&enum_labels));
+            sink.write_all(&header)?;
+        }
+        let mut row_count = 0usize;
+        for event in events.into_iter().skip(first_row_index) {
+            match event {
+                CopyToDmlEvent::Notice(notice) => sink.notice(
+                    notice.severity,
+                    notice.sqlstate,
+                    &notice.message,
+                    notice.detail.as_deref(),
+                    notice.position,
+                )?,
+                CopyToDmlEvent::Row(row) => {
+                    let rendered = render_copy_output(
+                        &columns,
+                        std::slice::from_ref(&row),
+                        &row_options,
+                        Some(&enum_labels),
+                    );
+                    sink.write_all(&rendered)?;
+                    row_count += 1;
+                }
+            }
+        }
+        if row_count == 0 && !rows.is_empty() {
+            for row in &rows {
+                let rendered = render_copy_output(
+                    &columns,
+                    std::slice::from_ref(row),
+                    &row_options,
+                    Some(&enum_labels),
+                );
+                sink.write_all(&rendered)?;
+                row_count += 1;
+            }
+        }
+        sink.finish()?;
+        Ok(row_count)
+    }
+
+    fn write_copy_command_rows_to_stdout_sink(
+        &self,
+        db: &Database,
+        options: &CopyOptions,
+        columns: &[crate::backend::executor::QueryColumn],
+        rows: &[Vec<Value>],
+        sink: &mut dyn CopyToSink,
+    ) -> Result<usize, ExecError> {
+        let catalog = self.catalog_lookup(db);
+        let enum_labels = copy_enum_label_map(&catalog);
+        sink.begin(copy_command_output_format(options.format), columns.len())?;
+        let rendered = render_copy_output(columns, rows, options, Some(&enum_labels));
+        sink.write_all(&rendered)?;
+        sink.finish()?;
+        Ok(rows.len())
+    }
+
     pub(crate) fn copy_from_text(
         &mut self,
         db: &Database,
@@ -7857,6 +8011,20 @@ impl Session {
             CopyToDestination::Program(_) => self.ensure_copy_to_program_allowed(db)?,
             CopyToDestination::Stdout => {}
         }
+        if let (CopyToDestination::Stdout, CopyToSource::Query { statement, .. }) =
+            (&stmt.destination, &stmt.source)
+            && matches!(
+                &**statement,
+                Statement::Insert(_) | Statement::Update(_) | Statement::Delete(_)
+            )
+        {
+            let sink = stdout_sink.ok_or_else(|| {
+                ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                    "COPY TO STDOUT requires a frontend/backend protocol sink".into(),
+                ))
+            })?;
+            return self.execute_copy_to_dml_stdout(db, stmt, sink);
+        }
         let (columns, rows) = self.collect_copy_to_rows(db, stmt)?;
         let float_format = FloatFormatOptions {
             extra_float_digits: self.extra_float_digits(),
@@ -7935,6 +8103,83 @@ impl Session {
                 Ok(rows.len())
             }
         }
+    }
+
+    fn execute_copy_to_dml_stdout(
+        &mut self,
+        db: &Database,
+        stmt: &CopyToStatement,
+        sink: &mut dyn CopyToSink,
+    ) -> Result<usize, ExecError> {
+        let CopyToSource::Query { statement, sql } = &stmt.source else {
+            return Err(ExecError::DetailedError {
+                message: "COPY DML stdout path requires a query source".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            });
+        };
+        self.validate_copy_to_query(db, statement, sql)?;
+        begin_copy_to_dml_capture();
+        let result = self.execute(db, sql);
+        let mut events = finish_copy_to_dml_capture();
+        let (columns, rows) = match result? {
+            StatementResult::Query { columns, rows, .. } => (columns, rows),
+            StatementResult::AffectedRows(_) => {
+                return Err(copy_to_feature_error(
+                    "COPY query must have a RETURNING clause",
+                ));
+            }
+        };
+        if !events
+            .iter()
+            .any(|event| matches!(event, CopyToDmlEvent::Row(_)))
+            && !rows.is_empty()
+        {
+            let insert_at = usize::from(!events.is_empty());
+            for (offset, row) in rows.into_iter().enumerate() {
+                events.insert(insert_at + offset, CopyToDmlEvent::Row(row));
+            }
+        }
+        let float_format = FloatFormatOptions {
+            extra_float_digits: self.extra_float_digits(),
+            bytea_output: self.bytea_output(),
+            datetime_config: self.datetime_config().clone(),
+        };
+        let first_row_index = events
+            .iter()
+            .position(|event| matches!(event, CopyToDmlEvent::Row(_)));
+        let first_row_index = first_row_index.unwrap_or(events.len());
+        let mut row_count = 0usize;
+        for event in events.iter().take(first_row_index) {
+            if let CopyToDmlEvent::Notice(notice) = event {
+                sink.notice(
+                    notice.severity,
+                    notice.sqlstate,
+                    &notice.message,
+                    notice.detail.as_deref(),
+                    notice.position,
+                )?;
+            }
+        }
+        begin_copy_to(sink, &columns, &stmt.options)?;
+        for event in events.into_iter().skip(first_row_index) {
+            match event {
+                CopyToDmlEvent::Notice(notice) => sink.notice(
+                    notice.severity,
+                    notice.sqlstate,
+                    &notice.message,
+                    notice.detail.as_deref(),
+                    notice.position,
+                )?,
+                CopyToDmlEvent::Row(row) => {
+                    write_copy_to_row(sink, &columns, &row, &stmt.options, &float_format)?;
+                    row_count += 1;
+                }
+            }
+        }
+        finish_copy_to(sink, &stmt.options)?;
+        Ok(row_count)
     }
 
     fn serialize_copy_to_bytes(
@@ -9003,6 +9248,13 @@ pub(crate) fn render_copy_output(
         out.push(b'\n');
     }
     out
+}
+
+fn copy_command_output_format(format: CopyFormat) -> ParserCopyFormat {
+    match format {
+        CopyFormat::Text => ParserCopyFormat::Text,
+        CopyFormat::Csv => ParserCopyFormat::Csv,
+    }
 }
 
 fn copy_value_to_field(

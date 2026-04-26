@@ -36,6 +36,7 @@ use crate::backend::utils::time::instant::Instant;
 use crate::pgrust::database::TransactionWaiter;
 use crate::pl::plpgsql::TriggerOperation;
 
+use super::copyto::{capture_copy_to_dml_notices, capture_copy_to_dml_returning_row};
 use super::explain::{
     format_buffer_usage, format_explain_lines_with_costs, format_explain_plan_with_subplans,
     format_verbose_explain_plan_with_subplans, push_explain_line,
@@ -2866,6 +2867,7 @@ pub fn execute_insert(
                 &stmt.rls_write_checks,
                 &stmt.indexes,
                 &values,
+                Some(&stmt.returning),
                 ctx,
                 xid,
                 cid,
@@ -2880,13 +2882,9 @@ pub fn execute_insert(
         if stmt.returning.is_empty() {
             Ok(StatementResult::AffectedRows(returned_rows.len()))
         } else {
-            let projected_rows = returned_rows
-                .iter()
-                .map(|row| project_returning_row(&stmt.returning, row, ctx))
-                .collect::<Result<Vec<_>, _>>()?;
             Ok(build_returning_result(
                 returning_result_columns(&stmt.returning),
-                projected_rows,
+                returned_rows,
             ))
         }
     })();
@@ -2973,6 +2971,7 @@ fn execute_insert_rows_with_routing(
     rls_write_checks: &[RlsWriteCheck],
     indexes: &[BoundIndexRelation],
     rows: &[Vec<Value>],
+    returning: Option<&[TargetEntry]>,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
@@ -2989,6 +2988,7 @@ fn execute_insert_rows_with_routing(
             rls_write_checks,
             indexes,
             rows,
+            returning,
             ctx,
             xid,
             cid,
@@ -3006,6 +3006,7 @@ fn execute_insert_rows_with_routing(
             rls_write_checks,
             indexes,
             rows,
+            returning,
             ctx,
             xid,
             cid,
@@ -3048,6 +3049,7 @@ fn execute_insert_rows_with_routing(
             rls_write_checks,
             &result_rel_info.indexes,
             &result_rel_info.rows,
+            returning,
             ctx,
             xid,
             cid,
@@ -4776,6 +4778,7 @@ pub(crate) fn execute_insert_rows(
     rls_write_checks: &[RlsWriteCheck],
     indexes: &[BoundIndexRelation],
     rows: &[Vec<Value>],
+    returning: Option<&[TargetEntry]>,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
@@ -4803,6 +4806,7 @@ pub(crate) fn execute_insert_rows(
         .map(|triggers| triggers.new_transition_capture());
 
     let mut inserted_rows = Vec::new();
+    let mut returned_rows = Vec::new();
     for values in rows {
         let Some(mut values) = (match &triggers {
             Some(triggers) => triggers.before_row_insert(values.clone(), ctx)?,
@@ -4810,6 +4814,7 @@ pub(crate) fn execute_insert_rows(
         }) else {
             continue;
         };
+        capture_copy_to_dml_notices();
         materialize_generated_columns(desc, &mut values, ctx)?;
         enforce_exclusion_constraints_against_values(
             relation_name,
@@ -4833,11 +4838,17 @@ pub(crate) fn execute_insert_rows(
         )?;
         maintain_indexes_for_row(rel, desc, indexes, &values, heap_tid, ctx)?;
         inserted_rows.push(values.clone());
+        if let Some(returning) = returning {
+            let row = project_returning_row(returning, &values, ctx)?;
+            capture_copy_to_dml_returning_row(row.clone());
+            returned_rows.push(row);
+        }
         if let Some(triggers) = &triggers {
             if let Some(capture) = transition_capture.as_mut() {
                 triggers.capture_insert_row(capture, &values);
             }
             triggers.after_row_insert(&values, ctx)?;
+            capture_copy_to_dml_notices();
         }
     }
 
@@ -4850,7 +4861,11 @@ pub(crate) fn execute_insert_rows(
         }
     }
 
-    Ok(inserted_rows)
+    if returning.is_some() {
+        Ok(returned_rows)
+    } else {
+        Ok(inserted_rows)
+    }
 }
 
 pub(crate) fn execute_insert_values(
@@ -4881,6 +4896,7 @@ pub(crate) fn execute_insert_values(
             rls_write_checks,
             indexes,
             rows,
+            None,
             ctx,
             xid,
             cid,
@@ -4898,6 +4914,7 @@ pub(crate) fn execute_insert_values(
         rls_write_checks,
         indexes,
         rows,
+        None,
         ctx,
         xid,
         cid,
@@ -5115,6 +5132,7 @@ pub fn execute_update_with_waiter(
                     }) else {
                         break;
                     };
+                    capture_copy_to_dml_notices();
                     materialize_generated_columns(&target.desc, &mut triggered_values, ctx)?;
                     match write_updated_row(
                         &target.relation_name,
@@ -5139,6 +5157,12 @@ pub fn execute_update_with_waiter(
                             ctx.session_stats
                                 .write()
                                 .note_relation_update(target.relation_oid);
+                            if !stmt.returning.is_empty() {
+                                let row =
+                                    project_returning_row(&stmt.returning, &triggered_values, ctx)?;
+                                capture_copy_to_dml_returning_row(row.clone());
+                                returned_rows.push(row);
+                            }
                             if let Some(triggers) = &triggers {
                                 if let Some(capture) = transition_capture.as_mut() {
                                     triggers.capture_update_row(
@@ -5152,13 +5176,7 @@ pub fn execute_update_with_waiter(
                                     &triggered_values,
                                     ctx,
                                 )?;
-                            }
-                            if !stmt.returning.is_empty() {
-                                returned_rows.push(project_returning_row(
-                                    &stmt.returning,
-                                    &triggered_values,
-                                    ctx,
-                                )?);
+                                capture_copy_to_dml_notices();
                             }
                             affected_rows += 1;
                             break;
@@ -5472,6 +5490,7 @@ fn execute_update_from_joined_input(
                 }) else {
                     break;
                 };
+                capture_copy_to_dml_notices();
                 materialize_generated_columns(&target.desc, &mut triggered_values, ctx)?;
                 match write_updated_row(
                     &target.relation_name,
@@ -5496,6 +5515,18 @@ fn execute_update_from_joined_input(
                         ctx.session_stats
                             .write()
                             .note_relation_update(target.relation_oid);
+                        if !stmt.returning.is_empty() {
+                            let row = project_update_from_returning_row(
+                                stmt,
+                                target,
+                                &triggered_values,
+                                &source_values,
+                                new_tid,
+                                ctx,
+                            )?;
+                            capture_copy_to_dml_returning_row(row.clone());
+                            returned_rows.push(row);
+                        }
                         if let Some(trigger) = triggers[target_index].as_ref() {
                             if let Some(capture) = transition_captures[target_index].as_mut() {
                                 trigger.capture_update_row(
@@ -5509,16 +5540,7 @@ fn execute_update_from_joined_input(
                                 &triggered_values,
                                 ctx,
                             )?;
-                        }
-                        if !stmt.returning.is_empty() {
-                            returned_rows.push(project_update_from_returning_row(
-                                stmt,
-                                target,
-                                &triggered_values,
-                                &source_values,
-                                new_tid,
-                                ctx,
-                            )?);
+                            capture_copy_to_dml_notices();
                         }
                         affected_rows += 1;
                         break;
@@ -5662,6 +5684,7 @@ pub fn execute_delete_with_waiter(
                             break;
                         }
                     }
+                    capture_copy_to_dml_notices();
                     let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_delete(
                         &target.relation_name,
                         &target.referenced_by_foreign_keys,
@@ -5709,18 +5732,18 @@ pub fn execute_delete_with_waiter(
                             ctx.session_stats
                                 .write()
                                 .note_relation_delete(target.relation_oid);
+                            if !stmt.returning.is_empty() {
+                                let row =
+                                    project_returning_row(&stmt.returning, &current_values, ctx)?;
+                                capture_copy_to_dml_returning_row(row.clone());
+                                returned_rows.push(row);
+                            }
                             if let Some(triggers) = &triggers {
                                 if let Some(capture) = transition_capture.as_mut() {
                                     triggers.capture_delete_row(capture, &current_values);
                                 }
                                 triggers.after_row_delete(&current_values, ctx)?;
-                            }
-                            if !stmt.returning.is_empty() {
-                                returned_rows.push(project_returning_row(
-                                    &stmt.returning,
-                                    &current_values,
-                                    ctx,
-                                )?);
+                                capture_copy_to_dml_notices();
                             }
                             affected_rows += 1;
                             break;

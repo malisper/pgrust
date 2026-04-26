@@ -5286,6 +5286,24 @@ fn parse_copy_query_to_program_with_legacy_options() {
 }
 
 #[test]
+fn parse_copy_insert_returning_to_stdout_keeps_inner_insert_statement() {
+    let stmt =
+        parse_statement("copy (insert into items values (1) returning id) to stdout").unwrap();
+    match stmt {
+        Statement::CopyTo(copy) => {
+            assert_eq!(copy.destination, CopyToDestination::Stdout);
+            match copy.source {
+                CopyToSource::Query { statement, .. } => {
+                    assert!(matches!(*statement, Statement::Insert(_)));
+                }
+                other => panic!("expected query source, got {other:?}"),
+            }
+        }
+        other => panic!("expected copy to statement, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_copy_query_rejects_from_direction() {
     let err = parse_statement("copy (select 1) from '/tmp/in'").unwrap_err();
     assert!(matches!(

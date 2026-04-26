@@ -281,6 +281,27 @@ mod tests {
         values
     }
 
+    fn notice_message(body: &[u8]) -> String {
+        let mut offset = 0usize;
+        while offset < body.len() {
+            let field = body[offset];
+            offset += 1;
+            if field == 0 {
+                break;
+            }
+            let start = offset;
+            while body[offset] != 0 {
+                offset += 1;
+            }
+            let value = String::from_utf8_lossy(&body[start..offset]).into_owned();
+            offset += 1;
+            if field == b'M' {
+                return value;
+            }
+        }
+        panic!("notice response missing message field");
+    }
+
     fn row_description_fields(body: &[u8]) -> Vec<(String, i32, i16, i32)> {
         row_description_fields_with_formats(body)
             .into_iter()
@@ -551,6 +572,74 @@ mod tests {
                 .map(|(_, body)| command_tag(body)),
             Some("COPY 1".to_string())
         );
+        let _ = stream.shutdown(Shutdown::Both);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn copy_to_stdout_with_returning_emits_row_before_after_trigger_notice() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+
+        send_query(&mut stream, "create table t (id serial, name text)");
+        let _ = read_until_ready(&mut stream, "create_table");
+        send_query(
+            &mut stream,
+            "create function qqq_trig() returns trigger language plpgsql as $$begin raise notice '% % %', tg_when, tg_op, coalesce(new.id, old.id); if tg_op = 'DELETE' then return old; end if; return new; end$$",
+        );
+        let _ = read_until_ready(&mut stream, "create_function");
+        send_query(
+            &mut stream,
+            "create trigger qqqbef before insert or update or delete on t for each row execute procedure qqq_trig()",
+        );
+        let _ = read_until_ready(&mut stream, "create_before_trigger");
+        send_query(
+            &mut stream,
+            "create trigger qqqaf after insert or update or delete on t for each row execute procedure qqq_trig()",
+        );
+        let _ = read_until_ready(&mut stream, "create_after_trigger");
+
+        send_query(
+            &mut stream,
+            "copy (insert into t (name) values ('x') returning id) to stdout",
+        );
+        let copy = read_until_ready(&mut stream, "copy_returning_trigger_order");
+        let events = copy
+            .iter()
+            .filter_map(|(kind, body)| match kind {
+                b'H' => Some("copy_out".to_string()),
+                b'd' => Some(format!("data:{}", String::from_utf8_lossy(body))),
+                b'N' => Some(format!("notice:{}", notice_message(body))),
+                b'c' => Some("copy_done".to_string()),
+                b'C' => Some(format!("command:{}", command_tag(body))),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let before_idx = events
+            .iter()
+            .position(|event| event == "notice:BEFORE INSERT 1")
+            .expect("missing BEFORE trigger notice");
+        let data_idx = events
+            .iter()
+            .position(|event| event == "data:1\n")
+            .expect("missing COPY data row");
+        let after_idx = events
+            .iter()
+            .position(|event| event == "notice:AFTER INSERT 1")
+            .expect("missing AFTER trigger notice");
+        assert!(
+            before_idx < data_idx,
+            "BEFORE notice should precede COPY data: {events:?}"
+        );
+        assert!(
+            data_idx < after_idx,
+            "COPY data should precede AFTER notice: {events:?}"
+        );
+        assert!(events.iter().any(|event| event == "copy_out"));
+        assert!(events.iter().any(|event| event == "copy_done"));
+        assert!(events.iter().any(|event| event == "command:COPY 1"));
+
         let _ = stream.shutdown(Shutdown::Both);
         server.join().unwrap();
     }
