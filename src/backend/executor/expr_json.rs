@@ -164,6 +164,7 @@ pub(crate) fn jsonb_to_tsvector_value(
     config_name: Option<&str>,
     jsonb: &Value,
     flags: Option<&Value>,
+    catalog: Option<&dyn CatalogLookup>,
 ) -> Result<Value, ExecError> {
     let Value::Jsonb(bytes) = jsonb else {
         return Err(ExecError::TypeMismatch {
@@ -179,6 +180,7 @@ pub(crate) fn jsonb_to_tsvector_value(
     let jsonb = decode_jsonb(bytes)?;
     let mut builder = JsonbTsVectorBuilder {
         config_name,
+        catalog,
         flags,
         next_position: 1,
         lexemes: Vec::new(),
@@ -235,6 +237,7 @@ fn jsonb_to_tsvector_flags_hint() -> String {
 
 struct JsonbTsVectorBuilder<'a> {
     config_name: Option<&'a str>,
+    catalog: Option<&'a dyn CatalogLookup>,
     flags: JsonbTsVectorFlags,
     next_position: u16,
     lexemes: Vec<TsLexeme>,
@@ -301,6 +304,7 @@ impl JsonbTsVectorBuilder<'_> {
                 self.config_name,
                 text,
                 self.next_position,
+                self.catalog,
             )
             .map_err(|e| {
                 ExecError::Parse(ParseError::UnexpectedToken {

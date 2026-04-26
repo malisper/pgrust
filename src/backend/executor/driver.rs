@@ -217,6 +217,16 @@ fn execute_statement_with_source(
             expected: "PUBLICATION handled by database/session layer",
             actual: "PUBLICATION".into(),
         })),
+        Statement::CreateTextSearchDictionary(_)
+        | Statement::AlterTextSearchDictionary(_)
+        | Statement::CreateTextSearchConfiguration(_)
+        | Statement::AlterTextSearchConfiguration(_)
+        | Statement::DropTextSearchConfiguration(_) => {
+            Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "TEXT SEARCH handled by database/session layer",
+                actual: "TEXT SEARCH".into(),
+            }))
+        }
         Statement::CreateTrigger(_)
         | Statement::DropTrigger(_)
         | Statement::AlterTableTriggerState(_)

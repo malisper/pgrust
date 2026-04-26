@@ -559,6 +559,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message == "wrong flag in flag array: \"\"" {
                 return None;
             }
+            if is_text_search_template_parameter_error(sql, message) {
+                return None;
+            }
             if message == "range lower bound must be less than or equal to range upper bound"
                 && let Some(position) = find_range_cast_literal_position(sql)
             {
@@ -644,6 +647,14 @@ fn suppress_missing_function_position(sql: &str) -> bool {
     lower.starts_with("drop function ")
         || lower.starts_with("create aggregate ")
         || lower.starts_with("create or replace aggregate ")
+}
+
+fn is_text_search_template_parameter_error(sql: &str, message: &str) -> bool {
+    sql.trim_start()
+        .to_ascii_lowercase()
+        .starts_with("create text search dictionary ")
+        && message.starts_with("unrecognized ")
+        && message.contains(" parameter: ")
 }
 
 fn is_missing_function_message(message: &str) -> bool {
