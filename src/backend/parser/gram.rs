@@ -11832,14 +11832,18 @@ fn build_analyze_options(pair: Pair<'_, Rule>) -> Result<AnalyzeOptionsBuilder, 
 }
 
 fn parse_option_bool(pair: Pair<'_, Rule>) -> Result<bool, ParseError> {
-    let mut inner = pair.into_inner();
-    match inner.next() {
+    match pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::option_bool_value)
+    {
         None => Ok(true),
-        Some(part) if part.as_rule() == Rule::option_bool_value => {
+        Some(part) => {
             let value = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
-            Ok(!matches!(value.as_rule(), Rule::kw_false | Rule::kw_off))
+            Ok(!matches!(
+                value.as_rule(),
+                Rule::kw_false | Rule::kw_off | Rule::kw_no_value
+            ))
         }
-        Some(_) => Ok(true),
     }
 }
 
@@ -16223,12 +16227,30 @@ fn build_vacuum(pair: Pair<'_, Rule>) -> Result<VacuumStatement, ParseError> {
     let mut targets = Vec::new();
     let mut analyze = false;
     let mut full = false;
+    let mut freeze = false;
     let mut verbose = false;
     let mut skip_locked = false;
     let mut buffer_usage_limit = None;
+    let mut disable_page_skipping = false;
+    let mut index_cleanup = None;
+    let mut truncate = None;
+    let mut parallel = None;
+    let mut process_main = None;
+    let mut process_toast = None;
+    let mut skip_database_stats = false;
+    let mut only_database_stats = false;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::kw_analyze => analyze = true,
+            Rule::vacuum_legacy_option => {
+                let opt = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+                match opt.as_rule() {
+                    Rule::vacuum_legacy_analyze_option => analyze = true,
+                    Rule::vacuum_legacy_full_option => full = true,
+                    Rule::vacuum_legacy_freeze_option => freeze = true,
+                    Rule::vacuum_legacy_verbose_option => verbose = true,
+                    _ => {}
+                }
+            }
             Rule::vacuum_option_block => {
                 for opt in part.into_inner() {
                     let opt = if opt.as_rule() == Rule::vacuum_option {
@@ -16239,6 +16261,29 @@ fn build_vacuum(pair: Pair<'_, Rule>) -> Result<VacuumStatement, ParseError> {
                     match opt.as_rule() {
                         Rule::vacuum_analyze_option => analyze = parse_option_bool(opt)?,
                         Rule::vacuum_full_option => full = parse_option_bool(opt)?,
+                        Rule::vacuum_freeze_option => freeze = parse_option_bool(opt)?,
+                        Rule::vacuum_disable_page_skipping_option => {
+                            disable_page_skipping = parse_option_bool(opt)?
+                        }
+                        Rule::vacuum_index_cleanup_option => {
+                            index_cleanup = parse_optional_option_scalar(opt)?
+                        }
+                        Rule::vacuum_truncate_option => truncate = Some(parse_option_bool(opt)?),
+                        Rule::vacuum_parallel_option => {
+                            parallel = parse_optional_option_scalar(opt)?
+                        }
+                        Rule::vacuum_process_main_option => {
+                            process_main = Some(parse_option_bool(opt)?)
+                        }
+                        Rule::vacuum_process_toast_option => {
+                            process_toast = Some(parse_option_bool(opt)?)
+                        }
+                        Rule::vacuum_skip_database_stats_option => {
+                            skip_database_stats = parse_option_bool(opt)?
+                        }
+                        Rule::vacuum_only_database_stats_option => {
+                            only_database_stats = parse_option_bool(opt)?
+                        }
                         Rule::analyze_verbose_option => verbose = parse_option_bool(opt)?,
                         Rule::analyze_skip_locked_option => skip_locked = parse_option_bool(opt)?,
                         Rule::analyze_buffer_usage_limit_option => {
@@ -16256,10 +16301,29 @@ fn build_vacuum(pair: Pair<'_, Rule>) -> Result<VacuumStatement, ParseError> {
         targets,
         analyze,
         full,
+        freeze,
         verbose,
         skip_locked,
         buffer_usage_limit,
+        disable_page_skipping,
+        index_cleanup,
+        truncate,
+        parallel,
+        process_main,
+        process_toast,
+        skip_database_stats,
+        only_database_stats,
     })
+}
+
+fn parse_optional_option_scalar(pair: Pair<'_, Rule>) -> Result<Option<String>, ParseError> {
+    match pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::option_scalar_value)
+    {
+        Some(scalar) => build_option_scalar_value(scalar).map(Some),
+        None => Ok(None),
+    }
 }
 
 fn build_maintenance_target_list(

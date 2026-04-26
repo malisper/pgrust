@@ -8966,6 +8966,20 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("vacuum (analyze, full) vactst").unwrap(), Statement::Vacuum(VacuumStatement { analyze: true, full: true, targets, .. }) if targets == vec![MaintenanceTarget { table_name: "vactst".into(), columns: vec![], only: false }])
     );
     assert!(
+        matches!(parse_statement("vacuum full freeze verbose vactst").unwrap(), Statement::Vacuum(VacuumStatement { full: true, freeze: true, verbose: true, targets, .. }) if targets == vec![MaintenanceTarget { table_name: "vactst".into(), columns: vec![], only: false }])
+    );
+    assert!(
+        matches!(parse_statement("vacuum (freeze, disable_page_skipping, parallel -1) vactst").unwrap(), Statement::Vacuum(VacuumStatement { freeze: true, disable_page_skipping: true, parallel: Some(parallel), targets, .. }) if parallel == "-1" && targets == vec![MaintenanceTarget { table_name: "vactst".into(), columns: vec![], only: false }])
+    );
+    let parsed_vacuum_options = parse_statement("vacuum (index_cleanup auto, truncate false, process_main false, process_toast yes, skip_database_stats, only_database_stats off)").unwrap();
+    assert!(
+        matches!(&parsed_vacuum_options, Statement::Vacuum(VacuumStatement { index_cleanup: Some(index_cleanup), truncate: Some(false), process_main: Some(false), process_toast: Some(true), skip_database_stats: true, only_database_stats: false, targets, .. }) if index_cleanup == "auto" && targets.is_empty()),
+        "{parsed_vacuum_options:?}"
+    );
+    assert!(
+        matches!(parse_statement("vacuum (parallel) pvactst").unwrap(), Statement::Vacuum(VacuumStatement { parallel: None, targets, .. }) if targets == vec![MaintenanceTarget { table_name: "pvactst".into(), columns: vec![], only: false }])
+    );
+    assert!(
         matches!(parse_statement("update people set note = 'x' where id = 1").unwrap(), Statement::Update(UpdateStatement { table_name, target_alias, only, from, .. }) if table_name == "people" && target_alias.is_none() && !only && from.is_none())
     );
     assert!(

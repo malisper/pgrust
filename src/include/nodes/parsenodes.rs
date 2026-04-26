@@ -3108,9 +3108,18 @@ pub struct VacuumStatement {
     pub targets: Vec<MaintenanceTarget>,
     pub analyze: bool,
     pub full: bool,
+    pub freeze: bool,
     pub verbose: bool,
     pub skip_locked: bool,
     pub buffer_usage_limit: Option<String>,
+    pub disable_page_skipping: bool,
+    pub index_cleanup: Option<String>,
+    pub truncate: Option<bool>,
+    pub parallel: Option<String>,
+    pub process_main: Option<bool>,
+    pub process_toast: Option<bool>,
+    pub skip_database_stats: bool,
+    pub only_database_stats: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
