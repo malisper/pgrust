@@ -317,6 +317,7 @@ pub enum Statement {
     AlterSequenceRename(AlterTableRenameStatement),
     AlterIndexRename(AlterTableRenameStatement),
     AlterViewRename(AlterTableRenameStatement),
+    AlterViewRenameColumn(AlterTableRenameColumnStatement),
     AlterIndexAttachPartition(AlterIndexAttachPartitionStatement),
     AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
@@ -335,6 +336,8 @@ pub enum Statement {
     AlterTableOwner(AlterRelationOwnerStatement),
     AlterTableRenameColumn(AlterTableRenameColumnStatement),
     AlterTableRename(AlterTableRenameStatement),
+    AlterTableSetSchema(AlterRelationSetSchemaStatement),
+    AlterViewSetSchema(AlterRelationSetSchemaStatement),
     AlterViewOwner(AlterRelationOwnerStatement),
     AlterSchemaOwner(AlterSchemaOwnerStatement),
     AlterTableSet(AlterTableSetStatement),
@@ -352,6 +355,7 @@ pub enum Statement {
     AlterOperator(AlterOperatorStatement),
     AlterTriggerRename(AlterTriggerRenameStatement),
     CommentOnTable(CommentOnTableStatement),
+    CommentOnView(CommentOnViewStatement),
     CommentOnIndex(CommentOnIndexStatement),
     CommentOnConstraint(CommentOnConstraintStatement),
     CommentOnRule(CommentOnRuleStatement),
@@ -1631,6 +1635,7 @@ pub struct CreateViewStatement {
     pub schema_name: Option<String>,
     pub view_name: String,
     pub persistence: TablePersistence,
+    pub options: Vec<RelOption>,
     pub query: SelectStatement,
     pub query_sql: String,
     pub or_replace: bool,
@@ -2028,6 +2033,13 @@ pub struct AlterTableRenameStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterRelationSetSchemaStatement {
+    pub if_exists: bool,
+    pub relation_name: String,
+    pub schema_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlterPolicyAction {
     Rename {
         new_name: String,
@@ -2148,6 +2160,12 @@ pub struct AlterTriggerRenameStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnTableStatement {
     pub table_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnViewStatement {
+    pub view_name: String,
     pub comment: Option<String>,
 }
 

@@ -258,6 +258,7 @@ impl Database {
                 'p',
                 'f',
                 self.auth_state(client_id).current_user_oid(),
+                None,
                 &ctx,
             )
             .map_err(map_catalog_error)?;

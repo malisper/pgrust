@@ -195,9 +195,13 @@ impl Database {
                         )?;
                     }
                     Statement::CreateView(create_stmt) => {
+                        let mut create_stmt = create_stmt.clone();
+                        if create_stmt.schema_name.is_none() {
+                            create_stmt.schema_name = Some(resolved.schema_name.clone());
+                        }
                         self.execute_create_view_stmt_in_transaction_with_search_path(
                             client_id,
-                            create_stmt,
+                            &create_stmt,
                             xid,
                             element_cid,
                             Some(&schema_search_path),

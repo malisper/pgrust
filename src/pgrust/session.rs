@@ -2377,6 +2377,24 @@ impl Session {
                     )
                 }
             }
+            Statement::AlterTableSetSchema(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_set_schema_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::AlterIndexRename(ref rename_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -2445,6 +2463,42 @@ impl Session {
                     db.execute_alter_view_rename_stmt_with_search_path(
                         self.client_id,
                         rename_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterViewRenameColumn(ref rename_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_view_rename_column_stmt_with_search_path(
+                        self.client_id,
+                        rename_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterViewSetSchema(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_view_set_schema_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
                         search_path.as_deref(),
                     )
                 }
@@ -3136,6 +3190,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_comment_on_table_stmt_with_search_path(
+                        self.client_id,
+                        comment_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::CommentOnView(ref comment_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_comment_on_view_stmt_with_search_path(
                         self.client_id,
                         comment_stmt,
                         search_path.as_deref(),
@@ -4247,6 +4319,28 @@ impl Session {
                     &mut txn.temp_effects,
                 )
             }
+            Statement::AlterTableSetSchema(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.relation_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.relation_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_table_set_schema_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                    &mut txn.temp_effects,
+                )
+            }
             Statement::AlterIndexRename(ref rename_stmt) => {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
@@ -4306,6 +4400,49 @@ impl Session {
                     cid,
                     search_path.as_deref(),
                     &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterViewRenameColumn(ref rename_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&rename_stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            rename_stmt.table_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_view_rename_column_stmt_in_transaction_with_search_path(
+                    client_id,
+                    rename_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterViewSetSchema(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.relation_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.relation_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_view_set_schema_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                    &mut txn.temp_effects,
                 )
             }
             Statement::AlterViewOwner(ref alter_stmt) => {
@@ -5187,6 +5324,40 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_comment_on_table_stmt_in_transaction_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::CommentOnView(ref comment_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = match catalog.lookup_any_relation(&comment_stmt.view_name) {
+                    Some(relation) if relation.relkind == 'v' => relation,
+                    Some(_) => {
+                        return Err(ExecError::Parse(ParseError::WrongObjectType {
+                            name: comment_stmt.view_name.clone(),
+                            expected: "view",
+                        }));
+                    }
+                    None => {
+                        return Err(ExecError::DetailedError {
+                            message: format!(
+                                "relation \"{}\" does not exist",
+                                comment_stmt.view_name
+                            ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42P01",
+                        });
+                    }
+                };
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_comment_on_view_stmt_in_transaction_with_search_path(
                     client_id,
                     comment_stmt,
                     xid,

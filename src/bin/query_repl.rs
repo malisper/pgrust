@@ -590,6 +590,18 @@ fn run_statement(
                 stmt.table_name, stmt.new_table_name
             ))))
         }
+        Statement::AlterViewRenameColumn(stmt) => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                "ALTER VIEW RENAME COLUMN in query_repl: {}.{} -> {}",
+                stmt.table_name, stmt.column_name, stmt.new_column_name
+            ))))
+        }
+        Statement::AlterViewSetSchema(stmt) => Err(ExecError::Parse(
+            ParseError::FeatureNotSupported(format!(
+                "ALTER VIEW SET SCHEMA in query_repl: {} -> {}",
+                stmt.relation_name, stmt.schema_name
+            )),
+        )),
         Statement::AlterSequence(stmt) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             format!("ALTER SEQUENCE in query_repl: {}", stmt.sequence_name),
         ))),
@@ -617,6 +629,12 @@ fn run_statement(
                 stmt.table_name, stmt.new_table_name
             ))))
         }
+        Statement::AlterTableSetSchema(stmt) => Err(ExecError::Parse(
+            ParseError::FeatureNotSupported(format!(
+                "ALTER TABLE SET SCHEMA in query_repl: {} -> {}",
+                stmt.relation_name, stmt.schema_name
+            )),
+        )),
         Statement::AlterTableDropColumn(stmt) => {
             Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                 "ALTER TABLE DROP COLUMN in query_repl: {}.{}",
@@ -919,6 +937,7 @@ fn run_statement(
         Statement::CommentOnConstraint(_)
         | Statement::CommentOnDomain(_)
         | Statement::CommentOnTrigger(_)
+        | Statement::CommentOnView(_)
         | Statement::CreateConversion(_)
         | Statement::CommentOnIndex(_)
         | Statement::CommentOnRule(_)

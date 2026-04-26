@@ -373,6 +373,7 @@ impl Database {
             xid,
             cid,
             'r',
+            None,
             catalog_effects,
             temp_effects,
         )
@@ -387,6 +388,7 @@ impl Database {
         xid: TransactionId,
         mut cid: CommandId,
         relkind: char,
+        reloptions: Option<Vec<String>>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<CreatedTempRelation, ExecError> {
@@ -435,6 +437,7 @@ impl Database {
                     't',
                     relkind,
                     self.auth_state(client_id).current_user_oid(),
+                    reloptions,
                     &ctx,
                 )
                 .map_err(map_catalog_error)?;

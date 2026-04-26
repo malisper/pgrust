@@ -12,7 +12,8 @@ use crate::backend::utils::misc::notices::{
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BootstrapCatalogKind, CSTRING_TYPE_OID, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
-    PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
+    PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID,
+    PgAggregateRow, TEXT_TYPE_OID,
 };
 use crate::include::nodes::datum::{ArrayValue, IntervalValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
@@ -6960,6 +6961,138 @@ fn create_view_selects_and_persists_rewrite_rule() {
 }
 
 #[test]
+fn comment_on_view_upserts_and_clears_pg_description() {
+    let dir = temp_dir("comment_on_view");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table items(id int4)").unwrap();
+    db.execute(1, "create view item_view as select id from items")
+        .unwrap();
+    db.execute(1, "comment on view item_view is 'visible ids'")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.description \
+             from pg_description d \
+             join pg_class c on c.oid = d.objoid \
+             where c.relname = 'item_view' and d.classoid = 1259 and d.objsubid = 0",
+        ),
+        vec![vec![Value::Text("visible ids".into())]]
+    );
+
+    db.execute(1, "comment on view item_view is null").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_description d \
+             join pg_class c on c.oid = d.objoid \
+             where c.relname = 'item_view' and d.classoid = 1259 and d.objsubid = 0",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn create_view_referencing_temp_relation_becomes_temp_view() {
+    let dir = temp_dir("create_view_infers_temp");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+    clear_backend_notices();
+
+    session.execute(&db, "create schema tenant").unwrap();
+    session
+        .execute(&db, "set search_path to tenant, public")
+        .unwrap();
+    session
+        .execute(&db, "create table base_items(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "create temp table temp_items(id int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view temp_item_view as select id from temp_items",
+        )
+        .unwrap();
+
+    assert_eq!(
+        take_backend_notices()
+            .into_iter()
+            .map(|notice| notice.message)
+            .collect::<Vec<_>>(),
+        vec!["view \"temp_item_view\" will be a temporary view"]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relpersistence, n.nspname like 'pg_temp_%' \
+             from pg_class c join pg_namespace n on n.oid = c.relnamespace \
+             where c.relname = 'temp_item_view'",
+        ),
+        vec![vec![Value::Text("t".into()), Value::Bool(true)]]
+    );
+
+    let err = session
+        .execute(
+            &db,
+            "create view tenant.bad_temp_view as select id from temp_items",
+        )
+        .unwrap_err();
+    match err {
+        ExecError::Parse(ParseError::TempTableInNonTempSchema(_)) => {}
+        other => panic!("expected temp relation in non-temp schema error, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_view_persists_security_reloptions() {
+    let dir = temp_dir("create_view_reloptions");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table items(id int4)").unwrap();
+    db.execute(
+        1,
+        "create view secure_items with (security_barrier, security_invoker=false) as select id from items",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'secure_items'",
+        ),
+        vec![vec![Value::PgArray(
+            crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                Value::Text("security_barrier=true".into()),
+                Value::Text("security_invoker=false".into()),
+            ])
+            .with_element_type_oid(TEXT_TYPE_OID)
+        )]]
+    );
+
+    db.execute(
+        1,
+        "create or replace view secure_items as select id from items",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'secure_items'",
+        ),
+        vec![vec![Value::Null]]
+    );
+}
+
+#[test]
 fn set_operation_inputs_expand_views() {
     let dir = temp_dir("set_operation_view_inputs");
     let db = Database::open(&dir, 128).unwrap();
@@ -7417,7 +7550,7 @@ fn view_relfilenode_is_zero_and_drop_table_rejects_view_name() {
 }
 
 #[test]
-fn dependent_views_block_alter_and_drop() {
+fn dependent_views_allow_add_column_but_block_drop() {
     let dir = temp_dir("dependent_views_block_ddl");
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
@@ -7429,11 +7562,9 @@ fn dependent_views_block_alter_and_drop() {
         .execute(&db, "create view base_view as select id from base_items")
         .unwrap();
 
-    match session.execute(&db, "alter table base_items add column note text") {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
-            if actual.contains("view depends on it: base_view") => {}
-        other => panic!("expected dependent-view alter-table error, got {other:?}"),
-    }
+    session
+        .execute(&db, "alter table base_items add column note text")
+        .unwrap();
 
     match session.execute(&db, "drop table base_items") {
         Err(ExecError::DetailedError {
@@ -7469,6 +7600,116 @@ fn drop_view_rejects_depended_on_view() {
         Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
             if actual.contains("view depends on it: second_view") => {}
         other => panic!("expected dependent-view drop-view error, got {other:?}"),
+    }
+}
+
+#[test]
+fn dependent_views_track_relation_rename_and_set_schema() {
+    let dir = temp_dir("dependent_views_track_renames");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema archive").unwrap();
+    session
+        .execute(&db, "create table items(id int4, note text, extra int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view item_view as select id, note from items where note is not null",
+        )
+        .unwrap();
+
+    session
+        .execute(&db, "alter table items rename to items_new")
+        .unwrap();
+    let renamed = query_rows(&db, 1, "select pg_get_viewdef('item_view'::regclass)");
+    let Value::Text(renamed_sql) = &renamed[0][0] else {
+        panic!("expected view definition text, got {renamed:?}");
+    };
+    assert!(renamed_sql.contains("FROM items_new"));
+    assert_eq!(
+        query_rows(&db, 1, "select * from item_view where id = 1 order by id",),
+        Vec::<Vec<Value>>::new()
+    );
+
+    session
+        .execute(&db, "alter table items_new set schema archive")
+        .unwrap();
+    let moved = query_rows(&db, 1, "select pg_get_viewdef('item_view'::regclass)");
+    let Value::Text(moved_sql) = &moved[0][0] else {
+        panic!("expected view definition text, got {moved:?}");
+    };
+    assert!(moved_sql.contains("archive.items_new"));
+}
+
+#[test]
+fn dependent_views_allow_safe_add_and_drop_column() {
+    let dir = temp_dir("dependent_views_safe_column_ddl");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items(id int4, note text, extra int4)")
+        .unwrap();
+    session
+        .execute(&db, "create view item_view as select id, note from items")
+        .unwrap();
+
+    session
+        .execute(&db, "alter table items add column status text")
+        .unwrap();
+    session
+        .execute(&db, "alter table items drop column extra")
+        .unwrap();
+
+    match session.execute(&db, "alter table items drop column note") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
+            if actual.contains("dependent view uses column note") => {}
+        other => panic!("expected dependent-view drop-column restriction, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_or_replace_view_rejects_incompatible_column_changes() {
+    let dir = temp_dir("create_or_replace_view_incompatible_columns");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items(id int4, note text)")
+        .unwrap();
+    session
+        .execute(&db, "create view item_view as select id, note from items")
+        .unwrap();
+
+    match session.execute(
+        &db,
+        "create or replace view item_view as select id as item_id, note from items",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "cannot change name of view column \"id\" to \"item_id\""
+            );
+            assert_eq!(sqlstate, "42P16");
+        }
+        other => panic!("expected create-or-replace name error, got {other:?}"),
+    }
+
+    match session.execute(
+        &db,
+        "create or replace view item_view as select id::int8 as id, note from items",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert!(message.contains("cannot change data type of view column \"id\""));
+            assert_eq!(sqlstate, "42P16");
+        }
+        other => panic!("expected create-or-replace type error, got {other:?}"),
     }
 }
 
@@ -8844,6 +9085,23 @@ fn create_schema_validates_embedded_element_schema_names() {
 }
 
 #[test]
+fn create_schema_rejects_embedded_temp_view() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    let err = session
+        .execute(
+            &db,
+            "create schema tenant create temp view testview as select 1",
+        )
+        .unwrap_err();
+    match err {
+        ExecError::Parse(ParseError::TempTableInNonTempSchema(_)) => {}
+        other => panic!("expected temp relation in non-temp schema error, got {other:?}"),
+    }
+}
+
+#[test]
 fn create_schema_executes_supported_embedded_elements_in_order() {
     let db = Database::open_ephemeral(16).unwrap();
     let mut session = Session::new(1);
@@ -8927,14 +9185,13 @@ fn create_schema_supports_authorization_and_if_not_exists() {
                 rows,
                 vec![vec![
                     Value::Text("postgres".into()),
-                    Value::Text("postgres".into()),
+                    Value::Text("postgres".into())
                 ]]
             );
         }
         other => panic!("expected query result, got {:?}", other),
     }
 }
-
 #[test]
 fn create_schema_authorization_current_role_uses_active_role() {
     let db = Database::open_ephemeral(16).unwrap();
@@ -23277,6 +23534,82 @@ fn create_function_uses_search_path_for_unqualified_creation() {
 }
 
 #[test]
+fn create_language_c_function_uses_link_symbol_as_rust_backing_function() {
+    let base = temp_dir("language_c_function_link_symbol");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function binary_coercible(oid, oid) returns bool \
+             as 'regress', 'binary_coercible' language c strict stable parallel safe",
+        )
+        .unwrap();
+
+    let visible = db.backend_catcache(1, None).unwrap();
+    let proc = visible
+        .proc_rows_by_name("binary_coercible")
+        .into_iter()
+        .find(|row| row.proname == "binary_coercible")
+        .expect("function row");
+    assert_eq!(proc.prolang, PG_LANGUAGE_C_OID);
+    assert_eq!(proc.prosrc, "binary_coercible");
+
+    let result = session
+        .execute(
+            &db,
+            "select binary_coercible(1043::oid, 25::oid), binary_coercible(23::oid, 25::oid)",
+        )
+        .unwrap();
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Bool(true), Value::Bool(false)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_language_c_function_without_link_symbol_uses_function_name() {
+    let base = temp_dir("language_c_function_default_symbol");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function interpt_pp(path, path) returns point as 'regress' language c strict",
+        )
+        .unwrap();
+
+    let visible = db.backend_catcache(1, None).unwrap();
+    let proc = visible
+        .proc_rows_by_name("interpt_pp")
+        .into_iter()
+        .find(|row| row.proname == "interpt_pp")
+        .expect("function row");
+    assert_eq!(proc.prolang, PG_LANGUAGE_C_OID);
+    assert_eq!(proc.prosrc, "interpt_pp");
+
+    session
+        .execute(&db, "create table paths_a(thepath path)")
+        .unwrap();
+    session
+        .execute(&db, "create table paths_b(thepath path)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view path_intersections as \
+             select interpt_pp(a.thepath, b.thepath) as exit \
+             from paths_a a, paths_b b \
+             where a.thepath ?# b.thepath",
+        )
+        .unwrap();
+}
+
+#[test]
 fn create_function_persists_explicit_cost() {
     let base = temp_dir("search_path_function_cost");
     let db = Database::open(&base, 16).unwrap();
@@ -27700,6 +28033,39 @@ fn pg_get_viewdef_returns_canonical_view_query() {
                 .into()
         )]]
     );
+}
+
+#[test]
+fn pg_get_viewdef_renders_sublinks_as_sql() {
+    let dir = temp_dir("pg_get_viewdef_sublinks");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table t1 (f1 int4)").unwrap();
+    db.execute(1, "create table t2 (f1 int4)").unwrap();
+    db.execute(
+        1,
+        "create view v_exists as select f1 from t1 where exists (select 1 from t2 where t2.f1 = t1.f1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view v_in as select f1 from t1 where f1 in (select f1 from t2)",
+    )
+    .unwrap();
+
+    let exists_def = query_rows(&db, 1, "select pg_get_viewdef('v_exists'::regclass)");
+    let Value::Text(exists_sql) = &exists_def[0][0] else {
+        panic!("expected text view definition, got {exists_def:?}");
+    };
+    assert!(exists_sql.contains("EXISTS ( SELECT 1"));
+    assert!(!exists_sql.contains("SubLink("));
+
+    let in_def = query_rows(&db, 1, "select pg_get_viewdef('v_in'::regclass)");
+    let Value::Text(in_sql) = &in_def[0][0] else {
+        panic!("expected text view definition, got {in_def:?}");
+    };
+    assert!(in_sql.contains(" IN ( SELECT"));
+    assert!(!in_sql.contains("SubLink("));
 }
 
 #[test]
