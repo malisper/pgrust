@@ -4,11 +4,12 @@ use crate::backend::parser::{
     resolve_raw_type_name,
 };
 use crate::include::catalog::{
-    BIT_TYPE_OID, BOOL_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_TYPE_OID,
-    INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, INTERNAL_CHAR_TYPE_OID, NUMERIC_TYPE_OID,
-    OID_TYPE_OID, REGCOLLATION_TYPE_OID, REGOPER_TYPE_OID, REGOPERATOR_TYPE_OID, REGPROC_TYPE_OID,
-    REGPROCEDURE_TYPE_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
-    TIMETZ_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID,
+    ACLITEM_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_TYPE_OID,
+    FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID,
+    INTERNAL_CHAR_TYPE_OID, NUMERIC_TYPE_OID, OID_TYPE_OID, REGCOLLATION_TYPE_OID,
+    REGOPER_TYPE_OID, REGOPERATOR_TYPE_OID, REGPROC_TYPE_OID, REGPROCEDURE_TYPE_OID, TEXT_TYPE_OID,
+    TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, VARBIT_TYPE_OID,
+    VARCHAR_TYPE_OID,
 };
 use crate::include::nodes::datum::Value;
 
@@ -555,6 +556,7 @@ pub(crate) fn format_type_text(
         FLOAT8_TYPE_OID => "double precision".into(),
         OID_TYPE_OID => "oid".into(),
         TEXT_TYPE_OID => "text".into(),
+        ACLITEM_ARRAY_TYPE_OID => "aclitem[]".into(),
         INTERNAL_CHAR_TYPE_OID => "\"char\"".into(),
         NUMERIC_TYPE_OID => "numeric".into(),
         VARCHAR_TYPE_OID => match typmod {
@@ -598,7 +600,15 @@ pub(crate) fn format_type_text(
         crate::include::catalog::ANYOID => "\"any\"".into(),
         _ => catalog
             .type_by_oid(oid)
-            .map(|row| quote_identifier_if_needed(&row.typname))
+            .map(|row| {
+                if row.typelem != 0
+                    && row.typname.starts_with('_')
+                    && let Some(element) = catalog.type_by_oid(row.typelem)
+                {
+                    return format!("{}[]", quote_identifier_if_needed(&element.typname));
+                }
+                quote_identifier_if_needed(&row.typname)
+            })
             .unwrap_or_else(|| "???".into()),
     }
 }

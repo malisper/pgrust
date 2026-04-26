@@ -86,6 +86,7 @@ pub fn create_role(
         rolreplication: attrs.rolreplication,
         rolbypassrls: attrs.rolbypassrls,
         rolconnlimit: attrs.rolconnlimit,
+        rolpassword: None,
     };
     *next_oid = next_oid.saturating_add(1);
     rows.push(row.clone());

@@ -8,6 +8,7 @@ use crate::backend::parser::{
     SerializedPartitionValue, deserialize_partition_bound, partition_value_to_value,
     relation_partition_spec,
 };
+use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, PlannerSubroot, RelOptInfo, RelOptKind,
@@ -430,7 +431,7 @@ fn collect_relation_access_paths(
     } else {
         Vec::new()
     };
-    if relkind != 'r' {
+    if relkind != 'r' || relation_uses_virtual_scan(relation_oid) {
         return paths;
     }
     for index in catalog
@@ -523,7 +524,7 @@ fn collect_relation_ordered_index_paths(
     config: PlannerConfig,
     catalog: &dyn CatalogLookup,
 ) -> Vec<Path> {
-    if !config.enable_indexscan {
+    if !config.enable_indexscan || relation_uses_virtual_scan(relation_oid) {
         return Vec::new();
     }
     let stats = relation_stats(catalog, relation_oid, &desc);
@@ -563,6 +564,10 @@ fn collect_relation_ordered_index_paths(
         }
     }
     paths
+}
+
+fn relation_uses_virtual_scan(relation_oid: u32) -> bool {
+    relation_oid == PG_LARGEOBJECT_METADATA_RELATION_OID
 }
 
 pub(super) fn relation_ordered_index_paths(

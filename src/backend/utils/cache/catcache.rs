@@ -369,6 +369,10 @@ impl CatCache {
                         entry.relation_oid,
                         column.collation_oid,
                     ),
+                    attacl: None,
+                    attoptions: None,
+                    attfdwoptions: None,
+                    attmissingval: None,
                     sql_type: column.sql_type,
                 })
                 .collect::<Vec<_>>();
@@ -1074,6 +1078,9 @@ fn catalog_object_name(name: &str) -> &str {
 
 pub fn sql_type_oid(sql_type: SqlType) -> u32 {
     if !sql_type.is_array && sql_type.type_oid != 0 {
+        return sql_type.type_oid;
+    }
+    if sql_type.is_array && sql_type.type_oid != 0 {
         return sql_type.type_oid;
     }
     if let Some(row) = builtin_type_rows()

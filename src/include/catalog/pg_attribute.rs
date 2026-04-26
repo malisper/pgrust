@@ -2,10 +2,11 @@ use super::{
     pg_am_desc, pg_amop_desc, pg_amproc_desc, pg_attrdef_desc, pg_auth_members_desc,
     pg_authid_desc, pg_cast_desc, pg_class_desc, pg_collation_desc, pg_constraint_desc,
     pg_conversion_desc, pg_database_desc, pg_depend_desc, pg_index_desc, pg_inherits_desc,
-    pg_language_desc, pg_largeobject_metadata_desc, pg_namespace_desc, pg_opclass_desc,
-    pg_operator_desc, pg_opfamily_desc, pg_proc_desc, pg_publication_desc,
-    pg_publication_namespace_desc, pg_publication_rel_desc, pg_rewrite_desc, pg_statistic_desc,
-    pg_statistic_ext_data_desc, pg_statistic_ext_desc, pg_tablespace_desc, pg_type_desc,
+    pg_language_desc, pg_largeobject_desc, pg_largeobject_metadata_desc, pg_namespace_desc,
+    pg_opclass_desc, pg_operator_desc, pg_opfamily_desc, pg_proc_desc, pg_publication_desc,
+    pg_publication_namespace_desc, pg_publication_rel_desc, pg_replication_origin_desc,
+    pg_rewrite_desc, pg_statistic_desc, pg_statistic_ext_data_desc, pg_statistic_ext_desc,
+    pg_tablespace_desc, pg_type_desc,
 };
 use crate::backend::catalog::catalog::{catalog_attribute_collation_oid, column_desc};
 use crate::backend::executor::RelationDesc;
@@ -13,10 +14,10 @@ use crate::backend::parser::SqlType;
 use crate::backend::parser::SqlTypeKind;
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
-    ANYARRAYOID, BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
-    BOX_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID,
-    CIRCLE_TYPE_OID, DATE_ARRAY_TYPE_OID, DATE_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID,
-    FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID,
+    ACLITEM_ARRAY_TYPE_OID, ANYARRAYOID, BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID,
+    BOOL_TYPE_OID, BOX_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_ARRAY_TYPE_OID,
+    BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATE_ARRAY_TYPE_OID, DATE_TYPE_OID, FLOAT4_ARRAY_TYPE_OID,
+    FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID,
     INT2VECTOR_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID,
     INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, INTERVAL_ARRAY_TYPE_OID,
     INTERVAL_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
@@ -29,22 +30,23 @@ use crate::include::catalog::{
     PG_AUTHID_RELATION_OID, PG_CAST_RELATION_OID, PG_CLASS_RELATION_OID, PG_COLLATION_RELATION_OID,
     PG_CONSTRAINT_RELATION_OID, PG_CONVERSION_RELATION_OID, PG_DATABASE_RELATION_OID,
     PG_DEPEND_RELATION_OID, PG_INDEX_RELATION_OID, PG_INHERITS_RELATION_OID,
-    PG_LANGUAGE_RELATION_OID, PG_LARGEOBJECT_METADATA_RELATION_OID, PG_LSN_ARRAY_TYPE_OID,
-    PG_LSN_TYPE_OID, PG_NAMESPACE_RELATION_OID, PG_NODE_TREE_TYPE_OID, PG_OPCLASS_RELATION_OID,
-    PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID, PG_PROC_RELATION_OID,
-    PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
-    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_DATA_RELATION_OID,
-    PG_STATISTIC_EXT_RELATION_OID, PG_STATISTIC_RELATION_OID, PG_TABLESPACE_RELATION_OID,
-    PG_TYPE_RELATION_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID,
-    REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID,
-    TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIME_ARRAY_TYPE_OID, TIME_TYPE_OID,
-    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_ARRAY_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
-    TIMETZ_ARRAY_TYPE_OID, TIMETZ_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID,
-    TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, UUID_ARRAY_TYPE_OID, UUID_TYPE_OID,
-    VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
-    XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID, XML_TYPE_OID,
-    bootstrap_composite_type_rows, builtin_type_rows, range_type_ref_for_sql_type,
+    PG_LANGUAGE_RELATION_OID, PG_LARGEOBJECT_METADATA_RELATION_OID, PG_LARGEOBJECT_RELATION_OID,
+    PG_LSN_ARRAY_TYPE_OID, PG_LSN_TYPE_OID, PG_NAMESPACE_RELATION_OID, PG_NODE_TREE_TYPE_OID,
+    PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
+    PG_PUBLICATION_RELATION_OID, PG_REPLICATION_ORIGIN_RELATION_OID, PG_REWRITE_RELATION_OID,
+    PG_STATISTIC_EXT_DATA_RELATION_OID, PG_STATISTIC_EXT_RELATION_OID, PG_STATISTIC_RELATION_OID,
+    PG_TABLESPACE_RELATION_OID, PG_TYPE_RELATION_OID, POINT_TYPE_OID, POLYGON_TYPE_OID,
+    REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
+    REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID,
+    TIME_ARRAY_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
+    TIMESTAMPTZ_ARRAY_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_ARRAY_TYPE_OID, TIMETZ_TYPE_OID,
+    TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID,
+    UUID_ARRAY_TYPE_OID, UUID_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
+    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID,
+    XML_TYPE_OID, bootstrap_composite_type_rows, builtin_type_rows, range_type_ref_for_sql_type,
 };
+use crate::include::nodes::datum::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgAttributeRow {
@@ -65,6 +67,10 @@ pub struct PgAttributeRow {
     pub attidentity: char,
     pub attgenerated: char,
     pub attcollation: u32,
+    pub attacl: Option<Vec<String>>,
+    pub attoptions: Option<Vec<String>>,
+    pub attfdwoptions: Option<Vec<String>>,
+    pub attmissingval: Option<Vec<Value>>,
     pub sql_type: SqlType,
 }
 
@@ -100,6 +106,22 @@ pub fn pg_attribute_desc() -> RelationDesc {
                 false,
             ),
             column_desc("attcollation", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc(
+                "attacl",
+                SqlType::new(SqlTypeKind::Text).with_identity(ACLITEM_ARRAY_TYPE_OID, 0),
+                true,
+            ),
+            column_desc(
+                "attoptions",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                true,
+            ),
+            column_desc(
+                "attfdwoptions",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                true,
+            ),
+            column_desc("attmissingval", SqlType::new(SqlTypeKind::AnyArray), true),
         ],
     }
 }
@@ -145,6 +167,10 @@ pub fn bootstrap_pg_attribute_rows() -> Vec<PgAttributeRow> {
     rows.extend(attribute_rows_for_desc(
         PG_COLLATION_RELATION_OID,
         &pg_collation_desc(),
+    ));
+    rows.extend(attribute_rows_for_desc(
+        PG_LARGEOBJECT_RELATION_OID,
+        &pg_largeobject_desc(),
     ));
     rows.extend(attribute_rows_for_desc(
         PG_LARGEOBJECT_METADATA_RELATION_OID,
@@ -224,6 +250,10 @@ pub fn bootstrap_pg_attribute_rows() -> Vec<PgAttributeRow> {
         &pg_publication_namespace_desc(),
     ));
     rows.extend(attribute_rows_for_desc(
+        PG_REPLICATION_ORIGIN_RELATION_OID,
+        &pg_replication_origin_desc(),
+    ));
+    rows.extend(attribute_rows_for_desc(
         PG_OPCLASS_RELATION_OID,
         &pg_opclass_desc(),
     ));
@@ -262,6 +292,10 @@ fn attribute_rows_for_desc(relid: u32, desc: &RelationDesc) -> Vec<PgAttributeRo
                 .map(|kind| kind.catalog_char())
                 .unwrap_or('\0'),
             attcollation: catalog_attribute_collation_oid(relid, column.collation_oid),
+            attacl: None,
+            attoptions: None,
+            attfdwoptions: None,
+            attmissingval: None,
             sql_type: column.sql_type,
         })
         .collect()
@@ -269,6 +303,9 @@ fn attribute_rows_for_desc(relid: u32, desc: &RelationDesc) -> Vec<PgAttributeRo
 
 fn sql_type_oid(sql_type: SqlType) -> u32 {
     if !sql_type.is_array && sql_type.type_oid != 0 {
+        return sql_type.type_oid;
+    }
+    if sql_type.is_array && sql_type.type_oid != 0 {
         return sql_type.type_oid;
     }
     if let Some(row) = builtin_type_rows()
@@ -508,6 +545,7 @@ mod tests {
             pg_authid_desc().columns.len(),
             pg_auth_members_desc().columns.len(),
             pg_collation_desc().columns.len(),
+            pg_largeobject_desc().columns.len(),
             pg_largeobject_metadata_desc().columns.len(),
             pg_database_desc().columns.len(),
             pg_tablespace_desc().columns.len(),
@@ -530,6 +568,7 @@ mod tests {
             pg_publication_desc().columns.len(),
             pg_publication_rel_desc().columns.len(),
             pg_publication_namespace_desc().columns.len(),
+            pg_replication_origin_desc().columns.len(),
         ]
         .into_iter()
         .sum::<usize>();

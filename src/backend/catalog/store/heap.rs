@@ -6949,6 +6949,10 @@ fn rows_for_new_relation_entry(
                         entry.relation_oid,
                         column.collation_oid,
                     ),
+                    attacl: None,
+                    attoptions: None,
+                    attfdwoptions: None,
+                    attmissingval: None,
                     sql_type: column.sql_type,
                 })
             })

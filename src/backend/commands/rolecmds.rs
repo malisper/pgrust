@@ -275,6 +275,7 @@ mod tests {
             rolreplication: false,
             rolbypassrls: false,
             rolconnlimit: -1,
+            rolpassword: None,
         }
     }
 
