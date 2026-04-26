@@ -480,7 +480,7 @@ at_time_zone_suffix = { kw_at ~ kw_time ~ kw_zone ~ postfix_expr }
 positive_expr = { "+" ~ unary_expr }
 prefix_operator = @{ operator_token }
 negated_expr = { prefix_operator ~ unary_expr }
-primary_expr = { kw_default | kw_null | kw_true | kw_false | kw_current_date | kw_current_catalog | kw_current_schema | kw_current_user | kw_session_user | kw_current_role | kw_current_time | kw_current_timestamp | kw_localtime | kw_localtimestamp | exists_expr | scalar_subquery_expr | array_subquery_expr | case_expr | array_expr | row_expr | implicit_row_expr | cast_expr | typed_string_literal | extract_expr | normalize_expr | position_expr | substring_expr | overlay_expr | trim_expr | xml_element_expr | xml_forest_expr | xml_parse_expr | xml_pi_expr | xml_root_expr | xml_serialize_expr | func_call | qualified_star | bit_string_literal | quoted_string_literal | identifier | numeric_literal | hex_integer | integer | "(" ~ expr ~ ")" }
+primary_expr = { kw_default | kw_null | kw_true | kw_false | kw_current_date | kw_current_catalog | kw_current_schema | kw_current_user | kw_session_user | kw_current_role | kw_current_time | kw_current_timestamp | kw_localtime | kw_localtimestamp | exists_expr | scalar_subquery_expr | array_subquery_expr | case_expr | array_expr | row_expr | implicit_row_expr | cast_expr | typed_string_literal | extract_expr | normalize_expr | position_expr | substring_expr | overlay_expr | trim_expr | xml_element_expr | xml_forest_expr | xml_parse_expr | xml_pi_expr | xml_root_expr | xml_serialize_expr | func_call | qualified_star | bit_string_literal | quoted_string_literal | identifier | numeric_literal | hex_integer | oct_integer | bin_integer | integer | "(" ~ expr ~ ")" }
 case_expr = { kw_case ~ (searched_case_body | simple_case_body) ~ kw_end }
 searched_case_body = { when_clause+ ~ else_clause? }
 simple_case_body = { expr ~ when_clause+ ~ else_clause? }
@@ -567,15 +567,20 @@ unicode_quoted_identifier = { unicode_identifier_prefix ~ quoted_identifier ~ un
 unicode_identifier_prefix = @{ ^"u&" }
 collation_name = { identifier ~ ("." ~ identifier)? }
 simple_identifier = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+dec_integer = @{ ASCII_DIGIT ~ ("_"? ~ ASCII_DIGIT)* }
 numeric_literal = @{
-    (ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT* ~ exponent?)
-    | ("." ~ ASCII_DIGIT+ ~ exponent?)
-    | (ASCII_DIGIT+ ~ exponent)
+    (dec_integer ~ "." ~ !"." ~ dec_integer? ~ exponent?)
+    | ("." ~ dec_integer ~ exponent?)
+    | (dec_integer ~ exponent)
 }
-integer = @{ ASCII_DIGIT+ }
-hex_integer = @{ "0x" ~ ASCII_HEX_DIGIT+ }
+integer = @{ dec_integer }
+hex_integer = @{ ^"0x" ~ ("_"? ~ ASCII_HEX_DIGIT)+ }
+oct_digit = _{ "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" }
+oct_integer = @{ ^"0o" ~ ("_"? ~ oct_digit)+ }
+bin_digit = _{ "0" | "1" }
+bin_integer = @{ ^"0b" ~ ("_"? ~ bin_digit)+ }
 signed_integer = @{ ("+" | "-")? ~ ASCII_DIGIT+ }
-exponent = _{ ("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+ }
+exponent = _{ ("e" | "E") ~ ("+" | "-")? ~ dec_integer }
 quoted_string_literal = _{ unicode_string_literal | escape_string_literal | dollar_string_literal | string_literal }
 string_literal = @{ "'" ~ ( "''" | (!"'" ~ ANY) )* ~ "'" }
 escape_string_literal = @{ ^"e" ~ string_literal }
