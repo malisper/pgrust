@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
@@ -37,6 +39,11 @@ pub fn pg_amop_desc() -> RelationDesc {
 }
 
 pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
+    static ROWS: OnceLock<Vec<PgAmopRow>> = OnceLock::new();
+    ROWS.get_or_init(build_bootstrap_pg_amop_rows).clone()
+}
+
+fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
     let mut oid = 8000u32;
     let mut rows = Vec::new();
     for (family, type_oid, operators) in [
@@ -374,13 +381,21 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
     });
     oid = oid.saturating_add(1);
     for (strategy, name, righttype) in [
+        (1_i16, "<<", ANYMULTIRANGEOID),
         (1_i16, "<<", ANYRANGEOID),
+        (2, "&<", ANYMULTIRANGEOID),
         (2, "&<", ANYRANGEOID),
+        (3, "&&", ANYMULTIRANGEOID),
         (3, "&&", ANYRANGEOID),
+        (4, "&>", ANYMULTIRANGEOID),
         (4, "&>", ANYRANGEOID),
+        (5, ">>", ANYMULTIRANGEOID),
         (5, ">>", ANYRANGEOID),
+        (6, "-|-", ANYMULTIRANGEOID),
         (6, "-|-", ANYRANGEOID),
+        (7, "@>", ANYMULTIRANGEOID),
         (7, "@>", ANYRANGEOID),
+        (8, "<@", ANYMULTIRANGEOID),
         (8, "<@", ANYRANGEOID),
         (16, "@>", ANYELEMENTOID),
         (18, "=", ANYRANGEOID),

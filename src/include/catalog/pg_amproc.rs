@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
@@ -30,6 +32,11 @@ pub fn pg_amproc_desc() -> RelationDesc {
 }
 
 pub fn bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
+    static ROWS: OnceLock<Vec<PgAmprocRow>> = OnceLock::new();
+    ROWS.get_or_init(build_bootstrap_pg_amproc_rows).clone()
+}
+
+fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
     let mut oid = 8100u32;
     let mut rows = Vec::new();
     for (family, type_oid, proc_oid) in [

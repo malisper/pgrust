@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::SqlType;
@@ -65,6 +67,29 @@ pub fn pg_type_desc() -> RelationDesc {
 }
 
 pub fn builtin_type_rows() -> Vec<PgTypeRow> {
+    builtin_type_rows_ref().to_vec()
+}
+
+pub fn builtin_type_row_by_oid(oid: u32) -> Option<PgTypeRow> {
+    builtin_type_rows_ref()
+        .iter()
+        .find(|row| row.oid == oid)
+        .cloned()
+}
+
+pub fn builtin_type_row_by_name(name: &str) -> Option<PgTypeRow> {
+    builtin_type_rows_ref()
+        .iter()
+        .find(|row| row.typname.eq_ignore_ascii_case(name))
+        .cloned()
+}
+
+fn builtin_type_rows_ref() -> &'static [PgTypeRow] {
+    static ROWS: OnceLock<Vec<PgTypeRow>> = OnceLock::new();
+    ROWS.get_or_init(build_builtin_type_rows)
+}
+
+fn build_builtin_type_rows() -> Vec<PgTypeRow> {
     let mut rows = vec![
         builtin_type_row(
             "any",
@@ -958,10 +983,7 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
 }
 
 pub fn builtin_type_name_for_oid(oid: u32) -> Option<String> {
-    builtin_type_rows()
-        .into_iter()
-        .find(|row| row.oid == oid)
-        .map(|row| row.typname)
+    builtin_type_row_by_oid(oid).map(|row| row.typname)
 }
 
 pub fn bootstrap_composite_type_rows() -> Vec<PgTypeRow> {

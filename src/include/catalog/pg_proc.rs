@@ -358,6 +358,11 @@ pub fn pg_proc_desc() -> RelationDesc {
 }
 
 pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
+    static ROWS: OnceLock<Vec<PgProcRow>> = OnceLock::new();
+    ROWS.get_or_init(build_bootstrap_pg_proc_rows).clone()
+}
+
+fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
     // :HACK: Seed a representative builtin subset before pg_proc becomes the
     // authoritative function lookup source. The current rows cover common
     // scalar, aggregate, and set-returning builtins that pgrust already

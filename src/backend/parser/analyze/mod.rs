@@ -43,10 +43,11 @@ use crate::include::catalog::{
     bootstrap_pg_collation_rows, bootstrap_pg_enum_rows, bootstrap_pg_language_rows,
     bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
     bootstrap_pg_proc_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
-    builtin_range_rows, builtin_type_rows, is_synthetic_range_proc_name,
-    multirange_type_ref_for_sql_type, proc_oid_for_builtin_aggregate_function,
-    proc_oid_for_builtin_hypothetical_aggregate_function, range_type_ref_for_sql_type,
-    relkind_is_analyzable, synthetic_range_proc_row_by_oid, synthetic_range_proc_rows_by_name,
+    builtin_range_rows, builtin_type_row_by_name, builtin_type_row_by_oid, builtin_type_rows,
+    is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
+    proc_oid_for_builtin_aggregate_function, proc_oid_for_builtin_hypothetical_aggregate_function,
+    range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_proc_row_by_oid,
+    synthetic_range_proc_rows_by_name,
 };
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
@@ -1285,10 +1286,24 @@ pub(crate) fn bound_index_relation_from_relcache_entry(
     entry: &crate::backend::utils::cache::relcache::RelCacheEntry,
     catalog: &dyn CatalogLookup,
 ) -> Option<BoundIndexRelation> {
+    bound_index_relation_from_relcache_entry_with_heap(name, entry, catalog, None)
+}
+
+fn bound_index_relation_from_relcache_entry_with_heap(
+    name: String,
+    entry: &crate::backend::utils::cache::relcache::RelCacheEntry,
+    catalog: &dyn CatalogLookup,
+    heap_relation: Option<&BoundRelation>,
+) -> Option<BoundIndexRelation> {
     let mut index_meta = entry.index.as_ref()?.clone();
-    let (index_exprs, index_predicate) = if let Some(heap) =
-        catalog.relation_by_oid(index_meta.indrelid)
-    {
+    let owned_heap;
+    let heap_relation = if let Some(heap) = heap_relation {
+        Some(heap)
+    } else {
+        owned_heap = catalog.relation_by_oid(index_meta.indrelid);
+        owned_heap.as_ref()
+    };
+    let (index_exprs, index_predicate) = if let Some(heap) = heap_relation {
         let index_exprs = relation_get_index_expressions(&mut index_meta, &heap.desc, catalog)
             .unwrap_or_default();
         let index_predicate = relation_get_index_predicate(&mut index_meta, &heap.desc, catalog)
@@ -1365,6 +1380,9 @@ impl CatalogLookup for Catalog {
 
     fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
         let relcache = RelCache::from_catalog(self);
+        let heap_relation = relcache
+            .get_by_oid(relation_oid)
+            .map(|entry| bound_relation_from_relcache_entry(&relcache, entry));
         relcache
             .relation_get_index_list(relation_oid)
             .into_iter()
@@ -1373,7 +1391,12 @@ impl CatalogLookup for Catalog {
                 let name = relcache
                     .relation_name_by_oid(index_oid)
                     .unwrap_or_else(|| index_oid.to_string());
-                bound_index_relation_from_relcache_entry(name, entry, self)
+                bound_index_relation_from_relcache_entry_with_heap(
+                    name,
+                    entry,
+                    self,
+                    heap_relation.as_ref(),
+                )
             })
             .collect()
     }
@@ -1458,6 +1481,152 @@ impl CatalogLookup for Catalog {
         let mut rows = builtin_type_rows();
         rows.extend(composite_type_rows_from_relcache(&relcache));
         rows
+    }
+
+    fn type_by_oid(&self, oid: u32) -> Option<PgTypeRow> {
+        if let Some(row) = builtin_type_row_by_oid(oid) {
+            return Some(row);
+        }
+        if let Some(row) = crate::include::catalog::bootstrap_composite_type_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+        {
+            return Some(row);
+        }
+        self.entries().find_map(|(name, entry)| {
+            let relname = name.rsplit('.').next().unwrap_or(name);
+            if entry.row_type_oid == oid {
+                Some(crate::include::catalog::composite_type_row(
+                    relname,
+                    entry.row_type_oid,
+                    entry.namespace_oid,
+                    entry.relation_oid,
+                    entry.array_type_oid,
+                ))
+            } else if entry.array_type_oid == oid {
+                Some(crate::include::catalog::composite_array_type_row(
+                    relname,
+                    entry.array_type_oid,
+                    entry.namespace_oid,
+                    entry.row_type_oid,
+                    entry.relation_oid,
+                ))
+            } else {
+                None
+            }
+        })
+    }
+
+    fn type_by_name(&self, name: &str) -> Option<PgTypeRow> {
+        let normalized = normalize_catalog_lookup_name(name);
+        if let Some(row) = builtin_type_row_by_name(normalized) {
+            return Some(row);
+        }
+        if let Some(row) = crate::include::catalog::bootstrap_composite_type_rows()
+            .into_iter()
+            .find(|row| row.typname.eq_ignore_ascii_case(normalized))
+        {
+            return Some(row);
+        }
+        self.entries().find_map(|(entry_name, entry)| {
+            let relname = entry_name.rsplit('.').next().unwrap_or(entry_name);
+            if entry.row_type_oid != 0 && relname.eq_ignore_ascii_case(normalized) {
+                return Some(crate::include::catalog::composite_type_row(
+                    relname,
+                    entry.row_type_oid,
+                    entry.namespace_oid,
+                    entry.relation_oid,
+                    entry.array_type_oid,
+                ));
+            }
+            let array_typname = format!("_{relname}");
+            if entry.array_type_oid != 0 && array_typname.eq_ignore_ascii_case(normalized) {
+                return Some(crate::include::catalog::composite_array_type_row(
+                    relname,
+                    entry.array_type_oid,
+                    entry.namespace_oid,
+                    entry.row_type_oid,
+                    entry.relation_oid,
+                ));
+            }
+            None
+        })
+    }
+
+    fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
+        if let Some(range_type) = range_type_ref_for_sql_type(sql_type) {
+            if sql_type.is_array {
+                return builtin_type_rows()
+                    .into_iter()
+                    .find(|row| row.typelem == range_type.type_oid())
+                    .map(|row| row.oid);
+            }
+            return Some(range_type.type_oid());
+        }
+        if let Some(multirange_type) = multirange_type_ref_for_sql_type(sql_type) {
+            if sql_type.is_array {
+                return builtin_type_rows()
+                    .into_iter()
+                    .find(|row| row.typelem == multirange_type.type_oid())
+                    .map(|row| row.oid);
+            }
+            return Some(multirange_type.type_oid());
+        }
+        if !sql_type.is_array && sql_type.type_oid != 0 {
+            return Some(sql_type.type_oid);
+        }
+        for row in builtin_type_rows() {
+            if row.sql_type == sql_type {
+                return Some(row.oid);
+            }
+        }
+        let mut fallback = None;
+        for row in builtin_type_rows() {
+            if row.sql_type.kind != sql_type.kind || row.sql_type.is_array != sql_type.is_array {
+                continue;
+            }
+            if row.typrelid == 0 {
+                return Some(row.oid);
+            }
+            fallback.get_or_insert(row.oid);
+        }
+        for (name, entry) in self.entries() {
+            let relname = name.rsplit('.').next().unwrap_or(name);
+            let rows = [
+                (entry.row_type_oid != 0).then(|| {
+                    crate::include::catalog::composite_type_row(
+                        relname,
+                        entry.row_type_oid,
+                        entry.namespace_oid,
+                        entry.relation_oid,
+                        entry.array_type_oid,
+                    )
+                }),
+                (entry.array_type_oid != 0).then(|| {
+                    crate::include::catalog::composite_array_type_row(
+                        relname,
+                        entry.array_type_oid,
+                        entry.namespace_oid,
+                        entry.row_type_oid,
+                        entry.relation_oid,
+                    )
+                }),
+            ];
+            for row in rows.into_iter().flatten() {
+                if row.sql_type == sql_type {
+                    return Some(row.oid);
+                }
+                if row.sql_type.kind != sql_type.kind || row.sql_type.is_array != sql_type.is_array
+                {
+                    continue;
+                }
+                if row.typrelid == 0 {
+                    return Some(row.oid);
+                }
+                fallback.get_or_insert(row.oid);
+            }
+        }
+        fallback
     }
 
     fn language_rows(&self) -> Vec<PgLanguageRow> {

@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
@@ -57,6 +59,11 @@ pub fn pg_operator_desc() -> RelationDesc {
 }
 
 pub fn bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
+    static ROWS: OnceLock<Vec<PgOperatorRow>> = OnceLock::new();
+    ROWS.get_or_init(build_bootstrap_pg_operator_rows).clone()
+}
+
+fn build_bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
     let mut rows = vec![
         operator_row(
             58,
@@ -4304,6 +4311,7 @@ fn range_operator_rows() -> Vec<PgOperatorRow> {
     let mut next_oid = 72_000u32;
     let mut next_proc_oid = 62_117u32;
     let mut rows = generic_range_operator_rows();
+    rows.extend(range_multirange_operator_rows());
     for (range_oid, subtype_oid) in specs {
         let eq = next_oid;
         let ne = next_oid + 1;
@@ -4596,6 +4604,39 @@ fn multirange_operator_rows() -> Vec<PgOperatorRow> {
             name,
             ANYMULTIRANGEOID,
             righttype,
+            0,
+            0,
+            builtin_proc(func),
+            false,
+            false,
+        ));
+        next_oid += 1;
+    }
+    rows
+}
+
+fn range_multirange_operator_rows() -> Vec<PgOperatorRow> {
+    fn builtin_proc(func: BuiltinScalarFunction) -> u32 {
+        proc_oid_for_builtin_scalar_function(func).unwrap_or(0)
+    }
+
+    let mut next_oid = 72_180u32;
+    let mut rows = Vec::new();
+    for (name, func) in [
+        ("<<", BuiltinScalarFunction::RangeStrictLeft),
+        ("&<", BuiltinScalarFunction::RangeOverLeft),
+        ("&&", BuiltinScalarFunction::RangeOverlap),
+        ("&>", BuiltinScalarFunction::RangeOverRight),
+        (">>", BuiltinScalarFunction::RangeStrictRight),
+        ("-|-", BuiltinScalarFunction::RangeAdjacent),
+        ("@>", BuiltinScalarFunction::RangeContains),
+        ("<@", BuiltinScalarFunction::RangeContainedBy),
+    ] {
+        rows.push(operator_row(
+            next_oid,
+            name,
+            ANYRANGEOID,
+            ANYMULTIRANGEOID,
             0,
             0,
             builtin_proc(func),
