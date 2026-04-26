@@ -1054,15 +1054,31 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     expr.as_ref(),
                     SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
                 );
-            let result_type = if source_is_timestamptz {
+            let source_is_time = matches!(source_type.kind, SqlTypeKind::Time);
+            let source_is_timetz = matches!(source_type.kind, SqlTypeKind::TimeTz);
+            let result_type = if source_is_timetz || source_is_time {
+                SqlType::new(SqlTypeKind::TimeTz)
+            } else if source_is_timestamptz {
                 SqlType::new(SqlTypeKind::Timestamp)
             } else {
                 SqlType::new(SqlTypeKind::TimestampTz)
             };
-            let source_target = if source_is_timestamptz {
+            let source_target = if source_is_timetz {
+                source_type
+            } else if source_is_time {
+                source_type
+            } else if source_is_timestamptz {
                 SqlType::new(SqlTypeKind::TimestampTz)
             } else {
                 SqlType::new(SqlTypeKind::Timestamp)
+            };
+            let zone_target = if matches!(
+                zone_type.kind,
+                SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
+            ) {
+                SqlType::new(SqlTypeKind::Text)
+            } else {
+                SqlType::new(SqlTypeKind::Interval)
             };
             let bound_expr = bind_agg_output_expr_in_clause(
                 expr,
@@ -1093,7 +1109,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 Some(result_type),
                 false,
                 vec![
-                    coerce_bound_expr(bound_zone, zone_type, SqlType::new(SqlTypeKind::Text)),
+                    coerce_bound_expr(bound_zone, zone_type, zone_target),
                     coerce_bound_expr(bound_expr, source_type, source_target),
                 ],
             ))

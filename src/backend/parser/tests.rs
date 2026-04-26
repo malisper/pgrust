@@ -6854,6 +6854,45 @@ fn analyze_at_time_zone_uses_timezone_function_types() {
 }
 
 #[test]
+fn analyze_timetz_at_time_zone_keeps_timetz_and_interval_types() {
+    let stmt = parse_select("select timetz '00:01-07' at time zone interval '00:00'").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+
+    let Expr::Func(func) = &query.target_list[0].expr else {
+        panic!("expected timezone function");
+    };
+    assert_eq!(
+        func.implementation,
+        crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+            crate::include::nodes::primnodes::BuiltinScalarFunction::Timezone
+        )
+    );
+    assert_eq!(func.funcresulttype, Some(SqlType::new(SqlTypeKind::TimeTz)));
+    assert!(matches!(
+        func.args.as_slice(),
+        [
+            Expr::Const(Value::Interval(_))
+                | Expr::Cast(
+                    _,
+                    SqlType {
+                        kind: SqlTypeKind::Interval,
+                        ..
+                    }
+                ),
+            Expr::Const(Value::TimeTz(_))
+                | Expr::Cast(
+                    _,
+                    SqlType {
+                        kind: SqlTypeKind::TimeTz,
+                        ..
+                    }
+                )
+        ]
+    ));
+}
+
+#[test]
 fn analyze_interval_typed_string_literal_keeps_interval_type() {
     let stmt = parse_select("select interval '1 day'").unwrap();
     let (query, _) =
