@@ -8,8 +8,8 @@ use crate::include::nodes::pathnodes::{
 };
 use crate::include::nodes::plannodes::{AggregateStrategy, PlanEstimate, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    Expr, ProjectSetTarget, TargetEntry, WindowClause, expr_contains_set_returning,
-    set_returning_call_exprs,
+    BuiltinScalarFunction, Expr, ProjectSetTarget, ScalarFunctionImpl, TargetEntry, WindowClause,
+    expr_contains_set_returning, set_returning_call_exprs,
 };
 
 use super::super::bestpath;
@@ -17,7 +17,7 @@ use super::super::create_plan_with_param_base;
 use super::super::groupby_rewrite;
 use super::super::has_grouping;
 use super::super::path::{query_planner, relation_ordered_index_paths, residual_where_qual};
-use super::super::pathnodes::{next_synthetic_slot_id, window_output_columns};
+use super::super::pathnodes::{expr_sql_type, next_synthetic_slot_id, window_output_columns};
 use super::super::root;
 use super::super::upperrels;
 use super::super::util::{
@@ -1267,6 +1267,40 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr) -> String {
         Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
             render_sort_key_expr(root, inner)
         }
+        Expr::Func(func) => match func.implementation {
+            ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoArea) => func
+                .args
+                .first()
+                .map(|arg| format!("(area({}))", render_geometry_sort_arg(root, arg)))
+                .unwrap_or_else(|| crate::backend::executor::render_explain_expr(expr, &[])),
+            ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPolyCenter) => func
+                .args
+                .first()
+                .map(|arg| format!("poly_center({})", render_geometry_sort_arg(root, arg)))
+                .unwrap_or_else(|| crate::backend::executor::render_explain_expr(expr, &[])),
+            ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPoint)
+                if func.args.len() == 1
+                    && expr_sql_type(&func.args[0]).kind
+                        == crate::backend::parser::SqlTypeKind::Polygon =>
+            {
+                format!(
+                    "poly_center({})",
+                    render_geometry_sort_arg(root, &func.args[0])
+                )
+            }
+            ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPointX)
+            | ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPointY) => {
+                let Some(arg) = func.args.first() else {
+                    return crate::backend::executor::render_explain_expr(expr, &[]);
+                };
+                let index = match func.implementation {
+                    ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPointX) => 0,
+                    _ => 1,
+                };
+                format!("(({})[{index}])", render_sort_key_expr(root, arg))
+            }
+            _ => crate::backend::executor::render_explain_expr(expr, &[]),
+        },
         Expr::Coalesce(left, right) => format!(
             "COALESCE({}, {})",
             render_sort_key_expr(root, left),
@@ -1282,6 +1316,24 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr) -> String {
                 .to_string()
         }
         _ => crate::backend::executor::render_explain_expr(expr, &[]),
+    }
+}
+
+fn render_geometry_sort_arg(root: &PlannerInfo, expr: &Expr) -> String {
+    let rendered = render_sort_key_expr(root, expr);
+    let Some((qualifier, name)) = rendered.rsplit_once('.') else {
+        return rendered;
+    };
+    let simple_ident = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    };
+    if simple_ident(qualifier) && simple_ident(name) {
+        name.to_string()
+    } else {
+        rendered
     }
 }
 

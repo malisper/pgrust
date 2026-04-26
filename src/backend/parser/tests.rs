@@ -7481,6 +7481,20 @@ fn build_plan_dispatches_geometry_and_range_position_operators_independently() {
 }
 
 #[test]
+fn build_plan_rejects_lseg_point_intersection_operator() {
+    let err = build_plan(
+        &parse_select("select '[(0,0),(1,1)]'::lseg # '(0,0)'::point").unwrap(),
+        &catalog(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UndefinedOperator { op, left_type, right_type }
+            if op == "#" && left_type == "lseg" && right_type == "point"
+    ));
+}
+
+#[test]
 fn build_plan_rejects_mixed_range_kinds() {
     let err = build_plan(
         &parse_select("select int4range(1, 4) = numrange(1.0, 4.0)").unwrap(),

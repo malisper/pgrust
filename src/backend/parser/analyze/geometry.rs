@@ -87,10 +87,9 @@ fn geometry_arithmetic_result_type(left: SqlType, right: SqlType) -> Option<SqlT
 
 fn geometry_intersection_result_type(left: SqlType, right: SqlType) -> Option<SqlType> {
     match (left.element_type().kind, right.element_type().kind) {
-        (SqlTypeKind::Line, SqlTypeKind::Line)
-        | (SqlTypeKind::Lseg, SqlTypeKind::Lseg)
-        | (SqlTypeKind::Lseg, SqlTypeKind::Point)
-        | (SqlTypeKind::Point, SqlTypeKind::Lseg) => Some(SqlType::new(SqlTypeKind::Point)),
+        (SqlTypeKind::Line, SqlTypeKind::Line) | (SqlTypeKind::Lseg, SqlTypeKind::Lseg) => {
+            Some(SqlType::new(SqlTypeKind::Point))
+        }
         (SqlTypeKind::Box, SqlTypeKind::Box) => Some(SqlType::new(SqlTypeKind::Box)),
         _ => None,
     }
@@ -119,6 +118,13 @@ pub(super) fn bind_maybe_geometry_arithmetic(
         "#" => BuiltinScalarFunction::GeoIntersection,
         _ => return None,
     };
+    if op == "#" && geometry_intersection_result_type(left_type, right_type).is_none() {
+        return Some(Err(ParseError::UndefinedOperator {
+            op,
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        }));
+    }
     Some(bind_geometry_call(
         func,
         &[left, right],
