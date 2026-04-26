@@ -613,6 +613,7 @@ pub enum BuiltinScalarFunction {
     PgGetExpr,
     PgGetConstraintDef,
     PgGetIndexDef,
+    PgGetRuleDef,
     PgGetViewDef,
     PgGetTriggerDef,
     PgTriggerDepth,

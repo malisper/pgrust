@@ -167,10 +167,12 @@ impl fmt::Display for ParseError {
             ParseError::UnsupportedQualifiedName(name) => {
                 write!(f, "unsupported qualified name: {name}")
             }
-            ParseError::InvalidInsertTargetCount { expected, actual } => write!(
-                f,
-                "INSERT has {actual} values but target list requires {expected}"
-            ),
+            ParseError::InvalidInsertTargetCount { expected, actual } if expected > actual => {
+                write!(f, "INSERT has more target columns than expressions")
+            }
+            ParseError::InvalidInsertTargetCount { .. } => {
+                write!(f, "INSERT has more expressions than target columns")
+            }
             ParseError::TableAlreadyExists(name) => write!(f, "table already exists: {name}"),
             ParseError::TableDoesNotExist(name) => write!(f, "table \"{name}\" does not exist"),
             ParseError::UnsupportedType(name) => write!(f, "type \"{name}\" does not exist"),

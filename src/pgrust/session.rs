@@ -9485,6 +9485,9 @@ fn parse_copy_endpoint(input: &str, from: bool) -> Result<(CopyEndpoint, &str), 
     if from && lower.starts_with("stdin") && copy_keyword_boundary(input, 5) {
         return Ok((CopyEndpoint::Stdin, &input[5..]));
     }
+    if from && lower.starts_with("stdout") && copy_keyword_boundary(input, 6) {
+        return Ok((CopyEndpoint::Stdin, &input[6..]));
+    }
     if !from && lower.starts_with("stdout") && copy_keyword_boundary(input, 6) {
         return Ok((CopyEndpoint::Stdout, &input[6..]));
     }
@@ -10390,8 +10393,9 @@ fn unquote_identifier(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Session, parse_bool_guc, parse_default_toast_compression_guc_value, parse_max_stack_depth,
-        parse_startup_options, parse_statement_timeout, validate_max_stack_depth,
+        CopyDirection, CopyEndpoint, Session, parse_bool_guc,
+        parse_default_toast_compression_guc_value, parse_max_stack_depth, parse_startup_options,
+        parse_statement_timeout, validate_max_stack_depth,
     };
     use crate::backend::executor::ExecError;
     use crate::backend::parser::ParseError;
@@ -10399,6 +10403,17 @@ mod tests {
     use crate::backend::utils::misc::stack_depth::max_stack_depth_limit_kb;
     use std::collections::HashMap;
     use std::time::Duration;
+
+    #[test]
+    fn parse_copy_from_stdout_as_copy_in_source() {
+        let copy = super::parse_copy_command("copy donothingbrtrig_test from stdout")
+            .expect("copy statement")
+            .unwrap();
+        assert!(matches!(
+            copy.direction,
+            CopyDirection::From(CopyEndpoint::Stdin)
+        ));
+    }
 
     #[test]
     fn parse_statement_timeout_accepts_postgres_units() {

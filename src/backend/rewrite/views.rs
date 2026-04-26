@@ -820,6 +820,7 @@ fn render_builtin_function_name(func: BuiltinScalarFunction) -> &'static str {
         BuiltinScalarFunction::CurrentDatabase => "current_database",
         BuiltinScalarFunction::PgGetUserById => "pg_get_userbyid",
         BuiltinScalarFunction::PgGetExpr => "pg_get_expr",
+        BuiltinScalarFunction::PgGetRuleDef => "pg_get_ruledef",
         BuiltinScalarFunction::PgGetViewDef => "pg_get_viewdef",
         BuiltinScalarFunction::CurrentSetting => "current_setting",
         BuiltinScalarFunction::Timezone => "timezone",

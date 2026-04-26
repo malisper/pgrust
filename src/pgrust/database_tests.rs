@@ -12149,6 +12149,17 @@ fn pg_rules_exposes_user_rules_but_not_return_rules() {
                 .into(),
         )]]
     );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'item_view_ins'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE RULE item_view_ins AS\n    ON INSERT TO item_view DO INSTEAD insert into items values (new.id)"
+                .into(),
+        )]]
+    );
 }
 
 #[test]

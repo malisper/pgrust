@@ -124,7 +124,7 @@ use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
 };
-use crate::backend::rewrite::format_view_definition;
+use crate::backend::rewrite::{format_stored_rule_definition, format_view_definition};
 use crate::backend::statistics::{
     render_pg_dependencies_text, render_pg_mcv_list_text, render_pg_ndistinct_text,
 };
@@ -2857,6 +2857,47 @@ fn eval_pg_get_viewdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value,
     Ok(Value::Text(definition.into()))
 }
 
+fn eval_pg_get_ruledef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let catalog = executor_catalog(ctx)?;
+    let (rule_oid, pretty) = match values {
+        [Value::Null] | [Value::Null, _] | [_, Value::Null] => return Ok(Value::Null),
+        [value] => (oid_arg_to_u32(value, "pg_get_ruledef")?, false),
+        [value, pretty] => (
+            oid_arg_to_u32(value, "pg_get_ruledef")?,
+            matches!(pretty, Value::Bool(true)),
+        ),
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "pg_get_ruledef(rule [, pretty])",
+                actual: format!("PgGetRuleDef({} args)", values.len()),
+            }));
+        }
+    };
+    if rule_oid == 0 {
+        return Ok(Value::Null);
+    }
+    let Some(rule) = catalog.rewrite_row_by_oid(rule_oid) else {
+        return Ok(Value::Null);
+    };
+    let relation_name = catalog
+        .class_row_by_oid(rule.ev_class)
+        .map(|row| row.relname)
+        .or_else(|| {
+            catalog
+                .relcache()
+                .relation_name_by_oid(rule.ev_class)
+                .map(|name| name.rsplit('.').next().unwrap_or(&name).to_string())
+        })
+        .unwrap_or_else(|| rule.ev_class.to_string());
+    let mut definition = format_stored_rule_definition(&rule, &relation_name);
+    if pretty {
+        definition = definition
+            .replace(" AS ON ", " AS\n    ON ")
+            .replace(" DO ALSO ", " DO  ");
+    }
+    Ok(Value::Text(definition.into()))
+}
+
 fn eval_pg_get_triggerdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
     let catalog = executor_catalog(ctx)?;
     let (trigger_oid, pretty) = match values {
@@ -3037,13 +3078,22 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
 }
 
 fn eval_pg_relation_size(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
-    let [value] = values else {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "pg_relation_size(regclass)",
-            actual: format!("PgRelationSize({} args)", values.len()),
-        }));
+    let value = match values {
+        [value] | [value, _] => value,
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "pg_relation_size(regclass)",
+                actual: format!("PgRelationSize({} args)", values.len()),
+            }));
+        }
     };
     if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    if values
+        .get(1)
+        .is_some_and(|fork| matches!(fork, Value::Null))
+    {
         return Ok(Value::Null);
     }
 
@@ -6866,6 +6916,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values),
         BuiltinScalarFunction::PgGetConstraintDef => eval_pg_get_constraintdef(&values, ctx),
         BuiltinScalarFunction::PgGetIndexDef => eval_pg_get_indexdef(&values, ctx),
+        BuiltinScalarFunction::PgGetRuleDef => eval_pg_get_ruledef(&values, ctx),
         BuiltinScalarFunction::PgGetViewDef => eval_pg_get_viewdef(&values, ctx),
         BuiltinScalarFunction::PgGetTriggerDef => eval_pg_get_triggerdef(&values, ctx),
         BuiltinScalarFunction::PgTriggerDepth => Ok(Value::Int32(ctx.trigger_depth as i32)),

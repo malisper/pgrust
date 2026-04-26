@@ -121,6 +121,14 @@ impl VisibleCatalog {
             .unwrap_or_default()
     }
 
+    pub fn rewrite_row_by_oid(&self, rewrite_oid: u32) -> Option<PgRewriteRow> {
+        self.catcache
+            .as_ref()?
+            .rewrite_rows()
+            .into_iter()
+            .find(|row| row.oid == rewrite_oid)
+    }
+
     pub fn depend_rows(&self) -> Vec<PgDependRow> {
         self.catcache
             .as_ref()
