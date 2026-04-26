@@ -16718,19 +16718,16 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
     let column = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
     let mut subscripts = Vec::new();
     let mut field_path = Vec::new();
+    let mut indirection = Vec::new();
     for part in inner {
         match part.as_rule() {
             Rule::assignment_target_suffix => {
                 let suffix = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
                 match suffix.as_rule() {
                     Rule::subscript_suffix => {
-                        if !field_path.is_empty() {
-                            return Err(ParseError::UnexpectedToken {
-                                expected: "record field selection at end of assignment target",
-                                actual: suffix.as_str().into(),
-                            });
-                        }
-                        subscripts.push(build_array_subscript(suffix)?);
+                        let subscript = build_array_subscript(suffix)?;
+                        subscripts.push(subscript.clone());
+                        indirection.push(AssignmentTargetIndirection::Subscript(subscript));
                     }
                     Rule::field_select_suffix => {
                         let field = suffix
@@ -16738,19 +16735,16 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
                             .find(|part| part.as_rule() == Rule::identifier)
                             .map(build_identifier)
                             .ok_or(ParseError::UnexpectedEof)?;
-                        field_path.push(field);
+                        field_path.push(field.clone());
+                        indirection.push(AssignmentTargetIndirection::Field(field));
                     }
                     _ => {}
                 }
             }
             Rule::subscript_suffix => {
-                if !field_path.is_empty() {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "record field selection at end of assignment target",
-                        actual: part.as_str().into(),
-                    });
-                }
-                subscripts.push(build_array_subscript(part)?);
+                let subscript = build_array_subscript(part)?;
+                subscripts.push(subscript.clone());
+                indirection.push(AssignmentTargetIndirection::Subscript(subscript));
             }
             Rule::field_select_suffix => {
                 let field = part
@@ -16758,7 +16752,8 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
                     .find(|inner| inner.as_rule() == Rule::identifier)
                     .map(build_identifier)
                     .ok_or(ParseError::UnexpectedEof)?;
-                field_path.push(field);
+                field_path.push(field.clone());
+                indirection.push(AssignmentTargetIndirection::Field(field));
             }
             _ => {}
         }
@@ -16767,6 +16762,7 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
         column,
         subscripts,
         field_path,
+        indirection,
     })
 }
 

@@ -18,16 +18,16 @@ use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::optimizer::{finalize_expr_subqueries, planner};
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
-    BoundDeleteStatement, BoundDeleteTarget, BoundExclusionConstraint, BoundForeignKeyConstraint,
-    BoundIndexRelation, BoundInsertSource, BoundInsertStatement, BoundMergeAction,
-    BoundMergeStatement, BoundMergeWhenClause, BoundModifyRowSource, BoundOnConflictAction,
-    BoundReferencedByForeignKey, BoundRelation, BoundRelationConstraints, BoundTemporalConstraint,
-    BoundUpdateStatement, BoundUpdateTarget, Catalog, CatalogLookup, DropTableStatement,
-    ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement, OverridingKind,
-    ParseError, SelectStatement, SqlType, SqlTypeKind, Statement, TruncateTableStatement,
-    UpdateStatement, VacuumStatement, bind_create_table, bind_generated_expr,
-    bind_referenced_by_foreign_keys, bind_relation_constraints, bind_scalar_expr_in_scope,
-    bind_update,
+    BoundAssignmentTargetIndirection, BoundDeleteStatement, BoundDeleteTarget,
+    BoundExclusionConstraint, BoundForeignKeyConstraint, BoundIndexRelation, BoundInsertSource,
+    BoundInsertStatement, BoundMergeAction, BoundMergeStatement, BoundMergeWhenClause,
+    BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey, BoundRelation,
+    BoundRelationConstraints, BoundTemporalConstraint, BoundUpdateStatement, BoundUpdateTarget,
+    Catalog, CatalogLookup, DropTableStatement, ExplainStatement, ForeignKeyAction,
+    MaintenanceTarget, MergeStatement, OverridingKind, ParseError, SelectStatement, SqlType,
+    SqlTypeKind, Statement, TruncateTableStatement, UpdateStatement, VacuumStatement,
+    bind_create_table, bind_generated_expr, bind_referenced_by_foreign_keys,
+    bind_relation_constraints, bind_scalar_expr_in_scope, bind_update,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -70,6 +70,32 @@ use crate::include::nodes::execnodes::*;
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::{QueryColumn, TargetEntry};
 
+fn finalize_assignment_indirection_subqueries(
+    indirection: Vec<BoundAssignmentTargetIndirection>,
+    catalog: &dyn CatalogLookup,
+    subplans: &mut Vec<crate::include::nodes::plannodes::Plan>,
+) -> Vec<BoundAssignmentTargetIndirection> {
+    indirection
+        .into_iter()
+        .map(|step| match step {
+            BoundAssignmentTargetIndirection::Field(field) => {
+                BoundAssignmentTargetIndirection::Field(field)
+            }
+            BoundAssignmentTargetIndirection::Subscript(subscript) => {
+                BoundAssignmentTargetIndirection::Subscript(BoundArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
+                })
+            }
+        })
+        .collect()
+}
+
 fn finalize_bound_insert(
     mut stmt: BoundInsertStatement,
     catalog: &dyn CatalogLookup,
@@ -98,6 +124,31 @@ fn finalize_bound_insert(
         ),
         BoundInsertSource::Select(query) => BoundInsertSource::Select(query),
     };
+    stmt.target_columns = stmt
+        .target_columns
+        .into_iter()
+        .map(|target| BoundAssignmentTarget {
+            subscripts: target
+                .subscripts
+                .into_iter()
+                .map(|subscript| BoundArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans)),
+                })
+                .collect(),
+            indirection: finalize_assignment_indirection_subqueries(
+                target.indirection,
+                catalog,
+                &mut subplans,
+            ),
+            ..target
+        })
+        .collect();
     stmt.on_conflict =
         stmt.on_conflict
             .map(|clause| crate::backend::parser::BoundOnConflictClause {
@@ -119,6 +170,11 @@ fn finalize_bound_insert(
                                     &mut subplans,
                                 ),
                                 field_path: assignment.field_path,
+                                indirection: finalize_assignment_indirection_subqueries(
+                                    assignment.indirection,
+                                    catalog,
+                                    &mut subplans,
+                                ),
                                 target_sql_type: assignment.target_sql_type,
                                 subscripts: assignment
                                     .subscripts
@@ -187,6 +243,11 @@ fn finalize_bound_update(
                     column_index: assignment.column_index,
                     expr: finalize_expr_subqueries(assignment.expr, catalog, &mut subplans),
                     field_path: assignment.field_path,
+                    indirection: finalize_assignment_indirection_subqueries(
+                        assignment.indirection,
+                        catalog,
+                        &mut subplans,
+                    ),
                     target_sql_type: assignment.target_sql_type,
                     subscripts: assignment
                         .subscripts
@@ -3429,6 +3490,7 @@ fn execute_merge_update_row(
                 column_index: assignment.column_index,
                 subscripts: assignment.subscripts.clone(),
                 field_path: assignment.field_path.clone(),
+                indirection: assignment.indirection.clone(),
                 target_sql_type: assignment.target_sql_type,
             },
             value,
@@ -3859,35 +3921,43 @@ pub(crate) fn apply_assignment_target(
         coerce_assignment_value_with_config(&value, assignment_type, &ctx.datetime_config)
     }
     .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
-    let resolved = target
-        .subscripts
-        .iter()
-        .map(|subscript| {
-            Ok(ResolvedAssignmentSubscript {
-                is_slice: subscript.is_slice,
-                lower: subscript
-                    .lower
-                    .as_ref()
-                    .map(|expr| eval_expr(expr, slot, ctx))
-                    .transpose()?,
-                upper: subscript
-                    .upper
-                    .as_ref()
-                    .map(|expr| eval_expr(expr, slot, ctx))
-                    .transpose()?,
+    let resolved_indirection = if target.indirection.is_empty() {
+        target
+            .subscripts
+            .iter()
+            .map(|subscript| {
+                Ok(ResolvedAssignmentSubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .as_ref()
+                        .map(|expr| eval_expr(expr, slot, ctx))
+                        .transpose()?,
+                    upper: subscript
+                        .upper
+                        .as_ref()
+                        .map(|expr| eval_expr(expr, slot, ctx))
+                        .transpose()?,
+                })
             })
-        })
-        .collect::<Result<Vec<_>, ExecError>>()?;
+            .collect::<Result<Vec<_>, ExecError>>()?
+            .into_iter()
+            .map(ResolvedAssignmentIndirection::Subscript)
+            .chain(
+                target
+                    .field_path
+                    .iter()
+                    .cloned()
+                    .map(ResolvedAssignmentIndirection::Field),
+            )
+            .collect()
+    } else {
+        resolve_assignment_indirection(&target.indirection, slot, ctx)?
+    };
     let current = values[target.column_index].clone();
     let column_type = desc.columns[target.column_index].sql_type;
-    values[target.column_index] = assign_typed_value(
-        current,
-        column_type,
-        &resolved,
-        &target.field_path,
-        value,
-        ctx,
-    )?;
+    values[target.column_index] =
+        assign_typed_value_ordered(current, column_type, &resolved_indirection, value, ctx)?;
     Ok(())
 }
 
@@ -4041,6 +4111,42 @@ struct ResolvedAssignmentSubscript {
     upper: Option<Value>,
 }
 
+#[derive(Clone)]
+enum ResolvedAssignmentIndirection {
+    Subscript(ResolvedAssignmentSubscript),
+    Field(String),
+}
+
+fn resolve_assignment_indirection(
+    indirection: &[BoundAssignmentTargetIndirection],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<ResolvedAssignmentIndirection>, ExecError> {
+    indirection
+        .iter()
+        .map(|step| match step {
+            BoundAssignmentTargetIndirection::Field(field) => {
+                Ok(ResolvedAssignmentIndirection::Field(field.clone()))
+            }
+            BoundAssignmentTargetIndirection::Subscript(subscript) => Ok(
+                ResolvedAssignmentIndirection::Subscript(ResolvedAssignmentSubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .as_ref()
+                        .map(|expr| eval_expr(expr, slot, ctx))
+                        .transpose()?,
+                    upper: subscript
+                        .upper
+                        .as_ref()
+                        .map(|expr| eval_expr(expr, slot, ctx))
+                        .transpose()?,
+                }),
+            ),
+        })
+        .collect()
+}
+
 fn assign_point_value(
     current: Value,
     subscripts: &[ResolvedAssignmentSubscript],
@@ -4092,6 +4198,133 @@ fn assign_point_value(
         point.y = coordinate;
     }
     Ok(Value::Point(point))
+}
+
+fn assign_typed_value_ordered(
+    current: Value,
+    sql_type: SqlType,
+    indirection: &[ResolvedAssignmentIndirection],
+    replacement: Value,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let Some((first, rest)) = indirection.split_first() else {
+        return Ok(replacement);
+    };
+    match first {
+        ResolvedAssignmentIndirection::Field(field) => {
+            assign_record_field_ordered(current, sql_type, field, rest, replacement, ctx)
+        }
+        ResolvedAssignmentIndirection::Subscript(subscript) => {
+            if sql_type.kind == SqlTypeKind::Point && !sql_type.is_array {
+                if !rest.is_empty() {
+                    return Err(ExecError::DetailedError {
+                        message: "cannot assign through a subscripted point value".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42804",
+                    });
+                }
+                return assign_point_value(current, std::slice::from_ref(subscript), replacement);
+            }
+            if sql_type.kind == SqlTypeKind::Jsonb && !sql_type.is_array {
+                if !rest.is_empty() {
+                    return Err(ExecError::DetailedError {
+                        message: "cannot assign through a subscripted jsonb value".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42804",
+                    });
+                }
+                return assign_jsonb_value(current, std::slice::from_ref(subscript), replacement);
+            }
+            assign_array_value_ordered(current, sql_type, subscript, rest, replacement, ctx)
+        }
+    }
+}
+
+fn assign_record_field_ordered(
+    current: Value,
+    sql_type: SqlType,
+    field: &str,
+    rest: &[ResolvedAssignmentIndirection],
+    replacement: Value,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let mut record = assignment_record_value(current, sql_type, ctx)?;
+    let (field_index, field_type) = record
+        .descriptor
+        .fields
+        .iter()
+        .enumerate()
+        .find(|(_, candidate)| candidate.name.eq_ignore_ascii_case(field))
+        .map(|(index, candidate)| (index, candidate.sql_type))
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("record has no field \"{field}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "42703",
+        })?;
+    record.fields[field_index] = assign_typed_value_ordered(
+        record.fields[field_index].clone(),
+        field_type,
+        rest,
+        replacement,
+        ctx,
+    )?;
+    Ok(Value::Record(record))
+}
+
+fn assign_array_value_ordered(
+    current: Value,
+    array_type: SqlType,
+    subscript: &ResolvedAssignmentSubscript,
+    rest: &[ResolvedAssignmentIndirection],
+    replacement: Value,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    if !array_type.is_array {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "cannot subscript type {} because it does not support subscripting",
+                sql_type_display_name(array_type)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+    if rest.is_empty() {
+        return assign_array_value(current, std::slice::from_ref(subscript), replacement);
+    }
+    if subscript.is_slice {
+        return Err(ExecError::DetailedError {
+            message: "sliced assignment into nested fields is not supported".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    let (mut lower_bound, mut items) = assignment_top_level(current)?;
+    let Some(index) = assignment_subscript_index(subscript.lower.as_ref())? else {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<array>".into(),
+            details: "array subscript in assignment must not be null".into(),
+        });
+    };
+    if items.is_empty() {
+        lower_bound = index;
+    }
+    extend_assignment_items(&mut lower_bound, &mut items, index, index)?;
+    let item_index = usize::try_from(i64::from(index) - i64::from(lower_bound))
+        .map_err(|_| array_assignment_limit_error())?;
+    items[item_index] = assign_typed_value_ordered(
+        items[item_index].clone(),
+        array_type.element_type(),
+        rest,
+        replacement,
+        ctx,
+    )?;
+    build_assignment_array_value(lower_bound, items)
 }
 
 fn assign_typed_value(
@@ -5326,6 +5559,7 @@ pub fn execute_update_with_waiter(
                             column_index: assignment.column_index,
                             subscripts: assignment.subscripts.clone(),
                             field_path: assignment.field_path.clone(),
+                            indirection: assignment.indirection.clone(),
                             target_sql_type: assignment.target_sql_type,
                         },
                         value,
@@ -5426,6 +5660,7 @@ pub fn execute_update_with_waiter(
                                         column_index: assignment.column_index,
                                         subscripts: assignment.subscripts.clone(),
                                         field_path: assignment.field_path.clone(),
+                                        indirection: assignment.indirection.clone(),
                                         target_sql_type: assignment.target_sql_type,
                                     },
                                     value,
@@ -5533,6 +5768,7 @@ fn evaluate_update_from_assignments(
                 column_index: assignment.column_index,
                 subscripts: assignment.subscripts.clone(),
                 field_path: assignment.field_path.clone(),
+                indirection: assignment.indirection.clone(),
                 target_sql_type: assignment.target_sql_type,
             },
             value,
@@ -6077,6 +6313,7 @@ pub(crate) fn materialize_update_row_events(
                         column_index: assignment.column_index,
                         subscripts: assignment.subscripts.clone(),
                         field_path: assignment.field_path.clone(),
+                        indirection: assignment.indirection.clone(),
                         target_sql_type: assignment.target_sql_type,
                     },
                     value,
@@ -6314,6 +6551,7 @@ pub(crate) fn apply_base_update_row(
                             column_index: assignment.column_index,
                             subscripts: assignment.subscripts.clone(),
                             field_path: assignment.field_path.clone(),
+                            indirection: assignment.indirection.clone(),
                             target_sql_type: assignment.target_sql_type,
                         },
                         value,

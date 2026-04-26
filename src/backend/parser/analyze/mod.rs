@@ -100,10 +100,11 @@ use geometry::*;
 pub(crate) use index_predicates::*;
 use infer::*;
 pub use modify::{
-    BoundArraySubscript, BoundAssignment, BoundAssignmentTarget, BoundDeleteStatement,
-    BoundDeleteTarget, BoundInsertSource, BoundInsertStatement, BoundMergeAction,
-    BoundMergeStatement, BoundMergeWhenClause, BoundUpdateStatement, BoundUpdateTarget,
-    PreparedInsert, bind_delete, bind_insert, bind_insert_prepared, bind_update, plan_merge,
+    BoundArraySubscript, BoundAssignment, BoundAssignmentTarget, BoundAssignmentTargetIndirection,
+    BoundDeleteStatement, BoundDeleteTarget, BoundInsertSource, BoundInsertStatement,
+    BoundMergeAction, BoundMergeStatement, BoundMergeWhenClause, BoundUpdateStatement,
+    BoundUpdateTarget, PreparedInsert, bind_delete, bind_insert, bind_insert_prepared, bind_update,
+    plan_merge,
 };
 pub(crate) use modify::{
     bind_delete_with_outer_scopes, bind_insert_with_outer_scopes, bind_update_with_outer_scopes,

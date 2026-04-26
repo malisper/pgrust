@@ -160,6 +160,7 @@ pub struct BoundAssignment {
     pub column_index: usize,
     pub subscripts: Vec<BoundArraySubscript>,
     pub field_path: Vec<String>,
+    pub indirection: Vec<BoundAssignmentTargetIndirection>,
     pub target_sql_type: SqlType,
     pub expr: Expr,
 }
@@ -169,6 +170,7 @@ pub struct BoundAssignmentTarget {
     pub column_index: usize,
     pub subscripts: Vec<BoundArraySubscript>,
     pub field_path: Vec<String>,
+    pub indirection: Vec<BoundAssignmentTargetIndirection>,
     pub target_sql_type: SqlType,
 }
 
@@ -177,6 +179,12 @@ pub struct BoundArraySubscript {
     pub is_slice: bool,
     pub lower: Option<Expr>,
     pub upper: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundAssignmentTargetIndirection {
+    Subscript(BoundArraySubscript),
+    Field(String),
 }
 
 fn merge_target_relation_name(stmt: &MergeStatement) -> String {
@@ -292,6 +300,58 @@ fn resolve_assignment_target_sql_type(
     Ok(current)
 }
 
+fn resolve_assignment_indirection_sql_type(
+    column_type: SqlType,
+    indirection: &[crate::include::nodes::parsenodes::AssignmentTargetIndirection],
+    catalog: &dyn CatalogLookup,
+) -> Result<SqlType, ParseError> {
+    let mut current = column_type;
+    for step in indirection {
+        match step {
+            crate::include::nodes::parsenodes::AssignmentTargetIndirection::Subscript(
+                subscript,
+            ) => {
+                if current.kind == SqlTypeKind::Jsonb && !current.is_array {
+                    if subscript.is_slice {
+                        return Err(ParseError::DetailedError {
+                            message: "jsonb subscript does not support slices".into(),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "0A000",
+                        });
+                    }
+                    current = SqlType::new(SqlTypeKind::Jsonb);
+                    continue;
+                }
+                if current.kind == SqlTypeKind::Point && !current.is_array {
+                    current = SqlType::new(SqlTypeKind::Float8);
+                    continue;
+                }
+                if !current.is_array {
+                    return Err(ParseError::DetailedError {
+                        message: format!(
+                            "cannot subscript type {} because it does not support subscripting",
+                            sql_type_name(current)
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42804",
+                    });
+                }
+                current = if subscript.is_slice {
+                    SqlType::array_of(current.element_type())
+                } else {
+                    current.element_type()
+                };
+            }
+            crate::include::nodes::parsenodes::AssignmentTargetIndirection::Field(field) => {
+                current = resolve_assignment_field_type(current, field, catalog)?;
+            }
+        }
+    }
+    Ok(current)
+}
+
 fn merge_explain_target_name(stmt: &MergeStatement) -> String {
     stmt.target_alias
         .as_ref()
@@ -339,6 +399,22 @@ fn unsupported_with_row_security(feature: &str) -> ParseError {
     ))
 }
 
+fn reject_default_indirection_assignment(target: &BoundAssignmentTarget) -> Result<(), ParseError> {
+    if target.indirection.is_empty() {
+        return Ok(());
+    }
+    let message = if target
+        .indirection
+        .iter()
+        .any(|step| matches!(step, BoundAssignmentTargetIndirection::Field(_)))
+    {
+        "cannot set a subfield to DEFAULT"
+    } else {
+        "cannot set an array element to DEFAULT"
+    };
+    Err(ParseError::FeatureNotSupportedMessage(message.into()))
+}
+
 fn merge_visible_insert_targets(
     desc: &RelationDesc,
     width: usize,
@@ -351,6 +427,23 @@ fn merge_visible_insert_targets(
         });
     }
     Ok(visible_targets.into_iter().take(width).collect())
+}
+
+fn bound_indirection_from_parts(
+    subscripts: &[BoundArraySubscript],
+    field_path: &[String],
+) -> Vec<BoundAssignmentTargetIndirection> {
+    subscripts
+        .iter()
+        .cloned()
+        .map(BoundAssignmentTargetIndirection::Subscript)
+        .chain(
+            field_path
+                .iter()
+                .cloned()
+                .map(BoundAssignmentTargetIndirection::Field),
+        )
+        .collect()
 }
 
 fn bind_merge_when_clause(
@@ -382,20 +475,29 @@ fn bind_merge_when_clause(
                 .iter()
                 .map(|assignment| {
                     let column_index = resolve_column(target_scope, &assignment.target.column)?;
+                    let subscripts = bind_assignment_subscripts(
+                        &assignment.target.subscripts,
+                        target_scope,
+                        catalog,
+                        local_ctes,
+                        &[],
+                    )?;
+                    let field_path = assignment.target.field_path.clone();
+                    let indirection = bind_assignment_indirection(
+                        &assignment.target.indirection,
+                        target_scope,
+                        catalog,
+                        local_ctes,
+                        &[],
+                    )?;
                     let target = BoundAssignmentTarget {
                         column_index,
-                        subscripts: bind_assignment_subscripts(
-                            &assignment.target.subscripts,
-                            target_scope,
-                            catalog,
-                            local_ctes,
-                            &[],
-                        )?,
-                        field_path: assignment.target.field_path.clone(),
-                        target_sql_type: resolve_assignment_target_sql_type(
+                        subscripts,
+                        field_path,
+                        indirection,
+                        target_sql_type: resolve_assignment_indirection_sql_type(
                             target_desc.columns[column_index].sql_type,
-                            &assignment.target.subscripts,
-                            &assignment.target.field_path,
+                            &assignment.target.indirection,
                             catalog,
                         )?,
                     };
@@ -413,6 +515,7 @@ fn bind_merge_when_clause(
                         column_index,
                         subscripts: target.subscripts,
                         field_path: target.field_path,
+                        indirection: target.indirection,
                         target_sql_type: target.target_sql_type,
                         expr: if matches!(assignment.expr, SqlExpr::Default)
                             && target_desc.columns[column_index].generated.is_some()
@@ -443,6 +546,7 @@ fn bind_merge_when_clause(
                             column_index,
                             subscripts: Vec::new(),
                             field_path: Vec::new(),
+                            indirection: Vec::new(),
                             target_sql_type: target_desc.columns[column_index].sql_type,
                         })
                     })
@@ -1058,6 +1162,10 @@ fn build_update_target(
                     &translation_exprs,
                 ),
                 field_path: assignment.field_path.clone(),
+                indirection: rewrite_assignment_indirection(
+                    &assignment.indirection,
+                    &translation_exprs,
+                ),
                 target_sql_type: assignment.target_sql_type,
                 expr: rewrite_local_vars_for_output_exprs(
                     assignment.expr.clone(),
@@ -1129,6 +1237,7 @@ fn build_update_target_from_joined_input(
                 )?,
                 subscripts: assignment.subscripts.clone(),
                 field_path: assignment.field_path.clone(),
+                indirection: assignment.indirection.clone(),
                 target_sql_type: assignment.target_sql_type,
                 expr: assignment.expr.clone(),
             })
@@ -1187,6 +1296,31 @@ fn rewrite_assignment_subscripts(
                 .upper
                 .as_ref()
                 .map(|expr| rewrite_local_vars_for_output_exprs(expr.clone(), 1, output_exprs)),
+        })
+        .collect()
+}
+
+fn rewrite_assignment_indirection(
+    indirection: &[BoundAssignmentTargetIndirection],
+    output_exprs: &[Expr],
+) -> Vec<BoundAssignmentTargetIndirection> {
+    indirection
+        .iter()
+        .map(|step| match step {
+            BoundAssignmentTargetIndirection::Field(field) => {
+                BoundAssignmentTargetIndirection::Field(field.clone())
+            }
+            BoundAssignmentTargetIndirection::Subscript(subscript) => {
+                BoundAssignmentTargetIndirection::Subscript(BoundArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript.lower.as_ref().map(|expr| {
+                        rewrite_local_vars_for_output_exprs(expr.clone(), 1, output_exprs)
+                    }),
+                    upper: subscript.upper.as_ref().map(|expr| {
+                        rewrite_local_vars_for_output_exprs(expr.clone(), 1, output_exprs)
+                    }),
+                })
+            }
         })
         .collect()
 }
@@ -1296,6 +1430,10 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
                     &resolved.visible_output_exprs,
                 ),
                 field_path: target.field_path.clone(),
+                indirection: rewrite_assignment_indirection(
+                    &target.indirection,
+                    &resolved.visible_output_exprs,
+                ),
                 target_sql_type: target.target_sql_type,
             })
         })
@@ -1403,6 +1541,10 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
                     &resolved.visible_output_exprs,
                 ),
                 field_path: assignment.field_path.clone(),
+                indirection: rewrite_assignment_indirection(
+                    &assignment.indirection,
+                    &resolved.visible_output_exprs,
+                ),
                 target_sql_type: assignment.target_sql_type,
                 expr: rewrite_local_vars_for_output_exprs(
                     assignment.expr.clone(),
@@ -1646,6 +1788,7 @@ fn visible_assignment_targets(desc: &RelationDesc) -> Vec<BoundAssignmentTarget>
             column_index,
             subscripts: Vec::new(),
             field_path: Vec::new(),
+            indirection: Vec::new(),
             target_sql_type: desc.columns[column_index].sql_type,
         })
         .collect()
@@ -1806,6 +1949,7 @@ pub fn bind_insert_prepared(
                         column_index: *column_index,
                         subscripts: Vec::new(),
                         field_path: Vec::new(),
+                        indirection: Vec::new(),
                         target_sql_type: entry.desc.columns[*column_index].sql_type,
                     },
                     Some(&SqlExpr::Const(Value::Null)),
@@ -1842,6 +1986,7 @@ pub fn bind_insert_prepared(
                     column_index: *column_index,
                     subscripts: Vec::new(),
                     field_path: Vec::new(),
+                    indirection: Vec::new(),
                     target_sql_type: entry.desc.columns[*column_index].sql_type,
                 },
                 Some(&SqlExpr::Const(Value::Null)),
@@ -1980,6 +2125,7 @@ pub(crate) fn bind_insert_with_outer_scopes(
                         .map(|(expr, target)| {
                             ensure_generated_assignment_allowed(&entry.desc, target, Some(expr))?;
                             if matches!(expr, SqlExpr::Default) {
+                                reject_default_indirection_assignment(target)?;
                                 return Ok(column_defaults[target.column_index].clone());
                             }
                             match normalize_identity_insert_expr(
@@ -2208,20 +2354,28 @@ fn bind_simple_update(
         .iter()
         .map(|assignment| {
             let column_index = resolve_column(&scope, &assignment.target.column)?;
+            let subscripts = bind_assignment_subscripts(
+                &assignment.target.subscripts,
+                &scope,
+                catalog,
+                local_ctes,
+                outer_scopes,
+            )?;
+            let indirection = bind_assignment_indirection(
+                &assignment.target.indirection,
+                &scope,
+                catalog,
+                local_ctes,
+                outer_scopes,
+            )?;
             let target = BoundAssignmentTarget {
                 column_index,
-                subscripts: bind_assignment_subscripts(
-                    &assignment.target.subscripts,
-                    &scope,
-                    catalog,
-                    local_ctes,
-                    outer_scopes,
-                )?,
+                subscripts,
                 field_path: assignment.target.field_path.clone(),
-                target_sql_type: resolve_assignment_target_sql_type(
+                indirection,
+                target_sql_type: resolve_assignment_indirection_sql_type(
                     entry.desc.columns[column_index].sql_type,
-                    &assignment.target.subscripts,
-                    &assignment.target.field_path,
+                    &assignment.target.indirection,
                     catalog,
                 )?,
             };
@@ -2231,6 +2385,7 @@ fn bind_simple_update(
                 column_index,
                 subscripts: target.subscripts,
                 field_path: target.field_path,
+                indirection: target.indirection,
                 target_sql_type: target.target_sql_type,
                 expr: if matches!(assignment.expr, SqlExpr::Default) {
                     column_defaults[column_index].clone()
@@ -2367,20 +2522,28 @@ fn bind_update_from(
         .iter()
         .map(|assignment| {
             let column_index = resolve_column(&target_scope, &assignment.target.column)?;
+            let subscripts = bind_assignment_subscripts(
+                &assignment.target.subscripts,
+                &eval_scope,
+                catalog,
+                local_ctes,
+                outer_scopes,
+            )?;
+            let indirection = bind_assignment_indirection(
+                &assignment.target.indirection,
+                &eval_scope,
+                catalog,
+                local_ctes,
+                outer_scopes,
+            )?;
             let target = BoundAssignmentTarget {
                 column_index,
-                subscripts: bind_assignment_subscripts(
-                    &assignment.target.subscripts,
-                    &eval_scope,
-                    catalog,
-                    local_ctes,
-                    outer_scopes,
-                )?,
+                subscripts,
                 field_path: assignment.target.field_path.clone(),
-                target_sql_type: resolve_assignment_target_sql_type(
+                indirection,
+                target_sql_type: resolve_assignment_indirection_sql_type(
                     entry.desc.columns[column_index].sql_type,
-                    &assignment.target.subscripts,
-                    &assignment.target.field_path,
+                    &assignment.target.indirection,
                     catalog,
                 )?,
             };
@@ -2390,6 +2553,7 @@ fn bind_update_from(
                 column_index,
                 subscripts: target.subscripts,
                 field_path: target.field_path,
+                indirection: target.indirection,
                 target_sql_type: target.target_sql_type,
                 expr: if matches!(assignment.expr, SqlExpr::Default) {
                     column_defaults[column_index].clone()
@@ -2460,6 +2624,8 @@ pub(super) fn bind_assignment_target(
     local_ctes: &[BoundCte],
 ) -> Result<BoundAssignmentTarget, ParseError> {
     let column_index = resolve_column(scope, &target.column)?;
+    let indirection =
+        bind_assignment_indirection(&target.indirection, scope, catalog, local_ctes, &[])?;
     Ok(BoundAssignmentTarget {
         column_index,
         subscripts: bind_assignment_subscripts(
@@ -2470,13 +2636,44 @@ pub(super) fn bind_assignment_target(
             &[],
         )?,
         field_path: target.field_path.clone(),
-        target_sql_type: resolve_assignment_target_sql_type(
+        indirection,
+        target_sql_type: resolve_assignment_indirection_sql_type(
             scope.desc.columns[column_index].sql_type,
-            &target.subscripts,
-            &target.field_path,
+            &target.indirection,
             catalog,
         )?,
     })
+}
+
+fn bind_assignment_indirection(
+    indirection: &[crate::include::nodes::parsenodes::AssignmentTargetIndirection],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    local_ctes: &[BoundCte],
+    outer_scopes: &[BoundScope],
+) -> Result<Vec<BoundAssignmentTargetIndirection>, ParseError> {
+    indirection
+        .iter()
+        .map(|step| match step {
+            crate::include::nodes::parsenodes::AssignmentTargetIndirection::Field(field) => {
+                Ok(BoundAssignmentTargetIndirection::Field(field.clone()))
+            }
+            crate::include::nodes::parsenodes::AssignmentTargetIndirection::Subscript(
+                subscript,
+            ) => Ok(BoundAssignmentTargetIndirection::Subscript(
+                bind_assignment_subscripts(
+                    std::slice::from_ref(subscript),
+                    scope,
+                    catalog,
+                    local_ctes,
+                    outer_scopes,
+                )?
+                .into_iter()
+                .next()
+                .expect("single subscript should bind to one subscript"),
+            )),
+        })
+        .collect()
 }
 
 pub(super) fn bind_assignment_subscripts(

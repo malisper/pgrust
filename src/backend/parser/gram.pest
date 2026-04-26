@@ -429,7 +429,8 @@ character_varying_type = { kw_character ~ kw_varying ~ ("(" ~ integer ~ ")")? }
 
 assignment = { assignment_target ~ "=" ~ expr }
 assignment_target_list = { assignment_target ~ ("," ~ assignment_target)* }
-assignment_target = { identifier ~ assignment_target_suffix* }
+assignment_target = { assignment_target_name ~ assignment_target_suffix* }
+assignment_target_name = { unicode_quoted_identifier | quoted_identifier | simple_identifier }
 assignment_target_suffix = { subscript_suffix | field_select_suffix }
 
 expr = { or_expr }

@@ -7078,9 +7078,11 @@ fn parse_array_subscript_expressions_and_targets() {
             assert_eq!(assignments[0].target.column, "a");
             assert_eq!(assignments[0].target.subscripts.len(), 1);
             assert!(assignments[0].target.field_path.is_empty());
+            assert_eq!(assignments[0].target.indirection.len(), 1);
             assert_eq!(assignments[1].target.column, "b");
             assert_eq!(assignments[1].target.subscripts.len(), 1);
             assert!(assignments[1].target.field_path.is_empty());
+            assert_eq!(assignments[1].target.indirection.len(), 1);
         }
         other => panic!("expected update, got {:?}", other),
     }
@@ -7090,6 +7092,7 @@ fn parse_array_subscript_expressions_and_targets() {
             assert_eq!(assignments[0].target.column, "a");
             assert_eq!(assignments[0].target.subscripts.len(), 1);
             assert_eq!(assignments[0].target.field_path, vec!["q1".to_string()]);
+            assert_eq!(assignments[0].target.indirection.len(), 2);
         }
         other => panic!("expected update, got {:?}", other),
     }
@@ -7102,9 +7105,11 @@ fn parse_array_subscript_expressions_and_targets() {
             assert_eq!(columns[0].column, "a");
             assert_eq!(columns[0].subscripts.len(), 1);
             assert!(columns[0].field_path.is_empty());
+            assert_eq!(columns[0].indirection.len(), 1);
             assert_eq!(columns[1].column, "b");
             assert_eq!(columns[1].subscripts.len(), 1);
             assert!(columns[1].field_path.is_empty());
+            assert_eq!(columns[1].indirection.len(), 1);
         }
         other => panic!("expected insert, got {:?}", other),
     }
@@ -7117,6 +7122,33 @@ fn parse_array_subscript_expressions_and_targets() {
             assert_eq!(columns[0].column, "a");
             assert_eq!(columns[0].subscripts.len(), 1);
             assert_eq!(columns[0].field_path, vec!["q1".to_string()]);
+            assert_eq!(columns[0].indirection.len(), 2);
+        }
+        other => panic!("expected insert, got {:?}", other),
+    }
+
+    match parse_statement("insert into widgets (f3.if2[1]) values ('foo')").unwrap() {
+        Statement::Insert(InsertStatement {
+            columns: Some(columns),
+            ..
+        }) => {
+            assert_eq!(columns[0].column, "f3");
+            assert_eq!(columns[0].field_path, vec!["if2".to_string()]);
+            assert_eq!(columns[0].subscripts.len(), 1);
+            assert_eq!(columns[0].indirection.len(), 2);
+        }
+        other => panic!("expected insert, got {:?}", other),
+    }
+
+    match parse_statement("insert into widgets (f4[1].if2[1]) values ('foo')").unwrap() {
+        Statement::Insert(InsertStatement {
+            columns: Some(columns),
+            ..
+        }) => {
+            assert_eq!(columns[0].column, "f4");
+            assert_eq!(columns[0].field_path, vec!["if2".to_string()]);
+            assert_eq!(columns[0].subscripts.len(), 2);
+            assert_eq!(columns[0].indirection.len(), 3);
         }
         other => panic!("expected insert, got {:?}", other),
     }
@@ -9447,11 +9479,13 @@ fn people_insert_with_on_conflict(
                 column: "id".into(),
                 subscripts: vec![],
                 field_path: vec![],
+                indirection: vec![],
             },
             crate::include::nodes::parsenodes::AssignmentTarget {
                 column: "name".into(),
                 subscripts: vec![],
                 field_path: vec![],
+                indirection: vec![],
             },
         ]),
         overriding: None,
@@ -9497,6 +9531,7 @@ fn bind_insert_resolves_on_conflict_constraint_name() {
                 column: "name".into(),
                 subscripts: vec![],
                 field_path: vec![],
+                indirection: vec![],
             },
             expr: parse_expr("excluded.name").unwrap(),
         }],
@@ -9524,6 +9559,7 @@ fn bind_insert_rejects_on_conflict_do_update_without_target() {
                 column: "name".into(),
                 subscripts: vec![],
                 field_path: vec![],
+                indirection: vec![],
             },
             expr: parse_expr("excluded.name").unwrap(),
         }],

@@ -3947,6 +3947,13 @@ pub struct AssignmentTarget {
     pub column: String,
     pub subscripts: Vec<ArraySubscript>,
     pub field_path: Vec<String>,
+    pub indirection: Vec<AssignmentTargetIndirection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignmentTargetIndirection {
+    Subscript(ArraySubscript),
+    Field(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
