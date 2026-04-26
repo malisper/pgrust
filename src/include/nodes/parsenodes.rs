@@ -369,6 +369,7 @@ pub enum Statement {
     AlterTableAlterColumnStorage(AlterTableAlterColumnStorageStatement),
     AlterTableAlterColumnOptions(AlterTableAlterColumnOptionsStatement),
     AlterTableAlterColumnStatistics(AlterTableAlterColumnStatisticsStatement),
+    AlterTableAlterColumnIdentity(AlterTableAlterColumnIdentityStatement),
     AlterTableOwner(AlterRelationOwnerStatement),
     AlterTableRenameColumn(AlterTableRenameColumnStatement),
     AlterTableRename(AlterTableRenameStatement),
@@ -1551,9 +1552,16 @@ pub struct InsertStatement {
     pub table_name: String,
     pub table_alias: Option<String>,
     pub columns: Option<Vec<AssignmentTarget>>,
+    pub overriding: Option<OverridingKind>,
     pub source: InsertSource,
     pub on_conflict: Option<OnConflictClause>,
     pub returning: Vec<SelectItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverridingKind {
+    System,
+    User,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2199,6 +2207,27 @@ pub struct AlterTableAlterColumnStatisticsStatement {
     pub table_name: String,
     pub column_name: String,
     pub statistics_target: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterColumnIdentityAction {
+    Add(ColumnIdentityDef),
+    Drop {
+        missing_ok: bool,
+    },
+    Set {
+        generation: Option<ColumnIdentityKind>,
+        options: SequenceOptionsPatchSpec,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAlterColumnIdentityStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub column_name: String,
+    pub action: AlterColumnIdentityAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2996,7 +3025,7 @@ pub struct ColumnDef {
     pub collation: Option<String>,
     pub default_expr: Option<String>,
     pub generated: Option<ColumnGeneratedDef>,
-    pub identity: Option<ColumnIdentityKind>,
+    pub identity: Option<ColumnIdentityDef>,
     pub storage: Option<crate::include::access::htup::AttributeStorage>,
     pub compression: Option<crate::include::access::htup::AttributeCompression>,
     pub constraints: Vec<ColumnConstraint>,
@@ -3029,6 +3058,12 @@ impl ColumnDef {
 pub struct ColumnGeneratedDef {
     pub expr_sql: String,
     pub kind: ColumnGeneratedKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnIdentityDef {
+    pub kind: ColumnIdentityKind,
+    pub options: SequenceOptionsSpec,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -3106,7 +3141,7 @@ pub struct TypedColumnOptions {
     pub collation: Option<String>,
     pub default_expr: Option<String>,
     pub generated: Option<ColumnGeneratedDef>,
-    pub identity: Option<ColumnIdentityKind>,
+    pub identity: Option<ColumnIdentityDef>,
     pub storage: Option<crate::include::access::htup::AttributeStorage>,
     pub compression: Option<crate::include::access::htup::AttributeCompression>,
     pub constraints: Vec<ColumnConstraint>,

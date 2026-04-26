@@ -147,6 +147,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_sequence_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_alter_table_identity_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_copy_statement(&sql, options)? {
         return Ok(stmt);
     }
@@ -5140,6 +5143,268 @@ fn try_parse_sequence_statement(sql: &str) -> Result<Option<Statement>, ParseErr
             .map(|stmt| Some(Statement::AlterSequenceRename(stmt)));
     }
     build_alter_sequence_statement(trimmed).map(|stmt| Some(Statement::AlterSequence(stmt)))
+}
+
+fn try_parse_alter_table_identity_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("alter table ") {
+        return Ok(None);
+    }
+    if ![
+        " identity",
+        " generated",
+        " restart",
+        " increment",
+        " minvalue",
+        " maxvalue",
+        " cache",
+        " cycle",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
+    {
+        return Ok(None);
+    }
+
+    let mut rest = consume_keyword(trimmed, "alter").trim_start();
+    rest = consume_keyword(rest, "table").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        let after_not = consume_keyword(after_if, "not").trim_start();
+        rest = consume_keyword(after_not, "exists").trim_start();
+        if_exists = true;
+    }
+    let mut only = false;
+    if keyword_at_start(rest, "only") {
+        rest = consume_keyword(rest, "only").trim_start();
+        only = true;
+    }
+    let (table_parts, mut rest) = parse_qualified_identifier_parts(rest)?;
+    let table_name = table_parts.join(".");
+    rest = rest.trim_start();
+    if let Some(after_star) = rest.strip_prefix('*') {
+        rest = after_star.trim_start();
+    }
+    if !keyword_at_start(rest, "alter") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "alter").trim_start();
+    if keyword_at_start(rest, "column") {
+        rest = consume_keyword(rest, "column").trim_start();
+    }
+    let (column_name, rest) = parse_unqualified_identifier(rest, "ALTER TABLE column name")?;
+    let rest = rest.trim_start();
+    let Some(action) = parse_alter_column_identity_action(rest)? else {
+        return Ok(None);
+    };
+    Ok(Some(Statement::AlterTableAlterColumnIdentity(
+        AlterTableAlterColumnIdentityStatement {
+            if_exists,
+            only,
+            table_name,
+            column_name,
+            action,
+        },
+    )))
+}
+
+fn parse_alter_column_identity_action(
+    input: &str,
+) -> Result<Option<AlterColumnIdentityAction>, ParseError> {
+    let rest = input.trim_start();
+    if keyword_at_start(rest, "add") {
+        let mut rest = consume_keyword(rest, "add").trim_start();
+        rest = consume_keyword(rest, "generated").trim_start();
+        let (kind, next) = parse_identity_generation_kind(rest)?;
+        rest = consume_keyword(next.trim_start(), "as").trim_start();
+        rest = consume_keyword(rest, "identity").trim_start();
+        let (options, rest) = parse_optional_parenthesized_sequence_options(rest)?;
+        ensure_identity_action_consumed(rest)?;
+        return Ok(Some(AlterColumnIdentityAction::Add(ColumnIdentityDef {
+            kind,
+            options,
+        })));
+    }
+    if keyword_at_start(rest, "drop") {
+        let mut rest = consume_keyword(rest, "drop").trim_start();
+        rest = consume_keyword(rest, "identity").trim_start();
+        let mut missing_ok = false;
+        if keyword_at_start(rest, "if") {
+            let after_if = consume_keyword(rest, "if").trim_start();
+            rest = consume_keyword(after_if, "exists").trim_start();
+            missing_ok = true;
+        }
+        ensure_identity_action_consumed(rest)?;
+        return Ok(Some(AlterColumnIdentityAction::Drop { missing_ok }));
+    }
+    if keyword_at_start(rest, "set") {
+        let after_set = consume_keyword(rest, "set").trim_start();
+        if keyword_at_start(after_set, "generated") {
+            let after_generated = consume_keyword(after_set, "generated").trim_start();
+            let (kind, rest) = parse_identity_generation_kind(after_generated)?;
+            let (options, rest) = parse_identity_sequence_option_patch(rest)?;
+            ensure_identity_action_consumed(rest)?;
+            return Ok(Some(AlterColumnIdentityAction::Set {
+                generation: Some(kind),
+                options,
+            }));
+        }
+    }
+    if starts_identity_sequence_option_patch(rest) {
+        let (options, rest) = parse_identity_sequence_option_patch(rest)?;
+        ensure_identity_action_consumed(rest)?;
+        return Ok(Some(AlterColumnIdentityAction::Set {
+            generation: None,
+            options,
+        }));
+    }
+    Ok(None)
+}
+
+fn starts_identity_sequence_option_patch(input: &str) -> bool {
+    let trimmed = input.trim_start();
+    if keyword_at_start(trimmed, "restart") {
+        return true;
+    }
+    if !keyword_at_start(trimmed, "set") {
+        return false;
+    }
+    let after_set = consume_keyword(trimmed, "set").trim_start();
+    keyword_at_start(after_set, "increment")
+        || keyword_at_start(after_set, "minvalue")
+        || keyword_at_start(after_set, "no minvalue")
+        || keyword_at_start(after_set, "maxvalue")
+        || keyword_at_start(after_set, "no maxvalue")
+        || keyword_at_start(after_set, "start")
+        || keyword_at_start(after_set, "restart")
+        || keyword_at_start(after_set, "cache")
+        || keyword_at_start(after_set, "cycle")
+        || keyword_at_start(after_set, "no cycle")
+}
+
+fn parse_identity_generation_kind(input: &str) -> Result<(ColumnIdentityKind, &str), ParseError> {
+    let input = input.trim_start();
+    if keyword_at_start(input, "always") {
+        return Ok((
+            ColumnIdentityKind::Always,
+            consume_keyword(input, "always").trim_start(),
+        ));
+    }
+    if keyword_at_start(input, "by") {
+        let after_by = consume_keyword(input, "by").trim_start();
+        if keyword_at_start(after_by, "default") {
+            return Ok((
+                ColumnIdentityKind::ByDefault,
+                consume_keyword(after_by, "default").trim_start(),
+            ));
+        }
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "ALWAYS or BY DEFAULT",
+        actual: input.into(),
+    })
+}
+
+fn parse_optional_parenthesized_sequence_options(
+    input: &str,
+) -> Result<(SequenceOptionsSpec, &str), ParseError> {
+    let input = input.trim_start();
+    let Some(after_open) = input.strip_prefix('(') else {
+        return Ok((SequenceOptionsSpec::default(), input));
+    };
+    let Some(close_index) = after_open.find(')') else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "closing ')' for identity sequence options",
+            actual: input.into(),
+        });
+    };
+    let inner = &after_open[..close_index];
+    let rest = &after_open[close_index + 1..];
+    let (options, option_rest) = parse_sequence_option_spec(inner)?;
+    if !option_rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "identity sequence options",
+            actual: option_rest.trim().into(),
+        });
+    }
+    if options.owned_by.is_some() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "identity sequence options without OWNED BY",
+            actual: inner.into(),
+        });
+    }
+    Ok((options, rest))
+}
+
+fn parse_identity_sequence_option_patch(
+    input: &str,
+) -> Result<(SequenceOptionsPatchSpec, &str), ParseError> {
+    let mut rest = input;
+    let mut options = SequenceOptionsPatchSpec::default();
+    loop {
+        let trimmed = rest.trim_start();
+        if trimmed.is_empty() {
+            return Ok((options, trimmed));
+        }
+        let option_input = if keyword_at_start(trimmed, "set") {
+            consume_keyword(trimmed, "set").trim_start()
+        } else {
+            trimmed
+        };
+        let (patch, remainder) = parse_sequence_option_patch(option_input)?;
+        if remainder == option_input {
+            return Ok((options, trimmed));
+        }
+        merge_sequence_option_patch(&mut options, patch)?;
+        rest = remainder;
+    }
+}
+
+fn merge_sequence_option_patch(
+    target: &mut SequenceOptionsPatchSpec,
+    patch: SequenceOptionsPatchSpec,
+) -> Result<(), ParseError> {
+    if patch.increment.is_some() {
+        target.increment = patch.increment;
+    }
+    if patch.minvalue.is_some() {
+        target.minvalue = patch.minvalue;
+    }
+    if patch.maxvalue.is_some() {
+        target.maxvalue = patch.maxvalue;
+    }
+    if patch.start.is_some() {
+        target.start = patch.start;
+    }
+    if patch.restart.is_some() {
+        target.restart = patch.restart;
+    }
+    if patch.cache.is_some() {
+        target.cache = patch.cache;
+    }
+    if patch.cycle.is_some() {
+        target.cycle = patch.cycle;
+    }
+    if patch.owned_by.is_some() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "identity sequence options without OWNED BY",
+            actual: "OWNED BY".into(),
+        });
+    }
+    Ok(())
+}
+
+fn ensure_identity_action_consumed(rest: &str) -> Result<(), ParseError> {
+    if rest.trim().is_empty() {
+        Ok(())
+    } else {
+        Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER TABLE identity action",
+            actual: rest.trim().into(),
+        })
+    }
 }
 
 fn parse_schema_qualified_name(
@@ -13184,6 +13449,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
     let mut table_name = None;
     let mut table_alias = None;
     let mut columns = None;
+    let mut overriding = None;
     let mut source = None;
     let mut on_conflict = None;
     let mut returning = Vec::new();
@@ -13207,6 +13473,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
                 table_alias = Some(build_identifier(alias));
             }
             Rule::assignment_target_list => columns = Some(build_assignment_target_list(part)?),
+            Rule::insert_overriding_clause => overriding = Some(build_insert_overriding(part)?),
             Rule::insert_values_source => {
                 source = Some(InsertSource::Values(
                     part.into_inner()
@@ -13228,9 +13495,24 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         table_alias,
         columns,
+        overriding,
         source: source.ok_or(ParseError::UnexpectedEof)?,
         on_conflict,
         returning,
+    })
+}
+
+fn build_insert_overriding(pair: Pair<'_, Rule>) -> Result<OverridingKind, ParseError> {
+    let raw = pair.as_str().to_ascii_lowercase();
+    if raw.contains(" system ") {
+        return Ok(OverridingKind::System);
+    }
+    if raw.contains(" user ") {
+        return Ok(OverridingKind::User);
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "OVERRIDING SYSTEM VALUE or OVERRIDING USER VALUE",
+        actual: raw,
     })
 }
 
@@ -16199,8 +16481,8 @@ fn set_column_generated(
 }
 
 fn set_column_identity(
-    target: &mut Option<ColumnIdentityKind>,
-    value: ColumnIdentityKind,
+    target: &mut Option<ColumnIdentityDef>,
+    value: ColumnIdentityDef,
     column_name: &str,
 ) -> Result<(), ParseError> {
     if target.is_some() {
@@ -16213,20 +16495,50 @@ fn set_column_identity(
     Ok(())
 }
 
-fn build_column_identity(pair: Pair<'_, Rule>) -> Result<ColumnIdentityKind, ParseError> {
-    let when = pair
-        .into_inner()
-        .find(|part| part.as_rule() == Rule::generated_when)
-        .map(|part| part.as_str().trim().to_ascii_lowercase())
-        .ok_or(ParseError::UnexpectedEof)?;
-    match when.as_str() {
+fn build_column_identity(pair: Pair<'_, Rule>) -> Result<ColumnIdentityDef, ParseError> {
+    let mut when = None;
+    let mut options = SequenceOptionsSpec::default();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::generated_when => when = Some(part.as_str().trim().to_ascii_lowercase()),
+            Rule::column_identity_options => {
+                let raw = part.as_str().trim();
+                let Some(inner) = raw
+                    .strip_prefix('(')
+                    .and_then(|value| value.strip_suffix(')'))
+                else {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "identity sequence options",
+                        actual: raw.into(),
+                    });
+                };
+                let (parsed, rest) = parse_sequence_option_spec(inner)?;
+                if !rest.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "identity sequence options",
+                        actual: rest.trim().into(),
+                    });
+                }
+                if parsed.owned_by.is_some() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "identity sequence options without OWNED BY",
+                        actual: raw.into(),
+                    });
+                }
+                options = parsed;
+            }
+            _ => {}
+        }
+    }
+    let kind = match when.as_deref().ok_or(ParseError::UnexpectedEof)? {
         "always" => Ok(ColumnIdentityKind::Always),
         "by default" => Ok(ColumnIdentityKind::ByDefault),
         other => Err(ParseError::UnexpectedToken {
             expected: "GENERATED ALWAYS or GENERATED BY DEFAULT",
             actual: other.into(),
         }),
-    }
+    }?;
+    Ok(ColumnIdentityDef { kind, options })
 }
 
 fn build_column_compression(

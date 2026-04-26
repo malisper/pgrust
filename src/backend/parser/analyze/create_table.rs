@@ -5,7 +5,8 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{
     ColumnConstraint, ConstraintAttributes, CreateTableElement, CreateTableLikeClause,
-    CreateTableLikeOption, RawTypeName, SerialKind, SqlType, SqlTypeKind, TableConstraint,
+    CreateTableLikeOption, RawTypeName, SequenceOptionsSpec, SerialKind, SqlType, SqlTypeKind,
+    TableConstraint,
 };
 use crate::include::access::htup::{AttributeCompression, AttributeStorage};
 use crate::include::catalog::{CONSTRAINT_CHECK, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};
@@ -40,6 +41,7 @@ pub struct OwnedSequenceSpec {
     pub column_name: String,
     pub serial_kind: SerialKind,
     pub sql_type: SqlType,
+    pub options: SequenceOptionsSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,8 +203,8 @@ pub fn lower_create_table(
                 if let Some(generated) = &column.generated {
                     desc.default_expr = Some(generated.expr_sql.clone());
                     desc.generated = Some(generated.kind);
-                } else if let Some(identity) = column.identity {
-                    desc.identity = Some(identity);
+                } else if let Some(identity) = &column.identity {
+                    desc.identity = Some(identity.kind);
                 } else {
                     desc.default_expr = column.default_expr.clone();
                     if desc.default_expr.is_none()
@@ -224,9 +226,10 @@ pub fn lower_create_table(
                         column_name: column.name.clone(),
                         serial_kind,
                         sql_type,
+                        options: SequenceOptionsSpec::default(),
                     });
                 }
-                if column.identity.is_some() {
+                if let Some(identity) = &column.identity {
                     desc.default_expr = None;
                     desc.missing_default_value = None;
                     owned_sequences.push(OwnedSequenceSpec {
@@ -234,6 +237,7 @@ pub fn lower_create_table(
                         column_name: column.name.clone(),
                         serial_kind: serial_kind_for_identity_sql_type(sql_type)?,
                         sql_type,
+                        options: identity.options.clone(),
                     });
                 }
                 if let Some(storage) = column.storage {
@@ -380,7 +384,7 @@ fn expand_create_table_of_type(
                 column.collation = options.collation.clone();
                 column.default_expr = options.default_expr.clone();
                 column.generated = options.generated.clone();
-                column.identity = options.identity;
+                column.identity = options.identity.clone();
                 column.storage = options.storage;
                 column.compression = options.compression;
                 column.constraints = options.constraints.clone();
@@ -586,7 +590,16 @@ fn expand_like_clause(
                     None
                 },
                 generated,
-                identity: options.identity.then_some(column.identity).flatten(),
+                identity: options
+                    .identity
+                    .then_some(column.identity)
+                    .flatten()
+                    .map(
+                        |kind| crate::include::nodes::parsenodes::ColumnIdentityDef {
+                            kind,
+                            options: SequenceOptionsSpec::default(),
+                        },
+                    ),
                 storage: options.storage.then_some(column.storage.attstorage),
                 compression: match (options.compression, column.storage.attcompression) {
                     (false, _) | (true, AttributeCompression::Default) => None,

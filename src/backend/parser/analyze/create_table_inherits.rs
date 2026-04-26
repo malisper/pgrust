@@ -360,7 +360,7 @@ fn merge_inherited_columns(
                     column.default_expr.clone()
                 },
                 generated,
-                identity: column.identity,
+                identity: None,
                 storage: Some(column.storage.attstorage),
                 compression: Some(column.storage.attcompression),
                 constraints: inherited_constraints_for_parent(column),

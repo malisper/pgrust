@@ -5,8 +5,8 @@ use crate::backend::parser::{
     AggregateArgType, AggregateSignatureKind, CreateAggregateStatement, CreateFunctionArg,
     CreateFunctionReturnSpec, CreateFunctionStatement, CreateProcedureStatement, FunctionArgMode,
     FunctionParallel, FunctionVolatility, OwnedSequenceSpec, PartitionBoundSpec, RawTypeName,
-    RelOption, SequenceOptionsSpec, SqlType, SqlTypeKind, Statement, parse_statement,
-    pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
+    RelOption, SqlType, SqlTypeKind, Statement, parse_statement, pg_partitioned_table_row,
+    resolve_raw_type_name, serialize_partition_bound,
 };
 use crate::backend::utils::misc::notices::{
     push_backend_notice, push_notice, push_notice_with_detail,
@@ -1265,7 +1265,7 @@ impl Database {
         }
 
         let options = resolve_sequence_options_spec(
-            &SequenceOptionsSpec::default(),
+            &column.options,
             sequence_type_oid_for_serial_kind(column.serial_kind),
         )
         .map_err(ExecError::Parse)?;

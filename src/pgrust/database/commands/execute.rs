@@ -541,6 +541,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableAlterColumnIdentity(ref alter_stmt) => self
+                .execute_alter_table_alter_column_identity_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableAddConstraint(ref alter_stmt) => self
                 .execute_alter_table_add_constraint_stmt_with_search_path(
                     client_id,

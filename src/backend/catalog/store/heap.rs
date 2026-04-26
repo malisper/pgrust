@@ -5287,6 +5287,52 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_table_set_column_identity_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        identity: Option<crate::include::nodes::parsenodes::ColumnIdentityKind>,
+        default_expr: Option<String>,
+        default_sequence_oid: Option<u32>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, control| {
+                if !matches!(entry.relkind, 'r' | 'p') {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                let column_index = relation_column_index_visible(&entry.desc, column_name)?;
+                let column = &mut entry.desc.columns[column_index];
+                column.identity = identity;
+                column.generated = None;
+                column.default_expr = default_expr;
+                column.default_sequence_oid = default_sequence_oid;
+                if column.default_expr.is_some() {
+                    if column.attrdef_oid.is_none() {
+                        column.attrdef_oid = Some(control.next_oid);
+                        control.next_oid = control.next_oid.saturating_add(1);
+                    }
+                } else {
+                    column.attrdef_oid = None;
+                    column.missing_default_value = None;
+                }
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgAttribute,
+                        BootstrapCatalogKind::PgDepend,
+                        BootstrapCatalogKind::PgAttrdef,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
     pub fn alter_table_set_column_statistics_mvcc(
         &mut self,
         relation_oid: u32,
