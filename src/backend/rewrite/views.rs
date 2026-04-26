@@ -242,6 +242,15 @@ fn render_view_query(query: &Query, catalog: &dyn CatalogLookup) -> String {
                 .join(", ")
         ));
     }
+    if let Some(limit) = query.limit_count {
+        lines.push(format!("  LIMIT {limit}"));
+    }
+    if query.limit_offset != 0 {
+        lines.push(format!("  OFFSET {}", query.limit_offset));
+    }
+    if let Some(locking_clause) = query.locking_clause {
+        lines.push(format!(" {}", locking_clause.sql()));
+    }
     lines.join("\n") + ";"
 }
 

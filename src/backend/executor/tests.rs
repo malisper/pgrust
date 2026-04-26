@@ -20432,6 +20432,87 @@ fn scalar_subquery_can_cast_outer_whole_row_to_text() {
 }
 
 #[test]
+fn bare_relation_reference_binds_as_whole_row() {
+    let db = Database::open(temp_dir("bare_relation_whole_row"), 16).unwrap();
+    db.execute(1, "create table table_a(id integer)").unwrap();
+    db.execute(1, "insert into table_a values (42)").unwrap();
+    db.execute(1, "create view view_a as select * from table_a")
+        .unwrap();
+
+    let expected = Value::Record(crate::include::nodes::datum::RecordValue::anonymous(vec![
+        ("id".into(), Value::Int32(42)),
+    ]));
+    for sql in [
+        "select view_a from view_a",
+        "select (select view_a) from view_a",
+        "select (select (select view_a)) from view_a",
+    ] {
+        assert_query_rows(db.execute(1, sql).unwrap(), vec![vec![expected.clone()]]);
+    }
+}
+
+#[test]
+fn limit_null_is_unbounded() {
+    let mut harness = seed_people_and_pets("limit_null_unbounded");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select id from people order by id limit null",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)],
+        ],
+    );
+}
+
+#[test]
+fn distinct_on_subquery_in_predicate_is_accepted() {
+    let db = Database::open(temp_dir("distinct_on_subquery_in"), 16).unwrap();
+    db.execute(1, "create temp table foo (id integer)").unwrap();
+    db.execute(1, "create temp table bar (id1 integer, id2 integer)")
+        .unwrap();
+    db.execute(1, "insert into foo values (1)").unwrap();
+    db.execute(1, "insert into bar values (1, 1), (2, 2), (3, 1)")
+        .unwrap();
+
+    assert_query_rows(
+        db.execute(
+            1,
+            "select * from foo where id in \
+             (select id2 from (select distinct on (id2) id1, id2 from bar) as s)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(1)]],
+    );
+}
+
+#[test]
+fn alter_function_signature_accepts_argument_names() {
+    let db = Database::open(temp_dir("alter_function_named_args"), 16).unwrap();
+    db.execute(
+        1,
+        "create function tattle(x int, y int) returns bool \
+         language sql as $$ select true $$",
+    )
+    .unwrap();
+    db.execute(1, "alter function tattle(x int, y int) stable")
+        .unwrap();
+
+    assert_query_rows(
+        db.execute(
+            1,
+            "select provolatile from pg_proc where proname = 'tattle'",
+        )
+        .unwrap(),
+        vec![vec![Value::Text("s".into())]],
+    );
+}
+
+#[test]
 fn range_constructor_semantics() {
     let base = temp_dir("range_constructor_accessors");
     let txns = TransactionManager::new_durable(&base).unwrap();

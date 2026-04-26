@@ -3047,7 +3047,8 @@ fn execute_psql_describe_query(
     {
         return psql_describe_constraints_query(db, session, sql);
     }
-    if lower.starts_with("select pg_catalog.pg_get_viewdef(") && lower.contains("::pg_catalog.oid")
+    if lower.starts_with("select pg_catalog.pg_get_viewdef(")
+        && (lower.contains("::pg_catalog.oid") || lower.contains("::pg_catalog.regclass"))
     {
         return psql_get_viewdef_query(db, session, sql);
     }
@@ -4364,7 +4365,11 @@ fn psql_get_viewdef_query(
     session: &Session,
     sql: &str,
 ) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
-    let oid = extract_quoted_oid_with_markers(sql, &["pg_get_viewdef('"])?;
+    let literal = extract_quoted_literal_with_markers(sql, &["pg_get_viewdef('"])?;
+    let oid = literal
+        .parse::<u32>()
+        .ok()
+        .or_else(|| resolve_regclass_literal(db, session, literal))?;
     let catalog = session.catalog_lookup(db);
     let value = catalog
         .lookup_relation_by_oid(oid)
@@ -8507,6 +8512,52 @@ mod tests {
         assert_eq!(
             rows,
             vec![vec![Value::Text(" SELECT id\n   FROM widgets;".into())]]
+        );
+    }
+
+    #[test]
+    fn psql_get_viewdef_query_accepts_regclass_literal() {
+        let db = Database::open(temp_dir("describe_viewdef_regclass"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table widgets (id int4)").unwrap();
+        db.execute(1, "create view widget_view as select id from widgets")
+            .unwrap();
+
+        let (_, rows) = execute_psql_describe_query(
+            &db,
+            &session,
+            "SELECT pg_catalog.pg_get_viewdef('widget_view'::pg_catalog.regclass, true);",
+        )
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![Value::Text(" SELECT id\n   FROM widgets;".into())]]
+        );
+    }
+
+    #[test]
+    fn create_view_for_update_of_renders_view_definition() {
+        let db = Database::open(temp_dir("describe_viewdef_for_update_of"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table widgets (id int4)").unwrap();
+        db.execute(
+            1,
+            "create view locked_widgets as \
+             select * from widgets for update of widgets",
+        )
+        .unwrap();
+
+        let (_, rows) = execute_psql_describe_query(
+            &db,
+            &session,
+            "SELECT pg_catalog.pg_get_viewdef('locked_widgets'::pg_catalog.regclass, true);",
+        )
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![Value::Text(
+                " SELECT id\n   FROM widgets\n FOR UPDATE;".into()
+            )]]
         );
     }
 

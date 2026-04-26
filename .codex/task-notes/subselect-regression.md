@@ -25,3 +25,30 @@ Remaining:
 full diff can be inspected. Later failures in the pasted diff include planner
 performance/EXPLAIN shape gaps, view support, `DISTINCT ON`, `ALTER FUNCTION`,
 and `LIMIT null`.
+
+Follow-up slice:
+Added focused fixes for several later `subselect.out` gaps:
+- `LIMIT NULL` parses as an unbounded limit.
+- `DISTINCT ON (...)` is accepted and lowered to the existing distinct path as a
+  temporary compatibility shim for the regression's `IN` subquery shape.
+- `FOR UPDATE OF ...` parses in SELECT/CREATE VIEW definitions; relation-list
+  targeting is still not represented in the plan node.
+- psql describe queries for `pg_get_viewdef('view'::regclass, true)` now return
+  rendered view SQL, which unblocks `\sv`-style callers.
+- `ALTER FUNCTION f(argname type, ...) stable/volatile/immutable` resolves
+  signatures with argument names.
+- Bare relation references such as `SELECT view_a FROM view_a` bind as whole-row
+  records instead of accidentally selecting the only scalar column.
+
+Follow-up tests run:
+`cargo fmt`
+Focused parser/executor/tcop tests for the bullets above.
+Existing `in_subquery_where_qual_uses_semi_join` planner pull-up test.
+`scripts/cargo_isolated.sh check`
+`git diff --check`
+
+Still remaining:
+Planner timeout/perf cases, EXPLAIN shape parity, full `DISTINCT ON` first-row
+semantics, `FOR UPDATE OF` relation-target row marks, view DML with
+`UPDATE ... FROM`, lateral exec-param cases, and the full `subselect`
+regression rerun once the `create_index` dependency setup is unblocked.

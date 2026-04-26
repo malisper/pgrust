@@ -40,7 +40,8 @@ simple_select_stmt = {
 select_into_core = { kw_select ~ select_distinct_clause? ~ (empty_select_list | select_list)? ~ kw_into ~ select_into_target ~ (kw_from ~ from_item)? ~ (kw_where ~ expr)? ~ group_by_clause? ~ having_clause? }
 simple_select_core = { kw_select ~ select_distinct_clause? ~ (empty_select_list | select_list)? ~ (kw_from ~ from_item)? ~ (kw_where ~ expr)? ~ group_by_clause? ~ having_clause? }
 select_into_target = { temp_clause? ~ kw_table? ~ identifier }
-select_distinct_clause = { kw_distinct }
+select_distinct_clause = { kw_distinct ~ distinct_on_clause? }
+distinct_on_clause = { kw_on ~ "(" ~ expr ~ ("," ~ expr)* ~ ")" }
 set_operation_stmt = {
     cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause? ~ order_by_clause? ~ limit_clause? ~ offset_clause? ~ locking_clause?
   | cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause? ~ order_by_clause? ~ locking_clause ~ limit_clause? ~ offset_clause?
@@ -62,9 +63,10 @@ order_by_clause = { kw_order ~ kw_by ~ order_by_item ~ ("," ~ order_by_item)* }
 operator_token = @{ ("!" | "#" | "%" | "&" | "*" | "+" | "-" | "/" | "<" | "=" | ">" | "?" | "@" | "^" | "|" | "~")+ }
 order_by_item = { expr ~ ((kw_using ~ operator_token) | (kw_asc | kw_desc))? ~ nulls_ordering? }
 nulls_ordering = { kw_nulls ~ (kw_first | kw_last) }
-limit_clause = { kw_limit ~ integer }
+limit_clause = { kw_limit ~ (integer | kw_null) }
 offset_clause = { kw_offset ~ integer }
-locking_clause = { kw_for ~ ((kw_no ~ kw_key ~ kw_update) | (kw_key ~ kw_share) | kw_update | kw_share) }
+locking_clause = { kw_for ~ ((kw_no ~ kw_key ~ kw_update) | (kw_key ~ kw_share) | kw_update | kw_share) ~ locking_of_clause? }
+locking_of_clause = { kw_of ~ identifier ~ ("," ~ identifier)* }
 set_stmt = { kw_set ~ set_scope? ~ (set_time_zone_clause | set_xml_option_clause | set_standard_clause) }
 reset_stmt = { kw_reset ~ (kw_all | time_zone_guc_name | identifier) }
 set_session_authorization_stmt = { kw_set ~ kw_session ~ kw_authorization ~ session_authorization_target }
