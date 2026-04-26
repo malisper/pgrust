@@ -496,6 +496,13 @@ impl CatalogLookup for VisibleCatalog {
             .find(|row| row.castsource == source_type_oid && row.casttarget == target_type_oid)
     }
 
+    fn cast_rows(&self) -> Vec<PgCastRow> {
+        self.catcache
+            .as_ref()
+            .map(CatCache::cast_rows)
+            .unwrap_or_else(bootstrap_pg_cast_rows)
+    }
+
     fn type_rows(&self) -> Vec<PgTypeRow> {
         let mut rows = self
             .catcache

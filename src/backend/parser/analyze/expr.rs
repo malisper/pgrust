@@ -7,7 +7,8 @@ use crate::backend::utils::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
 };
 use crate::include::catalog::{
-    ANYOID, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    ANYOID, builtin_type_name_for_oid, multirange_type_ref_for_sql_type,
+    range_type_ref_for_sql_type,
 };
 use crate::include::nodes::primnodes::{
     BoolExprType, CaseExpr as BoundCaseExpr, CaseTestExpr as BoundCaseTestExpr,
@@ -2055,12 +2056,8 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             if !matches!(inner.as_ref(), SqlExpr::Const(Value::Null)) {
                 validate_catalog_backed_explicit_cast(source_type, target_type, catalog)?;
             }
-            let coerced = coerce_bound_expr(bound_inner, source_type, target_type);
-            let cast_expr = if expr_sql_type_hint(&coerced) == Some(target_type) {
-                coerced
-            } else {
-                Expr::Cast(Box::new(coerced), target_type)
-            };
+            let cast_expr =
+                bind_explicit_cast_expr(bound_inner, source_type, target_type, catalog)?;
             bind_domain_constraint_expr(cast_expr, target_type, domain.as_ref())
         }
         SqlExpr::Collate { expr, collation } => {
@@ -4205,10 +4202,78 @@ fn validate_catalog_backed_explicit_cast(
         expected: "supported explicit cast",
         actual: format!(
             "cannot cast type {} to {}",
-            sql_type_name(source_type),
-            sql_type_name(target_type)
+            catalog_sql_type_name(source_type, catalog),
+            catalog_sql_type_name(target_type, catalog)
         ),
     })
+}
+
+fn catalog_sql_type_name(ty: SqlType, catalog: &dyn CatalogLookup) -> String {
+    if !ty.is_array
+        && ty.type_oid != 0
+        && builtin_type_name_for_oid(ty.type_oid).is_none()
+        && let Some(row) = catalog.type_by_oid(ty.type_oid)
+    {
+        return row.typname;
+    }
+    sql_type_name(ty)
+}
+
+fn bind_explicit_cast_expr(
+    bound_inner: Expr,
+    source_type: SqlType,
+    target_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<Expr, ParseError> {
+    let Some(source_oid) = catalog.type_oid_for_sql_type(source_type) else {
+        return Ok(coerce_bound_expr(bound_inner, source_type, target_type));
+    };
+    let Some(target_oid) = catalog.type_oid_for_sql_type(target_type) else {
+        return Ok(coerce_bound_expr(bound_inner, source_type, target_type));
+    };
+    let Some(cast_row) = catalog.cast_by_source_target(source_oid, target_oid) else {
+        let coerced = coerce_bound_expr(bound_inner, source_type, target_type);
+        return Ok(if expr_sql_type_hint(&coerced) == Some(target_type) {
+            coerced
+        } else {
+            Expr::Cast(Box::new(coerced), target_type)
+        });
+    };
+    if cast_row.castmethod != 'f' || cast_row.castfunc == 0 {
+        return Ok(coerce_bound_expr(bound_inner, source_type, target_type));
+    }
+    let Some(proc_row) = catalog.proc_row_by_oid(cast_row.castfunc) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "existing cast function",
+            actual: format!("function OID {}", cast_row.castfunc),
+        });
+    };
+    let first_arg_oid = proc_row
+        .proargtypes
+        .split_whitespace()
+        .next()
+        .and_then(|oid| oid.parse::<u32>().ok())
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "cast function with at least one argument",
+            actual: proc_row.proname.clone(),
+        })?;
+    let first_arg_type = catalog
+        .type_by_oid(first_arg_oid)
+        .map(|row| row.sql_type)
+        .ok_or_else(|| ParseError::UnsupportedType(first_arg_oid.to_string()))?;
+    let result_type = catalog
+        .type_by_oid(proc_row.prorettype)
+        .map(|row| row.sql_type)
+        .ok_or_else(|| ParseError::UnsupportedType(proc_row.prorettype.to_string()))?;
+    let arg = coerce_bound_expr(bound_inner, source_type, first_arg_type);
+    let func_expr = Expr::func(cast_row.castfunc, Some(result_type), false, vec![arg]);
+    Ok(
+        if proc_row.prorettype == target_oid || result_type == target_type {
+            func_expr
+        } else {
+            coerce_bound_expr(func_expr, result_type, target_type)
+        },
+    )
 }
 
 fn catalog_backed_explicit_cast_allowed(
@@ -4218,6 +4283,20 @@ fn catalog_backed_explicit_cast_allowed(
 ) -> bool {
     if source_type.element_type() == target_type.element_type() {
         return true;
+    }
+    let source_oid = catalog.type_oid_for_sql_type(source_type);
+    let target_oid = catalog.type_oid_for_sql_type(target_type);
+    if let (Some(source_oid), Some(target_oid)) = (source_oid, target_oid) {
+        if source_oid == target_oid
+            || catalog
+                .cast_by_source_target(source_oid, target_oid)
+                .is_some()
+        {
+            return true;
+        }
+        if is_user_defined_type_oid(source_oid) || is_user_defined_type_oid(target_oid) {
+            return false;
+        }
     }
     if source_type.is_range()
         && target_type.is_multirange()
@@ -4235,6 +4314,10 @@ fn catalog_backed_explicit_cast_allowed(
         return true;
     }
     false
+}
+
+fn is_user_defined_type_oid(type_oid: u32) -> bool {
+    type_oid != 0 && builtin_type_name_for_oid(type_oid).is_none()
 }
 
 fn bind_regprocedure_literal_cast(

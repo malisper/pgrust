@@ -27,7 +27,7 @@ use crate::include::access::brin_page::{
 };
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PgAggregateRow, PgAmRow,
-    PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgCollationRow,
+    PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
     PgConstraintRow, PgEnumRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
     PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticExtDataRow,
     PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
@@ -1629,6 +1629,23 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     fn operator_rows(&self) -> Vec<PgOperatorRow> {
         backend_catcache(self.db, self.client_id, self.txn_ctx)
             .map(|cache| cache.operator_rows())
+            .unwrap_or_default()
+    }
+
+    fn cast_by_source_target(
+        &self,
+        source_type_oid: u32,
+        target_type_oid: u32,
+    ) -> Option<PgCastRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .ok()?
+            .cast_by_source_target(source_type_oid, target_type_oid)
+            .cloned()
+    }
+
+    fn cast_rows(&self) -> Vec<PgCastRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .map(|cache| cache.cast_rows())
             .unwrap_or_default()
     }
 

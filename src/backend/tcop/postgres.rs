@@ -324,6 +324,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             }
             return None;
         }
+        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            expected: "supported explicit cast",
+            actual,
+        }) if actual.starts_with("cannot cast type ") => {
+            return find_explicit_cast_target_position(sql);
+        }
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. })
             if message == "duplicate trigger events specified at or near \"ON\"" =>
         {
@@ -996,6 +1002,15 @@ fn find_bytea_cast_literal_position(sql: &str) -> Option<usize> {
         }
     }
     Some(quote_index + 1)
+}
+
+fn find_explicit_cast_target_position(sql: &str) -> Option<usize> {
+    let cast_index = sql.rfind("::")?;
+    let mut position = cast_index + 2;
+    while position < sql.len() && sql.as_bytes()[position].is_ascii_whitespace() {
+        position += 1;
+    }
+    (position < sql.len()).then_some(position + 1)
 }
 
 fn find_detailed_operator_position(sql: &str, message: &str) -> Option<usize> {
@@ -8998,6 +9013,17 @@ mod tests {
         };
 
         assert_eq!(exec_error_position(sql, &err), Some(8));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_failed_explicit_cast_target() {
+        let sql = "SELECT 1234::int4::casttesttype;";
+        let err = ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            expected: "supported explicit cast",
+            actual: "cannot cast type integer to casttesttype".into(),
+        });
+
+        assert_eq!(exec_error_position(sql, &err), Some(20));
     }
 
     #[test]

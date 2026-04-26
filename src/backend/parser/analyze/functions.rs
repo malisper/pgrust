@@ -4,7 +4,7 @@ use crate::include::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
     ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
     TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_hypothetical_aggregate_function_for_proc_oid,
-    builtin_type_rows, builtin_window_function_for_proc_oid,
+    builtin_type_name_for_oid, builtin_type_rows, builtin_window_function_for_proc_oid,
 };
 use crate::include::catalog::{
     multirange_type_ref_for_sql_type, range_type_ref_for_multirange_sql_type,
@@ -646,6 +646,9 @@ fn match_proc_arg_type(
     if let Some(cost) = arg_type_match_cost(actual_type, declared_type) {
         return Some((cost, declared_type));
     }
+    if catalog_implicit_cast_exists(catalog, actual_type, declared_oid) {
+        return Some((3, declared_type));
+    }
     if is_text_like_type(actual_type) && catalog_text_input_cast_exists(catalog, declared_oid) {
         return Some((3, declared_type));
     }
@@ -1089,6 +1092,28 @@ fn can_coerce_to_compatible_anchor(value: SqlType, anchor: SqlType) -> bool {
             ))
 }
 
+fn catalog_implicit_cast_exists(
+    catalog: &dyn CatalogLookup,
+    actual_type: SqlType,
+    declared_oid: u32,
+) -> bool {
+    let Some(source_oid) = catalog.type_oid_for_sql_type(actual_type) else {
+        return false;
+    };
+    catalog
+        .cast_by_source_target(source_oid, declared_oid)
+        .is_some_and(|row| row.castcontext == 'i')
+}
+
+fn is_builtin_text_like_type(ty: SqlType) -> bool {
+    !ty.is_array
+        && matches!(
+            ty.kind,
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
+        )
+        && (ty.type_oid == 0 || builtin_type_name_for_oid(ty.type_oid).is_some())
+}
+
 fn canonical_polymorphic_type(mut ty: SqlType) -> SqlType {
     if !ty.is_array && !ty.is_range() && !ty.is_multirange() && ty.typrelid == 0 {
         ty.type_oid = 0;
@@ -1156,7 +1181,7 @@ fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usi
     if is_numeric_family(actual_type) && is_numeric_family(target_type) {
         return Some(1);
     }
-    if is_text_like_type(actual_type) && is_text_like_type(target_type) {
+    if is_builtin_text_like_type(actual_type) && is_builtin_text_like_type(target_type) {
         return Some(1);
     }
     if is_bit_string_type(actual_type) && is_bit_string_type(target_type) {
@@ -4087,10 +4112,7 @@ fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) 
         if matches!(row.sql_type.kind, SqlTypeKind::Enum) {
             return true;
         }
-        if matches!(
-            row.sql_type.kind,
-            SqlTypeKind::Text | SqlTypeKind::Char | SqlTypeKind::Varchar
-        ) {
+        if is_builtin_text_like_type(row.sql_type) {
             return true;
         }
         if matches!(

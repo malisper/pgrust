@@ -8,7 +8,9 @@ use crate::backend::parser::{
     RelOption, SequenceOptionsSpec, SqlType, SqlTypeKind, Statement, parse_statement,
     pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
 };
-use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
+use crate::backend::utils::misc::notices::{
+    push_backend_notice, push_notice, push_notice_with_detail,
+};
 use crate::include::catalog::{
     ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
     BOOTSTRAP_SUPERUSER_OID, BYTEA_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
@@ -1747,10 +1749,16 @@ impl Database {
         for arg in &create_stmt.args {
             let sql_type = resolve_raw_type_name(&arg.ty, &catalog).map_err(ExecError::Parse)?;
             if matches!(sql_type.kind, SqlTypeKind::Shell) {
-                push_notice(format!(
-                    "argument type {} is only a shell",
-                    notice_name_for_type(&arg.ty, sql_type)
-                ));
+                push_backend_notice(
+                    "NOTICE",
+                    "00000",
+                    format!(
+                        "argument type {} is only a shell",
+                        notice_name_for_type(&arg.ty, sql_type)
+                    ),
+                    None,
+                    arg.type_position,
+                );
             }
             let type_oid = create_function_type_oid(
                 &catalog,

@@ -13,11 +13,12 @@ use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec,
     AlterColumnExpressionAction, AlterTableTriggerMode, AlterTableTriggerStateStatement,
     AlterTableTriggerTarget, AlterTriggerRenameStatement, AlterTypeSetOptionsStatement,
-    ColumnConstraint, ColumnGeneratedKind, CommentOnAggregateStatement, CommentOnColumnStatement,
-    CommentOnFunctionStatement, CommentOnOperatorStatement, CommentOnTypeStatement,
-    CommentOnViewStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
-    CreateBaseTypeOption, CreateBaseTypeStatement, CreateCompositeTypeStatement,
-    CreateShellTypeStatement, CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement,
+    CastContext, ColumnConstraint, ColumnGeneratedKind, CommentOnAggregateStatement,
+    CommentOnColumnStatement, CommentOnFunctionStatement, CommentOnOperatorStatement,
+    CommentOnTypeStatement, CommentOnViewStatement, CompositeTypeAttributeDef,
+    CreateAggregateStatement, CreateBaseTypeOption, CreateBaseTypeStatement, CreateCastMethod,
+    CreateCastStatement, CreateCompositeTypeStatement, CreateShellTypeStatement,
+    CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement, DropCastStatement,
     DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType,
     GrantObjectPrivilege, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
     PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
@@ -4435,6 +4436,82 @@ fn parse_do_statement_with_explicit_language() {
 }
 
 #[test]
+fn parse_create_cast_with_function_and_implicit_context() {
+    let stmt = parse_statement(
+        "create cast (int4 as casttesttype) with function pg_catalog.int4_casttesttype(int4) as implicit",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateCast(CreateCastStatement {
+            source_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+            target_type: RawTypeName::Named {
+                name: "casttesttype".into(),
+                array_bounds: 0,
+            },
+            method: CreateCastMethod::Function {
+                schema_name: Some("pg_catalog".into()),
+                function_name: "int4_casttesttype".into(),
+                arg_types: vec![RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4))],
+            },
+            context: CastContext::Implicit,
+        })
+    );
+}
+
+#[test]
+fn parse_create_cast_without_function_and_assignment_context() {
+    let stmt = parse_statement("create cast (text as casttesttype) without function as assignment")
+        .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateCast(CreateCastStatement {
+            source_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+            target_type: RawTypeName::Named {
+                name: "casttesttype".into(),
+                array_bounds: 0,
+            },
+            method: CreateCastMethod::WithoutFunction,
+            context: CastContext::Assignment,
+        })
+    );
+}
+
+#[test]
+fn parse_create_cast_with_inout_defaults_to_explicit_context() {
+    let stmt = parse_statement("create cast (int4 as casttesttype) with inout").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateCast(CreateCastStatement {
+            source_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+            target_type: RawTypeName::Named {
+                name: "casttesttype".into(),
+                array_bounds: 0,
+            },
+            method: CreateCastMethod::InOut,
+            context: CastContext::Explicit,
+        })
+    );
+}
+
+#[test]
+fn parse_drop_cast_if_exists_cascade() {
+    let stmt = parse_statement("drop cast if exists (int4 as casttesttype) cascade").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropCast(DropCastStatement {
+            if_exists: true,
+            source_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+            target_type: RawTypeName::Named {
+                name: "casttesttype".into(),
+                array_bounds: 0,
+            },
+            cascade: true,
+        })
+    );
+}
+
+#[test]
 fn parse_create_function_statement_with_returns_table() {
     let stmt = parse_statement(
         "create function public.pair_rows(x int4) returns table(a int4, b text) language plpgsql as $$ begin return next; end $$",
@@ -4451,6 +4528,7 @@ fn parse_create_function_statement_with_returns_table() {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                type_position: None,
                 default_expr: None,
                 variadic: false,
             }],
@@ -4492,6 +4570,7 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                type_position: None,
                 default_expr: None,
                 variadic: false,
             }],
@@ -4787,6 +4866,7 @@ fn parse_create_function_statement_with_unnamed_args() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    type_position: None,
                     default_expr: None,
                     variadic: false,
                 },
@@ -4794,6 +4874,7 @@ fn parse_create_function_statement_with_unnamed_args() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    type_position: None,
                     default_expr: None,
                     variadic: false,
                 }
@@ -4831,6 +4912,7 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    type_position: None,
                     default_expr: None,
                     variadic: false,
                 },
@@ -4838,6 +4920,7 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    type_position: None,
                     default_expr: None,
                     variadic: false,
                 }
@@ -4874,6 +4957,7 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
                 mode: FunctionArgMode::In,
                 name: None,
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bytea)),
+                type_position: None,
                 default_expr: None,
                 variadic: false,
             }],
@@ -4909,6 +4993,7 @@ fn parse_create_function_statement_with_cost_clause() {
                 mode: FunctionArgMode::In,
                 name: None,
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                type_position: None,
                 default_expr: None,
                 variadic: false,
             }],
@@ -4979,6 +5064,7 @@ fn parse_create_procedure_statement() {
                     mode: FunctionArgMode::InOut,
                     name: Some("x".into()),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                    type_position: None,
                     default_expr: None,
                     variadic: false,
                 },
@@ -4986,6 +5072,7 @@ fn parse_create_procedure_statement() {
                     mode: FunctionArgMode::In,
                     name: Some("y".into()),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                    type_position: None,
                     default_expr: Some("'a'".into()),
                     variadic: false,
                 },

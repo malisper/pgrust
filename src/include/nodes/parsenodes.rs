@@ -324,6 +324,7 @@ pub enum Statement {
     CreateFunction(CreateFunctionStatement),
     CreateProcedure(CreateProcedureStatement),
     CreateAggregate(CreateAggregateStatement),
+    CreateCast(CreateCastStatement),
     CreateTrigger(CreateTriggerStatement),
     CreateType(CreateTypeStatement),
     AlterType(AlterTypeStatement),
@@ -419,6 +420,7 @@ pub enum Statement {
     DropDatabase(DropDatabaseStatement),
     DropPublication(DropPublicationStatement),
     DropStatistics(DropStatisticsStatement),
+    DropCast(DropCastStatement),
     DropFunction(DropFunctionStatement),
     DropProcedure(DropProcedureStatement),
     DropRoutine(DropProcedureStatement),
@@ -643,6 +645,7 @@ pub struct CreateFunctionArg {
     pub mode: FunctionArgMode,
     pub name: Option<String>,
     pub ty: RawTypeName,
+    pub type_position: Option<usize>,
     pub default_expr: Option<String>,
     pub variadic: bool,
 }
@@ -710,6 +713,40 @@ pub struct RoutineSignature {
     pub schema_name: Option<String>,
     pub routine_name: String,
     pub arg_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastContext {
+    Explicit,
+    Assignment,
+    Implicit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateCastMethod {
+    Function {
+        schema_name: Option<String>,
+        function_name: String,
+        arg_types: Vec<RawTypeName>,
+    },
+    WithoutFunction,
+    InOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateCastStatement {
+    pub source_type: RawTypeName,
+    pub target_type: RawTypeName,
+    pub method: CreateCastMethod,
+    pub context: CastContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropCastStatement {
+    pub if_exists: bool,
+    pub source_type: RawTypeName,
+    pub target_type: RawTypeName,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
