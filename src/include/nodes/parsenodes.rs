@@ -384,6 +384,7 @@ pub enum Statement {
     AlterViewOwner(AlterRelationOwnerStatement),
     AlterSchemaOwner(AlterSchemaOwnerStatement),
     AlterTableSet(AlterTableSetStatement),
+    AlterTableReset(AlterTableResetStatement),
     AlterTableReplicaIdentity(AlterTableReplicaIdentityStatement),
     AlterTableSetRowSecurity(AlterTableSetRowSecurityStatement),
     AlterPolicy(AlterPolicyStatement),
@@ -1752,6 +1753,7 @@ pub struct CreateTableStatement {
     pub persistence: TablePersistence,
     pub on_commit: OnCommitAction,
     pub elements: Vec<CreateTableElement>,
+    pub options: Vec<RelOption>,
     pub inherits: Vec<String>,
     pub partition_spec: Option<RawPartitionSpec>,
     pub partition_of: Option<String>,
@@ -2151,6 +2153,14 @@ pub struct AlterTableSetStatement {
     pub only: bool,
     pub table_name: String,
     pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableResetStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub options: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3142,9 +3152,19 @@ pub struct VacuumStatement {
     pub targets: Vec<MaintenanceTarget>,
     pub analyze: bool,
     pub full: bool,
+    pub freeze: bool,
     pub verbose: bool,
     pub skip_locked: bool,
     pub buffer_usage_limit: Option<String>,
+    pub disable_page_skipping: bool,
+    pub index_cleanup: Option<String>,
+    pub truncate: Option<bool>,
+    pub parallel: Option<String>,
+    pub parallel_specified: bool,
+    pub process_main: Option<bool>,
+    pub process_toast: Option<bool>,
+    pub skip_database_stats: bool,
+    pub only_database_stats: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

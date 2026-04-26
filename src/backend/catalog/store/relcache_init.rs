@@ -46,6 +46,8 @@ struct RelCacheEntryFile {
     row_type_oid: u32,
     array_type_oid: u32,
     reltoastrelid: u32,
+    #[serde(default)]
+    relhasindex: bool,
     relpersistence: char,
     relkind: char,
     #[serde(default = "default_relispopulated")]
@@ -211,6 +213,7 @@ fn relcache_entry_to_file(entry: &RelCacheEntry) -> RelCacheEntryFile {
         row_type_oid: entry.row_type_oid,
         array_type_oid: entry.array_type_oid,
         reltoastrelid: entry.reltoastrelid,
+        relhasindex: entry.relhasindex,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         relispopulated: entry.relispopulated,
@@ -234,6 +237,7 @@ fn relcache_entry_from_file(entry: RelCacheEntryFile) -> RelCacheEntry {
         row_type_oid: entry.row_type_oid,
         array_type_oid: entry.array_type_oid,
         reltoastrelid: entry.reltoastrelid,
+        relhasindex: entry.relhasindex,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         relispopulated: entry.relispopulated,

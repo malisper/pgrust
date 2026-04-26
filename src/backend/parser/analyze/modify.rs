@@ -39,6 +39,7 @@ pub struct BoundInsertStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoundInsertSource {
     Values(Vec<Vec<Expr>>),
+    ProjectSetValues(Vec<Vec<Expr>>),
     DefaultValues(Vec<Expr>),
     Select(Box<Query>),
 }
@@ -1842,40 +1843,6 @@ fn bind_insert_assignment_expr(
     bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, None, local_ctes)
 }
 
-fn values_row_has_default(row: &[SqlExpr]) -> bool {
-    row.iter().any(|expr| matches!(expr, SqlExpr::Default))
-}
-
-fn select_for_values_srf_row(
-    row: &[SqlExpr],
-    target_columns: &[BoundAssignmentTarget],
-) -> SelectStatement {
-    SelectStatement {
-        with_recursive: false,
-        with: Vec::new(),
-        distinct: false,
-        distinct_on: Vec::new(),
-        from: None,
-        targets: row
-            .iter()
-            .zip(target_columns.iter())
-            .map(|(expr, target)| SelectItem {
-                output_name: format!("column{}", target.column_index + 1),
-                expr: expr.clone(),
-            })
-            .collect(),
-        where_clause: None,
-        group_by: Vec::new(),
-        having: None,
-        window_clauses: Vec::new(),
-        order_by: Vec::new(),
-        limit: None,
-        offset: None,
-        locking_clause: None,
-        set_operation: None,
-    }
-}
-
 pub(super) fn ensure_generated_assignment_allowed(
     desc: &RelationDesc,
     target: &BoundAssignmentTarget,
@@ -2245,32 +2212,12 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
                         .collect::<Result<Vec<_>, _>>()
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let values_have_srfs = bound_rows.iter().flatten().any(expr_contains_set_returning);
-            if values_have_srfs {
-                if rows.len() != 1 {
-                    return Err(ParseError::FeatureNotSupported(
-                        "set-returning functions in multi-row INSERT VALUES".into(),
-                    ));
-                }
-                if rows.iter().any(|row| values_row_has_default(row)) {
-                    return Err(ParseError::FeatureNotSupported(
-                        "DEFAULT with set-returning functions in INSERT VALUES".into(),
-                    ));
-                }
-                let select = select_for_values_srf_row(&rows[0], &target_columns);
-                let (query, _) = analyze_select_query_with_outer(
-                    &select,
-                    catalog,
-                    outer_scopes,
-                    None,
-                    None,
-                    &visible_ctes,
-                    &[],
-                )?;
-                (target_columns, BoundInsertSource::Select(Box::new(query)))
+            let source = if bound_rows.iter().flatten().any(expr_contains_set_returning) {
+                BoundInsertSource::ProjectSetValues(bound_rows)
             } else {
-                (target_columns, BoundInsertSource::Values(bound_rows))
-            }
+                BoundInsertSource::Values(bound_rows)
+            };
+            (target_columns, source)
         }
         InsertSource::DefaultValues => (
             visible_assignment_targets(&entry.desc),

@@ -539,6 +539,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
                     row_type_oid: index_entry.row_type_oid,
                     array_type_oid: index_entry.array_type_oid,
                     reltoastrelid: index_entry.reltoastrelid,
+                    relhasindex: false,
                     relpersistence: index_entry.relpersistence,
                     relkind: index_entry.relkind,
                     relispopulated: index_entry.relispopulated,

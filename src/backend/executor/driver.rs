@@ -197,6 +197,7 @@ fn execute_statement_with_source(
         // :HACK: ALTER INDEX ... SET (...) is accepted narrowly for hash_index.sql and ignored
         // until mutable index reloptions are modeled for real.
         | Statement::AlterIndexSet(_)
+        | Statement::AlterTableReset(_)
         | Statement::AlterTableSetRowSecurity(_)
         | Statement::CreateStatistics(_)
         | Statement::AlterStatistics(_)
@@ -625,6 +626,7 @@ pub fn execute_readonly_statement_with_config(
         | Statement::Set(_)
         | Statement::Reset(_)
         | Statement::AlterTableSet(_)
+        | Statement::AlterTableReset(_)
         | Statement::AlterTableSetSchema(_)
         | Statement::AlterTableRenameColumn(_)
         | Statement::AlterViewRenameColumn(_)
