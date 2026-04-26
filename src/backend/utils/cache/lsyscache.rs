@@ -1751,9 +1751,11 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
 
     fn type_rows(&self) -> Vec<PgTypeRow> {
         let mut rows = ensure_type_rows(self.db, self.client_id, self.txn_ctx);
-        rows.extend(self.db.domain_type_rows_for_search_path(&self.search_path));
-        rows.extend(self.db.enum_type_rows_for_search_path(&self.search_path));
-        rows.extend(self.db.range_type_rows_for_search_path(&self.search_path));
+        for row in dynamic_type_rows_for_search_path(self.db, &self.search_path) {
+            if rows.iter().all(|existing| existing.oid != row.oid) {
+                rows.push(row);
+            }
+        }
         rows
     }
 

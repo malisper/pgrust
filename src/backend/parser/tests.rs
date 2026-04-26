@@ -10414,7 +10414,7 @@ fn parse_create_drop_and_comment_on_domain_statements() {
             array_bounds: 0
         }
     );
-    assert_eq!(create.check.as_deref(), Some("check (upper(value) < 10)"));
+    assert_eq!(create.check.as_deref(), Some("upper(value) < 10"));
 
     let Statement::DropDomain(drop_stmt) =
         parse_statement("drop domain if exists dom_int cascade").unwrap()
