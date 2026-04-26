@@ -688,9 +688,9 @@ pub(super) fn bind_scalar_function_call(
                 SqlType::new(SqlTypeKind::TimestampTz)
             };
             let source_target = if source_is_timetz {
-                SqlType::new(SqlTypeKind::TimeTz)
+                source_type
             } else if source_is_time {
-                SqlType::new(SqlTypeKind::Time)
+                source_type
             } else if source_is_timestamptz {
                 SqlType::new(SqlTypeKind::TimestampTz)
             } else {

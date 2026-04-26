@@ -358,6 +358,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 )
             {
                 SqlType::new(SqlTypeKind::Timestamp)
+            } else if matches!(source.kind, SqlTypeKind::Time | SqlTypeKind::TimeTz) {
+                SqlType::new(SqlTypeKind::TimeTz)
             } else {
                 SqlType::new(SqlTypeKind::TimestampTz)
             }
