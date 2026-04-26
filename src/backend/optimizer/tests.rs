@@ -148,6 +148,22 @@ fn values_path_with_rows(slot_id: usize, startup_cost: f64, total_cost: f64, row
     }
 }
 
+fn filtered_values_path_with_rows(
+    slot_id: usize,
+    startup_cost: f64,
+    total_cost: f64,
+    rows: f64,
+) -> Path {
+    let input = values_path_with_rows(slot_id, 0.0, 0.03, 3.0);
+    let pathtarget = input.semantic_output_target();
+    Path::Filter {
+        plan_info: PlanEstimate::new(startup_cost, total_cost, rows, 2),
+        pathtarget,
+        predicate: gt(var(slot_id, 1), Expr::Const(Value::Int32(0))),
+        input: Box::new(input),
+    }
+}
+
 fn seqscan_path_with_rows(slot_id: usize, startup_cost: f64, total_cost: f64, rows: f64) -> Path {
     let output_columns = values_output_columns();
     let rel_number = slot_id as u32;
@@ -3507,6 +3523,98 @@ fn swapped_join_candidate_keeps_logical_pathtarget_order() {
         swapped.output_vars(),
         vec![var(2, 1), var(2, 2), var(1, 1), var(1, 2)]
     );
+}
+
+#[test]
+fn cross_values_join_emits_swapped_candidate_with_logical_pathtarget_order() {
+    let paths = super::build_join_paths(
+        values_path_with_rows(1, 0.0, 0.03, 3.0),
+        values_path_with_rows(2, 0.0, 0.03, 3.0),
+        &[1],
+        &[2],
+        JoinType::Cross,
+        vec![],
+    );
+
+    let swapped = paths
+        .into_iter()
+        .find(|path| match path {
+            Path::NestedLoopJoin {
+                left,
+                kind: JoinType::Cross,
+                ..
+            } => left.output_vars().first() == Some(&var(2, 1)),
+            _ => false,
+        })
+        .expect("swapped values cross join");
+
+    assert_eq!(
+        swapped.semantic_output_vars(),
+        vec![var(1, 1), var(1, 2), var(2, 1), var(2, 2)]
+    );
+    assert_eq!(
+        swapped.output_vars(),
+        vec![var(2, 1), var(2, 2), var(1, 1), var(1, 2)]
+    );
+}
+
+#[test]
+fn cross_values_join_prefers_filtered_values_side_as_outer() {
+    let paths = super::build_join_paths(
+        values_path_with_rows(1, 0.0, 0.03, 3.0),
+        filtered_values_path_with_rows(2, 0.0, 0.0475, 2.985),
+        &[1],
+        &[2],
+        JoinType::Cross,
+        vec![],
+    );
+
+    let default = paths
+        .iter()
+        .find(|path| match path {
+            Path::NestedLoopJoin { left, .. } => left.output_vars().first() == Some(&var(1, 1)),
+            _ => false,
+        })
+        .expect("default values cross join");
+    let swapped = paths
+        .iter()
+        .find(|path| match path {
+            Path::NestedLoopJoin {
+                left,
+                kind: JoinType::Cross,
+                ..
+            } => left.output_vars().first() == Some(&var(2, 1)),
+            _ => false,
+        })
+        .expect("swapped values cross join");
+
+    assert!(
+        swapped.plan_info().total_cost.as_f64() < default.plan_info().total_cost.as_f64(),
+        "expected filtered values side as cheaper outer: default={:?}, swapped={:?}",
+        default.plan_info(),
+        swapped.plan_info()
+    );
+
+    let best = paths
+        .iter()
+        .min_by(|left, right| {
+            left.plan_info()
+                .total_cost
+                .as_f64()
+                .partial_cmp(&right.plan_info().total_cost.as_f64())
+                .unwrap()
+        })
+        .expect("best values cross join path");
+    match best {
+        Path::NestedLoopJoin {
+            left,
+            kind: JoinType::Cross,
+            ..
+        } => {
+            assert_eq!(left.output_vars().first(), Some(&var(2, 1)));
+        }
+        other => panic!("expected swapped values cross join best path, got {other:?}"),
+    }
 }
 
 #[test]
