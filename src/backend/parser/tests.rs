@@ -9127,6 +9127,21 @@ fn parse_merge_statement() {
         MergeMatchKind::NotMatchedBySource
     );
     assert!(matches!(stmt.when_clauses[2].action, MergeAction::Delete));
+    assert!(stmt.returning.is_empty());
+}
+
+#[test]
+fn parse_merge_returning_clause() {
+    let stmt = parse_statement(
+        "merge into target t using source s on t.tid = s.sid \
+         when matched then delete returning merge_action(), old, new, t.*",
+    )
+    .unwrap();
+    let stmt = match stmt {
+        Statement::Merge(stmt) => stmt,
+        other => panic!("expected merge statement, got {other:?}"),
+    };
+    assert_eq!(stmt.returning.len(), 4);
 }
 
 #[test]
@@ -9159,6 +9174,21 @@ fn plan_merge_uses_join_shape_for_explain() {
         strip_projections(&bound.input_plan.plan_tree),
         Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. } | Plan::MergeJoin { .. }
     ));
+    assert_eq!(bound.visible_column_count, 5);
+    assert_eq!(bound.target_ctid_index, 5);
+    assert_eq!(bound.source_present_index, 6);
+    assert_eq!(
+        bound.input_plan.column_names(),
+        [
+            "id",
+            "name",
+            "note",
+            "id",
+            "owner_id",
+            "__merge_target_ctid",
+            "__merge_source_present",
+        ]
+    );
 }
 
 #[test]

@@ -14103,6 +14103,7 @@ fn build_merge(pair: Pair<'_, Rule>) -> Result<MergeStatement, ParseError> {
     let mut source = None;
     let mut join_condition = None;
     let mut when_clauses = Vec::new();
+    let mut returning = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -14128,6 +14129,7 @@ fn build_merge(pair: Pair<'_, Rule>) -> Result<MergeStatement, ParseError> {
                 join_condition = Some(build_expr(expr)?);
             }
             Rule::merge_when_clause => when_clauses.push(build_merge_when_clause(part)?),
+            Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
         }
     }
@@ -14140,6 +14142,7 @@ fn build_merge(pair: Pair<'_, Rule>) -> Result<MergeStatement, ParseError> {
         source: source.ok_or(ParseError::UnexpectedEof)?,
         join_condition: join_condition.ok_or(ParseError::UnexpectedEof)?,
         when_clauses,
+        returning,
     })
 }
 
