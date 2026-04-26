@@ -1,6 +1,7 @@
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::nodes::datetime::TimestampTzADT;
 
 pub const BOOTSTRAP_SUPERUSER_OID: u32 = 10;
 pub const BOOTSTRAP_SUPERUSER_NAME: &str = "postgres";
@@ -30,6 +31,7 @@ pub struct PgAuthIdRow {
     pub rolbypassrls: bool,
     pub rolconnlimit: i32,
     pub rolpassword: Option<String>,
+    pub rolvaliduntil: Option<TimestampTzADT>,
 }
 
 pub fn pg_authid_desc() -> RelationDesc {
@@ -46,6 +48,11 @@ pub fn pg_authid_desc() -> RelationDesc {
             column_desc("rolbypassrls", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("rolconnlimit", SqlType::new(SqlTypeKind::Int4), false),
             column_desc("rolpassword", SqlType::new(SqlTypeKind::Text), true),
+            column_desc(
+                "rolvaliduntil",
+                SqlType::new(SqlTypeKind::TimestampTz),
+                true,
+            ),
         ],
     }
 }
@@ -64,6 +71,7 @@ pub fn bootstrap_pg_authid_rows() -> Vec<PgAuthIdRow> {
             rolbypassrls: true,
             rolconnlimit: -1,
             rolpassword: None,
+            rolvaliduntil: None,
         },
         predefined_role(PG_DATABASE_OWNER_OID, "pg_database_owner"),
         predefined_role(PG_READ_ALL_DATA_OID, "pg_read_all_data"),
@@ -93,6 +101,7 @@ fn predefined_role(oid: u32, name: &str) -> PgAuthIdRow {
         rolbypassrls: false,
         rolconnlimit: -1,
         rolpassword: None,
+        rolvaliduntil: None,
     }
 }
 
@@ -122,6 +131,7 @@ mod tests {
                 "rolbypassrls",
                 "rolconnlimit",
                 "rolpassword",
+                "rolvaliduntil",
             ]
         );
     }

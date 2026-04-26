@@ -509,6 +509,14 @@ test_uses_create_index_base() {
     local test_name="$1"
     local indexed_test=""
 
+    case "$test_name" in
+        # This test is scheduled after create_index upstream, but only covers
+        # role DDL/catalog state and does not depend on create_index objects.
+        roleattributes)
+            return 1
+            ;;
+    esac
+
     if [[ ${#CREATE_INDEX_BASE_TESTS[@]} -eq 0 ]]; then
         return 1
     fi

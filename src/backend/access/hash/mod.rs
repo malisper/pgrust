@@ -109,6 +109,8 @@ struct HashPageImage {
     will_init: bool,
 }
 
+const HASH_MAX_PAGES_PER_WAL_RECORD: usize = 200;
+
 fn write_hash_pages(
     pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
@@ -116,6 +118,13 @@ fn write_hash_pages(
     rel: RelFileLocator,
     pages: &[HashPageImage],
 ) -> Result<(), CatalogError> {
+    if pages.len() > HASH_MAX_PAGES_PER_WAL_RECORD {
+        for chunk in pages.chunks(HASH_MAX_PAGES_PER_WAL_RECORD) {
+            write_hash_pages(pool, client_id, xid, rel, chunk)?;
+        }
+        return Ok(());
+    }
+
     for page in pages {
         pool.ensure_block_exists(rel, ForkNumber::Main, page.block)
             .map_err(|err| CatalogError::Io(format!("hash extend failed: {err:?}")))?;
@@ -229,6 +238,97 @@ fn fillfactor_from_meta(meta: &crate::backend::utils::cache::relcache::IndexRelC
     meta.hash_options
         .map(|options| options.fillfactor)
         .unwrap_or(crate::include::access::hash::HASH_DEFAULT_FILLFACTOR)
+}
+
+fn build_bucket_count(index_tuple_count: usize, fillfactor: u16) -> u32 {
+    let target = HashMetaPageData::new(1, fillfactor).target_tuples_per_bucket() as usize;
+    let desired = index_tuple_count.div_ceil(target).max(2);
+    desired.min(HASH_MAX_BUCKETS) as u32
+}
+
+fn bulk_load_hash_index(
+    ctx: &IndexBuildContext,
+    fillfactor: u16,
+    pending: Vec<(ItemPointerData, Vec<Value>)>,
+) -> Result<IndexBuildResult, CatalogError> {
+    let mut result = IndexBuildResult {
+        heap_tuples: pending.len() as u64,
+        ..IndexBuildResult::default()
+    };
+    let mut meta = HashMetaPageData::new(build_bucket_count(pending.len(), fillfactor), fillfactor);
+    let mut buckets = vec![Vec::new(); meta.bucket_count() as usize];
+
+    for (tid, key_values) in pending {
+        check_catalog_interrupts(ctx.interrupts.as_ref())?;
+        let Some(first) = key_values.first() else {
+            return Err(CatalogError::Corrupt("hash index missing key value"));
+        };
+        let Some(hash) = support::hash_index_value(first, opclass_for_first_key(&ctx.index_meta))
+            .map_err(CatalogError::Io)?
+        else {
+            continue;
+        };
+        let payload = encode_hash_tuple_payload(
+            &ctx.index_desc,
+            &key_values,
+            hash,
+            ctx.default_toast_compression,
+        )?;
+        let bucket = meta.bucket_for_hash(hash) as usize;
+        buckets[bucket].push(IndexTupleData::new_raw(tid, false, true, false, payload));
+        result.index_tuples += 1;
+    }
+
+    meta.hashm_ntuples = result.index_tuples;
+    init_hash_relation(
+        &ctx.pool,
+        ctx.client_id,
+        ctx.snapshot.current_xid,
+        ctx.index_relation,
+        meta.bucket_count(),
+        fillfactor,
+    )?;
+
+    let mut reserved_blocks = (HASH_METAPAGE..=meta.bucket_count()).collect::<BTreeSet<_>>();
+    let mut images = Vec::new();
+    let mut meta_page = [0u8; crate::backend::storage::smgr::BLCKSZ];
+    hash_metapage_init(&mut meta_page, &meta);
+    images.push(HashPageImage {
+        block: HASH_METAPAGE,
+        page: meta_page,
+        wal_info: XLOG_HASH_INIT_META_PAGE,
+        will_init: false,
+    });
+
+    for (bucket, items) in buckets.iter().enumerate() {
+        if items.is_empty() {
+            continue;
+        }
+        let primary_block = meta
+            .bucket_block(bucket as u32)
+            .ok_or(CatalogError::Corrupt("hash bucket block missing"))?;
+        let (bucket_images, _) = build_bucket_chain_images(
+            &ctx.pool,
+            ctx.index_relation,
+            bucket as u32,
+            primary_block,
+            false,
+            &[],
+            items,
+            XLOG_HASH_INSERT,
+            &mut reserved_blocks,
+        )?;
+        images.extend(bucket_images);
+    }
+
+    write_hash_pages(
+        &ctx.pool,
+        ctx.client_id,
+        ctx.snapshot.current_xid,
+        ctx.index_relation,
+        &images,
+    )?;
+    Ok(result)
 }
 
 fn encode_hash_tuple_payload(
@@ -584,17 +684,6 @@ fn maybe_split_bucket(
 }
 
 fn hashbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
-    if relation_nblocks(&ctx.pool, ctx.index_relation)? == 0 {
-        init_hash_relation(
-            &ctx.pool,
-            ctx.client_id,
-            ctx.snapshot.current_xid,
-            ctx.index_relation,
-            2,
-            fillfactor_from_meta(&ctx.index_meta),
-        )?;
-    }
-
     let mut scan = heap_scan_begin_visible(
         &ctx.pool,
         ctx.client_id,
@@ -604,7 +693,8 @@ fn hashbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> 
     .map_err(|err| CatalogError::Io(format!("heap scan begin failed: {err:?}")))?;
     let attr_descs = ctx.heap_desc.attribute_descs();
     let mut key_projector = IndexBuildKeyProjector::new(ctx)?;
-    let mut result = IndexBuildResult::default();
+    let mut heap_tuples = 0;
+    let mut pending = Vec::new();
     loop {
         check_catalog_interrupts(ctx.interrupts.as_ref())?;
         let next = {
@@ -620,10 +710,26 @@ fn hashbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> 
             .deform(&attr_descs)
             .map_err(|err| CatalogError::Io(format!("heap deform failed: {err:?}")))?;
         let row_values = materialize_heap_row_values(&ctx.heap_desc, &datums)?;
-        result.heap_tuples += 1;
+        heap_tuples += 1;
         let Some(key_values) = key_projector.project(ctx, &row_values, tid)? else {
             continue;
         };
+        pending.push((tid, key_values));
+    }
+
+    let fillfactor = fillfactor_from_meta(&ctx.index_meta);
+    if relation_nblocks(&ctx.pool, ctx.index_relation)? == 0 {
+        let mut result = bulk_load_hash_index(ctx, fillfactor, pending)?;
+        result.heap_tuples = heap_tuples;
+        return Ok(result);
+    }
+
+    let mut result = IndexBuildResult {
+        heap_tuples,
+        ..IndexBuildResult::default()
+    };
+    for (tid, key_values) in pending {
+        check_catalog_interrupts(ctx.interrupts.as_ref())?;
         if insert_hash_key_values(
             &ctx.pool,
             ctx.client_id,
