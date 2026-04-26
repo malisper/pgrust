@@ -3671,6 +3671,9 @@ impl Session {
             }
             Statement::Commit => {
                 if self.active_txn.is_none() {
+                    crate::backend::utils::misc::notices::push_warning(
+                        "there is no transaction in progress",
+                    );
                     return Ok(StatementResult::AffectedRows(0));
                 }
                 let result = self
@@ -3688,7 +3691,12 @@ impl Session {
             Statement::Rollback => {
                 let txn = match self.active_txn.take() {
                     Some(t) => t,
-                    None => return Ok(StatementResult::AffectedRows(0)),
+                    None => {
+                        crate::backend::utils::misc::notices::push_warning(
+                            "there is no transaction in progress",
+                        );
+                        return Ok(StatementResult::AffectedRows(0));
+                    }
                 };
                 let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
                 self.abort_taken_transaction(db, &txn);

@@ -9772,6 +9772,22 @@ fn comment_on_missing_index_reports_relation_does_not_exist() {
 }
 
 #[test]
+fn drop_missing_index_reports_index_does_not_exist() {
+    let base = temp_dir("drop_missing_index");
+    let db = Database::open(&base, 16).unwrap();
+
+    match db.execute(1, "drop index missing_idx") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "index \"missing_idx\" does not exist");
+            assert_eq!(sqlstate, "42704");
+        }
+        other => panic!("expected missing index error, got {other:?}"),
+    }
+}
+
+#[test]
 fn comment_on_aggregate_uses_pg_proc_description_rows() {
     let base = temp_dir("comment_on_aggregate");
     let db = Database::open(&base, 16).unwrap();
@@ -13504,6 +13520,51 @@ fn alter_table_rename_column_updates_lookup_and_rolls_back() {
     match db.execute(1, "select body from items") {
         Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "body" => {}
         other => panic!("expected rollback to restore old column name, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_rename_column_reports_postgres_errors() {
+    let base = temp_dir("alter_table_rename_column_pg_errors");
+    let db = Database::open(&base, 16).unwrap();
+
+    match db.execute(
+        1,
+        "alter table nonesuchrel rename column nonesuchatt to newnonesuchatt",
+    ) {
+        Err(ExecError::Parse(ParseError::UnknownTable(name))) if name == "nonesuchrel" => {}
+        other => panic!("expected missing relation error, got {other:?}"),
+    }
+
+    db.execute(1, "create table emp (name text, salary int4)")
+        .unwrap();
+    db.execute(1, "create table stud_emp (manager int4) inherits (emp)")
+        .unwrap();
+
+    match db.execute(1, "alter table emp rename column salary to manager") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "column \"manager\" of relation \"stud_emp\" already exists"
+            );
+            assert_eq!(sqlstate, "42701");
+        }
+        other => panic!("expected duplicate inherited column error, got {other:?}"),
+    }
+
+    match db.execute(1, "alter table emp rename column salary to ctid") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "column name \"ctid\" conflicts with a system column name"
+            );
+            assert_eq!(sqlstate, "42701");
+        }
+        other => panic!("expected system column conflict error, got {other:?}"),
     }
 }
 
@@ -20215,6 +20276,25 @@ fn set_constraints_outside_transaction_emits_warning() {
         notices[0].message,
         "SET CONSTRAINTS can only be used in transaction blocks"
     );
+}
+
+#[test]
+fn abort_outside_transaction_emits_warning() {
+    let base = temp_dir("abort_outside_transaction_warning");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    clear_backend_notices();
+    assert_eq!(
+        session.execute(&db, "abort").unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].severity, "WARNING");
+    assert_eq!(notices[0].sqlstate, "01000");
+    assert_eq!(notices[0].message, "there is no transaction in progress");
 }
 
 #[test]

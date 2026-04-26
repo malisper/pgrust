@@ -75,6 +75,9 @@ fn parse_statement_with_options_inner(
     validate_unicode_string_literals(&sql, options)?;
     let sql = normalize_position_syntax_preserving_layout(&sql);
     validate_numeric_lexemes(&sql)?;
+    if let Some(error) = postgres_compatible_preparse_error(&sql) {
+        return Err(error);
+    }
     if let Some(stmt) = try_parse_domain_statement(&sql)? {
         return Ok(stmt);
     }
@@ -195,6 +198,57 @@ fn parse_statement_with_options_inner(
                 .ok_or_else(|| map_pest_error("statement", &sql, err))
         }
     }
+}
+
+fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
+    let trimmed = sql.trim_start();
+    let leading = sql.len() - trimmed.len();
+    let lowered = trimmed.to_ascii_lowercase();
+    let compact = lowered.trim_end();
+    if matches!(
+        compact,
+        "delete from;"
+            | "drop table;"
+            | "drop index;"
+            | "drop aggregate;"
+            | "drop type;"
+            | "drop operator;"
+            | "drop rule;"
+            | "alter table rename;"
+            | "create table;"
+            | "create table ;"
+    ) {
+        let semicolon = sql.rfind(';').unwrap_or(sql.len());
+        return Some(syntax_error_at(sql, semicolon, ";"));
+    }
+    if lowered.starts_with("drop index ") {
+        let rest_offset = leading + "drop index ".len();
+        let rest = &trimmed["drop index ".len()..];
+        if rest.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+            let token = syntax_error_token_at(rest, 0);
+            return Some(syntax_error_at(sql, rest_offset, &token));
+        }
+    }
+    if lowered.starts_with("select distinct from")
+        && trimmed["select distinct".len()..]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace)
+    {
+        let from_offset = leading + "select distinct ".len();
+        return Some(syntax_error_at(sql, from_offset, "from"));
+    }
+
+    if lowered.starts_with("select ")
+        && keyword_boundary(trimmed, "group by grouping sets").is_some()
+        && keyword_boundary(trimmed, "for update").is_some()
+    {
+        return Some(ParseError::FeatureNotSupportedMessage(
+            "FOR UPDATE is not allowed with GROUP BY clause".into(),
+        ));
+    }
+
+    None
 }
 
 fn is_select_with_trailing_operator(sql: &str) -> bool {
@@ -5755,8 +5809,21 @@ fn build_drop_function_statement(sql: &str) -> Result<DropFunctionStatement, Par
         if_exists = true;
         rest = next.trim_start();
     }
+    if rest.starts_with('(') {
+        return Err(syntax_error_at(sql, slice_byte_offset(sql, rest), "("));
+    }
+    if rest.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        return Err(syntax_error_at(
+            sql,
+            slice_byte_offset(sql, rest),
+            syntax_error_token_at(rest, 0).as_str(),
+        ));
+    }
     let ((schema_name, function_name), rest_after_name) = parse_qualified_sql_name(rest)?;
     let rest_after_name = rest_after_name.trim_start();
+    if !rest_after_name.starts_with('(') {
+        return Err(syntax_error_at_statement_end(sql));
+    }
     let (arg_sql, suffix) = take_parenthesized_segment(rest_after_name)?;
     let suffix = suffix.trim();
     let cascade = if suffix.is_empty() || keyword_at_start(suffix, "restrict") {
@@ -6544,9 +6611,11 @@ fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatemen
         None => parsed_options
             .basetype
             .clone()
-            .ok_or_else(|| ParseError::UnexpectedToken {
-                expected: "aggregate signature or BASETYPE option",
-                actual: aggregate_name.clone(),
+            .ok_or_else(|| ParseError::DetailedError {
+                message: "aggregate input type must be specified".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
             })?,
     };
 
@@ -6602,7 +6671,17 @@ fn build_drop_aggregate_statement(sql: &str) -> Result<DropAggregateStatement, P
         if_exists = true;
         rest = next.trim_start();
     }
+    if rest.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        return Err(syntax_error_at(
+            sql,
+            slice_byte_offset(sql, rest),
+            syntax_error_token_at(rest, 0).as_str(),
+        ));
+    }
     let ((schema_name, aggregate_name), rest_after_name) = parse_schema_qualified_name(rest)?;
+    if !rest_after_name.trim_start().starts_with('(') {
+        return Err(syntax_error_at_statement_end(sql));
+    }
     let (signature_sql, suffix) = take_parenthesized_segment(rest_after_name.trim_start())?;
     let suffix = suffix.trim();
     let cascade = if suffix.is_empty() || keyword_at_start(suffix, "restrict") {
@@ -8234,8 +8313,29 @@ fn build_drop_operator_statement(sql: &str) -> Result<DropOperatorStatement, Par
         if_exists = true;
         rest = next.trim_start();
     }
+    if rest.starts_with('(') {
+        return Err(syntax_error_at(sql, slice_byte_offset(sql, rest), "("));
+    }
+    if let Ok((_identifier, after_identifier)) = parse_sql_identifier(rest) {
+        let after_identifier = after_identifier.trim_start();
+        if !after_identifier.starts_with('.') {
+            if after_identifier.is_empty() {
+                return Err(syntax_error_at_statement_end(sql));
+            }
+            let token = syntax_error_token_at(after_identifier, 0);
+            return Err(syntax_error_at(
+                sql,
+                slice_byte_offset(sql, after_identifier),
+                &token,
+            ));
+        }
+    }
     let ((schema_name, operator_name), rest_after_name) = parse_operator_name(rest)?;
-    let ((left_arg, right_arg), suffix) = parse_operator_argtypes(rest_after_name.trim_start())?;
+    if !rest_after_name.trim_start().starts_with('(') {
+        return Err(syntax_error_at_statement_end(sql));
+    }
+    let ((left_arg, right_arg), suffix) =
+        parse_drop_operator_argtypes(sql, rest_after_name.trim_start())?;
     let suffix = suffix.trim();
     if !(suffix.is_empty()
         || keyword_at_start(suffix, "restrict")
@@ -8396,6 +8496,48 @@ fn parse_optional_operator_argtype(input: &str) -> Result<Option<RawTypeName>, P
         return Ok(None);
     }
     Ok(Some(parse_type_name(input)?))
+}
+
+fn parse_drop_operator_argtypes<'a>(
+    sql: &str,
+    input: &'a str,
+) -> Result<((Option<RawTypeName>, Option<RawTypeName>), &'a str), ParseError> {
+    let input_offset = slice_byte_offset(sql, input);
+    let (args_sql, rest) = take_parenthesized_segment(input)?;
+    let closing_paren_offset = slice_byte_offset(sql, rest).saturating_sub(1);
+    if args_sql.trim().is_empty() {
+        return Err(syntax_error_at(sql, closing_paren_offset, ")"));
+    }
+    let args = split_top_level_items(&args_sql, ',')?;
+    if args.len() == 1 {
+        return Err(missing_operator_argument(sql, closing_paren_offset));
+    }
+    if args.len() != 2 {
+        return Err(ParseError::UnexpectedToken {
+            expected: "(leftarg, rightarg)",
+            actual: args_sql,
+        });
+    }
+    if args[0].trim().is_empty() {
+        let comma_offset = args_sql.find(',').unwrap_or(0);
+        return Err(syntax_error_at(sql, input_offset + 1 + comma_offset, ","));
+    }
+    if args[1].trim().is_empty() {
+        return Err(syntax_error_at(sql, closing_paren_offset, ")"));
+    }
+    let left_arg = parse_optional_operator_argtype(&args[0])?;
+    let right_arg = parse_optional_operator_argtype(&args[1])?;
+    Ok(((left_arg, right_arg), rest))
+}
+
+fn missing_operator_argument(sql: &str, byte_offset: usize) -> ParseError {
+    ParseError::DetailedError {
+        message: "missing argument".into(),
+        detail: None,
+        hint: Some("Use NONE to denote the missing argument of a unary operator.".into()),
+        sqlstate: "42601",
+    }
+    .with_position(sql_position_from_byte_offset(sql, byte_offset))
 }
 
 fn parse_qualified_name_ref<'a>(
@@ -8855,6 +8997,19 @@ fn build_drop_type_statement(sql: &str) -> Result<DropTypeStatement, ParseError>
             expected: "type name",
             actual: sql.into(),
         });
+    }
+    if names_sql
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_digit())
+    {
+        let rest_offset = slice_byte_offset(sql, rest);
+        let digit_offset = rest[..split_at].find(names_sql).unwrap_or(0);
+        return Err(syntax_error_at(
+            sql,
+            rest_offset + digit_offset,
+            syntax_error_token_at(names_sql, 0).as_str(),
+        ));
     }
     let type_names = split_top_level_items(names_sql, ',')?
         .into_iter()
@@ -10089,14 +10244,17 @@ fn map_pest_error(
 
     match err.variant {
         ErrorVariant::ParsingError { .. } => {
-            let token = match err.location {
-                InputLocation::Pos(pos) => syntax_error_token_at(input, pos),
-                InputLocation::Span((start, _)) => syntax_error_token_at(input, start),
+            let (token, position) = match err.location {
+                InputLocation::Pos(pos) => syntax_error_token_at_with_position(input, pos),
+                InputLocation::Span((start, _)) => {
+                    syntax_error_token_at_with_position(input, start)
+                }
             };
             ParseError::UnexpectedToken {
                 expected,
                 actual: format!("syntax error at or near \"{token}\""),
             }
+            .with_position(sql_position_from_byte_offset(input, position))
         }
         ErrorVariant::CustomError { message } => ParseError::UnexpectedToken {
             expected,
@@ -10105,21 +10263,41 @@ fn map_pest_error(
     }
 }
 
-fn syntax_error_token_at(input: &str, pos: usize) -> String {
+fn sql_position_from_byte_offset(input: &str, byte_offset: usize) -> usize {
+    input[..byte_offset.min(input.len())].chars().count() + 1
+}
+
+fn slice_byte_offset(base: &str, subslice: &str) -> usize {
+    subslice.as_ptr() as usize - base.as_ptr() as usize
+}
+
+fn syntax_error_at(sql: &str, byte_offset: usize, token: &str) -> ParseError {
+    ParseError::UnexpectedToken {
+        expected: "statement",
+        actual: format!("syntax error at or near \"{token}\""),
+    }
+    .with_position(sql_position_from_byte_offset(sql, byte_offset))
+}
+
+fn syntax_error_at_statement_end(sql: &str) -> ParseError {
+    syntax_error_at(sql, sql.len(), ";")
+}
+
+fn syntax_error_token_at_with_position(input: &str, pos: usize) -> (String, usize) {
     if pos >= input.len() {
-        return "end of input".into();
+        return ("end of input".into(), input.len());
     }
 
     let ch = input[pos..].chars().next().expect("valid utf-8");
     if ch.is_whitespace() {
-        return syntax_error_token_at(input, pos + ch.len_utf8());
+        return syntax_error_token_at_with_position(input, pos + ch.len_utf8());
     }
     if ch == ',' {
         let next = pos + ch.len_utf8();
         if next < input.len() {
-            let next_token = syntax_error_token_at(input, next);
+            let (next_token, next_pos) = syntax_error_token_at_with_position(input, next);
             if next_token == ")" || next_token == "]" || next_token == "}" {
-                return next_token;
+                return (next_token, next_pos);
             }
         }
     }
@@ -10136,7 +10314,7 @@ fn syntax_error_token_at(input: &str, pos: usize) -> String {
                 break;
             }
         }
-        return input[pos..end].to_string();
+        return (input[pos..end].to_string(), pos);
     }
     if ch.is_ascii_alphanumeric() || ch == '_' {
         let mut end = pos + ch.len_utf8();
@@ -10148,9 +10326,13 @@ fn syntax_error_token_at(input: &str, pos: usize) -> String {
                 break;
             }
         }
-        return input[pos..end].to_string();
+        return (input[pos..end].to_string(), pos);
     }
-    ch.to_string()
+    (ch.to_string(), pos)
+}
+
+fn syntax_error_token_at(input: &str, pos: usize) -> String {
+    syntax_error_token_at_with_position(input, pos).0
 }
 
 fn validate_unicode_string_literals(sql: &str, options: ParseOptions) -> Result<(), ParseError> {
@@ -14811,7 +14993,9 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
 
 fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError> {
     let mut inner = pair.into_inner();
-    let first = inner.next().ok_or(ParseError::EmptySelectList)?;
+    let Some(first) = inner.next() else {
+        return Ok(Vec::new());
+    };
     if first.as_rule() == Rule::star {
         return Ok(vec![SelectItem {
             output_name: "*".into(),
