@@ -5292,6 +5292,17 @@ fn parse_reset_statement() {
 }
 
 #[test]
+fn parse_reset_time_zone_statement() {
+    let stmt = parse_statement("reset time zone").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Reset(ResetStatement {
+            name: Some("timezone".into()),
+        })
+    );
+}
+
+#[test]
 fn parse_checkpoint_statement() {
     assert_eq!(
         parse_statement("checkpoint").unwrap(),
@@ -7210,6 +7221,15 @@ fn parse_at_time_zone_expression() {
 }
 
 #[test]
+fn parse_overlaps_expression() {
+    let stmt = parse_select(
+        "select (timestamp '2000-11-27', timestamp '2000-11-28') overlaps (timestamp '2000-11-27 12:00', interval '1 day')",
+    )
+    .unwrap();
+    assert!(matches!(&stmt.targets[0].expr, SqlExpr::Overlaps(_, _)));
+}
+
+#[test]
 fn analyze_at_time_zone_uses_timezone_function_types() {
     let stmt =
         parse_select("select timestamptz '2001-02-16 20:38:40+00' at time zone 'America/Denver'")
@@ -7264,6 +7284,138 @@ fn analyze_timetz_at_time_zone_keeps_timetz_and_interval_types() {
                     }
                 )
         ]
+    ));
+}
+
+#[test]
+fn analyze_date_time_arithmetic_uses_postgres_result_types() {
+    let stmt = parse_select(
+        "select date '2001-01-02' + time '03:04', date '2001-01-02' + timetz '03:04+02', date '2001-01-02' - time '03:04'",
+    )
+    .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+    assert!(matches!(
+        &query.target_list[0].expr,
+        Expr::Op(op) if op.opresulttype == SqlType::new(SqlTypeKind::Timestamp)
+    ));
+    assert!(matches!(
+        &query.target_list[1].expr,
+        Expr::Op(op) if op.opresulttype == SqlType::new(SqlTypeKind::TimestampTz)
+    ));
+    assert!(matches!(
+        &query.target_list[2].expr,
+        Expr::Op(op) if op.opresulttype == SqlType::new(SqlTypeKind::Timestamp)
+    ));
+
+    let err = analyze_select_query_with_outer(
+        &parse_select("select date '2001-01-02' - timetz '03:04+02'").unwrap(),
+        &catalog(),
+        &[],
+        None,
+        None,
+        &[],
+        &[],
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UndefinedOperator {
+            op: "-",
+            left_type,
+            right_type,
+        } if left_type == "date" && right_type == "time with time zone"
+    ));
+}
+
+#[test]
+fn analyze_rejects_unsupported_timetz_interval_casts_with_postgres_error() {
+    for (sql, expected) in [
+        (
+            "select cast(time with time zone '01:02-08' as interval)",
+            "cannot cast type time with time zone to interval",
+        ),
+        (
+            "select cast(interval '02:03' as time with time zone)",
+            "cannot cast type interval to time with time zone",
+        ),
+    ] {
+        let err = analyze_select_query_with_outer(
+            &parse_select(sql).unwrap(),
+            &catalog(),
+            &[],
+            None,
+            None,
+            &[],
+            &[],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::DetailedError {
+                message,
+                sqlstate: "42846",
+                ..
+            } if message == expected
+        ));
+    }
+}
+
+#[test]
+fn analyze_timestamptz_date_time_constructor_overloads() {
+    let stmt = parse_select(
+        "select timestamptz(date '2001-01-02', time '03:04'), timestamptz(date '2001-01-02', timetz '03:04+02')",
+    )
+    .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+    for target in &query.target_list {
+        assert!(matches!(
+            &target.expr,
+            Expr::Func(func)
+                if func.implementation == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+                    crate::include::nodes::primnodes::BuiltinScalarFunction::TimestampTzConstructor
+                )
+                    && func.funcresulttype == Some(SqlType::new(SqlTypeKind::TimestampTz))
+        ));
+    }
+}
+
+#[test]
+fn analyze_mixed_date_timestamp_comparisons_coerce_to_postgres_common_types() {
+    let stmt = parse_select(
+        "select date '2001-01-02' < timestamp '2001-01-03', date '2001-01-02' <= timestamptz '2001-01-03 00:00+00', timestamp '2001-01-02' = timestamptz '2001-01-02 00:00+00'",
+    )
+    .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+
+    assert!(matches!(
+        &query.target_list[0].expr,
+        Expr::Op(op)
+            if op.args.iter().all(|arg| matches!(
+                arg,
+                Expr::Const(Value::Timestamp(_))
+                    | Expr::Cast(_, SqlType { kind: SqlTypeKind::Timestamp, .. })
+            ))
+    ));
+    assert!(matches!(
+        &query.target_list[1].expr,
+        Expr::Op(op)
+            if op.args.iter().all(|arg| matches!(
+                arg,
+                Expr::Const(Value::TimestampTz(_))
+                    | Expr::Cast(_, SqlType { kind: SqlTypeKind::TimestampTz, .. })
+            ))
+    ));
+    assert!(matches!(
+        &query.target_list[2].expr,
+        Expr::Op(op)
+            if op.args.iter().all(|arg| matches!(
+                arg,
+                Expr::Const(Value::TimestampTz(_))
+                    | Expr::Cast(_, SqlType { kind: SqlTypeKind::TimestampTz, .. })
+            ))
     ));
 }
 
@@ -9424,6 +9576,17 @@ fn parse_show_timezone() {
         parse_statement("show timezone").unwrap(),
         Statement::Show(ShowStatement { name }) if name == "timezone"
     ));
+    assert!(matches!(
+        parse_statement("show time zone").unwrap(),
+        Statement::Show(ShowStatement { name }) if name == "timezone"
+    ));
+}
+
+#[test]
+fn parse_between_symmetric_expression() {
+    let stmt = parse_select("select time '01:00' between symmetric time '02:00' and time '00:00'")
+        .unwrap();
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::Or(_, _)));
 }
 
 #[test]

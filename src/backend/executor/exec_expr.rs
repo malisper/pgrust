@@ -36,9 +36,9 @@ use super::expr_date::{
     eval_extract_function_with_config, eval_isfinite_function, eval_justify_days_function,
     eval_justify_hours_function, eval_justify_interval_function, eval_make_date_function,
     eval_make_interval_function, eval_make_time_function, eval_make_timestamp_function,
-    eval_make_timestamptz_function, eval_timezone_function as eval_timetz_timezone_function,
-    eval_to_date_function, eval_to_timestamp_function, timezone_interval_seconds,
-    timezone_target_offset_seconds,
+    eval_make_timestamptz_function, eval_timestamptz_constructor_function,
+    eval_timezone_function as eval_timetz_timezone_function, eval_to_date_function,
+    eval_to_timestamp_function, timezone_interval_seconds, timezone_target_offset_seconds,
 };
 use super::expr_datetime::{
     current_date_value, current_date_value_from_timestamp_with_config, current_time_value,
@@ -70,11 +70,11 @@ use super::expr_numeric::{
 };
 use super::expr_ops::compare_order_values;
 use super::expr_ops::{
-    add_values, bitwise_and_values, bitwise_not_value, bitwise_or_values, bitwise_xor_values,
-    compare_values, compare_values_with_type, concat_values, concat_values_with_cast_context,
-    div_values, eval_and, eval_or, mod_values, mul_values, negate_value, not_equal_values,
-    not_equal_values_with_type, order_values, shift_left_values, shift_right_values, sub_values,
-    values_are_distinct,
+    add_values, add_values_with_config, bitwise_and_values, bitwise_not_value, bitwise_or_values,
+    bitwise_xor_values, compare_values, compare_values_with_type, concat_values,
+    concat_values_with_cast_context, div_values, eval_and, eval_or, mod_values, mul_values,
+    negate_value, not_equal_values, not_equal_values_with_type, order_values, shift_left_values,
+    shift_right_values, sub_values, sub_values_with_config, values_are_distinct,
 };
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
 use super::expr_range::eval_range_function;
@@ -3277,12 +3277,16 @@ fn eval_op_expr(
         (OpExprKind::UnaryPlus, [inner]) => eval_expr(inner, slot, ctx),
         (OpExprKind::Negate, [inner]) => negate_value(eval_expr(inner, slot, ctx)?),
         (OpExprKind::BitNot, [inner]) => bitwise_not_value(eval_expr(inner, slot, ctx)?),
-        (OpExprKind::Add, [left, right]) => {
-            add_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
-        (OpExprKind::Sub, [left, right]) => {
-            sub_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
+        (OpExprKind::Add, [left, right]) => add_values_with_config(
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
+            &ctx.datetime_config,
+        ),
+        (OpExprKind::Sub, [left, right]) => sub_values_with_config(
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
+            &ctx.datetime_config,
+        ),
         (OpExprKind::BitAnd, [left, right]) => {
             bitwise_and_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
         }
@@ -4873,7 +4877,14 @@ fn eval_plpgsql_builtin_function(
         ),
         BuiltinScalarFunction::ToDate => eval_to_date_function(&values),
         BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
-        BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(&values),
+        BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(
+            &values,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        ),
+        BuiltinScalarFunction::TimestampTzConstructor => eval_timestamptz_constructor_function(
+            &values,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        ),
         BuiltinScalarFunction::Abs => eval_abs_function(&values),
         BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
@@ -6365,7 +6376,12 @@ fn eval_builtin_function(
         BuiltinScalarFunction::MakeTimestampTz => {
             eval_make_timestamptz_function(&values, &ctx.datetime_config)
         }
-        BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(&values),
+        BuiltinScalarFunction::TimestampTzConstructor => {
+            eval_timestamptz_constructor_function(&values, &ctx.datetime_config)
+        }
+        BuiltinScalarFunction::ToTimestamp => {
+            eval_to_timestamp_function(&values, &ctx.datetime_config)
+        }
         BuiltinScalarFunction::IntervalHash => {
             eval_hash_builtin_function(HashFunctionKind::Interval, false, &values)
         }

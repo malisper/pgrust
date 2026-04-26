@@ -30,8 +30,11 @@ use crate::backend::executor::jsonb::{
 use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::datetime::{
-    days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
+    current_timezone_name, days_from_ymd, days_in_month, named_timezone_offset_seconds_for_local,
+    timestamp_parts_from_usecs, timezone_offset_seconds, timezone_offset_seconds_at_utc,
+    ymd_from_days,
 };
+use crate::backend::utils::time::timestamp::is_valid_finite_timestamp_usecs;
 use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
 use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT,
@@ -431,6 +434,10 @@ pub(crate) fn add_values(left: Value, right: Value) -> Result<Value, ExecError> 
             .checked_add(*r)
             .map(Value::Interval)
             .ok_or_else(interval_out_of_range),
+        (Value::Date(l), Value::Time(r)) => date_time_value(*l, *r).map(Value::Timestamp),
+        (Value::Time(l), Value::Date(r)) => date_time_value(*r, *l).map(Value::Timestamp),
+        (Value::Date(l), Value::TimeTz(r)) => date_timetz_value(*l, *r).map(Value::TimestampTz),
+        (Value::TimeTz(l), Value::Date(r)) => date_timetz_value(*r, *l).map(Value::TimestampTz),
         (Value::Date(l), Value::Interval(r)) => date_interval_op(*l, *r, false),
         (Value::Interval(l), Value::Date(r)) => date_interval_op(*r, *l, false),
         (Value::Timestamp(l), Value::Interval(r)) => timestamp_interval_op(*l, *r, false),
@@ -450,6 +457,22 @@ pub(crate) fn add_values(left: Value, right: Value) -> Result<Value, ExecError> 
             left,
             right,
         }),
+    }
+}
+
+pub(crate) fn add_values_with_config(
+    left: Value,
+    right: Value,
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    match (&left, &right) {
+        (Value::TimestampTz(l), Value::Interval(r)) => {
+            timestamptz_interval_op_with_config(*l, *r, false, config)
+        }
+        (Value::Interval(l), Value::TimestampTz(r)) => {
+            timestamptz_interval_op_with_config(*r, *l, false, config)
+        }
+        _ => add_values(left, right),
     }
 }
 
@@ -541,6 +564,9 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
             .checked_sub(*r)
             .map(Value::Interval)
             .ok_or_else(interval_out_of_range),
+        (Value::Date(l), Value::Time(r)) => {
+            date_time_value(*l, TimeADT(-r.0)).map(Value::Timestamp)
+        }
         (Value::Date(l), Value::Interval(r)) => date_interval_op(*l, *r, true),
         (Value::Timestamp(l), Value::Interval(r)) => timestamp_interval_op(*l, *r, true),
         (Value::TimestampTz(l), Value::Interval(r)) => timestamptz_interval_op(*l, *r, true),
@@ -555,6 +581,19 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
             left,
             right,
         }),
+    }
+}
+
+pub(crate) fn sub_values_with_config(
+    left: Value,
+    right: Value,
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    match (&left, &right) {
+        (Value::TimestampTz(l), Value::Interval(r)) => {
+            timestamptz_interval_op_with_config(*l, *r, true, config)
+        }
+        _ => sub_values(left, right),
     }
 }
 
@@ -613,10 +652,13 @@ fn finite_timestamp_interval(timestamp: i64, interval: IntervalValue) -> Result<
     let total = i128::from(days) * i128::from(USECS_PER_DAY)
         + i128::from(time_usecs)
         + i128::from(interval.time_micros);
-    if total <= i128::from(TIMESTAMP_NOBEGIN) || total >= i128::from(TIMESTAMP_NOEND) {
+    let Ok(total) = i64::try_from(total) else {
+        return Err(timestamp_out_of_range());
+    };
+    if !is_valid_finite_timestamp_usecs(total) {
         return Err(timestamp_out_of_range());
     }
-    Ok(total as i64)
+    Ok(total)
 }
 
 fn timestamp_interval_value(
@@ -657,6 +699,37 @@ fn date_timestamp_value(date: DateADT) -> i64 {
     }
 }
 
+fn checked_timestamp_usecs(usecs: i64) -> Result<TimestampADT, ExecError> {
+    if !is_valid_finite_timestamp_usecs(usecs) {
+        Err(timestamp_out_of_range())
+    } else {
+        Ok(TimestampADT(usecs))
+    }
+}
+
+fn date_time_value(date: DateADT, time: TimeADT) -> Result<TimestampADT, ExecError> {
+    let timestamp = date_timestamp_value(date);
+    if timestamp == TIMESTAMP_NOBEGIN || timestamp == TIMESTAMP_NOEND {
+        return Ok(TimestampADT(timestamp));
+    }
+    timestamp
+        .checked_add(time.0)
+        .ok_or_else(timestamp_out_of_range)
+        .and_then(checked_timestamp_usecs)
+}
+
+fn date_timetz_value(date: DateADT, timetz: TimeTzADT) -> Result<TimestampTzADT, ExecError> {
+    let timestamp = date_timestamp_value(date);
+    if timestamp == TIMESTAMP_NOBEGIN || timestamp == TIMESTAMP_NOEND {
+        return Ok(TimestampTzADT(timestamp));
+    }
+    timestamp
+        .checked_add(timetz.time.0)
+        .and_then(|value| value.checked_sub(i64::from(timetz.offset_seconds) * USECS_PER_SEC))
+        .ok_or_else(timestamp_out_of_range)
+        .and_then(|value| checked_timestamp_usecs(value).map(|value| TimestampTzADT(value.0)))
+}
+
 fn date_interval_op(
     date: DateADT,
     interval: IntervalValue,
@@ -681,6 +754,78 @@ fn timestamptz_interval_op(
     subtract: bool,
 ) -> Result<Value, ExecError> {
     timestamp_interval_value(timestamp.0, interval, subtract)
+        .map(|value| Value::TimestampTz(TimestampTzADT(value)))
+}
+
+fn timezone_offset_seconds_for_local(config: &DateTimeConfig, local_usecs: i64) -> i32 {
+    named_timezone_offset_seconds_for_local(current_timezone_name(config), local_usecs)
+        .unwrap_or_else(|| timezone_offset_seconds(config))
+}
+
+fn finite_timestamptz_interval(
+    timestamp: i64,
+    interval: IntervalValue,
+    config: &DateTimeConfig,
+) -> Result<i64, ExecError> {
+    if interval.months == 0 && interval.days == 0 {
+        return finite_timestamp_interval(timestamp, interval);
+    }
+
+    let offset = timezone_offset_seconds_at_utc(config, timestamp);
+    let local = timestamp
+        .checked_add(i64::from(offset) * USECS_PER_SEC)
+        .ok_or_else(timestamp_out_of_range)?;
+    let local = finite_timestamp_interval(
+        local,
+        IntervalValue {
+            months: interval.months,
+            days: interval.days,
+            time_micros: 0,
+        },
+    )?;
+    let new_offset = timezone_offset_seconds_for_local(config, local);
+    let utc = local
+        .checked_sub(i64::from(new_offset) * USECS_PER_SEC)
+        .ok_or_else(timestamp_out_of_range)?;
+    finite_timestamp_interval(
+        utc,
+        IntervalValue {
+            months: 0,
+            days: 0,
+            time_micros: interval.time_micros,
+        },
+    )
+}
+
+fn timestamptz_interval_op_with_config(
+    timestamp: TimestampTzADT,
+    interval: IntervalValue,
+    subtract: bool,
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    let interval = if subtract {
+        interval
+            .checked_negate()
+            .ok_or_else(interval_out_of_range)?
+    } else {
+        interval
+    };
+    if interval.is_neg_infinity() {
+        if timestamp.0 == TIMESTAMP_NOEND {
+            return Err(timestamp_out_of_range());
+        }
+        return Ok(Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOBEGIN)));
+    }
+    if interval.is_infinity() {
+        if timestamp.0 == TIMESTAMP_NOBEGIN {
+            return Err(timestamp_out_of_range());
+        }
+        return Ok(Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOEND)));
+    }
+    if timestamp.0 == TIMESTAMP_NOBEGIN || timestamp.0 == TIMESTAMP_NOEND {
+        return Ok(Value::TimestampTz(timestamp));
+    }
+    finite_timestamptz_interval(timestamp.0, interval, config)
         .map(|value| Value::TimestampTz(TimestampTzADT(value)))
 }
 
@@ -2245,8 +2390,12 @@ fn exact_numeric_binary(
 mod tests {
     use std::cmp::Ordering;
 
+    use crate::backend::utils::misc::guc_datetime::{DateStyleFormat, DateTimeConfig};
+    use crate::backend::utils::time::datetime::days_from_ymd;
+    use crate::backend::utils::time::timestamp::{format_timestamptz_text, parse_timestamptz_text};
     use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
-    use crate::include::nodes::datum::{NumericValue, Value};
+    use crate::include::nodes::datetime::{TimestampADT, USECS_PER_DAY, USECS_PER_HOUR};
+    use crate::include::nodes::datum::{IntervalValue, NumericValue, Value};
 
     #[test]
     fn compare_order_values_orders_int64_values_directly() {
@@ -2303,5 +2452,68 @@ mod tests {
             numerator.div(&denominator, 0),
             Some(NumericValue::from_i64(6))
         );
+    }
+
+    #[test]
+    fn timestamptz_interval_day_uses_local_dst_calendar() {
+        let config = DateTimeConfig {
+            date_style_format: DateStyleFormat::Postgres,
+            time_zone: "CST7CDT,M4.1.0,M10.5.0".into(),
+            ..DateTimeConfig::default()
+        };
+        let start = parse_timestamptz_text("2005-04-02 12:00-07", &config).unwrap();
+        let day = IntervalValue {
+            months: 0,
+            days: 1,
+            time_micros: 0,
+        };
+        let hours = IntervalValue {
+            months: 0,
+            days: 0,
+            time_micros: 24 * USECS_PER_HOUR,
+        };
+
+        let Value::TimestampTz(calendar_day) =
+            super::add_values_with_config(Value::TimestampTz(start), Value::Interval(day), &config)
+                .unwrap()
+        else {
+            panic!("expected timestamptz result");
+        };
+        let Value::TimestampTz(fixed_hours) = super::add_values_with_config(
+            Value::TimestampTz(start),
+            Value::Interval(hours),
+            &config,
+        )
+        .unwrap() else {
+            panic!("expected timestamptz result");
+        };
+
+        assert_eq!(
+            format_timestamptz_text(calendar_day, &config),
+            "Sun Apr 03 12:00:00 2005 CDT"
+        );
+        assert_eq!(
+            format_timestamptz_text(fixed_hours, &config),
+            "Sun Apr 03 13:00:00 2005 CDT"
+        );
+    }
+
+    #[test]
+    fn timestamp_interval_arithmetic_checks_postgres_finite_range() {
+        let timestamp = TimestampADT(i64::from(days_from_ymd(2000, 1, 1).unwrap()) * USECS_PER_DAY);
+        let interval = IntervalValue {
+            months: 0,
+            days: 2_483_590,
+            time_micros: 0,
+        };
+
+        assert!(matches!(
+            super::sub_values(Value::Timestamp(timestamp), Value::Interval(interval)),
+            Err(crate::backend::executor::ExecError::DetailedError {
+                message,
+                sqlstate: "22008",
+                ..
+            }) if message == "timestamp out of range"
+        ));
     }
 }

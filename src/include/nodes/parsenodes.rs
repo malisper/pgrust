@@ -3818,6 +3818,7 @@ pub enum SqlExpr {
     IsNotNull(Box<SqlExpr>),
     IsDistinctFrom(Box<SqlExpr>, Box<SqlExpr>),
     IsNotDistinctFrom(Box<SqlExpr>, Box<SqlExpr>),
+    Overlaps(Box<SqlExpr>, Box<SqlExpr>),
     ArrayLiteral(Vec<SqlExpr>),
     Row(Vec<SqlExpr>),
     ArrayOverlap(Box<SqlExpr>, Box<SqlExpr>),

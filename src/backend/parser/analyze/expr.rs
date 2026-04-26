@@ -285,6 +285,88 @@ fn bind_row_expr_fields(
     Ok(field_exprs)
 }
 
+fn overlaps_row_items(expr: &SqlExpr) -> Result<(&SqlExpr, &SqlExpr), ParseError> {
+    let SqlExpr::Row(items) = expr else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "row expression",
+            actual: format!("{expr:?}"),
+        });
+    };
+    match items.as_slice() {
+        [start, end] => Ok((start, end)),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "two-element OVERLAPS row",
+            actual: format!("{} elements", items.len()),
+        }),
+    }
+}
+
+fn overlaps_end_expr(
+    start: &SqlExpr,
+    end_or_interval: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> SqlExpr {
+    let end_type = infer_sql_expr_type_with_ctes(
+        end_or_interval,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    );
+    if !end_type.is_array && matches!(end_type.kind, SqlTypeKind::Interval) {
+        SqlExpr::Add(Box::new(start.clone()), Box::new(end_or_interval.clone()))
+    } else {
+        end_or_interval.clone()
+    }
+}
+
+fn bind_overlaps_expr(
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let (left_start, left_end_or_interval) = overlaps_row_items(left)?;
+    let (right_start, right_end_or_interval) = overlaps_row_items(right)?;
+    let left_end = overlaps_end_expr(
+        left_start,
+        left_end_or_interval,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    );
+    let right_end = overlaps_end_expr(
+        right_start,
+        right_end_or_interval,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    );
+    let lowered = SqlExpr::And(
+        Box::new(SqlExpr::Lt(
+            Box::new(left_start.clone()),
+            Box::new(right_end),
+        )),
+        Box::new(SqlExpr::Lt(
+            Box::new(right_start.clone()),
+            Box::new(left_end),
+        )),
+    );
+    bind_expr_with_outer_and_ctes(&lowered, scope, catalog, outer_scopes, grouped_outer, ctes)
+}
+
 fn expand_bound_record_expr_fields(
     expr: &Expr,
     catalog: &dyn CatalogLookup,
@@ -1323,6 +1405,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 descriptor,
                 fields: field_exprs,
             }
+        }
+        SqlExpr::Overlaps(left, right) => {
+            return bind_overlaps_expr(
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
         }
         SqlExpr::BinaryOperator { op, left, right } => match op.as_str() {
             "@@" => bind_overloaded_binary_expr(
@@ -4198,6 +4291,23 @@ fn validate_catalog_backed_explicit_cast(
     target_type: SqlType,
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ParseError> {
+    if matches!(
+        (source_type.kind, target_type.kind),
+        (SqlTypeKind::TimeTz, SqlTypeKind::Interval) | (SqlTypeKind::Interval, SqlTypeKind::TimeTz)
+    ) && !source_type.is_array
+        && !target_type.is_array
+    {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "cannot cast type {} to {}",
+                sql_type_name(source_type),
+                sql_type_name(target_type)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42846",
+        });
+    }
     if catalog_backed_explicit_cast_allowed(source_type, target_type, catalog) {
         return Ok(());
     }
