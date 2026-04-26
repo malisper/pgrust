@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::backend::access::heap::heapam::HeapError;
+use crate::backend::access::transam::xact::{CommandId, INVALID_TRANSACTION_ID, TransactionId};
 use crate::backend::commands::tablecmds::{execute_delete, execute_insert, execute_update};
 use crate::backend::executor::{
     ArrayDimension, ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult,
@@ -121,6 +123,14 @@ pub(crate) fn execute_block_with_gucs(
 ) -> Result<StatementResult, ExecError> {
     let mut values = vec![Value::Null; block.total_slots];
     exec_do_block(block, &mut values, gucs)?;
+    Ok(StatementResult::AffectedRows(0))
+}
+
+pub(crate) fn execute_do_function(
+    compiled: &CompiledFunction,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
+    execute_compiled_function(compiled, &[], None, ctx)?;
     Ok(StatementResult::AffectedRows(0))
 }
 
@@ -810,6 +820,7 @@ fn exec_do_stmt(
         }
         CompiledStmt::Raise {
             level,
+            sqlstate,
             message,
             params,
         } => {
@@ -817,7 +828,7 @@ fn exec_do_stmt(
                 .iter()
                 .map(|expr| eval_do_expr(expr, values))
                 .collect::<Result<Vec<_>, _>>()?;
-            finish_raise(level, message, &param_values)
+            finish_raise(level, sqlstate.as_deref(), message, &param_values)
         }
         CompiledStmt::Assert { condition, message } => {
             if !plpgsql_check_asserts_enabled_from_gucs(Some(gucs)) {
@@ -943,6 +954,25 @@ fn exec_function_block(
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<FunctionControl, ExecError> {
+    // :HACK: PostgreSQL runs PL/pgSQL exception blocks in subtransactions.
+    // pgrust does not have full subtransaction ownership yet, but anonymous DO
+    // blocks need aborted inner writes to become invisible for MVCC regressions.
+    let subxact = if compiled.name == "inline_code_block"
+        && !block.exception_handlers.is_empty()
+        && ctx.snapshot.current_xid != INVALID_TRANSACTION_ID
+    {
+        Some((ctx.snapshot.clone(), ctx.txns.write().begin()))
+    } else {
+        None
+    };
+    if let Some((_, subxid)) = &subxact {
+        ctx.snapshot = ctx
+            .txns
+            .read()
+            .snapshot_for_command(*subxid, CommandId::MAX)
+            .map_err(|e| ExecError::Heap(HeapError::Mvcc(e)))?;
+    }
+
     for local in &block.local_slots {
         state.values[local.slot] = match &local.default_expr {
             Some(expr) => cast_value(eval_function_expr(expr, &state.values, ctx)?, local.ty)?,
@@ -954,8 +984,18 @@ fn exec_function_block(
             with_plpgsql_context_if_missing(err, compiled, stmt_context_action(stmt))
         }) {
             Ok(FunctionControl::Continue) => {}
-            Ok(FunctionControl::Return) => return Ok(FunctionControl::Return),
+            Ok(FunctionControl::Return) => {
+                finish_function_block_subxact(ctx, subxact, true)?;
+                return Ok(FunctionControl::Return);
+            }
             Err(err) => {
+                if let Some((parent_snapshot, subxid)) = subxact {
+                    ctx.txns
+                        .write()
+                        .abort(subxid)
+                        .map_err(|e| ExecError::Heap(HeapError::Mvcc(e)))?;
+                    ctx.snapshot = parent_snapshot;
+                }
                 return match exec_function_exception_handlers(
                     &block.exception_handlers,
                     &err,
@@ -970,7 +1010,34 @@ fn exec_function_block(
             }
         }
     }
+    finish_function_block_subxact(ctx, subxact, true)?;
     Ok(FunctionControl::Continue)
+}
+
+fn finish_function_block_subxact(
+    ctx: &mut ExecutorContext,
+    subxact: Option<(
+        crate::backend::access::transam::xact::Snapshot,
+        TransactionId,
+    )>,
+    commit: bool,
+) -> Result<(), ExecError> {
+    let Some((parent_snapshot, subxid)) = subxact else {
+        return Ok(());
+    };
+    if commit {
+        ctx.txns
+            .write()
+            .commit(subxid)
+            .map_err(|e| ExecError::Heap(HeapError::Mvcc(e)))?;
+    } else {
+        ctx.txns
+            .write()
+            .abort(subxid)
+            .map_err(|e| ExecError::Heap(HeapError::Mvcc(e)))?;
+    }
+    ctx.snapshot = parent_snapshot;
+    Ok(())
 }
 
 fn exec_function_exception_handlers(
@@ -1105,6 +1172,7 @@ fn exec_function_stmt(
         ),
         CompiledStmt::Raise {
             level,
+            sqlstate,
             message,
             params,
         } => {
@@ -1112,7 +1180,7 @@ fn exec_function_stmt(
                 .iter()
                 .map(|expr| eval_function_expr(expr, &state.values, ctx))
                 .collect::<Result<Vec<_>, _>>()?;
-            finish_raise(level, message, &param_values)?;
+            finish_raise(level, sqlstate.as_deref(), message, &param_values)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::Assert { condition, message } => {
@@ -2666,6 +2734,7 @@ fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
     match name.to_ascii_lowercase().as_str() {
         "assert_failure" => Some("P0004"),
         "division_by_zero" => Some("22012"),
+        "data_corrupted" => Some("XX001"),
         "raise_exception" => Some("P0001"),
         "no_data_found" => Some("P0002"),
         "too_many_rows" => Some("P0003"),
@@ -2677,6 +2746,7 @@ fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
         "null_value_not_allowed" => Some("22004"),
         "syntax_error" => Some("42601"),
         "feature_not_supported" => Some("0A000"),
+        "reading_sql_data_not_permitted" => Some("2F003"),
         _ => None,
     }
 }
@@ -2725,10 +2795,23 @@ fn render_assert_message(value: Value) -> Result<String, ExecError> {
     }
 }
 
-fn finish_raise(level: &RaiseLevel, message: &str, params: &[Value]) -> Result<(), ExecError> {
+fn finish_raise(
+    level: &RaiseLevel,
+    sqlstate: Option<&str>,
+    message: &str,
+    params: &[Value],
+) -> Result<(), ExecError> {
     let rendered = render_raise_message(message, params)?;
     match level {
-        RaiseLevel::Exception => Err(ExecError::RaiseException(rendered)),
+        RaiseLevel::Exception => match sqlstate.and_then(static_sqlstate) {
+            Some("P0001") | None => Err(ExecError::RaiseException(rendered)),
+            Some(sqlstate) => Err(ExecError::DetailedError {
+                message: rendered,
+                detail: None,
+                hint: None,
+                sqlstate,
+            }),
+        },
         RaiseLevel::Info | RaiseLevel::Notice | RaiseLevel::Warning => {
             NOTICE_QUEUE.with(|queue| {
                 queue.borrow_mut().push(PlpgsqlNotice {
@@ -2738,6 +2821,18 @@ fn finish_raise(level: &RaiseLevel, message: &str, params: &[Value]) -> Result<(
             });
             Ok(())
         }
+    }
+}
+
+fn static_sqlstate(sqlstate: &str) -> Option<&'static str> {
+    match sqlstate {
+        "0A000" => Some("0A000"),
+        "22012" => Some("22012"),
+        "2F003" => Some("2F003"),
+        "P0001" => Some("P0001"),
+        "P0004" => Some("P0004"),
+        "XX001" => Some("XX001"),
+        _ => None,
     }
 }
 

@@ -4,7 +4,9 @@ use std::sync::Arc;
 use parking_lot::RwLockWriteGuard;
 
 use crate::backend::access::common::toast_compression::compress_inline_datum;
-use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
+use crate::backend::access::heap::heapam::{
+    heap_fetch, heap_scan_begin_visible, heap_scan_next_visible,
+};
 use crate::backend::access::index::buildkeys::{
     IndexBuildKeyProjector, materialize_heap_row_values,
 };
@@ -14,7 +16,7 @@ use crate::backend::access::nbtree::nbtpreprocesskeys::preprocess_scan_keys;
 use crate::backend::access::nbtree::nbtsplitloc::choose_split_index;
 use crate::backend::access::nbtree::nbtutils::BtSortTuple;
 use crate::backend::access::nbtree::nbtxlog::log_btree_record;
-use crate::backend::access::transam::xact::TransactionId;
+use crate::backend::access::transam::xact::{TransactionId, TransactionStatus};
 use crate::backend::access::transam::xlog::{
     INVALID_LSN, XLOG_BTREE_INSERT_LEAF, XLOG_BTREE_INSERT_META, XLOG_BTREE_INSERT_UPPER,
     XLOG_BTREE_NEWROOT, XLOG_BTREE_SPLIT_L, XLOG_BTREE_SPLIT_R, XLOG_FPI,
@@ -2015,6 +2017,9 @@ fn insert_tuple_into_locked_page(
         .map_err(|err| CatalogError::Io(format!("btree high-key read failed: {err:?}")))?;
     let mut items = bt_page_data_items(&page)
         .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
+    if is_leaf {
+        prune_aborted_leaf_items(ctx, &mut items);
+    }
     let insert_at = if is_leaf {
         items.partition_point(|item| {
             let existing = tuple_key_values(&ctx.index_desc, item).unwrap_or_default();
@@ -2104,6 +2109,19 @@ fn insert_tuple_into_locked_page(
         .install_page_image_locked(pin.buffer_id(), &rebuilt, lsn, &mut guard)
         .map_err(|err| CatalogError::Io(format!("btree buffered write failed: {err:?}")))?;
     Ok(None)
+}
+
+fn prune_aborted_leaf_items(ctx: &IndexInsertContext, items: &mut Vec<IndexTupleData>) {
+    let txns = ctx.txns.read();
+    items.retain(|item| {
+        let Ok(tuple) = heap_fetch(&ctx.pool, ctx.client_id, ctx.heap_relation, item.t_tid) else {
+            return true;
+        };
+        !matches!(
+            txns.status(tuple.header.xmin),
+            Some(TransactionStatus::Aborted)
+        )
+    });
 }
 
 fn insert_tuple_into_page(

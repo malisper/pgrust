@@ -204,6 +204,7 @@ pub(crate) enum CompiledStmt {
     },
     Raise {
         level: RaiseLevel,
+        sqlstate: Option<String>,
         message: String,
         params: Vec<CompiledExpr>,
     },
@@ -557,6 +558,31 @@ pub(crate) fn compile_do_block(
     let mut env = CompileEnv::default();
     let _ = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
     compile_block(block, catalog, &mut env, None)
+}
+
+pub(crate) fn compile_do_function(
+    block: &Block,
+    catalog: &dyn CatalogLookup,
+) -> Result<CompiledFunction, ParseError> {
+    let mut env = CompileEnv::default();
+    let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
+    let sqlerrm_slot = env.define_var("sqlerrm", SqlType::new(SqlTypeKind::Text));
+    let return_contract = FunctionReturnContract::Scalar {
+        ty: SqlType::new(SqlTypeKind::Void),
+        setof: false,
+        output_slot: None,
+    };
+    let body = compile_block(block, catalog, &mut env, Some(&return_contract))?;
+    Ok(CompiledFunction {
+        name: "inline_code_block".into(),
+        parameter_slots: Vec::new(),
+        output_slots: Vec::new(),
+        body,
+        return_contract,
+        found_slot,
+        sqlerrm_slot,
+        local_ctes: Vec::new(),
+    })
 }
 
 pub(crate) fn compile_function_from_proc(
@@ -1045,6 +1071,7 @@ fn compile_stmt(
         } => compile_for_query_stmt(target, source, body, catalog, env, return_contract)?,
         Stmt::Raise {
             level,
+            sqlstate,
             message,
             params,
         } => {
@@ -1060,6 +1087,7 @@ fn compile_stmt(
             }
             CompiledStmt::Raise {
                 level: level.clone(),
+                sqlstate: sqlstate.clone(),
                 message: message.clone(),
                 params: params
                     .iter()

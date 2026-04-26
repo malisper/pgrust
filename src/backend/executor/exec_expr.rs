@@ -2,6 +2,7 @@ use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 use std::cmp::Ordering;
 
+use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
 use crate::backend::utils::trigger::format_trigger_definition;
@@ -2708,8 +2709,18 @@ fn eval_pg_relation_size(values: &[Value], ctx: &ExecutorContext) -> Result<Valu
         return Ok(Value::Null);
     }
 
-    let relation_oid = oid_arg_to_u32(value, "pg_relation_size")?;
     let catalog = executor_catalog(ctx)?;
+    let relation_oid = match oid_arg_to_u32(value, "pg_relation_size") {
+        Ok(oid) => oid,
+        Err(err) if value.as_text().is_some() => {
+            let relation_name = value.as_text().expect("guarded above");
+            catalog
+                .lookup_any_relation(relation_name)
+                .map(|relation| relation.relation_oid)
+                .ok_or(err)?
+        }
+        Err(err) => return Err(err),
+    };
     let Some(relation) = catalog.relcache().get_by_oid(relation_oid) else {
         return Err(ExecError::DetailedError {
             message: format!("could not open relation with OID {relation_oid}"),
@@ -2732,18 +2743,13 @@ fn eval_pg_relation_size(values: &[Value], ctx: &ExecutorContext) -> Result<Valu
             },
         ));
     }
-    let mut scan =
-        heap_scan_begin_visible(&ctx.pool, ctx.client_id, relation.rel, ctx.snapshot.clone())?;
-    let txns = ctx.txns.read();
-    let mut tuples = 0_i64;
-    while heap_scan_next_visible(&ctx.pool, ctx.client_id, &txns, &mut scan)?.is_some() {
-        tuples += 1;
-    }
-    Ok(Value::Int64(if tuples == 0 {
-        0
-    } else {
-        i64::from(crate::backend::storage::smgr::smgr::BLCKSZ as i32)
-    }))
+    let nblocks = ctx
+        .pool
+        .with_storage_mut(|s| s.smgr.nblocks(relation.rel, ForkNumber::Main))
+        .map_err(crate::backend::access::heap::heapam::HeapError::Storage)?;
+    Ok(Value::Int64(
+        i64::from(nblocks) * i64::from(crate::backend::storage::smgr::smgr::BLCKSZ as i32),
+    ))
 }
 
 fn parent_references_toast_relation(
