@@ -78,6 +78,27 @@ impl TidBitmap {
         self.pages.clear();
     }
 
+    pub fn union_with(&mut self, other: &TidBitmap) {
+        for (block, page) in &other.pages {
+            match (self.pages.entry(*block), page) {
+                (std::collections::btree_map::Entry::Vacant(entry), page) => {
+                    entry.insert(page.clone());
+                }
+                (std::collections::btree_map::Entry::Occupied(mut entry), TidBitmapPage::Lossy) => {
+                    entry.insert(TidBitmapPage::Lossy);
+                }
+                (
+                    std::collections::btree_map::Entry::Occupied(mut entry),
+                    TidBitmapPage::Exact(other_offsets),
+                ) => {
+                    if let TidBitmapPage::Exact(offsets) = entry.get_mut() {
+                        offsets.extend(other_offsets.iter().copied());
+                    }
+                }
+            }
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
         self.pages.keys().copied()
     }

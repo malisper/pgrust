@@ -800,6 +800,18 @@ fn cast_is_const_fold_safe(value: &Value, target: SqlType) -> bool {
     ) {
         return false;
     }
+    if !target.is_array
+        && matches!(
+            target.kind,
+            SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
+        )
+        && matches!(
+            source.element_type().kind,
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
+        )
+    {
+        return false;
+    }
     !matches!(
         (source.kind, target.kind),
         (SqlTypeKind::TimestampTz | SqlTypeKind::TimeTz, _)

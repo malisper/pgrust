@@ -331,6 +331,7 @@ pub(crate) fn execute_explain(
         analyze,
         buffers,
         costs,
+        summary,
         timing,
         verbose,
         statement,
@@ -404,23 +405,27 @@ pub(crate) fn execute_explain(
         ctx.timed = false;
         let execution_buffer_stats = ctx.pool.usage_stats();
         let (state, row_count, elapsed) = exec_result?;
-        format_explain_lines_with_costs(state.as_ref(), 0, true, costs, &mut lines);
+        format_explain_lines_with_costs(state.as_ref(), 0, true, costs, timing, &mut lines);
         if buffers {
             lines.push("Planning:".into());
             lines.push(format!("  {}", format_buffer_usage(planning_buffer_stats)));
         }
-        lines.push(format!(
-            "Planning Time: {:.3} ms",
-            planning_elapsed.as_secs_f64() * 1000.0
-        ));
-        lines.push(format!(
-            "Execution Time: {:.3} ms",
-            elapsed.as_secs_f64() * 1000.0
-        ));
+        if summary {
+            lines.push(format!(
+                "Planning Time: {:.3} ms",
+                planning_elapsed.as_secs_f64() * 1000.0
+            ));
+            lines.push(format!(
+                "Execution Time: {:.3} ms",
+                elapsed.as_secs_f64() * 1000.0
+            ));
+        }
         if buffers {
             lines.push(format_buffer_usage(execution_buffer_stats));
         }
-        lines.push(format!("Result Rows: {}", row_count));
+        if summary {
+            lines.push(format!("Result Rows: {}", row_count));
+        }
     } else {
         let plan_tree = query_desc.planned_stmt.plan_tree;
         let subplans = query_desc.planned_stmt.subplans;
@@ -432,7 +437,7 @@ pub(crate) fn execute_explain(
                 costs,
                 &mut lines,
             );
-            format_explain_lines_with_costs(state.as_ref(), 1, false, costs, &mut lines);
+            format_explain_lines_with_costs(state.as_ref(), 1, false, costs, true, &mut lines);
         } else {
             if verbose {
                 format_verbose_explain_plan_with_subplans(

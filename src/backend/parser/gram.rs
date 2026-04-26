@@ -12376,6 +12376,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
     let mut analyze = false;
     let mut buffers = false;
     let mut costs = true;
+    let mut summary = true;
     let mut timing = true;
     let mut verbose = false;
     let mut statement = None;
@@ -12406,9 +12407,10 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
                     Some(Rule::kw_analyze) => analyze = bool_val,
                     Some(Rule::kw_buffers) => buffers = bool_val,
                     Some(Rule::kw_costs) => costs = bool_val,
+                    Some(Rule::kw_summary) => summary = bool_val,
                     Some(Rule::kw_timing) => timing = bool_val,
                     Some(Rule::kw_verbose) => verbose = bool_val,
-                    _ => {} // SUMMARY, FORMAT: parsed but ignored
+                    _ => {} // FORMAT: parsed but ignored
                 }
             }
             Rule::select_stmt => statement = Some(Statement::Select(build_select(part)?)),
@@ -12423,6 +12425,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
         analyze,
         buffers,
         costs,
+        summary,
         timing,
         verbose,
         statement: Box::new(statement.ok_or(ParseError::UnexpectedEof)?),
@@ -12621,11 +12624,20 @@ fn build_set_operation_term(pair: Pair<'_, Rule>) -> Result<SelectStatement, Par
         Rule::set_operation_term => {
             build_set_operation_term(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
         }
-        Rule::parenthesized_set_operation_term => build_select(
-            pair.into_inner()
-                .find(|part| matches!(part.as_rule(), Rule::select_stmt))
-                .ok_or(ParseError::UnexpectedEof)?,
-        ),
+        Rule::parenthesized_set_operation_term => {
+            let inner = pair
+                .into_inner()
+                .find(|part| {
+                    matches!(
+                        part.as_rule(),
+                        Rule::select_stmt | Rule::values_stmt | Rule::table_stmt
+                    )
+                })
+                .ok_or(ParseError::UnexpectedEof)?;
+            build_set_operation_term(inner)
+        }
+        Rule::values_stmt => Ok(wrap_values_as_select(build_values_statement(pair)?)),
+        Rule::table_stmt => build_table_select(pair),
         Rule::simple_select_core
         | Rule::simple_select_stmt
         | Rule::set_operation_stmt
@@ -18133,6 +18145,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             Rule::kw_not => negated = true,
                             Rule::select_stmt => {
                                 subquery = Some(build_select(part)?);
+                            }
+                            Rule::values_stmt => {
+                                subquery =
+                                    Some(wrap_values_as_select(build_values_statement(part)?));
                             }
                             _ => {}
                         }

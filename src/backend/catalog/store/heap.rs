@@ -7077,7 +7077,7 @@ fn default_index_build_options_for_relation(
         if column_name.descending {
             option |= 0x0001;
         }
-        if column_name.nulls_first.unwrap_or(false) {
+        if column_name.nulls_first.unwrap_or(column_name.descending) {
             option |= 0x0002;
         }
         indoption.push(option);

@@ -1,6 +1,9 @@
-use super::query::shift_expr_rtindexes;
+use super::{is_text_like_type, query::shift_expr_rtindexes};
+use crate::backend::executor::compare_order_values;
+use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::{
-    BoolExprType, Expr, SELF_ITEM_POINTER_ATTR_NO, set_returning_call_exprs,
+    BoolExprType, Expr, OpExprKind, SELF_ITEM_POINTER_ATTR_NO, expr_sql_type_hint,
+    set_returning_call_exprs,
 };
 
 pub(crate) fn predicate_implies_index_predicate(
@@ -13,19 +16,10 @@ pub(crate) fn predicate_implies_index_predicate(
     let Some(filter) = filter else {
         return false;
     };
-    let index_conjuncts = flatten_and_conjuncts(index_predicate);
-    let filter_conjuncts = flatten_and_conjuncts(filter);
-    let index_conjuncts = index_conjuncts
-        .iter()
-        .map(canonicalize_predicate_expr)
-        .collect::<Vec<_>>();
-    let filter_conjuncts = filter_conjuncts
-        .iter()
-        .map(canonicalize_predicate_expr)
-        .collect::<Vec<_>>();
-    index_conjuncts
-        .iter()
-        .all(|conjunct| filter_conjuncts.contains(conjunct))
+    predicate_expr_implies(
+        &canonicalize_predicate_expr(filter),
+        &canonicalize_predicate_expr(index_predicate),
+    )
 }
 
 pub(crate) fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {
@@ -47,6 +41,152 @@ fn canonicalize_predicate_expr(expr: &Expr) -> Expr {
             shift_expr_rtindexes(expr.clone(), CANONICAL_RTINDEX - varno)
         }
         _ => expr.clone(),
+    }
+}
+
+fn predicate_expr_implies(filter: &Expr, predicate: &Expr) -> bool {
+    if filter == predicate || simple_comparison_implies(filter, predicate) {
+        return true;
+    }
+
+    match predicate {
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => bool_expr
+            .args
+            .iter()
+            .all(|part| predicate_expr_implies(filter, part)),
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or => bool_expr
+            .args
+            .iter()
+            .any(|part| predicate_expr_implies(filter, part)),
+        _ => match filter {
+            Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => bool_expr
+                .args
+                .iter()
+                .any(|part| predicate_expr_implies(part, predicate)),
+            Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or => bool_expr
+                .args
+                .iter()
+                .all(|part| predicate_expr_implies(part, predicate)),
+            _ => false,
+        },
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SimpleComparison {
+    key: Expr,
+    op: OpExprKind,
+    value: Value,
+}
+
+fn simple_comparison_implies(filter: &Expr, predicate: &Expr) -> bool {
+    let Some(filter) = extract_simple_comparison(filter) else {
+        return false;
+    };
+    let Some(predicate) = extract_simple_comparison(predicate) else {
+        return false;
+    };
+    if filter.key != predicate.key {
+        return false;
+    }
+    let Some(ordering) =
+        compare_order_values(&filter.value, &predicate.value, None, None, false).ok()
+    else {
+        return false;
+    };
+    match filter.op {
+        OpExprKind::Eq => match predicate.op {
+            OpExprKind::Eq => ordering.is_eq(),
+            OpExprKind::Lt => ordering.is_lt(),
+            OpExprKind::LtEq => !ordering.is_gt(),
+            OpExprKind::Gt => ordering.is_gt(),
+            OpExprKind::GtEq => !ordering.is_lt(),
+            _ => false,
+        },
+        OpExprKind::Lt => match predicate.op {
+            OpExprKind::Lt => !ordering.is_gt(),
+            OpExprKind::LtEq => !ordering.is_gt(),
+            _ => false,
+        },
+        OpExprKind::LtEq => match predicate.op {
+            OpExprKind::Lt => ordering.is_lt(),
+            OpExprKind::LtEq => !ordering.is_gt(),
+            _ => false,
+        },
+        OpExprKind::Gt => match predicate.op {
+            OpExprKind::Gt => !ordering.is_lt(),
+            OpExprKind::GtEq => !ordering.is_lt(),
+            _ => false,
+        },
+        OpExprKind::GtEq => match predicate.op {
+            OpExprKind::Gt => ordering.is_gt(),
+            OpExprKind::GtEq => !ordering.is_lt(),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn extract_simple_comparison(expr: &Expr) -> Option<SimpleComparison> {
+    let Expr::Op(op) = expr else {
+        return None;
+    };
+    let op_kind = match op.op {
+        OpExprKind::Eq | OpExprKind::Lt | OpExprKind::LtEq | OpExprKind::Gt | OpExprKind::GtEq => {
+            op.op
+        }
+        _ => return None,
+    };
+    let [left, right] = op.args.as_slice() else {
+        return None;
+    };
+    if let Some(value) = predicate_const_value(right) {
+        return predicate_key_expr(left).map(|key| SimpleComparison {
+            key,
+            op: op_kind,
+            value,
+        });
+    }
+    if let Some(value) = predicate_const_value(left) {
+        let op = commute_comparison_op(op_kind)?;
+        return predicate_key_expr(right).map(|key| SimpleComparison { key, op, value });
+    }
+    None
+}
+
+fn commute_comparison_op(op: OpExprKind) -> Option<OpExprKind> {
+    Some(match op {
+        OpExprKind::Eq => OpExprKind::Eq,
+        OpExprKind::Lt => OpExprKind::Gt,
+        OpExprKind::LtEq => OpExprKind::GtEq,
+        OpExprKind::Gt => OpExprKind::Lt,
+        OpExprKind::GtEq => OpExprKind::LtEq,
+        _ => return None,
+    })
+}
+
+fn predicate_key_expr(expr: &Expr) -> Option<Expr> {
+    let stripped = strip_text_like_casts(expr);
+    matches!(stripped, Expr::Var(_)).then(|| stripped.clone())
+}
+
+fn predicate_const_value(expr: &Expr) -> Option<Value> {
+    match strip_text_like_casts(expr) {
+        Expr::Const(value) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn strip_text_like_casts(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Cast(inner, target)
+            if expr_sql_type_hint(inner)
+                .is_some_and(|source| is_text_like_type(source) && is_text_like_type(*target)) =>
+        {
+            strip_text_like_casts(inner)
+        }
+        Expr::Collate { expr, .. } => strip_text_like_casts(expr),
+        _ => expr,
     }
 }
 
@@ -250,5 +390,53 @@ pub(crate) fn expr_uses_ctid(expr: &Expr) -> bool {
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::{OpExpr, Var, user_attrno};
+
+    fn var() -> Expr {
+        Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(0),
+            varlevelsup: 0,
+            vartype: SqlType::new(SqlTypeKind::Name),
+        })
+    }
+
+    fn cmp(op: OpExprKind, value: &str) -> Expr {
+        Expr::Op(Box::new(OpExpr {
+            opno: 0,
+            opfuncid: 0,
+            op,
+            opresulttype: SqlType::new(SqlTypeKind::Bool),
+            args: vec![var(), Expr::Const(Value::Text(value.into()))],
+            collation_oid: None,
+        }))
+    }
+
+    #[test]
+    fn equality_filter_implies_text_range_partial_predicate() {
+        assert!(predicate_implies_index_predicate(
+            Some(&cmp(OpExprKind::Eq, "ATAAAA")),
+            Some(&cmp(OpExprKind::Lt, "B")),
+        ));
+        assert!(!predicate_implies_index_predicate(
+            Some(&cmp(OpExprKind::Eq, "C")),
+            Some(&cmp(OpExprKind::Lt, "B")),
+        ));
+    }
+
+    #[test]
+    fn equality_filter_implies_matching_or_disjunct() {
+        let predicate = Expr::or(cmp(OpExprKind::Lt, "B"), cmp(OpExprKind::Gt, "Y"));
+        assert!(predicate_implies_index_predicate(
+            Some(&cmp(OpExprKind::Eq, "A")),
+            Some(&predicate),
+        ));
     }
 }

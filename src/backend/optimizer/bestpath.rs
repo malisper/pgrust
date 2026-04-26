@@ -151,6 +151,7 @@ fn contains_seq_scan(path: &Path) -> bool {
             cte_plan: input, ..
         } => contains_seq_scan(input),
         Path::Append { children, .. }
+        | Path::BitmapOr { children, .. }
         | Path::MergeAppend { children, .. }
         | Path::SetOp { children, .. } => children.iter().any(contains_seq_scan),
         Path::NestedLoopJoin { left, right, .. }

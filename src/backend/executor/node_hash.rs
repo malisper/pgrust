@@ -111,8 +111,16 @@ impl PlanNode for HashState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
-        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
     }
 }

@@ -218,8 +218,9 @@ pub(super) fn build_index_path_spec(
     filter: Option<&Expr>,
     order_items: Option<&[OrderByEntry]>,
     index: &BoundIndexRelation,
+    retain_implied_predicate_quals: bool,
 ) -> Option<IndexPathSpec> {
-    costsize::build_index_path_spec(filter, order_items, index)
+    costsize::build_index_path_spec(filter, order_items, index, retain_implied_predicate_quals)
 }
 
 pub(super) fn relation_ordered_index_paths(

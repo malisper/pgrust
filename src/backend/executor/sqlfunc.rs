@@ -338,9 +338,10 @@ fn inline_sql_function_body(
     // :HACK: This is a narrow compatibility path for regression setup helpers.
     // Full PostgreSQL SQL-language functions need dedicated planning/execution
     // rather than text substitution plus a readonly single-SELECT execution.
-    if !body.to_ascii_lowercase().starts_with("select ") {
+    let lower_body = body.to_ascii_lowercase();
+    if !(lower_body.starts_with("select ") || lower_body.starts_with("values ")) {
         return Err(sql_function_runtime_error(
-            "only single-SELECT LANGUAGE sql function bodies are supported",
+            "only single SELECT or VALUES LANGUAGE sql function bodies are supported",
             Some(row.prosrc.clone()),
             "0A000",
         ));

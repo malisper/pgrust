@@ -893,6 +893,43 @@ fn mutually_recursive_sql_functions_respect_max_stack_depth_setting() {
 }
 
 #[test]
+fn sql_set_returning_function_accepts_values_body() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function sillysrf(int4) returns setof int4 as
+             'values (1),(10),(2),($1)' language sql immutable",
+        )
+        .expect("create values SQL function");
+
+    assert_single_int_column_rows(
+        session
+            .execute(&db, "select sillysrf(42)")
+            .expect("execute values SQL function"),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(10)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(42)],
+        ],
+    );
+    assert_single_int_column_rows(
+        session
+            .execute(&db, "select sillysrf(-1) order by 1")
+            .expect("execute sorted values SQL function"),
+        vec![
+            vec![Value::Int32(-1)],
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(10)],
+        ],
+    );
+}
+
+#[test]
 fn large_rust_stack_still_respects_sql_max_stack_depth() {
     std::thread::Builder::new()
         .name("large_rust_stack_still_respects_sql_max_stack_depth".into())
@@ -26329,6 +26366,43 @@ fn temp_create_table_as_select_works() {
                     vec![Value::Int32(1), Value::Text("a".into())],
                     vec![Value::Int32(2), Value::Text("b".into())],
                 ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_table_as_select_star_preserves_name_type() {
+    let base = temp_dir("ctas_name_type");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table name_source (n name)")
+        .unwrap();
+    session
+        .execute(&db, "create table name_copy as select * from name_source")
+        .unwrap();
+
+    let catalog = db.catalog.read().catalog_snapshot().unwrap();
+    let relation = catalog.get("name_copy").unwrap();
+    assert_eq!(relation.desc.columns[0].sql_type.kind, SqlTypeKind::Name);
+    let visible = session.catalog_lookup(&db);
+    let relation = visible.lookup_any_relation("name_copy").unwrap();
+    assert_eq!(relation.desc.columns[0].sql_type.kind, SqlTypeKind::Name);
+
+    match session
+        .execute(
+            &db,
+            "explain (costs off) select * from name_copy where n = 'x'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows[1],
+                vec![Value::Text("  Filter: (n = 'x'::name)".into())]
             );
         }
         other => panic!("expected query result, got {:?}", other),

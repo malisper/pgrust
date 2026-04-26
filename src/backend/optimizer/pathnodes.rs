@@ -58,6 +58,7 @@ impl Path {
             | Self::IndexOnlyScan { plan_info, .. }
             | Self::IndexScan { plan_info, .. }
             | Self::BitmapIndexScan { plan_info, .. }
+            | Self::BitmapOr { plan_info, .. }
             | Self::BitmapHeapScan { plan_info, .. }
             | Self::Filter { plan_info, .. }
             | Self::NestedLoopJoin { plan_info, .. }
@@ -104,7 +105,7 @@ impl Path {
                     wire_type_oid: None,
                 })
                 .collect(),
-            Self::BitmapIndexScan { .. } => Vec::new(),
+            Self::BitmapIndexScan { .. } | Self::BitmapOr { .. } => Vec::new(),
             Self::BitmapHeapScan { desc, .. } => desc
                 .columns
                 .iter()
@@ -178,7 +179,7 @@ impl Path {
             | Self::BitmapHeapScan {
                 source_id, desc, ..
             } => slot_output_vars(*source_id, &desc.columns, |column| column.sql_type),
-            Self::BitmapIndexScan { .. } => Vec::new(),
+            Self::BitmapIndexScan { .. } | Self::BitmapOr { .. } => Vec::new(),
             Self::Filter { input, .. }
             | Self::OrderBy { input, .. }
             | Self::Limit { input, .. }
@@ -320,6 +321,7 @@ impl Path {
             | Self::IndexOnlyScan { pathtarget, .. }
             | Self::IndexScan { pathtarget, .. }
             | Self::BitmapIndexScan { pathtarget, .. }
+            | Self::BitmapOr { pathtarget, .. }
             | Self::BitmapHeapScan { pathtarget, .. }
             | Self::Filter { pathtarget, .. }
             | Self::NestedLoopJoin { pathtarget, .. }
@@ -348,6 +350,7 @@ impl Path {
             | Self::Append { .. }
             | Self::SeqScan { .. }
             | Self::BitmapIndexScan { .. }
+            | Self::BitmapOr { .. }
             | Self::BitmapHeapScan { .. }
             | Self::CteScan { .. }
             | Self::WorkTableScan { .. }

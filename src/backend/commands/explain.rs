@@ -22,7 +22,7 @@ pub(crate) fn format_explain_lines(
     analyze: bool,
     lines: &mut Vec<String>,
 ) {
-    format_explain_lines_with_costs(state, indent, analyze, true, lines);
+    format_explain_lines_with_costs(state, indent, analyze, true, true, lines);
 }
 
 pub(crate) fn format_explain_lines_with_costs(
@@ -30,15 +30,16 @@ pub(crate) fn format_explain_lines_with_costs(
     indent: usize,
     analyze: bool,
     show_costs: bool,
+    timing: bool,
     lines: &mut Vec<String>,
 ) {
     if let Some(child) = state.explain_passthrough() {
-        format_explain_lines_with_costs(child, indent, analyze, show_costs, lines);
+        format_explain_lines_with_costs(child, indent, analyze, show_costs, timing, lines);
         return;
     }
-    push_explain_state_line(state, indent, analyze, show_costs, lines);
+    push_explain_state_line(state, indent, analyze, show_costs, timing, lines);
     state.explain_details(indent, analyze, show_costs, lines);
-    state.explain_children(indent, analyze, show_costs, lines);
+    state.explain_children(indent, analyze, show_costs, timing, lines);
 }
 
 pub(crate) fn push_explain_line(
@@ -234,6 +235,7 @@ fn push_explain_state_line(
     indent: usize,
     analyze: bool,
     show_costs: bool,
+    timing: bool,
     lines: &mut Vec<String>,
 ) {
     let prefix = explain_node_prefix(indent, false);
@@ -241,30 +243,41 @@ fn push_explain_state_line(
     let plan_info = state.plan_info();
     if analyze && show_costs {
         let stats = state.node_stats();
+        let actual = if timing {
+            format!(
+                " (actual time={:.3}..{:.3} rows={:.2} loops={})",
+                stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
+                stats.total_time.as_secs_f64() * 1000.0,
+                stats.rows as f64,
+                stats.loops,
+            )
+        } else {
+            format!(
+                " (actual rows={:.2} loops={})",
+                stats.rows as f64, stats.loops
+            )
+        };
         lines.push(format!(
-            "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={}) (actual time={:.3}..{:.3} rows={:.2} loops={})",
+            "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={}){actual}",
             plan_info.startup_cost.as_f64(),
             plan_info.total_cost.as_f64(),
             plan_info.plan_rows.as_f64().round() as u64,
             plan_info.plan_width,
-            stats
-                .first_tuple_time
-                .unwrap_or_default()
-                .as_secs_f64()
-                * 1000.0,
-            stats.total_time.as_secs_f64() * 1000.0,
-            stats.rows as f64,
-            stats.loops,
         ));
     } else if analyze {
         let stats = state.node_stats();
-        lines.push(format!(
-            "{prefix}{label}  (actual time={:.3}..{:.3} rows={:.2} loops={})",
-            stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
-            stats.total_time.as_secs_f64() * 1000.0,
-            stats.rows as f64,
-            stats.loops,
-        ));
+        let actual = if timing {
+            format!(
+                "actual time={:.3}..{:.3} rows={:.2} loops={}",
+                stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
+                stats.total_time.as_secs_f64() * 1000.0,
+                stats.rows as f64,
+                stats.loops,
+            )
+        } else {
+            format!("actual rows={:.2} loops={}", stats.rows as f64, stats.loops)
+        };
+        lines.push(format!("{prefix}{label} ({actual})"));
     } else if show_costs {
         lines.push(format!(
             "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={})",
@@ -1224,7 +1237,7 @@ fn plan_join_output_exprs(
             desc,
             ..
         } => qualified_base_scan_output_exprs(relation_name, desc),
-        Plan::BitmapIndexScan { .. } => Vec::new(),
+        Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => Vec::new(),
         Plan::Hash { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
@@ -1338,7 +1351,7 @@ fn verbose_plan_output_exprs(
             .iter()
             .map(|column| column.name.clone())
             .collect(),
-        Plan::BitmapIndexScan { .. } => Vec::new(),
+        Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => Vec::new(),
         Plan::Hash { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
@@ -1831,6 +1844,7 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. }
         | Plan::Values { .. } => Vec::new(),
+        Plan::BitmapOr { children, .. } => children.iter().collect(),
         Plan::BitmapHeapScan { bitmapqual, .. } => vec![bitmapqual.as_ref()],
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
@@ -1877,8 +1891,32 @@ fn const_false_filter_result_plan(plan: &Plan) -> Option<PlanEstimate> {
             plan_info,
             input,
             predicate: Expr::Const(Value::Bool(false)),
-        } if matches!(input.as_ref(), Plan::SeqScan { .. }) => Some(*plan_info),
+        } if const_false_filter_input_can_render_as_result(input) => Some(*plan_info),
+        Plan::Append {
+            plan_info,
+            children,
+            ..
+        } if !children.is_empty()
+            && children
+                .iter()
+                .all(|child| const_false_filter_result_plan(child).is_some()) =>
+        {
+            Some(*plan_info)
+        }
+        Plan::Projection { input, targets, .. }
+            if projection_targets_are_explain_passthrough(input, targets) =>
+        {
+            const_false_filter_result_plan(input)
+        }
         _ => None,
+    }
+}
+
+fn const_false_filter_input_can_render_as_result(input: &Plan) -> bool {
+    match input {
+        Plan::SeqScan { .. } | Plan::Result { .. } => true,
+        Plan::Append { children, .. } => children.is_empty(),
+        _ => false,
     }
 }
 
@@ -1892,6 +1930,7 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
+        | Plan::BitmapOr { .. }
         | Plan::BitmapHeapScan { .. }
         | Plan::Limit { .. }
         | Plan::LockRows { .. }

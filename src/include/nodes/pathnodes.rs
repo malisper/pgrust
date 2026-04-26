@@ -34,6 +34,7 @@ pub struct PlannerConfig {
     pub enable_indexscan: bool,
     pub enable_indexonlyscan: bool,
     pub enable_bitmapscan: bool,
+    pub retain_partial_index_filters: bool,
 }
 
 impl Default for PlannerConfig {
@@ -44,6 +45,7 @@ impl Default for PlannerConfig {
             enable_indexscan: true,
             enable_indexonlyscan: true,
             enable_bitmapscan: true,
+            retain_partial_index_filters: false,
         }
     }
 }
@@ -484,6 +486,11 @@ pub enum Path {
         index_meta: IndexRelCacheEntry,
         keys: Vec<IndexScanKey>,
         index_quals: Vec<Expr>,
+    },
+    BitmapOr {
+        plan_info: PlanEstimate,
+        pathtarget: PathTarget,
+        children: Vec<Path>,
     },
     BitmapHeapScan {
         plan_info: PlanEstimate,

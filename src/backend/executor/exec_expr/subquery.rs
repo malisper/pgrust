@@ -2,7 +2,7 @@ use super::*;
 use crate::backend::executor::expr_string::eval_like;
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::include::nodes::datum::ArrayValue;
+use crate::include::nodes::datum::{ArrayValue, RecordValue};
 use crate::include::nodes::primnodes::{Expr, Var, user_attrno};
 
 fn local_var(index: usize) -> Expr {
@@ -180,13 +180,8 @@ pub(super) fn eval_quantified_subquery(
         while let Some(inner_slot) = exec_next(&mut state, ctx)? {
             saw_row = true;
             let values = inner_slot.values()?.iter().cloned().collect::<Vec<_>>();
-            if values.len() != 1 {
-                return Err(ExecError::CardinalityViolation {
-                    message: "subquery must return only one column".into(),
-                    hint: None,
-                });
-            }
-            match compare_subquery_values(left_value, &values[0], op, collation_oid)? {
+            let right_value = quantified_subquery_right_value(left_value, values)?;
+            match compare_subquery_values(left_value, &right_value, op, collation_oid)? {
                 Value::Bool(result) => {
                     if !is_all && result {
                         return Ok(Value::Bool(true));
@@ -207,6 +202,31 @@ pub(super) fn eval_quantified_subquery(
             Ok(Value::Bool(is_all))
         }
     })
+}
+
+fn quantified_subquery_right_value(
+    left_value: &Value,
+    values: Vec<Value>,
+) -> Result<Value, ExecError> {
+    if let Value::Record(record) = left_value {
+        if values.len() != record.fields.len() {
+            return Err(ExecError::CardinalityViolation {
+                message: "subquery row width does not match left row expression".into(),
+                hint: None,
+            });
+        }
+        return Ok(Value::Record(RecordValue::from_descriptor(
+            record.descriptor.clone(),
+            values,
+        )));
+    }
+    if values.len() != 1 {
+        return Err(ExecError::CardinalityViolation {
+            message: "subquery must return only one column".into(),
+            hint: None,
+        });
+    }
+    Ok(values.into_iter().next().unwrap_or(Value::Null))
 }
 
 fn is_pathological_regress_join_in_subquery(plan: &Plan) -> bool {
