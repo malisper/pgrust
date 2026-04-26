@@ -188,6 +188,10 @@ impl Database {
             .expect("range key found in snapshot");
         entry.owner_oid = new_owner.oid;
         entry.owner_usage = true;
+        save_range_type_entries(&self.cluster.base_dir, self.database_oid, &range_types)?;
+        drop(range_types);
+        self.refresh_catalog_store_dynamic_type_rows(client_id, configured_search_path);
+        self.invalidate_backend_cache_state(client_id);
         self.plan_cache.invalidate_all();
         Ok(StatementResult::AffectedRows(0))
     }

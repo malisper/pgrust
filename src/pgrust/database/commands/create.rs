@@ -75,17 +75,25 @@ fn validate_polymorphic_range_return_type(
     prorettype: u32,
     callable_arg_oids: &[u32],
 ) -> Result<(), ExecError> {
-    let (type_name, other_name, required_inputs) = match prorettype {
-        ANYRANGEOID => ("anyrange", "anymultirange", [ANYRANGEOID, ANYMULTIRANGEOID]),
-        ANYMULTIRANGEOID => ("anymultirange", "anyrange", [ANYMULTIRANGEOID, ANYRANGEOID]),
+    let (type_name, inputs, required_inputs) = match prorettype {
+        ANYRANGEOID => (
+            "anyrange",
+            "anyrange or anymultirange",
+            [ANYRANGEOID, ANYMULTIRANGEOID],
+        ),
+        ANYMULTIRANGEOID => (
+            "anymultirange",
+            "anyrange or anymultirange",
+            [ANYMULTIRANGEOID, ANYRANGEOID],
+        ),
         ANYCOMPATIBLERANGEOID => (
             "anycompatiblerange",
-            "anycompatiblemultirange",
+            "anycompatiblerange or anycompatiblemultirange",
             [ANYCOMPATIBLERANGEOID, ANYCOMPATIBLEMULTIRANGEOID],
         ),
         ANYCOMPATIBLEMULTIRANGEOID => (
             "anycompatiblemultirange",
-            "anycompatiblerange",
+            "anycompatiblerange or anycompatiblemultirange",
             [ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID],
         ),
         _ => return Ok(()),
@@ -99,7 +107,7 @@ fn validate_polymorphic_range_return_type(
     Err(ExecError::DetailedError {
         message: "cannot determine result data type".into(),
         detail: Some(format!(
-            "A result of type {type_name} requires at least one input of type {type_name} or {other_name}."
+            "A result of type {type_name} requires at least one input of type {inputs}."
         )),
         hint: None,
         sqlstate: "42P13",
