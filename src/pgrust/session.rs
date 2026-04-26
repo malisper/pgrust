@@ -62,6 +62,9 @@ use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::autovacuum::is_autovacuum_guc;
+use crate::pgrust::database::commands::privilege::{
+    acl_grants_privilege, effective_acl_grantee_names, function_owner_default_acl,
+};
 use crate::pgrust::database::{
     AsyncListenAction, AsyncListenOp, Database, DynamicTypeSnapshot, PendingNotification,
     SequenceMutationEffect, SessionStatsState, StatsFetchConsistency, TempMutationEffect,
@@ -555,7 +558,7 @@ fn resolve_call_procedure(
     }
     if rows
         .iter()
-        .filter(|row| row.prokind == 'f')
+        .filter(|row| row.prokind != 'p')
         .any(|row| match_call_candidate(row, &actuals).is_some())
     {
         return Err(ExecError::DetailedError {
@@ -569,6 +572,50 @@ fn resolve_call_procedure(
         });
     }
     Err(call_undefined_procedure_error(call_stmt))
+}
+
+fn check_proc_execute_acl(
+    session: &Session,
+    db: &Database,
+    proc_row: &PgProcRow,
+) -> Result<(), ExecError> {
+    let auth = session.auth_state();
+    if auth.current_user_oid() == proc_row.proowner {
+        return Ok(());
+    }
+    let auth_catalog = db
+        .auth_catalog(session.client_id, session.catalog_txn_ctx())
+        .map_err(|err| ExecError::DetailedError {
+            message: format!("catalog lookup failed: {err:?}"),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    if auth_catalog
+        .role_by_oid(auth.current_user_oid())
+        .is_some_and(|role| role.rolsuper)
+        || auth.has_effective_membership(proc_row.proowner, &auth_catalog)
+    {
+        return Ok(());
+    }
+    let owner_name = auth_catalog
+        .role_by_oid(proc_row.proowner)
+        .map(|row| row.rolname.clone())
+        .unwrap_or_else(|| proc_row.proowner.to_string());
+    let acl = proc_row
+        .proacl
+        .clone()
+        .unwrap_or_else(|| function_owner_default_acl(&owner_name));
+    let effective_names = effective_acl_grantee_names(auth, &auth_catalog);
+    if acl_grants_privilege(&acl, &effective_names, 'X') {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("permission denied for procedure {}", proc_row.proname),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
 }
 
 fn proc_matches_call_schema(
@@ -664,14 +711,29 @@ fn parse_proc_argtype_oids(argtypes: &str) -> Vec<u32> {
         .collect()
 }
 
+fn decode_proc_arg_defaults(row: &PgProcRow, input_count: usize) -> Vec<Option<String>> {
+    let Some(defaults) = row.proargdefaults.as_deref() else {
+        return vec![None; input_count];
+    };
+    if let Ok(parsed) = serde_json::from_str::<Vec<Option<String>>>(defaults)
+        && parsed.len() == input_count
+    {
+        return parsed;
+    }
+    let legacy = defaults
+        .split_whitespace()
+        .map(|default| Some(default.to_string()))
+        .collect::<Vec<_>>();
+    let mut aligned = vec![None; input_count.saturating_sub(legacy.len())];
+    aligned.extend(legacy);
+    aligned.resize(input_count, None);
+    aligned
+}
+
 fn match_call_candidate(row: &PgProcRow, actuals: &[CallActualArg]) -> Option<CallCandidateMatch> {
     let params = procedure_params(row);
     let input_count = row.pronargs.max(0) as usize;
-    let defaults = row
-        .proargdefaults
-        .as_deref()
-        .map(|defaults| defaults.split_whitespace().collect::<Vec<_>>())
-        .unwrap_or_default();
+    let defaults = decode_proc_arg_defaults(row, input_count);
     let uses_all_slots = params.iter().any(|param| param.input_index.is_none())
         && actuals.len() > input_count.saturating_sub(row.pronargdefaults.max(0) as usize);
     let mut assigned = vec![None::<String>; input_count];
@@ -741,7 +803,7 @@ fn match_call_candidate(row: &PgProcRow, actuals: &[CallActualArg]) -> Option<Ca
         }
         let default = defaults
             .get(index)
-            .copied()
+            .and_then(|default| default.as_deref())
             .filter(|default| !default.is_empty())?;
         *slot = Some(default.to_string());
         cost += 2;
@@ -1412,6 +1474,7 @@ impl Session {
         let catalog = self.catalog_lookup(db);
         let resolved = resolve_call_procedure(call_stmt, &catalog)?;
         let proc_row = resolved.row;
+        check_proc_execute_acl(self, db, &proc_row)?;
         let arg_values = self.evaluate_call_input_args(db, &resolved.input_arg_sql)?;
         if proc_row.prolang == PG_LANGUAGE_PLPGSQL_OID {
             return self.execute_plpgsql_call(db, &proc_row, &arg_values, xid, cid);
@@ -2185,6 +2248,24 @@ impl Session {
                     )
                 }
             }
+            Statement::DropRoutine(ref drop_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_drop_routine_stmt_with_search_path(
+                        self.client_id,
+                        drop_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::DropAggregate(ref drop_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -2673,6 +2754,24 @@ impl Session {
             Statement::AlterProcedure(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "ALTER PROCEDURE".into(),
             ))),
+            Statement::AlterRoutine(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_routine_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::AlterTableRenameColumn(ref rename_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -5934,6 +6033,18 @@ impl Session {
             Statement::AlterProcedure(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "ALTER PROCEDURE".into(),
             ))),
+            Statement::AlterRoutine(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_routine_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::CreateSchema(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 let maintenance_work_mem_kb = self.maintenance_work_mem_kb()?;
@@ -6044,6 +6155,18 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_drop_procedure_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::DropRoutine(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_drop_routine_stmt_in_transaction_with_search_path(
                     client_id,
                     drop_stmt,
                     xid,

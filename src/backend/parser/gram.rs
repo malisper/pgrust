@@ -99,6 +99,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_drop_function_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_alter_routine_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_comment_on_function_statement(&sql)? {
         return Ok(stmt);
     }
@@ -4221,6 +4224,18 @@ fn try_parse_drop_function_statement(sql: &str) -> Result<Option<Statement>, Par
     )))
 }
 
+fn try_parse_alter_routine_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    for prefix in ["alter function ", "alter procedure ", "alter routine "] {
+        if lowered.starts_with(prefix) {
+            return build_alter_routine_statement(trimmed)
+                .map(|stmt| Some(Statement::AlterRoutine(stmt)));
+        }
+    }
+    Ok(None)
+}
+
 fn try_parse_call_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     if !trimmed.to_ascii_lowercase().starts_with("call ") {
@@ -4242,9 +4257,13 @@ fn try_parse_procedure_statement(sql: &str) -> Result<Option<Statement>, ParseEr
         return build_drop_procedure_statement(trimmed)
             .map(|stmt| Some(Statement::DropProcedure(stmt)));
     }
+    if lowered.starts_with("drop routine ") {
+        return build_drop_routine_statement(trimmed)
+            .map(|stmt| Some(Statement::DropRoutine(stmt)));
+    }
     if lowered.starts_with("alter procedure ") {
-        return build_alter_procedure_statement(trimmed)
-            .map(|stmt| Some(Statement::AlterProcedure(stmt)));
+        return build_alter_routine_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterRoutine(stmt)));
     }
     Ok(None)
 }
@@ -4372,6 +4391,15 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("grant execute on function ") {
         return Ok(Statement::GrantObject(build_grant_function_execute(sql)?));
     }
+    if lowered.starts_with("grant execute on procedure ") {
+        return Ok(Statement::GrantObject(build_grant_procedure_execute(sql)?));
+    }
+    if lowered.starts_with("grant execute on routine ") {
+        return Ok(Statement::GrantObject(build_grant_routine_execute(sql)?));
+    }
+    if lowered.starts_with("grant insert on ") {
+        return Ok(Statement::GrantObject(build_grant_table_insert(sql)?));
+    }
     if lowered.starts_with("grant select on ") {
         return Ok(Statement::GrantObject(build_grant_table_select(sql)?));
     }
@@ -4401,6 +4429,14 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     }
     if lowered.starts_with("revoke execute on function ") {
         return Ok(Statement::RevokeObject(build_revoke_function_execute(sql)?));
+    }
+    if lowered.starts_with("revoke execute on procedure ") {
+        return Ok(Statement::RevokeObject(build_revoke_procedure_execute(
+            sql,
+        )?));
+    }
+    if lowered.starts_with("revoke execute on routine ") {
+        return Ok(Statement::RevokeObject(build_revoke_routine_execute(sql)?));
     }
     if lowered.starts_with("revoke all privileges on ") {
         return Ok(Statement::RevokeObject(build_revoke_table_all_privileges(
@@ -4512,6 +4548,22 @@ fn build_grant_table_select(sql: &str) -> Result<GrantObjectStatement, ParseErro
     })
 }
 
+fn build_grant_table_insert(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let prefix = "grant insert on ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege: GrantObjectPrivilege::InsertOnTable,
+        object_names: vec![normalize_simple_identifier(object_name)?],
+        grantee_names,
+        with_grant_option,
+    })
+}
+
 fn build_grant_schema_all(sql: &str) -> Result<GrantObjectStatement, ParseError> {
     let prefix = "grant all on schema ";
     let rest = sql
@@ -4576,6 +4628,38 @@ fn build_grant_function_execute(sql: &str) -> Result<GrantObjectStatement, Parse
     })
 }
 
+fn build_grant_procedure_execute(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    build_grant_routine_execute_with_prefix(
+        sql,
+        "grant execute on procedure ",
+        GrantObjectPrivilege::ExecuteOnProcedure,
+    )
+}
+
+fn build_grant_routine_execute(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    build_grant_routine_execute_with_prefix(
+        sql,
+        "grant execute on routine ",
+        GrantObjectPrivilege::ExecuteOnRoutine,
+    )
+}
+
+fn build_grant_routine_execute_with_prefix(
+    sql: &str,
+    prefix: &str,
+    privilege: GrantObjectPrivilege,
+) -> Result<GrantObjectStatement, ParseError> {
+    let rest = sql.get(prefix.len()..).ok_or(ParseError::UnexpectedEof)?;
+    let (object_name, rest) = split_once_keyword(rest.trim_start(), "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege,
+        object_names: vec![object_name.trim().to_ascii_lowercase()],
+        grantee_names,
+        with_grant_option,
+    })
+}
+
 fn build_revoke_database_create(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
     let prefix = "revoke create on database ";
     let rest = sql
@@ -4634,6 +4718,38 @@ fn build_revoke_function_execute(sql: &str) -> Result<RevokeObjectStatement, Par
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::ExecuteOnFunction,
+        object_names: vec![object_name.trim().to_ascii_lowercase()],
+        grantee_names,
+        cascade,
+    })
+}
+
+fn build_revoke_procedure_execute(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    build_revoke_routine_execute_with_prefix(
+        sql,
+        "revoke execute on procedure ",
+        GrantObjectPrivilege::ExecuteOnProcedure,
+    )
+}
+
+fn build_revoke_routine_execute(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    build_revoke_routine_execute_with_prefix(
+        sql,
+        "revoke execute on routine ",
+        GrantObjectPrivilege::ExecuteOnRoutine,
+    )
+}
+
+fn build_revoke_routine_execute_with_prefix(
+    sql: &str,
+    prefix: &str,
+    privilege: GrantObjectPrivilege,
+) -> Result<RevokeObjectStatement, ParseError> {
+    let rest = sql.get(prefix.len()..).ok_or(ParseError::UnexpectedEof)?;
+    let (object_name, rest) = split_once_keyword(rest.trim_start(), "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege,
         object_names: vec![object_name.trim().to_ascii_lowercase()],
         grantee_names,
         cascade,
@@ -5711,7 +5827,7 @@ fn build_create_procedure_statement(sql: &str) -> Result<CreateProcedureStatemen
     let mut language = None;
     let mut body = None;
     let mut sql_standard_body = false;
-    let mut strict = false;
+    let strict = false;
     let mut volatility = crate::backend::parser::FunctionVolatility::Volatile;
 
     while !rest.trim_start().is_empty() {
@@ -5754,9 +5870,12 @@ fn build_create_procedure_statement(sql: &str) -> Result<CreateProcedureStatemen
             continue;
         }
         if keyword_at_start(rest, "strict") {
-            strict = true;
-            rest = consume_keyword(rest, "strict");
-            continue;
+            return Err(ParseError::DetailedError {
+                message: "invalid attribute in procedure definition".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
         }
         if keyword_at_start(rest, "immutable") {
             volatility = crate::backend::parser::FunctionVolatility::Immutable;
@@ -5772,6 +5891,18 @@ fn build_create_procedure_statement(sql: &str) -> Result<CreateProcedureStatemen
             volatility = crate::backend::parser::FunctionVolatility::Volatile;
             rest = consume_keyword(rest, "volatile");
             continue;
+        }
+        if keyword_at_start(rest, "window")
+            || keyword_at_start(rest, "parallel")
+            || keyword_at_start(rest, "leakproof")
+            || keyword_at_start(rest, "returns")
+        {
+            return Err(ParseError::DetailedError {
+                message: "invalid attribute in procedure definition".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
         }
         return Err(ParseError::FeatureNotSupported(format!(
             "unsupported CREATE PROCEDURE clause: {}",
@@ -5797,6 +5928,33 @@ fn build_drop_procedure_statement(sql: &str) -> Result<DropProcedureStatement, P
     let Some(rest) = sql.get(prefix.len()..) else {
         return Err(ParseError::UnexpectedToken {
             expected: "DROP PROCEDURE name(args)",
+            actual: sql.into(),
+        });
+    };
+    let mut rest = rest.trim_start();
+    let mut if_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        if_exists = true;
+        rest = next.trim_start();
+    }
+    let (routine_list, cascade) = split_drop_routine_suffix(rest)?;
+    let procedures = split_top_level_items(routine_list, ',')?
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .map(|item| parse_drop_routine_item(&item))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(DropProcedureStatement {
+        if_exists,
+        procedures,
+        cascade,
+    })
+}
+
+fn build_drop_routine_statement(sql: &str) -> Result<DropProcedureStatement, ParseError> {
+    let prefix = "drop routine";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "DROP ROUTINE name(args)",
             actual: sql.into(),
         });
     };
@@ -5925,6 +6083,217 @@ fn build_alter_procedure_statement(sql: &str) -> Result<AlterProcedureStatement,
             .collect(),
         action,
     })
+}
+
+fn build_alter_routine_statement(sql: &str) -> Result<AlterRoutineStatement, ParseError> {
+    let lowered = sql.to_ascii_lowercase();
+    let (kind, prefix) = if lowered.starts_with("alter function ") {
+        (RoutineKind::Function, "alter function")
+    } else if lowered.starts_with("alter procedure ") {
+        (RoutineKind::Procedure, "alter procedure")
+    } else if lowered.starts_with("alter routine ") {
+        (RoutineKind::Routine, "alter routine")
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER FUNCTION, ALTER PROCEDURE, or ALTER ROUTINE",
+            actual: sql.into(),
+        });
+    };
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let ((schema_name, routine_name), rest_after_name) = parse_qualified_sql_name(rest)?;
+    let (arg_sql, suffix) = if rest_after_name.trim_start().starts_with('(') {
+        take_parenthesized_segment(rest_after_name.trim_start())?
+    } else {
+        ("".to_string(), rest_after_name.trim_start())
+    };
+    let signature = RoutineSignature {
+        schema_name,
+        routine_name,
+        arg_types: split_comma_separated_sql(&arg_sql)?
+            .into_iter()
+            .filter(|item| !item.is_empty())
+            .map(str::to_string)
+            .collect(),
+    };
+    let suffix = suffix.trim();
+    let suffix_lower = suffix.to_ascii_lowercase();
+    if keyword_at_start(suffix, "rename") {
+        let rest = consume_keyword(suffix, "rename").trim_start();
+        let rest = consume_keyword(rest, "to").trim_start();
+        return Ok(AlterRoutineStatement {
+            kind,
+            signature,
+            action: AlterRoutineAction::Rename {
+                new_name: normalize_simple_identifier(rest)?,
+            },
+        });
+    }
+    if suffix_lower.starts_with("set schema ") {
+        return Ok(AlterRoutineStatement {
+            kind,
+            signature,
+            action: AlterRoutineAction::SetSchema {
+                new_schema: normalize_simple_identifier(suffix["set schema ".len()..].trim())?,
+            },
+        });
+    }
+    if suffix_lower.starts_with("owner to ") {
+        return Ok(AlterRoutineStatement {
+            kind,
+            signature,
+            action: AlterRoutineAction::OwnerTo {
+                new_owner: normalize_simple_identifier(suffix["owner to ".len()..].trim())?,
+            },
+        });
+    }
+    if suffix_lower.starts_with("depends on extension ")
+        || suffix_lower.starts_with("no depends on extension ")
+    {
+        let remove = suffix_lower.starts_with("no ");
+        let prefix = if remove {
+            "no depends on extension "
+        } else {
+            "depends on extension "
+        };
+        return Ok(AlterRoutineStatement {
+            kind,
+            signature,
+            action: AlterRoutineAction::DependsOnExtension {
+                extension_name: normalize_simple_identifier(suffix[prefix.len()..].trim())?,
+                remove,
+            },
+        });
+    }
+    Ok(AlterRoutineStatement {
+        kind,
+        signature,
+        action: AlterRoutineAction::Options(parse_alter_routine_options(suffix)?),
+    })
+}
+
+fn parse_alter_routine_options(mut input: &str) -> Result<Vec<AlterRoutineOption>, ParseError> {
+    let mut options = Vec::new();
+    while !input.trim().is_empty() {
+        input = input.trim_start();
+        if keyword_at_start(input, "strict") {
+            options.push(AlterRoutineOption::Strict(true));
+            input = consume_keyword(input, "strict");
+        } else if keyword_at_start(input, "returns") {
+            let rest = consume_keyword(input, "returns").trim_start();
+            let rest = consume_keyword(rest, "null").trim_start();
+            let rest = consume_keyword(rest, "on").trim_start();
+            input = consume_keyword(rest, "null").trim_start();
+            options.push(AlterRoutineOption::Strict(false));
+        } else if keyword_at_start(input, "called") {
+            let rest = consume_keyword(input, "called").trim_start();
+            let rest = consume_keyword(rest, "on").trim_start();
+            input = consume_keyword(rest, "null").trim_start();
+            options.push(AlterRoutineOption::Strict(false));
+        } else if keyword_at_start(input, "immutable") {
+            options.push(AlterRoutineOption::Volatility(
+                FunctionVolatility::Immutable,
+            ));
+            input = consume_keyword(input, "immutable");
+        } else if keyword_at_start(input, "stable") {
+            options.push(AlterRoutineOption::Volatility(FunctionVolatility::Stable));
+            input = consume_keyword(input, "stable");
+        } else if keyword_at_start(input, "volatile") {
+            options.push(AlterRoutineOption::Volatility(FunctionVolatility::Volatile));
+            input = consume_keyword(input, "volatile");
+        } else if keyword_at_start(input, "security") {
+            let rest = consume_keyword(input, "security").trim_start();
+            if keyword_at_start(rest, "definer") {
+                options.push(AlterRoutineOption::SecurityDefiner(true));
+                input = consume_keyword(rest, "definer");
+            } else {
+                options.push(AlterRoutineOption::SecurityDefiner(false));
+                input = consume_keyword(rest, "invoker");
+            }
+        } else if keyword_at_start(input, "leakproof") {
+            options.push(AlterRoutineOption::Leakproof(true));
+            input = consume_keyword(input, "leakproof");
+        } else if keyword_at_start(input, "not") {
+            let rest = consume_keyword(input, "not").trim_start();
+            options.push(AlterRoutineOption::Leakproof(false));
+            input = consume_keyword(rest, "leakproof");
+        } else if keyword_at_start(input, "parallel") {
+            let rest = consume_keyword(input, "parallel").trim_start();
+            let (value, rest) = take_next_word(rest)?;
+            let parallel = match value.to_ascii_lowercase().as_str() {
+                "safe" => FunctionParallel::Safe,
+                "restricted" => FunctionParallel::Restricted,
+                "unsafe" => FunctionParallel::Unsafe,
+                _ => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "SAFE, RESTRICTED, or UNSAFE",
+                        actual: value,
+                    });
+                }
+            };
+            options.push(AlterRoutineOption::Parallel(parallel));
+            input = rest;
+        } else if keyword_at_start(input, "cost") {
+            let rest = consume_keyword(input, "cost").trim_start();
+            let (value, rest) = take_next_word(rest)?;
+            options.push(AlterRoutineOption::Cost(value));
+            input = rest;
+        } else if keyword_at_start(input, "rows") {
+            let rest = consume_keyword(input, "rows").trim_start();
+            let (value, rest) = take_next_word(rest)?;
+            options.push(AlterRoutineOption::Rows(value));
+            input = rest;
+        } else if keyword_at_start(input, "support") {
+            let rest = consume_keyword(input, "support").trim_start();
+            let (value, rest) = take_next_word(rest)?;
+            options.push(AlterRoutineOption::Support(value));
+            input = rest;
+        } else if keyword_at_start(input, "set") {
+            let rest = consume_keyword(input, "set").trim_start();
+            let (name, rest) = take_next_word(rest)?;
+            let rest = rest.trim_start();
+            let rest = if keyword_at_start(rest, "to") {
+                consume_keyword(rest, "to").trim_start()
+            } else if rest.starts_with('=') {
+                rest[1..].trim_start()
+            } else {
+                rest
+            };
+            let (value, rest) = take_next_word(rest)?;
+            options.push(AlterRoutineOption::SetConfig { name, value });
+            input = rest;
+        } else if keyword_at_start(input, "reset") {
+            let rest = consume_keyword(input, "reset").trim_start();
+            if keyword_at_start(rest, "all") {
+                options.push(AlterRoutineOption::ResetAll);
+                input = consume_keyword(rest, "all");
+            } else {
+                let (name, rest) = take_next_word(rest)?;
+                options.push(AlterRoutineOption::ResetConfig(name));
+                input = rest;
+            }
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "routine option",
+                actual: input.into(),
+            });
+        }
+    }
+    Ok(options)
+}
+
+fn take_next_word(input: &str) -> Result<(String, &str), ParseError> {
+    let trimmed = input.trim_start();
+    if trimmed.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    Ok((
+        trimmed[..end].trim_matches('\'').to_string(),
+        &trimmed[end..],
+    ))
 }
 
 fn build_drop_routine_like_statement(

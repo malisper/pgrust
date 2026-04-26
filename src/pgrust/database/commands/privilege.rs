@@ -3,7 +3,7 @@ use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::commands::rolecmds::{membership_row, role_management_error};
 use crate::backend::parser::{
     CatalogLookup, GrantObjectPrivilege, GrantObjectStatement, GrantRoleMembershipStatement,
-    ParseError, RevokeObjectStatement, RevokeRoleMembershipStatement, RoleGrantorSpec,
+    ParseError, RevokeObjectStatement, RevokeRoleMembershipStatement, RoleGrantorSpec, RoutineKind,
     parse_type_name, resolve_raw_type_name,
 };
 use crate::include::catalog::{
@@ -13,6 +13,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 const TABLE_ALL_PRIVILEGE_CHARS: &str = "arwdDxtm";
 const TABLE_SELECT_PRIVILEGE_CHARS: &str = "r";
+const TABLE_INSERT_PRIVILEGE_CHARS: &str = "a";
 const SCHEMA_ALL_PRIVILEGE_CHARS: &str = "UC";
 const SCHEMA_USAGE_PRIVILEGE_CHARS: &str = "U";
 const TYPE_USAGE_PRIVILEGE_CHARS: &str = "U";
@@ -22,6 +23,7 @@ fn table_privilege_chars(privilege: GrantObjectPrivilege) -> Option<&'static str
     match privilege {
         GrantObjectPrivilege::AllPrivilegesOnTable => Some(TABLE_ALL_PRIVILEGE_CHARS),
         GrantObjectPrivilege::SelectOnTable => Some(TABLE_SELECT_PRIVILEGE_CHARS),
+        GrantObjectPrivilege::InsertOnTable => Some(TABLE_INSERT_PRIVILEGE_CHARS),
         _ => None,
     }
 }
@@ -31,7 +33,9 @@ fn object_privilege_chars(privilege: GrantObjectPrivilege) -> Option<&'static st
         GrantObjectPrivilege::AllPrivilegesOnSchema => Some(SCHEMA_ALL_PRIVILEGE_CHARS),
         GrantObjectPrivilege::UsageOnSchema => Some(SCHEMA_USAGE_PRIVILEGE_CHARS),
         GrantObjectPrivilege::UsageOnType => Some(TYPE_USAGE_PRIVILEGE_CHARS),
-        GrantObjectPrivilege::ExecuteOnFunction => Some(FUNCTION_EXECUTE_PRIVILEGE_CHARS),
+        GrantObjectPrivilege::ExecuteOnFunction
+        | GrantObjectPrivilege::ExecuteOnProcedure
+        | GrantObjectPrivilege::ExecuteOnRoutine => Some(FUNCTION_EXECUTE_PRIVILEGE_CHARS),
         _ => None,
     }
 }
@@ -163,7 +167,7 @@ pub(crate) fn type_owner_default_acl(owner_name: &str) -> Vec<String> {
     ]
 }
 
-fn function_owner_default_acl(owner_name: &str) -> Vec<String> {
+pub(crate) fn function_owner_default_acl(owner_name: &str) -> Vec<String> {
     vec![
         format!("{owner_name}={FUNCTION_EXECUTE_PRIVILEGE_CHARS}/{owner_name}"),
         format!("={FUNCTION_EXECUTE_PRIVILEGE_CHARS}/{owner_name}"),
@@ -275,6 +279,22 @@ fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
         .collect()
 }
 
+pub(crate) fn routine_kind_matches(kind: RoutineKind, prokind: char) -> bool {
+    match kind {
+        RoutineKind::Function => prokind == 'f',
+        RoutineKind::Procedure => prokind == 'p',
+        RoutineKind::Routine => matches!(prokind, 'f' | 'p'),
+    }
+}
+
+pub(crate) fn routine_kind_name(kind: RoutineKind) -> &'static str {
+    match kind {
+        RoutineKind::Function => "function",
+        RoutineKind::Procedure => "procedure",
+        RoutineKind::Routine => "routine",
+    }
+}
+
 fn ensure_function_signature_exists(
     db: &Database,
     client_id: ClientId,
@@ -340,6 +360,7 @@ fn lookup_function_row_by_signature(
     txn_ctx: CatalogTxnContext,
     configured_search_path: Option<&[String]>,
     signature: &str,
+    kind: RoutineKind,
 ) -> Result<crate::include::catalog::PgProcRow, ExecError> {
     let catalog = db.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
     let (proc_name, arg_names) =
@@ -372,20 +393,35 @@ fn lookup_function_row_by_signature(
         None => None,
     };
     let normalized_name = base_name.trim_matches('"').to_ascii_lowercase();
-    catalog
+    let candidates = catalog
         .proc_rows_by_name(&normalized_name)
         .into_iter()
-        .find(|row| {
+        .filter(|row| {
             parse_proc_argtype_oids(&row.proargtypes) == Some(desired_arg_oids.clone())
                 && schema_oid
                     .map(|schema_oid| row.pronamespace == schema_oid)
                     .unwrap_or(true)
         })
-        .ok_or_else(|| ExecError::DetailedError {
-            message: format!("function {signature} does not exist"),
-            detail: None,
-            hint: None,
-            sqlstate: "42883",
+        .collect::<Vec<_>>();
+    candidates
+        .iter()
+        .find(|row| routine_kind_matches(kind, row.prokind))
+        .cloned()
+        .ok_or_else(|| {
+            if !candidates.is_empty() {
+                return ExecError::DetailedError {
+                    message: format!("{} is not a {}", signature, routine_kind_name(kind)),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42809",
+                };
+            }
+            ExecError::DetailedError {
+                message: format!("{} {signature} does not exist", routine_kind_name(kind)),
+                detail: None,
+                hint: None,
+                sqlstate: "42883",
+            }
         })
 }
 
@@ -400,13 +436,14 @@ impl Database {
             GrantObjectPrivilege::CreateOnDatabase => {
                 self.execute_grant_database_create_stmt(client_id, stmt)
             }
-            GrantObjectPrivilege::AllPrivilegesOnTable | GrantObjectPrivilege::SelectOnTable => {
-                self.execute_grant_table_acl_stmt_with_search_path(
+            GrantObjectPrivilege::AllPrivilegesOnTable
+            | GrantObjectPrivilege::SelectOnTable
+            | GrantObjectPrivilege::InsertOnTable => self
+                .execute_grant_table_acl_stmt_with_search_path(
                     client_id,
                     stmt,
                     configured_search_path,
-                )
-            }
+                ),
             GrantObjectPrivilege::AllPrivilegesOnSchema | GrantObjectPrivilege::UsageOnSchema => {
                 self.execute_grant_schema_acl_stmt_with_search_path(
                     client_id,
@@ -419,7 +456,9 @@ impl Database {
                 stmt,
                 configured_search_path,
             ),
-            GrantObjectPrivilege::ExecuteOnFunction => self
+            GrantObjectPrivilege::ExecuteOnFunction
+            | GrantObjectPrivilege::ExecuteOnProcedure
+            | GrantObjectPrivilege::ExecuteOnRoutine => self
                 .execute_grant_function_acl_stmt_with_search_path(
                     client_id,
                     stmt,
@@ -441,16 +480,17 @@ impl Database {
             GrantObjectPrivilege::CreateOnDatabase => {
                 self.execute_revoke_database_create_stmt(client_id, stmt)
             }
-            GrantObjectPrivilege::AllPrivilegesOnTable | GrantObjectPrivilege::SelectOnTable => {
-                self.execute_revoke_table_acl_stmt_in_transaction_with_search_path(
+            GrantObjectPrivilege::AllPrivilegesOnTable
+            | GrantObjectPrivilege::SelectOnTable
+            | GrantObjectPrivilege::InsertOnTable => self
+                .execute_revoke_table_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt,
                     xid,
                     cid,
                     configured_search_path,
                     catalog_effects,
-                )
-            }
+                ),
             GrantObjectPrivilege::AllPrivilegesOnSchema | GrantObjectPrivilege::UsageOnSchema => {
                 self.execute_schema_acl_stmt_in_transaction_with_search_path(
                     client_id,
@@ -476,7 +516,9 @@ impl Database {
                     catalog_effects,
                     true,
                 ),
-            GrantObjectPrivilege::ExecuteOnFunction => self
+            GrantObjectPrivilege::ExecuteOnFunction
+            | GrantObjectPrivilege::ExecuteOnProcedure
+            | GrantObjectPrivilege::ExecuteOnRoutine => self
                 .execute_function_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt.privilege.clone(),
@@ -504,16 +546,17 @@ impl Database {
             GrantObjectPrivilege::CreateOnDatabase => {
                 self.execute_grant_database_create_stmt(client_id, stmt)
             }
-            GrantObjectPrivilege::AllPrivilegesOnTable | GrantObjectPrivilege::SelectOnTable => {
-                self.execute_grant_table_acl_stmt_in_transaction_with_search_path(
+            GrantObjectPrivilege::AllPrivilegesOnTable
+            | GrantObjectPrivilege::SelectOnTable
+            | GrantObjectPrivilege::InsertOnTable => self
+                .execute_grant_table_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt,
                     xid,
                     cid,
                     configured_search_path,
                     catalog_effects,
-                )
-            }
+                ),
             GrantObjectPrivilege::AllPrivilegesOnSchema | GrantObjectPrivilege::UsageOnSchema => {
                 self.execute_schema_acl_stmt_in_transaction_with_search_path(
                     client_id,
@@ -539,7 +582,9 @@ impl Database {
                     catalog_effects,
                     false,
                 ),
-            GrantObjectPrivilege::ExecuteOnFunction => self
+            GrantObjectPrivilege::ExecuteOnFunction
+            | GrantObjectPrivilege::ExecuteOnProcedure
+            | GrantObjectPrivilege::ExecuteOnRoutine => self
                 .execute_function_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt.privilege.clone(),
@@ -564,13 +609,14 @@ impl Database {
             GrantObjectPrivilege::CreateOnDatabase => {
                 self.execute_revoke_database_create_stmt(client_id, stmt)
             }
-            GrantObjectPrivilege::AllPrivilegesOnTable | GrantObjectPrivilege::SelectOnTable => {
-                self.execute_revoke_table_acl_stmt_with_search_path(
+            GrantObjectPrivilege::AllPrivilegesOnTable
+            | GrantObjectPrivilege::SelectOnTable
+            | GrantObjectPrivilege::InsertOnTable => self
+                .execute_revoke_table_acl_stmt_with_search_path(
                     client_id,
                     stmt,
                     configured_search_path,
-                )
-            }
+                ),
             GrantObjectPrivilege::AllPrivilegesOnSchema | GrantObjectPrivilege::UsageOnSchema => {
                 self.execute_revoke_schema_acl_stmt_with_search_path(
                     client_id,
@@ -584,7 +630,9 @@ impl Database {
                     stmt,
                     configured_search_path,
                 ),
-            GrantObjectPrivilege::ExecuteOnFunction => self
+            GrantObjectPrivilege::ExecuteOnFunction
+            | GrantObjectPrivilege::ExecuteOnProcedure
+            | GrantObjectPrivilege::ExecuteOnRoutine => self
                 .execute_revoke_function_acl_stmt_with_search_path(
                     client_id,
                     stmt,
@@ -1348,6 +1396,11 @@ impl Database {
             waiter: None,
             interrupts: self.interrupt_state(client_id),
         };
+        let routine_kind = match privilege {
+            GrantObjectPrivilege::ExecuteOnProcedure => RoutineKind::Procedure,
+            GrantObjectPrivilege::ExecuteOnRoutine => RoutineKind::Routine,
+            _ => RoutineKind::Function,
+        };
         for object_name in object_names {
             let row = lookup_function_row_by_signature(
                 self,
@@ -1355,6 +1408,7 @@ impl Database {
                 Some((xid, cid)),
                 configured_search_path,
                 object_name,
+                routine_kind,
             )?;
             if !auth_catalog
                 .role_by_oid(auth.current_user_oid())

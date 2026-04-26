@@ -3586,7 +3586,10 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 if matches!(legacy_func, BuiltinScalarFunction::RangeConstructor) {
                     resolve_function_cast_type(catalog, name)
                         .filter(|ty| range_type_ref_for_sql_type(*ty).is_some())
-                } else if matches!(legacy_func, BuiltinScalarFunction::Greatest) {
+                } else if matches!(
+                    legacy_func,
+                    BuiltinScalarFunction::Greatest | BuiltinScalarFunction::Least
+                ) {
                     infer_common_scalar_expr_type_with_ctes(
                         &lowered_args,
                         scope,
@@ -3594,7 +3597,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                         outer_scopes,
                         grouped_outer,
                         ctes,
-                        "GREATEST arguments with a common type",
+                        "GREATEST/LEAST arguments with a common type",
                     )
                     .ok()
                 } else {

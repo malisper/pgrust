@@ -1,6 +1,7 @@
 use super::super::*;
 use super::create::{aggregate_signature_arg_oids, resolve_aggregate_proc_rows};
 use super::dependency_drop::{CatalogDependencyGraph, DropBehavior, ObjectAddress};
+use crate::backend::executor::expr_reg::format_type_text;
 use crate::backend::parser::{parse_type_name, resolve_raw_type_name};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
@@ -350,6 +351,19 @@ fn drop_function_arg_type_oid(
 struct DropRoutineArgSpec {
     mode: Option<u8>,
     type_oid: u32,
+}
+
+fn drop_routine_signature_display(
+    name: &str,
+    specs: &[DropRoutineArgSpec],
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+) -> String {
+    let args = specs
+        .iter()
+        .map(|spec| format_type_text(spec.type_oid, None, catalog))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({args})")
 }
 
 fn drop_routine_arg_spec(
@@ -821,6 +835,59 @@ impl Database {
         Ok(StatementResult::AffectedRows(0))
     }
 
+    pub(crate) fn execute_drop_routine_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        drop_stmt: &DropProcedureStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_drop_routine_stmt_in_transaction_with_search_path(
+            client_id,
+            drop_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_drop_routine_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        drop_stmt: &DropProcedureStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        for routine in &drop_stmt.procedures {
+            let function_stmt = DropFunctionStatement {
+                if_exists: drop_stmt.if_exists,
+                schema_name: routine.schema_name.clone(),
+                function_name: routine.routine_name.clone(),
+                arg_types: routine.arg_types.clone(),
+                cascade: drop_stmt.cascade,
+            };
+            self.execute_drop_function_stmt_in_transaction_with_kind(
+                client_id,
+                &function_stmt,
+                xid,
+                cid,
+                configured_search_path,
+                catalog_effects,
+                'r',
+                "routine",
+            )?;
+        }
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     fn execute_drop_function_stmt_with_kind(
         &self,
         client_id: ClientId,
@@ -882,8 +949,14 @@ impl Database {
             .proc_rows_by_name(&drop_stmt.function_name)
             .into_iter()
             .filter(|row| {
-                drop_routine_signature_matches(row, &desired_arg_specs, proc_kind)
-                    && row.prokind == proc_kind
+                let effective_kind = if proc_kind == 'r' {
+                    row.prokind
+                } else {
+                    proc_kind
+                };
+                drop_routine_signature_matches(row, &desired_arg_specs, effective_kind)
+                    && (row.prokind == proc_kind
+                        || (proc_kind == 'r' && matches!(row.prokind, 'f' | 'p')))
                     && schema_oid
                         .map(|schema_oid| row.pronamespace == schema_oid)
                         .unwrap_or(true)
@@ -893,64 +966,52 @@ impl Database {
             .proc_rows_by_name(&drop_stmt.function_name)
             .into_iter()
             .filter(|row| {
-                drop_routine_signature_matches(row, &desired_arg_specs, proc_kind)
+                proc_kind != 'r'
+                    && drop_routine_signature_matches(row, &desired_arg_specs, proc_kind)
                     && row.prokind != proc_kind
                     && schema_oid
                         .map(|schema_oid| row.pronamespace == schema_oid)
                         .unwrap_or(true)
             })
             .collect::<Vec<_>>();
+        let display_signature =
+            drop_routine_signature_display(&drop_stmt.function_name, &desired_arg_specs, &catalog);
         let proc_row = match matches.as_slice() {
             [row] => row.clone(),
             [] if !wrong_kind_matches.is_empty() => {
-                let signature = format!(
-                    "{}({})",
-                    drop_stmt.function_name,
-                    drop_stmt.arg_types.join(", ")
-                );
                 return Err(ExecError::DetailedError {
-                    message: format!("{signature} is not a {object_kind}"),
+                    message: format!("{display_signature} is not a {object_kind}"),
                     detail: None,
                     hint: None,
                     sqlstate: "42809",
                 });
             }
             [] if drop_stmt.if_exists => {
-                let signature = format!(
-                    "{}({})",
-                    drop_stmt.function_name,
-                    drop_stmt.arg_types.join(", ")
-                );
                 push_notice(format!(
-                    "{object_kind} {signature} does not exist, skipping"
+                    "{object_kind} {display_signature} does not exist, skipping"
                 ));
                 return Ok(StatementResult::AffectedRows(0));
             }
             [] => {
-                let signature = format!(
-                    "{}({})",
-                    drop_stmt.function_name,
-                    drop_stmt.arg_types.join(", ")
-                );
                 return Err(ExecError::DetailedError {
-                    message: format!("{object_kind} {signature} does not exist"),
+                    message: format!("{object_kind} {display_signature} does not exist"),
                     detail: None,
                     hint: None,
                     sqlstate: "42883",
                 });
             }
             _ => {
-                let signature = format!(
-                    "{}({})",
-                    drop_stmt.function_name,
-                    drop_stmt.arg_types.join(", ")
-                );
                 return Err(ExecError::DetailedError {
-                    message: format!("{object_kind} name \"{signature}\" is not unique"),
+                    message: format!(
+                        "{object_kind} name \"{}\" is not unique",
+                        drop_stmt.function_name
+                    ),
                     detail: None,
-                    hint: Some(format!(
-                        "Specify the argument list to select the {object_kind} unambiguously."
-                    )),
+                    hint: drop_stmt.arg_types.is_empty().then(|| {
+                        format!(
+                            "Specify the argument list to select the {object_kind} unambiguously."
+                        )
+                    }),
                     sqlstate: "42725",
                 });
             }

@@ -757,6 +757,12 @@ impl Database {
             Statement::AlterProcedure(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "ALTER PROCEDURE".into(),
             ))),
+            Statement::AlterRoutine(ref alter_stmt) => self
+                .execute_alter_routine_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateSequence(ref create_stmt) => self
                 .execute_create_sequence_stmt_with_search_path(
                     client_id,
@@ -1557,6 +1563,12 @@ impl Database {
                 ),
             Statement::DropProcedure(ref drop_stmt) => self
                 .execute_drop_procedure_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
+            Statement::DropRoutine(ref drop_stmt) => self
+                .execute_drop_routine_stmt_with_search_path(
                     client_id,
                     drop_stmt,
                     configured_search_path,

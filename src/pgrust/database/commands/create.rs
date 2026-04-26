@@ -2,10 +2,10 @@ use super::super::*;
 use super::privilege::{acl_grants_privilege, effective_acl_grantee_names, type_owner_default_acl};
 use crate::backend::commands::partition::validate_new_partition_bound;
 use crate::backend::parser::{
-    AggregateArgType, AggregateSignatureKind, CreateAggregateStatement, CreateFunctionReturnSpec,
-    CreateFunctionStatement, CreateProcedureStatement, FunctionArgMode, FunctionParallel,
-    FunctionVolatility, OwnedSequenceSpec, PartitionBoundSpec, RawTypeName, RelOption,
-    SequenceOptionsSpec, SqlType, SqlTypeKind, Statement, parse_statement,
+    AggregateArgType, AggregateSignatureKind, CreateAggregateStatement, CreateFunctionArg,
+    CreateFunctionReturnSpec, CreateFunctionStatement, CreateProcedureStatement, FunctionArgMode,
+    FunctionParallel, FunctionVolatility, OwnedSequenceSpec, PartitionBoundSpec, RawTypeName,
+    RelOption, SequenceOptionsSpec, SqlType, SqlTypeKind, Statement, parse_statement,
     pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
 };
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
@@ -588,6 +588,72 @@ fn proc_arg_mode(mode: FunctionArgMode) -> u8 {
         FunctionArgMode::Out => b'o',
         FunctionArgMode::InOut => b'b',
     }
+}
+
+fn encode_proc_arg_defaults(defaults: &[Option<String>]) -> Option<String> {
+    defaults
+        .iter()
+        .any(Option::is_some)
+        .then(|| serde_json::to_string(defaults).expect("procedure defaults serialize"))
+}
+
+fn invalid_procedure_attribute() -> ExecError {
+    ExecError::DetailedError {
+        message: "invalid attribute in procedure definition".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "42P13",
+    }
+}
+
+fn validate_proc_arg_order(args: &[CreateFunctionArg], proc_kind: char) -> Result<(), ExecError> {
+    let mut saw_variadic_input = false;
+    let mut saw_default = false;
+    for arg in args {
+        let is_input = matches!(arg.mode, FunctionArgMode::In | FunctionArgMode::InOut);
+        let is_output = matches!(arg.mode, FunctionArgMode::Out | FunctionArgMode::InOut);
+        if saw_variadic_input && is_input {
+            return Err(ExecError::DetailedError {
+                message: "VARIADIC parameter must be the last input parameter".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
+        }
+        if proc_kind == 'p' && saw_variadic_input && is_output {
+            return Err(ExecError::DetailedError {
+                message: "VARIADIC parameter must be the last parameter".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
+        }
+        if is_input && saw_default && arg.default_expr.is_none() {
+            return Err(ExecError::DetailedError {
+                message: "input parameters after one with a default value must also have defaults"
+                    .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
+        }
+        if proc_kind == 'p' && is_output && !is_input && saw_default {
+            return Err(ExecError::DetailedError {
+                message: "procedure OUT parameters cannot appear after one with a default value"
+                    .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
+        }
+        if arg.default_expr.is_some() {
+            saw_default = true;
+        }
+        if arg.variadic && is_input {
+            saw_variadic_input = true;
+        }
+    }
+    Ok(())
 }
 
 fn validate_range_polymorphic_result(
@@ -1617,6 +1683,10 @@ impl Database {
             object_kind,
             configured_search_path,
         )?;
+        validate_proc_arg_order(&create_stmt.args, proc_kind)?;
+        if proc_kind == 'p' && create_stmt.strict {
+            return Err(invalid_procedure_attribute());
+        }
 
         let language_row = catalog
             .language_row_by_name(&create_stmt.language)
@@ -1927,7 +1997,7 @@ impl Database {
             proallargtypes,
             proargmodes,
             proargnames,
-            proargdefaults: None,
+            proargdefaults: encode_proc_arg_defaults(&callable_arg_defaults),
             prosrc,
             probin: None,
             prosqlbody: None,

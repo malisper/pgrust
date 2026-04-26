@@ -168,10 +168,7 @@ fn check_visibility(
     xmax: TransactionId,
     cid: CommandId,
 ) -> bool {
-    if xmin == INVALID_TRANSACTION_ID {
-        return true;
-    }
-    if xmin == FROZEN_TRANSACTION_ID {
+    if xmin == INVALID_TRANSACTION_ID || xmin == FROZEN_TRANSACTION_ID {
         if xmax == INVALID_TRANSACTION_ID {
             return true;
         }
