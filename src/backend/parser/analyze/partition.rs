@@ -173,9 +173,11 @@ pub(crate) fn lower_partition_clause(
         .lookup_any_relation(parent_name)
         .ok_or_else(|| ParseError::UnknownTable(parent_name.to_string()))?;
     if parent.relkind != 'p' {
-        return Err(ParseError::WrongObjectType {
-            name: parent_name.to_string(),
-            expected: "partitioned table",
+        return Err(ParseError::DetailedError {
+            message: format!("\"{parent_name}\" is not partitioned"),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
         });
     }
     let child_persistence = relation_persistence_code(persistence);
@@ -1548,13 +1550,23 @@ fn evaluate_partition_bound_expr(
             "partition bound values must be constant",
         ));
     };
-    cast_value(value, target).map_err(|_| {
-        partition_bound_error(format!(
-            "specified value cannot be cast to type {} for column \"{}\"",
-            sql_type_name(target),
-            key_name
-        ))
-    })
+    if matches!(target.kind, SqlTypeKind::Bool)
+        && matches!(
+            value,
+            Value::Int16(_) | Value::Int32(_) | Value::Int64(_) | Value::Numeric(_)
+        )
+    {
+        return Err(partition_bound_cast_error(target, key_name));
+    }
+    cast_value(value, target).map_err(|_| partition_bound_cast_error(target, key_name))
+}
+
+fn partition_bound_cast_error(target: SqlType, key_name: &str) -> ParseError {
+    partition_bound_error(format!(
+        "specified value cannot be cast to type {} for column \"{}\"",
+        sql_type_name(target),
+        key_name
+    ))
 }
 
 fn ensure_matching_partition_shape(

@@ -314,14 +314,18 @@ fn resolve_parent_relations(
                 sqlstate: "42P16",
             });
         }
-        if !(parent.relkind == 'r' || allow_partitioned_parent && parent.relkind == 'p') {
+        if allow_partitioned_parent && parent.relkind != 'p' {
+            return Err(ParseError::DetailedError {
+                message: format!("\"{parent_name}\" is not partitioned"),
+                detail: None,
+                hint: None,
+                sqlstate: "42809",
+            });
+        }
+        if !allow_partitioned_parent && parent.relkind != 'r' {
             return Err(ParseError::WrongObjectType {
                 name: parent_name.clone(),
-                expected: if allow_partitioned_parent {
-                    "partitioned table"
-                } else {
-                    "table"
-                },
+                expected: "table",
             });
         }
         if !seen.insert(parent.relation_oid) {

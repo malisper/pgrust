@@ -20,6 +20,8 @@ src/backend/catalog/store.rs
 src/backend/commands/partition.rs
 src/backend/executor/driver.rs
 src/backend/executor/exec_expr.rs
+src/backend/executor/expr_string.rs
+src/backend/executor/mod.rs
 src/backend/optimizer/constfold.rs
 src/backend/optimizer/mod.rs
 src/backend/parser/analyze/constraints.rs
@@ -69,11 +71,13 @@ scripts/cargo_isolated.sh test --lib --quiet builtin_scalar_helpers_have_proc_oi
 scripts/cargo_isolated.sh test --lib --quiet exec_error_position_points_at_create_table
 scripts/cargo_isolated.sh test --lib --quiet create_table_partition_validation_matches_postgres_messages
 scripts/cargo_isolated.sh test --lib --quiet partition_bound_validation_and_catalog_describe_helpers
+scripts/cargo_isolated.sh test --lib --quiet hash_partitioned_tables_route_rows_and_validate_bounds
 scripts/cargo_isolated.sh test --lib --quiet psql_describe_tableinfo_query_reports_partition_without_rules
 scripts/cargo_isolated.sh test --lib --quiet psql_describe_inherits_query_excludes_partitioned_parent
 scripts/run_regression.sh --test create_table --results-dir /tmp/pgrust-create-table-regression-final --timeout 240 --port 55837
+CARGO_TARGET_DIR=/tmp/pgrust-target-chicago-create-table-next2 scripts/run_regression.sh --test create_table --results-dir /tmp/pgrust-create-table-regression-next2 --timeout 240 --port 56137
 
 Remaining:
-Current complete create_table regression: 232/330 queries matched, 642 diff lines; copied to `/tmp/diffs/create_table.diff`.
-The fixed partition slice now covers most requested validation order/messages, bound validation, partition persistence wording, partition child catalog visibility, partition list ordering, and psql `Partition of`/constraint footers for simple list/range/hash/default cases.
-Remaining prominent causes: exact LINE/caret rendering for some parser and partition-bound errors; partition key dependencies for functions/domains and DROP ... CASCADE behavior; rowtype and whole-row partition keys; default partition row revalidation before accepting overlapping partitions; hash modulus DETAIL text; inherited partition constraint/locality propagation and related ALTER TABLE DROP CONSTRAINT support; collation handling in partition definitions; expression-key bound values are serialized/displayed as text literals in some `abs(...)` range cases; user-defined operator class DDL; COMMENT/obj_description support for partitioned tables; array partition values; active-query guard for CREATE TABLE ... PARTITION OF inside triggers; volatile partition-bound expressions; partitioned-table column drop and dependent index propagation.
+Current complete create_table regression: 238/330 queries matched, 606 diff lines; copied to `/tmp/diffs/create_table.diff`.
+The fixed partition slice now covers most requested validation order/messages, bound validation, partition persistence wording, partition child catalog visibility, partition list ordering, psql `Partition of`/constraint footers for simple list/range/hash/default cases, non-partitioned parent wording, hash modulus DETAIL text, boolean bound cast rejection, and `to_char(...)::int` constant partition bounds.
+Remaining prominent causes: exact LINE/caret rendering for some parser and partition-bound errors; partition key dependencies for functions/domains and DROP ... CASCADE behavior; rowtype and whole-row partition keys; default partition row revalidation before accepting overlapping partitions; inherited partition constraint/locality propagation and related ALTER TABLE DROP CONSTRAINT support; collation handling in partition definitions; expression-key bound values are serialized/displayed as text literals in some `abs(...)` range cases; user-defined operator class DDL; COMMENT/obj_description support for partitioned tables; array partition values; active-query guard for CREATE TABLE ... PARTITION OF inside triggers; volatile partition-bound expressions; partitioned-table column drop and dependent index propagation.

@@ -992,6 +992,22 @@ fn hash_moduli_compatible(left: i32, right: i32) -> bool {
     higher % lower == 0
 }
 
+fn hash_modulus_compatibility_detail(
+    new_modulus: i32,
+    existing_modulus: i32,
+    existing_name: &str,
+) -> String {
+    if new_modulus > existing_modulus {
+        format!(
+            "The new modulus {new_modulus} is not divisible by {existing_modulus}, the modulus of existing partition \"{existing_name}\"."
+        )
+    } else {
+        format!(
+            "The new modulus {new_modulus} is not a factor of {existing_modulus}, the modulus of existing partition \"{existing_name}\"."
+        )
+    }
+}
+
 fn hash_bounds_overlap(
     left_modulus: i32,
     left_remainder: i32,
@@ -1050,9 +1066,12 @@ pub(crate) fn validate_new_partition_bound(
 
     if let PartitionBoundSpec::Hash {
         modulus: new_modulus,
-        ..
+        remainder: new_remainder,
     } = bound
     {
+        let mut next_larger_incompatible: Option<(i32, String)> = None;
+        let mut matching_lower_incompatible: Option<(i32, String)> = None;
+        let mut first_lower_incompatible: Option<(i32, String)> = None;
         for child in direct_partition_children(catalog, parent.relation_oid)? {
             if skip_child_oid.is_some_and(|oid| oid == child.relation_oid) {
                 continue;
@@ -1060,19 +1079,40 @@ pub(crate) fn validate_new_partition_bound(
             let existing_bound = child_partition_bound(&child)?;
             if let PartitionBoundSpec::Hash {
                 modulus: existing_modulus,
-                ..
+                remainder: existing_remainder,
             } = existing_bound
                 && !hash_moduli_compatible(*new_modulus, existing_modulus)
             {
-                return Err(ExecError::DetailedError {
-                    message:
-                        "every hash partition modulus must be a factor of the next larger modulus"
-                            .into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42P17",
-                });
+                let existing_name = relation_name_for_oid(catalog, child.relation_oid);
+                if existing_modulus > *new_modulus {
+                    if next_larger_incompatible
+                        .as_ref()
+                        .is_none_or(|(modulus, _)| existing_modulus < *modulus)
+                    {
+                        next_larger_incompatible = Some((existing_modulus, existing_name));
+                    }
+                } else if *new_remainder % existing_modulus == existing_remainder {
+                    matching_lower_incompatible = Some((existing_modulus, existing_name));
+                } else if first_lower_incompatible.is_none() {
+                    first_lower_incompatible = Some((existing_modulus, existing_name));
+                }
             }
+        }
+        if let Some((existing_modulus, existing_name)) = next_larger_incompatible
+            .or(matching_lower_incompatible)
+            .or(first_lower_incompatible)
+        {
+            return Err(ExecError::DetailedError {
+                message: "every hash partition modulus must be a factor of the next larger modulus"
+                    .into(),
+                detail: Some(hash_modulus_compatibility_detail(
+                    *new_modulus,
+                    existing_modulus,
+                    &existing_name,
+                )),
+                hint: None,
+                sqlstate: "42P17",
+            });
         }
     }
 
@@ -1125,12 +1165,12 @@ pub(crate) fn validate_partition_relation_compatibility(
     child_name: &str,
 ) -> Result<(), ExecError> {
     if parent.relkind != 'p' || parent.partitioned_table.is_none() {
-        return Err(ExecError::Parse(
-            crate::backend::parser::ParseError::WrongObjectType {
-                name: parent_name.to_string(),
-                expected: "partitioned table",
-            },
-        ));
+        return Err(ExecError::DetailedError {
+            message: format!("\"{parent_name}\" is not partitioned"),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
     }
     if !matches!(child.relkind, 'r' | 'p') {
         return Err(ExecError::Parse(

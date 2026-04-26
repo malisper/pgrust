@@ -5884,9 +5884,17 @@ fn hash_partitioned_tables_route_rows_and_validate_bounds() {
         "create table hp_bad partition of hp for values with (modulus 3, remainder 0)",
     ) {
         Err(ExecError::DetailedError {
-            message, sqlstate, ..
+            message,
+            detail,
+            sqlstate,
+            ..
         }) if message
             == "every hash partition modulus must be a factor of the next larger modulus"
+            && detail
+                == Some(
+                    "The new modulus 3 is not divisible by 2, the modulus of existing partition \"hp0\"."
+                        .into(),
+                )
             && sqlstate == "42P17" => {}
         other => panic!("expected hash modulus factor rejection, got {other:?}"),
     }
@@ -5983,6 +5991,36 @@ fn partition_bound_validation_and_catalog_describe_helpers() {
             && sqlstate == "42P17" => {}
         other => panic!("expected partition bound aggregate rejection, got {other:?}"),
     }
+
+    session
+        .execute(
+            &db,
+            "create table bool_parted (a bool) partition by list (a)",
+        )
+        .unwrap();
+    match session.execute(
+        &db,
+        "create table bool_parted_1 partition of bool_parted for values in (1)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) if message == "specified value cannot be cast to type boolean for column \"a\""
+            && sqlstate == "42P17" => {}
+        other => panic!("expected boolean partition bound cast rejection, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create table money_parted (a money) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table money_parted_12 partition of money_parted for values in (to_char(12, '99')::int)",
+        )
+        .unwrap();
 
     session
         .execute(

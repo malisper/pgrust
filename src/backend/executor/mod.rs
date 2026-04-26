@@ -110,6 +110,7 @@ pub(crate) use expr_range::{
     parse_range_text,
 };
 pub use expr_range::{render_range_text, render_range_text_with_config};
+pub(crate) use expr_string::eval_to_char_function;
 pub(crate) use expr_txid::{
     cast_text_to_txid_snapshot, eval_txid_builtin_function, is_txid_snapshot_type_oid,
 };
