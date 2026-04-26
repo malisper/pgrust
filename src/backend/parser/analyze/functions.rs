@@ -2580,6 +2580,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("similar_substring", BuiltinScalarFunction::SimilarSubstring),
         ("overlay", BuiltinScalarFunction::Overlay),
         ("reverse", BuiltinScalarFunction::Reverse),
+        ("starts_with", BuiltinScalarFunction::TextStartsWith),
         ("trim", BuiltinScalarFunction::BTrim),
         ("btrim", BuiltinScalarFunction::BTrim),
         ("ltrim", BuiltinScalarFunction::LTrim),

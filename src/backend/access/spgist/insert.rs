@@ -21,9 +21,6 @@ fn spgist_insert_mutex() -> &'static parking_lot::Mutex<()> {
 
 pub(crate) fn spginsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
     let _guard = spgist_insert_mutex().lock();
-    if ctx.values.iter().any(|value| matches!(value, Value::Null)) {
-        return Ok(false);
-    }
     if relation_nblocks(&ctx.pool, ctx.index_relation)? == 0 {
         ensure_empty_spgist(
             &ctx.pool,
@@ -34,8 +31,14 @@ pub(crate) fn spginsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> 
     }
     let state = SpgistState::new(&ctx.index_desc, &ctx.index_meta)?;
     let _ = state.config(0)?;
-    let _ = state.choose(0, &ctx.values[0], &ctx.values[0])?;
-    let _ = state.picksplit(0, &ctx.values)?;
+    if !ctx
+        .values
+        .first()
+        .is_none_or(|value| matches!(value, Value::Null))
+    {
+        let _ = state.choose(0, &ctx.values[0], &ctx.values[0])?;
+        let _ = state.picksplit(0, &ctx.values)?;
+    }
     let tuple = make_leaf_tuple(&ctx.index_desc, &ctx.values, ctx.heap_tid)?;
 
     let last_block = relation_nblocks(&ctx.pool, ctx.index_relation)?.saturating_sub(1);

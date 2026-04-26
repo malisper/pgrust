@@ -2832,11 +2832,15 @@ fn validate_executable_plan(plan: &Plan) {
         Plan::BitmapHeapScan {
             bitmapqual,
             recheck_qual,
+            filter_qual,
             ..
         } => {
             recheck_qual
                 .iter()
                 .for_each(|expr| validate_executable_expr(expr, "BitmapHeapScan", "recheck_qual"));
+            filter_qual
+                .iter()
+                .for_each(|expr| validate_executable_expr(expr, "BitmapHeapScan", "filter_qual"));
             validate_executable_plan(bitmapqual);
         }
         Plan::Hash {
@@ -3258,10 +3262,14 @@ fn validate_planner_path(path: &Path) {
         Path::BitmapHeapScan {
             bitmapqual,
             recheck_qual,
+            filter_qual,
             ..
         } => {
             for expr in recheck_qual {
                 validate_planner_expr(expr, "BitmapHeapScan", "recheck_qual");
+            }
+            for expr in filter_qual {
+                validate_planner_expr(expr, "BitmapHeapScan", "filter_qual");
             }
             validate_planner_path(bitmapqual);
         }
@@ -3672,6 +3680,7 @@ fn set_bitmap_index_scan_references(
     rel: crate::RelFileLocator,
     relation_oid: u32,
     index_rel: crate::RelFileLocator,
+    index_name: String,
     am_oid: u32,
     desc: crate::include::nodes::primnodes::RelationDesc,
     index_desc: crate::include::nodes::primnodes::RelationDesc,
@@ -3702,6 +3711,7 @@ fn set_bitmap_index_scan_references(
         rel,
         relation_oid,
         index_rel,
+        index_name,
         am_oid,
         desc,
         index_desc,
@@ -3723,11 +3733,25 @@ fn set_bitmap_heap_scan_references(
     desc: crate::include::nodes::primnodes::RelationDesc,
     bitmapqual: Box<Path>,
     recheck_qual: Vec<Expr>,
+    filter_qual: Vec<Expr>,
 ) -> Plan {
     let scan_tlist = build_simple_tlist_from_exprs(
         &slot_output_target(source_id, &desc.columns, |column| column.sql_type).exprs,
     );
     let recheck_qual = recheck_qual
+        .into_iter()
+        .map(|expr| {
+            lower_expr(
+                ctx,
+                expr,
+                LowerMode::Input {
+                    path: None,
+                    tlist: &scan_tlist,
+                },
+            )
+        })
+        .collect();
+    let filter_qual = filter_qual
         .into_iter()
         .map(|expr| {
             lower_expr(
@@ -3750,6 +3774,7 @@ fn set_bitmap_heap_scan_references(
         desc,
         bitmapqual: Box::new(set_plan_refs(ctx, *bitmapqual)),
         recheck_qual,
+        filter_qual,
     }
 }
 
@@ -4682,6 +4707,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             rel,
             relation_oid,
             index_rel,
+            index_name,
             am_oid,
             desc,
             index_desc,
@@ -4696,6 +4722,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             rel,
             relation_oid,
             index_rel,
+            index_name,
             am_oid,
             desc,
             index_desc,
@@ -4713,6 +4740,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             desc,
             bitmapqual,
             recheck_qual,
+            filter_qual,
             ..
         } => set_bitmap_heap_scan_references(
             ctx,
@@ -4725,6 +4753,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             desc,
             bitmapqual,
             recheck_qual,
+            filter_qual,
         ),
         Path::Filter {
             plan_info,

@@ -1080,6 +1080,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             rel,
             relation_oid,
             index_rel,
+            index_name,
             am_oid,
             desc,
             index_desc,
@@ -1092,6 +1093,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             rel,
             relation_oid,
             index_rel,
+            index_name,
             am_oid,
             desc,
             index_desc,
@@ -1112,6 +1114,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             desc,
             bitmapqual,
             recheck_qual,
+            filter_qual,
         } => Plan::BitmapHeapScan {
             plan_info,
             source_id,
@@ -1122,6 +1125,10 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             desc,
             bitmapqual: Box::new(rebase_plan_subplan_ids(*bitmapqual, base)),
             recheck_qual: recheck_qual
+                .into_iter()
+                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
+            filter_qual: filter_qual
                 .into_iter()
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
@@ -1519,6 +1526,7 @@ pub(super) fn finalize_plan_subqueries(
             desc,
             bitmapqual,
             recheck_qual,
+            filter_qual,
         } => Plan::BitmapHeapScan {
             plan_info,
             source_id,
@@ -1529,6 +1537,10 @@ pub(super) fn finalize_plan_subqueries(
             desc,
             bitmapqual: Box::new(finalize_plan_subqueries(*bitmapqual, catalog, subplans)),
             recheck_qual: recheck_qual
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                .collect(),
+            filter_qual: filter_qual
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
                 .collect(),

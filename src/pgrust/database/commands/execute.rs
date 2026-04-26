@@ -1443,6 +1443,7 @@ impl Database {
                     None,
                     0,
                     configured_search_path,
+                    planner_config,
                 ),
             Statement::RefreshMaterializedView(ref refresh_stmt) => self
                 .execute_refresh_materialized_view_stmt_with_search_path(

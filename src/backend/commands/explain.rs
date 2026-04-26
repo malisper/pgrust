@@ -213,9 +213,7 @@ fn projection_targets_are_explain_passthrough(input: &Plan, targets: &[TargetEnt
     if identity_projection {
         return true;
     }
-    let full_width_projection =
-        targets.len() == input_names.len() && targets.iter().all(|target| !target.resjunk);
-    if matches!(input, Plan::WindowAgg { .. }) && full_width_projection {
+    if matches!(input, Plan::WindowAgg { .. }) && targets.iter().all(|target| !target.resjunk) {
         return true;
     }
     targets
@@ -1034,6 +1032,19 @@ fn explain_plan_children_with_context(
                 verbose,
                 true,
                 &right_ctx,
+                lines,
+            );
+        }
+        Plan::BitmapHeapScan { bitmapqual, .. } => {
+            let child_indent = if indent == 0 { 1 } else { indent + 3 };
+            format_explain_plan_with_subplans_inner(
+                bitmapqual,
+                subplans,
+                child_indent,
+                show_costs,
+                verbose,
+                true,
+                ctx,
                 lines,
             );
         }

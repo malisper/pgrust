@@ -190,6 +190,7 @@ impl Database {
             Self::temp_namespace_oid(temp_backend_id),
             Self::temp_toast_namespace_oid(temp_backend_id),
         ];
+        let mut dropped_relation_oids = std::collections::BTreeSet::new();
         for include_indexes in [false, true] {
             let catcache = self
                 .txn_backend_catcache(client_id, xid, *cid)
@@ -208,6 +209,9 @@ impl Database {
                 &catcache.inherit_rows(),
             );
             for relation_oid in relation_oids {
+                if dropped_relation_oids.contains(&relation_oid) {
+                    continue;
+                }
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -220,7 +224,7 @@ impl Database {
                 let visible_type_rows = self
                     .lazy_catalog_lookup(client_id, Some((xid, *cid)), None)
                     .type_rows();
-                let effect = self
+                let (dropped, effect) = self
                     .catalog
                     .write()
                     .drop_relation_by_oid_mvcc_with_extra_type_rows(
@@ -228,8 +232,8 @@ impl Database {
                         &ctx,
                         &visible_type_rows,
                     )
-                    .map_err(map_catalog_error)?
-                    .1;
+                    .map_err(map_catalog_error)?;
+                dropped_relation_oids.extend(dropped.into_iter().map(|entry| entry.relation_oid));
                 catalog_effects.push(effect);
                 *cid = (*cid).saturating_add(1);
             }

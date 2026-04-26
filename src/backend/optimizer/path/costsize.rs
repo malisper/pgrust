@@ -23,13 +23,15 @@ use crate::include::catalog::{
     relkind_has_storage,
 };
 use crate::include::nodes::datum::ArrayValue;
-use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo, RestrictInfo};
+use crate::include::nodes::pathnodes::{
+    Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, RestrictInfo,
+};
 use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument, PlanEstimate};
 use crate::include::nodes::primnodes::SetReturningCall;
 use crate::include::nodes::primnodes::{
-    BoolExprType, BuiltinScalarFunction, Expr, JoinType, OpExprKind, OrderByEntry,
-    ProjectSetTarget, QueryColumn, RelationDesc, ToastRelationRef, attrno_index,
-    set_returning_call_exprs,
+    BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, JoinType, OpExprKind, OrderByEntry,
+    ProjectSetTarget, QueryColumn, RelationDesc, ScalarFunctionImpl, ToastRelationRef,
+    attrno_index, set_returning_call_exprs,
 };
 
 use super::super::pathnodes::{expr_sql_type, slot_output_target};
@@ -47,10 +49,18 @@ fn is_gist_like_am(am_oid: u32) -> bool {
 }
 
 pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
+    optimize_path_with_config(plan, catalog, PlannerConfig::default())
+}
+
+pub(super) fn optimize_path_with_config(
+    plan: Path,
+    catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
+) -> Path {
     if plan.plan_info() != PlanEstimate::default() {
         return plan;
     }
-    match try_optimize_access_subtree(plan, catalog) {
+    match try_optimize_access_subtree(plan, catalog, config) {
         Ok(plan) => plan,
         Err(plan) => match plan {
             Path::Result { pathtarget, .. } => Path::Result {
@@ -60,7 +70,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
             Path::Unique {
                 pathtarget, input, ..
             } => {
-                let input = optimize_path(*input, catalog);
+                let input = optimize_path_with_config(*input, catalog, config);
                 let input_info = input.plan_info();
                 let rows = clamp_rows(input_info.plan_rows.as_f64());
                 Path::Unique {
@@ -84,7 +94,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
             } => {
                 let children = children
                     .into_iter()
-                    .map(|child| optimize_path(child, catalog))
+                    .map(|child| optimize_path_with_config(child, catalog, config))
                     .collect::<Vec<_>>();
                 let startup_cost = children
                     .iter()
@@ -124,7 +134,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
             } => {
                 let children = children
                     .into_iter()
-                    .map(|child| optimize_path(child, catalog))
+                    .map(|child| optimize_path_with_config(child, catalog, config))
                     .collect::<Vec<_>>();
                 let startup_cost = children
                     .iter()
@@ -165,7 +175,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
             } => {
                 let children = children
                     .into_iter()
-                    .map(|child| optimize_path(child, catalog))
+                    .map(|child| optimize_path_with_config(child, catalog, config))
                     .collect::<Vec<_>>();
                 let startup_cost = children
                     .iter()
@@ -332,6 +342,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 rel,
                 relation_oid,
                 index_rel,
+                index_name,
                 am_oid,
                 desc,
                 index_desc,
@@ -354,6 +365,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     rel,
                     relation_oid,
                     index_rel,
+                    index_name,
                     am_oid,
                     desc,
                     index_desc,
@@ -372,11 +384,14 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 desc,
                 bitmapqual,
                 recheck_qual,
+                filter_qual,
                 ..
             } => {
-                let bitmapqual = optimize_path(*bitmapqual, catalog);
+                let bitmapqual = optimize_path_with_config(*bitmapqual, catalog, config);
                 let stats = relation_stats(catalog, relation_oid, &desc);
-                let recheck_expr = and_exprs(recheck_qual.clone());
+                let mut selectivity_quals = recheck_qual.clone();
+                selectivity_quals.extend(filter_qual.clone());
+                let recheck_expr = and_exprs(selectivity_quals);
                 let selectivity = recheck_expr
                     .as_ref()
                     .map(|expr| clause_selectivity(expr, Some(&stats), stats.reltuples))
@@ -406,6 +421,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     desc,
                     bitmapqual: Box::new(bitmapqual),
                     recheck_qual,
+                    filter_qual,
                 }
             }
             Path::Filter {
@@ -414,7 +430,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 predicate,
                 ..
             } => {
-                let input = optimize_path(*input, catalog);
+                let input = optimize_path_with_config(*input, catalog, config);
                 let input_info = input.plan_info();
                 let input_rows = input_info.plan_rows.as_f64();
                 let selectivity = clause_selectivity(&predicate, None, input_rows);
@@ -439,7 +455,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 display_items,
                 ..
             } => {
-                let input = optimize_path(*input, catalog);
+                let input = optimize_path_with_config(*input, catalog, config);
                 let input_info = input.plan_info();
                 let sort_cost = estimate_sort_cost(input_info.plan_rows.as_f64(), items.len());
                 Path::OrderBy {
@@ -462,7 +478,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 offset,
                 ..
             } => {
-                let input = optimize_path(*input, catalog);
+                let input = optimize_path_with_config(*input, catalog, config);
                 let input_info = input.plan_info();
                 let input_rows = input_info.plan_rows.as_f64();
                 let requested = limit
@@ -500,7 +516,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 row_marks,
                 ..
             } => {
-                let input = optimize_path(*input, catalog);
+                let input = optimize_path_with_config(*input, catalog, config);
                 let input_info = input.plan_info();
                 Path::LockRows {
                     plan_info: PlanEstimate::new(
@@ -521,7 +537,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 slot_id,
                 ..
             } => {
-                let input = optimize_path(*input, catalog);
+                let input = optimize_path_with_config(*input, catalog, config);
                 let input_info = input.plan_info();
                 let width = targets
                     .iter()
@@ -554,7 +570,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 pathkeys,
                 ..
             } => {
-                let input = optimize_path(*input, catalog);
+                let input = optimize_path_with_config(*input, catalog, config);
                 let input_info = input.plan_info();
                 let rows = if group_by.is_empty() {
                     1.0
@@ -591,7 +607,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 slot_id,
                 ..
             } => {
-                let input = optimize_path(*input, catalog);
+                let input = optimize_path_with_config(*input, catalog, config);
                 let input_info = input.plan_info();
                 let width = output_columns
                     .iter()
@@ -623,7 +639,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 output_columns,
                 ..
             } => {
-                let cte_plan = optimize_path(*cte_plan, catalog);
+                let cte_plan = optimize_path_with_config(*cte_plan, catalog, config);
                 let cte_info = cte_plan.plan_info();
                 let width = output_columns
                     .iter()
@@ -655,7 +671,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 pathkeys,
                 ..
             } => {
-                let input = optimize_path(*input, catalog);
+                let input = optimize_path_with_config(*input, catalog, config);
                 let input_info = input.plan_info();
                 let width = output_columns
                     .iter()
@@ -711,8 +727,8 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 recursive,
                 ..
             } => {
-                let anchor = optimize_path(*anchor, catalog);
-                let recursive = optimize_path(*recursive, catalog);
+                let anchor = optimize_path_with_config(*anchor, catalog, config);
+                let recursive = optimize_path_with_config(*recursive, catalog, config);
                 let anchor_info = anchor.plan_info();
                 let recursive_info = recursive.plan_info();
                 let rows = clamp_rows(
@@ -759,8 +775,8 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 restrict_clauses,
                 ..
             } => {
-                let left = optimize_path(*left, catalog);
-                let right = optimize_path(*right, catalog);
+                let left = optimize_path_with_config(*left, catalog, config);
+                let right = optimize_path_with_config(*right, catalog, config);
                 choose_join_plan(
                     left,
                     right,
@@ -782,8 +798,8 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 restrict_clauses,
                 ..
             } => {
-                let left = optimize_path(*left, catalog);
-                let right = optimize_path(*right, catalog);
+                let left = optimize_path_with_config(*left, catalog, config);
+                let right = optimize_path_with_config(*right, catalog, config);
                 let left_relids = path_relids(&left);
                 let right_relids = path_relids(&right);
                 let join_clauses =
@@ -815,8 +831,8 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 restrict_clauses,
                 ..
             } => {
-                let left = optimize_path(*left, catalog);
-                let right = optimize_path(*right, catalog);
+                let left = optimize_path_with_config(*left, catalog, config);
+                let right = optimize_path_with_config(*right, catalog, config);
                 let left_relids = path_relids(&left);
                 let right_relids = path_relids(&right);
                 let join_clauses =
@@ -883,7 +899,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 slot_id,
                 ..
             } => {
-                let input = optimize_path(*input, catalog);
+                let input = optimize_path_with_config(*input, catalog, config);
                 let input_info = input.plan_info();
                 let rows = clamp_rows(input_info.plan_rows.as_f64() * 10.0);
                 let width = targets
@@ -913,7 +929,11 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
     }
 }
 
-fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Result<Path, Path> {
+fn try_optimize_access_subtree(
+    plan: Path,
+    catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
+) -> Result<Path, Path> {
     let (
         source_id,
         rel,
@@ -1088,7 +1108,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
         order_items.clone(),
         order_display_items.clone(),
     );
-    if relkind != 'r' {
+    if relkind != 'r' || !config.enable_indexscan {
         return Ok(best.plan);
     }
     let indexes = catalog.index_relations_for_heap(relation_oid);
@@ -1113,6 +1133,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
             spec,
             order_items.clone(),
             order_display_items.clone(),
+            config,
             catalog,
         );
         if candidate.total_cost < best.total_cost {
@@ -1361,6 +1382,7 @@ fn estimate_brin_bitmap_candidate(
         rel,
         relation_oid,
         index_rel: spec.index.rel,
+        index_name: spec.index.name.clone(),
         am_oid: spec.index.index_meta.am_oid,
         desc: desc.clone(),
         index_desc: spec.index.desc.clone(),
@@ -1369,11 +1391,11 @@ fn estimate_brin_bitmap_candidate(
         index_quals: spec.used_quals.clone(),
     };
 
-    let mut recheck_qual = spec.used_quals.clone();
-    if let Some(residual) = spec.residual.clone() {
-        recheck_qual.extend(flatten_and_conjuncts(&residual));
-    }
-    let recheck_expr = and_exprs(recheck_qual.clone());
+    let recheck_qual = spec.recheck_quals.clone();
+    let filter_qual = spec.filter_quals.clone();
+    let mut selectivity_quals = recheck_qual.clone();
+    selectivity_quals.extend(filter_qual.clone());
+    let recheck_expr = and_exprs(selectivity_quals);
     let rows = recheck_expr
         .as_ref()
         .map(|expr| {
@@ -1405,6 +1427,7 @@ fn estimate_brin_bitmap_candidate(
         desc,
         bitmapqual: Box::new(bitmap_index),
         recheck_qual,
+        filter_qual,
     };
 
     if let Some(items) = order_items {
@@ -1462,6 +1485,7 @@ fn estimate_gin_bitmap_candidate(
         rel,
         relation_oid,
         index_rel: spec.index.rel,
+        index_name: spec.index.name.clone(),
         am_oid: spec.index.index_meta.am_oid,
         desc: desc.clone(),
         index_desc: spec.index.desc.clone(),
@@ -1470,11 +1494,11 @@ fn estimate_gin_bitmap_candidate(
         index_quals: spec.used_quals.clone(),
     };
 
-    let mut recheck_qual = spec.used_quals.clone();
-    if let Some(residual) = spec.residual.clone() {
-        recheck_qual.extend(flatten_and_conjuncts(&residual));
-    }
-    let recheck_expr = and_exprs(recheck_qual.clone());
+    let recheck_qual = spec.recheck_quals.clone();
+    let filter_qual = spec.filter_quals.clone();
+    let mut selectivity_quals = recheck_qual.clone();
+    selectivity_quals.extend(filter_qual.clone());
+    let recheck_expr = and_exprs(selectivity_quals);
     let rows = recheck_expr
         .as_ref()
         .map(|expr| {
@@ -1506,6 +1530,143 @@ fn estimate_gin_bitmap_candidate(
         desc,
         bitmapqual: Box::new(bitmap_index),
         recheck_qual,
+        filter_qual,
+    };
+
+    if let Some(items) = order_items {
+        let sort_cost = estimate_sort_cost(rows, items.len());
+        total_cost += sort_cost;
+        plan = Path::OrderBy {
+            plan_info: PlanEstimate::new(total_cost - sort_cost, total_cost, rows, stats.width),
+            pathtarget: plan.semantic_output_target(),
+            input: Box::new(plan),
+            items,
+            display_items: order_display_items.unwrap_or_default(),
+        };
+    }
+
+    AccessCandidate { total_cost, plan }
+}
+
+pub(super) fn estimate_bitmap_candidate(
+    source_id: usize,
+    rel: RelFileLocator,
+    relation_name: String,
+    relation_oid: u32,
+    toast: Option<ToastRelationRef>,
+    desc: RelationDesc,
+    stats: &RelationStats,
+    spec: IndexPathSpec,
+    order_items: Option<Vec<OrderByEntry>>,
+    order_display_items: Option<Vec<String>>,
+    catalog: &dyn CatalogLookup,
+) -> AccessCandidate {
+    match spec.index.index_meta.am_oid {
+        BRIN_AM_OID => {
+            return estimate_brin_bitmap_candidate(
+                source_id,
+                rel,
+                relation_name,
+                relation_oid,
+                toast,
+                desc,
+                stats,
+                spec,
+                order_items,
+                order_display_items,
+                catalog,
+            );
+        }
+        GIN_AM_OID => {
+            return estimate_gin_bitmap_candidate(
+                source_id,
+                rel,
+                relation_name,
+                relation_oid,
+                toast,
+                desc,
+                stats,
+                spec,
+                order_items,
+                order_display_items,
+                catalog,
+            );
+        }
+        _ => {}
+    }
+
+    let index_pages = catalog
+        .class_row_by_oid(spec.index.relation_oid)
+        .map(|row| row.relpages.max(1) as f64)
+        .unwrap_or(DEFAULT_NUM_PAGES);
+    let qual_selectivity = spec
+        .used_quals
+        .iter()
+        .map(|expr| clause_selectivity(expr, Some(stats), stats.reltuples))
+        .product::<f64>()
+        .clamp(0.0, 1.0);
+    let index_rows = clamp_rows(stats.reltuples * qual_selectivity);
+    let index_startup_cost = spec
+        .used_quals
+        .iter()
+        .map(|expr| predicate_cost(expr) * CPU_OPERATOR_COST)
+        .sum::<f64>()
+        + CPU_OPERATOR_COST;
+    let index_total_cost =
+        index_startup_cost + index_pages * RANDOM_PAGE_COST + index_rows * CPU_INDEX_TUPLE_COST;
+    let bitmap_index = Path::BitmapIndexScan {
+        plan_info: PlanEstimate::new(index_startup_cost, index_total_cost, index_rows, 0),
+        pathtarget: PathTarget::new(Vec::new()),
+        source_id,
+        rel,
+        relation_oid,
+        index_rel: spec.index.rel,
+        index_name: spec.index.name.clone(),
+        am_oid: spec.index.index_meta.am_oid,
+        desc: desc.clone(),
+        index_desc: spec.index.desc.clone(),
+        index_meta: spec.index.index_meta.clone(),
+        keys: spec.keys.clone(),
+        index_quals: spec.used_quals.clone(),
+    };
+
+    let recheck_qual = spec.recheck_quals.clone();
+    let filter_qual = spec.filter_quals.clone();
+    let mut selectivity_quals = recheck_qual.clone();
+    selectivity_quals.extend(filter_qual.clone());
+    let recheck_expr = and_exprs(selectivity_quals);
+    let rows = recheck_expr
+        .as_ref()
+        .map(|expr| {
+            clamp_rows(stats.reltuples * clause_selectivity(expr, Some(stats), stats.reltuples))
+        })
+        .unwrap_or(index_rows);
+    let heap_pages = stats.relpages.max(1.0).min(rows.max(1.0));
+    let recheck_cost = recheck_expr
+        .as_ref()
+        .map(|expr| predicate_cost(expr) * rows * CPU_OPERATOR_COST)
+        .unwrap_or(0.0);
+    let mut total_cost = bitmap_index.plan_info().total_cost.as_f64()
+        + heap_pages * RANDOM_PAGE_COST
+        + rows * CPU_TUPLE_COST
+        + recheck_cost;
+    let mut plan = Path::BitmapHeapScan {
+        plan_info: PlanEstimate::new(
+            bitmap_index.plan_info().startup_cost.as_f64(),
+            total_cost,
+            rows,
+            stats.width,
+        ),
+        pathtarget: slot_output_target(source_id, &desc.columns, |column| column.sql_type),
+        source_id,
+        rel,
+        relation_name,
+        relation_oid,
+        toast,
+        desc,
+        bitmapqual: Box::new(bitmap_index),
+        recheck_qual,
+        filter_qual,
     };
 
     if let Some(items) = order_items {
@@ -1534,25 +1695,11 @@ pub(super) fn estimate_index_candidate(
     spec: IndexPathSpec,
     order_items: Option<Vec<OrderByEntry>>,
     order_display_items: Option<Vec<String>>,
+    config: PlannerConfig,
     catalog: &dyn CatalogLookup,
 ) -> AccessCandidate {
-    if spec.index.index_meta.am_oid == BRIN_AM_OID {
-        return estimate_brin_bitmap_candidate(
-            source_id,
-            rel,
-            relation_name,
-            relation_oid,
-            toast,
-            desc,
-            stats,
-            spec,
-            order_items,
-            order_display_items,
-            catalog,
-        );
-    }
-    if spec.index.index_meta.am_oid == GIN_AM_OID {
-        return estimate_gin_bitmap_candidate(
+    if matches!(spec.index.index_meta.am_oid, BRIN_AM_OID | GIN_AM_OID) {
+        return estimate_bitmap_candidate(
             source_id,
             rel,
             relation_name,
@@ -1616,7 +1763,8 @@ pub(super) fn estimate_index_candidate(
     } else {
         Vec::new()
     };
-    let index_only = index_supports_index_only_scan(&desc, &spec.index);
+    let index_only =
+        config.enable_indexonlyscan && index_supports_index_only_scan(&desc, &spec.index);
     let mut plan = if index_only {
         Path::IndexOnlyScan {
             plan_info: scan_info,
@@ -2303,10 +2451,12 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
         Path::BitmapHeapScan {
             bitmapqual,
             recheck_qual,
+            filter_qual,
             ..
         } => {
             path_uses_immediate_outer_columns(bitmapqual)
                 || recheck_qual.iter().any(expr_uses_immediate_outer_columns)
+                || filter_qual.iter().any(expr_uses_immediate_outer_columns)
         }
         Path::Append { children, .. } | Path::SetOp { children, .. } => {
             children.iter().any(path_uses_immediate_outer_columns)
@@ -2839,7 +2989,20 @@ pub(super) fn build_index_path_spec(
         _ => return None,
     };
     let used_quals = used_indexes
-        .into_iter()
+        .iter()
+        .filter_map(|idx| parsed_quals.get(*idx).map(|qual| qual.index_expr.clone()))
+        .collect::<Vec<_>>();
+    let recheck_quals = used_indexes
+        .iter()
+        .filter_map(|idx| {
+            parsed_quals
+                .get(*idx)
+                .and_then(|qual| qual.recheck_expr.clone())
+        })
+        .collect::<Vec<_>>();
+    let used_original_quals = used_indexes
+        .iter()
+        .copied()
         .filter_map(|idx| parsed_quals.get(idx).map(|qual| qual.expr.clone()))
         .collect::<Vec<_>>();
     // :HACK: PostgreSQL's multirange regression exercises unordered btree
@@ -2867,21 +3030,31 @@ pub(super) fn build_index_path_spec(
     } else {
         (Vec::new(), None)
     };
-    if keys.is_empty() && order_match.is_none() {
+    let optional_spgist_full_scan =
+        index.index_meta.am_oid == SPGIST_AM_OID && filter.is_none() && order_match.is_none();
+    if keys.is_empty() && order_match.is_none() && !optional_spgist_full_scan {
         return None;
     }
 
-    let used_exprs = used_quals.iter().collect::<Vec<_>>();
-    let residual = and_exprs(
+    let used_exprs = used_original_quals.iter().collect::<Vec<_>>();
+    let mut filter_quals = used_indexes
+        .iter()
+        .filter_map(|idx| {
+            parsed_quals
+                .get(*idx)
+                .and_then(|qual| qual.residual_expr.clone())
+        })
+        .collect::<Vec<_>>();
+    filter_quals.extend(
         conjuncts
             .iter()
             .filter(|expr| !used_exprs.iter().any(|used_expr| *used_expr == *expr))
             .filter(|expr| {
                 !predicate_implies_index_predicate(index.index_predicate.as_ref(), Some(expr))
             })
-            .cloned()
-            .collect(),
+            .cloned(),
     );
+    let residual = and_exprs(filter_quals.clone());
 
     Some(IndexPathSpec {
         index: index.clone(),
@@ -2889,6 +3062,8 @@ pub(super) fn build_index_path_spec(
         order_by_keys,
         residual,
         used_quals,
+        recheck_quals,
+        filter_quals,
         direction: order_match
             .as_ref()
             .map(|(_, direction)| *direction)
@@ -3342,6 +3517,12 @@ fn simple_index_column(index: &BoundIndexRelation, index_pos: usize) -> Option<u
     (attnum > 0).then_some((attnum - 1) as usize)
 }
 
+fn index_key_count(index: &BoundIndexRelation) -> usize {
+    usize::try_from(index.index_meta.indnkeyatts)
+        .unwrap_or_default()
+        .min(index.index_meta.indkey.len())
+}
+
 fn index_covers_relation(desc: &RelationDesc, index: &BoundIndexRelation) -> bool {
     desc.columns.iter().enumerate().all(|(column_index, _)| {
         index
@@ -3646,24 +3827,37 @@ fn qual_strategy(
     }
     let argument_type_oid = index_argument_type_oid(&qual.argument);
     match qual.lookup {
-        super::super::IndexStrategyLookup::Operator { oid, kind } => index
-            .index_meta
-            .amop_strategy_for_operator(&index.desc, index_pos, oid, argument_type_oid)
-            .or_else(|| {
-                (index.index_meta.am_oid == BTREE_AM_OID || index.index_meta.am_oid == BRIN_AM_OID)
-                    .then(|| btree_builtin_strategy(kind))
-                    .flatten()
-                    .or_else(|| {
-                        (index.index_meta.am_oid == SPGIST_AM_OID)
-                            .then(|| spgist_text_builtin_strategy(index, index_pos, kind))
-                            .flatten()
-                    })
-                    .or_else(|| {
-                        (index.index_meta.am_oid == HASH_AM_OID && kind == OpExprKind::Eq)
-                            .then_some(1)
-                    })
-                    .or_else(|| gist_operator_builtin_strategy(index, index_pos, kind))
-            }),
+        super::super::IndexStrategyLookup::Operator { oid, kind } => {
+            if index.index_meta.am_oid == SPGIST_AM_OID
+                && oid == 0
+                && matches!(qual.argument, IndexScanKeyArgument::Const(Value::Null))
+            {
+                return match kind {
+                    OpExprKind::Eq => Some(0),
+                    OpExprKind::Lt => Some(1),
+                    _ => None,
+                };
+            }
+            index
+                .index_meta
+                .amop_strategy_for_operator(&index.desc, index_pos, oid, argument_type_oid)
+                .or_else(|| {
+                    (index.index_meta.am_oid == BTREE_AM_OID
+                        || index.index_meta.am_oid == BRIN_AM_OID)
+                        .then(|| btree_builtin_strategy(kind))
+                        .flatten()
+                        .or_else(|| {
+                            (index.index_meta.am_oid == SPGIST_AM_OID)
+                                .then(|| spgist_text_builtin_strategy(index, index_pos, kind))
+                                .flatten()
+                        })
+                        .or_else(|| {
+                            (index.index_meta.am_oid == HASH_AM_OID && kind == OpExprKind::Eq)
+                                .then_some(1)
+                        })
+                        .or_else(|| gist_operator_builtin_strategy(index, index_pos, kind))
+                })
+        }
         super::super::IndexStrategyLookup::Proc(proc_oid) => index
             .index_meta
             .amop_strategy_for_proc(&index.desc, index_pos, proc_oid, argument_type_oid)
@@ -3685,7 +3879,7 @@ fn build_btree_index_keys(
     let mut keys = Vec::new();
     let mut equality_prefix = 0usize;
 
-    for index_pos in 0..index.index_meta.indkey.len() {
+    for index_pos in 0..index_key_count(index) {
         let Some(column) = simple_index_column(index, index_pos) else {
             break;
         };
@@ -3804,13 +3998,12 @@ fn build_gist_index_keys(
         .iter()
         .enumerate()
         .filter_map(|(qual_idx, qual)| {
-            let (index_pos, strategy) =
-                (0..index.index_meta.indkey.len()).find_map(|index_pos| {
-                    (index_key_matches_qual(index, index_pos, qual))
-                        .then(|| qual_strategy(index, index_pos, qual))
-                        .flatten()
-                        .map(|strategy| (index_pos, strategy))
-                })?;
+            let (index_pos, strategy) = (0..index_key_count(index)).find_map(|index_pos| {
+                (index_key_matches_qual(index, index_pos, qual))
+                    .then(|| qual_strategy(index, index_pos, qual))
+                    .flatten()
+                    .map(|strategy| (index_pos, strategy))
+            })?;
             used_qual_indexes.push(qual_idx);
             Some(IndexScanKey::new(
                 (index_pos + 1) as i16,
@@ -3831,13 +4024,12 @@ fn build_brin_index_keys(
         .iter()
         .enumerate()
         .filter_map(|(qual_idx, qual)| {
-            let (index_pos, strategy) =
-                (0..index.index_meta.indkey.len()).find_map(|index_pos| {
-                    (index_key_matches_qual(index, index_pos, qual))
-                        .then(|| qual_strategy(index, index_pos, qual))
-                        .flatten()
-                        .map(|strategy| (index_pos, strategy))
-                })?;
+            let (index_pos, strategy) = (0..index_key_count(index)).find_map(|index_pos| {
+                (index_key_matches_qual(index, index_pos, qual))
+                    .then(|| qual_strategy(index, index_pos, qual))
+                    .flatten()
+                    .map(|strategy| (index_pos, strategy))
+            })?;
             used_qual_indexes.push(qual_idx);
             Some(IndexScanKey::new(
                 (index_pos + 1) as i16,
@@ -3853,7 +4045,7 @@ fn build_hash_index_keys(
     index: &BoundIndexRelation,
     parsed_quals: &[IndexableQual],
 ) -> (Vec<IndexScanKey>, Vec<usize>) {
-    if index.index_meta.indkey.len() != 1 {
+    if index_key_count(index) != 1 {
         return (Vec::new(), Vec::new());
     }
     let Some((qual_idx, key)) = parsed_quals
@@ -3888,7 +4080,10 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
             key_expr: strip_casts(key_expr).clone(),
             lookup,
             argument,
+            index_expr: expr.clone(),
+            recheck_expr: Some(expr.clone()),
             expr: expr.clone(),
+            residual_expr: None,
             is_not_null,
         })
     }
@@ -3927,13 +4122,25 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
             let left = strip_casts(&func.args[0]);
             let right = &func.args[1];
             if let Some(argument) = index_key_argument(right) {
-                return mk(
+                let mut qual = mk(
                     left,
                     super::super::IndexStrategyLookup::Proc(func.funcid),
                     argument,
                     expr,
                     false,
-                );
+                )?;
+                if matches!(
+                    (&func.implementation, func.funcname.as_deref()),
+                    (
+                        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TextStartsWith),
+                        Some("starts_with")
+                    )
+                ) {
+                    qual.index_expr = text_starts_with_index_expr(func);
+                    qual.recheck_expr = None;
+                    qual.residual_expr = Some(expr.clone());
+                }
+                return Some(qual);
             }
             if let Some(argument) = index_key_argument(&func.args[0]) {
                 return mk(
@@ -3958,8 +4165,24 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
             expr,
             true,
         ),
+        Expr::IsNull(inner) => mk(
+            strip_casts(inner),
+            super::super::IndexStrategyLookup::Operator {
+                oid: 0,
+                kind: OpExprKind::Eq,
+            },
+            IndexScanKeyArgument::Const(Value::Null),
+            expr,
+            false,
+        ),
         _ => None,
     }
+}
+
+fn text_starts_with_index_expr(func: &FuncExpr) -> Expr {
+    let mut index_func = func.clone();
+    index_func.funcname = None;
+    Expr::Func(Box::new(index_func))
 }
 
 pub(super) fn and_exprs(mut exprs: Vec<Expr>) -> Option<Expr> {
@@ -3983,10 +4206,14 @@ fn index_order_match(
     let mut direction = None;
     let mut matched = 0usize;
     for (idx, item) in items.iter().enumerate() {
+        let index_pos = equality_prefix + idx;
+        if index_pos >= index_key_count(index) {
+            break;
+        }
         let Some(column) = expr_column_index(&item.expr) else {
             break;
         };
-        let Some(index_column) = simple_index_column(index, equality_prefix + idx) else {
+        let Some(index_column) = simple_index_column(index, index_pos) else {
             break;
         };
         if index_column != column {
@@ -3995,7 +4222,7 @@ fn index_order_match(
         let index_desc = index
             .index_meta
             .indoption
-            .get(equality_prefix + idx)
+            .get(index_pos)
             .is_some_and(|option| option & BT_DESC_FLAG != 0);
         let item_direction = if item.descending == index_desc {
             crate::include::access::relscan::ScanDirection::Forward
@@ -4035,49 +4262,48 @@ fn gist_order_match(
         let Some((column, proc_oid, argument)) = gist_order_item(item) else {
             return (Vec::new(), None);
         };
-        let Some((index_pos, strategy)) =
-            (0..index.index_meta.indkey.len()).find_map(|index_pos| {
-                if simple_index_column(index, index_pos) != Some(column) {
-                    return None;
-                }
-                let right_type_oid = value_type_oid(&argument);
-                let left_type_oid = index
-                    .index_meta
-                    .opckeytype_oids
-                    .get(index_pos)
-                    .copied()
-                    .filter(|oid| *oid != 0)
-                    .or_else(|| {
-                        index
-                            .desc
-                            .columns
-                            .get(index_pos)
-                            .map(|column| sql_type_oid(column.sql_type))
-                    });
-                let strategy = left_type_oid
-                    .zip(right_type_oid)
-                    .and_then(|(left_type_oid, right_type_oid)| {
-                        gist_ordering_operator_oid(proc_oid, left_type_oid, right_type_oid)
-                            .and_then(|operator_oid| {
-                                index.index_meta.amop_ordering_strategy_for_operator(
-                                    &index.desc,
-                                    index_pos,
-                                    operator_oid,
-                                    Some(right_type_oid),
-                                )
-                            })
-                    })
-                    .or_else(|| {
-                        index.index_meta.amop_ordering_strategy_for_proc(
-                            &index.desc,
-                            index_pos,
-                            proc_oid,
-                            right_type_oid,
-                        )
-                    })?;
-                Some((index_pos, strategy))
-            })
-        else {
+        let Some((index_pos, strategy)) = (0..index_key_count(index)).find_map(|index_pos| {
+            if simple_index_column(index, index_pos) != Some(column) {
+                return None;
+            }
+            let right_type_oid = value_type_oid(&argument);
+            let left_type_oid = index
+                .index_meta
+                .opckeytype_oids
+                .get(index_pos)
+                .copied()
+                .filter(|oid| *oid != 0)
+                .or_else(|| {
+                    index
+                        .desc
+                        .columns
+                        .get(index_pos)
+                        .map(|column| sql_type_oid(column.sql_type))
+                });
+            let strategy = left_type_oid
+                .zip(right_type_oid)
+                .and_then(|(left_type_oid, right_type_oid)| {
+                    gist_ordering_operator_oid(proc_oid, left_type_oid, right_type_oid).and_then(
+                        |operator_oid| {
+                            index.index_meta.amop_ordering_strategy_for_operator(
+                                &index.desc,
+                                index_pos,
+                                operator_oid,
+                                Some(right_type_oid),
+                            )
+                        },
+                    )
+                })
+                .or_else(|| {
+                    index.index_meta.amop_ordering_strategy_for_proc(
+                        &index.desc,
+                        index_pos,
+                        proc_oid,
+                        right_type_oid,
+                    )
+                })?;
+            Some((index_pos, strategy))
+        }) else {
             return (Vec::new(), None);
         };
         keys.push(IndexScanKey::const_value(
