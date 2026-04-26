@@ -1785,13 +1785,53 @@ fn render_index_scan_key(
                 .map(crate::backend::utils::cache::catcache::sql_type_oid)
         }
     });
-    let operator_name = index_meta
+    let operator_name = lookup_index_scan_operator_name(
+        index_meta,
+        index_attno,
+        purpose,
+        key.strategy,
+        right_type_oid,
+    )
+    // :HACK: GiST/SP-GiST distance order-by scan keys normalize AMOP strategy 15
+    // to the internal scan strategy 1. EXPLAIN still needs to deparse the
+    // original ordering operator.
+    .or_else(|| {
+        (purpose == 'o' && key.strategy == 1).then(|| {
+            lookup_index_scan_operator_name(index_meta, index_attno, purpose, 15, right_type_oid)
+        })?
+    })
+    .or_else(|| fallback_index_scan_operator(index_meta.am_oid, key.strategy))?;
+    let value_sql = match &key.argument {
+        IndexScanKeyArgument::Const(value) => match right_type_oid {
+            Some(_type_oid) => {
+                let sql_type = display_type.or_else(|| value.sql_type_hint())?;
+                format!(
+                    "{}::{}",
+                    render_explain_literal(value),
+                    render_explain_sql_type_name(sql_type)
+                )
+            }
+            None => render_explain_literal(value),
+        },
+        IndexScanKeyArgument::Runtime(expr) => render_explain_expr(expr, &[]),
+    };
+    Some(format!("{left_sql} {operator_name} {value_sql}"))
+}
+
+fn lookup_index_scan_operator_name(
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    index_attno: usize,
+    purpose: char,
+    strategy: u16,
+    right_type_oid: Option<u32>,
+) -> Option<String> {
+    index_meta
         .amop_entries
         .get(index_attno)
         .into_iter()
         .flat_map(|entries| entries.iter())
         .filter(|entry| {
-            entry.purpose == purpose && u16::try_from(entry.strategy).ok() == Some(key.strategy)
+            entry.purpose == purpose && u16::try_from(entry.strategy).ok() == Some(strategy)
         })
         .filter(|entry| {
             let Some(actual) = right_type_oid else {
@@ -1827,22 +1867,6 @@ fn render_index_scan_key(
                 .find(|row| row.oid == operator.operator_oid)
                 .map(|row| row.oprname)
         })
-        .or_else(|| fallback_index_scan_operator(index_meta.am_oid, key.strategy))?;
-    let value_sql = match &key.argument {
-        IndexScanKeyArgument::Const(value) => match right_type_oid {
-            Some(_type_oid) => {
-                let sql_type = display_type.or_else(|| value.sql_type_hint())?;
-                format!(
-                    "{}::{}",
-                    render_explain_literal(value),
-                    render_explain_sql_type_name(sql_type)
-                )
-            }
-            None => render_explain_literal(value),
-        },
-        IndexScanKeyArgument::Runtime(expr) => render_explain_expr(expr, &[]),
-    };
-    Some(format!("{left_sql} {operator_name} {value_sql}"))
 }
 
 fn fallback_index_scan_operator(am_oid: u32, strategy: u16) -> Option<String> {
