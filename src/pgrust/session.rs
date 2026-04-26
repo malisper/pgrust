@@ -8794,6 +8794,15 @@ fn copy_value_to_field(
     options: &CopyOptions,
     enum_labels: Option<&HashMap<(u32, u32), String>>,
 ) -> String {
+    let enum_label_type_oid = || {
+        (matches!(sql_type.kind, crate::backend::parser::SqlTypeKind::Enum)
+            && sql_type.type_oid != 0)
+            .then_some(if sql_type.typrelid != 0 {
+                sql_type.typrelid
+            } else {
+                sql_type.type_oid
+            })
+    };
     if matches!(value, Value::Null) {
         return match options.format {
             CopyFormat::Text => options.null_marker.clone(),
@@ -8819,12 +8828,8 @@ fn copy_value_to_field(
         Value::Numeric(v) => v.render(),
         Value::Text(v) => v.to_string(),
         Value::TextRef(_, _) => value.as_text().unwrap_or("").to_string(),
-        Value::EnumOid(label_oid) => enum_labels
-            .filter(|_| {
-                matches!(sql_type.kind, crate::backend::parser::SqlTypeKind::Enum)
-                    && sql_type.type_oid != 0
-            })
-            .and_then(|labels| labels.get(&(sql_type.type_oid, *label_oid)))
+        Value::EnumOid(label_oid) => enum_label_type_oid()
+            .and_then(|type_oid| enum_labels.and_then(|labels| labels.get(&(type_oid, *label_oid))))
             .cloned()
             .unwrap_or_else(|| label_oid.to_string()),
         Value::Bool(true) => "t".into(),
