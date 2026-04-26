@@ -14678,7 +14678,13 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             part
         };
         match part.as_rule() {
-            Rule::temp_clause => persistence = TablePersistence::Temporary,
+            Rule::table_persistence_clause => {
+                persistence = if part.as_str().eq_ignore_ascii_case("unlogged") {
+                    TablePersistence::Unlogged
+                } else {
+                    TablePersistence::Temporary
+                };
+            }
             Rule::if_not_exists_clause => if_not_exists = true,
             Rule::identifier if relation_name.is_none() => {
                 relation_name = Some(build_relation_name(part))
@@ -16063,6 +16069,7 @@ fn unique_nulls_clause_is_not_distinct(pair: Pair<'_, Rule>) -> bool {
 fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, ParseError> {
     let mut name = None;
     let mut expr_sql = None;
+    let mut collation = None;
     let mut opclass = None;
     let mut descending = false;
     let mut nulls_first = None;
@@ -16090,6 +16097,13 @@ fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, Parse
                     part.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
                 ))
             }
+            Rule::collate_suffix if collation.is_none() => {
+                collation = Some(build_collation_name(
+                    part.into_inner()
+                        .find(|part| part.as_rule() == Rule::collation_name)
+                        .ok_or(ParseError::UnexpectedEof)?,
+                )?);
+            }
             Rule::kw_desc => descending = true,
             Rule::nulls_ordering => {
                 let text = part.as_str().to_ascii_lowercase();
@@ -16102,7 +16116,7 @@ fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, Parse
         name: name.unwrap_or_default(),
         expr_sql,
         expr_type: None,
-        collation: None,
+        collation,
         opclass,
         descending,
         nulls_first,

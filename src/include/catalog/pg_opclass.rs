@@ -64,8 +64,6 @@ pub const INET_SPGIST_OPCLASS_OID: u32 = 76017;
 pub const MULTIRANGE_GIST_OPCLASS_OID: u32 = 76018;
 pub const QUAD_POINT_SPGIST_OPCLASS_OID: u32 = 76019;
 pub const KD_POINT_SPGIST_OPCLASS_OID: u32 = 76020;
-pub const POLY_GIST_OPCLASS_OID: u32 = 76021;
-pub const CIRCLE_GIST_OPCLASS_OID: u32 = 76022;
 pub const JSONB_GIN_OPCLASS_OID: u32 = 10064;
 pub const BYTEA_BRIN_MINMAX_OPCLASS_OID: u32 = 76120;
 pub const CHAR_BRIN_MINMAX_OPCLASS_OID: u32 = 76121;
@@ -471,28 +469,6 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             GIST_NETWORK_FAMILY_OID,
             INET_TYPE_OID,
         ),
-        PgOpclassRow {
-            oid: POLY_GIST_OPCLASS_OID,
-            opcmethod: GIST_AM_OID,
-            opcname: "poly_ops".into(),
-            opcnamespace: PG_CATALOG_NAMESPACE_OID,
-            opcowner: BOOTSTRAP_SUPERUSER_OID,
-            opcfamily: GIST_POLY_FAMILY_OID,
-            opcintype: POLYGON_TYPE_OID,
-            opcdefault: true,
-            opckeytype: BOX_TYPE_OID,
-        },
-        PgOpclassRow {
-            oid: CIRCLE_GIST_OPCLASS_OID,
-            opcmethod: GIST_AM_OID,
-            opcname: "circle_ops".into(),
-            opcnamespace: PG_CATALOG_NAMESPACE_OID,
-            opcowner: BOOTSTRAP_SUPERUSER_OID,
-            opcfamily: GIST_CIRCLE_FAMILY_OID,
-            opcintype: CIRCLE_TYPE_OID,
-            opcdefault: true,
-            opckeytype: BOX_TYPE_OID,
-        },
         // :HACK: PostgreSQL stores GiST multirange keys as compressed range
         // bounding boxes via opckeytype=anyrange. pgrust has not wired GiST
         // compress support through tuple I/O yet, so store multirange keys

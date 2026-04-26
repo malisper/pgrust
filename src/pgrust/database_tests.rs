@@ -15977,6 +15977,96 @@ fn create_gin_array_index_builds_and_vacuums() {
 }
 
 #[test]
+fn create_gin_array_index_uses_bitmap_scan_and_rechecks() {
+    let base = temp_dir("gin_array_bitmap_scan");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table docs (id int4 not null, tags int4[])")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into docs select i, ARRAY[i % 5, i]::int4[] from generate_series(1, 2000) i",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into docs values (2001, ARRAY[]::int4[])")
+        .unwrap();
+    session
+        .execute(&db, "create index docs_tags_gin on docs using gin (tags)")
+        .unwrap();
+    session.execute(&db, "analyze docs").unwrap();
+    session.execute(&db, "set enable_seqscan = off").unwrap();
+
+    let lines = session_explain_lines(
+        &mut session,
+        &db,
+        "select id from docs where tags @> ARRAY[2]::int4[] order by id",
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Bitmap Heap Scan on docs")),
+        "expected Bitmap Heap Scan in EXPLAIN, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Bitmap Index Scan on docs_tags_gin")),
+        "expected Bitmap Index Scan on docs_tags_gin, got {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Recheck Cond:")
+            && line.contains("tags @> '{2}'::integer[]")),
+        "expected array GIN Recheck Cond in EXPLAIN, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Index Cond:") && line.contains("tags @> '{2}'::integer[]")),
+        "expected array GIN Index Cond in EXPLAIN, got {lines:?}"
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id from docs where tags @> ARRAY[2]::int4[] order by id",
+        ),
+        (2..=1997)
+            .step_by(5)
+            .map(|value| vec![Value::Int32(value)])
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id from docs where tags = ARRAY[]::int4[]",
+        ),
+        vec![vec![Value::Int32(2001)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from docs where tags @> ARRAY[]::int4[]",
+        ),
+        vec![vec![Value::Int64(2001)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id from docs where tags <@ ARRAY[]::int4[]",
+        ),
+        vec![vec![Value::Int32(2001)]]
+    );
+}
+
+#[test]
 fn reopen_brin_index_preserves_pages_per_range_in_catalog() {
     let base = temp_dir("brin_reopen_catalog_options");
 
@@ -20024,6 +20114,46 @@ fn compound_alter_table_drop_add_using_index_promotes_and_renames() {
             vec![Value::Text("a".into()), Value::Bool(true)],
             vec![Value::Text("b".into()), Value::Bool(true)],
         ]
+    );
+    let err = db.execute(1, "drop index cwi_replaced_pkey").unwrap_err();
+    assert!(
+        format!("{err:?}").contains(
+            "cannot drop index cwi_replaced_pkey because constraint cwi_replaced_pkey on table cwi_test requires it"
+        ),
+        "expected constraint-backed index drop rejection, got {err:?}"
+    );
+}
+
+#[test]
+fn alter_table_using_index_rejects_non_default_collation_after_index_build() {
+    let base = temp_dir("alter_using_index_collation");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(1, "create table cwi_collation (b text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create unique index cwi_collation_idx on cwi_collation (b collate \"POSIX\")",
+    )
+    .unwrap();
+
+    let err = db
+        .execute(
+            1,
+            "alter table cwi_collation add unique using index cwi_collation_idx",
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("does not have default sorting behavior"),
+        "expected non-default collation rejection, got {err:?}"
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indcollation[0] <> 0 from pg_index where indexrelid = 'cwi_collation_idx'::regclass",
+        ),
+        vec![vec![Value::Bool(true)]]
     );
 }
 
@@ -26484,37 +26614,24 @@ fn partial_unique_index_on_conflict_respects_predicate() {
 }
 
 #[test]
-fn partial_index_with_ctid_predicate_builds_and_persists_catalog_predicate() {
-    let base = temp_dir("partial_index_ctid_predicate");
+fn create_index_rejects_system_columns() {
+    let base = temp_dir("create_index_system_columns");
     let db = Database::open(&base, 16).unwrap();
 
     db.execute(1, "create table items (id int4, note text)")
         .unwrap();
-    db.execute(
-        1,
-        "insert into items values (1, 'alpha'), (2, 'beta'), (3, 'gamma')",
-    )
-    .unwrap();
-    db.execute(
-        1,
-        "create index items_ctid_idx on items (id) where ctid >= '(0,1)'",
-    )
-    .unwrap();
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select indpred \
-             from pg_index \
-             where indexrelid = (select oid from pg_class where relname = 'items_ctid_idx')",
-        ),
-        vec![vec![Value::Text("ctid >= '(0,1)'".into())]]
-    );
-    assert_eq!(
-        psql_index_definition(&db, 1, "items", "items_ctid_idx"),
-        "CREATE INDEX items_ctid_idx ON items USING btree (id) WHERE (ctid >= '(0,1)')"
-    );
+    for sql in [
+        "create index on items (ctid)",
+        "create index on items ((ctid >= '(0,1)'))",
+        "create index on items (id) where ctid >= '(0,1)'",
+    ] {
+        match db.execute(1, sql) {
+            Err(ExecError::DetailedError { message, .. }) => {
+                assert_eq!(message, "index creation on system columns is not supported");
+            }
+            other => panic!("expected system column index error for {sql}, got {other:?}"),
+        }
+    }
 }
 
 #[test]

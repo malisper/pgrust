@@ -719,6 +719,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
                 indclass: index.index_meta.indclass.clone(),
                 indcollation: index.index_meta.indcollation.clone(),
                 indoption: index.index_meta.indoption.clone(),
+                reloptions: None,
                 indnullsnotdistinct: index.index_meta.indnullsnotdistinct,
                 indisexclusion: index.index_meta.indisexclusion,
                 indimmediate: index.index_meta.indimmediate,

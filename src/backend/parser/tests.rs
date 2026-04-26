@@ -2464,6 +2464,21 @@ fn parse_create_index_with_if_not_exists_and_opclass() {
 }
 
 #[test]
+fn parse_create_index_column_collation() {
+    let stmt =
+        parse_statement("create unique index cwi_uniq4_idx on cwi_test (b collate \"POSIX\")")
+            .unwrap();
+    match stmt {
+        Statement::CreateIndex(CreateIndexStatement { columns, .. }) => {
+            assert_eq!(columns.len(), 1);
+            assert_eq!(columns[0].name, "b");
+            assert_eq!(columns[0].collation.as_deref(), Some("POSIX"));
+        }
+        other => panic!("expected create index statement, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_create_index_without_name() {
     let stmt = parse_statement("create index on tenk1 (thousand, tenthous)").unwrap();
     assert_eq!(
@@ -9069,6 +9084,9 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create temp table tempy ()").unwrap(), Statement::CreateTable(ct) if ct.persistence == TablePersistence::Temporary && ct.table_name == "tempy" && ct.columns().count() == 0)
     );
     assert!(
+        matches!(parse_statement("create unlogged table unlogged_hash_table (id int4)").unwrap(), Statement::CreateTable(ct) if ct.persistence == TablePersistence::Unlogged && ct.table_name == "unlogged_hash_table" && ct.columns().count() == 1)
+    );
+    assert!(
         matches!(parse_statement("create temp table withoutoid() without oids").unwrap(), Statement::CreateTable(ct) if ct.persistence == TablePersistence::Temporary && ct.table_name == "withoutoid" && ct.columns().count() == 0)
     );
     assert!(
@@ -15177,6 +15195,16 @@ fn parse_current_timestamp() {
 #[test]
 fn parse_insert_select_default_values_and_table_stmt() {
     let stmt = parse_statement("insert into people select 1, 'alice'").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::Insert(InsertStatement {
+            table_name,
+            source: InsertSource::Select(_),
+            ..
+        }) if table_name == "people"
+    ));
+
+    let stmt = parse_statement("insert into people (select 1, 'alice')").unwrap();
     assert!(matches!(
         stmt,
         Statement::Insert(InsertStatement {

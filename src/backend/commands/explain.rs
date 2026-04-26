@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::backend::executor::{
     executor_start, render_explain_expr, render_index_order_by,
-    render_index_scan_condition_with_key_names, render_verbose_range_support_expr,
-    set_returning_call_label,
+    render_index_scan_condition_with_key_names, render_index_scan_condition_with_runtime_renderer,
+    render_verbose_range_support_expr, set_returning_call_label,
 };
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
@@ -174,6 +174,7 @@ fn push_direct_plan_subplans(
         };
         lines.push(label);
         if let Some(child) = subplans.get(subplan.plan_id) {
+            let child_ctx = subplan_explain_context(plan, subplan, ctx);
             format_explain_plan_with_subplans_inner(
                 child,
                 subplans,
@@ -181,11 +182,36 @@ fn push_direct_plan_subplans(
                 show_costs,
                 verbose,
                 true,
-                ctx,
+                &child_ctx,
                 lines,
             );
         }
     }
+}
+
+fn subplan_explain_context(
+    parent: &Plan,
+    subplan: &SubPlan,
+    ctx: &VerboseExplainContext,
+) -> VerboseExplainContext {
+    if subplan.par_param.is_empty() || subplan.args.is_empty() {
+        return ctx.clone();
+    }
+    let mut child_ctx = ctx.clone();
+    let column_names = plan_join_output_exprs(parent, ctx, true);
+    child_ctx.exec_params.extend(
+        subplan
+            .par_param
+            .iter()
+            .copied()
+            .zip(subplan.args.iter().cloned())
+            .map(|(paramid, expr)| VerboseExecParam {
+                paramid,
+                expr,
+                column_names: column_names.clone(),
+            }),
+    );
+    child_ctx
 }
 
 fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
@@ -440,6 +466,63 @@ fn push_nonverbose_plan_details(
                     .collect::<Vec<_>>()
                     .join(" AND ");
                 lines.push(format!("{prefix}Filter: {rendered}"));
+            }
+            true
+        }
+        Plan::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            desc,
+            index_meta,
+            ..
+        }
+        | Plan::IndexScan {
+            keys,
+            order_by_keys,
+            desc,
+            index_meta,
+            ..
+        } => {
+            let key_column_names = desc
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            let render_runtime = |expr: &Expr| render_verbose_expr(expr, &key_column_names, ctx);
+            if let Some(detail) = render_index_scan_condition_with_runtime_renderer(
+                keys,
+                desc,
+                index_meta,
+                Some(&key_column_names),
+                Some(&render_runtime),
+            ) {
+                lines.push(format!("{prefix}Index Cond: ({detail})"));
+            }
+            if let Some(detail) = render_index_order_by(order_by_keys, desc, index_meta) {
+                lines.push(format!("{prefix}Order By: ({detail})"));
+            }
+            true
+        }
+        Plan::BitmapIndexScan {
+            keys,
+            desc,
+            index_meta,
+            ..
+        } => {
+            let key_column_names = desc
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            let render_runtime = |expr: &Expr| render_verbose_expr(expr, &key_column_names, ctx);
+            if let Some(detail) = render_index_scan_condition_with_runtime_renderer(
+                keys,
+                desc,
+                index_meta,
+                Some(&key_column_names),
+                Some(&render_runtime),
+            ) {
+                lines.push(format!("{prefix}Index Cond: ({detail})"));
             }
             true
         }
@@ -2137,6 +2220,9 @@ fn verbose_op_text(
         crate::include::nodes::primnodes::OpExprKind::Gt => Some(">"),
         crate::include::nodes::primnodes::OpExprKind::GtEq => Some(">="),
         crate::include::nodes::primnodes::OpExprKind::Concat => Some("||"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayOverlap => Some("&&"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayContains => Some("@>"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayContained => Some("<@"),
         _ => None,
     }
 }

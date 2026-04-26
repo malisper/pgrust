@@ -75,6 +75,34 @@ fn map_reindex_unique_violation(err: ExecError, index_name: &str) -> ExecError {
     }
 }
 
+fn resolve_index_collation_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    collation: &str,
+) -> Result<u32, ExecError> {
+    let lookup_name = collation.rsplit('.').next().unwrap_or(collation);
+    crate::backend::utils::cache::syscache::ensure_collation_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .find(|row| row.collname.eq_ignore_ascii_case(lookup_name))
+        .map(|row| row.oid)
+        .ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "known collation",
+                actual: collation.into(),
+            })
+        })
+}
+
+fn index_reloptions(options: &[RelOption]) -> Option<Vec<String>> {
+    (!options.is_empty()).then(|| {
+        options
+            .iter()
+            .map(|option| format!("{}={}", option.name.to_ascii_lowercase(), option.value))
+            .collect()
+    })
+}
+
 fn expression_index_detail_columns(
     index_entry: &crate::backend::catalog::CatalogEntry,
 ) -> Vec<crate::include::nodes::primnodes::ColumnDesc> {
@@ -193,6 +221,36 @@ fn reject_record_index_column(
         .is_some_and(|ty| ty.kind == crate::backend::parser::SqlTypeKind::Record && !ty.is_array)
     {
         return Err(record_index_column_error(column));
+    }
+    Ok(())
+}
+
+fn index_system_column_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "index creation on system columns is not supported".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn reject_system_columns_in_index(
+    columns: &[crate::backend::parser::IndexColumnDef],
+    predicate_sql: Option<&str>,
+) -> Result<(), ExecError> {
+    for column in columns {
+        if column
+            .expr_sql
+            .as_deref()
+            .is_some_and(crate::backend::parser::sql_expr_mentions_system_column)
+            || (column.expr_sql.is_none()
+                && crate::backend::parser::is_system_column_name(&column.name))
+        {
+            return Err(index_system_column_error());
+        }
+    }
+    if predicate_sql.is_some_and(crate::backend::parser::sql_expr_mentions_system_column) {
+        return Err(index_system_column_error());
     }
     Ok(())
 }
@@ -808,7 +866,16 @@ impl Database {
                 })
             })?;
             indclass.push(opclass.oid);
-            indcollation.push(0);
+            indcollation.push(
+                column
+                    .collation
+                    .as_deref()
+                    .map(|collation| {
+                        resolve_index_collation_oid(self, client_id, txn_ctx, collation)
+                    })
+                    .transpose()?
+                    .unwrap_or(0),
+            );
             let mut option = 0i16;
             if column.descending {
                 option |= 0x0001;
@@ -842,6 +909,7 @@ impl Database {
                 indclass,
                 indcollation,
                 indoption,
+                reloptions: index_reloptions(options),
                 indnullsnotdistinct: false,
                 indisexclusion: false,
                 indimmediate: true,
@@ -905,6 +973,7 @@ impl Database {
                 indclass,
                 indcollation,
                 indoption,
+                reloptions: None,
                 indnullsnotdistinct: false,
                 indisexclusion: true,
                 indimmediate: true,
@@ -1759,6 +1828,7 @@ impl Database {
             )));
         }
         let mut key_columns = create_stmt.columns.clone();
+        reject_system_columns_in_index(&key_columns, create_stmt.predicate_sql.as_deref())?;
         for column in &mut key_columns {
             if let Some(expr_sql) = column.expr_sql.as_deref() {
                 column.expr_type = Some(
@@ -1783,6 +1853,9 @@ impl Database {
             .include_columns
             .iter()
             .map(|name| {
+                if crate::backend::parser::is_system_column_name(name) {
+                    return Err(index_system_column_error());
+                }
                 if !entry
                     .desc
                     .columns

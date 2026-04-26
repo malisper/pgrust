@@ -165,7 +165,7 @@ impl Database {
                 } else {
                     format!("{}.{}", namespace.nspname, lowered_name)
                 };
-                return Ok((storage_name, namespace.oid, TablePersistence::Permanent));
+                return Ok((storage_name, namespace.oid, persistence));
             }
         }
 

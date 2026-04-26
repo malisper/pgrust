@@ -1055,6 +1055,7 @@ pub struct CreateRangeTypeStatement {
 pub enum TablePersistence {
     Permanent,
     Temporary,
+    Unlogged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

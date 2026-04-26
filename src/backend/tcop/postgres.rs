@@ -34,14 +34,17 @@ use crate::backend::utils::misc::notices::{
 };
 use crate::backend::utils::misc::stack_depth::StackDepthGuard;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
+use crate::backend::utils::sql_deparse::{
+    normalize_index_expression_sql, normalize_index_predicate_sql,
+};
 use crate::include::access::htup::TupleError;
-use crate::include::catalog::RECORD_TYPE_OID;
+use crate::include::catalog::{ANYELEMENTOID, RECORD_TYPE_OID};
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value,
 };
 use crate::include::nodes::parsenodes::{CopyFormat, CopyToStatement};
-use crate::include::nodes::primnodes::RelationDesc;
+use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices};
@@ -4056,6 +4059,20 @@ fn psql_describe_tableinfo_query(
             .map(|row| row.typname)
             .unwrap_or_default()
     };
+    let reloptions = if sql
+        .to_ascii_lowercase()
+        .contains("array_to_string(c.reloptions")
+    {
+        session
+            .catalog_lookup(db)
+            .class_row_by_oid(oid)
+            .and_then(|row| row.reloptions)
+            .filter(|options| !options.is_empty())
+            .map(|options| options.join(", "))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     let visible_amname = match entry.relkind {
         // :HACK: psql's verbose \d+ footer only renders a table access method
         // when pg_class.relam points at a non-default AM. pgrust stores the
@@ -4140,7 +4157,7 @@ fn psql_describe_tableinfo_query(
             Value::Bool(false),
             Value::Bool(false),
             Value::Bool(false),
-            Value::Text("".into()),
+            Value::Text(reloptions.into()),
             Value::Int32(0),
             Value::Text(reloftype.into()),
             Value::InternalChar(entry.relpersistence as u8),
@@ -4176,6 +4193,13 @@ fn psql_describe_columns_query(
         .index
         .as_ref()
         .map(|index_meta| psql_index_display_columns(db, session, &entry.desc, index_meta));
+    let index_base_relation = entry.index.as_ref().and_then(|index_meta| {
+        db.describe_relation_by_oid(
+            session.client_id,
+            session.catalog_txn_ctx(),
+            index_meta.indrelid,
+        )
+    });
 
     let mut columns = vec![
         QueryColumn::text("attname"),
@@ -4248,9 +4272,24 @@ fn psql_describe_columns_query(
         .iter()
         .enumerate()
         .map(|(index, column)| {
+            let base_column = entry
+                .index
+                .as_ref()
+                .and_then(|index_meta| index_meta.indkey.get(index).copied())
+                .filter(|attnum| *attnum > 0)
+                .and_then(|attnum| {
+                    index_base_relation.as_ref().and_then(|relation| {
+                        relation
+                            .desc
+                            .columns
+                            .get((attnum as usize).saturating_sub(1))
+                    })
+                });
+            let display_column = base_column.unwrap_or(column);
             let index_display = index_display_columns
                 .as_ref()
                 .and_then(|columns| columns.get(index));
+            let catalog = session.catalog_lookup(db);
             let index_display_type_oid = entry.index.as_ref().and_then(|index_meta| {
                 index_meta
                     .opckeytype_oids
@@ -4258,6 +4297,10 @@ fn psql_describe_columns_query(
                     .copied()
                     .filter(|oid| *oid != 0)
             });
+            let index_display_type_oid =
+                resolve_psql_index_display_type_oid(&catalog, base_column, index_display_type_oid);
+            let display_type_storage = index_display_type_oid
+                .and_then(|type_oid| catalog.type_by_oid(type_oid).map(|row| row.typstorage));
             let mut row = vec![
                 Value::Text(
                     index_display
@@ -4266,8 +4309,13 @@ fn psql_describe_columns_query(
                         .into(),
                 ),
                 Value::Text(
-                    format_psql_display_type(db, session, column.sql_type, index_display_type_oid)
-                        .into(),
+                    format_psql_display_type(
+                        db,
+                        session,
+                        display_column.sql_type,
+                        index_display_type_oid,
+                    )
+                    .into(),
                 ),
             ];
             if include_attrdef {
@@ -4325,19 +4373,21 @@ fn psql_describe_columns_query(
             }
             if include_attstorage {
                 row.push(Value::InternalChar(
-                    column.storage.attstorage.as_char() as u8
+                    display_type_storage
+                        .unwrap_or(display_column.storage.attstorage)
+                        .as_char() as u8,
                 ));
             }
             if include_attcompression {
                 row.push(Value::InternalChar(
-                    column.storage.attcompression.as_char() as u8
+                    display_column.storage.attcompression.as_char() as u8,
                 ));
             }
             if include_attstattarget {
-                row.push(if column.attstattarget < 0 {
+                row.push(if display_column.attstattarget < 0 {
                     Value::Null
                 } else {
-                    Value::Int16(column.attstattarget)
+                    Value::Int16(display_column.attstattarget)
                 });
             }
             if include_attdescr {
@@ -4401,7 +4451,7 @@ fn psql_index_display_columns(
             }
             let expression_sql = expression_sqls
                 .get(expression_index)
-                .cloned()
+                .map(|sql| normalize_index_expression_sql(sql))
                 .or_else(|| {
                     index_desc
                         .columns
@@ -5347,9 +5397,12 @@ pub(crate) fn format_psql_indexdef(
         .as_deref()
         .filter(|pred| !pred.is_empty())
     {
-        definition.push_str(" WHERE (");
-        definition.push_str(predicate);
-        definition.push(')');
+        let base_relation =
+            db.describe_relation_by_oid(session.client_id, txn_ctx, index.index_meta.indrelid);
+        let predicate =
+            normalize_index_predicate_sql(predicate, base_relation.as_ref().map(|rel| &rel.desc));
+        definition.push_str(" WHERE ");
+        definition.push_str(&predicate);
     }
     definition
 }
@@ -5508,6 +5561,20 @@ fn format_psql_display_type(
             .map(|row| format_psql_type(row.sql_type))
             .unwrap_or_else(|| format_psql_type(fallback_sql_type)),
         None => format_psql_type(fallback_sql_type),
+    }
+}
+
+fn resolve_psql_index_display_type_oid(
+    catalog: &dyn CatalogLookup,
+    base_column: Option<&ColumnDesc>,
+    opckeytype_oid: Option<u32>,
+) -> Option<u32> {
+    match opckeytype_oid {
+        Some(ANYELEMENTOID) => base_column
+            .filter(|column| column.sql_type.is_array)
+            .and_then(|column| catalog.type_oid_for_sql_type(column.sql_type.element_type()))
+            .or(opckeytype_oid),
+        other => other,
     }
 }
 
@@ -9171,6 +9238,76 @@ ORDER BY 1, 2;";
         assert_eq!(rows[0][7], Value::InternalChar(b'p'));
         assert_eq!(rows[0][8], Value::InternalChar(0));
         assert_eq!(rows[0][9], Value::Null);
+    }
+
+    #[test]
+    fn psql_describe_tableinfo_query_reports_index_reloptions() {
+        let db = Database::open(temp_dir("describe_index_reloptions"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table array_index_op_test (i int4[])")
+            .unwrap();
+        db.execute(
+            1,
+            "create index gin_relopts_test on array_index_op_test using gin (i) \
+             with (fastupdate=on, gin_pending_list_limit=128)",
+        )
+        .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("gin_relopts_test")
+            .unwrap();
+
+        let sql = format!(
+            "SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, \
+                 c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, \
+                 false AS relhasoids, c.relispartition, \
+                 pg_catalog.array_to_string(c.reloptions || \
+                 array(select 'toast.' || x from pg_catalog.unnest(tc.reloptions) x), ', '), \
+                 c.reltablespace, \
+                 CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, \
+                 c.relpersistence, c.relreplident, am.amname \
+             FROM pg_catalog.pg_class c \
+             LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid) \
+             LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid) \
+             WHERE c.oid = '{}';",
+            entry.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(
+            rows[0][9],
+            Value::Text("fastupdate=on, gin_pending_list_limit=128".into())
+        );
+    }
+
+    #[test]
+    fn psql_describe_columns_query_uses_gin_key_type_storage() {
+        let db = Database::open(temp_dir("describe_gin_key_storage"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table array_index_op_test (i int4[])")
+            .unwrap();
+        db.execute(
+            1,
+            "create index gin_relopts_test on array_index_op_test using gin (i)",
+        )
+        .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("gin_relopts_test")
+            .unwrap();
+
+        let sql = format!(
+            "SELECT a.attname, \
+                 pg_catalog.format_type(a.atttypid, a.atttypmod), \
+                 a.attstorage \
+             FROM pg_catalog.pg_attribute a \
+             WHERE a.attrelid = '{}' AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY a.attnum",
+            entry.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(rows[0][0], Value::Text("i".into()));
+        assert_eq!(rows[0][1], Value::Text("integer".into()));
+        assert_eq!(rows[0][2], Value::InternalChar(b'p'));
     }
 
     #[test]

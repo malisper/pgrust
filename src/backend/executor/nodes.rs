@@ -284,9 +284,34 @@ pub(crate) fn render_index_scan_condition_with_key_names(
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     key_column_names: Option<&[String]>,
 ) -> Option<String> {
+    render_index_scan_condition_with_runtime_renderer(
+        keys,
+        desc,
+        index_meta,
+        key_column_names,
+        None,
+    )
+}
+
+pub(crate) fn render_index_scan_condition_with_runtime_renderer(
+    keys: &[IndexScanKey],
+    desc: &RelationDesc,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    key_column_names: Option<&[String]>,
+    runtime_renderer: Option<&dyn Fn(&Expr) -> String>,
+) -> Option<String> {
     let rendered = keys
         .iter()
-        .filter_map(|key| render_index_scan_key(key, desc, index_meta, 's', key_column_names))
+        .filter_map(|key| {
+            render_index_scan_key(
+                key,
+                desc,
+                index_meta,
+                's',
+                key_column_names,
+                runtime_renderer,
+            )
+        })
         .collect::<Vec<_>>();
     match rendered.len() {
         0 => None,
@@ -308,7 +333,7 @@ pub(crate) fn render_index_order_by(
 ) -> Option<String> {
     let rendered = keys
         .iter()
-        .filter_map(|key| render_index_scan_key(key, desc, index_meta, 'o', None))
+        .filter_map(|key| render_index_scan_key(key, desc, index_meta, 'o', None, None))
         .collect::<Vec<_>>();
     match rendered.len() {
         0 => None,
@@ -1915,6 +1940,7 @@ fn render_index_scan_key(
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     purpose: char,
     key_column_names: Option<&[String]>,
+    runtime_renderer: Option<&dyn Fn(&Expr) -> String>,
 ) -> Option<String> {
     let default_column_names;
     if purpose == 's'
@@ -2001,7 +2027,9 @@ fn render_index_scan_key(
             ),
             None => render_explain_literal(value),
         },
-        IndexScanKeyArgument::Runtime(expr) => render_explain_expr(expr, &[]),
+        IndexScanKeyArgument::Runtime(expr) => runtime_renderer
+            .map(|render| render(expr))
+            .unwrap_or_else(|| render_explain_expr(expr, &[])),
     };
     Some(format!("{left_sql} {operator_name} {value_sql}"))
 }
@@ -2067,6 +2095,7 @@ fn lookup_index_scan_operator_name(
                 || (entry.righttype == crate::include::catalog::ANYMULTIRANGEOID
                     && crate::include::catalog::builtin_range_spec_by_multirange_oid(actual)
                         .is_some())
+                || entry.righttype == crate::include::catalog::ANYARRAYOID
                 || entry.righttype == crate::include::catalog::ANYELEMENTOID
         })
         .max_by_key(|entry| {
@@ -2077,6 +2106,7 @@ fn lookup_index_scan_operator_name(
             {
                 2
             } else if entry.righttype == crate::include::catalog::ANYOID
+                || entry.righttype == crate::include::catalog::ANYARRAYOID
                 || entry.righttype == crate::include::catalog::ANYELEMENTOID
             {
                 1
@@ -2728,7 +2758,10 @@ fn render_explain_expr_inner_with_qualifier(
             | crate::include::nodes::primnodes::OpExprKind::LtEq
             | crate::include::nodes::primnodes::OpExprKind::Gt
             | crate::include::nodes::primnodes::OpExprKind::GtEq
-            | crate::include::nodes::primnodes::OpExprKind::RegexMatch => {
+            | crate::include::nodes::primnodes::OpExprKind::RegexMatch
+            | crate::include::nodes::primnodes::OpExprKind::ArrayOverlap
+            | crate::include::nodes::primnodes::OpExprKind::ArrayContains
+            | crate::include::nodes::primnodes::OpExprKind::ArrayContained => {
                 let [left, right] = op.args.as_slice() else {
                     return format!("{expr:?}");
                 };
@@ -3540,6 +3573,9 @@ fn infix_operator_text(
         crate::include::nodes::primnodes::OpExprKind::Gt => Some(">"),
         crate::include::nodes::primnodes::OpExprKind::GtEq => Some(">="),
         crate::include::nodes::primnodes::OpExprKind::RegexMatch => Some("~"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayOverlap => Some("&&"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayContains => Some("@>"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayContained => Some("<@"),
         _ => None,
     }
 }
@@ -3937,6 +3973,17 @@ fn render_explain_const(value: &Value) -> String {
             ),
             None => render_explain_literal(value),
         },
+        Value::PgArray(array) => match value.sql_type_hint() {
+            Some(sql_type) => format!(
+                "'{}'::{}",
+                crate::backend::executor::format_array_value_text(array),
+                render_explain_sql_type_name(sql_type)
+            ),
+            None => format!(
+                "'{}'",
+                crate::backend::executor::format_array_value_text(array)
+            ),
+        },
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
@@ -4068,6 +4115,12 @@ fn render_explain_literal(value: &Value) -> String {
         }
         Value::Inet(value) => format!("'{}'", value.render_inet()),
         Value::Cidr(value) => format!("'{}'", value.render_cidr()),
+        Value::PgArray(array) => {
+            format!(
+                "'{}'",
+                crate::backend::executor::format_array_value_text(array)
+            )
+        }
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),

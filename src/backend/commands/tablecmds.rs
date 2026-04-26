@@ -3217,6 +3217,15 @@ fn resolve_hash_options(options: &[RelOption]) -> Result<HashOptions, ExecError>
     Ok(resolved)
 }
 
+fn index_reloptions(options: &[RelOption]) -> Option<Vec<String>> {
+    (!options.is_empty()).then(|| {
+        options
+            .iter()
+            .map(|option| format!("{}={}", option.name.to_ascii_lowercase(), option.value))
+            .collect()
+    })
+}
+
 fn index_column_sql_type(
     relation: &BoundRelation,
     column: &IndexColumnDef,
@@ -3236,6 +3245,36 @@ fn index_column_sql_type(
         .find(|desc| desc.name.eq_ignore_ascii_case(&column.name))
         .map(|desc| desc.sql_type)
         .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column.name.clone())))
+}
+
+fn index_system_column_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "index creation on system columns is not supported".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn reject_system_columns_in_index(
+    columns: &[IndexColumnDef],
+    predicate_sql: Option<&str>,
+) -> Result<(), ExecError> {
+    for column in columns {
+        if column
+            .expr_sql
+            .as_deref()
+            .is_some_and(crate::backend::parser::sql_expr_mentions_system_column)
+            || (column.expr_sql.is_none()
+                && crate::backend::parser::is_system_column_name(&column.name))
+        {
+            return Err(index_system_column_error());
+        }
+    }
+    if predicate_sql.is_some_and(crate::backend::parser::sql_expr_mentions_system_column) {
+        return Err(index_system_column_error());
+    }
+    Ok(())
 }
 
 fn index_column_type_oid(catalog: &Catalog, sql_type: SqlType) -> Option<u32> {
@@ -3373,7 +3412,15 @@ fn resolve_create_index_build_options(
             })
         })?;
         indclass.push(opclass.oid);
-        indcollation.push(0);
+        indcollation.push(
+            column
+                .collation
+                .as_deref()
+                .map(|collation| crate::backend::parser::resolve_collation_oid(collation, catalog))
+                .transpose()
+                .map_err(ExecError::Parse)?
+                .unwrap_or(0),
+        );
         let mut option = 0i16;
         if column.descending {
             option |= 0x0001;
@@ -3404,6 +3451,7 @@ fn resolve_create_index_build_options(
         indclass,
         indcollation,
         indoption,
+        reloptions: index_reloptions(options),
         indnullsnotdistinct: false,
         indisexclusion: false,
         indimmediate: true,
@@ -3483,6 +3531,7 @@ pub fn execute_create_index(
         .unwrap_or(&stmt.table_name)
         .to_string();
     let mut key_columns = stmt.columns.clone();
+    reject_system_columns_in_index(&key_columns, stmt.predicate_sql.as_deref())?;
     for column in &mut key_columns {
         if let Some(expr_sql) = column.expr_sql.as_deref() {
             if access_method.oid == BRIN_AM_OID {
@@ -3525,6 +3574,9 @@ pub fn execute_create_index(
         .include_columns
         .iter()
         .map(|name| {
+            if crate::backend::parser::is_system_column_name(name) {
+                return Err(index_system_column_error());
+            }
             if !relation
                 .desc
                 .columns

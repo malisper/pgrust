@@ -233,6 +233,16 @@ fn created_relkind(lowered: &crate::backend::parser::LoweredCreateTable) -> char
     }
 }
 
+fn relation_persistence_char(persistence: TablePersistence) -> char {
+    match persistence {
+        TablePersistence::Permanent => 'p',
+        TablePersistence::Temporary => 't',
+        // :HACK: Unlogged tables currently use the normal heap storage path;
+        // catalog relpersistence is preserved for SQL-visible compatibility.
+        TablePersistence::Unlogged => 'u',
+    }
+}
+
 fn validate_partitioned_table_ddl(
     table_name: &str,
     lowered: &crate::backend::parser::LoweredCreateTable,
@@ -1731,7 +1741,7 @@ impl Database {
         };
 
         let sequence_oid = match persistence {
-            TablePersistence::Permanent => {
+            TablePersistence::Permanent | TablePersistence::Unlogged => {
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -3174,7 +3184,8 @@ impl Database {
         let relation_relkind = created_relkind(&lowered);
         let reloptions = create_table_reloptions(&create_stmt.options)?;
         match persistence {
-            TablePersistence::Permanent => {
+            TablePersistence::Permanent | TablePersistence::Unlogged => {
+                let relpersistence = relation_persistence_char(persistence);
                 let mut catalog_guard = self.catalog.write();
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
@@ -3191,7 +3202,7 @@ impl Database {
                         desc.clone(),
                         namespace_oid,
                         self.database_oid,
-                        'p',
+                        relpersistence,
                         crate::include::catalog::PG_TOAST_NAMESPACE_OID,
                         crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                         self.auth_state(client_id).current_user_oid(),
@@ -3206,7 +3217,7 @@ impl Database {
                             desc.clone(),
                             namespace_oid,
                             self.database_oid,
-                            'p',
+                            relpersistence,
                             relation_relkind,
                             self.auth_state(client_id).current_user_oid(),
                             reloptions.clone(),
@@ -3785,7 +3796,7 @@ impl Database {
             existing_relation.relation_oid
         } else {
             match effective_persistence {
-                TablePersistence::Permanent => {
+                TablePersistence::Permanent | TablePersistence::Unlogged => {
                     let (entry, create_effect) = self
                         .catalog
                         .write()
@@ -3995,7 +4006,7 @@ impl Database {
         };
 
         let (relation_oid, rel, toast, toast_index) = match persistence {
-            TablePersistence::Permanent => {
+            TablePersistence::Permanent | TablePersistence::Unlogged => {
                 let stmt = CreateTableStatement {
                     schema_name: None,
                     table_name: table_name.clone(),
@@ -4046,7 +4057,7 @@ impl Database {
                         create_relation_desc(&stmt, &catalog)?,
                         namespace_oid,
                         self.database_oid,
-                        'p',
+                        relation_persistence_char(persistence),
                         crate::include::catalog::PG_TOAST_NAMESPACE_OID,
                         crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                         self.auth_state(client_id).current_user_oid(),

@@ -3833,18 +3833,6 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             'i',
         ),
-        proc_row(
-            1258,
-            "textcat",
-            TEXT_TYPE_OID,
-            &oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID]),
-            "textcat",
-            2,
-            false,
-            false,
-            'f',
-            'i',
-        ),
         variadic_proc_row(
             6238,
             "concat",

@@ -2566,6 +2566,9 @@ fn expr_uses_only_index_keys(
 ) -> bool {
     match expr {
         Expr::Var(var) => {
+            if var.varlevelsup > 0 {
+                return true;
+            }
             var.varlevelsup == 0
                 && var.varno == source_id
                 && !is_system_attr(var.varattno)

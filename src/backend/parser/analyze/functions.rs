@@ -1473,7 +1473,6 @@ pub(super) fn validate_scalar_function_arity(
                         1
                     }
             }
-            BuiltinScalarFunction::Textcat => args.len() == 2,
             BuiltinScalarFunction::Concat => true,
             BuiltinScalarFunction::ConcatWs => !args.is_empty(),
             BuiltinScalarFunction::Format => !args.is_empty(),

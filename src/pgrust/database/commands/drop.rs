@@ -1879,6 +1879,28 @@ impl Database {
                 {
                     continue;
                 }
+                if let Some(constraint) = catalog
+                    .constraint_rows_for_index(entry.relation_oid)
+                    .into_iter()
+                    .next()
+                {
+                    let table_name = catalog
+                        .class_row_by_oid(constraint.conrelid)
+                        .map(|row| row.relname)
+                        .unwrap_or_else(|| constraint.conrelid.to_string());
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "cannot drop index {} because constraint {} on table {} requires it",
+                            index_name, constraint.conname, table_name
+                        ),
+                        detail: None,
+                        hint: Some(format!(
+                            "You can drop constraint {} on table {} instead.",
+                            constraint.conname, table_name
+                        )),
+                        sqlstate: "2BP01",
+                    });
+                }
                 Self::collect_index_drop_oids(
                     &catalog,
                     entry.relation_oid,

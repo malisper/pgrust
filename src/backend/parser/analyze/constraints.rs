@@ -281,6 +281,7 @@ fn table_persistence_code(persistence: TablePersistence) -> char {
     match persistence {
         TablePersistence::Permanent => 'p',
         TablePersistence::Temporary => 't',
+        TablePersistence::Unlogged => 'u',
     }
 }
 
@@ -1347,9 +1348,7 @@ pub fn normalize_alter_table_add_constraint(
             if nulls_not_distinct {
                 return Err(ParseError::UnexpectedToken {
                     expected: "default NULL handling",
-                    actual: format!(
-                        "index \"{index_name}\" has NULLS NOT DISTINCT and cannot back a primary key"
-                    ),
+                    actual: "primary keys cannot use NULLS NOT DISTINCT indexes".into(),
                 });
             }
             let constraint_name = assign_constraint_name(
@@ -2862,9 +2861,12 @@ fn index_columns_for_existing_index(
         .class_row_by_oid(index.relation_oid)
         .is_some_and(|row| row.relkind == 'I')
     {
-        return Err(ParseError::FeatureNotSupported(
-            "ALTER TABLE / ADD CONSTRAINT USING INDEX on partitioned indexes".into(),
-        ));
+        return Err(ParseError::UnexpectedToken {
+            expected: "non-partitioned index",
+            actual:
+                "ALTER TABLE / ADD CONSTRAINT USING INDEX is not supported on partitioned tables"
+                    .into(),
+        });
     }
     if index
         .index_meta
@@ -2877,10 +2879,32 @@ fn index_columns_for_existing_index(
             actual: format!("index \"{index_name}\" contains a predicate"),
         });
     }
-    if index.index_meta.indoption.iter().any(|option| *option != 0) {
+    if let Some(column_index) = index
+        .index_meta
+        .indoption
+        .iter()
+        .position(|option| *option != 0)
+    {
         return Err(ParseError::UnexpectedToken {
             expected: "default index ordering",
-            actual: format!("index \"{index_name}\" has non-default sort ordering"),
+            actual: format!(
+                "index \"{index_name}\" column number {} does not have default sorting behavior",
+                column_index + 1
+            ),
+        });
+    }
+    if let Some(column_index) = index
+        .index_meta
+        .indcollation
+        .iter()
+        .position(|collation_oid| *collation_oid != 0)
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "default index collation",
+            actual: format!(
+                "index \"{index_name}\" column number {} does not have default sorting behavior",
+                column_index + 1
+            ),
         });
     }
     let mut all_columns = Vec::with_capacity(index.index_meta.indkey.len());

@@ -62,14 +62,14 @@ pub fn resolve_unqualified_create_persistence(
     }
 
     let Some(search_path) = configured_search_path else {
-        return Ok(TablePersistence::Permanent);
+        return Ok(persistence);
     };
 
     for schema in search_path {
         let schema = schema.trim().to_ascii_lowercase();
         match schema.as_str() {
             "" | "$user" => continue,
-            "public" => return Ok(TablePersistence::Permanent),
+            "public" => return Ok(persistence),
             "pg_temp" => return Ok(TablePersistence::Temporary),
             "pg_catalog" => {
                 return Err(ParseError::UnsupportedQualifiedName(format!(

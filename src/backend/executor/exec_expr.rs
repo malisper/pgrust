@@ -3,6 +3,9 @@ use std::cmp::Ordering;
 
 use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
+use crate::backend::utils::sql_deparse::{
+    normalize_index_expression_sql, normalize_index_predicate_sql,
+};
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
 use crate::backend::utils::trigger::format_trigger_definition;
@@ -2866,8 +2869,9 @@ fn format_indexdef_for_catalog(
         .as_deref()
         .filter(|pred| !pred.is_empty())
     {
+        let predicate = normalize_index_predicate_sql(predicate, Some(&relation.desc));
         definition.push_str(" WHERE (");
-        definition.push_str(predicate);
+        definition.push_str(&predicate);
         definition.push(')');
     }
     definition
@@ -2907,7 +2911,7 @@ fn index_definition_columns(
             }
             let rendered = expression_sqls
                 .get(expression_index)
-                .map(|expr| parenthesized_index_expression(expr))
+                .map(|expr| parenthesized_index_expression(&normalize_index_expression_sql(expr)))
                 .or_else(|| {
                     index
                         .desc
@@ -5014,10 +5018,6 @@ fn eval_plpgsql_builtin_function(
             &values,
             func_variadic,
             &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-        ),
-        BuiltinScalarFunction::Textcat => concat_values(
-            values.first().cloned().unwrap_or(Value::Null),
-            values.get(1).cloned().unwrap_or(Value::Null),
         ),
         BuiltinScalarFunction::ConcatWs => eval_concat_ws_function(
             &values,

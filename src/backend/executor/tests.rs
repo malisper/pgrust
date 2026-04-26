@@ -9845,6 +9845,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
                 indcollation: vec![0],
                 indoption: vec![0],
+                reloptions: None,
                 indnullsnotdistinct: false,
                 indisexclusion: false,
                 indimmediate: true,
@@ -9867,6 +9868,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indclass: vec![crate::include::catalog::BOX_GIST_OPCLASS_OID],
                 indcollation: vec![0],
                 indoption: vec![0],
+                reloptions: None,
                 indnullsnotdistinct: false,
                 indisexclusion: false,
                 indimmediate: true,
@@ -9889,6 +9891,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indclass: vec![crate::include::catalog::BOX_SPGIST_OPCLASS_OID],
                 indcollation: vec![0],
                 indoption: vec![0],
+                reloptions: None,
                 indnullsnotdistinct: false,
                 indisexclusion: false,
                 indimmediate: true,
@@ -11044,6 +11047,12 @@ fn insert_select_default_values_and_table_stmt_work() {
             "insert into bit_defaults select B'1111', B'1'",
         )
         .unwrap();
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "insert into bit_defaults (select B'0000', B'0')",
+        )
+        .unwrap();
     assert_query_rows(
         harness
             .execute(INVALID_TRANSACTION_ID, "table bit_defaults")
@@ -11087,6 +11096,16 @@ fn insert_select_default_values_and_table_stmt_work() {
                 Value::Bit(crate::include::nodes::datum::BitString::new(
                     1,
                     vec![0b1000_0000],
+                )),
+            ],
+            vec![
+                Value::Bit(crate::include::nodes::datum::BitString::new(
+                    4,
+                    vec![0b0000_0000],
+                )),
+                Value::Bit(crate::include::nodes::datum::BitString::new(
+                    1,
+                    vec![0b0000_0000],
                 )),
             ],
         ],
