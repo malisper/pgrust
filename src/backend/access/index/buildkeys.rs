@@ -1,5 +1,7 @@
 use crate::backend::catalog::CatalogError;
-use crate::backend::commands::tablecmds::index_key_values_for_row;
+use crate::backend::commands::tablecmds::{
+    coerce_index_key_to_opckeytype, index_key_values_for_row,
+};
 use crate::backend::executor::value_io::{decode_value, missing_column_value};
 use crate::backend::executor::{ExecError, ExecutorContext};
 use crate::backend::parser::{
@@ -40,22 +42,36 @@ pub(crate) fn project_index_key_values(
     row_values: &[Value],
     expr_values: &[Value],
 ) -> Result<Vec<Value>, CatalogError> {
+    project_index_key_values_with_opckeytypes(index_desc, indkey, 0, &[], row_values, expr_values)
+}
+
+fn project_index_key_values_with_opckeytypes(
+    index_desc: &RelationDesc,
+    indkey: &[i16],
+    am_oid: u32,
+    opckeytype_oids: &[u32],
+    row_values: &[Value],
+    expr_values: &[Value],
+) -> Result<Vec<Value>, CatalogError> {
     let mut keys = Vec::with_capacity(index_desc.columns.len());
     let mut expr_iter = expr_values.iter();
-    for attnum in indkey {
-        if *attnum > 0 {
+    for (key_pos, attnum) in indkey.iter().enumerate() {
+        let value = if *attnum > 0 {
             let idx = attnum.saturating_sub(1) as usize;
-            keys.push(
-                row_values
-                    .get(idx)
-                    .cloned()
-                    .ok_or(CatalogError::Corrupt("index key attnum out of range"))?,
-            );
+            row_values
+                .get(idx)
+                .cloned()
+                .ok_or(CatalogError::Corrupt("index key attnum out of range"))?
         } else {
-            keys.push(expr_iter.next().cloned().ok_or(CatalogError::Corrupt(
+            expr_iter.next().cloned().ok_or(CatalogError::Corrupt(
                 "missing projected index expression value",
-            ))?);
-        }
+            ))?
+        };
+        keys.push(coerce_index_key_to_opckeytype(
+            value,
+            am_oid,
+            opckeytype_oids.get(key_pos).copied(),
+        ));
     }
     Ok(keys)
 }
@@ -176,8 +192,15 @@ impl IndexBuildKeyProjector {
                 .map(Some)
                 .map_err(map_build_exec_error)
         } else {
-            project_index_key_values(&ctx.index_desc, &ctx.index_meta.indkey, row_values, &[])
-                .map(Some)
+            project_index_key_values_with_opckeytypes(
+                &ctx.index_desc,
+                &ctx.index_meta.indkey,
+                ctx.index_meta.am_oid,
+                &ctx.index_meta.opckeytype_oids,
+                row_values,
+                &[],
+            )
+            .map(Some)
         }
     }
 }

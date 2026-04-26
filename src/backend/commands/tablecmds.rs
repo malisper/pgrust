@@ -46,6 +46,7 @@ use super::trigger::RuntimeTriggers;
 use super::upsert::execute_insert_on_conflict_rows;
 use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr};
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
+use crate::backend::executor::expr_geometry::circle_bound_box;
 use crate::backend::executor::value_io::{
     coerce_assignment_value_with_config, encode_tuple_values_with_config,
 };
@@ -57,7 +58,7 @@ use crate::backend::executor::{
 use crate::include::access::amapi::IndexUniqueCheck;
 use crate::include::access::htup::HeapTuple;
 use crate::include::access::itemptr::ItemPointerData;
-use crate::include::catalog::builtin_range_name_for_sql_type;
+use crate::include::catalog::{BOX_TYPE_OID, GIST_AM_OID, builtin_range_name_for_sql_type};
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
 };
@@ -964,15 +965,15 @@ pub(crate) fn index_key_values_for_row(
         };
 
         let mut key_values = Vec::with_capacity(index.index_meta.indkey.len());
-        for attnum in &index.index_meta.indkey {
-            if *attnum > 0 {
+        for (key_pos, attnum) in index.index_meta.indkey.iter().enumerate() {
+            let value = if *attnum > 0 {
                 let idx = attnum.saturating_sub(1) as usize;
-                key_values.push(values.get(idx).cloned().ok_or_else(|| {
+                values.get(idx).cloned().ok_or_else(|| {
                     ExecError::Parse(ParseError::UnexpectedToken {
                         expected: "index key column",
                         actual: "index key attnum out of range".into(),
                     })
-                })?);
+                })?
             } else {
                 let expr = exprs.next().ok_or_else(|| {
                     ExecError::Parse(ParseError::UnexpectedToken {
@@ -980,11 +981,31 @@ pub(crate) fn index_key_values_for_row(
                         actual: "missing expression for index key".into(),
                     })
                 })?;
-                key_values.push(eval_expr(expr, &mut slot, ctx)?);
-            }
+                eval_expr(expr, &mut slot, ctx)?
+            };
+            key_values.push(coerce_index_key_to_opckeytype(
+                value,
+                index.index_meta.am_oid,
+                index.index_meta.opckeytype_oids.get(key_pos).copied(),
+            ));
         }
         Ok(key_values)
     })
+}
+
+pub(crate) fn coerce_index_key_to_opckeytype(
+    value: Value,
+    am_oid: u32,
+    opckeytype_oid: Option<u32>,
+) -> Value {
+    if am_oid != GIST_AM_OID || opckeytype_oid != Some(BOX_TYPE_OID) {
+        return value;
+    }
+    match value {
+        Value::Polygon(poly) => Value::Box(poly.bound_box),
+        Value::Circle(circle) => Value::Box(circle_bound_box(&circle)),
+        other => other,
+    }
 }
 
 pub(crate) fn slot_toast_context(

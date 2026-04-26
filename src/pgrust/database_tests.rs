@@ -14834,6 +14834,96 @@ fn spgist_box_window_knn_avoids_sort_when_index_can_supply_order() {
 }
 
 #[test]
+fn create_gist_polygon_and_circle_indexes_use_default_box_key_opclasses() {
+    let base = temp_dir("gist_polygon_circle_default_opclasses");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table geom_gist (id int4 not null, p polygon, c circle)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into geom_gist values \
+         (1, '((0,0),(2,0),(1,2))'::polygon, '<(0,0),2>'::circle), \
+         (2, '((5,5),(7,5),(6,7))'::polygon, '<(5,5),1>'::circle), \
+         (3, '((0,0))'::polygon, '<(NaN,NaN),NaN>'::circle), \
+         (4, '((0,1),(0,1))'::polygon, '<(3,5),0>'::circle)",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "create index geom_gist_p_idx on geom_gist using gist (p)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index geom_gist_c_idx on geom_gist using gist (c)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, i.indclass \
+             from pg_class c join pg_index i on i.indexrelid = c.oid \
+             where c.relname in ('geom_gist_p_idx', 'geom_gist_c_idx') \
+             order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("geom_gist_c_idx".into()),
+                Value::Text(
+                    crate::include::catalog::CIRCLE_GIST_OPCLASS_OID
+                        .to_string()
+                        .into()
+                ),
+            ],
+            vec![
+                Value::Text("geom_gist_p_idx".into()),
+                Value::Text(
+                    crate::include::catalog::POLY_GIST_OPCLASS_OID
+                        .to_string()
+                        .into()
+                ),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn explain_geometry_sort_keys_render_sql_function_names() {
+    let base = temp_dir("explain_geometry_sort_keys");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table poly_sort (f1 polygon)")
+        .unwrap();
+
+    let area_lines = explain_lines(&db, 1, "select * from poly_sort order by area(f1)");
+    assert!(
+        area_lines
+            .iter()
+            .any(|line| line.contains("Sort Key: (area(f1))")),
+        "expected SQL area sort key, got {area_lines:?}"
+    );
+
+    let center_x_lines = explain_lines(
+        &db,
+        1,
+        "select * from poly_sort order by (poly_center(f1))[0]",
+    );
+    assert!(
+        center_x_lines
+            .iter()
+            .any(|line| line.contains("Sort Key: ((poly_center(f1))[0])")),
+        "expected SQL poly_center subscript sort key, got {center_x_lines:?}"
+    );
+}
+
+#[test]
 fn create_gist_range_index_explain_and_query_use_it() {
     let base = temp_dir("gist_range_index_scan_explain");
     let db = Database::open(&base, 16).unwrap();
