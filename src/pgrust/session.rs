@@ -124,6 +124,8 @@ pub(crate) struct CopyOptions {
     pub on_error_ignore: bool,
     pub freeze: bool,
     pub where_clause: Option<String>,
+    pub force_quote_all: bool,
+    pub force_quote_columns: Vec<String>,
 }
 
 impl Default for CopyOptions {
@@ -138,6 +140,8 @@ impl Default for CopyOptions {
             on_error_ignore: false,
             freeze: false,
             where_clause: None,
+            force_quote_all: false,
+            force_quote_columns: Vec::new(),
         }
     }
 }
@@ -7091,6 +7095,7 @@ impl Session {
                         sqlstate: "55000",
                     });
                 }
+                self.ensure_copy_to_relation_source(db, name)?;
                 let select_list = columns
                     .as_ref()
                     .map(|columns| columns.join(", "))
@@ -8298,6 +8303,21 @@ fn parse_copy_command_inner(sql: &str) -> Result<CopyCommand, ExecError> {
     let body = sql[4..].trim_start();
     let (relation, rest) = parse_copy_relation(body)?;
     let rest = rest.trim_start();
+    if matches!(relation, CopyRelation::Query(_)) {
+        let lower = rest.to_ascii_lowercase();
+        if lower.starts_with("from") && copy_keyword_boundary(rest, 4) {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "TO",
+                actual: "syntax error at or near \"from\"".into(),
+            }));
+        }
+        if rest.starts_with('(') {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "TO",
+                actual: "syntax error at or near \"(\"".into(),
+            }));
+        }
+    }
     let lower = rest.to_ascii_lowercase();
     let (direction, option_text) = if lower.starts_with("from") && copy_keyword_boundary(rest, 4) {
         let (endpoint, options) = parse_copy_endpoint(rest[4..].trim_start(), true)?;
@@ -8459,7 +8479,7 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
             let after_header = rest[6..].trim_start();
             let (word, after) = take_copy_word(after_header);
             match word.to_ascii_lowercase().as_str() {
-                "" | "true" | "on" | "1" => {
+                "true" | "on" | "1" => {
                     options.header = CopyHeader::Present;
                     rest = after;
                 }
@@ -8472,14 +8492,27 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
                     rest = after;
                 }
                 _ => {
-                    return Err(ExecError::DetailedError {
-                        message: "header requires a Boolean value or \"match\"".into(),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "22023",
-                    });
+                    options.header = CopyHeader::Present;
+                    rest = after_header;
                 }
             }
+            continue;
+        }
+        if lower.starts_with("force") && copy_keyword_boundary(rest, 5) {
+            let after_force = rest[5..].trim_start();
+            if !after_force.to_ascii_lowercase().starts_with("quote")
+                || !copy_keyword_boundary(after_force, 5)
+            {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "QUOTE",
+                    actual: after_force.into(),
+                }));
+            }
+            rest = parse_copy_force_quote_option(&mut options, after_force[5..].trim_start())?;
+            continue;
+        }
+        if lower.starts_with("force_quote") && copy_keyword_boundary(rest, 11) {
+            rest = parse_copy_force_quote_option(&mut options, rest[11..].trim_start())?;
             continue;
         }
         if lower.starts_with("quote") && copy_keyword_boundary(rest, 5) {
@@ -8559,6 +8592,40 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
     Ok(options)
 }
 
+fn parse_copy_force_quote_option<'a>(
+    options: &mut CopyOptions,
+    input: &'a str,
+) -> Result<&'a str, ExecError> {
+    let input = input.trim_start();
+    if let Some(rest) = input.strip_prefix('*') {
+        options.force_quote_all = true;
+        return Ok(rest);
+    }
+    if input.starts_with('(') {
+        let close = find_matching_paren(input, 0).ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "COPY FORCE QUOTE column list",
+                actual: input.into(),
+            })
+        })?;
+        options.force_quote_columns.extend(
+            split_copy_list(&input[1..close])
+                .into_iter()
+                .map(|part| unquote_identifier(part.trim())),
+        );
+        return Ok(input[close + 1..].trim_start());
+    }
+    let (word, after) = take_copy_word(input);
+    if word.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COPY FORCE QUOTE column",
+            actual: input.into(),
+        }));
+    }
+    options.force_quote_columns.push(unquote_identifier(&word));
+    Ok(after)
+}
+
 fn merge_copy_options(options: &mut CopyOptions, nested: CopyOptions) {
     if nested.format != CopyFormat::Text {
         options.format = nested.format;
@@ -8579,6 +8646,10 @@ fn merge_copy_options(options: &mut CopyOptions, nested: CopyOptions) {
     options.on_error_ignore |= nested.on_error_ignore;
     options.freeze |= nested.freeze;
     options.where_clause = options.where_clause.take().or(nested.where_clause);
+    options.force_quote_all |= nested.force_quote_all;
+    options
+        .force_quote_columns
+        .extend(nested.force_quote_columns);
 }
 
 fn read_copy_text_file(file_path: &str) -> Result<String, ExecError> {
@@ -8759,7 +8830,7 @@ pub(crate) fn render_copy_output(
             .map(|column| match options.format {
                 CopyFormat::Text => escape_copy_text_field(&column.name),
                 CopyFormat::Csv => {
-                    escape_copy_csv_field(&column.name, options.quote, options.escape)
+                    escape_copy_csv_field(&column.name, options.quote, options.escape, false)
                 }
             })
             .collect::<Vec<_>>()
@@ -8775,7 +8846,13 @@ pub(crate) fn render_copy_output(
             .iter()
             .zip(columns.iter())
             .map(|(value, column)| {
-                copy_value_to_field(value, column.sql_type, options, enum_labels)
+                copy_value_to_field(
+                    value,
+                    column,
+                    options,
+                    enum_labels,
+                    copy_options_force_quote_column(options, column),
+                )
             })
             .collect::<Vec<_>>();
         let line = fields.join(match options.format {
@@ -8790,10 +8867,12 @@ pub(crate) fn render_copy_output(
 
 fn copy_value_to_field(
     value: &Value,
-    sql_type: crate::backend::parser::SqlType,
+    column: &crate::backend::executor::QueryColumn,
     options: &CopyOptions,
     enum_labels: Option<&HashMap<(u32, u32), String>>,
+    force_quote: bool,
 ) -> String {
+    let sql_type = column.sql_type;
     let enum_label_type_oid = || {
         (matches!(sql_type.kind, crate::backend::parser::SqlTypeKind::Enum)
             && sql_type.type_oid != 0)
@@ -8893,8 +8972,19 @@ fn copy_value_to_field(
     };
     match options.format {
         CopyFormat::Text => escape_copy_text_field(&raw),
-        CopyFormat::Csv => escape_copy_csv_field(&raw, options.quote, options.escape),
+        CopyFormat::Csv => escape_copy_csv_field(&raw, options.quote, options.escape, force_quote),
     }
+}
+
+fn copy_options_force_quote_column(
+    options: &CopyOptions,
+    column: &crate::backend::executor::QueryColumn,
+) -> bool {
+    options.force_quote_all
+        || options
+            .force_quote_columns
+            .iter()
+            .any(|name| name == &column.name)
 }
 
 fn copy_enum_label_map(catalog: &dyn CatalogLookup) -> HashMap<(u32, u32), String> {
@@ -8944,8 +9034,9 @@ fn unescape_copy_text_field(value: &str) -> String {
     out
 }
 
-fn escape_copy_csv_field(value: &str, quote: char, escape: char) -> String {
-    let needs_quote = value.contains(',')
+fn escape_copy_csv_field(value: &str, quote: char, escape: char, force_quote: bool) -> String {
+    let needs_quote = force_quote
+        || value.contains(',')
         || value.contains(quote)
         || value.contains('\n')
         || value.contains('\r')
