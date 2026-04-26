@@ -3584,7 +3584,13 @@ impl CatalogStore {
             confupdtype: ' ',
             confdeltype: ' ',
             confmatchtype: ' ',
-            conkey: index.index.as_ref().map(|meta| meta.indkey.clone()),
+            conkey: index.index.as_ref().map(|meta| {
+                meta.indkey
+                    .iter()
+                    .take(meta.indclass.len())
+                    .copied()
+                    .collect()
+            }),
             confkey: None,
             conpfeqop: None,
             conppeqop: None,
@@ -3691,7 +3697,7 @@ impl CatalogStore {
             confupdtype: ' ',
             confdeltype: ' ',
             confmatchtype: ' ',
-            conkey: index.index_meta.as_ref().map(|meta| meta.indkey.clone()),
+            conkey: index.index_meta.as_ref().map(index_constraint_key_attnums),
             confkey: None,
             conpfeqop: None,
             conppeqop: None,
@@ -6386,6 +6392,7 @@ fn build_index_entry_with_relkind(
 
     let mut indkey = Vec::with_capacity(columns.len());
     let mut index_columns = Vec::with_capacity(columns.len());
+    let mut used_index_column_names = BTreeSet::new();
     let mut expr_sqls = Vec::new();
     for (position, column_name) in columns.iter().enumerate() {
         if let Some(expr_sql) = column_name.expr_sql.as_deref() {
@@ -6394,11 +6401,15 @@ fn build_index_entry_with_relkind(
             let expr_type = column_name
                 .expr_type
                 .ok_or(CatalogError::Corrupt("missing expression index sql type"))?;
-            index_columns.push(crate::backend::catalog::catalog::column_desc(
-                format!("expr{}", position + 1),
-                expr_type,
-                true,
-            ));
+            push_unique_index_column(
+                &mut index_columns,
+                &mut used_index_column_names,
+                crate::backend::catalog::catalog::column_desc(
+                    format!("expr{}", position + 1),
+                    expr_type,
+                    true,
+                ),
+            );
             continue;
         }
 
@@ -6417,7 +6428,7 @@ fn build_index_entry_with_relkind(
         column.not_null_primary_key_owned = false;
         column.attrdef_oid = None;
         column.default_expr = None;
-        index_columns.push(column);
+        push_unique_index_column(&mut index_columns, &mut used_index_column_names, column);
     }
 
     let key_count = resolved_options.indclass.len();
@@ -6503,6 +6514,22 @@ fn build_index_entry_with_relkind(
     Ok(entry)
 }
 
+fn push_unique_index_column(
+    columns: &mut Vec<ColumnDesc>,
+    used_names: &mut BTreeSet<String>,
+    mut column: ColumnDesc,
+) {
+    let base = column.name.clone();
+    let mut candidate = base.clone();
+    let mut suffix = 1usize;
+    while !used_names.insert(candidate.to_ascii_lowercase()) {
+        candidate = format!("{base}{suffix}");
+        suffix = suffix.saturating_add(1);
+    }
+    column.name = candidate;
+    columns.push(column);
+}
+
 fn build_toast_catalog_changes(
     parent_name: &str,
     parent: &CatalogEntry,
@@ -6582,6 +6609,14 @@ fn build_toast_catalog_changes(
         index_name,
         index_entry,
     }))
+}
+
+fn index_constraint_key_attnums(meta: &CatalogIndexMeta) -> Vec<i16> {
+    meta.indkey
+        .iter()
+        .take(meta.indclass.len())
+        .copied()
+        .collect()
 }
 
 fn default_index_build_options_for_relation(

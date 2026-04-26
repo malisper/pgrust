@@ -2452,6 +2452,7 @@ fn lower_index_scan_key(
         attribute_number: key.attribute_number,
         strategy: key.strategy,
         argument,
+        display_expr: key.display_expr,
     }
 }
 

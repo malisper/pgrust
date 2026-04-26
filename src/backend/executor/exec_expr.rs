@@ -2231,7 +2231,18 @@ fn format_index_backed_constraintdef_for_catalog(
         .index_relations_for_heap(row.conrelid)
         .into_iter()
         .find(|index| index.relation_oid == row.conindid)?;
-    let mut columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)?;
+    let all_columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)?;
+    let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or_default();
+    let mut columns = all_columns
+        .iter()
+        .take(key_count)
+        .cloned()
+        .collect::<Vec<_>>();
+    let include_columns = all_columns
+        .iter()
+        .skip(key_count)
+        .cloned()
+        .collect::<Vec<_>>();
     if row.conperiod
         && let Some(period_column) = columns.last_mut()
     {
@@ -2243,6 +2254,11 @@ fn format_index_backed_constraintdef_for_catalog(
         "UNIQUE"
     };
     let mut def = format!("{prefix} ({})", columns.join(", "));
+    if !include_columns.is_empty() {
+        def.push_str(" INCLUDE (");
+        def.push_str(&include_columns.join(", "));
+        def.push(')');
+    }
     append_constraint_deferrability(&mut def, row);
     Some(def)
 }

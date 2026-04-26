@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::backend::access::nbtree::nbtree::UNIQUE_BUILD_DETAIL_SEPARATOR;
 use crate::backend::commands::tablecmds::{
     collect_matching_rows_heap, index_key_values_for_row, insert_index_entry_for_row,
     reinitialize_index_relation, row_matches_index_predicate,
@@ -6,6 +7,7 @@ use crate::backend::commands::tablecmds::{
 use crate::backend::utils::cache::relcache::{IndexAmOpEntry, IndexAmProcEntry};
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::misc::notices::push_notice;
 use crate::include::access::amapi::{
     IndexBuildEmptyContext, IndexBuildExprContext, IndexInsertContext, IndexUniqueCheck,
 };
@@ -26,6 +28,25 @@ struct ResolvedIndexSupportMetadata {
     opckeytype_oids: Vec<u32>,
     amop_entries: Vec<Vec<IndexAmOpEntry>>,
     amproc_entries: Vec<Vec<IndexAmProcEntry>>,
+}
+
+fn map_unique_index_build_violation(
+    constraint: String,
+    fallback_detail: Option<String>,
+) -> ExecError {
+    if let Some((index_name, detail)) = constraint.split_once(UNIQUE_BUILD_DETAIL_SEPARATOR) {
+        ExecError::DetailedError {
+            message: format!("could not create unique index \"{index_name}\""),
+            detail: Some(detail.to_string()),
+            hint: None,
+            sqlstate: "23505",
+        }
+    } else {
+        ExecError::UniqueViolation {
+            constraint,
+            detail: fallback_detail,
+        }
+    }
 }
 
 pub(super) fn catalog_entry_from_bound_relation(
@@ -443,14 +464,16 @@ impl Database {
         relation_name: &str,
         columns: &[crate::backend::parser::IndexColumnDef],
     ) -> String {
+        let mut used_names = BTreeSet::new();
         let column_part = columns
             .iter()
             .map(|column| {
-                if let Some(expr_sql) = column.expr_sql.as_deref() {
+                let name = if let Some(expr_sql) = column.expr_sql.as_deref() {
                     expression_index_default_name(expr_sql)
                 } else {
                     column.name.clone()
-                }
+                };
+                Self::unique_index_name_part(name, &mut used_names)
             })
             .collect::<Vec<_>>()
             .join("_");
@@ -462,6 +485,16 @@ impl Database {
         format!("{relation_name}_{column_part}_idx")
     }
 
+    fn unique_index_name_part(base: String, used_names: &mut BTreeSet<String>) -> String {
+        let mut candidate = base.clone();
+        let mut suffix = 1usize;
+        while !used_names.insert(candidate.to_ascii_lowercase()) {
+            candidate = format!("{base}{suffix}");
+            suffix = suffix.saturating_add(1);
+        }
+        candidate
+    }
+
     pub(super) fn resolve_simple_index_build_options(
         &self,
         client_id: ClientId,
@@ -471,6 +504,12 @@ impl Database {
         columns: &[crate::backend::parser::IndexColumnDef],
         options: &[RelOption],
     ) -> Result<(u32, u32, CatalogIndexBuildOptions), ExecError> {
+        let access_method_name = if access_method_name.eq_ignore_ascii_case("rtree") {
+            push_notice("substituting access method \"gist\" for obsolete method \"rtree\"");
+            "gist"
+        } else {
+            access_method_name
+        };
         let access_method = crate::backend::utils::cache::lsyscache::access_method_row_by_name(
             self,
             client_id,
@@ -1034,10 +1073,9 @@ impl Database {
         } else {
             crate::backend::access::index::indexam::index_build_stub(&build_ctx, access_method_oid)
                 .map_err(|err| match err {
-                    CatalogError::UniqueViolation(constraint) => ExecError::UniqueViolation {
-                        constraint,
-                        detail: None,
-                    },
+                    CatalogError::UniqueViolation(constraint) => {
+                        map_unique_index_build_violation(constraint, None)
+                    }
                     CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
                     _ => ExecError::Parse(ParseError::UnexpectedToken {
                         expected: "index access method build",
@@ -1283,10 +1321,9 @@ impl Database {
                     access_method_oid,
                 )
                 .map_err(|err| match err {
-                    CatalogError::UniqueViolation(constraint) => ExecError::UniqueViolation {
-                        constraint,
-                        detail: unique_detail.clone(),
-                    },
+                    CatalogError::UniqueViolation(constraint) => {
+                        map_unique_index_build_violation(constraint, unique_detail.clone())
+                    }
                     _ => map_catalog_error(err),
                 })?;
             }
@@ -1400,7 +1437,15 @@ impl Database {
             }));
         }
         ensure_relation_owner(self, client_id, &entry, &create_stmt.table_name)?;
-        let access_method_name = create_stmt.using_method.as_deref().unwrap_or("btree");
+        let mut access_method_name = create_stmt
+            .using_method
+            .as_deref()
+            .unwrap_or("btree")
+            .to_string();
+        if access_method_name.eq_ignore_ascii_case("rtree") {
+            push_notice("substituting access method \"gist\" for obsolete method \"rtree\"");
+            access_method_name = "gist".into();
+        }
         if access_method_name.eq_ignore_ascii_case("brin") && create_stmt.predicate.is_some() {
             return Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "BRIN partial indexes".into(),
@@ -1451,6 +1496,29 @@ impl Database {
                 Ok(crate::backend::parser::IndexColumnDef::from(name.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let access_method_row = crate::backend::utils::cache::lsyscache::access_method_row_by_name(
+            self,
+            client_id,
+            Some((xid, cid)),
+            &access_method_name,
+        )
+        .filter(|row| row.amtype == 'i')
+        .ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "supported index access method",
+                actual: "unsupported index access method".into(),
+            })
+        })?;
+        if !include_columns.is_empty() && !Self::access_method_can_include(access_method_row.oid) {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "access method \"{access_method_name}\" does not support included columns"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
         if let Some(predicate_sql) = create_stmt.predicate_sql.as_deref() {
             crate::backend::parser::bind_index_predicate_sql_expr(
                 predicate_sql,
@@ -1470,7 +1538,7 @@ impl Database {
             .resolve_simple_index_build_options(
                 client_id,
                 Some((xid, cid)),
-                access_method_name,
+                &access_method_name,
                 &entry,
                 &key_columns,
                 &create_stmt.options,
@@ -1482,21 +1550,6 @@ impl Database {
                     actual: format!("unknown access method oid {access_method_oid}"),
                 })
             })?;
-        if !include_columns.is_empty() && !Self::access_method_can_include(access_method_oid) {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "access method \"{access_method_name}\" does not support included columns"
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "0A000",
-            });
-        }
-        if create_stmt.unique && !include_columns.is_empty() {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "unique indexes with INCLUDE columns".into(),
-            )));
-        }
         let mut index_columns = key_columns.clone();
         index_columns.extend(include_columns);
         if key_columns.len() > 1 && !am_routine.amcanmulticol {
@@ -1529,17 +1582,6 @@ impl Database {
                 "access method \"{}\" does not support unique indexes",
                 access_method_name
             ))));
-        }
-        if !create_stmt.include_columns.is_empty()
-            && !matches!(
-                access_method_oid,
-                BTREE_AM_OID | GIST_AM_OID | SPGIST_AM_OID
-            )
-        {
-            return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "index access method supporting INCLUDE",
-                actual: "unsupported CREATE INDEX feature".into(),
-            }));
         }
         let index_name = if create_stmt.index_name.is_empty() {
             self.choose_available_relation_name(
@@ -1707,10 +1749,11 @@ impl Database {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, 0)), configured_search_path);
         let index_entry = catalog
             .lookup_any_relation(&reindex_stmt.index_name)
-            .ok_or_else(|| {
-                ExecError::Parse(ParseError::TableDoesNotExist(
-                    reindex_stmt.index_name.clone(),
-                ))
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("relation \"{}\" does not exist", reindex_stmt.index_name),
+                detail: None,
+                hint: None,
+                sqlstate: "42P01",
             })?;
         self.table_locks.lock_table_interruptible(
             index_entry.rel,
@@ -1750,10 +1793,11 @@ impl Database {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let index_entry = catalog
             .lookup_any_relation(&reindex_stmt.index_name)
-            .ok_or_else(|| {
-                ExecError::Parse(ParseError::TableDoesNotExist(
-                    reindex_stmt.index_name.clone(),
-                ))
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("relation \"{}\" does not exist", reindex_stmt.index_name),
+                detail: None,
+                hint: None,
+                sqlstate: "42P01",
             })?;
         if !matches!(index_entry.relkind, 'i') {
             return Err(ExecError::Parse(ParseError::WrongObjectType {

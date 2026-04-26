@@ -15,6 +15,7 @@ use super::ParseError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexBackedConstraintAction {
     pub constraint_name: Option<String>,
+    pub existing_index_name: Option<String>,
     pub columns: Vec<String>,
     pub include_columns: Vec<String>,
     pub primary: bool,
@@ -180,6 +181,7 @@ pub enum NormalizedAlterTableConstraint {
 #[derive(Debug, Clone)]
 struct PendingIndexConstraint {
     explicit_name: Option<String>,
+    existing_index_name: Option<String>,
     generated_base: String,
     columns: Vec<String>,
     include_columns: Vec<String>,
@@ -313,6 +315,7 @@ pub fn normalize_create_table_constraints(
                         validate_key_attributes(attributes, "PRIMARY KEY")?;
                     index_constraints.push(PendingIndexConstraint {
                         explicit_name: attributes.name.clone(),
+                        existing_index_name: None,
                         generated_base: format!("{}_pkey", stmt.table_name),
                         columns: vec![column.name.clone()],
                         include_columns: Vec::new(),
@@ -331,6 +334,7 @@ pub fn normalize_create_table_constraints(
                         validate_key_attributes(attributes, "UNIQUE")?;
                     index_constraints.push(PendingIndexConstraint {
                         explicit_name: attributes.name.clone(),
+                        existing_index_name: None,
                         generated_base: format!("{}_{}_key", stmt.table_name, column.name),
                         columns: vec![column.name.clone()],
                         include_columns: Vec::new(),
@@ -411,6 +415,7 @@ pub fn normalize_create_table_constraints(
             TableConstraint::PrimaryKey {
                 attributes,
                 columns: key_columns,
+                include_columns,
                 without_overlaps,
             } => {
                 let (deferrable, initially_deferred) =
@@ -428,11 +433,14 @@ pub fn normalize_create_table_constraints(
                     &column_lookup,
                     catalog,
                 )?;
+                let resolved_include =
+                    resolve_constraint_columns(include_columns, &columns, &column_lookup)?;
                 index_constraints.push(PendingIndexConstraint {
                     explicit_name: attributes.name.clone(),
+                    existing_index_name: None,
                     generated_base: format!("{}_pkey", stmt.table_name),
                     columns: resolved,
-                    include_columns: Vec::new(),
+                    include_columns: resolved_include,
                     primary: true,
                     exclusion: false,
                     nulls_not_distinct: false,
@@ -446,6 +454,7 @@ pub fn normalize_create_table_constraints(
             TableConstraint::Unique {
                 attributes,
                 columns: key_columns,
+                include_columns,
                 without_overlaps,
             } => {
                 let (deferrable, initially_deferred) =
@@ -463,11 +472,23 @@ pub fn normalize_create_table_constraints(
                     &column_lookup,
                     catalog,
                 )?;
+                let resolved_include =
+                    resolve_constraint_columns(include_columns, &columns, &column_lookup)?;
+                let generated_columns = resolved
+                    .iter()
+                    .chain(resolved_include.iter())
+                    .cloned()
+                    .collect::<Vec<_>>();
                 index_constraints.push(PendingIndexConstraint {
                     explicit_name: attributes.name.clone(),
-                    generated_base: format!("{}_{}_key", stmt.table_name, resolved.join("_")),
+                    existing_index_name: None,
+                    generated_base: format!(
+                        "{}_{}_key",
+                        stmt.table_name,
+                        generated_columns.join("_")
+                    ),
                     columns: resolved,
-                    include_columns: Vec::new(),
+                    include_columns: resolved_include,
                     primary: false,
                     exclusion: false,
                     nulls_not_distinct: attributes.nulls_not_distinct,
@@ -500,6 +521,7 @@ pub fn normalize_create_table_constraints(
                     .collect::<Vec<_>>();
                 index_constraints.push(PendingIndexConstraint {
                     explicit_name: attributes.name.clone(),
+                    existing_index_name: None,
                     generated_base: format!(
                         "{}_{}_excl",
                         stmt.table_name,
@@ -518,6 +540,13 @@ pub fn normalize_create_table_constraints(
                         .collect(),
                     deferrable,
                     initially_deferred,
+                });
+            }
+            TableConstraint::PrimaryKeyUsingIndex { .. }
+            | TableConstraint::UniqueUsingIndex { .. } => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "CREATE TABLE constraint",
+                    actual: "USING INDEX constraint".into(),
                 });
             }
             TableConstraint::ForeignKey {
@@ -651,6 +680,7 @@ pub fn normalize_create_table_constraints(
             constraint_name: Some(constraint.explicit_name.unwrap_or_else(|| {
                 choose_generated_constraint_name(&constraint.generated_base, &mut used_names)
             })),
+            existing_index_name: constraint.existing_index_name,
             columns: constraint.columns,
             include_columns: constraint.include_columns,
             primary: constraint.primary,
@@ -1074,6 +1104,7 @@ pub fn normalize_alter_table_add_constraint(
         TableConstraint::PrimaryKey {
             attributes,
             columns,
+            include_columns,
             without_overlaps,
         } => {
             let (deferrable, initially_deferred) =
@@ -1104,11 +1135,14 @@ pub fn normalize_alter_table_add_constraint(
                 desc,
                 &column_lookup,
             )?;
+            let resolved_include =
+                resolve_relation_constraint_columns(include_columns, desc, &column_lookup)?;
             Ok(NormalizedAlterTableConstraint::IndexBacked(
                 IndexBackedConstraintAction {
                     constraint_name: Some(constraint_name),
+                    existing_index_name: None,
                     columns: resolved,
-                    include_columns: Vec::new(),
+                    include_columns: resolved_include,
                     primary: true,
                     exclusion: false,
                     nulls_not_distinct: false,
@@ -1123,6 +1157,7 @@ pub fn normalize_alter_table_add_constraint(
         TableConstraint::Unique {
             attributes,
             columns,
+            include_columns,
             without_overlaps,
         } => {
             let (deferrable, initially_deferred) = validate_key_attributes(attributes, "UNIQUE")?;
@@ -1138,16 +1173,24 @@ pub fn normalize_alter_table_add_constraint(
                 desc,
                 &column_lookup,
             )?;
+            let resolved_include =
+                resolve_relation_constraint_columns(include_columns, desc, &column_lookup)?;
+            let generated_columns = resolved
+                .iter()
+                .chain(resolved_include.iter())
+                .cloned()
+                .collect::<Vec<_>>();
             let constraint_name = assign_constraint_name(
                 attributes.name.clone(),
-                format!("{table_name}_{}_key", resolved.join("_")),
+                format!("{table_name}_{}_key", generated_columns.join("_")),
                 &mut used_names,
             )?;
             Ok(NormalizedAlterTableConstraint::IndexBacked(
                 IndexBackedConstraintAction {
                     constraint_name: Some(constraint_name),
+                    existing_index_name: None,
                     columns: resolved,
-                    include_columns: Vec::new(),
+                    include_columns: resolved_include,
                     primary: false,
                     exclusion: false,
                     nulls_not_distinct: attributes.nulls_not_distinct,
@@ -1186,6 +1229,7 @@ pub fn normalize_alter_table_add_constraint(
             Ok(NormalizedAlterTableConstraint::IndexBacked(
                 IndexBackedConstraintAction {
                     constraint_name: Some(constraint_name),
+                    existing_index_name: None,
                     columns: resolved,
                     include_columns: resolved_include,
                     primary: false,
@@ -1197,6 +1241,94 @@ pub fn normalize_alter_table_add_constraint(
                         .iter()
                         .map(|element| element.operator.clone())
                         .collect(),
+                    deferrable,
+                    initially_deferred,
+                },
+            ))
+        }
+        TableConstraint::PrimaryKeyUsingIndex {
+            attributes,
+            index_name,
+        } => {
+            let (deferrable, initially_deferred) =
+                validate_key_attributes(attributes, "PRIMARY KEY")?;
+            if existing_constraints
+                .iter()
+                .any(|row| row.contype == crate::include::catalog::CONSTRAINT_PRIMARY)
+            {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "at most one PRIMARY KEY",
+                    actual: "multiple PRIMARY KEY constraints".into(),
+                });
+            }
+            let (columns, include_columns, nulls_not_distinct) = index_columns_for_existing_index(
+                table_name,
+                relation_oid,
+                desc,
+                index_name,
+                catalog,
+            )?;
+            let constraint_name = assign_constraint_name(
+                Some(
+                    attributes
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| index_name.clone()),
+                ),
+                index_name.clone(),
+                &mut used_names,
+            )?;
+            Ok(NormalizedAlterTableConstraint::IndexBacked(
+                IndexBackedConstraintAction {
+                    constraint_name: Some(constraint_name),
+                    existing_index_name: Some(index_name.clone()),
+                    columns,
+                    include_columns,
+                    primary: true,
+                    exclusion: false,
+                    nulls_not_distinct,
+                    without_overlaps: None,
+                    access_method: None,
+                    exclusion_operators: Vec::new(),
+                    deferrable,
+                    initially_deferred,
+                },
+            ))
+        }
+        TableConstraint::UniqueUsingIndex {
+            attributes,
+            index_name,
+        } => {
+            let (deferrable, initially_deferred) = validate_key_attributes(attributes, "UNIQUE")?;
+            let (columns, include_columns, nulls_not_distinct) = index_columns_for_existing_index(
+                table_name,
+                relation_oid,
+                desc,
+                index_name,
+                catalog,
+            )?;
+            let constraint_name = assign_constraint_name(
+                Some(
+                    attributes
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| index_name.clone()),
+                ),
+                index_name.clone(),
+                &mut used_names,
+            )?;
+            Ok(NormalizedAlterTableConstraint::IndexBacked(
+                IndexBackedConstraintAction {
+                    constraint_name: Some(constraint_name),
+                    existing_index_name: Some(index_name.clone()),
+                    columns,
+                    include_columns,
+                    primary: false,
+                    exclusion: false,
+                    nulls_not_distinct,
+                    without_overlaps: None,
+                    access_method: None,
+                    exclusion_operators: Vec::new(),
                     deferrable,
                     initially_deferred,
                 },
@@ -2265,6 +2397,53 @@ fn resolve_relation_constraint_columns(
         resolved.push(desc_column.name.clone());
     }
     Ok(resolved)
+}
+
+fn index_columns_for_existing_index(
+    table_name: &str,
+    relation_oid: u32,
+    desc: &RelationDesc,
+    index_name: &str,
+    catalog: &dyn super::CatalogLookup,
+) -> Result<(Vec<String>, Vec<String>, bool), ParseError> {
+    let index = catalog
+        .index_relations_for_heap(relation_oid)
+        .into_iter()
+        .find(|index| index.name.eq_ignore_ascii_case(index_name))
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "existing index on table",
+            actual: format!("index \"{index_name}\" does not exist for table \"{table_name}\""),
+        })?;
+    if !index.index_meta.indisunique {
+        return Err(ParseError::UnexpectedToken {
+            expected: "unique index",
+            actual: format!("index \"{index_name}\" is not unique"),
+        });
+    }
+    let mut all_columns = Vec::with_capacity(index.index_meta.indkey.len());
+    for attnum in &index.index_meta.indkey {
+        if *attnum <= 0 {
+            return Err(ParseError::UnexpectedToken {
+                expected: "simple column index",
+                actual: format!("index \"{index_name}\" contains expressions"),
+            });
+        }
+        let column = desc
+            .columns
+            .get((*attnum as usize).saturating_sub(1))
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "index column",
+                actual: format!("index \"{index_name}\" has invalid column reference"),
+            })?;
+        all_columns.push(column.name.clone());
+    }
+    let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or_default();
+    let include_columns = all_columns.split_off(key_count.min(all_columns.len()));
+    Ok((
+        all_columns,
+        include_columns,
+        index.index_meta.indnullsnotdistinct,
+    ))
 }
 
 fn resolve_relation_index_constraint_columns(

@@ -1744,6 +1744,27 @@ fn render_index_scan_key(
     purpose: char,
     key_column_names: Option<&[String]>,
 ) -> Option<String> {
+    let default_column_names;
+    if purpose == 's'
+        && let Some(display_expr) = &key.display_expr
+    {
+        let column_names = match key_column_names {
+            Some(names) => names,
+            None => {
+                default_column_names = desc
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect::<Vec<_>>();
+                &default_column_names
+            }
+        };
+        return Some(render_explain_expr_inner_with_qualifier(
+            display_expr,
+            None,
+            column_names,
+        ));
+    }
     let index_attno = usize::try_from(key.attribute_number.checked_sub(1)?).ok()?;
     let index_key_attno = *index_meta.indkey.get(index_attno)?;
     let (column_name, column_type) = if index_key_attno == 0 {
@@ -1802,15 +1823,12 @@ fn render_index_scan_key(
     })
     .or_else(|| fallback_index_scan_operator(index_meta.am_oid, key.strategy))?;
     let value_sql = match &key.argument {
-        IndexScanKeyArgument::Const(value) => match right_type_oid {
-            Some(_type_oid) => {
-                let sql_type = display_type.or_else(|| value.sql_type_hint())?;
-                format!(
-                    "{}::{}",
-                    render_explain_literal(value),
-                    render_explain_sql_type_name(sql_type)
-                )
-            }
+        IndexScanKeyArgument::Const(value) => match display_type {
+            Some(sql_type) => format!(
+                "{}::{}",
+                render_explain_literal(value),
+                render_explain_sql_type_name(sql_type)
+            ),
             None => render_explain_literal(value),
         },
         IndexScanKeyArgument::Runtime(expr) => render_explain_expr(expr, &[]),
@@ -1913,9 +1931,12 @@ fn index_key_argument_display_type(
 ) -> Option<SqlType> {
     match argument {
         IndexScanKeyArgument::Const(Value::Text(_) | Value::TextRef(_, _))
-            if column_type.kind == SqlTypeKind::Char =>
+            if matches!(column_type.kind, SqlTypeKind::Char | SqlTypeKind::Name) =>
         {
-            Some(SqlType::new(SqlTypeKind::Char))
+            Some(SqlType::new(column_type.kind))
+        }
+        IndexScanKeyArgument::Const(Value::Int32(_)) if column_type.kind == SqlTypeKind::Int4 => {
+            None
         }
         IndexScanKeyArgument::Const(value) => value.sql_type_hint(),
         IndexScanKeyArgument::Runtime(expr) => {
@@ -2557,6 +2578,16 @@ fn render_explain_expr_inner_with_qualifier(
             elements,
             array_type,
         } => render_explain_array_literal(elements, *array_type, qualifier, column_names),
+        Expr::Row { fields, .. } => {
+            let fields = fields
+                .iter()
+                .map(|(_, expr)| {
+                    render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("ROW({fields})")
+        }
         Expr::SubPlan(subplan) => {
             if subplan.par_param.is_empty() {
                 format!("(InitPlan {}).col1", subplan.plan_id + 1)

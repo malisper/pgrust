@@ -34,7 +34,7 @@ use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT,
     TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
 };
-use crate::include::nodes::datum::IntervalValue;
+use crate::include::nodes::datum::{IntervalValue, RecordValue};
 use crate::pgrust::compact_string::CompactString;
 
 pub(crate) fn compare_order_by_keys(
@@ -1226,6 +1226,7 @@ pub(crate) fn order_values(
             _ => unreachable!(),
         })),
         (Value::Bool(_), Value::Bool(_)) => order_bool_values(op, &left, &right),
+        (Value::Record(l), Value::Record(r)) => order_record_values(op, l, r, collation_oid),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             let ordering = parsed_numeric_value(l)
                 .zip(parsed_numeric_value(r))
@@ -1488,10 +1489,7 @@ fn interval_out_of_range() -> ExecError {
     }
 }
 
-fn compare_record_values(
-    left: &crate::include::nodes::datum::RecordValue,
-    right: &crate::include::nodes::datum::RecordValue,
-) -> Ordering {
+fn compare_record_values(left: &RecordValue, right: &RecordValue) -> Ordering {
     for (left_value, right_value) in left.fields.iter().zip(&right.fields) {
         let value_ordering = compare_order_values(left_value, right_value, None, None, false)
             .expect("record field comparisons use implicit default collation");
@@ -1500,6 +1498,28 @@ fn compare_record_values(
         }
     }
     left.fields.len().cmp(&right.fields.len())
+}
+
+fn order_record_values(
+    op: &'static str,
+    left: &RecordValue,
+    right: &RecordValue,
+    collation_oid: Option<u32>,
+) -> Result<Value, ExecError> {
+    for (left_value, right_value) in left.fields.iter().zip(&right.fields) {
+        if matches!(left_value, Value::Null) || matches!(right_value, Value::Null) {
+            return Ok(Value::Null);
+        }
+        let ordering = compare_order_values(left_value, right_value, collation_oid, None, false)?;
+        if ordering != Ordering::Equal {
+            return Ok(Value::Bool(compare_ord(ordering, Ordering::Equal, op)));
+        }
+    }
+    Ok(Value::Bool(compare_ord(
+        left.fields.len().cmp(&right.fields.len()),
+        Ordering::Equal,
+        op,
+    )))
 }
 
 fn normalize_array_value(value: &Value) -> Option<ArrayValue> {

@@ -5,8 +5,8 @@ use crate::include::catalog::*;
 
 pub const ARRAY_BTREE_OPCLASS_OID: u32 = 76012;
 pub const BOOL_BTREE_OPCLASS_OID: u32 = 424;
-pub const INT2_BTREE_OPCLASS_OID: u32 = 1978;
-pub const INT4_BTREE_OPCLASS_OID: u32 = 1979;
+pub const INT2_BTREE_OPCLASS_OID: u32 = 1979;
+pub const INT4_BTREE_OPCLASS_OID: u32 = 1978;
 pub const INT8_BTREE_OPCLASS_OID: u32 = 3124;
 pub const OID_BTREE_OPCLASS_OID: u32 = 1989;
 pub const CHAR_BTREE_OPCLASS_OID: u32 = 10007;

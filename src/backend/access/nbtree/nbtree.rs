@@ -23,9 +23,8 @@ use crate::backend::access::transam::xlog::{
 };
 use crate::backend::catalog::CatalogError;
 use crate::backend::executor::value_io::{
-    decode_value, encode_anyarray_bytes, encode_array_bytes, format_vector_array_storage_text,
+    decode_value, encode_value, format_unique_key_detail, format_vector_array_storage_text,
 };
-use crate::backend::executor::{encode_range_bytes, render_datetime_value_text};
 use crate::backend::storage::fsm::get_free_index_page;
 use crate::backend::storage::page::bufpage::{MAX_HEAP_TUPLE_SIZE, max_align, page_header};
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
@@ -34,7 +33,7 @@ use crate::include::access::amapi::{
     IndexAmRoutine, IndexBeginScanContext, IndexBuildContext, IndexBuildEmptyContext,
     IndexBuildResult, IndexInsertContext,
 };
-use crate::include::access::htup::{AttributeCompression, AttributeStorage};
+use crate::include::access::htup::{AttributeCompression, AttributeStorage, TupleValue};
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::itup::IndexTupleData;
 use crate::include::access::nbtree::{
@@ -48,6 +47,7 @@ use crate::include::access::relscan::{
     BtIndexScanOpaque, IndexScanDesc, IndexScanOpaque, ScanDirection,
 };
 use crate::include::access::scankey::ScanKeyData;
+use crate::include::access::tidbitmap::TidBitmap;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
 use crate::include::storage::buf_internals::Page;
@@ -61,6 +61,7 @@ fn check_catalog_interrupts(
 
 const BT_DESC_FLAG: i16 = 0x0001;
 const TOAST_INDEX_TARGET: usize = MAX_HEAP_TUPLE_SIZE / 16;
+pub(crate) const UNIQUE_BUILD_DETAIL_SEPARATOR: &str = "\nDETAIL: ";
 
 #[derive(Debug, Clone)]
 struct BuiltPageRef {
@@ -101,141 +102,6 @@ enum LockedUniqueCheckResult {
     Clear,
     WaitFor(TransactionId),
     Restart { split_block: Option<u32> },
-}
-
-fn encode_index_value(
-    sql_type: crate::backend::parser::SqlType,
-    value: &Value,
-) -> Result<Vec<u8>, CatalogError> {
-    match value {
-        Value::Null => Ok(Vec::new()),
-        Value::Int16(v) => Ok(v.to_le_bytes().to_vec()),
-        Value::Int32(v) => Ok(v.to_le_bytes().to_vec()),
-        Value::EnumOid(v) => Ok(v.to_le_bytes().to_vec()),
-        Value::Int64(v)
-            if matches!(
-                sql_type.kind,
-                crate::backend::parser::SqlTypeKind::Oid
-                    | crate::backend::parser::SqlTypeKind::RegProc
-                    | crate::backend::parser::SqlTypeKind::RegClass
-                    | crate::backend::parser::SqlTypeKind::RegType
-                    | crate::backend::parser::SqlTypeKind::RegRole
-                    | crate::backend::parser::SqlTypeKind::RegNamespace
-                    | crate::backend::parser::SqlTypeKind::RegOper
-                    | crate::backend::parser::SqlTypeKind::RegOperator
-                    | crate::backend::parser::SqlTypeKind::RegProcedure
-                    | crate::backend::parser::SqlTypeKind::RegCollation
-                    | crate::backend::parser::SqlTypeKind::RegConfig
-                    | crate::backend::parser::SqlTypeKind::RegDictionary
-            ) =>
-        {
-            let oid = u32::try_from(*v)
-                .map_err(|_| CatalogError::Io(format!("oid index key out of range: {v}")))?;
-            Ok(oid.to_le_bytes().to_vec())
-        }
-        Value::Int64(v) => Ok(v.to_le_bytes().to_vec()),
-        Value::PgLsn(v) => Ok(v.to_le_bytes().to_vec()),
-        Value::Money(v) => Ok(v.to_le_bytes().to_vec()),
-        Value::Bool(v) => Ok(vec![u8::from(*v)]),
-        Value::Text(v) => Ok(v.as_bytes().to_vec()),
-        Value::TextRef(_, _) => Ok(value
-            .as_text()
-            .ok_or(CatalogError::Corrupt("text ref must materialize"))?
-            .to_owned()
-            .into_bytes()),
-        Value::Xml(v) => Ok(v.as_bytes().to_vec()),
-        Value::Numeric(v) => Ok(v.render().into_bytes()),
-        Value::Bytea(v) => Ok(v.clone()),
-        Value::Uuid(v) => Ok(v.to_vec()),
-        Value::Inet(v) => Ok(v.render_inet().into_bytes()),
-        Value::Cidr(v) => Ok(v.render_cidr().into_bytes()),
-        Value::MacAddr(v) => Ok(v.to_vec()),
-        Value::MacAddr8(v) => Ok(v.to_vec()),
-        Value::Bit(v) => {
-            let mut bytes = Vec::with_capacity(4 + v.bytes.len());
-            bytes.extend_from_slice(&(v.bit_len as u32).to_le_bytes());
-            bytes.extend_from_slice(&v.bytes);
-            Ok(bytes)
-        }
-        Value::Float64(v)
-            if matches!(sql_type.kind, crate::backend::parser::SqlTypeKind::Float4) =>
-        {
-            Ok((*v as f32).to_le_bytes().to_vec())
-        }
-        Value::Float64(v) => Ok(v.to_le_bytes().to_vec()),
-        Value::Json(v) => Ok(v.as_bytes().to_vec()),
-        Value::Jsonb(v) => Ok(v.clone()),
-        Value::JsonPath(v) => Ok(v.as_bytes().to_vec()),
-        Value::TsVector(v) => Ok(crate::backend::executor::render_tsvector_text(v).into_bytes()),
-        Value::TsQuery(v) => Ok(crate::backend::executor::render_tsquery_text(v).into_bytes()),
-        Value::InternalChar(v) => Ok(vec![*v]),
-        Value::Date(_)
-        | Value::Time(_)
-        | Value::TimeTz(_)
-        | Value::Timestamp(_)
-        | Value::TimestampTz(_) => Ok(render_datetime_value_text(value)
-            .expect("datetime values must render")
-            .into_bytes()),
-        Value::Interval(v) => {
-            let mut bytes = Vec::with_capacity(16);
-            bytes.extend_from_slice(&v.time_micros.to_le_bytes());
-            bytes.extend_from_slice(&v.days.to_le_bytes());
-            bytes.extend_from_slice(&v.months.to_le_bytes());
-            Ok(bytes)
-        }
-        Value::Point(_)
-        | Value::Lseg(_)
-        | Value::Path(_)
-        | Value::Line(_)
-        | Value::Box(_)
-        | Value::Polygon(_)
-        | Value::Circle(_) => Err(CatalogError::Io(format!(
-            "unsupported index key type {:?}",
-            sql_type.kind
-        ))),
-        Value::Range(range) => {
-            encode_range_bytes(range).map_err(|err| CatalogError::Io(format!("{err:?}")))
-        }
-        Value::Multirange(v) => crate::backend::executor::encode_multirange_bytes(v)
-            .map_err(|err| CatalogError::Io(format!("{err:?}"))),
-        Value::Array(_) | Value::PgArray(_)
-            if matches!(
-                sql_type.kind,
-                crate::backend::parser::SqlTypeKind::Int2Vector
-                    | crate::backend::parser::SqlTypeKind::OidVector
-            ) =>
-        {
-            let array = value
-                .as_array_value()
-                .ok_or_else(|| CatalogError::Io("vector index key must materialize".into()))?;
-            format_vector_array_storage_text(sql_type, &array)
-                .map(|text| text.into_bytes())
-                .map_err(|err| CatalogError::Io(format!("{err:?}")))
-        }
-        Value::Array(_) | Value::PgArray(_)
-            if sql_type.kind == crate::backend::parser::SqlTypeKind::AnyArray =>
-        {
-            let array = value
-                .as_array_value()
-                .ok_or_else(|| CatalogError::Io("array index key must materialize".into()))?;
-            encode_anyarray_bytes(&array).map_err(|err| CatalogError::Io(format!("{err:?}")))
-        }
-        Value::Array(_) | Value::PgArray(_) if sql_type.is_array => {
-            let array = value
-                .as_array_value()
-                .ok_or_else(|| CatalogError::Io("array index key must materialize".into()))?;
-            encode_array_bytes(sql_type.element_type(), &array)
-                .map_err(|err| CatalogError::Io(format!("{err:?}")))
-        }
-        Value::Array(_) | Value::PgArray(_) => Err(CatalogError::Io(format!(
-            "unsupported index key type {:?}",
-            sql_type.kind
-        ))),
-        Value::Record(_) => Err(CatalogError::Io(format!(
-            "unsupported index key type {:?}",
-            sql_type.kind
-        ))),
-    }
 }
 
 fn decode_index_value(column: &ColumnDesc, bytes: &[u8]) -> Result<Value, CatalogError> {
@@ -285,11 +151,14 @@ pub(crate) fn encode_key_payload(
             }
             _ => {
                 payload.push(0);
-                let bytes = maybe_compress_index_value(
-                    column,
-                    encode_index_value(column.sql_type, &value)?,
-                    default_toast_compression,
-                )?;
+                let encoded = encode_value(column, value).map_err(|err| {
+                    CatalogError::Io(format!("btree index value encode failed: {err:?}"))
+                })?;
+                let bytes = match encoded {
+                    TupleValue::Null => Vec::new(),
+                    TupleValue::Bytes(bytes) | TupleValue::EncodedVarlena(bytes) => bytes,
+                };
+                let bytes = maybe_compress_index_value(column, bytes, default_toast_compression)?;
                 payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
                 payload.extend_from_slice(&bytes);
             }
@@ -343,11 +212,35 @@ fn compare_key_arrays(left: &[Value], right: &[Value]) -> Ordering {
     left.len().cmp(&right.len())
 }
 
+fn btree_key_count(
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+) -> usize {
+    usize::try_from(index_meta.indnkeyatts.max(0)).unwrap_or_default()
+}
+
+fn key_prefix(values: &[Value], key_count: usize) -> &[Value] {
+    &values[..values.len().min(key_count)]
+}
+
+fn compare_key_prefixes(left: &[Value], right: &[Value], key_count: usize) -> Ordering {
+    compare_key_arrays(key_prefix(left, key_count), key_prefix(right, key_count))
+}
+
 fn tuple_key_values(
     desc: &RelationDesc,
     tuple: &IndexTupleData,
 ) -> Result<Vec<Value>, CatalogError> {
     decode_key_payload(desc, &tuple.payload)
+}
+
+fn tuple_key_prefix_values(
+    desc: &RelationDesc,
+    tuple: &IndexTupleData,
+    key_count: usize,
+) -> Result<Vec<Value>, CatalogError> {
+    let mut values = tuple_key_values(desc, tuple)?;
+    values.truncate(key_count);
+    Ok(values)
 }
 
 fn pivot_tuple(
@@ -639,6 +532,7 @@ fn page_lower_bound(
     pool: &crate::BufferPool<crate::SmgrStorageBackend>,
     rel: RelFileLocator,
     block: u32,
+    key_count: usize,
 ) -> Result<Vec<Value>, CatalogError> {
     let page = read_page(pool, rel, block)?;
     let items = bt_page_data_items(&page)
@@ -646,19 +540,20 @@ fn page_lower_bound(
     let tuple = items
         .first()
         .ok_or(CatalogError::Corrupt("btree page unexpectedly empty"))?;
-    tuple_key_values(desc, tuple)
+    tuple_key_prefix_values(desc, tuple, key_count)
 }
 
 fn page_first_key_values(
     desc: &RelationDesc,
     page: &Page,
+    key_count: usize,
 ) -> Result<Option<Vec<Value>>, CatalogError> {
     let items = bt_page_data_items(page)
         .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
     let Some(tuple) = items.first() else {
         return Ok(None);
     };
-    tuple_key_values(desc, tuple).map(Some)
+    tuple_key_prefix_values(desc, tuple, key_count).map(Some)
 }
 
 fn ensure_empty_btree(
@@ -759,11 +654,12 @@ fn build_leaf_pages(
         built.push(BuiltPageRef {
             block,
             level: 0,
-            lower_bound: tuple_key_values(
+            lower_bound: tuple_key_prefix_values(
                 &ctx.index_desc,
                 items
                     .first()
                     .ok_or(CatalogError::Corrupt("empty leaf build page"))?,
+                btree_key_count(&ctx.index_meta),
             )?,
         });
     }
@@ -842,11 +738,12 @@ fn build_internal_level(
         built.push(BuiltPageRef {
             block,
             level,
-            lower_bound: tuple_key_values(
+            lower_bound: tuple_key_prefix_values(
                 &ctx.index_desc,
                 items
                     .first()
                     .ok_or(CatalogError::Corrupt("empty internal build page"))?,
+                btree_key_count(&ctx.index_meta),
             )?,
         });
     }
@@ -949,19 +846,39 @@ fn build_btree_pages(
     Ok(IndexBuildResult::default())
 }
 
-fn check_unique_build(index_name: &str, tuples: &[BtSortTuple]) -> Result<(), CatalogError> {
+fn check_unique_build(
+    index_name: &str,
+    tuples: &[BtSortTuple],
+    columns: &[ColumnDesc],
+    key_count: usize,
+    nulls_not_distinct: bool,
+) -> Result<(), CatalogError> {
     let mut last: Option<&[Value]> = None;
     for tuple in tuples {
-        if keys_contain_null(&tuple.key_values) {
+        let tuple_keys = key_prefix(&tuple.key_values, key_count);
+        if !nulls_not_distinct && keys_contain_null(tuple_keys) {
             last = None;
             continue;
         }
-        if last.is_some_and(|prev| compare_key_arrays(prev, &tuple.key_values) == Ordering::Equal) {
-            return Err(CatalogError::UniqueViolation(index_name.to_string()));
+        if last.is_some_and(|prev| compare_key_arrays(prev, tuple_keys) == Ordering::Equal) {
+            let detail = format_unique_build_key_detail(
+                &columns[..columns.len().min(key_count)],
+                tuple_keys,
+            );
+            return Err(CatalogError::UniqueViolation(format!(
+                "{index_name}{UNIQUE_BUILD_DETAIL_SEPARATOR}{detail}"
+            )));
         }
-        last = Some(&tuple.key_values);
+        last = Some(tuple_keys);
     }
     Ok(())
+}
+
+fn format_unique_build_key_detail(columns: &[ColumnDesc], values: &[Value]) -> String {
+    format_unique_key_detail(columns, values)
+        .strip_suffix(" already exists.")
+        .map(|prefix| format!("{prefix} is duplicated."))
+        .unwrap_or_else(|| format_unique_key_detail(columns, values))
 }
 
 fn btbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
@@ -977,6 +894,7 @@ fn btbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
     let mut spool = crate::backend::access::nbtree::nbtsort::BtSpool::default();
     let mut result = IndexBuildResult::default();
     let mut approx_bytes = 0usize;
+    let key_count = btree_key_count(&ctx.index_meta);
 
     loop {
         check_catalog_interrupts(ctx.interrupts.as_ref())?;
@@ -993,17 +911,18 @@ fn btbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
             .deform(&attr_descs)
             .map_err(|err| CatalogError::Io(format!("heap deform failed: {err:?}")))?;
         let row_values = materialize_heap_row_values(&ctx.heap_desc, &datums)?;
-        let Some(key_values) = key_projector.project(ctx, &row_values, tid)? else {
+        let Some(all_values) = key_projector.project(ctx, &row_values, tid)? else {
             result.heap_tuples += 1;
             continue;
         };
         let payload =
-            encode_key_payload(&ctx.index_desc, &key_values, ctx.default_toast_compression)?;
+            encode_key_payload(&ctx.index_desc, &all_values, ctx.default_toast_compression)?;
         let tuple = IndexTupleData::new_raw(tid, false, false, false, payload);
         check_leaf_tuple_size(&ctx.index_name, &tuple)?;
+        let key_values = key_prefix(&all_values, key_count).to_vec();
         approx_bytes = approx_bytes
             .saturating_add(tuple.size())
-            .saturating_add(key_values.len() * 16);
+            .saturating_add(all_values.len() * 16);
         if approx_bytes > ctx.maintenance_work_mem_kb.saturating_mul(1024) {
             return Err(CatalogError::Io(
                 "CREATE INDEX requires external build spill, which is not supported yet".into(),
@@ -1014,9 +933,15 @@ fn btbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
         result.index_tuples += 1;
     }
 
-    let tuples = spool.finish();
+    let tuples = spool.finish(key_count);
     if ctx.index_meta.indisunique {
-        check_unique_build(&ctx.index_name, &tuples)?;
+        check_unique_build(
+            &ctx.index_name,
+            &tuples,
+            &ctx.index_desc.columns,
+            key_count,
+            ctx.index_meta.indnullsnotdistinct,
+        )?;
     }
     build_btree_pages(ctx, tuples)?;
     Ok(result)
@@ -1027,6 +952,7 @@ fn choose_child_slot(
     items: &[IndexTupleData],
     target: &[Value],
     direction: ScanDirection,
+    key_count: usize,
 ) -> Result<usize, CatalogError> {
     if items.is_empty() {
         return Err(CatalogError::Corrupt("empty internal btree page"));
@@ -1039,8 +965,8 @@ fn choose_child_slot(
     }
     let mut choice = 0usize;
     for (idx, tuple) in items.iter().enumerate() {
-        let key = tuple_key_values(desc, tuple)?;
-        if compare_key_arrays(&key, target) != Ordering::Greater {
+        let key = tuple_key_prefix_values(desc, tuple, key_count)?;
+        if compare_key_prefixes(&key, target, key_count) != Ordering::Greater {
             choice = idx;
         } else {
             break;
@@ -1173,6 +1099,7 @@ fn find_leaf_with_ancestors(
     desc: &RelationDesc,
     target: &[Value],
     direction: ScanDirection,
+    key_count: usize,
 ) -> Result<(Vec<u32>, u32), CatalogError> {
     let meta_page = read_page(pool, rel, BTREE_METAPAGE)?;
     let meta = bt_page_get_meta(&meta_page)
@@ -1183,7 +1110,7 @@ fn find_leaf_with_ancestors(
     while level > 0 {
         ancestors.push(block);
         let (items, _) = read_page_items(pool, rel, block)?;
-        let slot = choose_child_slot(desc, &items, target, direction)?;
+        let slot = choose_child_slot(desc, &items, target, direction, key_count)?;
         block = items[slot].t_tid.block_number;
         level -= 1;
     }
@@ -1213,7 +1140,12 @@ fn leaf_upper_bound(
     if let Some(high_key) = bt_page_high_key(page)
         .map_err(|err| CatalogError::Io(format!("btree high-key read failed: {err:?}")))?
     {
-        return tuple_key_values(&ctx.index_desc, &high_key).map(Some);
+        return tuple_key_prefix_values(
+            &ctx.index_desc,
+            &high_key,
+            btree_key_count(&ctx.index_meta),
+        )
+        .map(Some);
     }
     if opaque.btpo_next == P_NONE {
         return Ok(None);
@@ -1224,7 +1156,12 @@ fn leaf_upper_bound(
     let Some(first_tuple) = next_items.first() else {
         return Ok(None);
     };
-    tuple_key_values(&ctx.index_desc, first_tuple).map(Some)
+    tuple_key_prefix_values(
+        &ctx.index_desc,
+        first_tuple,
+        btree_key_count(&ctx.index_meta),
+    )
+    .map(Some)
 }
 
 fn left_sibling_may_contain_key(
@@ -1238,7 +1175,7 @@ fn left_sibling_may_contain_key(
     let upper_bound = if let Some(high_key) = bt_page_high_key(left_page)
         .map_err(|err| CatalogError::Io(format!("btree high-key read failed: {err:?}")))?
     {
-        tuple_key_values(&ctx.index_desc, &high_key)?
+        tuple_key_prefix_values(&ctx.index_desc, &high_key, btree_key_count(&ctx.index_meta))?
     } else if left_opaque.btpo_next == right_block {
         let Some(right_first_key) = right_first_key else {
             return Ok(false);
@@ -1251,7 +1188,10 @@ fn left_sibling_may_contain_key(
             "btree leaf missing high key without adjacent sibling bound",
         ));
     };
-    Ok(compare_key_arrays(key_values, &upper_bound) != Ordering::Greater)
+    Ok(
+        compare_key_prefixes(key_values, &upper_bound, btree_key_count(&ctx.index_meta))
+            != Ordering::Greater,
+    )
 }
 
 fn find_parent_from_stack(
@@ -1362,8 +1302,13 @@ fn find_leaf_for_insert(
             }
             let items = bt_page_data_items(&page)
                 .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
-            let slot =
-                choose_child_slot(&ctx.index_desc, &items, key_values, ScanDirection::Forward)?;
+            let slot = choose_child_slot(
+                &ctx.index_desc,
+                &items,
+                key_values,
+                ScanDirection::Forward,
+                btree_key_count(&ctx.index_meta),
+            )?;
             parent_stack.push(InsertStackEntry {
                 block,
                 offset: slot,
@@ -1389,7 +1334,9 @@ fn find_leaf_for_insert(
                     parent_stack,
                 });
             };
-            if compare_key_arrays(key_values, &upper_bound) != Ordering::Greater {
+            if compare_key_prefixes(key_values, &upper_bound, btree_key_count(&ctx.index_meta))
+                != Ordering::Greater
+            {
                 return Ok(InsertSearchPath {
                     leaf_block: block,
                     parent_stack,
@@ -1427,7 +1374,8 @@ fn find_locked_unique_insert_path<'a>(
                 continue 'search;
             }
             if let Some(upper_bound) = leaf_upper_bound(ctx, &page, opaque)?
-                && compare_key_arrays(key_values, &upper_bound) == Ordering::Greater
+                && compare_key_prefixes(key_values, &upper_bound, btree_key_count(&ctx.index_meta))
+                    == Ordering::Greater
             {
                 drop(guard);
                 drop(pin);
@@ -1445,7 +1393,11 @@ fn find_locked_unique_insert_path<'a>(
                     finish_incomplete_split(ctx, left_block, &[])?;
                     continue 'search;
                 }
-                let current_first_key = page_first_key_values(&ctx.index_desc, &page)?;
+                let current_first_key = page_first_key_values(
+                    &ctx.index_desc,
+                    &page,
+                    btree_key_count(&ctx.index_meta),
+                )?;
                 if left_sibling_may_contain_key(
                     ctx,
                     &left_page,
@@ -1508,8 +1460,13 @@ fn find_parent_stack_for_key(
             }
             let items = bt_page_data_items(&page)
                 .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
-            let slot =
-                choose_child_slot(&ctx.index_desc, &items, key_values, ScanDirection::Forward)?;
+            let slot = choose_child_slot(
+                &ctx.index_desc,
+                &items,
+                key_values,
+                ScanDirection::Forward,
+                btree_key_count(&ctx.index_meta),
+            )?;
             parent_stack.push(InsertStackEntry {
                 block,
                 offset: slot,
@@ -1527,7 +1484,13 @@ fn find_parent_stack_for_key(
         }
         let items = bt_page_data_items(&page)
             .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
-        let slot = choose_child_slot(&ctx.index_desc, &items, key_values, ScanDirection::Forward)?;
+        let slot = choose_child_slot(
+            &ctx.index_desc,
+            &items,
+            key_values,
+            ScanDirection::Forward,
+            btree_key_count(&ctx.index_meta),
+        )?;
         parent_stack.push(InsertStackEntry {
             block,
             offset: slot,
@@ -1558,6 +1521,7 @@ fn initial_scan_block(scan: &IndexScanDesc) -> Result<Option<u32>, CatalogError>
         &scan.index_desc,
         &target,
         scan.direction,
+        btree_key_count(&scan.index_meta),
     )?;
     loop {
         let page = read_page(&scan.pool, scan.index_relation, block)?;
@@ -1765,6 +1729,17 @@ fn btgettuple(scan: &mut IndexScanDesc) -> Result<bool, CatalogError> {
     }
 }
 
+fn btgetbitmap(scan: &mut IndexScanDesc, bitmap: &mut TidBitmap) -> Result<i64, CatalogError> {
+    let mut count = 0_i64;
+    while btgettuple(scan)? {
+        if let Some(tid) = scan.xs_heaptid {
+            bitmap.add_tid(tid);
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 fn btendscan(scan: IndexScanDesc) -> Result<(), CatalogError> {
     crate::backend::access::index::genam::index_endscan_stub(scan)
 }
@@ -1949,11 +1924,12 @@ fn write_split_pages_locked(
         left_block: block,
         right_block: new_block,
         level,
-        right_lower_bound: tuple_key_values(
+        right_lower_bound: tuple_key_prefix_values(
             &ctx.index_desc,
             right_items
                 .first()
                 .ok_or(CatalogError::Corrupt("right split page empty"))?,
+            btree_key_count(&ctx.index_meta),
         )?,
         parent_stack: Vec::new(),
     })
@@ -2020,16 +1996,19 @@ fn insert_tuple_into_locked_page(
     if is_leaf {
         prune_aborted_leaf_items(ctx, &mut items);
     }
+    let key_count = btree_key_count(&ctx.index_meta);
     let insert_at = if is_leaf {
         items.partition_point(|item| {
-            let existing = tuple_key_values(&ctx.index_desc, item).unwrap_or_default();
+            let existing =
+                tuple_key_prefix_values(&ctx.index_desc, item, key_count).unwrap_or_default();
             compare_bt_keyspace(&existing, &item.t_tid, key_values, &new_tuple.t_tid)
                 != Ordering::Greater
         })
     } else {
         items.partition_point(|item| {
-            let existing = tuple_key_values(&ctx.index_desc, item).unwrap_or_default();
-            compare_key_arrays(&existing, key_values) != Ordering::Greater
+            let existing =
+                tuple_key_prefix_values(&ctx.index_desc, item, key_count).unwrap_or_default();
+            compare_key_prefixes(&existing, key_values, key_count) != Ordering::Greater
         })
     };
     items.insert(insert_at, new_tuple);
@@ -2142,8 +2121,13 @@ fn create_new_root(
     child_level: u32,
     right_lower_bound: &[Value],
 ) -> Result<(), CatalogError> {
-    let left_lower_bound =
-        page_lower_bound(&ctx.index_desc, &ctx.pool, ctx.index_relation, left_block)?;
+    let left_lower_bound = page_lower_bound(
+        &ctx.index_desc,
+        &ctx.pool,
+        ctx.index_relation,
+        left_block,
+        btree_key_count(&ctx.index_meta),
+    )?;
     let root_block = allocate_btree_block(ctx)?;
     let mut root = [0u8; crate::backend::storage::smgr::BLCKSZ];
     bt_page_init(&mut root, BTP_ROOT, child_level + 1)
@@ -2295,6 +2279,7 @@ fn finish_incomplete_split(
         &ctx.pool,
         ctx.index_relation,
         opaque.btpo_next,
+        btree_key_count(&ctx.index_meta),
     )?;
     propagate_split_upwards(
         ctx,
@@ -2321,8 +2306,9 @@ fn bt_check_unique_locked(
         let items = bt_page_data_items(&page)
             .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
         for tuple in items {
-            let tuple_keys = tuple_key_values(&ctx.index_desc, &tuple)?;
-            match compare_key_arrays(&tuple_keys, key_values) {
+            let tuple_keys =
+                tuple_key_prefix_values(&ctx.index_desc, &tuple, btree_key_count(&ctx.index_meta))?;
+            match compare_key_prefixes(&tuple_keys, key_values, btree_key_count(&ctx.index_meta)) {
                 Ordering::Less => continue,
                 Ordering::Greater => return Ok(LockedUniqueCheckResult::Clear),
                 Ordering::Equal => match classify_unique_candidate(ctx, tuple.t_tid)? {
@@ -2340,7 +2326,8 @@ fn bt_check_unique_locked(
         let Some(upper_bound) = leaf_upper_bound(ctx, &page, opaque)? else {
             return Ok(LockedUniqueCheckResult::Clear);
         };
-        if compare_key_arrays(key_values, &upper_bound) != Ordering::Equal
+        if compare_key_prefixes(key_values, &upper_bound, btree_key_count(&ctx.index_meta))
+            != Ordering::Equal
             || opaque.btpo_next == P_NONE
         {
             return Ok(LockedUniqueCheckResult::Clear);
@@ -2368,13 +2355,15 @@ fn btinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
         )?;
     }
 
-    let key_values = key_values_from_heap_row(
+    let all_values = key_values_from_heap_row(
         &ctx.heap_desc,
         &ctx.index_desc,
         &ctx.index_meta.indkey,
         &ctx.values,
     )?;
-    let payload = encode_key_payload(&ctx.index_desc, &key_values, ctx.default_toast_compression)?;
+    let key_count = btree_key_count(&ctx.index_meta);
+    let key_values = key_prefix(&all_values, key_count).to_vec();
+    let payload = encode_key_payload(&ctx.index_desc, &all_values, ctx.default_toast_compression)?;
     let new_tuple = IndexTupleData::new_raw(ctx.heap_tid, false, false, false, payload);
     check_leaf_tuple_size(&ctx.index_name, &new_tuple)?;
 
@@ -2477,7 +2466,7 @@ pub fn btree_am_handler() -> IndexAmRoutine {
         ambeginscan: Some(btbeginscan),
         amrescan: Some(btrescan),
         amgettuple: Some(btgettuple),
-        amgetbitmap: None,
+        amgetbitmap: Some(btgetbitmap),
         amendscan: Some(btendscan),
         ambulkdelete: Some(crate::backend::access::nbtree::nbtvacuum::btbulkdelete),
         amvacuumcleanup: Some(crate::backend::access::nbtree::nbtvacuum::btvacuumcleanup),

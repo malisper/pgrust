@@ -11,12 +11,12 @@ impl BtSpool {
         self.tuples.push(tuple);
     }
 
-    pub fn finish(mut self) -> Vec<BtSortTuple> {
+    pub fn finish(mut self, key_count: usize) -> Vec<BtSortTuple> {
         self.tuples.sort_by(|left, right| {
             compare_bt_keyspace(
-                &left.key_values,
+                &left.key_values[..left.key_values.len().min(key_count)],
                 &left.tuple.t_tid,
-                &right.key_values,
+                &right.key_values[..right.key_values.len().min(key_count)],
                 &right.tuple.t_tid,
             )
         });
@@ -60,7 +60,7 @@ mod tests {
             ),
             key_values: vec![Value::Int32(5)],
         });
-        let tuples = spool.finish();
+        let tuples = spool.finish(1);
         assert_eq!(tuples[0].tuple.t_tid.offset_number, 1);
     }
 }

@@ -56,6 +56,7 @@ fn build_catalog_index_entry(
 ) -> Result<CatalogEntry, CatalogError> {
     let mut indkey = Vec::with_capacity(columns.len());
     let mut index_columns = Vec::with_capacity(columns.len());
+    let mut used_index_column_names = BTreeSet::new();
     let mut expr_sqls = Vec::new();
     for (position, column_name) in columns.iter().enumerate() {
         if let Some(expr_sql) = column_name.expr_sql.as_deref() {
@@ -64,11 +65,11 @@ fn build_catalog_index_entry(
             let expr_type = column_name
                 .expr_type
                 .ok_or(CatalogError::Corrupt("missing expression index sql type"))?;
-            index_columns.push(column_desc(
-                format!("expr{}", position + 1),
-                expr_type,
-                true,
-            ));
+            push_unique_index_column(
+                &mut index_columns,
+                &mut used_index_column_names,
+                column_desc(format!("expr{}", position + 1), expr_type, true),
+            );
             continue;
         }
 
@@ -87,7 +88,7 @@ fn build_catalog_index_entry(
         column.not_null_primary_key_owned = false;
         column.attrdef_oid = None;
         column.default_expr = None;
-        index_columns.push(column);
+        push_unique_index_column(&mut index_columns, &mut used_index_column_names, column);
     }
     let key_count = options.indclass.len();
     if key_count > columns.len()
@@ -161,6 +162,30 @@ fn build_catalog_index_entry(
             hash_options: options.hash_options,
         }),
     })
+}
+
+fn push_unique_index_column(
+    columns: &mut Vec<crate::backend::executor::ColumnDesc>,
+    used_names: &mut BTreeSet<String>,
+    mut column: crate::backend::executor::ColumnDesc,
+) {
+    let base = column.name.clone();
+    let mut candidate = base.clone();
+    let mut suffix = 1usize;
+    while !used_names.insert(candidate.to_ascii_lowercase()) {
+        candidate = format!("{base}{suffix}");
+        suffix = suffix.saturating_add(1);
+    }
+    column.name = candidate;
+    columns.push(column);
+}
+
+fn index_constraint_key_attnums(meta: &CatalogIndexMeta) -> Vec<i16> {
+    meta.indkey
+        .iter()
+        .take(meta.indclass.len())
+        .copied()
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -885,7 +910,7 @@ impl Catalog {
             confupdtype: ' ',
             confdeltype: ' ',
             confmatchtype: ' ',
-            conkey: index.index_meta.as_ref().map(|meta| meta.indkey.clone()),
+            conkey: index.index_meta.as_ref().map(index_constraint_key_attnums),
             confkey: None,
             conpfeqop: None,
             conppeqop: None,

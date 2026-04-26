@@ -754,6 +754,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
                 Some(&partition_spec),
                 &[IndexBackedConstraintAction {
                     constraint_name: desired_constraint_name.map(str::to_string),
+                    existing_index_name: None,
                     columns: spec.columns.clone(),
                     include_columns: Vec::new(),
                     primary: spec.primary,

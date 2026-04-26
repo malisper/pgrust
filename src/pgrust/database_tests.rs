@@ -7941,12 +7941,13 @@ fn assert_explain_uses_index(db: &Database, client_id: u32, sql: &str, index_nam
     let lines = explain_lines(db, client_id, sql);
     assert!(
         lines.iter().any(|line| {
-            (line.contains("Index Scan using ")
+            ((line.contains("Index Scan using ")
                 || line.contains("Index Scan Backward using ")
                 || line.contains("Index Only Scan using ")
                 || line.contains("Index Only Scan Backward using "))
                 && (line.contains(&format!("using rel {relfilenode} "))
-                    || line.contains(&format!("using {index_name} ")))
+                    || line.contains(&format!("using {index_name} "))))
+                || line.contains(&format!("Bitmap Index Scan on {index_name} "))
         }),
         "expected EXPLAIN to use index {index_name} (relfilenode {relfilenode}), got {lines:?}"
     );
@@ -17323,6 +17324,16 @@ fn create_unique_index_rejects_duplicate_live_keys() {
         Err(ExecError::UniqueViolation { constraint, .. }) => {
             assert_eq!(constraint, "items_id_key");
         }
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(message, "could not create unique index \"items_id_key\"");
+            assert_eq!(detail.as_deref(), Some("Key (id)=(1) is duplicated."));
+            assert_eq!(sqlstate, "23505");
+        }
         other => panic!("expected unique violation, got {:?}", other),
     }
 }
@@ -17443,6 +17454,97 @@ fn create_table_primary_key_and_unique_constraints_are_enforced_and_persisted() 
             ],
             vec![Value::Text("items_pkey".into()), Value::Text("p".into())],
         ]
+    );
+}
+
+#[test]
+fn unique_include_constraint_uses_only_key_columns_for_enforcement_and_catalogs() {
+    let base = temp_dir("unique_include_key_only");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(
+        1,
+        "create table include_items (
+            a int4,
+            b int4,
+            payload int4,
+            constraint include_items_key unique (a, b) include (payload)
+        )",
+    )
+    .unwrap();
+    db.execute(1, "insert into include_items values (1, 2, 10)")
+        .unwrap();
+    db.execute(1, "insert into include_items values (1, 3, 10)")
+        .unwrap();
+    db.execute(1, "update include_items set payload = 99 where b = 3")
+        .unwrap();
+
+    match db.execute(1, "insert into include_items values (1, 2, 11)") {
+        Err(ExecError::UniqueViolation { constraint, detail }) => {
+            assert_eq!(constraint, "include_items_key");
+            assert_eq!(detail.as_deref(), Some("Key (a, b)=(1, 2) already exists."));
+        }
+        other => panic!("expected key-only unique INCLUDE rejection, got {other:?}"),
+    }
+
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("include_items").unwrap();
+    let constraint = lookup
+        .constraint_rows_for_relation(relation.relation_oid)
+        .into_iter()
+        .find(|row| row.conname == "include_items_key")
+        .unwrap();
+    assert_eq!(constraint.conkey.as_deref(), Some(&[1, 2][..]));
+    let index = lookup
+        .index_relations_for_heap(relation.relation_oid)
+        .into_iter()
+        .find(|index| index.relation_oid == constraint.conindid)
+        .unwrap();
+    assert_eq!(index.index_meta.indnkeyatts, 2);
+    assert_eq!(index.index_meta.indkey, vec![1, 2, 3]);
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_constraintdef(oid) from pg_constraint where conname = 'include_items_key'",
+        ),
+        vec![vec![Value::Text("UNIQUE (a, b) INCLUDE (payload)".into())]]
+    );
+}
+
+#[test]
+fn alter_table_add_unique_using_index_include_derives_key_conkey() {
+    let base = temp_dir("alter_using_index_include");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(1, "create table using_items (a int4, payload int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create unique index using_items_idx on using_items (a) include (payload)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table using_items add constraint using_items_key unique using index using_items_idx",
+    )
+    .unwrap();
+
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("using_items").unwrap();
+    let constraint = lookup
+        .constraint_rows_for_relation(relation.relation_oid)
+        .into_iter()
+        .find(|row| row.conname == "using_items_key")
+        .unwrap();
+    assert_eq!(constraint.conkey.as_deref(), Some(&[1][..]));
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_constraintdef(oid) from pg_constraint where conname = 'using_items_key'",
+        ),
+        vec![vec![Value::Text("UNIQUE (a) INCLUDE (payload)".into())]]
     );
 }
 
