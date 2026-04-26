@@ -15,7 +15,7 @@ use crate::backend::executor::{ExecutorContext, RelationDesc};
 use crate::backend::parser::{
     BoundRelation, CatalogLookup, parse_type_name, resolve_raw_type_name,
 };
-use crate::backend::utils::misc::notices::push_notice;
+use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
     relkind_is_analyzable,
@@ -54,6 +54,16 @@ struct AutovacuumTarget {
     analyze: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct VacuumExecOptions {
+    analyze: bool,
+    full: bool,
+    parallel_workers: Option<i32>,
+    process_main: bool,
+    process_toast: bool,
+    only_database_stats: bool,
+}
+
 fn autovacuum_client_id(database_oid: u32) -> ClientId {
     AUTOVACUUM_CLIENT_ID_BASE | (database_oid & 0x0000_FFFF)
 }
@@ -75,15 +85,143 @@ fn lookup_vacuum_relation_for_ddl(
     name: &str,
 ) -> Result<crate::backend::parser::BoundRelation, ExecError> {
     match catalog.lookup_any_relation(name) {
-        Some(entry) if matches!(entry.relkind, 'r' | 'm') => Ok(entry),
+        Some(entry) if matches!(entry.relkind, 'r' | 'm' | 'p') => Ok(entry),
         Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
             name: name.to_string(),
             expected: "table or materialized view",
         })),
-        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
-            name.to_string(),
-        ))),
+        None => Err(ExecError::Parse(ParseError::UnknownTable(name.to_string()))),
     }
+}
+
+fn vacuum_option_error(message: impl Into<String>, sqlstate: &'static str) -> ExecError {
+    ExecError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate,
+    }
+}
+
+fn parse_vacuum_parallel_workers(stmt: &VacuumStatement) -> Result<Option<i32>, ExecError> {
+    if !stmt.parallel_specified {
+        return Ok(None);
+    }
+    let Some(raw) = stmt.parallel.as_deref() else {
+        return Err(vacuum_option_error(
+            "parallel option requires a value between 0 and 1024",
+            "42601",
+        ));
+    };
+    let workers = raw.parse::<i32>().map_err(|_| {
+        vacuum_option_error(
+            "parallel workers for vacuum must be between 0 and 1024",
+            "42601",
+        )
+    })?;
+    if !(0..=1024).contains(&workers) {
+        return Err(vacuum_option_error(
+            "parallel workers for vacuum must be between 0 and 1024",
+            "42601",
+        ));
+    }
+    Ok(Some(workers))
+}
+
+fn parse_buffer_usage_limit_kb(raw: &str) -> Option<i64> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    let mut parts = normalized.split_whitespace();
+    let number = parts.next()?.parse::<i64>().ok()?;
+    match parts.next() {
+        None | Some("kb") | Some("k") => Some(number),
+        Some(_) => None,
+    }
+}
+
+fn validate_buffer_usage_limit(raw: &str) -> Result<(), ExecError> {
+    let Some(kb) = parse_buffer_usage_limit_kb(raw) else {
+        return Err(vacuum_option_error(
+            "BUFFER_USAGE_LIMIT option must be 0 or between 128 kB and 16777216 kB",
+            "22023",
+        ));
+    };
+    if kb == 0 || (128..=16_777_216).contains(&kb) {
+        return Ok(());
+    }
+    Err(vacuum_option_error(
+        "BUFFER_USAGE_LIMIT option must be 0 or between 128 kB and 16777216 kB",
+        "22023",
+    ))
+}
+
+fn vacuum_exec_options(stmt: &VacuumStatement) -> Result<VacuumExecOptions, ExecError> {
+    let parallel_workers = parse_vacuum_parallel_workers(stmt)?;
+    if let Some(raw) = &stmt.buffer_usage_limit {
+        validate_buffer_usage_limit(raw)?;
+    }
+    if stmt.targets.iter().any(|target| !target.columns.is_empty()) && !stmt.analyze {
+        return Err(vacuum_option_error(
+            "ANALYZE option must be specified when a column list is provided",
+            "0A000",
+        ));
+    }
+    if stmt.full && parallel_workers.unwrap_or(0) > 0 {
+        return Err(vacuum_option_error(
+            "VACUUM FULL cannot be performed in parallel",
+            "0A000",
+        ));
+    }
+    if stmt.full && stmt.buffer_usage_limit.is_some() && !stmt.analyze {
+        return Err(vacuum_option_error(
+            "BUFFER_USAGE_LIMIT cannot be specified for VACUUM FULL",
+            "0A000",
+        ));
+    }
+    if stmt.full && stmt.disable_page_skipping {
+        return Err(vacuum_option_error(
+            "VACUUM option DISABLE_PAGE_SKIPPING cannot be used with FULL",
+            "0A000",
+        ));
+    }
+    let process_toast = stmt.process_toast.unwrap_or(true);
+    if stmt.full && !process_toast {
+        return Err(vacuum_option_error(
+            "PROCESS_TOAST required with VACUUM FULL",
+            "0A000",
+        ));
+    }
+    if stmt.only_database_stats {
+        if !stmt.targets.is_empty() {
+            return Err(vacuum_option_error(
+                "ONLY_DATABASE_STATS cannot be specified with a list of tables",
+                "0A000",
+            ));
+        }
+        if stmt.analyze
+            || stmt.full
+            || stmt.freeze
+            || stmt.disable_page_skipping
+            || stmt.buffer_usage_limit.is_some()
+            || stmt.parallel_specified
+            || stmt.skip_database_stats
+        {
+            return Err(vacuum_option_error(
+                "ONLY_DATABASE_STATS cannot be specified with other VACUUM options",
+                "0A000",
+            ));
+        }
+    }
+    Ok(VacuumExecOptions {
+        analyze: stmt.analyze,
+        full: stmt.full,
+        parallel_workers,
+        process_main: stmt.process_main.unwrap_or(true),
+        process_toast,
+        only_database_stats: stmt.only_database_stats,
+    })
 }
 
 fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
@@ -304,6 +442,9 @@ fn collect_catalog_vacuum_targets(
     configured_search_path: Option<&[String]>,
     vacuum_stmt: &VacuumStatement,
 ) -> Result<Vec<MaintenanceTarget>, ExecError> {
+    if vacuum_stmt.only_database_stats {
+        return Ok(Vec::new());
+    }
     if !vacuum_stmt.targets.is_empty() {
         return Ok(vacuum_stmt.targets.clone());
     }
@@ -351,6 +492,177 @@ fn collect_catalog_vacuum_targets(
         });
     }
     Ok(targets)
+}
+
+fn relation_display_name_for_target(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
+    catalog
+        .class_row_by_oid(relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation_oid.to_string())
+}
+
+fn validate_maintenance_targets_for_vacuum(
+    targets: &[MaintenanceTarget],
+    catalog: &dyn CatalogLookup,
+    analyze: bool,
+) -> Result<(), ExecError> {
+    for target in targets {
+        let entry = match catalog.lookup_any_relation(&target.table_name) {
+            Some(entry) if matches!(entry.relkind, 'r' | 'm' | 'p') => entry,
+            Some(_) => {
+                return Err(ExecError::Parse(ParseError::WrongObjectType {
+                    name: target.table_name.clone(),
+                    expected: "table or materialized view",
+                }));
+            }
+            None => {
+                return Err(ExecError::Parse(ParseError::UnknownTable(
+                    target.table_name.clone(),
+                )));
+            }
+        };
+        if !analyze && !target.columns.is_empty() {
+            return Err(vacuum_option_error(
+                "ANALYZE option must be specified when a column list is provided",
+                "0A000",
+            ));
+        }
+        for column in &target.columns {
+            if !entry
+                .desc
+                .columns
+                .iter()
+                .any(|desc| !desc.dropped && desc.name.eq_ignore_ascii_case(column))
+            {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "column \"{}\" of relation \"{}\" does not exist",
+                        column,
+                        relation_basename(&target.table_name)
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42703",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn expand_explicit_maintenance_targets(
+    targets: &[MaintenanceTarget],
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<MaintenanceTarget>, ExecError> {
+    let mut expanded = Vec::new();
+    let mut seen = BTreeSet::new();
+    for target in targets {
+        let relation = lookup_vacuum_relation_for_ddl(catalog, &target.table_name)?;
+        if target.only {
+            if relation.relkind == 'p' {
+                push_warning(format!(
+                    "VACUUM ONLY of partitioned table \"{}\" has no effect",
+                    relation_display_name_for_target(catalog, relation.relation_oid)
+                ));
+                continue;
+            }
+            if seen.insert(relation.relation_oid) {
+                expanded.push(target.clone());
+            }
+            continue;
+        }
+
+        if seen.insert(relation.relation_oid) {
+            expanded.push(target.clone());
+        }
+        for child_oid in catalog.find_all_inheritors(relation.relation_oid) {
+            if child_oid == relation.relation_oid || !seen.insert(child_oid) {
+                continue;
+            }
+            let Some(child) = catalog.relation_by_oid(child_oid) else {
+                continue;
+            };
+            if !matches!(child.relkind, 'r' | 'm' | 'p') {
+                continue;
+            }
+            expanded.push(MaintenanceTarget {
+                table_name: relation_display_name_for_target(catalog, child.relation_oid),
+                columns: target.columns.clone(),
+                only: false,
+            });
+        }
+    }
+    Ok(expanded)
+}
+
+fn relation_is_maintenance_owner(
+    relation: &BoundRelation,
+    auth: &AuthState,
+    auth_catalog: &crate::pgrust::auth::AuthCatalog,
+    database_owner_oid: u32,
+) -> bool {
+    auth_catalog
+        .role_by_oid(auth.current_user_oid())
+        .is_some_and(|row| row.rolsuper)
+        || auth.current_user_oid() == database_owner_oid
+        || auth.has_effective_membership(relation.owner_oid, auth_catalog)
+}
+
+fn filter_explicit_vacuum_targets_by_permission(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    catalog: &dyn CatalogLookup,
+    targets: &[MaintenanceTarget],
+    options: &VacuumExecOptions,
+) -> Result<Vec<MaintenanceTarget>, ExecError> {
+    let auth = db.auth_state(client_id);
+    let auth_catalog = db
+        .auth_catalog(client_id, txn_ctx)
+        .map_err(map_catalog_error)?;
+    let database_owner_oid = current_database_owner_oid(db, client_id, txn_ctx)?;
+    let mut allowed = Vec::with_capacity(targets.len());
+    for target in targets {
+        let relation = lookup_vacuum_relation_for_ddl(catalog, &target.table_name)?;
+        if relation_is_maintenance_owner(&relation, &auth, &auth_catalog, database_owner_oid) {
+            allowed.push(target.clone());
+            continue;
+        }
+        let relname = relation_display_name_for_target(catalog, relation.relation_oid);
+        if options.process_main {
+            push_warning(format!(
+                "permission denied to vacuum \"{}\", skipping it",
+                relname
+            ));
+        }
+        if options.analyze {
+            push_warning(format!(
+                "permission denied to analyze \"{}\", skipping it",
+                relname
+            ));
+        }
+    }
+    Ok(allowed)
+}
+
+fn warn_parallel_vacuum_temp_tables(
+    catalog: &dyn CatalogLookup,
+    targets: &[MaintenanceTarget],
+    options: &VacuumExecOptions,
+) {
+    if options.full || options.parallel_workers.unwrap_or(0) <= 0 {
+        return;
+    }
+    for target in targets {
+        if let Some(relation) = catalog.lookup_any_relation(&target.table_name)
+            && relation.relpersistence == 't'
+        {
+            push_warning(format!(
+                "disabling parallel option of vacuum on \"{}\" --- cannot vacuum temporary tables in parallel",
+                relation_display_name_for_target(catalog, relation.relation_oid)
+            ));
+        }
+    }
 }
 
 fn relation_name_for_add_column_notice(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
@@ -1413,14 +1725,25 @@ impl Database {
         vacuum_stmt: &VacuumStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        let options = vacuum_exec_options(vacuum_stmt)?;
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let targets = self.effective_vacuum_targets_with_search_path(
+        let raw_targets = self.effective_vacuum_targets_with_search_path(
             client_id,
             None,
             configured_search_path,
             vacuum_stmt,
         )?;
+        validate_maintenance_targets_for_vacuum(&raw_targets, &catalog, options.analyze)?;
+        let targets = if vacuum_stmt.targets.is_empty() {
+            raw_targets
+        } else {
+            let expanded = expand_explicit_maintenance_targets(&raw_targets, &catalog)?;
+            filter_explicit_vacuum_targets_by_permission(
+                self, client_id, None, &catalog, &expanded, &options,
+            )?
+        };
+        warn_parallel_vacuum_temp_tables(&catalog, &targets, &options);
         let relation_names = targets
             .iter()
             .map(|target| target.table_name.clone())
@@ -1430,11 +1753,16 @@ impl Database {
             .map(|name| lookup_vacuum_relation_for_ddl(&catalog, name))
             .collect::<Result<Vec<_>, _>>()?;
         let rel_locs = rels.iter().map(|rel| rel.rel).collect::<Vec<_>>();
+        let lock_mode = if options.full {
+            TableLockMode::AccessExclusive
+        } else {
+            TableLockMode::ShareUpdateExclusive
+        };
         lock_tables_interruptible(
             &self.table_locks,
             client_id,
             &rel_locs,
-            TableLockMode::ShareUpdateExclusive,
+            lock_mode,
             interrupts.as_ref(),
         )?;
 
@@ -1444,7 +1772,7 @@ impl Database {
         let result = self.execute_vacuum_stmt_in_transaction_with_search_path(
             client_id,
             &targets,
-            vacuum_stmt.analyze,
+            &options,
             xid,
             0,
             configured_search_path,
@@ -1572,7 +1900,7 @@ impl Database {
         &self,
         client_id: ClientId,
         targets: &[MaintenanceTarget],
-        analyze: bool,
+        options: &VacuumExecOptions,
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
@@ -1634,12 +1962,49 @@ impl Database {
             ctx.session_stats.write().flush_pending(&ctx.stats);
         }
         let vacuum_started = Instant::now();
-        let vacuumed =
-            crate::backend::commands::tablecmds::collect_vacuum_stats(targets, &catalog, &mut ctx)?;
+        let vacuumed = if options.only_database_stats {
+            Vec::new()
+        } else if options.full {
+            self.execute_vacuum_full_targets_with_search_path(
+                client_id,
+                targets,
+                xid,
+                cid,
+                configured_search_path,
+                options.process_main,
+                &mut ctx,
+                catalog_effects,
+            )?
+        } else if !options.process_main {
+            let _process_toast = options.process_toast;
+            Vec::new()
+        } else {
+            crate::backend::commands::tablecmds::collect_vacuum_stats(targets, &catalog, &mut ctx)?
+        };
         let vacuum_elapsed = vacuum_started.elapsed();
-        let analyzed = if analyze {
+        let analyzed = if options.analyze {
             let analyze_started = Instant::now();
-            crate::backend::commands::analyze::collect_analyze_stats(targets, &catalog, &mut ctx)?
+            let analyze_results = if options.full {
+                let analyze_cid = cid.saturating_add(1);
+                ctx.snapshot = self.txns.read().snapshot_for_command(xid, analyze_cid)?;
+                ctx.next_command_id = analyze_cid;
+                let analyze_catalog = self.lazy_catalog_lookup(
+                    client_id,
+                    Some((xid, analyze_cid)),
+                    configured_search_path,
+                );
+                ctx.catalog = analyze_catalog.materialize_visible_catalog();
+                crate::backend::commands::analyze::collect_analyze_stats(
+                    targets,
+                    &analyze_catalog,
+                    &mut ctx,
+                )?
+            } else {
+                crate::backend::commands::analyze::collect_analyze_stats(
+                    targets, &catalog, &mut ctx,
+                )?
+            };
+            analyze_results
                 .into_iter()
                 .map(|result| (result, analyze_started.elapsed()))
                 .collect()
@@ -1649,11 +2014,16 @@ impl Database {
         let session_stats = Arc::clone(&ctx.session_stats);
         drop(ctx);
 
+        let stats_cid = if options.full {
+            cid.saturating_add(1)
+        } else {
+            cid
+        };
         let write_ctx = CatalogWriteContext {
             pool: Arc::clone(&self.pool),
             txns: self.txns.clone(),
             xid,
-            cid,
+            cid: stats_cid,
             client_id,
             waiter: Some(self.txn_waiter.clone()),
             interrupts: Arc::clone(&interrupts),

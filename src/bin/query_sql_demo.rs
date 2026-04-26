@@ -166,6 +166,7 @@ fn main() -> Result<(), ExecError> {
             row_type_oid: 16_385,
             array_type_oid: 16_386,
             reltoastrelid: 0,
+            relhasindex: false,
             relpersistence: 'p',
             relkind: 'r',
             relispopulated: true,

@@ -34,6 +34,7 @@ use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
 use crate::backend::utils::time::instant::Instant;
+use crate::include::executor::execdesc::CommandType;
 use crate::pgrust::database::TransactionWaiter;
 use crate::pl::plpgsql::TriggerOperation;
 
@@ -68,7 +69,7 @@ use crate::include::nodes::datum::{
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::pathnodes::PlannerConfig;
-use crate::include::nodes::primnodes::{QueryColumn, TargetEntry};
+use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, expr_sql_type_hint};
 
 fn finalize_bound_insert(
     mut stmt: BoundInsertStatement,
@@ -82,6 +83,15 @@ fn finalize_bound_insert(
         .collect();
     stmt.source = match stmt.source {
         BoundInsertSource::Values(rows) => BoundInsertSource::Values(
+            rows.into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans))
+                        .collect()
+                })
+                .collect(),
+        ),
+        BoundInsertSource::ProjectSetValues(rows) => BoundInsertSource::ProjectSetValues(
             rows.into_iter()
                 .map(|row| {
                     row.into_iter()
@@ -3790,6 +3800,33 @@ pub(crate) fn materialize_insert_rows(
                 Ok(values)
             })
             .collect::<Result<Vec<_>, ExecError>>(),
+        BoundInsertSource::ProjectSetValues(rows) => {
+            let mut materialized = Vec::new();
+            for row in rows {
+                for (row_values, mut slot) in
+                    execute_insert_project_set_row(row, stmt, catalog, ctx)?
+                {
+                    let (_, mut values) = eval_implicit_insert_defaults(
+                        &stmt.column_defaults,
+                        &stmt.target_columns,
+                        stmt.desc.columns.len(),
+                        ctx,
+                    )?;
+                    for (target, value) in stmt.target_columns.iter().zip(row_values.into_iter()) {
+                        apply_assignment_target(
+                            &stmt.desc,
+                            &mut values,
+                            target,
+                            value,
+                            &mut slot,
+                            ctx,
+                        )?;
+                    }
+                    materialized.push(values);
+                }
+            }
+            Ok(materialized)
+        }
         BoundInsertSource::DefaultValues(defaults) => {
             let mut slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
             let mut values = vec![Value::Null; stmt.desc.columns.len()];
@@ -3832,6 +3869,59 @@ pub(crate) fn materialize_insert_rows(
             result
         }
     }
+}
+
+fn execute_insert_project_set_row(
+    row: &[Expr],
+    stmt: &BoundInsertStatement,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<(Vec<Value>, TupleSlot)>, ExecError> {
+    let target_list = row
+        .iter()
+        .zip(stmt.target_columns.iter())
+        .enumerate()
+        .map(|(index, (expr, target))| {
+            let column = &stmt.desc.columns[target.column_index];
+            TargetEntry::new(
+                column.name.clone(),
+                expr.clone(),
+                expr_sql_type_hint(expr).unwrap_or(target.target_sql_type),
+                index + 1,
+            )
+        })
+        .collect::<Vec<_>>();
+    let query = crate::include::nodes::parsenodes::Query {
+        command_type: CommandType::Select,
+        depends_on_row_security: false,
+        rtable: Vec::new(),
+        jointree: None,
+        target_list,
+        distinct: false,
+        where_qual: None,
+        group_by: Vec::new(),
+        accumulators: Vec::new(),
+        window_clauses: Vec::new(),
+        having_qual: None,
+        sort_clause: Vec::new(),
+        limit_count: None,
+        limit_offset: 0,
+        locking_clause: None,
+        row_marks: Vec::new(),
+        has_target_srfs: true,
+        recursive_union: None,
+        set_operation: None,
+    };
+    let query = crate::backend::optimizer::fold_query_constants(query).map_err(ExecError::Parse)?;
+    let planned = planner(query, catalog).map_err(ExecError::Parse)?;
+    let mut state = executor_start(planned.plan_tree);
+    let mut rows = Vec::new();
+    while let Some(slot) = state.exec_proc_node(ctx)? {
+        ctx.check_for_interrupts()?;
+        let row_values = slot.values()?.to_vec();
+        rows.push((row_values, slot.clone()));
+    }
+    Ok(rows)
 }
 
 pub(crate) fn apply_assignment_target(

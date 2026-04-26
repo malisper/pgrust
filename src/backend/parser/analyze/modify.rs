@@ -39,6 +39,7 @@ pub struct BoundInsertStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoundInsertSource {
     Values(Vec<Vec<Expr>>),
+    ProjectSetValues(Vec<Vec<Expr>>),
     DefaultValues(Vec<Expr>),
     Select(Box<Query>),
 }
@@ -2004,7 +2005,12 @@ pub(crate) fn bind_insert_with_outer_scopes(
                         .collect::<Result<Vec<_>, _>>()
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            (target_columns, BoundInsertSource::Values(bound_rows))
+            let source = if bound_rows.iter().flatten().any(expr_contains_set_returning) {
+                BoundInsertSource::ProjectSetValues(bound_rows)
+            } else {
+                BoundInsertSource::Values(bound_rows)
+            };
+            (target_columns, source)
         }
         InsertSource::DefaultValues => (
             visible_assignment_targets(&entry.desc),

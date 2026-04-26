@@ -37,6 +37,7 @@ pub fn bootstrap_catalog_entry(kind: BootstrapCatalogKind) -> CatalogEntry {
         row_type_oid: kind.row_type_oid(),
         array_type_oid: kind.array_type_oid(),
         reltoastrelid: kind.toast_relation_oid(),
+        relhasindex: false,
         relpersistence: 'p',
         relkind: 'r',
         am_oid: crate::include::catalog::relam_for_relkind('r'),

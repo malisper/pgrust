@@ -379,8 +379,10 @@ pub(crate) fn namespace_row_from_values(
 }
 
 pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow, CatalogError> {
-    let relpersistence = expect_char(&values[13], "relpersistence")?;
-    let relkind = expect_char(&values[14], "relkind")?;
+    let has_relhasindex = matches!(values.get(13), Some(Value::Bool(_)));
+    let offset = usize::from(has_relhasindex);
+    let relpersistence = expect_char(&values[13 + offset], "relpersistence")?;
+    let relkind = expect_char(&values[14 + offset], "relkind")?;
     Ok(PgClassRow {
         oid: expect_oid(&values[0])?,
         relname: expect_text(&values[1])?,
@@ -395,20 +397,29 @@ pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow,
         relallvisible: expect_int32(&values[10])?,
         relallfrozen: expect_int32(&values[11])?,
         reltoastrelid: expect_oid(&values[12])?,
+        relhasindex: if has_relhasindex {
+            expect_bool(&values[13])?
+        } else {
+            false
+        },
         relpersistence,
         relkind,
-        relnatts: expect_int16(&values[15])?,
-        relhassubclass: expect_bool(&values[16])?,
-        relhastriggers: expect_bool(&values[17])?,
-        relrowsecurity: expect_bool(&values[18])?,
-        relforcerowsecurity: expect_bool(&values[19])?,
-        relispopulated: expect_bool(&values[20])?,
-        relispartition: expect_bool(&values[21])?,
-        relfrozenxid: expect_oid(&values[22])?,
-        relpartbound: nullable_text(&values[23])?,
-        reloptions: nullable_text_array(&values[24])?,
-        relacl: nullable_text_array(&values[25])?,
-        reloftype: values.get(26).map(expect_oid).transpose()?.unwrap_or(0),
+        relnatts: expect_int16(&values[15 + offset])?,
+        relhassubclass: expect_bool(&values[16 + offset])?,
+        relhastriggers: expect_bool(&values[17 + offset])?,
+        relrowsecurity: expect_bool(&values[18 + offset])?,
+        relforcerowsecurity: expect_bool(&values[19 + offset])?,
+        relispopulated: expect_bool(&values[20 + offset])?,
+        relispartition: expect_bool(&values[21 + offset])?,
+        relfrozenxid: expect_oid(&values[22 + offset])?,
+        relpartbound: nullable_text(&values[23 + offset])?,
+        reloptions: nullable_text_array(&values[24 + offset])?,
+        relacl: nullable_text_array(&values[25 + offset])?,
+        reloftype: values
+            .get(26 + offset)
+            .map(expect_oid)
+            .transpose()?
+            .unwrap_or(0),
     })
 }
 
@@ -1271,6 +1282,7 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
         Value::Int32(row.relallvisible),
         Value::Int32(row.relallfrozen),
         Value::Int32(row.reltoastrelid as i32),
+        Value::Bool(row.relhasindex),
         Value::Text(row.relpersistence.to_string().into()),
         Value::Text(row.relkind.to_string().into()),
         Value::Int16(row.relnatts),

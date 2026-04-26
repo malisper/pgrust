@@ -150,6 +150,7 @@ fn catalog_entry_from_bound_relation(
         row_type_oid,
         array_type_oid,
         reltoastrelid: relation.toast.map(|toast| toast.relation_oid).unwrap_or(0),
+        relhasindex: false,
         relpersistence: relation.relpersistence,
         relkind: relation.relkind,
         am_oid: class

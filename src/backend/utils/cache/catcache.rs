@@ -276,6 +276,7 @@ impl CatCache {
                 relallvisible: entry.relallvisible,
                 relallfrozen: entry.relallfrozen,
                 reltoastrelid: entry.reltoastrelid,
+                relhasindex: entry.relhasindex,
                 relpersistence: entry.relpersistence,
                 relkind: entry.relkind,
                 relnatts: entry.desc.columns.len() as i16,

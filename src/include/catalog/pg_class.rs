@@ -21,6 +21,7 @@ pub struct PgClassRow {
     pub relallvisible: i32,
     pub relallfrozen: i32,
     pub reltoastrelid: u32,
+    pub relhasindex: bool,
     pub relpersistence: char,
     pub relkind: char,
     pub relnatts: i16,
@@ -53,6 +54,7 @@ pub fn pg_class_desc() -> RelationDesc {
             column_desc("relallvisible", SqlType::new(SqlTypeKind::Int4), false),
             column_desc("relallfrozen", SqlType::new(SqlTypeKind::Int4), false),
             column_desc("reltoastrelid", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("relhasindex", SqlType::new(SqlTypeKind::Bool), false),
             column_desc(
                 "relpersistence",
                 SqlType::new(SqlTypeKind::InternalChar),
@@ -161,6 +163,7 @@ fn bootstrap_pg_class_row(kind: BootstrapCatalogKind) -> PgClassRow {
         relallvisible: 0,
         relallfrozen: 0,
         reltoastrelid: kind.toast_relation_oid(),
+        relhasindex: false,
         relpersistence: 'p',
         relkind: 'r',
         relnatts: bootstrap_relation_desc(kind).columns.len() as i16,

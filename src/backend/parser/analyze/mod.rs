@@ -1221,6 +1221,10 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn pg_stat_all_tables_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
     fn pg_stat_user_tables_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }

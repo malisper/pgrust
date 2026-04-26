@@ -16235,6 +16235,7 @@ fn build_vacuum(pair: Pair<'_, Rule>) -> Result<VacuumStatement, ParseError> {
     let mut index_cleanup = None;
     let mut truncate = None;
     let mut parallel = None;
+    let mut parallel_specified = false;
     let mut process_main = None;
     let mut process_toast = None;
     let mut skip_database_stats = false;
@@ -16270,6 +16271,7 @@ fn build_vacuum(pair: Pair<'_, Rule>) -> Result<VacuumStatement, ParseError> {
                         }
                         Rule::vacuum_truncate_option => truncate = Some(parse_option_bool(opt)?),
                         Rule::vacuum_parallel_option => {
+                            parallel_specified = true;
                             parallel = parse_optional_option_scalar(opt)?
                         }
                         Rule::vacuum_process_main_option => {
@@ -16309,6 +16311,7 @@ fn build_vacuum(pair: Pair<'_, Rule>) -> Result<VacuumStatement, ParseError> {
         index_cleanup,
         truncate,
         parallel,
+        parallel_specified,
         process_main,
         process_toast,
         skip_database_stats,
