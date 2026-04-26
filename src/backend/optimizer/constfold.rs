@@ -337,6 +337,19 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::TxidSnapshotXip {
+            func_oid,
+            func_variadic,
+            arg,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::TxidSnapshotXip {
+            func_oid,
+            func_variadic,
+            arg: simplify_expr(arg, None)?,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::TextSearchTableFunction {
             kind,
             args,

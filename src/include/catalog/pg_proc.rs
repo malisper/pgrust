@@ -5059,6 +5059,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             'i',
         ),
+        proc_row(
+            3360,
+            "txid_status",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[INT8_TYPE_OID]),
+            "pg_xact_status",
+            1,
+            false,
+            false,
+            'f',
+            'v',
+        ),
     ];
     rows.extend(pg_proc_alias_pair_rows());
     rows.extend(aggregate_transition_proc_rows(&rows));
@@ -5537,6 +5549,18 @@ fn pg_proc_alias_pair_rows() -> Vec<PgProcRow> {
             false,
             'f',
             'i',
+        ),
+        proc_row(
+            5066,
+            "pg_xact_status",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[XID8_TYPE_OID]),
+            "pg_xact_status",
+            1,
+            false,
+            false,
+            'f',
+            'v',
         ),
         comparison_proc_row(68, "xideq", &[XID_TYPE_OID, XID_TYPE_OID]),
         comparison_proc_row(69, "cideq", &[CID_TYPE_OID, CID_TYPE_OID]),
@@ -7444,14 +7468,43 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pg_get_acl", BuiltinScalarFunction::PgGetAcl),
         ("makeaclitem", BuiltinScalarFunction::MakeAclItem),
         ("txid_current", BuiltinScalarFunction::TxidCurrent),
+        ("pg_current_xact_id", BuiltinScalarFunction::TxidCurrent),
         (
             "txid_current_if_assigned",
             BuiltinScalarFunction::TxidCurrentIfAssigned,
         ),
         (
+            "pg_current_xact_id_if_assigned",
+            BuiltinScalarFunction::TxidCurrentIfAssigned,
+        ),
+        (
+            "txid_current_snapshot",
+            BuiltinScalarFunction::TxidCurrentSnapshot,
+        ),
+        (
+            "pg_current_snapshot",
+            BuiltinScalarFunction::TxidCurrentSnapshot,
+        ),
+        (
+            "txid_snapshot_xmin",
+            BuiltinScalarFunction::TxidSnapshotXmin,
+        ),
+        ("pg_snapshot_xmin", BuiltinScalarFunction::TxidSnapshotXmin),
+        (
+            "txid_snapshot_xmax",
+            BuiltinScalarFunction::TxidSnapshotXmax,
+        ),
+        ("pg_snapshot_xmax", BuiltinScalarFunction::TxidSnapshotXmax),
+        (
             "txid_visible_in_snapshot",
             BuiltinScalarFunction::TxidVisibleInSnapshot,
         ),
+        (
+            "pg_visible_in_snapshot",
+            BuiltinScalarFunction::TxidVisibleInSnapshot,
+        ),
+        ("txid_status", BuiltinScalarFunction::TxidStatus),
+        ("pg_xact_status", BuiltinScalarFunction::TxidStatus),
         ("pg_size_pretty", BuiltinScalarFunction::PgSizePretty),
         (
             "pg_size_pretty_numeric",

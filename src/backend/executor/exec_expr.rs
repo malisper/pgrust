@@ -5602,9 +5602,11 @@ fn eval_builtin_function(
         BuiltinScalarFunction::RandomNormal => eval_random_normal_function(&values),
         BuiltinScalarFunction::TxidCurrent
         | BuiltinScalarFunction::TxidCurrentIfAssigned
-        | BuiltinScalarFunction::TxidVisibleInSnapshot => {
-            eval_txid_builtin_function(func, &values, ctx)
-        }
+        | BuiltinScalarFunction::TxidCurrentSnapshot
+        | BuiltinScalarFunction::TxidSnapshotXmin
+        | BuiltinScalarFunction::TxidSnapshotXmax
+        | BuiltinScalarFunction::TxidVisibleInSnapshot
+        | BuiltinScalarFunction::TxidStatus => eval_txid_builtin_function(func, &values, ctx),
         BuiltinScalarFunction::UuidIn
         | BuiltinScalarFunction::UuidOut
         | BuiltinScalarFunction::UuidRecv

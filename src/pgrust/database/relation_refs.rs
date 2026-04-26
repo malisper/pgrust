@@ -249,6 +249,9 @@ fn collect_rels_from_set_returning_call(
             collect_rels_from_expr(relid, rels);
         }
         crate::include::nodes::primnodes::SetReturningCall::PgLockStatus { .. } => {}
+        crate::include::nodes::primnodes::SetReturningCall::TxidSnapshotXip { arg, .. } => {
+            collect_rels_from_expr(arg, rels);
+        }
         crate::include::nodes::primnodes::SetReturningCall::Unnest { args, .. }
         | crate::include::nodes::primnodes::SetReturningCall::JsonTableFunction { args, .. }
         | crate::include::nodes::primnodes::SetReturningCall::JsonRecordFunction { args, .. }
@@ -459,6 +462,9 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 collect_rels_from_expr(relid, rels);
             }
             crate::include::nodes::primnodes::SetReturningCall::PgLockStatus { .. } => {}
+            crate::include::nodes::primnodes::SetReturningCall::TxidSnapshotXip { arg, .. } => {
+                collect_rels_from_expr(arg, rels);
+            }
             crate::include::nodes::primnodes::SetReturningCall::Unnest { args, .. }
             | crate::include::nodes::primnodes::SetReturningCall::JsonTableFunction {
                 args, ..
@@ -536,6 +542,12 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                             crate::include::nodes::primnodes::SetReturningCall::PgLockStatus {
                                 ..
                             } => {}
+                            crate::include::nodes::primnodes::SetReturningCall::TxidSnapshotXip {
+                                arg,
+                                ..
+                            } => {
+                                collect_rels_from_expr(arg, rels);
+                            }
                             crate::include::nodes::primnodes::SetReturningCall::Unnest {
                                 args, ..
                             }

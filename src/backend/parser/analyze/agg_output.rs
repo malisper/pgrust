@@ -304,6 +304,7 @@ fn query_references_local_cte(
                     SetReturningCall::PartitionTree { relid, .. }
                     | SetReturningCall::PartitionAncestors { relid, .. } => vec![relid],
                     SetReturningCall::PgLockStatus { .. } => Vec::new(),
+                    SetReturningCall::TxidSnapshotXip { arg, .. } => vec![arg],
                     SetReturningCall::Unnest { args, .. }
                     | SetReturningCall::JsonTableFunction { args, .. }
                     | SetReturningCall::JsonRecordFunction { args, .. }

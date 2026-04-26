@@ -848,6 +848,34 @@ fn bind_select_list_srf_call(
                             }
                         });
                     }
+                    if matches!(resolved.srf_impl, Some(ResolvedSrfImpl::TxidSnapshotXip)) {
+                        let bound_args = bind_user_defined_srf_args(
+                            &args,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                            &resolved.declared_arg_types,
+                        )?;
+                        let arg = bound_args.into_iter().next().ok_or_else(|| {
+                            ParseError::UnexpectedToken {
+                                expected: "single txid_snapshot argument",
+                                actual: other.to_string(),
+                            }
+                        })?;
+                        return Ok(SetReturningCall::TxidSnapshotXip {
+                            func_oid: resolved.proc_oid,
+                            func_variadic: resolved.func_variadic,
+                            arg,
+                            output_columns: vec![QueryColumn {
+                                name: other.to_string(),
+                                sql_type: resolved.result_type,
+                                wire_type_oid: None,
+                            }],
+                            with_ordinality: false,
+                        });
+                    }
                     if resolved.prokind != 'f' || !resolved.proretset {
                         return Err(ParseError::UnexpectedToken {
                             expected: "supported set-returning function",

@@ -362,6 +362,19 @@ fn finalize_set_returning_call(
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::TxidSnapshotXip {
+            func_oid,
+            func_variadic,
+            arg,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::TxidSnapshotXip {
+            func_oid,
+            func_variadic,
+            arg: finalize_expr_subqueries(arg, catalog, subplans),
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,
@@ -815,6 +828,19 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
         } => SetReturningCall::PgLockStatus {
             func_oid,
             func_variadic,
+            output_columns,
+            with_ordinality,
+        },
+        SetReturningCall::TxidSnapshotXip {
+            func_oid,
+            func_variadic,
+            arg,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::TxidSnapshotXip {
+            func_oid,
+            func_variadic,
+            arg: rebase_expr_subplan_ids(arg, base),
             output_columns,
             with_ordinality,
         },

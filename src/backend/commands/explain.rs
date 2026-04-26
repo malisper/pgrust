@@ -1459,6 +1459,9 @@ fn render_verbose_set_returning_call(
             vec![render_verbose_function_arg(relid, ctx)]
         }
         SetReturningCall::PgLockStatus { .. } => Vec::new(),
+        SetReturningCall::TxidSnapshotXip { arg, .. } => {
+            vec![render_verbose_function_arg(arg, ctx)]
+        }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
@@ -2236,6 +2239,9 @@ fn collect_direct_set_returning_call_subplans<'a>(
             collect_direct_expr_subplans(relid, out);
         }
         SetReturningCall::PgLockStatus { .. } => {}
+        SetReturningCall::TxidSnapshotXip { arg, .. } => {
+            collect_direct_expr_subplans(arg, out);
+        }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }

@@ -2498,6 +2498,7 @@ fn set_returning_call_uses_immediate_outer_columns(call: &SetReturningCall) -> b
             expr_uses_immediate_outer_columns(relid)
         }
         SetReturningCall::PgLockStatus { .. } => false,
+        SetReturningCall::TxidSnapshotXip { arg, .. } => expr_uses_immediate_outer_columns(arg),
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
