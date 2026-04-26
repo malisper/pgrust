@@ -17527,7 +17527,7 @@ fn explain_verbose_count_nonnull_constant_elides_projection() {
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("Seq Scan on agg_simplify")),
+            .any(|line| line.contains("Seq Scan on") && line.contains("agg_simplify")),
         "expected seq scan on agg_simplify, got {lines:?}"
     );
     assert!(

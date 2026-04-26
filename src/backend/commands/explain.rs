@@ -217,7 +217,7 @@ fn projection_targets_are_explain_passthrough(input: &Plan, targets: &[TargetEnt
     if matches!(input, Plan::WindowAgg { .. }) && targets.iter().all(|target| !target.resjunk) {
         return true;
     }
-    if targets.iter().all(|target| !target.resjunk) {
+    if targets.iter().all(|target| !target.resjunk) && !targets_have_direct_subplans(targets) {
         return true;
     }
     targets
@@ -313,15 +313,7 @@ fn push_nonverbose_plan_details(
             display_items,
             ..
         } => {
-            let sort_items = if display_items.is_empty() {
-                let input_names = input.column_names();
-                items
-                    .iter()
-                    .map(|item| render_explain_expr(&item.expr, &input_names))
-                    .collect::<Vec<_>>()
-            } else {
-                display_items.clone()
-            };
+            let sort_items = nonverbose_sort_items(input, items, display_items, ctx);
             let sort_key = sort_items.join(", ");
             if !sort_key.is_empty() {
                 lines.push(format!("{prefix}Sort Key: {sort_key}"));
@@ -336,29 +328,17 @@ fn push_nonverbose_plan_details(
             presorted_display_items,
             ..
         } => {
-            let sort_items = if display_items.is_empty() {
-                let input_names = input.column_names();
-                items
-                    .iter()
-                    .map(|item| render_explain_expr(&item.expr, &input_names))
-                    .collect::<Vec<_>>()
-            } else {
-                display_items.clone()
-            };
+            let sort_items = nonverbose_sort_items(input, items, display_items, ctx);
             let sort_key = sort_items.join(", ");
             if !sort_key.is_empty() {
                 lines.push(format!("{prefix}Sort Key: {sort_key}"));
             }
-            let presorted_items = if presorted_display_items.is_empty() {
-                let input_names = input.column_names();
-                items
-                    .iter()
-                    .take(*presorted_count)
-                    .map(|item| render_explain_expr(&item.expr, &input_names))
-                    .collect::<Vec<_>>()
-            } else {
-                presorted_display_items.clone()
-            };
+            let presorted_items = nonverbose_sort_items(
+                input,
+                &items[..*presorted_count],
+                presorted_display_items,
+                ctx,
+            );
             let presorted_key = presorted_items.join(", ");
             if !presorted_key.is_empty() {
                 lines.push(format!("{prefix}Presorted Key: {presorted_key}"));
@@ -448,11 +428,10 @@ fn push_nonverbose_plan_details(
             having,
             ..
         } => {
-            let input_names = nonverbose_aggregate_input_names(input, ctx);
             if !group_by.is_empty() {
                 let mut group_items = Vec::new();
                 for expr in group_by {
-                    let rendered = render_verbose_expr(expr, &input_names, ctx);
+                    let rendered = render_nonverbose_aggregate_group_key(expr, input, ctx);
                     if !group_items.contains(&rendered) {
                         group_items.push(rendered);
                     }
@@ -471,10 +450,74 @@ fn push_nonverbose_plan_details(
     }
 }
 
+fn targets_have_direct_subplans(targets: &[TargetEntry]) -> bool {
+    targets.iter().any(|target| {
+        let mut subplans = Vec::new();
+        collect_direct_expr_subplans(&target.expr, &mut subplans);
+        !subplans.is_empty()
+    })
+}
+
+fn nonverbose_sort_items(
+    input: &Plan,
+    items: &[crate::include::nodes::primnodes::OrderByEntry],
+    display_items: &[String],
+    ctx: &VerboseExplainContext,
+) -> Vec<String> {
+    if !display_items.is_empty() {
+        return display_items.to_vec();
+    }
+    let input_names = verbose_plan_output_exprs(input, ctx, true);
+    items
+        .iter()
+        .map(|item| render_nonverbose_sort_item(item, &input_names, ctx))
+        .collect()
+}
+
+fn render_nonverbose_sort_item(
+    item: &crate::include::nodes::primnodes::OrderByEntry,
+    input_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> String {
+    let mut rendered = render_verbose_expr(&item.expr, input_names, ctx);
+    if item.descending {
+        rendered.push_str(" DESC");
+    }
+    if let Some(nulls_first) = item.nulls_first {
+        rendered.push_str(if nulls_first {
+            " NULLS FIRST"
+        } else {
+            " NULLS LAST"
+        });
+    }
+    rendered
+}
+
+fn render_nonverbose_aggregate_group_key(
+    expr: &Expr,
+    input: &Plan,
+    ctx: &VerboseExplainContext,
+) -> String {
+    let input_names = input.column_names();
+    let rendered = render_explain_expr(expr, &input_names);
+    if !rendered.contains("?column?") {
+        return rendered;
+    }
+    let input_names = nonverbose_aggregate_input_names(input, ctx);
+    render_verbose_expr(expr, &input_names, ctx)
+}
+
 fn nonverbose_aggregate_input_names(input: &Plan, ctx: &VerboseExplainContext) -> Vec<String> {
     plan_join_output_exprs(input, ctx, true)
         .into_iter()
         .map(strip_self_qualified_identifiers)
+        .collect()
+}
+
+fn nonverbose_window_input_names(input: &Plan, ctx: &VerboseExplainContext) -> Vec<String> {
+    plan_join_output_exprs(input, ctx, true)
+        .into_iter()
+        .map(strip_qualified_identifiers)
         .collect()
 }
 
@@ -518,6 +561,42 @@ fn strip_self_qualified_identifiers(input: String) -> String {
     output
 }
 
+fn strip_qualified_identifiers(input: String) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if !is_explain_ident_start(chars[index]) {
+            output.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        let first_start = index;
+        index += 1;
+        while index < chars.len() && is_explain_ident_part(chars[index]) {
+            index += 1;
+        }
+        if chars.get(index) != Some(&'.') {
+            output.extend(chars[first_start..index].iter());
+            continue;
+        }
+        let second_start = index + 1;
+        let mut second_end = second_start;
+        if second_end >= chars.len() || !is_explain_ident_start(chars[second_end]) {
+            output.extend(chars[first_start..=index].iter());
+            index = second_start;
+            continue;
+        }
+        second_end += 1;
+        while second_end < chars.len() && is_explain_ident_part(chars[second_end]) {
+            second_end += 1;
+        }
+        output.extend(chars[second_start..second_end].iter());
+        index = second_end;
+    }
+    output
+}
+
 fn is_explain_ident_start(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphabetic()
 }
@@ -531,7 +610,7 @@ fn render_window_clause_for_explain(
     clause: &WindowClause,
     ctx: &VerboseExplainContext,
 ) -> String {
-    let input_names = verbose_plan_output_exprs(input, ctx, true);
+    let input_names = nonverbose_window_input_names(input, ctx);
     let mut parts = Vec::new();
     if !clause.spec.partition_by.is_empty() {
         parts.push(format!(
@@ -781,7 +860,7 @@ fn push_verbose_projected_scan_plan(
     let Plan::Projection { input, targets, .. } = plan else {
         return false;
     };
-    if !projection_targets_are_verbose_scan_projection(input, targets) {
+    if !projection_targets_are_verbose_scan_projection(input, targets, ctx) {
         return false;
     }
 
@@ -810,11 +889,16 @@ fn push_verbose_projected_scan_plan(
     true
 }
 
-fn projection_targets_are_verbose_scan_projection(input: &Plan, targets: &[TargetEntry]) -> bool {
+fn projection_targets_are_verbose_scan_projection(
+    input: &Plan,
+    targets: &[TargetEntry],
+    ctx: &VerboseExplainContext,
+) -> bool {
     matches!(
         input,
         Plan::SeqScan { .. } | Plan::IndexOnlyScan { .. } | Plan::IndexScan { .. }
     ) && targets.iter().all(|target| !target.resjunk)
+        && (ctx.scan_output_override.is_some() || targets.len() > input.column_names().len())
 }
 
 fn verbose_scan_projection_input_names(input: &Plan) -> Vec<String> {

@@ -233,26 +233,32 @@ fn make_aggregate_rel(
         } else {
             let path_satisfies_group_order =
                 bestpath::pathkeys_satisfy(&path.pathkeys(), &group_pathkeys);
-            rel.add_path(aggregate_path(
-                AggregateStrategy::Hashed,
-                Vec::new(),
-                slot_id,
-                path.clone(),
-                group_by.clone(),
-                passthrough_exprs.clone(),
-                accumulators.clone(),
-                having.clone(),
-                output_columns.clone(),
-                root.grouped_target.clone(),
-                catalog,
-                root.config,
-            ));
-            if path_satisfies_group_order {
+            if root.config.enable_hashagg {
+                rel.add_path(aggregate_path(
+                    AggregateStrategy::Hashed,
+                    Vec::new(),
+                    slot_id,
+                    path.clone(),
+                    group_by.clone(),
+                    passthrough_exprs.clone(),
+                    accumulators.clone(),
+                    having.clone(),
+                    output_columns.clone(),
+                    root.grouped_target.clone(),
+                    catalog,
+                    root.config,
+                ));
+            }
+            if path_satisfies_group_order || !root.config.enable_hashagg {
                 rel.add_path(aggregate_path(
                     AggregateStrategy::Sorted,
-                    group_pathkeys,
+                    group_pathkeys.clone(),
                     slot_id,
-                    path,
+                    if path_satisfies_group_order {
+                        path
+                    } else {
+                        ordered_group_input(path, &group_pathkeys)
+                    },
                     group_by,
                     passthrough_exprs,
                     accumulators,
@@ -973,7 +979,7 @@ fn make_ordered_rel(
                 .unwrap_or(Ordering::Equal)
         });
     if let Some(path) = cheapest_presorted {
-        let display_items = sort_key_display_items(root, &root.query_pathkeys);
+        let display_items = sort_key_display_items(root, &root.query_pathkeys, catalog);
         rel.add_path(path_with_sort_display_items(path.clone(), &display_items));
     }
     if root.parse.limit_count.is_some() || root.parse.limit_offset != 0 {
@@ -998,7 +1004,7 @@ fn make_ordered_rel(
     if let Some(path) = input_rel.cheapest_total_path() {
         let required_pathkeys = required_query_pathkeys_for_path(root, path);
         if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
-            let display_items = sort_key_display_items(root, &root.query_pathkeys);
+            let display_items = sort_key_display_items(root, &root.query_pathkeys, catalog);
             rel.add_path(optimize_path_with_config(
                 Path::OrderBy {
                     plan_info: PlanEstimate::default(),
@@ -1307,17 +1313,17 @@ fn order_path_for_distinct(
     if bestpath::pathkeys_satisfy(&path.pathkeys(), required_pathkeys) {
         return Some(path_with_sort_display_items(
             path,
-            &sort_key_display_items(root, required_pathkeys),
+            &sort_key_display_items(root, required_pathkeys, catalog),
         ));
     }
     if !root.config.enable_sort {
         return None;
     }
     let presorted_count = common_presorted_prefix_len(&path.pathkeys(), required_pathkeys);
-    let display_items = sort_key_display_items(root, required_pathkeys);
+    let display_items = sort_key_display_items(root, required_pathkeys, catalog);
     if presorted_count > 0 && presorted_count < required_pathkeys.len() {
         let presorted_display_items =
-            sort_key_display_items(root, &required_pathkeys[..presorted_count]);
+            sort_key_display_items(root, &required_pathkeys[..presorted_count], catalog);
         Some(optimize_path_with_config(
             Path::IncrementalSort {
                 plan_info: PlanEstimate::default(),
@@ -1523,6 +1529,44 @@ fn path_uses_seqscan(path: &Path) -> bool {
     }
 }
 
+fn path_uses_indexscan(path: &Path) -> bool {
+    match path {
+        Path::IndexOnlyScan { .. } | Path::IndexScan { .. } | Path::BitmapIndexScan { .. } => true,
+        Path::Append { children, .. } | Path::MergeAppend { children, .. } => {
+            children.iter().any(path_uses_indexscan)
+        }
+        Path::Unique { input, .. }
+        | Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::WindowAgg { input, .. }
+        | Path::ProjectSet { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::BitmapHeapScan {
+            bitmapqual: input, ..
+        } => path_uses_indexscan(input),
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. }
+        | Path::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => path_uses_indexscan(left) || path_uses_indexscan(right),
+        Path::Result { .. }
+        | Path::SeqScan { .. }
+        | Path::Values { .. }
+        | Path::FunctionScan { .. }
+        | Path::CteScan { .. }
+        | Path::WorkTableScan { .. }
+        | Path::SetOp { .. } => false,
+    }
+}
+
 fn make_distinct_rel(
     root: &mut PlannerInfo,
     input_rel: RelOptInfo,
@@ -1611,7 +1655,13 @@ fn make_distinct_rel(
         }
     }
 
+    let has_index_unique_path = rel
+        .pathlist
+        .iter()
+        .any(|path| matches!(path, Path::Unique { .. }) && path_uses_indexscan(path));
+
     if root.config.enable_hashagg
+        && !has_index_unique_path
         && distinct_targets_hashable(targets)
         && let Some(path) = raw_input_paths.into_iter().min_by(|left, right| {
             left.plan_info()
@@ -1675,7 +1725,7 @@ fn make_distinct_on_rel(
         let mut rel = RelOptInfo::new(input_rel.relids.clone(), RelOptKind::UpperRel, reltarget);
         for path in input_paths {
             let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
-                let display_items = sort_key_display_items(root, &required_pathkeys);
+                let display_items = sort_key_display_items(root, &required_pathkeys, catalog);
                 optimize_path_with_config(
                     Path::OrderBy {
                         plan_info: PlanEstimate::default(),
@@ -1722,7 +1772,7 @@ fn make_distinct_on_rel(
     for path in input_paths {
         let required_pathkeys = distinct_on_required_pathkeys_for_path(root, &path, &key_pathkeys);
         let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
-            let display_items = sort_key_display_items(root, &required_pathkeys);
+            let display_items = sort_key_display_items(root, &required_pathkeys, catalog);
             optimize_path_with_config(
                 Path::OrderBy {
                     plan_info: PlanEstimate::default(),
@@ -1810,7 +1860,11 @@ fn make_lock_rows_rel(
     rel
 }
 
-fn sort_key_display_items(root: &PlannerInfo, pathkeys: &[PathKey]) -> Vec<String> {
+fn sort_key_display_items(
+    root: &PlannerInfo,
+    pathkeys: &[PathKey],
+    catalog: &dyn CatalogLookup,
+) -> Vec<String> {
     let mut display_items = Vec::new();
     let mut display_exprs = Vec::new();
     for key in pathkeys {
@@ -1829,7 +1883,7 @@ fn sort_key_display_items(root: &PlannerInfo, pathkeys: &[PathKey]) -> Vec<Strin
         {
             continue;
         }
-        let mut rendered = render_sort_key_expr(root, &display_expr);
+        let mut rendered = render_sort_key_expr(root, &display_expr, catalog);
         if sort_key_needs_extra_expression_parens(&display_expr)
             || sort_key_rendering_needs_expression_parens(&rendered)
         {
@@ -1913,7 +1967,7 @@ fn inner_join_equates_exprs(root: &PlannerInfo, left: &Expr, right: &Expr) -> bo
     })
 }
 
-fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr) -> String {
+fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLookup) -> String {
     match expr {
         Expr::Var(var) if var.varlevelsup == 0 => root
             .parse
@@ -1924,17 +1978,21 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr) -> String {
                     if let RangeTblEntryKind::Join { joinaliasvars, .. } = &rte.kind
                         && let Some(alias_expr) = joinaliasvars.get(index)
                     {
-                        return Some(render_sort_key_expr(root, alias_expr));
+                        return Some(render_sort_key_expr(root, alias_expr, catalog));
                     }
                     rte.desc.columns.get(index).map(|column| {
-                        if matches!(rte.kind, RangeTblEntryKind::Relation { .. }) {
-                            return column.name.clone();
-                        }
-                        let qualifier = rte.alias.clone();
-                        match qualifier {
-                            Some(qualifier) if qualifier == column.name => column.name.clone(),
-                            Some(qualifier) => format!("{qualifier}.{}", column.name),
-                            None => column.name.clone(),
+                        let qualifier = rte.alias.as_deref();
+                        match (qualifier, &rte.kind) {
+                            (Some(qualifier), RangeTblEntryKind::Relation { relation_oid, .. })
+                                if catalog.class_row_by_oid(*relation_oid).is_some_and(
+                                    |class_row| class_row.relname.eq_ignore_ascii_case(qualifier),
+                                ) =>
+                            {
+                                column.name.clone()
+                            }
+                            (Some(qualifier), _) if qualifier == column.name => column.name.clone(),
+                            (Some(qualifier), _) => format!("{qualifier}.{}", column.name),
+                            (None, _) => column.name.clone(),
                         }
                     })
                 })
@@ -1960,24 +2018,29 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr) -> String {
             };
             format!(
                 "({} {} {})",
-                render_sort_key_expr(root, left),
+                render_sort_key_expr(root, left, catalog),
                 op_text,
-                render_sort_key_expr(root, right)
+                render_sort_key_expr(root, right, catalog)
             )
         }
         Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
-            render_sort_key_expr(root, inner)
+            render_sort_key_expr(root, inner, catalog)
         }
         Expr::Func(func) => match func.implementation {
             ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoArea) => func
                 .args
                 .first()
-                .map(|arg| format!("(area({}))", render_geometry_sort_arg(root, arg)))
+                .map(|arg| format!("(area({}))", render_geometry_sort_arg(root, arg, catalog)))
                 .unwrap_or_else(|| crate::backend::executor::render_explain_expr(expr, &[])),
             ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPolyCenter) => func
                 .args
                 .first()
-                .map(|arg| format!("poly_center({})", render_geometry_sort_arg(root, arg)))
+                .map(|arg| {
+                    format!(
+                        "poly_center({})",
+                        render_geometry_sort_arg(root, arg, catalog)
+                    )
+                })
                 .unwrap_or_else(|| crate::backend::executor::render_explain_expr(expr, &[])),
             ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPoint)
                 if func.args.len() == 1
@@ -1986,7 +2049,7 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr) -> String {
             {
                 format!(
                     "poly_center({})",
-                    render_geometry_sort_arg(root, &func.args[0])
+                    render_geometry_sort_arg(root, &func.args[0], catalog)
                 )
             }
             ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPointX)
@@ -1998,14 +2061,14 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr) -> String {
                     ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPointX) => 0,
                     _ => 1,
                 };
-                format!("(({})[{index}])", render_sort_key_expr(root, arg))
+                format!("(({})[{index}])", render_sort_key_expr(root, arg, catalog))
             }
             _ => crate::backend::executor::render_explain_expr(expr, &[]),
         },
         Expr::Coalesce(left, right) => format!(
             "COALESCE({}, {})",
-            render_sort_key_expr(root, left),
-            render_sort_key_expr(root, right)
+            render_sort_key_expr(root, left, catalog),
+            render_sort_key_expr(root, right, catalog)
         ),
         Expr::Const(value) => {
             let rendered =
@@ -2020,8 +2083,12 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr) -> String {
     }
 }
 
-fn render_geometry_sort_arg(root: &PlannerInfo, expr: &Expr) -> String {
-    let rendered = render_sort_key_expr(root, expr);
+fn render_geometry_sort_arg(
+    root: &PlannerInfo,
+    expr: &Expr,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let rendered = render_sort_key_expr(root, expr, catalog);
     let Some((qualifier, name)) = rendered.rsplit_once('.') else {
         return rendered;
     };
