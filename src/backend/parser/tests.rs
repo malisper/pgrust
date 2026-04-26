@@ -14,7 +14,8 @@ use crate::include::nodes::parsenodes::{
     AlterColumnExpressionAction, AlterTableTriggerMode, AlterTableTriggerStateStatement,
     AlterTableTriggerTarget, AlterTriggerRenameStatement, ColumnConstraint, ColumnGeneratedKind,
     CommentOnAggregateStatement, CommentOnFunctionStatement, CompositeTypeAttributeDef,
-    CreateAggregateStatement, CreateCompositeTypeStatement, CreateTriggerStatement,
+    CreateAggregateStatement, CreateBaseTypeOption, CreateBaseTypeStatement,
+    CreateCompositeTypeStatement, CreateShellTypeStatement, CreateTriggerStatement,
     CreateTypeStatement, DropAggregateStatement, DropTriggerStatement, DropTypeStatement,
     ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef, InsertSource,
     InsertStatement, JoinTreeNode, PartitionStrategy, PublicationObjectSpec, PublicationOption,
@@ -4040,6 +4041,8 @@ fn parse_create_function_statement_with_returns_table() {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                default_expr: None,
+                variadic: false,
             }],
             return_spec: CreateFunctionReturnSpec::Table(vec![
                 CreateFunctionTableColumn {
@@ -4079,6 +4082,8 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                default_expr: None,
+                variadic: false,
             }],
             return_spec: CreateFunctionReturnSpec::Table(vec![
                 CreateFunctionTableColumn {
@@ -4369,11 +4374,15 @@ fn parse_create_function_statement_with_unnamed_args() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    default_expr: None,
+                    variadic: false,
                 },
                 CreateFunctionArg {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    default_expr: None,
+                    variadic: false,
                 }
             ],
             return_spec: CreateFunctionReturnSpec::Type {
@@ -4409,11 +4418,15 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    default_expr: None,
+                    variadic: false,
                 },
                 CreateFunctionArg {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    default_expr: None,
+                    variadic: false,
                 }
             ],
             return_spec: CreateFunctionReturnSpec::Type {
@@ -4448,6 +4461,8 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
                 mode: FunctionArgMode::In,
                 name: None,
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bytea)),
+                default_expr: None,
+                variadic: false,
             }],
             return_spec: CreateFunctionReturnSpec::Type {
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
@@ -4481,6 +4496,8 @@ fn parse_create_function_statement_with_cost_clause() {
                 mode: FunctionArgMode::In,
                 name: None,
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                default_expr: None,
+                variadic: false,
             }],
             return_spec: CreateFunctionReturnSpec::Type {
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool)),
@@ -4508,6 +4525,104 @@ fn parse_drop_function_statement_with_signature() {
             function_name: "p2text".into(),
             arg_types: vec!["p2".into()],
             cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_call_statement_with_named_and_positional_args() {
+    let stmt = parse_statement("call public.ptest5(10, b => 'Hello')").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Call(CallStatement {
+            schema_name: Some("public".into()),
+            procedure_name: "ptest5".into(),
+            args: SqlCallArgs::Args(vec![
+                SqlFunctionArg::positional(SqlExpr::IntegerLiteral("10".into())),
+                SqlFunctionArg {
+                    name: Some("b".into()),
+                    value: SqlExpr::Const(Value::Text("Hello".into())),
+                },
+            ]),
+            raw_arg_sql: vec!["10".into(), "'Hello'".into()],
+        })
+    );
+}
+
+#[test]
+fn parse_create_procedure_statement() {
+    let stmt = parse_statement(
+        "create or replace procedure public.ptest1(inout x int4, y text default 'a') language sql as $$ insert into cp_test values (1, y) $$",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateProcedure(CreateProcedureStatement {
+            schema_name: Some("public".into()),
+            procedure_name: "ptest1".into(),
+            replace_existing: true,
+            args: vec![
+                CreateFunctionArg {
+                    mode: FunctionArgMode::InOut,
+                    name: Some("x".into()),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                    default_expr: None,
+                    variadic: false,
+                },
+                CreateFunctionArg {
+                    mode: FunctionArgMode::In,
+                    name: Some("y".into()),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                    default_expr: Some("'a'".into()),
+                    variadic: false,
+                },
+            ],
+            strict: false,
+            volatility: FunctionVolatility::Volatile,
+            language: "sql".into(),
+            body: " insert into cp_test values (1, y) ".into(),
+            sql_standard_body: false,
+        })
+    );
+}
+
+#[test]
+fn parse_create_procedure_sql_standard_body() {
+    let stmt = parse_statement(
+        "create procedure ptest1s(x text) language sql begin atomic insert into cp_test values (1, x); end",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::CreateProcedure(CreateProcedureStatement {
+            procedure_name,
+            sql_standard_body: true,
+            ..
+        }) if procedure_name == "ptest1s"
+    ));
+}
+
+#[test]
+fn parse_drop_and_alter_procedure_statements() {
+    assert_eq!(
+        parse_statement("drop procedure if exists public.ptest1(text) cascade").unwrap(),
+        Statement::DropProcedure(DropProcedureStatement {
+            if_exists: true,
+            procedures: vec![DropRoutineItem {
+                schema_name: Some("public".into()),
+                routine_name: "ptest1".into(),
+                arg_types: vec!["text".into()],
+            }],
+            cascade: true,
+        })
+    );
+    assert_eq!(
+        parse_statement("alter procedure public.ptest1(text) strict").unwrap(),
+        Statement::AlterProcedure(AlterProcedureStatement {
+            schema_name: Some("public".into()),
+            procedure_name: "ptest1".into(),
+            arg_types: vec!["text".into()],
+            action: AlterProcedureAction::Strict,
         })
     );
 }
@@ -5333,6 +5448,10 @@ fn parse_standalone_type_names() {
     assert_eq!(
         parse_type_name("bpchar").unwrap(),
         SqlType::new(SqlTypeKind::Char)
+    );
+    assert_eq!(
+        parse_type_name("cstring").unwrap(),
+        SqlType::new(SqlTypeKind::Cstring)
     );
     assert_eq!(
         parse_type_name("char").unwrap(),
@@ -8859,6 +8978,62 @@ fn parse_create_table_partition_of_with_table_elements() {
 }
 
 #[test]
+fn parse_create_table_partition_of_with_column_options() {
+    match parse_statement(
+        "create table part_b partition of parted \
+         (b with options not null default 0) \
+         for values in ('b')",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.partition_of.as_deref(), Some("parted"));
+            assert_eq!(ct.elements.len(), 1);
+            assert!(matches!(
+                &ct.elements[0],
+                CreateTableElement::PartitionColumnOverride(override_)
+                    if override_.name == "b"
+                        && override_.default_expr.as_deref() == Some("0")
+                        && override_.constraints.iter().any(|constraint| {
+                            matches!(constraint, ColumnConstraint::NotNull { .. })
+                        })
+            ));
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_table_partition_of_with_short_column_options() {
+    match parse_statement(
+        "create table part_b partition of parted \
+         (a not null, b default 1) \
+         for values in ('b')",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.partition_of.as_deref(), Some("parted"));
+            assert_eq!(ct.elements.len(), 2);
+            assert!(matches!(
+                &ct.elements[0],
+                CreateTableElement::PartitionColumnOverride(override_)
+                    if override_.name == "a"
+                        && override_.constraints.iter().any(|constraint| {
+                            matches!(constraint, ColumnConstraint::NotNull { .. })
+                        })
+            ));
+            assert!(matches!(
+                &ct.elements[1],
+                CreateTableElement::PartitionColumnOverride(override_)
+                    if override_.name == "b" && override_.default_expr.as_deref() == Some("1")
+            ));
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
 fn parse_alter_table_attach_partition() {
     match parse_statement(
         "alter table measurement attach partition measurement_mid \
@@ -10324,17 +10499,54 @@ fn parse_create_and_drop_type_statements() {
 }
 
 #[test]
-fn parse_create_type_supports_enum_and_rejects_other_unsupported_forms() {
-    assert!(matches!(
-        parse_statement("create type myint"),
-        Err(ParseError::FeatureNotSupported(feature))
-            if feature == "shell types are not supported in CREATE TYPE"
-    ));
-    assert!(matches!(
-        parse_statement("create type myint (input = myintin, output = myintout, like = int4)"),
-        Err(ParseError::FeatureNotSupported(feature))
-            if feature == "base type definitions are not supported in CREATE TYPE"
-    ));
+fn parse_create_type_supports_base_enum_and_range_forms() {
+    let Statement::CreateType(CreateTypeStatement::Shell(CreateShellTypeStatement {
+        schema_name,
+        type_name,
+    })) = parse_statement("create type myint").unwrap()
+    else {
+        panic!("expected shell create type");
+    };
+    assert_eq!(schema_name, None);
+    assert_eq!(type_name, "myint");
+    let Statement::CreateType(CreateTypeStatement::Base(CreateBaseTypeStatement {
+        schema_name,
+        type_name,
+        options,
+    })) = parse_statement(
+        "create type myint (input = myintin, output = myintout, internallength = 4, passedbyvalue, default = 42)",
+    )
+    .unwrap()
+    else {
+        panic!("expected base create type");
+    };
+    assert_eq!(schema_name, None);
+    assert_eq!(type_name, "myint");
+    assert_eq!(
+        options,
+        vec![
+            CreateBaseTypeOption {
+                name: "input".into(),
+                value: Some("myintin".into()),
+            },
+            CreateBaseTypeOption {
+                name: "output".into(),
+                value: Some("myintout".into()),
+            },
+            CreateBaseTypeOption {
+                name: "internallength".into(),
+                value: Some("4".into()),
+            },
+            CreateBaseTypeOption {
+                name: "passedbyvalue".into(),
+                value: None,
+            },
+            CreateBaseTypeOption {
+                name: "default".into(),
+                value: Some("42".into()),
+            },
+        ]
+    );
     match parse_statement("create type mood as enum ('sad', 'ok')").unwrap() {
         Statement::CreateType(CreateTypeStatement::Enum(stmt)) => {
             assert_eq!(stmt.schema_name, None);

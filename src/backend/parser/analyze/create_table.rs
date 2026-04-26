@@ -103,6 +103,29 @@ pub fn lower_create_table(
                 if sql_type.kind == SqlTypeKind::AnyArray {
                     return Err(ParseError::UnsupportedType("anyarray".into()));
                 }
+                if matches!(sql_type.kind, SqlTypeKind::Cstring) {
+                    return Err(ParseError::DetailedError {
+                        message: format!(
+                            "column \"{}\" has pseudo-type cstring",
+                            column.name
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P16",
+                    });
+                }
+                if matches!(sql_type.kind, SqlTypeKind::Shell) {
+                    let type_name = match &column.ty {
+                        crate::backend::parser::RawTypeName::Named { name, .. } => name.as_str(),
+                        _ => &column.name,
+                    };
+                    return Err(ParseError::DetailedError {
+                        message: format!("type \"{type_name}\" is only a shell"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42809",
+                    });
+                }
                 let not_null = not_nulls_by_column.get(&column.name.to_ascii_lowercase());
                 let serial_kind = match column.ty {
                     crate::backend::parser::RawTypeName::Serial(kind) => Some(kind),
@@ -167,6 +190,8 @@ pub fn lower_create_table(
                 if let Some(not_null) = not_null {
                     desc.not_null_constraint_name = Some(not_null.constraint_name.clone());
                     desc.not_null_constraint_validated = !not_null.not_valid;
+                    desc.not_null_constraint_is_local = not_null.is_local;
+                    desc.not_null_constraint_inhcount = not_null.inhcount;
                     desc.not_null_constraint_no_inherit = not_null.no_inherit;
                     desc.not_null_primary_key_owned = not_null.primary_key_owned;
                 }
@@ -177,7 +202,13 @@ pub fn lower_create_table(
                     desc.identity = Some(identity);
                 } else {
                     desc.default_expr = column.default_expr.clone();
-                    desc.missing_default_value = column
+                    if desc.default_expr.is_none()
+                        && let Some(type_oid) = catalog.type_oid_for_sql_type(sql_type)
+                        && let Some(type_default) = catalog.type_default_sql(type_oid)
+                    {
+                        desc.default_expr = Some(type_default);
+                    }
+                    desc.missing_default_value = desc
                         .default_expr
                         .as_deref()
                         .and_then(|sql| super::derive_literal_default_value(sql, sql_type).ok());
@@ -248,7 +279,9 @@ fn expand_create_table_like_clauses(
     let mut post_create_actions = Vec::new();
     for element in &stmt.elements {
         match element {
-            CreateTableElement::Column(_) | CreateTableElement::Constraint(_) => {
+            CreateTableElement::Column(_)
+            | CreateTableElement::PartitionColumnOverride(_)
+            | CreateTableElement::Constraint(_) => {
                 expanded.elements.push(element.clone());
             }
             CreateTableElement::Like(like) => {

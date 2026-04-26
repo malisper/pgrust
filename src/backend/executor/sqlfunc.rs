@@ -206,7 +206,7 @@ fn inline_sql_function_body(
         ));
     }
 
-    let mut sql = substitute_positional_args(body, args, catalog, datetime_config)?;
+    let mut sql = substitute_positional_args_with_catalog(body, args, catalog, datetime_config)?;
     if let Some(names) = row.proargnames.as_ref() {
         for (index, name) in names.iter().enumerate() {
             if name.is_empty() || index >= args.len() {
@@ -219,7 +219,7 @@ fn inline_sql_function_body(
     Ok(sql)
 }
 
-fn substitute_positional_args(
+fn substitute_positional_args_with_catalog(
     input: &str,
     args: &[Value],
     catalog: &dyn CatalogLookup,
@@ -313,11 +313,93 @@ fn parenthesized_sql_literal(
 ) -> Result<String, ExecError> {
     Ok(format!(
         "({})",
-        render_sql_literal(value, catalog, datetime_config)?
+        render_sql_literal_with_catalog(value, catalog, datetime_config)?
     ))
 }
 
-fn substitute_named_arg(input: &str, name: &str, replacement: &str) -> String {
+pub(crate) fn substitute_positional_args(input: &str, args: &[Value]) -> Result<String, ExecError> {
+    let mut out = String::with_capacity(input.len());
+    let chars = input.as_bytes();
+    let mut i = 0usize;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    while i < chars.len() {
+        let ch = chars[i] as char;
+        if in_single_quote {
+            out.push(ch);
+            if ch == '\'' {
+                if i + 1 < chars.len() && chars[i + 1] as char == '\'' {
+                    out.push('\'');
+                    i += 2;
+                    continue;
+                }
+                in_single_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double_quote {
+            out.push(ch);
+            if ch == '"' {
+                if i + 1 < chars.len() && chars[i + 1] as char == '"' {
+                    out.push('"');
+                    i += 2;
+                    continue;
+                }
+                in_double_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            '\'' => {
+                in_single_quote = true;
+                out.push(ch);
+                i += 1;
+            }
+            '"' => {
+                in_double_quote = true;
+                out.push(ch);
+                i += 1;
+            }
+            '$' => {
+                let start = i + 1;
+                let mut end = start;
+                while end < chars.len() && (chars[end] as char).is_ascii_digit() {
+                    end += 1;
+                }
+                if end == start {
+                    out.push(ch);
+                    i += 1;
+                    continue;
+                }
+                let position = input[start..end].parse::<usize>().map_err(|_| {
+                    sql_function_runtime_error(
+                        "invalid SQL function parameter reference",
+                        None,
+                        "42P02",
+                    )
+                })?;
+                let arg = args.get(position.saturating_sub(1)).ok_or_else(|| {
+                    sql_function_runtime_error(
+                        "SQL function parameter reference out of range",
+                        Some(format!("${position}")),
+                        "42P02",
+                    )
+                })?;
+                out.push_str(&render_sql_literal(arg)?);
+                i = end;
+            }
+            _ => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn substitute_named_arg(input: &str, name: &str, replacement: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let chars = input.as_bytes();
     let mut i = 0usize;
@@ -389,7 +471,7 @@ fn substitute_named_arg(input: &str, name: &str, replacement: &str) -> String {
     out
 }
 
-fn render_sql_literal(
+fn render_sql_literal_with_catalog(
     value: &Value,
     catalog: &dyn CatalogLookup,
     datetime_config: &DateTimeConfig,
@@ -495,6 +577,11 @@ fn render_sql_literal(
     })
 }
 
+pub(crate) fn render_sql_literal(value: &Value) -> Result<String, ExecError> {
+    let catalog = crate::backend::parser::Catalog::default();
+    render_sql_literal_with_catalog(value, &catalog, &DateTimeConfig::default())
+}
+
 fn sql_type_literal_name(catalog: &dyn CatalogLookup, ty: SqlType) -> Result<String, ExecError> {
     if ty.is_array {
         let element = ty.element_type();
@@ -598,6 +685,7 @@ mod tests {
                 .map(|names| names.len() as i16)
                 .unwrap_or(0),
             pronargdefaults: 0,
+            proargdefaults: None,
             prorettype: 25,
             proargtypes: String::new(),
             proallargtypes: None,

@@ -9,8 +9,9 @@ use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
 use crate::backend::utils::misc::notices::{
     clear_notices as clear_backend_notices, take_notices as take_backend_notices,
 };
+use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    BootstrapCatalogKind, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
+    BootstrapCatalogKind, CSTRING_TYPE_OID, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
     PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
 };
 use crate::include::nodes::datum::{ArrayValue, IntervalValue};
@@ -4307,6 +4308,254 @@ fn partition_tuple_routing_handles_nested_and_default_partitions() {
             == "new row for relation \"route_orders_eu_low\" violates partition constraint"
             && sqlstate == "23514" => {}
         other => panic!("expected partition constraint violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn partitioned_table_parent_defaults_not_null_and_checks_are_cataloged_and_inherited() {
+    let base = temp_dir("partition_parent_column_metadata");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parted_meta (
+                a int4 default 1,
+                b int4 not null default 0,
+                constraint parted_meta_b_nonnegative check (b >= 0)
+            ) partition by list (a)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_attrdef where adrelid = 'parted_meta'::regclass"
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select conname, contype from pg_constraint \
+             where conrelid = 'parted_meta'::regclass order by conname"
+        ),
+        vec![
+            vec![
+                Value::Text("parted_meta_b_nonnegative".into()),
+                Value::Text("c".into()),
+            ],
+            vec![
+                Value::Text("parted_meta_b_not_null".into()),
+                Value::Text("n".into()),
+            ],
+        ]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table parted_meta_one partition of parted_meta for values in (1)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into parted_meta default values")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select a, b from parted_meta"),
+        vec![vec![Value::Int32(1), Value::Int32(0)]]
+    );
+
+    match session.execute(&db, "insert into parted_meta values (1, null)") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint: _,
+            ..
+        }) if relation == "parted_meta_one" && column == "b" => {}
+        other => panic!("expected inherited not-null violation, got {other:?}"),
+    }
+
+    match session.execute(&db, "insert into parted_meta values (1, -1)") {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "parted_meta_one" && constraint == "parted_meta_b_nonnegative" => {}
+        other => panic!("expected inherited check violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn partition_column_options_override_inherited_defaults_and_nullability() {
+    let base = temp_dir("partition_column_options_override");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parted_opts (
+                a text,
+                b int4 not null default 1,
+                constraint check_a check (length(a) > 0)
+            ) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table part_b partition of parted_opts \
+             (b with options not null default 0, constraint check_a check (length(a) > 0)) \
+             for values in ('b')",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select conname, conislocal, coninhcount \
+             from pg_constraint where conrelid = 'part_b'::regclass \
+             order by coninhcount desc, conname"
+        ),
+        vec![
+            vec![
+                Value::Text("check_a".into()),
+                Value::Bool(false),
+                Value::Int16(1),
+            ],
+            vec![
+                Value::Text("part_b_b_not_null".into()),
+                Value::Bool(true),
+                Value::Int16(1),
+            ],
+        ]
+    );
+
+    session
+        .execute(&db, "insert into part_b (a) values ('b')")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select a, b from part_b"),
+        vec![vec![Value::Text("b".into()), Value::Int32(0)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_attrdef where adrelid = 'part_b'::regclass"
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    match session.execute(&db, "insert into part_b values ('b', null)") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint: _,
+            ..
+        }) if relation == "part_b" && column == "b" => {}
+        other => panic!("expected partition-local not-null violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_add_check_reconciles_existing_partition_constraint() {
+    let dir = temp_dir("alter_partition_check_reconcile");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parted (
+                a text default 'a',
+                b int4
+            ) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table part_b partition of parted
+             (constraint check_b check (b >= 0))
+             for values in ('b')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table parted add constraint check_b check (b >= 0)",
+        )
+        .unwrap();
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select c.relname, con.conname, con.conparentid <> 0, con.conislocal, con.coninhcount
+         from pg_constraint con
+         join pg_class c on c.oid = con.conrelid
+         where con.conname = 'check_b'
+         order by c.relname",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                Value::Text("part_b".into()),
+                Value::Text("check_b".into()),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Int16(1),
+            ],
+            vec![
+                Value::Text("parted".into()),
+                Value::Text("check_b".into()),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Int16(0),
+            ],
+        ]
+    );
+
+    match session.execute(&db, "insert into parted values ('b', -1)") {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "part_b" && constraint == "check_b" => {}
+        other => panic!("expected reconciled inherited check violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn partitioned_parent_defaults_route_before_child_not_null_checks() {
+    let base = temp_dir("partition_parent_default_routes_before_not_null");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parted_notnull_inh_test \
+             (a int4 default 1, b int4 not null default 0) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table parted_notnull_inh_test1 \
+             partition of parted_notnull_inh_test \
+             (a not null, b default 1) for values in (1)",
+        )
+        .unwrap();
+
+    match session.execute(&db, "insert into parted_notnull_inh_test (b) values (null)") {
+        Err(ExecError::NotNullViolation {
+            relation, column, ..
+        }) if relation == "parted_notnull_inh_test1" && column == "b" => {}
+        other => panic!("expected child not-null violation after routing, got {other:?}"),
     }
 }
 
@@ -11266,6 +11515,164 @@ fn regoperator_literal_cast_resolves_operator_signature() {
             "select oprleft, oprright from pg_operator where oid = '===(boolean,boolean)'::regoperator"
         ),
         vec![vec![Value::Int64(16), Value::Int64(16)]]
+    );
+}
+
+#[test]
+fn create_function_accepts_cstring_but_table_columns_reject_it() {
+    let base = temp_dir("cstring_type_signature");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function cstring_echo(cstring) returns cstring as 'textout' language internal strict immutable",
+    )
+    .unwrap();
+
+    let catalog = db.lazy_catalog_lookup(1, None, None);
+    let proc_row = catalog
+        .proc_rows_by_name("cstring_echo")
+        .into_iter()
+        .find(|row| row.proargtypes == CSTRING_TYPE_OID.to_string())
+        .expect("cstring_echo(cstring)");
+    assert_eq!(proc_row.prorettype, CSTRING_TYPE_OID);
+
+    match db.execute(1, "create table bad_cstring (value cstring)") {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(message, "column \"value\" has pseudo-type cstring");
+            assert_eq!(sqlstate, "42P16");
+        }
+        other => panic!("expected cstring column rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_type_shell_persists_and_drops() {
+    let base = temp_dir("shell_type_create_drop");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create type shell").unwrap();
+    let catalog = db.lazy_catalog_lookup(1, None, None);
+    let shell_row = catalog.type_by_name("shell").expect("shell type row");
+    assert_eq!(shell_row.sql_type.kind, SqlTypeKind::Shell);
+    assert_eq!(shell_row.typrelid, 0);
+    assert_eq!(shell_row.typarray, 0);
+
+    match db.execute(1, "create type shell") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "type \"shell\" already exists");
+            assert_eq!(sqlstate, "42710");
+        }
+        other => panic!("expected duplicate shell type rejection, got {other:?}"),
+    }
+
+    db.execute(1, "drop type shell").unwrap();
+    assert!(
+        db.lazy_catalog_lookup(1, None, None)
+            .type_by_name("shell")
+            .is_none()
+    );
+}
+
+#[test]
+fn create_function_creates_and_references_shell_return_type() {
+    let base = temp_dir("shell_type_function_signature");
+    let db = Database::open(&base, 16).unwrap();
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "create function widget_in(cstring) returns widget as 'pg_rust_test_widget_in' language internal strict immutable",
+    )
+    .unwrap();
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].message, "type \"widget\" is not yet defined");
+    assert_eq!(
+        notices[0].detail.as_deref(),
+        Some("Creating a shell type definition.")
+    );
+
+    let catalog = db.lazy_catalog_lookup(1, None, None);
+    let widget_row = catalog.type_by_name("widget").expect("widget shell type");
+    assert_eq!(widget_row.sql_type.kind, SqlTypeKind::Shell);
+    let proc_row = catalog
+        .proc_rows_by_name("widget_in")
+        .into_iter()
+        .find(|row| row.proargtypes == CSTRING_TYPE_OID.to_string())
+        .expect("widget_in(cstring)");
+    assert_eq!(proc_row.prorettype, widget_row.oid);
+    drop(catalog);
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "create function widget_out(widget) returns cstring as 'pg_rust_test_widget_out' language internal strict immutable",
+    )
+    .unwrap();
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].message, "argument type widget is only a shell");
+
+    match db.execute(1, "create table bad_widget (value widget)") {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(message, "type \"widget\" is only a shell");
+            assert_eq!(sqlstate, "42809");
+        }
+        other => panic!("expected shell column rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_type_base_completes_shell_and_applies_type_default() {
+    let base = temp_dir("base_type_create_default");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create type int42").unwrap();
+    db.execute(
+        1,
+        "create function int42_in(cstring) returns int42 as 'pg_rust_test_int42_in' language internal strict immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function int42_out(int42) returns cstring as 'pg_rust_test_int42_out' language internal strict immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create type int42 (internallength = 4, input = int42_in, output = int42_out, alignment = int4, default = 42, passedbyvalue)",
+    )
+    .unwrap();
+
+    let catalog = db.lazy_catalog_lookup(1, None, None);
+    let int42_type = catalog.type_by_name("int42").expect("int42 type row");
+    let int42_array = catalog
+        .type_by_name("_int42")
+        .expect("int42 array type row");
+    assert_eq!(int42_type.sql_type.kind, SqlTypeKind::Text);
+    assert_eq!(int42_type.sql_type.type_oid, int42_type.oid);
+    assert_eq!(int42_type.typlen, 4);
+    assert_eq!(int42_type.typalign, AttributeAlign::Int);
+    assert_eq!(int42_type.typstorage, AttributeStorage::Plain);
+    assert_eq!(int42_type.typelem, 0);
+    assert_eq!(int42_type.typarray, int42_array.oid);
+    assert_eq!(int42_array.typelem, int42_type.oid);
+    drop(catalog);
+
+    db.execute(1, "create table int42_rows (value int42)")
+        .unwrap();
+    db.execute(1, "insert into int42_rows default values")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select value from int42_rows"),
+        vec![vec![Value::Text("42".into())]]
     );
 }
 
@@ -22915,6 +23322,333 @@ fn drop_function_uses_search_path_and_signature() {
         visible.proc_rows_by_name("add_one").is_empty(),
         "expected dropped function to be absent from pg_proc"
     );
+}
+
+#[test]
+fn create_and_drop_procedure_uses_pg_proc_procedure_kind() {
+    let base = temp_dir("create_drop_procedure_catalog");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema tenant_proc").unwrap();
+    session
+        .execute(&db, "set search_path = tenant_proc")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create procedure add_log(x int4, y text default 'a') \
+             language sql as $$ insert into cp_test values (x, y) $$",
+        )
+        .unwrap();
+
+    let visible = db.backend_catcache(1, None).unwrap();
+    let tenant_ns = visible
+        .namespace_by_name("tenant_proc")
+        .expect("tenant namespace")
+        .oid;
+    let proc = visible
+        .proc_rows_by_name("add_log")
+        .into_iter()
+        .find(|row| row.pronamespace == tenant_ns)
+        .expect("procedure row");
+    assert_eq!(proc.prokind, 'p');
+    assert_eq!(proc.pronargs, 2);
+
+    session
+        .execute(&db, "drop procedure add_log(int4, text)")
+        .unwrap();
+    let visible = db.backend_catcache(1, None).unwrap();
+    assert!(
+        visible.proc_rows_by_name("add_log").is_empty(),
+        "expected dropped procedure to be absent from pg_proc"
+    );
+}
+
+#[test]
+fn call_sql_procedure_executes_body_and_rejects_functions() {
+    let base = temp_dir("call_sql_procedure_executes");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table cp_test (id int4, value text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create procedure add_log(x int4, y text) \
+             language sql as $$ insert into cp_test values ($1, y) $$",
+        )
+        .unwrap();
+    session
+        .execute(&db, "call add_log(7, 'xy' || 'zzy')")
+        .unwrap();
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select id, value from cp_test order by id",
+    );
+    assert_eq!(
+        rows,
+        vec![vec![Value::Int32(7), Value::Text("xyzzy".into())]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create function add_log_fn(x int4) returns int4 language sql as $$ select x $$",
+        )
+        .unwrap();
+    let err = session.execute(&db, "call add_log_fn(1)").unwrap_err();
+    let message = format!("{err:?}");
+    assert!(message.contains("is not a procedure"), "{message}");
+}
+
+#[test]
+fn call_sql_procedure_returns_out_and_inout_rows() {
+    let base = temp_dir("call_sql_procedure_out_rows");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create procedure ptest_out(inout a int4, out b text) \
+             language sql as $$ select a + 1, 'done' $$",
+        )
+        .unwrap();
+    let result = session.execute(&db, "call ptest_out(4, null)").unwrap();
+
+    match result {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["a", "b"]);
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(5), Value::Text("done".into())]]
+            );
+        }
+        other => panic!("expected CALL output row, got {other:?}"),
+    }
+}
+
+#[test]
+fn call_procedure_resolves_defaults_named_args_variadic_and_multi_drop() {
+    let base = temp_dir("call_procedure_resolution");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create procedure p_defaults(out a int4, in b int4 default 5, in c int4 default 2) \
+             language sql as $$ select b + c $$",
+        )
+        .unwrap();
+    let result = session
+        .execute(&db, "call p_defaults(null, c => 4, b => 11)")
+        .unwrap();
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(15)]]);
+        }
+        other => panic!("expected CALL output row, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create procedure p_variadic(out a int4, variadic b int4[]) \
+             language sql as $$ select b[1] + b[2] $$",
+        )
+        .unwrap();
+    let result = session
+        .execute(&db, "call p_variadic(null, 11, 12, 13)")
+        .unwrap();
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(23)]]);
+        }
+        other => panic!("expected CALL output row, got {other:?}"),
+    }
+
+    session
+        .execute(&db, "drop procedure p_defaults, p_variadic")
+        .unwrap();
+    let visible = db.backend_catcache(1, None).unwrap();
+    assert!(visible.proc_rows_by_name("p_defaults").is_empty());
+    assert!(visible.proc_rows_by_name("p_variadic").is_empty());
+}
+
+#[test]
+fn call_plpgsql_procedure_executes_body() {
+    let base = temp_dir("call_plpgsql_procedure_executes");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table cp_plpgsql (id int4, value text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create procedure plpgsql_add_log(x text) \
+             language plpgsql as $$ \
+             begin \
+                 insert into cp_plpgsql values (1, x); \
+             end $$",
+        )
+        .unwrap();
+    session
+        .execute(&db, "call plpgsql_add_log('value')")
+        .unwrap();
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select id, value from cp_plpgsql order by id",
+    );
+    assert_eq!(
+        rows,
+        vec![vec![Value::Int32(1), Value::Text("value".into())]]
+    );
+}
+
+#[test]
+fn call_plpgsql_procedure_returns_out_and_inout_rows() {
+    let base = temp_dir("call_plpgsql_procedure_out_rows");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create procedure plpgsql_out(inout a int4, out b text) \
+             language plpgsql as $$ \
+             begin \
+                 a := a + 3; \
+                 b := 'done'; \
+             end $$",
+        )
+        .unwrap();
+    let result = session.execute(&db, "call plpgsql_out(4, null)").unwrap();
+
+    match result {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["a", "b"]);
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(7), Value::Text("done".into())]]
+            );
+        }
+        other => panic!("expected CALL output row, got {other:?}"),
+    }
+}
+
+#[test]
+fn procedure_catalog_display_helpers_read_pg_proc_metadata() {
+    let base = temp_dir("procedure_catalog_display_helpers");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create procedure ptest_meta(in x int4, out y text) \
+             language sql as $$ select 'value' $$",
+        )
+        .unwrap();
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select pg_function_is_visible(oid), \
+                pg_get_function_result(oid), \
+                pg_get_function_arguments(oid), \
+                pg_get_functiondef(oid) \
+          from pg_proc \
+          where proname = 'ptest_meta'",
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], Value::Bool(true));
+    assert_eq!(rows[0][1], Value::Null);
+    assert_eq!(rows[0][2], Value::Text("IN x integer, OUT y text".into()));
+    let definition = rows[0][3].as_text().unwrap();
+    assert!(definition.contains("CREATE OR REPLACE PROCEDURE public.ptest_meta"));
+    assert!(definition.contains("LANGUAGE sql"));
+    assert!(definition.contains("AS $procedure$"));
+}
+
+#[test]
+fn sql_standard_procedure_body_displays_and_executes() {
+    let base = temp_dir("sql_standard_procedure_body");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table cp_standard (id int4, value text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create procedure ptest_standard(x text) \
+             language sql \
+             BEGIN ATOMIC \
+                 insert into cp_standard values (1, x); \
+             END",
+        )
+        .unwrap();
+    session.execute(&db, "call ptest_standard('ok')").unwrap();
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select id, value from cp_standard order by id",
+    );
+    assert_eq!(rows, vec![vec![Value::Int32(1), Value::Text("ok".into())]]);
+
+    let def_rows = session_query_rows(
+        &mut session,
+        &db,
+        "select pg_get_functiondef(oid) from pg_proc where proname = 'ptest_standard'",
+    );
+    let definition = def_rows[0][0].as_text().unwrap();
+    assert!(definition.contains("CREATE OR REPLACE PROCEDURE public.ptest_standard(IN x text)"));
+    assert!(definition.contains("BEGIN ATOMIC"));
+    assert!(!definition.contains("AS $function$"));
+}
+
+#[test]
+fn selecting_procedure_reports_wrong_object_type() {
+    let base = temp_dir("selecting_procedure_wrong_object");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create procedure ptest_select_error(x text) language sql as $$ select 1 $$",
+        )
+        .unwrap();
+    let err = session
+        .execute(&db, "select ptest_select_error('x')")
+        .unwrap_err();
+    match err {
+        ExecError::Parse(ParseError::DetailedError {
+            message,
+            hint: Some(hint),
+            sqlstate: "42809",
+            ..
+        }) => {
+            assert_eq!(message, "ptest_select_error(unknown) is a procedure");
+            assert_eq!(hint, "To call a procedure, use CALL.");
+        }
+        other => panic!("expected wrong-object procedure error, got {other:?}"),
+    }
 }
 
 #[test]

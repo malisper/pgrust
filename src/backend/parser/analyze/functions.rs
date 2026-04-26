@@ -1101,6 +1101,11 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgRustTestFdwHandler => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncSetup => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncConversion => args.len() == 4,
+            BuiltinScalarFunction::PgRustTestWidgetIn
+            | BuiltinScalarFunction::PgRustTestWidgetOut
+            | BuiltinScalarFunction::PgRustTestInt44In
+            | BuiltinScalarFunction::PgRustTestInt44Out => args.len() == 1,
+            BuiltinScalarFunction::PgRustTestPtInWidget => args.len() == 2,
             BuiltinScalarFunction::CurrentSetting => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgNotify => args.len() == 2,
             BuiltinScalarFunction::PgNotificationQueueUsage => args.is_empty(),
@@ -1115,6 +1120,10 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgGetUserById => args.len() == 1,
             BuiltinScalarFunction::ObjDescription => args.len() == 2,
             BuiltinScalarFunction::PgDescribeObject => args.len() == 3,
+            BuiltinScalarFunction::PgGetFunctionArguments
+            | BuiltinScalarFunction::PgGetFunctionDef
+            | BuiltinScalarFunction::PgGetFunctionResult
+            | BuiltinScalarFunction::PgFunctionIsVisible => args.len() == 1,
             BuiltinScalarFunction::PgGetExpr => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetConstraintDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgGetIndexDef => matches!(args.len(), 1 | 3),
@@ -2015,6 +2024,26 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_rust_test_enc_conversion",
             BuiltinScalarFunction::PgRustTestEncConversion,
         ),
+        (
+            "pg_rust_test_widget_in",
+            BuiltinScalarFunction::PgRustTestWidgetIn,
+        ),
+        (
+            "pg_rust_test_widget_out",
+            BuiltinScalarFunction::PgRustTestWidgetOut,
+        ),
+        (
+            "pg_rust_test_int44in",
+            BuiltinScalarFunction::PgRustTestInt44In,
+        ),
+        (
+            "pg_rust_test_int44out",
+            BuiltinScalarFunction::PgRustTestInt44Out,
+        ),
+        (
+            "pg_rust_test_pt_in_widget",
+            BuiltinScalarFunction::PgRustTestPtInWidget,
+        ),
         ("pg_notify", BuiltinScalarFunction::PgNotify),
         (
             "pg_notification_queue_usage",
@@ -2046,6 +2075,22 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_describe_object",
             BuiltinScalarFunction::PgDescribeObject,
+        ),
+        (
+            "pg_get_function_arguments",
+            BuiltinScalarFunction::PgGetFunctionArguments,
+        ),
+        (
+            "pg_get_functiondef",
+            BuiltinScalarFunction::PgGetFunctionDef,
+        ),
+        (
+            "pg_get_function_result",
+            BuiltinScalarFunction::PgGetFunctionResult,
+        ),
+        (
+            "pg_function_is_visible",
+            BuiltinScalarFunction::PgFunctionIsVisible,
         ),
         ("pg_get_expr", BuiltinScalarFunction::PgGetExpr),
         ("pg_get_expr_ext", BuiltinScalarFunction::PgGetExpr),
@@ -2455,6 +2500,22 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_describe_object",
             BuiltinScalarFunction::PgDescribeObject,
+        ),
+        (
+            "pg_get_function_arguments",
+            BuiltinScalarFunction::PgGetFunctionArguments,
+        ),
+        (
+            "pg_get_functiondef",
+            BuiltinScalarFunction::PgGetFunctionDef,
+        ),
+        (
+            "pg_get_function_result",
+            BuiltinScalarFunction::PgGetFunctionResult,
+        ),
+        (
+            "pg_function_is_visible",
+            BuiltinScalarFunction::PgFunctionIsVisible,
         ),
         (
             "pg_get_statisticsobjdef",
@@ -2868,6 +2929,9 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             BuiltinScalarFunction::PgGetAcl,
             BuiltinScalarFunction::ObjDescription,
             BuiltinScalarFunction::PgDescribeObject,
+            BuiltinScalarFunction::PgGetFunctionArguments,
+            BuiltinScalarFunction::PgGetFunctionDef,
+            BuiltinScalarFunction::PgGetFunctionResult,
             BuiltinScalarFunction::PgGetExpr,
             BuiltinScalarFunction::PgGetConstraintDef,
             BuiltinScalarFunction::PgGetIndexDef,
@@ -2900,6 +2964,15 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
         {
             by_func.push((
                 BuiltinScalarFunction::PgStatisticsObjIsVisible,
+                SqlType::new(SqlTypeKind::Bool),
+            ));
+        }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::PgFunctionIsVisible)
+        {
+            by_func.push((
+                BuiltinScalarFunction::PgFunctionIsVisible,
                 SqlType::new(SqlTypeKind::Bool),
             ));
         }
@@ -3063,6 +3136,9 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgGetUserById
             | BuiltinScalarFunction::ObjDescription
             | BuiltinScalarFunction::PgDescribeObject
+            | BuiltinScalarFunction::PgGetFunctionArguments
+            | BuiltinScalarFunction::PgGetFunctionDef
+            | BuiltinScalarFunction::PgGetFunctionResult
             | BuiltinScalarFunction::PgGetExpr
             | BuiltinScalarFunction::PgGetConstraintDef
             | BuiltinScalarFunction::PgGetIndexDef
@@ -3071,6 +3147,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
             | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
             | BuiltinScalarFunction::PgStatisticsObjIsVisible
+            | BuiltinScalarFunction::PgFunctionIsVisible
             | BuiltinScalarFunction::PgColumnSize
             | BuiltinScalarFunction::PgRelationSize
             | BuiltinScalarFunction::PgRelationIsPublishable

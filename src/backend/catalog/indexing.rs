@@ -26,10 +26,13 @@ use crate::include::access::amapi::{
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, BootstrapCatalogKind, PG_CATALOG_NAMESPACE_OID,
-    system_catalog_index_by_oid, system_catalog_indexes, system_catalog_indexes_for_heap,
+    BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, BootstrapCatalogKind, CatalogIndexDescriptor,
+    PG_CATALOG_NAMESPACE_OID, system_catalog_index_by_oid, system_catalog_indexes,
+    system_catalog_indexes_for_heap,
 };
 use crate::include::nodes::datum::Value;
+
+const SYSTEM_CATALOG_INDEX_SHADOW_REL_NUMBER_BASE: u32 = 0xF000_0000;
 
 pub fn insert_bootstrap_system_indexes(catalog: &mut Catalog) {
     for descriptor in system_catalog_indexes() {
@@ -90,6 +93,18 @@ fn system_catalog_index_rel(
         spc_oid: heap_rel.spc_oid,
         db_oid: heap_rel.db_oid,
         rel_number: descriptor.relation_oid,
+    }
+}
+
+fn system_catalog_index_shadow_rel(
+    descriptor: CatalogIndexDescriptor,
+    db_oid: u32,
+    ordinal: usize,
+) -> RelFileLocator {
+    let target = system_catalog_index_rel(descriptor, db_oid);
+    RelFileLocator {
+        rel_number: SYSTEM_CATALOG_INDEX_SHADOW_REL_NUMBER_BASE.saturating_add(ordinal as u32),
+        ..target
     }
 }
 
@@ -197,23 +212,82 @@ pub fn rebuild_system_catalog_indexes_for_db(
     base_dir: &Path,
     db_oid: u32,
 ) -> Result<(), CatalogError> {
+    rebuild_system_catalog_indexes_for_db_with_hook(base_dir, db_oid, |_, _, _| Ok(()))
+}
+
+fn rebuild_system_catalog_indexes_for_db_with_hook(
+    base_dir: &Path,
+    db_oid: u32,
+    mut before_swap: impl FnMut(
+        &CatalogIndexDescriptor,
+        RelFileLocator,
+        RelFileLocator,
+    ) -> Result<(), CatalogError>,
+) -> Result<(), CatalogError> {
     // Bootstrap/template-copy path only. Normal catalog writes should preserve
     // existing index relfiles and maintain them incrementally.
-    let mut smgr = MdStorageManager::new(base_dir);
-    for descriptor in system_catalog_indexes() {
-        let rel = system_catalog_index_rel(*descriptor, db_oid);
-        smgr.open(rel)
-            .map_err(|e| CatalogError::Io(format!("open system index relfile failed: {e}")))?;
-        smgr.unlink(rel, None, false);
-        smgr.create(rel, ForkNumber::Main, false)
-            .map_err(|e| CatalogError::Io(format!("create system index relfile failed: {e}")))?;
-    }
-
+    let smgr = MdStorageManager::new(base_dir);
     let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 64));
     let txns = Arc::new(RwLock::new(
         TransactionManager::new_durable(base_dir.to_path_buf()).unwrap_or_default(),
     ));
-    rebuild_system_catalog_indexes_in_pool_for_db(&pool, &txns, db_oid)
+    let snapshot = txns
+        .read()
+        .snapshot(INVALID_TRANSACTION_ID)
+        .map_err(|err| CatalogError::Io(format!("system catalog snapshot failed: {err:?}")))?;
+    let interrupts = Arc::new(InterruptState::new());
+    for (ordinal, descriptor) in system_catalog_indexes().iter().enumerate() {
+        let target_rel = system_catalog_index_rel(*descriptor, db_oid);
+        let shadow_rel = system_catalog_index_shadow_rel(*descriptor, db_oid, ordinal);
+        pool.with_storage_mut(|storage| {
+            storage.smgr.unlink(shadow_rel, None, false);
+            Ok::<(), crate::backend::storage::smgr::SmgrError>(())
+        })
+        .map_err(|err| {
+            CatalogError::Io(format!(
+                "remove stale shadow system index relfile failed for {}: {err}",
+                descriptor.relation_name
+            ))
+        })?;
+        let build_ctx = system_catalog_index_build_context(
+            &pool,
+            &txns,
+            &snapshot,
+            &interrupts,
+            *descriptor,
+            db_oid,
+            shadow_rel,
+        );
+        index_build_stub(&build_ctx, BTREE_AM_OID).map_err(|err| {
+            CatalogError::Io(format!(
+                "system catalog index build failed for {}: {err:?}",
+                descriptor.relation_name
+            ))
+        })?;
+        pool.checkpoint_flush_all(true).map_err(|err| {
+            CatalogError::Io(format!(
+                "system catalog index shadow flush failed for {}: {err:?}",
+                descriptor.relation_name
+            ))
+        })?;
+        before_swap(descriptor, shadow_rel, target_rel)?;
+        let _ = pool.invalidate_relation(shadow_rel);
+        pool.with_storage_mut(|storage| {
+            storage.smgr.immedsync(shadow_rel, ForkNumber::Main)?;
+            storage
+                .smgr
+                .replace_relation_main_fork_from_shadow(shadow_rel, target_rel)
+        })
+        .map_err(|err| {
+            CatalogError::Io(format!(
+                "system catalog index shadow swap failed for {}: {err}",
+                descriptor.relation_name
+            ))
+        })?;
+        let _ = pool.invalidate_relation(shadow_rel);
+        let _ = pool.invalidate_relation(target_rel);
+    }
+    Ok(())
 }
 
 pub fn rebuild_system_catalog_indexes_in_pool(
@@ -234,23 +308,15 @@ pub fn rebuild_system_catalog_indexes_in_pool_for_db(
         .map_err(|err| CatalogError::Io(format!("system catalog snapshot failed: {err:?}")))?;
     let interrupts = Arc::new(InterruptState::new());
     for descriptor in system_catalog_indexes() {
-        let heap_relation = bootstrap_catalog_rel(descriptor.heap_kind, db_oid);
-        let build_ctx = IndexBuildContext {
-            pool: Arc::clone(pool),
-            txns: Arc::clone(txns),
-            client_id: 0,
-            interrupts: Arc::clone(&interrupts),
-            snapshot: snapshot.clone(),
-            heap_relation,
-            heap_desc: crate::include::catalog::bootstrap_relation_desc(descriptor.heap_kind),
-            index_relation: system_catalog_index_rel(*descriptor, db_oid),
-            index_name: descriptor.relation_name.to_string(),
-            index_desc: system_catalog_index_desc(*descriptor),
-            index_meta: system_catalog_index_relcache(*descriptor),
-            default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
-            maintenance_work_mem_kb: 65_536,
-            expr_eval: None,
-        };
+        let build_ctx = system_catalog_index_build_context(
+            pool,
+            txns,
+            &snapshot,
+            &interrupts,
+            *descriptor,
+            db_oid,
+            system_catalog_index_rel(*descriptor, db_oid),
+        );
         index_build_stub(&build_ctx, BTREE_AM_OID).map_err(|err| {
             CatalogError::Io(format!(
                 "system catalog index build failed for {}: {err:?}",
@@ -259,6 +325,34 @@ pub fn rebuild_system_catalog_indexes_in_pool_for_db(
         })?;
     }
     Ok(())
+}
+
+fn system_catalog_index_build_context(
+    pool: &Arc<BufferPool<SmgrStorageBackend>>,
+    txns: &Arc<RwLock<TransactionManager>>,
+    snapshot: &Snapshot,
+    interrupts: &Arc<InterruptState>,
+    descriptor: CatalogIndexDescriptor,
+    db_oid: u32,
+    index_relation: RelFileLocator,
+) -> IndexBuildContext {
+    let heap_relation = bootstrap_catalog_rel(descriptor.heap_kind, db_oid);
+    IndexBuildContext {
+        pool: Arc::clone(pool),
+        txns: Arc::clone(txns),
+        client_id: 0,
+        interrupts: Arc::clone(interrupts),
+        snapshot: snapshot.clone(),
+        heap_relation,
+        heap_desc: crate::include::catalog::bootstrap_relation_desc(descriptor.heap_kind),
+        index_relation,
+        index_name: descriptor.relation_name.to_string(),
+        index_desc: system_catalog_index_desc(descriptor),
+        index_meta: system_catalog_index_relcache(descriptor),
+        default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+        maintenance_work_mem_kb: 65_536,
+        expr_eval: None,
+    }
 }
 
 pub fn maintain_catalog_indexes_for_insert(
@@ -425,4 +519,61 @@ pub fn vacuum_system_catalog_indexes_for_kinds_in_db(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::backend::catalog::store::CatalogStore;
+    use crate::backend::storage::smgr::segment_path;
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("pgrust_catalog_indexing_{label}_{nanos}"))
+    }
+
+    #[test]
+    fn durable_rebuild_failure_keeps_existing_index_and_cleans_shadow_on_retry() {
+        let base = temp_dir("shadow_failure");
+        let _store = CatalogStore::load_database(&base, 1).unwrap();
+        let descriptor = system_catalog_indexes()[0];
+        let target_rel = system_catalog_index_rel(descriptor, 1);
+        let shadow_rel = system_catalog_index_shadow_rel(descriptor, 1, 0);
+        let target_path = segment_path(&base, target_rel, ForkNumber::Main, 0);
+        let shadow_path = segment_path(&base, shadow_rel, ForkNumber::Main, 0);
+        let before = fs::read(&target_path).unwrap();
+
+        let err =
+            rebuild_system_catalog_indexes_for_db_with_hook(&base, 1, |current, shadow, target| {
+                if current.relation_oid == descriptor.relation_oid {
+                    assert_eq!(shadow, shadow_rel);
+                    assert_eq!(target, target_rel);
+                    Err(CatalogError::Io("injected rebuild failure".into()))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        assert!(matches!(err, CatalogError::Io(_)));
+        assert_eq!(fs::read(&target_path).unwrap(), before);
+        assert!(
+            shadow_path.exists(),
+            "failed rebuild should leave the shadow relfile for retry cleanup"
+        );
+
+        CatalogStore::load_database(&base, 1).unwrap();
+        rebuild_system_catalog_indexes_for_db(&base, 1).unwrap();
+        assert_eq!(fs::read(&target_path).unwrap(), before);
+        assert!(
+            !shadow_path.exists(),
+            "successful retry should consume the stale shadow relfile"
+        );
+    }
 }

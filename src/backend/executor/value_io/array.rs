@@ -7,6 +7,8 @@ use crate::include::catalog::{
     INTERVAL_TYPE_OID, builtin_type_rows, multirange_type_ref_for_sql_type,
     range_type_ref_for_sql_type,
 };
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 pub(crate) fn encode_array_bytes(
     element_type: SqlType,
@@ -535,6 +537,13 @@ fn array_element_layout(
                 details: "internal arrays are unsupported".into(),
             });
         }
+        SqlTypeKind::Shell => {
+            return Err(ExecError::InvalidStorageValue {
+                column: column.into(),
+                details: "shell type arrays are unsupported".into(),
+            });
+        }
+        SqlTypeKind::Cstring => (-2, AttributeAlign::Char),
         SqlTypeKind::Trigger => {
             return Err(ExecError::InvalidStorageValue {
                 column: column.into(),
@@ -757,19 +766,39 @@ pub(crate) fn builtin_type_oid_for_sql_type(sql_type: SqlType) -> Option<u32> {
     if sql_type.type_oid != 0 {
         return Some(sql_type.type_oid);
     }
-    builtin_type_rows().into_iter().find_map(|row| {
-        (!row.sql_type.is_array
-            && row.sql_type.kind == sql_type.kind
-            && !matches!(row.sql_type.kind, SqlTypeKind::AnyArray))
-        .then_some(row.oid)
-    })
+    builtin_type_oid_by_kind().get(&sql_type.kind).copied()
 }
 
 fn sql_type_for_builtin_oid(oid: u32) -> Option<SqlType> {
-    builtin_type_rows()
-        .into_iter()
-        .find_map(|row| (row.oid == oid).then_some(row.sql_type))
+    builtin_sql_type_by_oid()
+        .get(&oid)
+        .copied()
         .or_else(|| (oid != 0).then_some(SqlType::record(oid)))
+}
+
+fn builtin_sql_type_by_oid() -> &'static HashMap<u32, SqlType> {
+    static BUILTIN_SQL_TYPE_BY_OID: OnceLock<HashMap<u32, SqlType>> = OnceLock::new();
+
+    BUILTIN_SQL_TYPE_BY_OID.get_or_init(|| {
+        builtin_type_rows()
+            .into_iter()
+            .map(|row| (row.oid, row.sql_type))
+            .collect()
+    })
+}
+
+fn builtin_type_oid_by_kind() -> &'static HashMap<SqlTypeKind, u32> {
+    static BUILTIN_TYPE_OID_BY_KIND: OnceLock<HashMap<SqlTypeKind, u32>> = OnceLock::new();
+
+    BUILTIN_TYPE_OID_BY_KIND.get_or_init(|| {
+        let mut by_kind = HashMap::new();
+        for row in builtin_type_rows() {
+            if !row.sql_type.is_array && !matches!(row.sql_type.kind, SqlTypeKind::AnyArray) {
+                by_kind.entry(row.sql_type.kind).or_insert(row.oid);
+            }
+        }
+        by_kind
+    })
 }
 
 fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
@@ -869,6 +898,10 @@ fn decode_array_element_value(
         SqlTypeKind::Internal => Err(ExecError::InvalidStorageValue {
             column: column.into(),
             details: "internal arrays are unsupported".into(),
+        }),
+        SqlTypeKind::Shell => Err(ExecError::InvalidStorageValue {
+            column: column.into(),
+            details: "shell type arrays are unsupported".into(),
         }),
         SqlTypeKind::Trigger => Err(ExecError::InvalidStorageValue {
             column: column.into(),
@@ -1200,6 +1233,7 @@ fn decode_array_element_value(
             Ok(Value::Bool(bytes[0] != 0))
         }
         SqlTypeKind::Text
+        | SqlTypeKind::Cstring
         | SqlTypeKind::Tid
         | SqlTypeKind::Name
         | SqlTypeKind::Int2Vector

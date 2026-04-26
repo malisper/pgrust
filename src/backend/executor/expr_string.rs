@@ -3028,6 +3028,121 @@ pub(super) fn eval_pg_rust_test_fdw_handler(values: &[Value]) -> Result<Value, E
     Ok(Value::Null)
 }
 
+pub(super) fn eval_pg_rust_test_widget_in(values: &[Value]) -> Result<Value, ExecError> {
+    let [input] = values else {
+        return Err(ExecError::TypeMismatch {
+            op: "pg_rust_test_widget_in",
+            left: values.first().cloned().unwrap_or(Value::Null),
+            right: Value::Null,
+        });
+    };
+    let Some(input) = input.as_text() else {
+        return Ok(Value::Null);
+    };
+    let (x, y, radius) = parse_test_widget_text(input)?;
+    Ok(Value::Text(CompactString::from_owned(format!(
+        "({x},{y},{radius})"
+    ))))
+}
+
+pub(super) fn eval_pg_rust_test_widget_out(values: &[Value]) -> Result<Value, ExecError> {
+    let [widget] = values else {
+        return Err(ExecError::TypeMismatch {
+            op: "pg_rust_test_widget_out",
+            left: values.first().cloned().unwrap_or(Value::Null),
+            right: Value::Null,
+        });
+    };
+    let Some(widget) = widget.as_text() else {
+        return Ok(Value::Null);
+    };
+    let (x, y, radius) = parse_test_widget_text(widget)?;
+    Ok(Value::Text(CompactString::from_owned(format!(
+        "({x},{y},{radius})"
+    ))))
+}
+
+pub(super) fn eval_pg_rust_test_int44in(values: &[Value]) -> Result<Value, ExecError> {
+    let [input] = values else {
+        return Err(ExecError::TypeMismatch {
+            op: "pg_rust_test_int44in",
+            left: values.first().cloned().unwrap_or(Value::Null),
+            right: Value::Null,
+        });
+    };
+    let Some(input) = input.as_text() else {
+        return Ok(Value::Null);
+    };
+    let mut parts = [0_i32; 4];
+    for (idx, item) in input.split(',').take(4).enumerate() {
+        parts[idx] = item.trim().parse::<i32>().unwrap_or(0);
+    }
+    Ok(Value::Text(CompactString::from_owned(format!(
+        "{},{},{},{}",
+        parts[0], parts[1], parts[2], parts[3]
+    ))))
+}
+
+pub(super) fn eval_pg_rust_test_int44out(values: &[Value]) -> Result<Value, ExecError> {
+    let [input] = values else {
+        return Err(ExecError::TypeMismatch {
+            op: "pg_rust_test_int44out",
+            left: values.first().cloned().unwrap_or(Value::Null),
+            right: Value::Null,
+        });
+    };
+    let Some(input) = input.as_text() else {
+        return Ok(Value::Null);
+    };
+    eval_pg_rust_test_int44in(&[Value::Text(input.into())])
+}
+
+pub(super) fn eval_pg_rust_test_pt_in_widget(values: &[Value]) -> Result<Value, ExecError> {
+    let [point, widget] = values else {
+        return Err(ExecError::TypeMismatch {
+            op: "pg_rust_test_pt_in_widget",
+            left: values.first().cloned().unwrap_or(Value::Null),
+            right: values.get(1).cloned().unwrap_or(Value::Null),
+        });
+    };
+    let (Value::Point(point), Some(widget)) = (point, widget.as_text()) else {
+        return Ok(Value::Null);
+    };
+    let (x, y, radius) = parse_test_widget_text(widget)?;
+    Ok(Value::Bool((point.x - x).hypot(point.y - y) < radius))
+}
+
+fn parse_test_widget_text(input: &str) -> Result<(f64, f64, f64), ExecError> {
+    let inner = input
+        .trim()
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .unwrap_or(input.trim());
+    let parts = inner.split(',').map(str::trim).collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return Err(invalid_test_widget_input(input));
+    }
+    let x = parts[0]
+        .parse::<f64>()
+        .map_err(|_| invalid_test_widget_input(input))?;
+    let y = parts[1]
+        .parse::<f64>()
+        .map_err(|_| invalid_test_widget_input(input))?;
+    let radius = parts[2]
+        .parse::<f64>()
+        .map_err(|_| invalid_test_widget_input(input))?;
+    Ok((x, y, radius))
+}
+
+fn invalid_test_widget_input(input: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("invalid input syntax for type widget: \"{input}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "22P02",
+    }
+}
+
 pub(super) fn eval_pg_rust_test_enc_conversion(values: &[Value]) -> Result<Value, ExecError> {
     let [string, src_encoding, dst_encoding, no_error] = values else {
         return Err(ExecError::TypeMismatch {

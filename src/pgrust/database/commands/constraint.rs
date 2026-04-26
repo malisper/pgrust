@@ -38,6 +38,12 @@ fn choose_available_constraint_name(
     unreachable!("constraint name suffix space exhausted")
 }
 
+fn check_constraint_exprs_match(row: &PgConstraintRow, expr_sql: &str) -> bool {
+    row.conbin
+        .as_deref()
+        .is_some_and(|conbin| conbin.trim().eq_ignore_ascii_case(expr_sql.trim()))
+}
+
 fn ddl_executor_context(
     db: &Database,
     catalog: &dyn CatalogLookup,
@@ -1001,20 +1007,36 @@ impl Database {
                     waiter: None,
                     interrupts,
                 };
-                let effect = self
+                let (parent_constraint, effect) = self
                     .catalog
                     .write()
-                    .create_check_constraint_mvcc(
+                    .create_check_constraint_mvcc_with_row(
                         relation.relation_oid,
-                        action.constraint_name,
+                        action.constraint_name.clone(),
                         action.enforced,
                         action.enforced && !action.not_valid,
                         action.no_inherit,
-                        action.expr_sql,
+                        action.expr_sql.clone(),
+                        action.parent_constraint_oid.unwrap_or(0),
+                        action.is_local,
+                        action.inhcount,
                         &ctx,
                     )
                     .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
+                if !alter_stmt.only && !action.no_inherit {
+                    self.propagate_check_constraint_to_inheritors(
+                        client_id,
+                        xid,
+                        cid.saturating_add(1),
+                        &relation,
+                        &action,
+                        parent_constraint.oid,
+                        configured_search_path,
+                        catalog_effects,
+                    )?;
+                }
             }
             crate::backend::parser::NormalizedAlterTableConstraint::IndexBacked(action) => {
                 if relation.relkind == 'p' || relation.relispartition {
@@ -1328,6 +1350,133 @@ impl Database {
         }
 
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn propagate_check_constraint_to_inheritors(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        parent_relation: &crate::backend::parser::BoundRelation,
+        action: &crate::backend::parser::CheckConstraintAction,
+        parent_constraint_oid: u32,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let mut children = catalog.inheritance_children(parent_relation.relation_oid);
+        children.sort_by_key(|row| (row.inhseqno, row.inhrelid));
+        for child in children {
+            let child_relation =
+                catalog
+                    .lookup_relation_by_oid(child.inhrelid)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnknownTable(child.inhrelid.to_string()))
+                    })?;
+            let child_name = relation_basename(
+                &catalog
+                    .class_row_by_oid(child_relation.relation_oid)
+                    .map(|row| row.relname)
+                    .unwrap_or_else(|| child_relation.relation_oid.to_string()),
+            )
+            .to_string();
+            crate::backend::parser::bind_check_constraint_expr(
+                &action.expr_sql,
+                Some(&child_name),
+                &child_relation.desc,
+                &catalog,
+            )
+            .map_err(ExecError::Parse)?;
+            if !action.not_valid {
+                validate_check_rows(
+                    self,
+                    &child_relation,
+                    &child_name,
+                    &action.constraint_name,
+                    &action.expr_sql,
+                    &catalog,
+                    client_id,
+                    xid,
+                    cid,
+                    self.interrupt_state(client_id),
+                )?;
+            }
+
+            let existing = catalog
+                .constraint_rows_for_relation(child_relation.relation_oid)
+                .into_iter()
+                .find(|row| {
+                    row.contype == CONSTRAINT_CHECK
+                        && row.conname.eq_ignore_ascii_case(&action.constraint_name)
+                });
+            let constraint_ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: cid.saturating_add(catalog_effects.len() as u32),
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            let child_constraint_oid = if let Some(existing) = existing {
+                if !check_constraint_exprs_match(&existing, &action.expr_sql) {
+                    return Err(ExecError::Parse(ParseError::InvalidTableDefinition(
+                        format!(
+                            "constraint \"{}\" conflicts with inherited constraint",
+                            action.constraint_name
+                        ),
+                    )));
+                }
+                let effect = self
+                    .catalog
+                    .write()
+                    .update_check_constraint_inheritance_mvcc(
+                        child_relation.relation_oid,
+                        existing.oid,
+                        parent_constraint_oid,
+                        existing.conislocal,
+                        existing.coninhcount.saturating_add(1),
+                        false,
+                        &constraint_ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+                existing.oid
+            } else {
+                let (child_constraint, effect) = self
+                    .catalog
+                    .write()
+                    .create_check_constraint_mvcc_with_row(
+                        child_relation.relation_oid,
+                        action.constraint_name.clone(),
+                        action.enforced,
+                        action.enforced && !action.not_valid,
+                        false,
+                        action.expr_sql.clone(),
+                        parent_constraint_oid,
+                        false,
+                        1,
+                        &constraint_ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+                child_constraint.oid
+            };
+            self.propagate_check_constraint_to_inheritors(
+                client_id,
+                xid,
+                cid.saturating_add(1),
+                &child_relation,
+                action,
+                child_constraint_oid,
+                configured_search_path,
+                catalog_effects,
+            )?;
+        }
+        Ok(())
     }
 
     pub(crate) fn execute_alter_table_drop_constraint_stmt_with_search_path(

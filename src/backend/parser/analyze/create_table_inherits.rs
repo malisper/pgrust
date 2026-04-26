@@ -6,8 +6,8 @@ use crate::backend::utils::misc::notices::push_notice;
 use super::create_table::{LoweredCreateTable, lower_create_table};
 use super::{
     BoundRelation, CatalogLookup, ColumnConstraint, ConstraintAttributes, CreateTableElement,
-    CreateTableStatement, ParseError, RawTypeName, TableConstraint, TablePersistence,
-    lower_partition_clause, validate_partitioned_index_backed_constraints,
+    CreateTableStatement, ParseError, PartitionColumnOverride, RawTypeName, TableConstraint,
+    TablePersistence, lower_partition_clause, validate_partitioned_index_backed_constraints,
 };
 
 #[derive(Debug, Clone)]
@@ -15,6 +15,8 @@ struct MergedColumnSpec {
     column: crate::backend::parser::ColumnDef,
     attinhcount: i16,
     attislocal: bool,
+    not_null_inhcount: i16,
+    not_null_is_local: bool,
     conflicting_parent_default: bool,
 }
 
@@ -64,6 +66,7 @@ pub fn lower_create_table_with_catalog(
     }
     let merged_columns = merge_inherited_columns(stmt, &parents)?;
     let inherited_constraints = inherited_table_constraints(&parents, catalog);
+    let local_constraints = merge_local_table_constraints(&inherited_constraints, stmt)?;
     let mut synthetic = stmt.clone();
     synthetic.elements = merged_columns
         .iter()
@@ -75,14 +78,15 @@ pub fn lower_create_table_with_catalog(
                 .map(CreateTableElement::Constraint),
         )
         .chain(
-            stmt.constraints()
-                .cloned()
+            local_constraints
+                .into_iter()
                 .map(CreateTableElement::Constraint),
         )
         .collect();
     synthetic.inherits.clear();
 
     let mut lowered = lower_create_table(&synthetic, catalog)?;
+    mark_inherited_check_actions(&mut lowered, &parents, catalog);
     for (column, merged) in lowered
         .relation_desc
         .columns
@@ -91,6 +95,10 @@ pub fn lower_create_table_with_catalog(
     {
         column.attinhcount = merged.attinhcount;
         column.attislocal = merged.attislocal;
+        if !column.storage.nullable {
+            column.not_null_constraint_is_local = merged.not_null_is_local;
+            column.not_null_constraint_inhcount = merged.not_null_inhcount;
+        }
     }
     lowered.parent_oids = parents
         .into_iter()
@@ -106,6 +114,51 @@ pub fn lower_create_table_with_catalog(
         &lowered.constraint_actions,
     )?;
     Ok(lowered)
+}
+
+fn merge_local_table_constraints(
+    inherited_constraints: &[TableConstraint],
+    stmt: &CreateTableStatement,
+) -> Result<Vec<TableConstraint>, ParseError> {
+    let mut local_constraints = Vec::new();
+    for constraint in stmt.constraints() {
+        let Some(name) = constraint.attributes().name.as_deref() else {
+            local_constraints.push(constraint.clone());
+            continue;
+        };
+        let Some(inherited) = inherited_constraints
+            .iter()
+            .find(|inherited| inherited.attributes().name.as_deref() == Some(name))
+        else {
+            local_constraints.push(constraint.clone());
+            continue;
+        };
+        if !table_constraints_are_mergeable(inherited, constraint) {
+            return Err(ParseError::InvalidTableDefinition(format!(
+                "constraint \"{name}\" conflicts with inherited constraint"
+            )));
+        }
+        push_notice(format!(
+            "merging constraint \"{name}\" with inherited definition"
+        ));
+    }
+    Ok(local_constraints)
+}
+
+fn table_constraints_are_mergeable(left: &TableConstraint, right: &TableConstraint) -> bool {
+    match (left, right) {
+        (
+            TableConstraint::Check {
+                expr_sql: left_expr,
+                ..
+            },
+            TableConstraint::Check {
+                expr_sql: right_expr,
+                ..
+            },
+        ) => left_expr.trim().eq_ignore_ascii_case(right_expr.trim()),
+        _ => false,
+    }
 }
 
 fn inherited_table_constraints(
@@ -318,6 +371,8 @@ fn merge_inherited_columns(
                     column: inherited,
                     attinhcount: 1,
                     attislocal: false,
+                    not_null_inhcount: inherited_not_null_count(column),
+                    not_null_is_local: false,
                     conflicting_parent_default: false,
                 });
                 column_lookup.insert(normalized, index);
@@ -325,8 +380,12 @@ fn merge_inherited_columns(
         }
     }
 
+    let mut seen_local_columns = BTreeSet::new();
     for column in stmt.columns() {
         let normalized = column.name.to_ascii_lowercase();
+        if !seen_local_columns.insert(normalized.clone()) {
+            return Err(duplicate_column_error(&column.name));
+        }
         if let Some(index) = column_lookup.get(&normalized).copied() {
             merge_local_column(&mut merged[index], column)?;
         } else {
@@ -335,10 +394,23 @@ fn merge_inherited_columns(
                 column: column.clone(),
                 attinhcount: 0,
                 attislocal: true,
+                not_null_inhcount: 0,
+                not_null_is_local: !column.nullable(),
                 conflicting_parent_default: false,
             });
             column_lookup.insert(normalized, index);
         }
+    }
+
+    for override_ in stmt.partition_column_overrides() {
+        let normalized = override_.name.to_ascii_lowercase();
+        if !seen_local_columns.insert(normalized.clone()) {
+            return Err(duplicate_column_error(&override_.name));
+        }
+        let Some(index) = column_lookup.get(&normalized).copied() else {
+            return Err(ParseError::UnknownColumn(override_.name.clone()));
+        };
+        merge_partition_column_override(&mut merged[index], override_)?;
     }
 
     if let Some(conflict) = merged
@@ -355,6 +427,10 @@ fn merge_inherited_columns(
     }
 
     Ok(merged)
+}
+
+fn duplicate_column_error(name: &str) -> ParseError {
+    ParseError::InvalidTableDefinition(format!("column \"{name}\" specified more than once"))
 }
 
 fn merge_parent_column(
@@ -374,6 +450,10 @@ fn merge_parent_column(
     merged.attinhcount = merged.attinhcount.saturating_add(1);
     if !parent.nullable() {
         ensure_not_null_constraint(&mut merged.column);
+        merged.not_null_inhcount = merged.not_null_inhcount.saturating_add(1);
+        if !merged.not_null_is_local {
+            merged.not_null_is_local = false;
+        }
     }
     ensure_matching_column_generated(
         &merged.column.name,
@@ -413,6 +493,7 @@ fn merge_local_column(
         merged.column.compression = Some(local_compression);
     }
     if let Some(attributes) = local_not_null_constraint_attributes(local) {
+        merged.not_null_is_local = true;
         if merged.column.nullable() {
             merged.column.constraints.push(ColumnConstraint::NotNull {
                 attributes: attributes.clone(),
@@ -425,6 +506,7 @@ fn merge_local_column(
         }
     } else if !local.nullable() {
         ensure_not_null_constraint(&mut merged.column);
+        merged.not_null_is_local = true;
     }
     if local.primary_key() {
         ensure_primary_key_constraint(&mut merged.column);
@@ -460,6 +542,82 @@ fn merge_local_column(
     Ok(())
 }
 
+fn merge_partition_column_override(
+    merged: &mut MergedColumnSpec,
+    override_: &PartitionColumnOverride,
+) -> Result<(), ParseError> {
+    if merged.attinhcount == 0 {
+        return Err(ParseError::UnknownColumn(override_.name.clone()));
+    }
+    push_notice(format!(
+        "merging column \"{}\" with inherited definition",
+        merged.column.name
+    ));
+    merged.attislocal = true;
+    if let Some(attributes) = override_not_null_constraint_attributes(override_) {
+        merged.not_null_is_local = true;
+        if merged.column.nullable() {
+            merged.column.constraints.push(ColumnConstraint::NotNull {
+                attributes: attributes.clone(),
+            });
+        } else if attributes.no_inherit {
+            return Err(ParseError::InvalidTableDefinition(format!(
+                "cannot define not-null constraint with NO INHERIT on column \"{}\"",
+                merged.column.name
+            )));
+        }
+    }
+    if let Some(default_expr) = &override_.default_expr {
+        if merged.column.generated.is_some() {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "both default and generation expression specified for column \"{}\"",
+                    merged.column.name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            });
+        }
+        merged.column.default_expr = Some(default_expr.clone());
+        merged.conflicting_parent_default = false;
+    }
+    Ok(())
+}
+
+fn inherited_not_null_count(column: &crate::include::nodes::primnodes::ColumnDesc) -> i16 {
+    (!column.storage.nullable && !column.not_null_constraint_no_inherit) as i16
+}
+
+fn mark_inherited_check_actions(
+    lowered: &mut LoweredCreateTable,
+    parents: &[BoundRelation],
+    catalog: &dyn CatalogLookup,
+) {
+    let inherited_checks = parents
+        .iter()
+        .flat_map(|parent| catalog.constraint_rows_for_relation(parent.relation_oid))
+        .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_CHECK && !row.connoinherit)
+        .collect::<Vec<_>>();
+    for action in &mut lowered.check_actions {
+        let matches = inherited_checks
+            .iter()
+            .filter(|row| {
+                row.conname.eq_ignore_ascii_case(&action.constraint_name)
+                    && row.conbin.as_deref().is_some_and(|expr| {
+                        expr.trim().eq_ignore_ascii_case(action.expr_sql.trim())
+                    })
+            })
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            continue;
+        }
+        action.parent_constraint_oid = matches.first().map(|row| row.oid);
+        action.is_local = false;
+        action.inhcount = matches.len().min(i16::MAX as usize) as i16;
+    }
+}
+
 fn inherited_constraints_for_parent(
     column: &crate::include::nodes::primnodes::ColumnDesc,
 ) -> Vec<ColumnConstraint> {
@@ -470,6 +628,18 @@ fn inherited_constraints_for_parent(
         });
     }
     constraints
+}
+
+fn override_not_null_constraint_attributes(
+    override_: &PartitionColumnOverride,
+) -> Option<&ConstraintAttributes> {
+    override_
+        .constraints
+        .iter()
+        .find_map(|constraint| match constraint {
+            ColumnConstraint::NotNull { attributes } => Some(attributes),
+            _ => None,
+        })
 }
 
 fn local_not_null_constraint_attributes(

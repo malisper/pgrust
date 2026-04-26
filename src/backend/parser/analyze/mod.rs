@@ -786,6 +786,10 @@ pub trait CatalogLookup {
         None
     }
 
+    fn type_default_sql(&self, _type_oid: u32) -> Option<String> {
+        None
+    }
+
     fn range_rows(&self) -> Vec<PgRangeRow> {
         builtin_range_rows()
     }
@@ -1989,6 +1993,8 @@ fn builtin_named_type_alias(name: &str) -> Option<SqlType> {
         Some(SqlType::new(SqlTypeKind::RegNamespace))
     } else if name.eq_ignore_ascii_case("regcollation") {
         Some(SqlType::new(SqlTypeKind::RegCollation))
+    } else if name.eq_ignore_ascii_case("cstring") {
+        Some(SqlType::new(SqlTypeKind::Cstring))
     } else {
         None
     }

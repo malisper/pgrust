@@ -101,6 +101,19 @@ transform_triggers_fixture() {
     " "$input_path" > "$output_path"
 }
 
+transform_create_type_fixture() {
+    local input_path="$1"
+    local output_path="$2"
+
+    perl -0pe "
+        s/CREATE FUNCTION widget_in\\(cstring\\)\\n\\s+RETURNS widget\\n\\s+AS :'regresslib'\\n\\s+LANGUAGE C STRICT IMMUTABLE;/CREATE FUNCTION widget_in(cstring)\\n   RETURNS widget\\n   AS 'pg_rust_test_widget_in'\\n   LANGUAGE internal STRICT IMMUTABLE;/s;
+        s/CREATE FUNCTION widget_out\\(widget\\)\\n\\s+RETURNS cstring\\n\\s+AS :'regresslib'\\n\\s+LANGUAGE C STRICT IMMUTABLE;/CREATE FUNCTION widget_out(widget)\\n   RETURNS cstring\\n   AS 'pg_rust_test_widget_out'\\n   LANGUAGE internal STRICT IMMUTABLE;/s;
+        s/CREATE FUNCTION int44in\\(cstring\\)\\n\\s+RETURNS city_budget\\n\\s+AS :'regresslib'\\n\\s+LANGUAGE C STRICT IMMUTABLE;/CREATE FUNCTION int44in(cstring)\\n   RETURNS city_budget\\n   AS 'pg_rust_test_int44in'\\n   LANGUAGE internal STRICT IMMUTABLE;/s;
+        s/CREATE FUNCTION int44out\\(city_budget\\)\\n\\s+RETURNS cstring\\n\\s+AS :'regresslib'\\n\\s+LANGUAGE C STRICT IMMUTABLE;/CREATE FUNCTION int44out(city_budget)\\n   RETURNS cstring\\n   AS 'pg_rust_test_int44out'\\n   LANGUAGE internal STRICT IMMUTABLE;/s;
+        s/CREATE FUNCTION pt_in_widget\\(point, widget\\)\\n\\s+RETURNS bool\\n\\s+AS :'regresslib'\\n\\s+LANGUAGE C STRICT;/CREATE FUNCTION pt_in_widget(point, widget)\\n   RETURNS bool\\n   AS 'pg_rust_test_pt_in_widget'\\n   LANGUAGE internal STRICT;/s;
+    " "$input_path" > "$output_path"
+}
+
 prepare_setup_fixture() {
     local input_path="$1"
     local output_path="$2"
@@ -150,6 +163,13 @@ prepare_test_fixture() {
             PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
             transform_triggers_fixture "$sql_file" "$PREPARED_SQL_FILE"
             transform_triggers_fixture "$expected_file" "$PREPARED_EXPECTED_FILE"
+            ;;
+        create_type)
+            mkdir -p "$fixture_dir"
+            PREPARED_SQL_FILE="$fixture_dir/${test_name}.sql"
+            PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
+            transform_create_type_fixture "$sql_file" "$PREPARED_SQL_FILE"
+            transform_create_type_fixture "$expected_file" "$PREPARED_EXPECTED_FILE"
             ;;
         *)
             ;;
