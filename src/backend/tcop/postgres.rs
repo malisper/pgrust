@@ -4410,12 +4410,116 @@ fn psql_index_display_columns(
                 })
                 .unwrap_or_else(|| format!("expr{}", index + 1));
             expression_index += 1;
+            if let Some((name, definition)) = function_call_index_expression(&expression_sql) {
+                return PsqlIndexDisplayColumn {
+                    display_name: name,
+                    definition,
+                };
+            }
             PsqlIndexDisplayColumn {
                 display_name: "expr".into(),
                 definition: parenthesized_index_expression(&expression_sql),
             }
         })
         .collect()
+}
+
+fn function_call_index_expression(expr_sql: &str) -> Option<(String, String)> {
+    let trimmed = strip_outer_parens_once(expr_sql.trim());
+    let open = trimmed.find('(')?;
+    if !trimmed.ends_with(')') || trimmed[..open].contains(char::is_whitespace) {
+        return None;
+    }
+    let name = trimmed[..open].trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch == '_' || ch == '.' || ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    let args = &trimmed[open + 1..trimmed.len().saturating_sub(1)];
+    let args = split_top_level_commas(args)
+        .into_iter()
+        .map(|arg| arg.trim().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some((
+        name.rsplit('.').next().unwrap_or(name).to_string(),
+        format!("{name}({args})"),
+    ))
+}
+
+fn strip_outer_parens_once(input: &str) -> &str {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
+        return trimmed;
+    }
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let bytes = trimmed.as_bytes();
+    let mut i = 0usize;
+    while i < trimmed.len() {
+        let ch = trimmed[i..].chars().next().unwrap_or_default();
+        if in_string {
+            if ch == '\'' {
+                if bytes.get(i + 1).is_some_and(|next| *next == b'\'') {
+                    i += 1;
+                } else {
+                    in_string = false;
+                }
+            }
+        } else {
+            match ch {
+                '\'' => in_string = true,
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 && i + ch.len_utf8() < trimmed.len() {
+                        return trimmed;
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += ch.len_utf8();
+    }
+    trimmed[1..trimmed.len().saturating_sub(1)].trim()
+}
+
+fn split_top_level_commas(input: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut start = 0usize;
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    while i < input.len() {
+        let ch = input[i..].chars().next().unwrap_or_default();
+        if in_string {
+            if ch == '\'' {
+                if bytes.get(i + 1).is_some_and(|next| *next == b'\'') {
+                    i += 1;
+                } else {
+                    in_string = false;
+                }
+            }
+        } else {
+            match ch {
+                '\'' => in_string = true,
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    parts.push(input[start..i].trim());
+                    start = i + ch.len_utf8();
+                }
+                _ => {}
+            }
+        }
+        i += ch.len_utf8();
+    }
+    parts.push(input[start..].trim());
+    parts
 }
 
 fn parenthesized_index_expression(expr_sql: &str) -> String {
@@ -5233,6 +5337,9 @@ pub(crate) fn format_psql_indexdef(
         definition.push_str(" INCLUDE (");
         definition.push_str(&include_column_names.join(", "));
         definition.push(')');
+    }
+    if index.index_meta.indnullsnotdistinct {
+        definition.push_str(" NULLS NOT DISTINCT");
     }
     if let Some(predicate) = index
         .index_meta
@@ -9153,6 +9260,86 @@ ORDER BY 1, 2;";
         assert_eq!(rows[1][0], Value::Text("widgets_code_key".into()));
         assert_eq!(rows[1][6], Value::Text("UNIQUE (code)".into()));
         assert!(matches!(&rows[1][5], Value::Text(text) if text.contains("USING btree (code)")));
+    }
+
+    #[test]
+    fn psql_describe_indexes_query_preserves_nulls_not_distinct() {
+        let db = Database::open(temp_dir("describe_indexes_nnd"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table widgets (id int4)").unwrap();
+        db.execute(
+            1,
+            "create unique index widgets_id_key on widgets (id) nulls not distinct",
+        )
+        .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widgets")
+            .unwrap();
+
+        let sql = format!(
+            "SELECT c2.relname, i.indisprimary, i.indisunique, \
+                 i.indisclustered, i.indisvalid, \
+                 pg_catalog.pg_get_indexdef(i.indexrelid, 0, true), \
+                 pg_catalog.pg_get_constraintdef(con.oid, true), \
+                 contype, condeferrable, condeferred, \
+                 i.indisreplident, c2.reltablespace, false AS conperiod \
+             FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i \
+             LEFT JOIN pg_catalog.pg_constraint con \
+               ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p', 'u', 'x')) \
+             WHERE c.oid = '{}' AND c.oid = i.indrelid AND i.indexrelid = c2.oid \
+             ORDER BY i.indisprimary DESC, c2.relname",
+            entry.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert!(matches!(
+            &rows[0][5],
+            Value::Text(text) if text.contains("USING btree (id) NULLS NOT DISTINCT")
+        ));
+    }
+
+    #[test]
+    fn psql_describe_expression_function_index_uses_function_name() {
+        let db = Database::open(temp_dir("describe_expression_function_index"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table widgets (f1 text, f2 text)")
+            .unwrap();
+        db.execute(
+            1,
+            "create unique index widgets_textcat_key on widgets (textcat(f1,f2))",
+        )
+        .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widgets_textcat_key")
+            .unwrap();
+
+        let sql = format!(
+            "SELECT a.attname, \
+                 pg_catalog.format_type(a.atttypid, a.atttypmod), \
+                 false AS is_key, \
+                 pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, true) AS indexdef \
+             FROM pg_catalog.pg_attribute a \
+             WHERE a.attrelid = '{}' AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY a.attnum",
+            entry.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(rows[0][0], Value::Text("textcat".into()));
+        assert_eq!(rows[0][3], Value::Text("textcat(f1, f2)".into()));
+        let index = session
+            .catalog_lookup(&db)
+            .index_relations_for_heap(
+                session
+                    .catalog_lookup(&db)
+                    .lookup_any_relation("widgets")
+                    .unwrap()
+                    .relation_oid,
+            )
+            .into_iter()
+            .find(|index| index.name == "widgets_textcat_key")
+            .unwrap();
+        assert!(format_psql_indexdef(&db, &session, &index).contains("textcat(f1, f2)"));
     }
 
     #[test]

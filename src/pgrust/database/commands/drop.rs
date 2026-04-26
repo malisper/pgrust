@@ -1781,6 +1781,15 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
+        if drop_stmt.concurrently && drop_stmt.index_names.len() > 1 {
+            return Err(ExecError::DetailedError {
+                message: "DROP INDEX CONCURRENTLY does not support dropping multiple objects"
+                    .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let catcache = self
             .backend_catcache(client_id, Some((xid, cid)))
@@ -1790,6 +1799,7 @@ impl Database {
         for index_name in &drop_stmt.index_names {
             let Some(entry) = catalog.lookup_any_relation(index_name) else {
                 if drop_stmt.if_exists {
+                    push_notice(format!("index \"{index_name}\" does not exist, skipping"));
                     continue;
                 }
                 return Err(ExecError::DetailedError {

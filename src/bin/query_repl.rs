@@ -516,6 +516,7 @@ fn run_statement(
         | Statement::AlterStatistics(_)
         | Statement::DropStatistics(_)
         | Statement::CommentOnStatistics(_)
+        | Statement::AlterTableCompound(_)
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableAddColumns(_)
         | Statement::AlterTableAddConstraint(_)
@@ -1059,10 +1060,6 @@ fn run_statement(
         Statement::DropIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP INDEX through Database/session path",
             actual: "DROP INDEX".into(),
-        })),
-        Statement::ReindexIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "REINDEX through Database/session path",
-            actual: "REINDEX".into(),
         })),
         Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP VIEW through Database/session path",

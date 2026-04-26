@@ -499,6 +499,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
             spec.access_method_handler,
             &spec.build_options,
             self.maintenance_work_mem_kb,
+            false,
             self.catalog_effects,
         )
     }

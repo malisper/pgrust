@@ -562,6 +562,9 @@ fn execute_statement_with_source(
             execute_update(bind_update(&stmt, catalog)?, catalog, ctx, xid, cid)
         }
         Statement::Delete(stmt) => execute_delete(bind_delete(&stmt, catalog)?, catalog, ctx, xid),
+        Statement::AlterTableCompound(_) => Err(ExecError::Parse(
+            ParseError::FeatureNotSupported("ALTER TABLE compound execution".into()),
+        )),
         Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
         Statement::AlterTableMulti(_) | Statement::AlterTableReplicaIdentity(_) => {
             Err(ExecError::Parse(ParseError::FeatureNotSupported(

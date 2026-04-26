@@ -7,7 +7,7 @@ use crate::backend::commands::tablecmds::{
 use crate::backend::utils::cache::relcache::{IndexAmOpEntry, IndexAmProcEntry};
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
-use crate::backend::utils::misc::notices::push_notice;
+use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::access::amapi::{
     IndexBuildEmptyContext, IndexBuildExprContext, IndexInsertContext, IndexUniqueCheck,
 };
@@ -56,6 +56,145 @@ fn invalid_fillfactor_error(value: &str) -> ExecError {
         hint: None,
         sqlstate: "22023",
     }
+}
+
+fn map_reindex_unique_violation(err: ExecError, index_name: &str) -> ExecError {
+    match err {
+        ExecError::UniqueViolation { detail, .. } => ExecError::DetailedError {
+            message: format!("could not create unique index \"{index_name}\""),
+            detail: detail.map(|detail| {
+                detail
+                    .strip_suffix(" already exists.")
+                    .map(|prefix| format!("{prefix} is duplicated."))
+                    .unwrap_or(detail)
+            }),
+            hint: None,
+            sqlstate: "23505",
+        },
+        other => other,
+    }
+}
+
+fn expression_index_detail_columns(
+    index_entry: &crate::backend::catalog::CatalogEntry,
+) -> Vec<crate::include::nodes::primnodes::ColumnDesc> {
+    let mut columns = index_entry.desc.columns.clone();
+    let Some(meta) = index_entry.index_meta.as_ref() else {
+        return columns;
+    };
+    let expression_sqls = meta
+        .indexprs
+        .as_deref()
+        .and_then(|sql| serde_json::from_str::<Vec<String>>(sql).ok())
+        .unwrap_or_default();
+    let mut expression_index = 0usize;
+    for (column_index, attnum) in meta.indkey.iter().enumerate() {
+        if *attnum != 0 {
+            continue;
+        }
+        if let Some(column) = columns.get_mut(column_index) {
+            let fallback_name = column.name.clone();
+            let expr_sql = expression_sqls
+                .get(expression_index)
+                .map(String::as_str)
+                .unwrap_or(fallback_name.as_str());
+            column.name = expression_index_detail_name(expr_sql);
+        }
+        expression_index += 1;
+    }
+    columns
+}
+
+fn expression_index_detail_name(expr_sql: &str) -> String {
+    let trimmed = expr_sql.trim();
+    if let Some(function_call) = normalized_function_call_expression(trimmed) {
+        return function_call;
+    }
+    if (trimmed.starts_with('(') && trimmed.ends_with(')')) || looks_like_function_call(trimmed) {
+        trimmed.to_string()
+    } else {
+        format!("({trimmed})")
+    }
+}
+
+fn normalized_function_call_expression(expr_sql: &str) -> Option<String> {
+    let trimmed = strip_outer_parens_once(expr_sql.trim());
+    if !looks_like_function_call(trimmed) {
+        return None;
+    }
+    let open = trimmed.find('(')?;
+    let name = trimmed[..open].trim();
+    let args = trimmed[open + 1..trimmed.len().saturating_sub(1)]
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("{name}({args})"))
+}
+
+fn strip_outer_parens_once(input: &str) -> &str {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
+        return trimmed;
+    }
+    let mut depth = 0i32;
+    for (idx, ch) in trimmed.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 && idx + ch.len_utf8() < trimmed.len() {
+                    return trimmed;
+                }
+            }
+            _ => {}
+        }
+    }
+    trimmed[1..trimmed.len().saturating_sub(1)].trim()
+}
+
+fn looks_like_function_call(expr_sql: &str) -> bool {
+    let Some(first) = expr_sql.chars().next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && expr_sql.ends_with(')')
+        && expr_sql
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '(' | ')' | ',' | ' '))
+}
+
+fn record_index_column_error(column: &crate::backend::parser::IndexColumnDef) -> ExecError {
+    let raw = column
+        .expr_sql
+        .as_deref()
+        .unwrap_or(column.name.as_str())
+        .trim();
+    let name = raw
+        .trim_start_matches('(')
+        .split(|ch: char| ch == '(' || ch.is_ascii_whitespace())
+        .next()
+        .filter(|part| !part.is_empty())
+        .unwrap_or(raw)
+        .trim_matches('"');
+    ExecError::DetailedError {
+        message: format!("column \"{name}\" has pseudo-type record"),
+        detail: None,
+        hint: None,
+        sqlstate: "42P16",
+    }
+}
+
+fn reject_record_index_column(
+    column: &crate::backend::parser::IndexColumnDef,
+) -> Result<(), ExecError> {
+    if column
+        .expr_type
+        .is_some_and(|ty| ty.kind == crate::backend::parser::SqlTypeKind::Record && !ty.is_array)
+    {
+        return Err(record_index_column_error(column));
+    }
+    Ok(())
 }
 
 pub(super) fn catalog_entry_from_bound_relation(
@@ -930,6 +1069,7 @@ impl Database {
         access_method_handler: u32,
         build_options: &CatalogIndexBuildOptions,
         maintenance_work_mem_kb: usize,
+        leave_invalid_on_failure: bool,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<crate::backend::catalog::CatalogEntry, ExecError> {
         let interrupts = self.interrupt_state(client_id);
@@ -975,6 +1115,59 @@ impl Database {
             .as_ref()
             .and_then(|meta| meta.indpred.as_deref())
             .is_some_and(|predicate| !predicate.trim().is_empty());
+        if has_expression_keys
+            && access_method_oid != GIST_AM_OID
+            && access_method_oid != SPGIST_AM_OID
+        {
+            if let Err(err) = self.build_expression_index_rows_in_transaction(
+                client_id,
+                relation,
+                &index_entry,
+                index_name,
+                visible_catalog,
+                xid,
+                cid,
+                access_method_oid,
+                access_method_handler,
+                maintenance_work_mem_kb,
+            ) {
+                if !leave_invalid_on_failure {
+                    self.cleanup_failed_index_build(
+                        client_id,
+                        xid,
+                        cid,
+                        &index_entry,
+                        catalog_effects,
+                        Arc::clone(&interrupts),
+                    );
+                }
+                return Err(err);
+            }
+            let mut catalog_guard = self.catalog.write();
+            let readiness_ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: cid.saturating_add(1),
+                client_id,
+                waiter: None,
+                interrupts,
+            };
+            let ready_effect = catalog_guard
+                .set_index_entry_ready_valid_mvcc(&index_entry, true, true, &readiness_ctx)
+                .map_err(|err| match err {
+                    CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
+                    _ => ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "index catalog readiness update",
+                        actual: "index readiness update failed".into(),
+                    }),
+                })?;
+            drop(catalog_guard);
+            self.apply_catalog_mutation_effect_immediate(&ready_effect)?;
+            catalog_effects.push(ready_effect);
+            return Ok(index_entry);
+        }
+
         let snapshot = self
             .txns
             .read()
@@ -1035,7 +1228,7 @@ impl Database {
             // :HACK: Temporal PK/UNIQUE constraints are enforced by a heap scan for now.
             // Keep the GiST relation initialized for catalog/deparse parity without relying
             // on full exclusion-index probing or btree_gist-equivalent scalar support.
-            crate::backend::access::index::indexam::index_build_empty_stub(
+            let build_result = crate::backend::access::index::indexam::index_build_empty_stub(
                 &IndexBuildEmptyContext {
                     pool: self.pool.clone(),
                     client_id,
@@ -1046,19 +1239,56 @@ impl Database {
                 },
                 access_method_oid,
             )
-            .map_err(map_catalog_error)?;
+            .map_err(map_catalog_error);
+            if let Err(err) = build_result {
+                if !leave_invalid_on_failure {
+                    self.cleanup_failed_index_build(
+                        client_id,
+                        xid,
+                        cid,
+                        &index_entry,
+                        catalog_effects,
+                        Arc::clone(&interrupts),
+                    );
+                }
+                return Err(err);
+            }
         } else {
-            crate::backend::access::index::indexam::index_build_stub(&build_ctx, access_method_oid)
-                .map_err(|err| match err {
-                    CatalogError::UniqueViolation(constraint) => {
-                        map_unique_index_build_violation(constraint, None)
-                    }
-                    CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
-                    _ => ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "index access method build",
-                        actual: format!("index build failed: {err:?}"),
-                    }),
-                })?;
+            let build_result = crate::backend::access::index::indexam::index_build_stub(
+                &build_ctx,
+                access_method_oid,
+            )
+            .map_err(|err| match err {
+                CatalogError::UniqueViolation(constraint) => {
+                    map_unique_index_build_violation(constraint, None)
+                }
+                CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
+                _ => ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index access method build",
+                    actual: "index build failed".into(),
+                }),
+            });
+            if let Err(err) = build_result {
+                if !leave_invalid_on_failure {
+                    self.cleanup_failed_index_build(
+                        client_id,
+                        xid,
+                        cid,
+                        &index_entry,
+                        catalog_effects,
+                        Arc::clone(&interrupts),
+                    );
+                } else {
+                    self.initialize_failed_concurrent_index_storage(
+                        client_id,
+                        xid,
+                        &index_entry,
+                        &relcache_index_meta,
+                        access_method_oid,
+                    );
+                }
+                return Err(err);
+            }
         }
 
         let mut catalog_guard = self.catalog.write();
@@ -1125,6 +1355,65 @@ impl Database {
             )?;
         }
         Ok(index_entry)
+    }
+
+    fn cleanup_failed_index_build(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        index_entry: &crate::backend::catalog::CatalogEntry,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        interrupts: Arc<crate::backend::utils::misc::interrupts::InterruptState>,
+    ) {
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: cid.saturating_add(2),
+            client_id,
+            waiter: Some(self.txn_waiter.clone()),
+            interrupts,
+        };
+        let effect = self
+            .catalog
+            .write()
+            .drop_relation_entry_mvcc(index_entry.clone(), &ctx);
+        let Ok(effect) = effect else {
+            return;
+        };
+        if self
+            .apply_catalog_mutation_effect_immediate(&effect)
+            .is_ok()
+        {
+            catalog_effects.push(effect);
+        }
+    }
+
+    fn initialize_failed_concurrent_index_storage(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        index_entry: &crate::backend::catalog::CatalogEntry,
+        index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+        access_method_oid: u32,
+    ) {
+        // :HACK: PostgreSQL's CREATE INDEX CONCURRENTLY failure leaves an
+        // invalid catalog entry whose storage is still readable by VACUUM and
+        // REINDEX. pgrust does not model the separate CIC phases yet, so make
+        // the committed invalid stub physically well-formed before returning
+        // the original build error.
+        let _ = crate::backend::access::index::indexam::index_build_empty_stub(
+            &IndexBuildEmptyContext {
+                pool: self.pool.clone(),
+                client_id,
+                xid,
+                index_relation: index_entry.rel,
+                index_desc: index_entry.desc.clone(),
+                index_meta: index_meta.clone(),
+            },
+            access_method_oid,
+        );
     }
 
     fn build_expression_index_rows_in_transaction(
@@ -1273,9 +1562,12 @@ impl Database {
                 }
                 let key_values =
                     index_key_values_for_row(&bound_index, &relation.desc, &values, &mut ctx)?;
-                let unique_detail = index_meta.indisunique.then(|| {
+                let detail_columns = index_meta
+                    .indisunique
+                    .then(|| expression_index_detail_columns(index_entry));
+                let unique_detail = detail_columns.as_ref().map(|columns| {
                     crate::backend::executor::value_io::format_unique_key_detail(
-                        &index_entry.desc.columns,
+                        columns,
                         &key_values,
                     )
                 });
@@ -1380,6 +1672,26 @@ impl Database {
             maintenance_work_mem_kb,
             &mut catalog_effects,
         );
+        if create_stmt.concurrently && result.is_err() && !catalog_effects.is_empty() {
+            let err = result.err().expect("checked is_err");
+            // :HACK: PostgreSQL leaves an invalid catalog entry behind when
+            // CREATE INDEX CONCURRENTLY fails after the catalog stub is visible.
+            // This shim commits the stub in one transaction instead of modeling
+            // PostgreSQL's multi-transaction concurrent build protocol.
+            let commit_result = self.finish_txn(
+                client_id,
+                xid,
+                Ok(StatementResult::AffectedRows(0)),
+                &catalog_effects,
+                &[],
+                &[],
+            );
+            guard.disarm();
+            return match commit_result {
+                Ok(_) => Err(err),
+                Err(commit_err) => Err(commit_err),
+            };
+        }
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         result
@@ -1464,6 +1776,7 @@ impl Database {
                     )
                     .map_err(ExecError::Parse)?,
                 );
+                reject_record_index_column(column)?;
             }
         }
         let include_columns = create_stmt
@@ -1602,6 +1915,9 @@ impl Database {
                 Err(ExecError::Parse(ParseError::TableAlreadyExists(_)))
                     if create_stmt.if_not_exists =>
                 {
+                    push_notice(format!(
+                        r#"relation "{index_name}" already exists, skipping"#
+                    ));
                     return Ok(StatementResult::AffectedRows(0));
                 }
                 Err(err) => return Err(err),
@@ -1624,12 +1940,16 @@ impl Database {
             access_method_handler,
             &build_options,
             maintenance_work_mem_kb,
+            create_stmt.concurrently,
             catalog_effects,
         ) {
             Ok(_) => {}
             Err(ExecError::Parse(ParseError::TableAlreadyExists(_)))
                 if create_stmt.if_not_exists =>
             {
+                push_notice(format!(
+                    r#"relation "{index_name}" already exists, skipping"#
+                ));
                 return Ok(StatementResult::AffectedRows(0));
             }
             Err(err) => return Err(err),
@@ -1667,9 +1987,16 @@ impl Database {
         visible_catalog: Option<crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
         xid: TransactionId,
         cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<(), ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
+        let mut rebuilt_index = index.clone();
+        if let Some(rel) =
+            self.rewrite_index_storage_for_reindex(client_id, xid, cid, index, catalog_effects)?
+        {
+            rebuilt_index.rel = rel;
+        }
         let mut ctx = ExecutorContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -1720,11 +2047,88 @@ impl Database {
             deferred_foreign_keys: None,
             trigger_depth: 0,
         };
-        reinitialize_index_relation(index, &mut ctx, xid)?;
+        reinitialize_index_relation(&rebuilt_index, &mut ctx, xid)?;
         let rows = collect_matching_rows_heap(heap.rel, &heap.desc, heap.toast, None, &mut ctx)?;
         for (tid, values) in rows {
-            insert_index_entry_for_row(heap.rel, &heap.desc, index, &values, tid, None, &mut ctx)?;
+            insert_index_entry_for_row(
+                heap.rel,
+                &heap.desc,
+                &rebuilt_index,
+                &values,
+                tid,
+                None,
+                &mut ctx,
+            )
+            .map_err(|err| map_reindex_unique_violation(err, &rebuilt_index.name))?;
         }
+        self.mark_reindexed_index_ready_valid(
+            client_id,
+            xid,
+            cid,
+            &rebuilt_index,
+            catalog_effects,
+        )?;
+        if rebuilt_index.rel != index.rel {
+            self.replace_temp_entry_rel(client_id, rebuilt_index.relation_oid, rebuilt_index.rel)
+                .ok();
+        }
+        Ok(())
+    }
+
+    fn rewrite_index_storage_for_reindex(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        index: &crate::backend::parser::BoundIndexRelation,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<Option<crate::backend::storage::smgr::RelFileLocator>, ExecError> {
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: Some(self.txn_waiter.clone()),
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .rewrite_relation_storage_mvcc(&[index.relation_oid], &ctx)
+            .map_err(map_catalog_error)?;
+        let rewritten_rel = effect.created_rels.first().copied();
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        Ok(rewritten_rel)
+    }
+
+    fn mark_reindexed_index_ready_valid(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        index: &crate::backend::parser::BoundIndexRelation,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: cid.saturating_add(1),
+            client_id,
+            waiter: Some(self.txn_waiter.clone()),
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .set_index_ready_valid_mvcc(index.relation_oid, true, true, &ctx)
+            .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        self.replace_temp_entry_index_readiness(client_id, index.relation_oid, true, true)
+            .ok();
         Ok(())
     }
 
@@ -1737,20 +2141,27 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, 0)), configured_search_path);
-        let index_entry = catalog
-            .lookup_any_relation(&reindex_stmt.index_name)
-            .ok_or_else(|| ExecError::DetailedError {
-                message: format!("relation \"{}\" does not exist", reindex_stmt.index_name),
-                detail: None,
-                hint: None,
-                sqlstate: "42P01",
-            })?;
-        self.table_locks.lock_table_interruptible(
-            index_entry.rel,
-            TableLockMode::AccessExclusive,
-            client_id,
-            self.interrupt_state(client_id).as_ref(),
-        )?;
+        let locked_rel = match reindex_stmt.kind {
+            crate::backend::parser::ReindexTargetKind::Index
+            | crate::backend::parser::ReindexTargetKind::Table => {
+                let entry = catalog
+                    .lookup_any_relation(&reindex_stmt.index_name)
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("relation \"{}\" does not exist", reindex_stmt.index_name),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P01",
+                    })?;
+                self.table_locks.lock_table_interruptible(
+                    entry.rel,
+                    TableLockMode::AccessExclusive,
+                    client_id,
+                    self.interrupt_state(client_id).as_ref(),
+                )?;
+                Some(entry.rel)
+            }
+            _ => None,
+        };
         let mut catalog_effects = Vec::new();
         let result = self.execute_reindex_index_stmt_in_transaction_with_search_path(
             client_id,
@@ -1762,7 +2173,9 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(index_entry.rel, client_id);
+        if let Some(rel) = locked_rel {
+            self.table_locks.unlock_table(rel, client_id);
+        }
         result
     }
 
@@ -1773,30 +2186,174 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
-        _catalog_effects: &mut Vec<CatalogMutationEffect>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        if reindex_stmt.concurrently {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "REINDEX CONCURRENTLY".into(),
-            )));
-        }
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let index_entry = catalog
-            .lookup_any_relation(&reindex_stmt.index_name)
-            .ok_or_else(|| ExecError::DetailedError {
-                message: format!("relation \"{}\" does not exist", reindex_stmt.index_name),
-                detail: None,
-                hint: None,
-                sqlstate: "42P01",
-            })?;
+        match reindex_stmt.kind {
+            crate::backend::parser::ReindexTargetKind::Index => {
+                self.reindex_named_index_in_transaction(
+                    client_id,
+                    &catalog,
+                    &reindex_stmt.index_name,
+                    xid,
+                    cid,
+                    catalog_effects,
+                )?;
+            }
+            crate::backend::parser::ReindexTargetKind::Table => {
+                let relation = catalog
+                    .lookup_any_relation(&reindex_stmt.index_name)
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("relation \"{}\" does not exist", reindex_stmt.index_name),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P01",
+                    })?;
+                if !matches!(relation.relkind, 'r' | 'm' | 't') {
+                    return Err(ExecError::Parse(ParseError::WrongObjectType {
+                        name: reindex_stmt.index_name.clone(),
+                        expected: "table or materialized view",
+                    }));
+                }
+                ensure_relation_owner(self, client_id, &relation, &reindex_stmt.index_name)?;
+                self.reindex_table_indexes_in_transaction(
+                    client_id,
+                    &catalog,
+                    &relation,
+                    xid,
+                    cid,
+                    catalog_effects,
+                )?;
+            }
+            crate::backend::parser::ReindexTargetKind::Schema => {
+                let namespace_oid = catalog
+                    .namespace_rows()
+                    .into_iter()
+                    .find(|row| row.nspname.eq_ignore_ascii_case(&reindex_stmt.index_name))
+                    .map(|row| row.oid)
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("schema \"{}\" does not exist", reindex_stmt.index_name),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "3F000",
+                    })?;
+                if reindex_stmt.concurrently
+                    && catalog
+                        .namespace_row_by_oid(namespace_oid)
+                        .is_some_and(|row| row.nspname == "pg_catalog")
+                {
+                    push_warning("cannot reindex system catalogs concurrently, skipping all");
+                    return Ok(StatementResult::AffectedRows(0));
+                }
+                if self.reindex_owned_temp_namespace_in_transaction(
+                    client_id,
+                    &catalog,
+                    namespace_oid,
+                    xid,
+                    cid,
+                    catalog_effects,
+                )? {
+                    return Ok(StatementResult::AffectedRows(0));
+                }
+                self.reindex_matching_tables_in_transaction(
+                    client_id,
+                    &catalog,
+                    Some(namespace_oid),
+                    false,
+                    xid,
+                    cid,
+                    catalog_effects,
+                )?;
+            }
+            crate::backend::parser::ReindexTargetKind::Database => {
+                if !reindex_stmt.index_name.is_empty()
+                    && !reindex_stmt
+                        .index_name
+                        .eq_ignore_ascii_case(&self.current_database_name())
+                {
+                    return Err(ExecError::DetailedError {
+                        message: "can only reindex the currently open database".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "0A000",
+                    });
+                }
+                self.reindex_matching_tables_in_transaction(
+                    client_id,
+                    &catalog,
+                    None,
+                    false,
+                    xid,
+                    cid,
+                    catalog_effects,
+                )?;
+            }
+            crate::backend::parser::ReindexTargetKind::System => {
+                if reindex_stmt.concurrently {
+                    return Err(ExecError::DetailedError {
+                        message: "cannot reindex system catalogs concurrently".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "0A000",
+                    });
+                }
+                if !reindex_stmt.index_name.is_empty()
+                    && !reindex_stmt
+                        .index_name
+                        .eq_ignore_ascii_case(&self.current_database_name())
+                {
+                    return Err(ExecError::DetailedError {
+                        message: "can only reindex the currently open database".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "0A000",
+                    });
+                }
+                let pg_catalog_oid = catalog
+                    .namespace_rows()
+                    .into_iter()
+                    .find(|row| row.nspname == "pg_catalog")
+                    .map(|row| row.oid);
+                self.reindex_matching_tables_in_transaction(
+                    client_id,
+                    &catalog,
+                    pg_catalog_oid,
+                    true,
+                    xid,
+                    cid,
+                    catalog_effects,
+                )?;
+            }
+        }
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn reindex_named_index_in_transaction(
+        &self,
+        client_id: ClientId,
+        catalog: &dyn crate::backend::parser::CatalogLookup,
+        index_name: &str,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let index_entry =
+            catalog
+                .lookup_any_relation(index_name)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("relation \"{}\" does not exist", index_name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P01",
+                })?;
         if !matches!(index_entry.relkind, 'i') {
             return Err(ExecError::Parse(ParseError::WrongObjectType {
-                name: reindex_stmt.index_name.clone(),
+                name: index_name.to_string(),
                 expected: "index",
             }));
         }
-        ensure_relation_owner(self, client_id, &index_entry, &reindex_stmt.index_name)?;
-        let index = Self::bound_index_relation_for_reindex(&catalog, index_entry.relation_oid)?;
+        ensure_relation_owner(self, client_id, &index_entry, index_name)?;
+        let index = Self::bound_index_relation_for_reindex(catalog, index_entry.relation_oid)?;
         let heap = catalog
             .lookup_relation_by_oid(index.index_meta.indrelid)
             .ok_or_else(|| {
@@ -1811,8 +2368,136 @@ impl Database {
             catalog.materialize_visible_catalog(),
             xid,
             cid,
-        )?;
-        Ok(StatementResult::AffectedRows(0))
+            catalog_effects,
+        )
+    }
+
+    fn reindex_table_indexes_in_transaction(
+        &self,
+        client_id: ClientId,
+        catalog: &dyn crate::backend::parser::CatalogLookup,
+        relation: &crate::backend::parser::BoundRelation,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        for index in catalog.index_relations_for_heap(relation.relation_oid) {
+            if self.is_stale_owned_temp_relation(client_id, catalog, index.relation_oid) {
+                continue;
+            }
+            self.rebuild_index_relation_in_transaction(
+                client_id,
+                relation,
+                &index,
+                catalog.materialize_visible_catalog(),
+                xid,
+                cid,
+                catalog_effects,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn reindex_owned_temp_namespace_in_transaction(
+        &self,
+        client_id: ClientId,
+        catalog: &dyn crate::backend::parser::CatalogLookup,
+        namespace_oid: u32,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<bool, ExecError> {
+        let temp_tables = self
+            .temp_relations
+            .read()
+            .get(&self.temp_backend_id(client_id))
+            .filter(|namespace| namespace.oid == namespace_oid)
+            .map(|namespace| {
+                namespace
+                    .tables
+                    .values()
+                    .filter(|entry| matches!(entry.entry.relkind, 'r' | 'm' | 't'))
+                    .map(|entry| entry.entry.relation_oid)
+                    .collect::<Vec<_>>()
+            });
+        let Some(temp_tables) = temp_tables else {
+            return Ok(false);
+        };
+        for relation_oid in temp_tables {
+            if self.is_stale_owned_temp_relation(client_id, catalog, relation_oid) {
+                continue;
+            }
+            let Some(relation) = catalog.lookup_relation_by_oid(relation_oid) else {
+                continue;
+            };
+            self.reindex_table_indexes_in_transaction(
+                client_id,
+                catalog,
+                &relation,
+                xid,
+                cid,
+                catalog_effects,
+            )?;
+        }
+        Ok(true)
+    }
+
+    fn is_stale_owned_temp_relation(
+        &self,
+        client_id: ClientId,
+        catalog: &dyn crate::backend::parser::CatalogLookup,
+        relation_oid: u32,
+    ) -> bool {
+        let is_owned_temp = self
+            .temp_relations
+            .read()
+            .get(&self.temp_backend_id(client_id))
+            .is_some_and(|namespace| {
+                namespace
+                    .tables
+                    .values()
+                    .any(|entry| entry.entry.relation_oid == relation_oid)
+            });
+        is_owned_temp && catalog.class_row_by_oid(relation_oid).is_none()
+    }
+
+    fn reindex_matching_tables_in_transaction(
+        &self,
+        client_id: ClientId,
+        catalog: &dyn crate::backend::parser::CatalogLookup,
+        namespace_oid: Option<u32>,
+        system_only: bool,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let catcache = self
+            .backend_catcache(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
+        for class_row in catcache.class_rows() {
+            if !matches!(class_row.relkind, 'r' | 'm' | 't') {
+                continue;
+            }
+            if namespace_oid.is_some_and(|oid| class_row.relnamespace != oid) {
+                continue;
+            }
+            if system_only && namespace_oid.is_none() && class_row.oid >= 16_384 {
+                continue;
+            }
+            let Some(relation) = catalog.lookup_relation_by_oid(class_row.oid) else {
+                continue;
+            };
+            ensure_relation_owner(self, client_id, &relation, &class_row.relname)?;
+            self.reindex_table_indexes_in_transaction(
+                client_id,
+                catalog,
+                &relation,
+                xid,
+                cid,
+                catalog_effects,
+            )?;
+        }
+        Ok(())
     }
 }
 

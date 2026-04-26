@@ -54,6 +54,8 @@ pub const POINT_SPGIST_OPCLASS_OID: u32 = 10052;
 pub const TEXT_BRIN_BLOOM_OPCLASS_OID: u32 = 10053;
 pub const BOX_GIST_OPCLASS_OID: u32 = 76010;
 pub const POINT_GIST_OPCLASS_OID: u32 = 76015;
+pub const POLY_GIST_OPCLASS_OID: u32 = 76021;
+pub const CIRCLE_GIST_OPCLASS_OID: u32 = 76022;
 pub const RANGE_GIST_OPCLASS_OID: u32 = 76011;
 pub const BOX_SPGIST_OPCLASS_OID: u32 = 76013;
 pub const POLY_SPGIST_OPCLASS_OID: u32 = 76014;
@@ -434,6 +436,22 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             "point_ops",
             GIST_POINT_FAMILY_OID,
             POINT_TYPE_OID,
+        ),
+        // :HACK: PostgreSQL declares these GiST opclasses with opckeytype=box
+        // and compresses leaf geometry values to boxes. pgrust's GiST tuple
+        // storage is not opckeytype-aware yet, so store native geometry values
+        // and let the support procs use bounding boxes for internal decisions.
+        gist_row(
+            POLY_GIST_OPCLASS_OID,
+            "poly_ops",
+            GIST_POLY_FAMILY_OID,
+            POLYGON_TYPE_OID,
+        ),
+        gist_row(
+            CIRCLE_GIST_OPCLASS_OID,
+            "circle_ops",
+            GIST_CIRCLE_FAMILY_OID,
+            CIRCLE_TYPE_OID,
         ),
         gist_row(
             RANGE_GIST_OPCLASS_OID,
@@ -1005,6 +1023,33 @@ fn hash_row(oid: u32, opcname: &str, family: u32, input_type: u32) -> PgOpclassR
         opcdefault: true,
         opckeytype: 0,
     }
+}
+
+pub fn default_opclass_oid_for_am(am_oid: u32, type_oid: u32, sql_type: SqlType) -> Option<u32> {
+    if matches!(sql_type.element_type().kind, SqlTypeKind::Enum) {
+        return match am_oid {
+            BTREE_AM_OID => Some(ENUM_BTREE_OPCLASS_OID),
+            HASH_AM_OID => Some(ENUM_HASH_OPCLASS_OID),
+            _ => None,
+        };
+    }
+    let is_range = sql_type.is_range()
+        || builtin_range_rows()
+            .iter()
+            .any(|row| row.rngtypid == type_oid);
+    let is_multirange =
+        sql_type.is_multirange() || multirange_type_ref_for_sql_type(sql_type).is_some();
+    bootstrap_pg_opclass_rows()
+        .into_iter()
+        .find(|row| {
+            row.opcmethod == am_oid
+                && row.opcdefault
+                && (row.opcintype == type_oid
+                    || (row.opcintype == ANYARRAYOID && sql_type.is_array)
+                    || (row.opcintype == ANYRANGEOID && is_range)
+                    || (row.opcintype == ANYMULTIRANGEOID && is_multirange))
+        })
+        .map(|row| row.oid)
 }
 
 pub fn default_btree_opclass_oid(type_oid: u32) -> Option<u32> {

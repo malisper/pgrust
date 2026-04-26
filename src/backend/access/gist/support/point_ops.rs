@@ -99,8 +99,8 @@ pub(crate) fn consistent(
         (10 | 29, Value::Point(query)) => key.y < query.y,
         (11 | 30, Value::Point(query)) => key.y > query.y,
         (8 | 28, Value::Box(query)) => point_in_box(key, query),
-        (48, Value::Polygon(query)) => point_in_polygon(key, query),
-        (68, Value::Circle(query)) => point_in_circle(key, query),
+        (7 | 8 | 48, Value::Polygon(query)) => point_in_polygon(key, query),
+        (7 | 8 | 68, Value::Circle(query)) => point_in_circle(key, query),
         _ => return Err(CatalogError::Corrupt("unsupported GiST point strategy")),
     };
     Ok(GistConsistentResult {

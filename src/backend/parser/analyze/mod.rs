@@ -1464,7 +1464,7 @@ pub(crate) fn bound_index_relation_from_relcache_entry(
     bound_index_relation_from_relcache_entry_with_heap(name, entry, catalog, None)
 }
 
-fn bound_index_relation_from_relcache_entry_with_heap(
+pub(crate) fn bound_index_relation_from_relcache_entry_with_heap(
     name: String,
     entry: &crate::backend::utils::cache::relcache::RelCacheEntry,
     catalog: &dyn CatalogLookup,

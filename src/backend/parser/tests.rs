@@ -15974,3 +15974,94 @@ fn analyze_simple_case_uses_case_test_expr() {
         other => panic!("expected CASE expression, got {other:?}"),
     }
 }
+
+#[test]
+fn parse_numeric_literals_with_underscores() {
+    let stmt = parse_select("select 2_147_483_647, 1_000.5, 1_0e+2").unwrap();
+    assert!(matches!(
+        stmt.targets[0].expr,
+        SqlExpr::IntegerLiteral(ref value) if value == "2_147_483_647"
+    ));
+    assert!(matches!(
+        stmt.targets[1].expr,
+        SqlExpr::NumericLiteral(ref value) if value == "1_000.5"
+    ));
+    assert!(matches!(
+        stmt.targets[2].expr,
+        SqlExpr::NumericLiteral(ref value) if value == "1_0e+2"
+    ));
+}
+
+#[test]
+fn parse_create_unique_index_nulls_distinct() {
+    let stmt =
+        parse_statement("create unique index idx_items_id on items (id) nulls distinct").unwrap();
+    match stmt {
+        Statement::CreateIndex(stmt) => {
+            assert!(stmt.unique);
+            assert!(!stmt.nulls_not_distinct);
+        }
+        other => panic!("expected create index, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_vacuum_full_bare_option() {
+    let stmt = parse_statement("vacuum full items").unwrap();
+    match stmt {
+        Statement::Vacuum(stmt) => {
+            assert!(stmt.full);
+            assert_eq!(stmt.targets.len(), 1);
+            assert_eq!(stmt.targets[0].table_name, "items");
+        }
+        other => panic!("expected vacuum, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_reindex_table_concurrently_verbose() {
+    let stmt = parse_statement("reindex (verbose, concurrently) table items").unwrap();
+    match stmt {
+        Statement::ReindexIndex(stmt) => {
+            assert_eq!(stmt.kind, ReindexTargetKind::Table);
+            assert!(stmt.verbose);
+            assert!(stmt.concurrently);
+            assert_eq!(stmt.index_name, "items");
+        }
+        other => panic!("expected reindex, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_set_session_role() {
+    let stmt = parse_statement("set session role regress_reindexuser").unwrap();
+    match stmt {
+        Statement::SetRole(stmt) => {
+            assert_eq!(stmt.role_name.as_deref(), Some("regress_reindexuser"));
+        }
+        other => panic!("expected set role, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_compound_alter_table_drop_add_using_index() {
+    let stmt = parse_statement(
+        "alter table cwi_test drop constraint cwi_uniq_idx, \
+         add constraint cwi_replaced_pkey primary key using index cwi_uniq2_idx",
+    )
+    .unwrap();
+    match stmt {
+        Statement::AlterTableCompound(stmt) => {
+            assert_eq!(stmt.actions.len(), 2);
+            assert!(matches!(
+                stmt.actions[0],
+                Statement::AlterTableDropConstraint(_)
+            ));
+            assert!(matches!(
+                stmt.actions[1],
+                Statement::AlterTableAddConstraint(_)
+            ));
+        }
+        other => panic!("expected compound alter table, got {other:?}"),
+    }
+}

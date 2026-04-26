@@ -1344,6 +1344,14 @@ pub fn normalize_alter_table_add_constraint(
                 index_name,
                 catalog,
             )?;
+            if nulls_not_distinct {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "default NULL handling",
+                    actual: format!(
+                        "index \"{index_name}\" has NULLS NOT DISTINCT and cannot back a primary key"
+                    ),
+                });
+            }
             let constraint_name = assign_constraint_name(
                 Some(
                     attributes
@@ -2848,6 +2856,31 @@ fn index_columns_for_existing_index(
             ),
             hint: None,
             sqlstate: "42809",
+        });
+    }
+    if catalog
+        .class_row_by_oid(index.relation_oid)
+        .is_some_and(|row| row.relkind == 'I')
+    {
+        return Err(ParseError::FeatureNotSupported(
+            "ALTER TABLE / ADD CONSTRAINT USING INDEX on partitioned indexes".into(),
+        ));
+    }
+    if index
+        .index_meta
+        .indpred
+        .as_deref()
+        .is_some_and(|pred| !pred.trim().is_empty())
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "non-partial index",
+            actual: format!("index \"{index_name}\" contains a predicate"),
+        });
+    }
+    if index.index_meta.indoption.iter().any(|option| *option != 0) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "default index ordering",
+            actual: format!("index \"{index_name}\" has non-default sort ordering"),
         });
     }
     let mut all_columns = Vec::with_capacity(index.index_meta.indkey.len());

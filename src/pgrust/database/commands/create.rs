@@ -1350,6 +1350,7 @@ impl Database {
                     access_method_handler,
                     &build_options,
                     65_536,
+                    false,
                     catalog_effects,
                 )?;
                 let constraint_ctx = CatalogWriteContext {

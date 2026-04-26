@@ -279,6 +279,20 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },
         PgOpfamilyRow {
+            oid: GIST_POLY_FAMILY_OID,
+            opfmethod: GIST_AM_OID,
+            opfname: "poly_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: GIST_CIRCLE_FAMILY_OID,
+            opfmethod: GIST_AM_OID,
+            opfname: "circle_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
             oid: GIST_RANGE_FAMILY_OID,
             opfmethod: GIST_AM_OID,
             opfname: "range_ops".into(),

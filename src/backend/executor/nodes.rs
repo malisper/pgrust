@@ -1770,6 +1770,18 @@ impl PlanNode for IndexScanState {
                         tid: Some(tid),
                     }];
                     set_active_system_bindings(ctx, &self.current_bindings);
+
+                    if let Some(qual) = &self.qual {
+                        let outer_values = materialize_slot_values(&mut self.slot)?;
+                        let current_bindings = self.current_bindings.clone();
+                        set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                        clear_inner_expr_bindings(ctx);
+                        if !qual(&mut self.slot, ctx)? {
+                            note_filtered_row(&mut self.stats);
+                            continue;
+                        }
+                    }
+
                     finish_row(&mut self.stats, start);
                     return Ok(Some(&mut self.slot));
                 }

@@ -280,6 +280,53 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         });
         oid = oid.saturating_add(1);
     }
+    for (family, type_oid, procs) in [
+        (
+            GIST_POLY_FAMILY_OID,
+            POLYGON_TYPE_OID,
+            [
+                (1_i16, GIST_POLY_CONSISTENT_PROC_OID),
+                (2, GIST_POLY_UNION_PROC_OID),
+                (5, GIST_POLY_PENALTY_PROC_OID),
+                (6, GIST_POLY_PICKSPLIT_PROC_OID),
+                (7, GIST_POLY_SAME_PROC_OID),
+                (8, GIST_POLY_DISTANCE_PROC_OID),
+            ],
+        ),
+        (
+            GIST_CIRCLE_FAMILY_OID,
+            CIRCLE_TYPE_OID,
+            [
+                (1_i16, GIST_CIRCLE_CONSISTENT_PROC_OID),
+                (2, GIST_CIRCLE_UNION_PROC_OID),
+                (5, GIST_CIRCLE_PENALTY_PROC_OID),
+                (6, GIST_CIRCLE_PICKSPLIT_PROC_OID),
+                (7, GIST_CIRCLE_SAME_PROC_OID),
+                (8, GIST_CIRCLE_DISTANCE_PROC_OID),
+            ],
+        ),
+    ] {
+        for (procnum, proc_oid) in procs {
+            rows.push(PgAmprocRow {
+                oid,
+                amprocfamily: family,
+                amproclefttype: type_oid,
+                amprocrighttype: type_oid,
+                amprocnum: procnum,
+                amproc: proc_oid,
+            });
+            oid = oid.saturating_add(1);
+        }
+        rows.push(PgAmprocRow {
+            oid,
+            amprocfamily: family,
+            amproclefttype: ANYOID,
+            amprocrighttype: ANYOID,
+            amprocnum: 12,
+            amproc: GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID,
+        });
+        oid = oid.saturating_add(1);
+    }
     for (family, procs) in [
         (
             SPGIST_QUAD_POINT_FAMILY_OID,

@@ -3871,29 +3871,80 @@ fn try_parse_reindex_statement(sql: &str) -> Result<Option<Statement>, ParseErro
     }
 
     let mut rest = consume_keyword(trimmed, "reindex").trim_start();
-    let concurrently = if keyword_at_start(rest, "concurrently") {
+    let mut verbose = false;
+    let mut concurrently = false;
+    if rest.starts_with('(') {
+        let close = rest.find(')').ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "REINDEX option list",
+            actual: rest.to_string(),
+        })?;
+        let options = &rest[1..close];
+        for option in options.split(',') {
+            let option = option.trim();
+            if option.eq_ignore_ascii_case("verbose") {
+                verbose = true;
+            } else if option.eq_ignore_ascii_case("concurrently") {
+                concurrently = true;
+            } else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "REINDEX option",
+                    actual: option.to_string(),
+                });
+            }
+        }
+        rest = rest[close + 1..].trim_start();
+    }
+    if keyword_at_start(rest, "concurrently") {
         rest = consume_keyword(rest, "concurrently").trim_start();
-        true
+        concurrently = true;
+    }
+    let kind = if keyword_at_start(rest, "index") {
+        rest = consume_keyword(rest, "index").trim_start();
+        ReindexTargetKind::Index
+    } else if keyword_at_start(rest, "table") {
+        rest = consume_keyword(rest, "table").trim_start();
+        ReindexTargetKind::Table
+    } else if keyword_at_start(rest, "schema") {
+        rest = consume_keyword(rest, "schema").trim_start();
+        ReindexTargetKind::Schema
+    } else if keyword_at_start(rest, "database") {
+        rest = consume_keyword(rest, "database").trim_start();
+        ReindexTargetKind::Database
+    } else if keyword_at_start(rest, "system") {
+        rest = consume_keyword(rest, "system").trim_start();
+        ReindexTargetKind::System
     } else {
-        false
-    };
-    if !keyword_at_start(rest, "index") {
         return Err(ParseError::UnexpectedToken {
-            expected: "REINDEX INDEX",
+            expected: "REINDEX target",
             actual: rest.to_string(),
         });
+    };
+    if keyword_at_start(rest, "concurrently") {
+        rest = consume_keyword(rest, "concurrently").trim_start();
+        concurrently = true;
     }
-    rest = consume_keyword(rest, "index").trim_start();
-    let (parts, tail) = parse_qualified_identifier_parts(rest)?;
-    if !tail.trim().is_empty() {
+    let (index_name, tail) = if rest.trim().is_empty()
+        && matches!(
+            kind,
+            ReindexTargetKind::Database | ReindexTargetKind::System
+        ) {
+        (String::new(), "")
+    } else {
+        let (parts, tail) = parse_qualified_identifier_parts(rest)?;
+        (parts.join("."), tail)
+    };
+    let tail = tail.trim();
+    if !tail.is_empty() && !tail.eq_ignore_ascii_case("force") {
         return Err(ParseError::UnexpectedToken {
-            expected: "end of REINDEX INDEX statement",
-            actual: tail.trim().to_string(),
+            expected: "end of REINDEX statement",
+            actual: tail.to_string(),
         });
     }
     Ok(Some(Statement::ReindexIndex(ReindexIndexStatement {
         concurrently,
-        index_name: parts.join("."),
+        verbose,
+        kind,
+        index_name,
     })))
 }
 
@@ -5751,12 +5802,26 @@ fn parse_sequence_owned_by(input: &str) -> Result<(SequenceOwnedByClause, &str),
 fn parse_signed_i64_token(input: &str) -> Result<(i64, &str), ParseError> {
     let input = input.trim_start();
     let mut end = 0usize;
+    let mut previous_was_digit = false;
     for (idx, ch) in input.char_indices() {
         if idx == 0 && matches!(ch, '+' | '-') {
             end = ch.len_utf8();
             continue;
         }
         if ch.is_ascii_digit() {
+            end = idx + ch.len_utf8();
+            previous_was_digit = true;
+            continue;
+        }
+        if ch == '_' && previous_was_digit {
+            let next = input[idx + ch.len_utf8()..].chars().next();
+            if next.is_some_and(|next| next.is_ascii_digit()) {
+                end = idx + ch.len_utf8();
+                previous_was_digit = false;
+                continue;
+            }
+        }
+        if ch == '_' {
             end = idx + ch.len_utf8();
             continue;
         }
@@ -5769,7 +5834,8 @@ fn parse_signed_i64_token(input: &str) -> Result<(i64, &str), ParseError> {
         });
     }
     let token = &input[..end];
-    let value = token
+    let normalized = normalize_numeric_token(token);
+    let value = normalized
         .parse::<i64>()
         .map_err(|_| ParseError::UnexpectedToken {
             expected: "signed integer in i64 range",
@@ -12416,7 +12482,8 @@ fn fetch_count_from_text(text: &str) -> Result<Option<i64>, ParseError> {
 }
 
 fn parse_i64(text: &str) -> Result<i64, ParseError> {
-    text.parse::<i64>()
+    normalize_numeric_token(text)
+        .parse::<i64>()
         .map_err(|_| ParseError::InvalidInteger(text.to_string()))
 }
 
@@ -12757,7 +12824,7 @@ fn build_create_database_option_value(pair: Pair<'_, Rule>) -> Result<String, Pa
         Rule::kw_on_value => Ok("on".into()),
         Rule::kw_off => Ok("off".into()),
         Rule::kw_default => Ok("default".into()),
-        Rule::signed_integer | Rule::integer => Ok(inner.as_str().into()),
+        Rule::signed_integer | Rule::integer => Ok(normalize_numeric_token(inner.as_str()).into()),
         _ => Ok(inner.as_str().into()),
     }
 }
@@ -15326,7 +15393,8 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
             let nulls_not_distinct = body
                 .clone()
                 .into_inner()
-                .any(|part| part.as_rule() == Rule::unique_nulls_not_distinct_clause);
+                .find(|part| part.as_rule() == Rule::unique_nulls_distinct_clause)
+                .is_some_and(unique_nulls_clause_is_not_distinct);
             let mut attributes = attributes;
             attributes.nulls_not_distinct = nulls_not_distinct;
             let (columns, include_columns, without_overlaps) = build_key_constraint_body(body)?;
@@ -15674,7 +15742,8 @@ fn build_column_constraint(pair: Pair<'_, Rule>) -> Result<ColumnConstraint, Par
             let mut attributes = attributes;
             attributes.nulls_not_distinct = body
                 .into_inner()
-                .any(|part| part.as_rule() == Rule::unique_nulls_not_distinct_clause);
+                .find(|part| part.as_rule() == Rule::unique_nulls_distinct_clause)
+                .is_some_and(unique_nulls_clause_is_not_distinct);
             Ok(ColumnConstraint::Unique { attributes })
         }
         Rule::references_column_constraint => {
@@ -15955,7 +16024,9 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
                     options.push(build_reloption(option)?);
                 }
             }
-            Rule::unique_nulls_not_distinct_clause => nulls_not_distinct = true,
+            Rule::unique_nulls_distinct_clause => {
+                nulls_not_distinct = unique_nulls_clause_is_not_distinct(part)
+            }
             _ => {}
         }
     }
@@ -15983,6 +16054,10 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
         predicate_sql,
         options,
     })
+}
+
+fn unique_nulls_clause_is_not_distinct(pair: Pair<'_, Rule>) -> bool {
+    pair.as_str().to_ascii_lowercase().contains("not")
 }
 
 fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, ParseError> {
@@ -16720,6 +16795,17 @@ fn build_vacuum(pair: Pair<'_, Rule>) -> Result<VacuumStatement, ParseError> {
                         Rule::analyze_buffer_usage_limit_option => {
                             buffer_usage_limit = Some(parse_option_scalar(opt)?)
                         }
+                        _ => {}
+                    }
+                }
+            }
+            Rule::vacuum_bare_option_list => {
+                for opt in part.into_inner() {
+                    let text = opt.as_str().to_ascii_lowercase();
+                    match text.as_str() {
+                        "analyze" => analyze = true,
+                        "full" => full = true,
+                        "verbose" => verbose = true,
                         _ => {}
                     }
                 }
@@ -18874,6 +18960,14 @@ fn build_numeric_typemod_component(pair: Pair<'_, Rule>) -> Result<i32, ParseErr
 fn parse_i32(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
     parse_i32_literal(pair.as_str())
         .map_err(|_| ParseError::InvalidInteger(pair.as_str().to_string()))
+}
+
+fn normalize_numeric_token(token: &str) -> std::borrow::Cow<'_, str> {
+    if token.as_bytes().contains(&b'_') {
+        std::borrow::Cow::Owned(token.replace('_', ""))
+    } else {
+        std::borrow::Cow::Borrowed(token)
+    }
 }
 
 fn build_collation_name(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
