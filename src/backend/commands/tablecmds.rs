@@ -2582,6 +2582,10 @@ fn apply_inbound_foreign_key_actions_on_update(
         {
             continue;
         }
+        if !crate::backend::executor::foreign_key_action_trigger_enabled_on_update(constraint, ctx)
+        {
+            continue;
+        }
         match constraint.on_update {
             ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => {
                 crate::backend::executor::enforce_inbound_foreign_keys_on_update(
@@ -2663,6 +2667,10 @@ fn apply_inbound_foreign_key_actions_on_delete(
     let mut pending = Vec::new();
     for constraint in constraints {
         if !constraint.enforced {
+            continue;
+        }
+        if !crate::backend::executor::foreign_key_action_trigger_enabled_on_delete(constraint, ctx)
+        {
             continue;
         }
         match constraint.on_delete {

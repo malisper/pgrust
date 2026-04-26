@@ -8051,7 +8051,9 @@ fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, P
         }
         if keyword_at_start(rest, "for") {
             let mut next = consume_keyword(rest, "for").trim_start();
-            next = consume_keyword(next, "each").trim_start();
+            if keyword_at_start(next, "each") {
+                next = consume_keyword(next, "each").trim_start();
+            }
             if keyword_at_start(next, "row") {
                 level = TriggerLevel::Row;
                 rest = consume_keyword(next, "row");
@@ -13242,6 +13244,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
                         with = ctes;
                     }
                     Rule::set_operation_stmt
+                    | Rule::parenthesized_select_stmt
                     | Rule::simple_select_stmt
                     | Rule::simple_select_core => nested = Some(build_select(part)?),
                     _ => {}
@@ -13255,6 +13258,14 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
             return Ok(stmt);
         }
         Rule::set_operation_stmt => return build_set_operation_select(pair),
+        Rule::parenthesized_select_stmt => {
+            return build_select(
+                pair.into_inner()
+                    .find(|part| matches!(part.as_rule(), Rule::select_stmt))
+                    .ok_or(ParseError::UnexpectedEof)?,
+            );
+        }
+        Rule::values_stmt => return Ok(wrap_values_as_select(build_values_statement(pair)?)),
         Rule::simple_select_stmt | Rule::simple_select_core => pair.into_inner().collect(),
         _ => {
             return Err(ParseError::UnexpectedToken {
@@ -13420,12 +13431,25 @@ fn build_set_operation_term(pair: Pair<'_, Rule>) -> Result<SelectStatement, Par
         }
         Rule::parenthesized_set_operation_term => {
             let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
-            if matches!(inner.as_rule(), Rule::parenthesized_set_operation_term) {
-                build_set_operation_term(inner)
-            } else {
-                build_select(inner)
+            match inner.as_rule() {
+                Rule::parenthesized_set_operation_term => build_set_operation_term(inner),
+                Rule::values_stmt => Ok(wrap_values_as_select(build_values_statement(inner)?)),
+                _ => build_select(inner),
             }
         }
+        Rule::parenthesized_select_stmt => build_select(
+            pair.into_inner()
+                .find(|part| matches!(part.as_rule(), Rule::select_stmt))
+                .ok_or(ParseError::UnexpectedEof)?,
+        ),
+        Rule::parenthesized_values_stmt => {
+            let values = pair
+                .into_inner()
+                .find(|part| matches!(part.as_rule(), Rule::values_stmt))
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(wrap_values_as_select(build_values_statement(values)?))
+        }
+        Rule::values_stmt => Ok(wrap_values_as_select(build_values_statement(pair)?)),
         Rule::simple_select_core
         | Rule::simple_select_stmt
         | Rule::set_operation_stmt
@@ -17484,6 +17508,7 @@ fn build_alter_table_drop_column(
 ) -> Result<AlterTableDropColumnStatement, ParseError> {
     let mut if_exists = false;
     let mut only = false;
+    let mut cascade = false;
     let mut parts = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -17495,6 +17520,7 @@ fn build_alter_table_drop_column(
                 parts.push(parsed_table_name);
             }
             Rule::identifier => parts.push(build_identifier(part)),
+            Rule::drop_behavior => cascade = part.as_str().eq_ignore_ascii_case("cascade"),
             _ => {}
         }
     }
@@ -17504,6 +17530,7 @@ fn build_alter_table_drop_column(
         only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         column_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        cascade,
     })
 }
 

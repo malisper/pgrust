@@ -4141,7 +4141,7 @@ impl CatalogStore {
         confdelsetcols: Option<&[i16]>,
         conperiod: bool,
         ctx: &CatalogWriteContext,
-    ) -> Result<CatalogMutationEffect, CatalogError> {
+    ) -> Result<(PgConstraintRow, CatalogMutationEffect), CatalogError> {
         let conname = conname.into();
         let table = self
             .relation_id_get_relation(ctx, relation_oid)?
@@ -4227,7 +4227,7 @@ impl CatalogStore {
         effect_record_oid(&mut effect.relation_oids, relation_oid);
         effect_record_oid(&mut effect.relation_oids, referenced_relation_oid);
         effect_record_oid(&mut effect.relation_oids, referenced_index_oid);
-        Ok(effect)
+        Ok((constraint, effect))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4249,7 +4249,7 @@ impl CatalogStore {
         confdelsetcols: Option<&[i16]>,
         conperiod: bool,
         ctx: &CatalogWriteContext,
-    ) -> Result<CatalogMutationEffect, CatalogError> {
+    ) -> Result<(PgConstraintRow, CatalogMutationEffect), CatalogError> {
         let conname = conname.into();
         if table.relkind != 'r' {
             return Err(CatalogError::UnknownTable(table.relation_oid.to_string()));
@@ -4328,7 +4328,7 @@ impl CatalogStore {
         effect_record_oid(&mut effect.relation_oids, table.relation_oid);
         effect_record_oid(&mut effect.relation_oids, referenced_table.relation_oid);
         effect_record_oid(&mut effect.relation_oids, referenced_index.relation_oid);
-        Ok(effect)
+        Ok((constraint, effect))
     }
 
     pub fn drop_relation_entry_by_oid_mvcc(

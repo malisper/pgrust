@@ -119,6 +119,7 @@ fn aggregate_path(
             pathtarget: reltarget,
             slot_id,
             strategy,
+            disabled: false,
             pathkeys,
             input: Box::new(input),
             group_by,
@@ -873,8 +874,13 @@ fn project_set_targets_for_srf_level(
         let Expr::SetReturning(srf) = expr.clone() else {
             unreachable!("SRF collector only returns Expr::SetReturning")
         };
+        let name = target_list
+            .iter()
+            .find(|target| target.expr == expr)
+            .map(|target| target.name.clone())
+            .unwrap_or_else(|| srf.name.clone());
         targets.push(ProjectSetTarget::Set {
-            name: srf.name.clone(),
+            name,
             source_expr: expr,
             call: srf.call.clone(),
             sql_type: srf.sql_type,
@@ -1727,6 +1733,23 @@ pub(super) fn grouping_planner(
             root,
             &sort_group_pathkeys(&root.parse.distinct_on, &root.processed_tlist),
         );
+    if !has_grouping
+        && !has_windowing(root)
+        && !has_target_srfs
+        && !root.query_pathkeys.is_empty()
+        && !distinct_on_constant
+        && current_rel.reltarget != root.sort_input_target
+    {
+        current_rel = make_pathtarget_projection_rel(
+            root,
+            current_rel,
+            &root.sort_input_target,
+            catalog,
+            false,
+        );
+        projection_done = current_rel.reltarget == root.final_target;
+    }
+
     if !root.query_pathkeys.is_empty() && !distinct_on_constant {
         current_rel = make_ordered_rel(root, current_rel, catalog);
     }

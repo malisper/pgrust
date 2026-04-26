@@ -81,6 +81,86 @@ fn unnest_element_type(arg_type: SqlType) -> Option<SqlType> {
     }
 }
 
+fn signed_integer_literal_type(expr: &SqlExpr) -> Option<SqlTypeKind> {
+    let (negative, value) = match expr {
+        SqlExpr::IntegerLiteral(value) => (false, value.as_str()),
+        SqlExpr::Negate(inner) => match inner.as_ref() {
+            SqlExpr::IntegerLiteral(value) => (true, value.as_str()),
+            _ => return None,
+        },
+        SqlExpr::UnaryPlus(inner) => match inner.as_ref() {
+            SqlExpr::IntegerLiteral(value) => (false, value.as_str()),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if !value.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let signed = if negative {
+        format!("-{value}")
+    } else {
+        value.to_string()
+    };
+    if signed.parse::<i32>().is_ok() {
+        Some(SqlTypeKind::Int4)
+    } else if signed.parse::<i64>().is_ok() {
+        Some(SqlTypeKind::Int8)
+    } else {
+        None
+    }
+}
+
+fn infer_random_function_return_type_with_ctes(
+    args: &[SqlFunctionArg],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> SqlType {
+    if args.is_empty() {
+        return SqlType::new(SqlTypeKind::Float8);
+    }
+    if args.len() != 2 {
+        return SqlType::new(SqlTypeKind::Float8);
+    }
+    if let (Some(left), Some(right)) = (
+        signed_integer_literal_type(&args[0].value),
+        signed_integer_literal_type(&args[1].value),
+    ) {
+        return if matches!(left, SqlTypeKind::Int8) || matches!(right, SqlTypeKind::Int8) {
+            SqlType::new(SqlTypeKind::Int8)
+        } else {
+            SqlType::new(SqlTypeKind::Int4)
+        };
+    }
+
+    let left = infer_sql_expr_type_with_ctes(
+        &args[0].value,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    );
+    let right = infer_sql_expr_type_with_ctes(
+        &args[1].value,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    );
+    if matches!(left.kind, SqlTypeKind::Numeric) || matches!(right.kind, SqlTypeKind::Numeric) {
+        SqlType::new(SqlTypeKind::Numeric)
+    } else if matches!(left.kind, SqlTypeKind::Int8) || matches!(right.kind, SqlTypeKind::Int8) {
+        SqlType::new(SqlTypeKind::Int8)
+    } else {
+        SqlType::new(SqlTypeKind::Int4)
+    }
+}
+
 pub(super) fn infer_sql_expr_type(
     expr: &SqlExpr,
     scope: &BoundScope,
@@ -827,7 +907,14 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 Some(BuiltinScalarFunction::TsRank | BuiltinScalarFunction::TsRankCd) => {
                     SqlType::new(SqlTypeKind::Float4)
                 }
-                Some(BuiltinScalarFunction::Random) => SqlType::new(SqlTypeKind::Float8),
+                Some(BuiltinScalarFunction::Random) => infer_random_function_return_type_with_ctes(
+                    args.args(),
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                ),
                 Some(BuiltinScalarFunction::CashLarger | BuiltinScalarFunction::CashSmaller) => {
                     SqlType::new(SqlTypeKind::Money)
                 }

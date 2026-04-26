@@ -37,18 +37,26 @@ fn lower_sublink_to_subplan(
         .target_list
         .first()
         .map(|target| target.sql_type);
-    let plan_id = append_planned_subquery(
-        planner(*sublink.subselect, catalog)
-            .expect("locking validation should complete before subplan lowering"),
-        subplans,
-    );
+    let planned_stmt = planner(*sublink.subselect, catalog)
+        .expect("locking validation should complete before subplan lowering");
+    let par_param = planned_stmt
+        .ext_params
+        .iter()
+        .map(|param| param.paramid)
+        .collect::<Vec<_>>();
+    let args = planned_stmt
+        .ext_params
+        .iter()
+        .map(|param| finalize_expr_subqueries(param.expr.clone(), catalog, subplans))
+        .collect::<Vec<_>>();
+    let plan_id = append_planned_subquery(planned_stmt, subplans);
     Expr::SubPlan(Box::new(SubPlan {
         sublink_type: sublink.sublink_type,
         testexpr,
         first_col_type,
         plan_id,
-        par_param: Vec::new(),
-        args: Vec::new(),
+        par_param,
+        args,
     }))
 }
 
@@ -351,22 +359,26 @@ fn finalize_set_returning_call(
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionTree {
             func_oid,
             func_variadic,
             relid: finalize_expr_subqueries(relid, catalog, subplans),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid: finalize_expr_subqueries(relid, catalog, subplans),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PgLockStatus {
             func_oid,
@@ -837,22 +849,26 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionTree {
             func_oid,
             func_variadic,
             relid: rebase_expr_subplan_ids(relid, base),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid: rebase_expr_subplan_ids(relid, base),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PgLockStatus {
             func_oid,
@@ -1215,11 +1231,13 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
         Plan::SetOp {
             plan_info,
             op,
+            strategy,
             output_columns,
             children,
         } => Plan::SetOp {
             plan_info,
             op,
+            strategy,
             output_columns,
             children: children
                 .into_iter()
@@ -1401,6 +1419,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
         Plan::Aggregate {
             plan_info,
             strategy,
+            disabled,
             input,
             group_by,
             passthrough_exprs,
@@ -1410,6 +1429,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
         } => Plan::Aggregate {
             plan_info,
             strategy,
+            disabled,
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
             group_by: group_by
                 .into_iter()
@@ -1632,11 +1652,13 @@ pub(super) fn finalize_plan_subqueries(
         Plan::SetOp {
             plan_info,
             op,
+            strategy,
             output_columns,
             children,
         } => Plan::SetOp {
             plan_info,
             op,
+            strategy,
             output_columns,
             children: children
                 .into_iter()
@@ -1823,6 +1845,7 @@ pub(super) fn finalize_plan_subqueries(
         Plan::Aggregate {
             plan_info,
             strategy,
+            disabled,
             input,
             group_by,
             passthrough_exprs,
@@ -1832,6 +1855,7 @@ pub(super) fn finalize_plan_subqueries(
         } => Plan::Aggregate {
             plan_info,
             strategy,
+            disabled,
             input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
             group_by: group_by
                 .into_iter()

@@ -96,6 +96,7 @@ use crate::include::catalog::{
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 pub use crate::pgrust::autovacuum::AutovacuumConfig;
 use crate::pgrust::cluster::{Cluster, ClusterShared, SessionActivityEntry, SessionActivityState};
+use crate::pl::plpgsql::PlpgsqlFunctionCache;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use ddl::{
     ensure_can_set_role, ensure_relation_owner, map_catalog_error,
@@ -214,6 +215,8 @@ pub struct Database {
     pub(crate) session_replication_role_states:
         Arc<RwLock<HashMap<ClientId, SessionReplicationRole>>>,
     pub(crate) session_stats_states: Arc<RwLock<HashMap<ClientId, Arc<RwLock<SessionStatsState>>>>>,
+    pub(crate) session_plpgsql_function_caches:
+        Arc<RwLock<HashMap<ClientId, Arc<RwLock<PlpgsqlFunctionCache>>>>>,
     pub(crate) session_temp_backend_ids: Arc<RwLock<HashMap<ClientId, TempBackendId>>>,
     pub(crate) database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
     pub(crate) temp_relations: Arc<RwLock<HashMap<TempBackendId, TempNamespace>>>,
@@ -639,6 +642,16 @@ impl Database {
             .insert(client_id, stats_state);
     }
 
+    pub(crate) fn install_plpgsql_function_cache(
+        &self,
+        client_id: ClientId,
+        cache: Arc<RwLock<PlpgsqlFunctionCache>>,
+    ) {
+        self.session_plpgsql_function_caches
+            .write()
+            .insert(client_id, cache);
+    }
+
     pub(crate) fn install_temp_backend_id(
         &self,
         client_id: ClientId,
@@ -690,8 +703,25 @@ impl Database {
             .unwrap_or_else(|| Arc::new(RwLock::new(SessionStatsState::default())))
     }
 
+    pub(crate) fn plpgsql_function_cache(
+        &self,
+        client_id: ClientId,
+    ) -> Arc<RwLock<PlpgsqlFunctionCache>> {
+        self.session_plpgsql_function_caches
+            .read()
+            .get(&client_id)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(RwLock::new(PlpgsqlFunctionCache::default())))
+    }
+
     pub(crate) fn clear_stats_state(&self, client_id: ClientId) {
         self.session_stats_states.write().remove(&client_id);
+    }
+
+    pub(crate) fn clear_plpgsql_function_cache(&self, client_id: ClientId) {
+        self.session_plpgsql_function_caches
+            .write()
+            .remove(&client_id);
     }
 
     pub(crate) fn clear_temp_backend_id(&self, client_id: ClientId) {
@@ -1440,6 +1470,7 @@ impl Database {
         self.clear_row_security_enabled(client_id);
         self.clear_session_replication_role(client_id);
         self.clear_stats_state(client_id);
+        self.clear_plpgsql_function_cache(client_id);
         self.sequences.clear_currvals_for_client(client_id);
     }
 

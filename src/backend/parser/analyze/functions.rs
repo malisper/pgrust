@@ -1262,6 +1262,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Random | BuiltinScalarFunction::RandomNormal => {
                 matches!(args.len(), 0 | 2)
             }
+            BuiltinScalarFunction::SetSeed => args.len() == 1,
             BuiltinScalarFunction::UuidIn
             | BuiltinScalarFunction::UuidOut
             | BuiltinScalarFunction::UuidRecv
@@ -2355,6 +2356,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("random_normal", BuiltinScalarFunction::RandomNormal),
         ("drandom_normal", BuiltinScalarFunction::RandomNormal),
         ("drandom_normal_noargs", BuiltinScalarFunction::RandomNormal),
+        ("setseed", BuiltinScalarFunction::SetSeed),
         ("pi", BuiltinScalarFunction::Pi),
         ("dpi", BuiltinScalarFunction::Pi),
         ("uuid_in", BuiltinScalarFunction::UuidIn),
@@ -3839,6 +3841,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::TsRank
             | BuiltinScalarFunction::TsRankCd
             | BuiltinScalarFunction::RandomNormal
+            | BuiltinScalarFunction::SetSeed
             | BuiltinScalarFunction::UuidIn
             | BuiltinScalarFunction::UuidOut
             | BuiltinScalarFunction::UuidRecv

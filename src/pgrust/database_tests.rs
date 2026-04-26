@@ -12,8 +12,9 @@ use crate::backend::utils::misc::notices::{
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BootstrapCatalogKind, CSTRING_TYPE_OID, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
-    PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_OPERATOR_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow, TEXT_TYPE_OID,
+    PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID,
+    PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
+    TEXT_TYPE_OID,
 };
 use crate::include::nodes::datum::{ArrayValue, IntervalValue, RecordValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
@@ -214,6 +215,7 @@ fn analyze_executor_context(
         transaction_lock_scope_id: None,
         next_command_id: cid,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+        random_state: crate::backend::executor::PgPrngState::shared(),
         timed: false,
         allow_side_effects: false,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -224,7 +226,10 @@ fn analyze_executor_context(
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
         catalog: visible_catalog,
-        compiled_functions: HashMap::new(),
+        plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
+            crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
+        )),
+        pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: HashMap::new(),
         cte_producers: HashMap::new(),
         recursive_worktables: HashMap::new(),
@@ -257,6 +262,88 @@ fn ephemeral_database_executes_basic_sql() {
             vec![Value::Int32(1), Value::Text("a".into())],
             vec![Value::Int32(2), Value::Text("b".into())],
         ]
+    );
+}
+
+#[test]
+fn session_setseed_affects_following_random_statement() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select oid, prosrc from pg_proc where proname = 'setseed'",
+        ),
+        vec![vec![Value::Int64(1599), Value::Text("setseed".into())]]
+    );
+    session
+        .execute(&db, "select setseed(0.5)")
+        .expect("seed random state");
+    let result = session
+        .execute(&db, "select random() from generate_series(1, 3)")
+        .expect("read seeded random values");
+    let StatementResult::Query { rows, .. } = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(rows.len(), 3);
+    let expected = [0.9851677175347999, 0.825301858027981, 0.12974610012450416];
+    for (row, expected) in rows.iter().zip(expected) {
+        match row.first() {
+            Some(Value::Float64(actual)) => assert_eq!(*actual, expected),
+            other => panic!("expected float8 random value, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn cte_order_by_feeds_row_number_in_materialized_order() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "
+            with samples as (
+                select column1 r from (values (3), (1), (2)) v order by 1
+            ), indexed_samples as (
+                select row_number() over () i, r from samples
+            )
+            select i, r from indexed_samples
+            ",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Int64(1), Value::Int32(1)],
+            vec![Value::Int64(2), Value::Int32(2)],
+            vec![Value::Int64(3), Value::Int32(3)],
+        ],
+    );
+}
+
+#[test]
+fn order_by_ordinal_sorts_projected_volatile_value() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select random() r from generate_series(1, 50) order by 1",
+    );
+    let values = rows
+        .iter()
+        .map(|row| match row.as_slice() {
+            [Value::Float64(value)] => *value,
+            other => panic!("expected one float8 column, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        values.windows(2).all(|pair| pair[0] <= pair[1]),
+        "ORDER BY 1 must sort the projected random() values: {values:?}"
     );
 }
 
@@ -7979,6 +8066,303 @@ fn information_schema_view_metadata_tracks_updatable_views() {
 }
 
 #[test]
+fn information_schema_columns_reports_generated_column_metadata() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table gtest0 (a int primary key, b int generated always as (55) virtual)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table gtest1 (a int primary key, b int generated always as (a * 2) virtual)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select table_name, column_name, column_default, is_nullable, is_generated, generation_expression
+             from information_schema.columns
+             where table_schema = 'public' and table_name in ('gtest0', 'gtest1')
+             order by 1, 2",
+        ),
+        vec![
+            vec![
+                Value::Text("gtest0".into()),
+                Value::Text("a".into()),
+                Value::Null,
+                Value::Text("NO".into()),
+                Value::Text("NEVER".into()),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("gtest0".into()),
+                Value::Text("b".into()),
+                Value::Null,
+                Value::Text("YES".into()),
+                Value::Text("ALWAYS".into()),
+                Value::Text("55".into()),
+            ],
+            vec![
+                Value::Text("gtest1".into()),
+                Value::Text("a".into()),
+                Value::Null,
+                Value::Text("NO".into()),
+                Value::Text("NEVER".into()),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("gtest1".into()),
+                Value::Text("b".into()),
+                Value::Null,
+                Value::Text("YES".into()),
+                Value::Text("ALWAYS".into()),
+                Value::Text("(a * 2)".into()),
+            ],
+        ]
+    );
+
+    let rows = query_rows(
+        &db,
+        1,
+        "select * from information_schema.columns where table_name = 'gtest1' and column_name = 'b'",
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].len(), 44);
+}
+
+#[test]
+fn information_schema_column_column_usage_reports_generated_dependencies() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table gtest1 (a int primary key, b int generated always as (a * 2) virtual)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select table_name, column_name, dependent_column
+             from information_schema.column_column_usage
+             where table_schema = 'public'
+             order by 1, 2, 3",
+        ),
+        vec![vec![
+            Value::Text("gtest1".into()),
+            Value::Text("a".into()),
+            Value::Text("b".into()),
+        ]]
+    );
+
+    let relation = db
+        .lazy_catalog_lookup(1, None, None)
+        .lookup_any_relation("gtest1")
+        .unwrap();
+    let attrdef_oid = relation.desc.columns[1].attrdef_oid.unwrap();
+    assert!(
+        db.backend_catcache(1, None)
+            .unwrap()
+            .depend_rows()
+            .iter()
+            .any(|row| {
+                row.classid == PG_ATTRDEF_RELATION_OID
+                    && row.objid == attrdef_oid
+                    && row.refclassid == PG_CLASS_RELATION_OID
+                    && row.refobjid == relation.relation_oid
+                    && row.refobjsubid == 1
+                    && row.deptype == 'n'
+            })
+    );
+}
+
+#[test]
+fn generated_column_source_drop_uses_dependency_metadata_for_restrict_and_cascade() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table gtest10 (
+            a int primary key,
+            b int,
+            c int generated always as (b * 2) virtual
+        )",
+    )
+    .unwrap();
+
+    match db.execute(1, "alter table gtest10 drop column b") {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(
+                message,
+                "cannot drop column b of table gtest10 because other objects depend on it"
+            );
+            assert_eq!(
+                detail.as_deref(),
+                Some("column c of table gtest10 depends on column b of table gtest10")
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some("Use DROP ... CASCADE to drop the dependent objects too.")
+            );
+            assert_eq!(sqlstate, "2BP01");
+        }
+        other => panic!("expected generated dependency restrict error, got {other:?}"),
+    }
+
+    clear_backend_notices();
+    db.execute(1, "alter table gtest10 drop column b cascade")
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec!["drop cascades to column c of table gtest10".to_string()]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select column_name
+             from information_schema.columns
+             where table_name = 'gtest10'
+             order by ordinal_position",
+        ),
+        vec![vec![Value::Text("a".into())]]
+    );
+}
+
+#[test]
+fn generated_inheritance_metadata_conflicts_and_not_null_names_match_parent() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table gtest1 (a int primary key, b int generated always as (a * 2) virtual)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table gtesty (x int, b int generated always as (x * 22) virtual)",
+    )
+    .unwrap();
+
+    match db.execute(1, "create table gtest1_y () inherits (gtest1, gtesty)") {
+        Err(ExecError::Parse(ParseError::DetailedError { message, hint, .. })) => {
+            assert_eq!(
+                message,
+                "column \"b\" inherits conflicting generation expressions"
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some("To resolve the conflict, specify a generation expression explicitly.")
+            );
+        }
+        other => panic!("expected generated inheritance conflict, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "create table gtest1_y (b int generated always as (x + 1) virtual) inherits (gtest1, gtesty)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select generation_expression
+             from information_schema.columns
+             where table_name = 'gtest1_y' and column_name = 'b'",
+        ),
+        vec![vec![Value::Text("(x + 1)".into())]]
+    );
+
+    db.execute(1, "create table gtest_normal (a int, b int)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table gtest_normal_child (a int, b int generated always as (a * 2) virtual)",
+    )
+    .unwrap();
+    match db.execute(1, "alter table gtest_normal_child inherit gtest_normal") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "column \"b\" in child table must not be a generated column"
+            );
+        }
+        other => panic!("expected alter inherit generated mismatch, got {other:?}"),
+    }
+
+    db.execute(1, "create table gtestxx_1 (a int not null, b int)")
+        .unwrap();
+    match db.execute(1, "alter table gtestxx_1 inherit gtest1") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "column \"b\" in child table must be a generated column"
+            );
+        }
+        other => panic!("expected alter inherit missing generated column, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "create table gtestx (x int, b int generated always as (a * 22) virtual) inherits (gtest1)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.conname
+             from pg_constraint c
+             join pg_class r on r.oid = c.conrelid
+             where r.relname = 'gtestx' and c.contype = 'n'",
+        ),
+        vec![vec![Value::Text("gtest1_a_not_null".into())]]
+    );
+}
+
+#[test]
+fn drop_table_cascade_notice_uses_visible_search_path_name() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create schema generated_virtual_tests")
+        .unwrap();
+    session
+        .execute(&db, "set search_path = generated_virtual_tests")
+        .unwrap();
+    session
+        .execute(&db, "create table gtestp (f1 int)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table gtestc (f2 int generated always as (f1 + 1) virtual) inherits (gtestp)",
+        )
+        .unwrap();
+    take_backend_notice_messages();
+
+    session.execute(&db, "drop table gtestp cascade").unwrap();
+
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from("drop cascades to table gtestc")]
+    );
+}
+
+#[test]
 fn create_view_supports_check_option_and_or_replace() {
     let dir = temp_dir("create_view_check_option_replace");
     let db = Database::open(&dir, 128).unwrap();
@@ -10901,6 +11285,192 @@ fn statement_trigger_return_value_is_ignored() {
     assert_eq!(
         query_rows(&db, 1, "select id from items"),
         vec![vec![Value::Int32(1)]]
+    );
+}
+
+#[test]
+fn foreign_key_actions_respect_disabled_internal_triggers() {
+    let dir = temp_dir("fk_actions_disabled_internal_triggers");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 references parents(id) on delete cascade)",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1), (2)")
+        .unwrap();
+    db.execute(1, "insert into children values (1), (2)")
+        .unwrap();
+
+    db.execute(1, "alter table parents disable trigger user")
+        .unwrap();
+    db.execute(1, "delete from parents where id = 2").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id from children order by id"),
+        vec![vec![Value::Int32(1)]]
+    );
+
+    db.execute(1, "alter table parents disable trigger all")
+        .unwrap();
+    db.execute(1, "delete from parents where id = 1").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id from children order by id"),
+        vec![vec![Value::Int32(1)]]
+    );
+}
+
+#[test]
+fn foreign_key_checks_respect_disabled_internal_triggers() {
+    let dir = temp_dir("fk_checks_disabled_internal_triggers");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(1, "create table children (id int4 references parents(id))")
+        .unwrap();
+
+    db.execute(1, "alter table children disable trigger all")
+        .unwrap();
+    db.execute(1, "insert into children values (99)").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id from children"),
+        vec![vec![Value::Int32(99)]]
+    );
+
+    db.execute(1, "alter table children enable trigger all")
+        .unwrap();
+    match db.execute(1, "insert into children values (100)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. })
+            if constraint == "children_id_fkey" => {}
+        other => panic!("expected foreign key violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn partition_trigger_state_propagates_to_clones_unless_only() {
+    let dir = temp_dir("partition_trigger_state_propagates");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parent_part (id int4) partition by range (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table child_part partition of parent_part for values from (0) to (10)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function part_trig_fn() returns trigger language plpgsql as $$ begin return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger part_trig after insert on parent_part for each row execute function part_trig_fn()",
+    )
+    .unwrap();
+
+    db.execute(1, "alter table parent_part disable trigger part_trig")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, t.tgenabled::text \
+             from pg_trigger t join pg_class c on c.oid = t.tgrelid \
+             where t.tgname = 'part_trig' order by c.relname"
+        ),
+        vec![
+            vec![Value::Text("child_part".into()), Value::Text("D".into())],
+            vec![Value::Text("parent_part".into()), Value::Text("D".into())],
+        ]
+    );
+
+    db.execute(
+        1,
+        "alter table only parent_part enable always trigger part_trig",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, t.tgenabled::text \
+             from pg_trigger t join pg_class c on c.oid = t.tgrelid \
+             where t.tgname = 'part_trig' order by c.relname"
+        ),
+        vec![
+            vec![Value::Text("child_part".into()), Value::Text("D".into())],
+            vec![Value::Text("parent_part".into()), Value::Text("A".into())],
+        ]
+    );
+}
+
+#[test]
+fn trigger_relid_regclass_assignment_uses_relation_name() {
+    let dir = temp_dir("trigger_relid_regclass_assignment");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(1, "create table trigger_items (id int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function relid_notice() returns trigger language plpgsql as $$ \
+         declare relid text; \
+         begin \
+           relid := TG_RELID::regclass; \
+           raise notice 'relid %', relid; \
+           return new; \
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger relid_notice before insert on trigger_items for each row execute function relid_notice()",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "insert into trigger_items values (1)")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![String::from("relid trigger_items")]
+    );
+}
+
+#[test]
+fn partition_ancestors_supports_with_ordinality() {
+    let dir = temp_dir("partition_ancestors_with_ordinality");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parent_part (id int4) partition by range (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table child_part partition of parent_part for values from (0) to (10)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relid::regclass::text, ordinality \
+             from pg_partition_ancestors('child_part') with ordinality as a(relid, ordinality)"
+        ),
+        vec![
+            vec![Value::Text("child_part".into()), Value::Int64(1)],
+            vec![Value::Text("parent_part".into()), Value::Int64(2)],
+        ]
     );
 }
 
@@ -28019,6 +28589,112 @@ fn plpgsql_cte_select_into_assigns_target() {
 }
 
 #[test]
+fn plpgsql_cte_body_can_reference_local_generate_series_bound() {
+    let base = temp_dir("plpgsql_cte_local_generate_series");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            r#"
+            create function cte_local_series_count(n int4) returns int8 language plpgsql as $$
+            declare
+                total int8;
+            begin
+                with samples as (
+                    select generate_series from generate_series(1, n)
+                )
+                select into total count(*) from samples;
+                return total;
+            end
+            $$
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select cte_local_series_count(5)"),
+        vec![vec![Value::Int64(5)]]
+    );
+}
+
+#[test]
+fn plpgsql_cte_assignment_subquery_can_reference_local_generate_series_bound() {
+    let base = temp_dir("plpgsql_cte_assignment_local_generate_series");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            r#"
+            create function cte_assignment_local_series_count(n int4) returns bool language plpgsql as $$
+            declare
+                ok bool;
+            begin
+                ok := (
+                    with samples as (
+                        select generate_series from generate_series(1, n)
+                    )
+                    select count(*) = n from samples
+                );
+                return ok;
+            end
+            $$
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select cte_assignment_local_series_count(5)"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn plpgsql_cte_assignment_subquery_with_random_normal_ks_expr_returns() {
+    let base = temp_dir("plpgsql_cte_random_normal_ks_expr");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            r#"
+            create function cte_random_normal_ks_expr(n int4) returns bool language plpgsql as $$
+            declare
+                c float8 := 1.94947;
+                ok bool;
+            begin
+                ok := (
+                    with samples as (
+                        select random_normal() r from generate_series(1, n) order by 1
+                    ), indexed_samples as (
+                        select (row_number() over())-1.0 i, r from samples
+                    )
+                    select max(abs((1+erf(r/sqrt(2)))/2 - i/n)) < c / sqrt(n)
+                    from indexed_samples
+                );
+                return ok;
+            end
+            $$
+            "#,
+        )
+        .unwrap();
+
+    match session_query_rows(&mut session, &db, "select cte_random_normal_ks_expr(1000)").as_slice()
+    {
+        [row] => assert!(matches!(row.as_slice(), [Value::Bool(_)])),
+        rows => panic!("expected one boolean row, got {rows:?}"),
+    }
+}
+
+#[test]
 fn copy_into_partitioned_table_handles_reordered_child_columns() {
     let base = temp_dir("copy_partition_reordered_columns");
     let db = Database::open(&base, 16).unwrap();
@@ -30325,6 +31001,206 @@ fn create_or_replace_function_updates_existing_body() {
         query_rows(&db, 1, "select inc(4)"),
         vec![vec![Value::Int32(6)]]
     );
+}
+
+#[test]
+fn plpgsql_function_cache_reuses_scalar_across_statements() {
+    let dir = temp_dir("plpgsql_cache_scalar");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
+        )
+        .unwrap();
+    assert_eq!(session.plpgsql_function_cache_len(), 0);
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(2)"),
+        vec![vec![Value::Int32(3)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+}
+
+#[test]
+fn plpgsql_function_cache_recompiles_create_or_replace_body() {
+    let dir = temp_dir("plpgsql_cache_replace");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+
+    session
+        .execute(
+            &db,
+            "create or replace function inc(x int4) returns int4 language plpgsql as $$ begin return x + 2; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(3)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+}
+
+#[test]
+fn plpgsql_function_cache_does_not_reuse_dropped_function_body() {
+    let dir = temp_dir("plpgsql_cache_drop_recreate");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(2)]]
+    );
+    session.execute(&db, "drop function inc(int4)").unwrap();
+    session
+        .execute(
+            &db,
+            "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 9; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(10)]]
+    );
+}
+
+#[test]
+fn plpgsql_function_cache_keeps_polymorphic_signatures_separate() {
+    let dir = temp_dir("plpgsql_cache_polymorphic");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function echo_any(x anyelement) returns anyelement language plpgsql as $$ begin return x; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select echo_any(7::int4)"),
+        vec![vec![Value::Int32(7)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select echo_any('txt'::text)"),
+        vec![vec![Value::Text("txt".into())]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 2);
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select echo_any(8::int4)"),
+        vec![vec![Value::Int32(8)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 2);
+}
+
+#[test]
+fn plpgsql_function_cache_reuses_trigger_function_across_statements() {
+    let dir = temp_dir("plpgsql_cache_trigger");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4, note text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function row_notice() returns trigger language plpgsql as $$
+             begin
+               raise notice '%:%', TG_OP, NEW.id;
+               return NEW;
+             end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create trigger items_notice before insert on items for each row execute function row_notice()",
+        )
+        .unwrap();
+
+    clear_notices();
+    session
+        .execute(&db, "insert into items values (1, 'a')")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["INSERT:1".to_string()]);
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+    clear_notices();
+    session
+        .execute(&db, "insert into items values (2, 'b')")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["INSERT:2".to_string()]);
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+}
+
+#[test]
+fn plpgsql_function_cache_uses_current_transition_table_rows() {
+    let dir = temp_dir("plpgsql_cache_transition_table");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4, note text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function insert_transition_notice() returns trigger language plpgsql as $$
+             declare c int4; s int4;
+             begin
+               select count(*), sum(id) into c, s from new_rows;
+               raise notice 'insert:%:%', c, s;
+               return null;
+             end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create trigger items_insert_ref after insert on items referencing new table as new_rows for each statement execute function insert_transition_notice()",
+        )
+        .unwrap();
+
+    clear_notices();
+    session
+        .execute(&db, "insert into items values (1, 'a'), (2, 'b')")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["insert:2:3".to_string()]);
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+
+    clear_notices();
+    session
+        .execute(
+            &db,
+            "insert into items values (10, 'x'), (20, 'y'), (30, 'z')",
+        )
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["insert:3:60".to_string()]);
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
 }
 
 #[test]

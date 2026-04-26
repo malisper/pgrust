@@ -1,4 +1,5 @@
 mod ast;
+mod cache;
 mod compile;
 mod exec;
 mod gram;
@@ -9,6 +10,7 @@ use crate::backend::executor::{ExecError, ExecutorContext, StatementResult};
 use crate::backend::parser::{Catalog, CatalogLookup, DoStatement, ParseError};
 
 pub use ast::*;
+pub use cache::PlpgsqlFunctionCache;
 pub use compile::{CompiledFunction, TriggerTransitionTable};
 pub use exec::{
     PlpgsqlNotice, TriggerCallContext, TriggerFunctionResult, TriggerOperation, clear_notices,
@@ -315,6 +317,47 @@ mod tests {
                 ExecError::DetailedError { message, sqlstate: "XX001", .. } if message == "bad rows"
             ));
         });
+    }
+
+    #[test]
+    fn execute_do_raise_sqlstate_uses_literal_message_and_handler() {
+        run_plpgsql_test(
+            "execute_do_raise_sqlstate_uses_literal_message_and_handler",
+            || {
+                let err = execute_do(&DoStatement {
+                    language: None,
+                    code: "begin raise exception sqlstate 'U9999'; end".into(),
+                })
+                .unwrap_err();
+                assert!(matches!(
+                    err,
+                    ExecError::DetailedError { message, sqlstate: "U9999", .. } if message == "U9999"
+                ));
+
+                let stmt = DoStatement {
+                    language: None,
+                    code: r#"
+                    begin
+                        begin
+                            raise exception sqlstate 'U9999';
+                        exception when sqlstate 'U9999' then
+                            raise notice 'handled';
+                        end;
+                    end
+                "#
+                    .into(),
+                };
+
+                assert_eq!(execute_do(&stmt).unwrap(), StatementResult::AffectedRows(0));
+                assert_eq!(
+                    take_notices(),
+                    vec![PlpgsqlNotice {
+                        level: RaiseLevel::Notice,
+                        message: "handled".into(),
+                    }]
+                );
+            },
+        );
     }
 
     #[test]
