@@ -1549,33 +1549,29 @@ fn eval_least(values: &[Value]) -> Result<Value, ExecError> {
 fn lookup_system_binding(
     bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
     varno: usize,
-) -> Result<Value, ExecError> {
+) -> Value {
     bindings
         .iter()
         .find(|binding| binding.varno == varno)
         .map(|binding| Value::Int64(i64::from(binding.table_oid)))
-        .ok_or(ExecError::DetailedError {
-            message: "tableoid is not available for this row".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        })
+        .unwrap_or(Value::Null)
 }
 
-fn lookup_ctid(slot: &TupleSlot) -> Result<Value, ExecError> {
-    slot.tid()
+fn lookup_ctid(
+    bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
+    varno: usize,
+) -> Value {
+    bindings
+        .iter()
+        .find(|binding| binding.varno == varno)
+        .and_then(|binding| binding.tid)
         .map(|tid| {
             Value::Text(CompactString::from_owned(format!(
                 "({},{})",
                 tid.block_number, tid.offset_number
             )))
         })
-        .ok_or(ExecError::DetailedError {
-            message: "ctid is not available for this row".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        })
+        .unwrap_or(Value::Null)
 }
 
 fn builtin_function_for_expr(funcid: u32) -> Result<BuiltinScalarFunction, ExecError> {
@@ -3920,9 +3916,9 @@ pub fn eval_expr(
                     sqlstate: "XX000",
                 })
             } else if var.varattno == TABLE_OID_ATTR_NO {
-                lookup_system_binding(&ctx.system_bindings, var.varno)
+                Ok(lookup_system_binding(&ctx.system_bindings, var.varno))
             } else if var.varattno == SELF_ITEM_POINTER_ATTR_NO {
-                lookup_ctid(slot)
+                Ok(lookup_ctid(&ctx.system_bindings, var.varno))
             } else {
                 let index = attrno_index(var.varattno).ok_or_else(|| {
                     malformed_expr_error("system attribute outside executor support")
