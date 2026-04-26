@@ -1,6 +1,8 @@
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
+use crate::include::nodes::parsenodes::{
+    JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RangeTblEref,
+};
 use crate::include::nodes::primnodes::{
     Aggref, BoolExpr, BoolExprType, CaseExpr, CaseWhen, Expr, ExprArraySubscript, FuncExpr,
     JoinType, OpExpr, OpExprKind, OrderByEntry, RelationDesc, ScalarArrayOpExpr, SubLink,
@@ -452,6 +454,15 @@ fn make_pulled_up_join(
     let joinleftcols = (1..=left_desc.columns.len()).collect::<Vec<_>>();
     query.rtable.push(RangeTblEntry {
         alias: None,
+        alias_preserves_source_names: false,
+        eref: RangeTblEref {
+            aliasname: "join".into(),
+            colnames: left_desc
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+        },
         desc: left_desc.clone(),
         inh: false,
         security_quals: Vec::new(),

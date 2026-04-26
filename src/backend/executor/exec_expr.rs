@@ -123,7 +123,7 @@ use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
 };
-use crate::backend::rewrite::format_view_definition;
+use crate::backend::rewrite::{format_stored_rule_definition, format_view_definition};
 use crate::backend::statistics::{
     render_pg_dependencies_text, render_pg_mcv_list_text, render_pg_ndistinct_text,
 };
@@ -2857,6 +2857,37 @@ fn eval_pg_get_viewdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value,
     let definition =
         format_view_definition(relation_oid, &relation.desc, catalog).map_err(ExecError::Parse)?;
     Ok(Value::Text(definition.into()))
+}
+
+fn eval_pg_get_ruledef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let catalog = executor_catalog(ctx)?;
+    let rule_oid = match values {
+        [Value::Null] | [Value::Null, _] | [_, Value::Null] => return Ok(Value::Null),
+        [value] | [value, _] => oid_arg_to_u32(value, "pg_get_ruledef")?,
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "pg_get_ruledef(rule [, pretty])",
+                actual: format!("PgGetRuleDef({} args)", values.len()),
+            }));
+        }
+    };
+    if rule_oid == 0 {
+        return Ok(Value::Null);
+    }
+    let Some(rule) = catalog
+        .rewrite_rows()
+        .into_iter()
+        .find(|row| row.oid == rule_oid)
+    else {
+        return Ok(Value::Null);
+    };
+    let relation_name = catalog
+        .class_row_by_oid(rule.ev_class)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| rule.ev_class.to_string());
+    Ok(Value::Text(
+        format_stored_rule_definition(&rule, &relation_name).into(),
+    ))
 }
 
 fn eval_pg_get_triggerdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -6832,6 +6863,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgGetConstraintDef => eval_pg_get_constraintdef(&values, ctx),
         BuiltinScalarFunction::PgGetIndexDef => eval_pg_get_indexdef(&values, ctx),
         BuiltinScalarFunction::PgGetViewDef => eval_pg_get_viewdef(&values, ctx),
+        BuiltinScalarFunction::PgGetRuleDef => eval_pg_get_ruledef(&values, ctx),
         BuiltinScalarFunction::PgGetTriggerDef => eval_pg_get_triggerdef(&values, ctx),
         BuiltinScalarFunction::PgTriggerDepth => Ok(Value::Int32(ctx.trigger_depth as i32)),
         BuiltinScalarFunction::PgRelationIsPublishable => {

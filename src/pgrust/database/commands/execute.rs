@@ -3,11 +3,103 @@ use crate::backend::executor::{
     ExecutorTransactionState, SharedExecutorTransactionState, execute_planned_stmt,
     execute_readonly_statement_with_config,
 };
-use crate::backend::parser::ParseOptions;
+use crate::backend::parser::{
+    CatalogLookup, CteBody, FromItem, InsertSource, InsertStatement, ParseOptions, SelectStatement,
+};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::stack_depth::StackDepthGuard;
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::pl::plpgsql::execute_do_with_gucs;
+
+fn restrict_nonsystem_view_enabled(gucs: &std::collections::HashMap<String, String>) -> bool {
+    gucs.get("restrict_nonsystem_relation_kind")
+        .map(|value| {
+            value
+                .split(',')
+                .any(|part| part.trim().trim_matches('\'').eq_ignore_ascii_case("view"))
+        })
+        .unwrap_or(false)
+}
+
+fn reject_restricted_view_access(name: &str, catalog: &dyn CatalogLookup) -> Result<(), ExecError> {
+    let Some(entry) = catalog.lookup_any_relation(name) else {
+        return Ok(());
+    };
+    if entry.relkind == 'v'
+        && entry.namespace_oid != crate::include::catalog::PG_CATALOG_NAMESPACE_OID
+    {
+        return Err(ExecError::DetailedError {
+            message: format!("access to non-system view \"{name}\" is restricted"),
+            detail: None,
+            hint: None,
+            sqlstate: "42501",
+        });
+    }
+    Ok(())
+}
+
+fn reject_restricted_views_in_select(
+    select: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    for cte in &select.with {
+        reject_restricted_views_in_cte_body(&cte.body, catalog)?;
+    }
+    if let Some(from) = &select.from {
+        reject_restricted_views_in_from_item(from, catalog)?;
+    }
+    if let Some(set_op) = &select.set_operation {
+        for input in &set_op.inputs {
+            reject_restricted_views_in_select(input, catalog)?;
+        }
+    }
+    Ok(())
+}
+
+fn reject_restricted_views_in_cte_body(
+    body: &CteBody,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    match body {
+        CteBody::Select(select) => reject_restricted_views_in_select(select, catalog),
+        CteBody::Values(_) => Ok(()),
+        CteBody::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            reject_restricted_views_in_cte_body(anchor, catalog)?;
+            reject_restricted_views_in_select(recursive, catalog)
+        }
+    }
+}
+
+fn reject_restricted_views_in_from_item(
+    item: &FromItem,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    match item {
+        FromItem::Table { name, .. } => reject_restricted_view_access(name, catalog),
+        FromItem::DerivedTable(select) => reject_restricted_views_in_select(select, catalog),
+        FromItem::Join { left, right, .. } => {
+            reject_restricted_views_in_from_item(left, catalog)?;
+            reject_restricted_views_in_from_item(right, catalog)
+        }
+        FromItem::Alias { source, .. } | FromItem::Lateral(source) => {
+            reject_restricted_views_in_from_item(source, catalog)
+        }
+        FromItem::Values { .. } | FromItem::FunctionCall { .. } => Ok(()),
+    }
+}
+
+fn reject_restricted_views_in_insert(
+    insert: &InsertStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    reject_restricted_view_access(&insert.table_name, catalog)?;
+    if let InsertSource::Select(select) = &insert.source {
+        reject_restricted_views_in_select(select, catalog)?;
+    }
+    Ok(())
+}
 
 fn autocommit_datetime_config(config: &DateTimeConfig) -> DateTimeConfig {
     let statement_timestamp_usecs = config
@@ -1128,6 +1220,19 @@ impl Database {
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let visible_catalog =
                     self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                if restrict_nonsystem_view_enabled(gucs) {
+                    match &stmt {
+                        Statement::Select(select) => {
+                            reject_restricted_views_in_select(select, &visible_catalog)?;
+                        }
+                        Statement::Explain(explain) => {
+                            if let Statement::Select(select) = explain.statement.as_ref() {
+                                reject_restricted_views_in_select(select, &visible_catalog)?;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 let (stmt, planned_select, rels) = {
                     let mut rels = std::collections::BTreeSet::new();
                     let mut planned_select = None;
@@ -1278,6 +1383,9 @@ impl Database {
             }
             Statement::Insert(ref insert_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                if restrict_nonsystem_view_enabled(gucs) {
+                    reject_restricted_views_in_insert(insert_stmt, &catalog)?;
+                }
                 let bound = bind_insert(insert_stmt, &catalog)?;
                 let prepared = super::rules::prepare_bound_insert_for_execution(bound, &catalog)?;
                 let lock_requests = merge_table_lock_requests(
