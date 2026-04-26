@@ -618,12 +618,15 @@ fn split_create_schema_elements(input: &str) -> Result<Vec<String>, ParseError> 
             break;
         };
         let index = offset + relative;
-        starts.push(index);
+        let tail = &input[index..];
+        if keyword_at_start(tail, "grant") || is_create_schema_element_start(tail) {
+            starts.push(index);
+        }
         offset = index
-            + if keyword_at_start(&input[index..], "create") {
-                "create".len()
-            } else {
+            + if keyword_at_start(tail, "grant") {
                 "grant".len()
+            } else {
+                "create".len()
             };
     }
     if starts.is_empty() {
@@ -642,6 +645,20 @@ fn split_create_schema_elements(input: &str) -> Result<Vec<String>, ParseError> 
         }
     }
     Ok(elements)
+}
+
+fn is_create_schema_element_start(input: &str) -> bool {
+    let mut rest = consume_keyword(input, "create").trim_start();
+    if keyword_at_start(rest, "temp") {
+        rest = consume_keyword(rest, "temp").trim_start();
+    } else if keyword_at_start(rest, "temporary") {
+        rest = consume_keyword(rest, "temporary").trim_start();
+    }
+    keyword_at_start(rest, "sequence")
+        || keyword_at_start(rest, "table")
+        || keyword_at_start(rest, "view")
+        || keyword_at_start(rest, "index")
+        || keyword_at_start(rest, "trigger")
 }
 
 #[derive(Debug)]
@@ -9497,9 +9514,18 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_rename_stmt => Ok(Statement::AlterTableRename(build_alter_table_rename(
             inner,
         )?)),
+        Rule::alter_table_set_schema_stmt => Ok(Statement::AlterTableSetSchema(
+            build_alter_relation_set_schema(inner)?,
+        )),
         Rule::alter_view_owner_stmt => Ok(Statement::AlterViewOwner(build_alter_relation_owner(
             inner,
         )?)),
+        Rule::alter_view_rename_column_stmt => Ok(Statement::AlterViewRenameColumn(
+            build_alter_view_rename_column(inner)?,
+        )),
+        Rule::alter_view_set_schema_stmt => Ok(Statement::AlterViewSetSchema(
+            build_alter_relation_set_schema(inner)?,
+        )),
         Rule::alter_schema_owner_stmt => Ok(Statement::AlterSchemaOwner(build_alter_schema_owner(
             inner,
         )?)),
@@ -9529,6 +9555,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::comment_on_table_stmt => {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
         }
+        Rule::comment_on_view_stmt => Ok(Statement::CommentOnView(build_comment_on_view(inner)?)),
         Rule::comment_on_index_stmt => {
             Ok(Statement::CommentOnIndex(build_comment_on_index(inner)?))
         }
@@ -11825,6 +11852,7 @@ fn build_create_materialized_view(
 fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseError> {
     let mut relation_name = None;
     let mut persistence = TablePersistence::Permanent;
+    let mut options = Vec::new();
     let mut query = None;
     let mut query_sql = None;
     let mut or_replace = false;
@@ -11835,6 +11863,14 @@ fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseE
             Rule::temp_clause => persistence = TablePersistence::Temporary,
             Rule::identifier if relation_name.is_none() => {
                 relation_name = Some(build_relation_name(part))
+            }
+            Rule::view_options_clause => {
+                for option in part
+                    .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::view_reloption)
+                {
+                    options.push(build_view_reloption(option)?);
+                }
             }
             Rule::select_stmt => {
                 query_sql = Some(part.as_str().trim().to_string());
@@ -11862,6 +11898,7 @@ fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseE
         schema_name,
         view_name,
         persistence,
+        options,
         query: query.ok_or(ParseError::UnexpectedEof)?,
         query_sql: query_sql.ok_or(ParseError::UnexpectedEof)?,
         or_replace,
@@ -12906,6 +12943,29 @@ fn build_comment_on_table(pair: Pair<'_, Rule>) -> Result<CommentOnTableStatemen
     })
 }
 
+fn build_comment_on_view(pair: Pair<'_, Rule>) -> Result<CommentOnViewStatement, ParseError> {
+    let mut view_name = None;
+    let mut comment = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => view_name = Some(build_identifier(part)),
+            Rule::quoted_string_literal
+            | Rule::string_literal
+            | Rule::unicode_string_literal
+            | Rule::escape_string_literal
+            | Rule::dollar_string_literal => {
+                comment = Some(Some(decode_string_literal_pair(part)?))
+            }
+            Rule::kw_null => comment = Some(None),
+            _ => {}
+        }
+    }
+    Ok(CommentOnViewStatement {
+        view_name: view_name.ok_or(ParseError::UnexpectedEof)?,
+        comment: comment.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
 fn build_comment_on_index(pair: Pair<'_, Rule>) -> Result<CommentOnIndexStatement, ParseError> {
     let mut index_name = None;
     let mut comment = None;
@@ -13021,6 +13081,22 @@ fn build_reloption(pair: Pair<'_, Rule>) -> Result<RelOption, ParseError> {
     Ok(RelOption {
         name: name.ok_or(ParseError::UnexpectedEof)?,
         value: value.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_view_reloption(pair: Pair<'_, Rule>) -> Result<RelOption, ParseError> {
+    let mut name = None;
+    let mut value = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::set_value_atom => value = Some(build_set_value_atom(part)?),
+            _ => {}
+        }
+    }
+    Ok(RelOption {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        value: value.unwrap_or_else(|| "true".into()),
     })
 }
 
@@ -13675,6 +13751,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
             }
             _ => raw_type_output_name(ty).to_string(),
         },
+        SqlExpr::Collate { expr, .. } => select_item_name(expr, index),
         SqlExpr::Case { .. } => "case".to_string(),
         SqlExpr::Row(_) => "row".to_string(),
         SqlExpr::Random => "random".to_string(),
@@ -14925,6 +15002,32 @@ fn build_alter_table_rename_column(
     })
 }
 
+fn build_alter_view_rename_column(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableRenameColumnStatement, ParseError> {
+    let mut if_exists = false;
+    let mut parts = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_view_target => {
+                let (parsed_if_exists, table_name) = build_alter_view_target(part)?;
+                if_exists = parsed_if_exists;
+                parts.push(table_name);
+            }
+            Rule::identifier => parts.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    let mut parts = parts.into_iter();
+    Ok(AlterTableRenameColumnStatement {
+        if_exists,
+        only: false,
+        table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        column_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        new_column_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
 fn build_alter_table_target(pair: Pair<'_, Rule>) -> Result<(bool, bool, String), ParseError> {
     let mut if_exists = false;
     let mut only = false;
@@ -14942,6 +15045,48 @@ fn build_alter_table_target(pair: Pair<'_, Rule>) -> Result<(bool, bool, String)
         only,
         table_name.ok_or(ParseError::UnexpectedEof)?,
     ))
+}
+
+fn build_alter_view_target(pair: Pair<'_, Rule>) -> Result<(bool, String), ParseError> {
+    let mut if_exists = false;
+    let mut table_name = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::if_exists_clause => if_exists = true,
+            Rule::identifier => table_name = Some(build_identifier(part)),
+            _ => {}
+        }
+    }
+    Ok((if_exists, table_name.ok_or(ParseError::UnexpectedEof)?))
+}
+
+fn build_alter_relation_set_schema(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterRelationSetSchemaStatement, ParseError> {
+    let mut if_exists = false;
+    let mut relation_name = None;
+    let mut schema_name = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, _, parsed_relation_name) = build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                relation_name = Some(parsed_relation_name);
+            }
+            Rule::alter_view_target => {
+                let (parsed_if_exists, parsed_relation_name) = build_alter_view_target(part)?;
+                if_exists = parsed_if_exists;
+                relation_name = Some(parsed_relation_name);
+            }
+            Rule::identifier => schema_name = Some(build_identifier(part)),
+            _ => {}
+        }
+    }
+    Ok(AlterRelationSetSchemaStatement {
+        if_exists,
+        relation_name: relation_name.ok_or(ParseError::UnexpectedEof)?,
+        schema_name: schema_name.ok_or(ParseError::UnexpectedEof)?,
+    })
 }
 
 fn add_array_bounds(ty: RawTypeName, bounds: usize) -> RawTypeName {

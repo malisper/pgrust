@@ -271,6 +271,7 @@ impl CatCache {
                 relispartition: entry.relispartition,
                 relfrozenxid: entry.relfrozenxid,
                 relpartbound: entry.relpartbound.clone(),
+                reloptions: entry.reloptions.clone(),
                 relacl: entry.relacl.clone(),
             };
             cache.classes_by_name.insert(

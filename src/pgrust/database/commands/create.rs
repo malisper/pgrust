@@ -3,19 +3,20 @@ use crate::backend::commands::partition::validate_new_partition_bound;
 use crate::backend::parser::{
     AggregateArgType, AggregateSignatureKind, CreateAggregateStatement, CreateFunctionReturnSpec,
     CreateFunctionStatement, CreateProcedureStatement, FunctionArgMode, FunctionParallel,
-    FunctionVolatility, OwnedSequenceSpec, PartitionBoundSpec, RawTypeName, SequenceOptionsSpec,
-    SqlType, SqlTypeKind, Statement, parse_statement, pg_partitioned_table_row,
-    resolve_raw_type_name, serialize_partition_bound,
+    FunctionVolatility, OwnedSequenceSpec, PartitionBoundSpec, RawTypeName, RelOption,
+    SequenceOptionsSpec, SqlType, SqlTypeKind, Statement, parse_statement,
+    pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
 };
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
 use crate::include::catalog::{
     ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
     BOOTSTRAP_SUPERUSER_OID, BYTEA_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PgAggregateRow,
-    PgProcRow, RECORD_TYPE_OID, VOID_TYPE_OID,
+    PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID,
+    PgAggregateRow, PgProcRow, RECORD_TYPE_OID, VOID_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::include::nodes::primnodes::{QueryColumn, RelationDesc};
+use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pgrust::database::{
     SequenceData, SequenceRuntime, default_sequence_name_base, format_nextval_default_oid,
     initial_sequence_state, resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
@@ -227,19 +228,105 @@ fn validate_partitioned_table_ddl(
     Ok(())
 }
 
-fn existing_view_prefix_matches(
+fn validate_create_or_replace_view_columns(
     old_desc: &crate::backend::executor::RelationDesc,
     new_desc: &crate::backend::executor::RelationDesc,
-) -> bool {
-    old_desc.columns.len() <= new_desc.columns.len()
-        && old_desc
-            .columns
-            .iter()
-            .zip(new_desc.columns.iter())
-            .all(|(old_column, new_column)| {
-                old_column.name.eq_ignore_ascii_case(&new_column.name)
-                    && old_column.sql_type == new_column.sql_type
-            })
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    if old_desc.columns.len() > new_desc.columns.len() {
+        return Err(ExecError::DetailedError {
+            message: "cannot drop columns from view".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+
+    for (old_column, new_column) in old_desc.columns.iter().zip(new_desc.columns.iter()) {
+        if !old_column.name.eq_ignore_ascii_case(&new_column.name) {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot change name of view column \"{}\" to \"{}\"",
+                    old_column.name, new_column.name
+                ),
+                detail: None,
+                hint: Some(
+                    "Use ALTER VIEW ... RENAME COLUMN ... to change name of view column instead."
+                        .into(),
+                ),
+                sqlstate: "42P16",
+            });
+        }
+        if old_column.sql_type != new_column.sql_type {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot change data type of view column \"{}\" from {} to {}",
+                    old_column.name,
+                    format_sql_type_name(old_column.sql_type),
+                    format_sql_type_name(new_column.sql_type)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
+        if old_column.collation_oid != new_column.collation_oid {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot change collation of view column \"{}\" from \"{}\" to \"{}\"",
+                    old_column.name,
+                    collation_name(catalog, old_column.collation_oid),
+                    collation_name(catalog, new_column.collation_oid)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn collation_name(catalog: &dyn CatalogLookup, oid: u32) -> String {
+    catalog
+        .collation_rows()
+        .into_iter()
+        .find(|row| row.oid == oid)
+        .map(|row| row.collname)
+        .unwrap_or_else(|| oid.to_string())
+}
+
+fn create_view_reloptions(options: &[RelOption]) -> Result<Option<Vec<String>>, ExecError> {
+    let mut reloptions = Vec::new();
+    for option in options {
+        let name = option.name.to_ascii_lowercase();
+        if !matches!(name.as_str(), "security_barrier" | "security_invoker") {
+            return Err(ExecError::DetailedError {
+                message: format!("unrecognized parameter \"{}\"", option.name),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            });
+        }
+        let value = match option.value.to_ascii_lowercase().as_str() {
+            "true" | "on" => "true",
+            "false" | "off" => "false",
+            _ => {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "invalid value for boolean option \"{name}\": {}",
+                        option.value
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22023",
+                });
+            }
+        };
+        reloptions.push(format!("{name}={value}"));
+    }
+    Ok((!reloptions.is_empty()).then_some(reloptions))
 }
 
 pub(super) fn normalize_create_proc_name_for_search_path(
@@ -1026,6 +1113,7 @@ impl Database {
                         'p',
                         'S',
                         self.auth_state(client_id).current_user_oid(),
+                        None,
                         &ctx,
                     )
                     .map_err(map_catalog_error)?;
@@ -1043,6 +1131,7 @@ impl Database {
                     xid,
                     cid,
                     'S',
+                    None,
                     catalog_effects,
                     temp_effects,
                 )?;
@@ -1439,16 +1528,19 @@ impl Database {
             .language_row_by_name(&create_stmt.language)
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "LANGUAGE plpgsql, sql, or internal",
+                    expected: "LANGUAGE plpgsql, sql, internal, or c",
                     actual: format!("LANGUAGE {}", create_stmt.language),
                 })
             })?;
         if !matches!(
             language_row.oid,
-            PG_LANGUAGE_PLPGSQL_OID | PG_LANGUAGE_SQL_OID | PG_LANGUAGE_INTERNAL_OID
+            PG_LANGUAGE_PLPGSQL_OID
+                | PG_LANGUAGE_SQL_OID
+                | PG_LANGUAGE_INTERNAL_OID
+                | PG_LANGUAGE_C_OID
         ) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "LANGUAGE plpgsql, sql, or internal",
+                expected: "LANGUAGE plpgsql, sql, internal, or c",
                 actual: format!("LANGUAGE {}", create_stmt.language),
             }));
         }
@@ -1682,6 +1774,15 @@ impl Database {
             }));
         }
 
+        let prosrc = if language_row.oid == PG_LANGUAGE_C_OID {
+            create_stmt
+                .link_symbol
+                .clone()
+                .unwrap_or_else(|| function_name.clone())
+        } else {
+            create_stmt.body.clone()
+        };
+
         let proc_row = PgProcRow {
             oid: 0,
             proname: function_name.clone(),
@@ -1731,7 +1832,7 @@ impl Database {
             proallargtypes,
             proargmodes,
             proargnames,
-            prosrc: create_stmt.body.clone(),
+            prosrc,
         };
 
         let ctx = CatalogWriteContext {
@@ -2201,6 +2302,7 @@ impl Database {
                             'p',
                             relation_relkind,
                             self.auth_state(client_id).current_user_oid(),
+                            None,
                             &ctx,
                         )
                         .map(|(entry, effect)| {
@@ -2377,6 +2479,7 @@ impl Database {
                     xid,
                     table_cid,
                     relation_relkind,
+                    None,
                     catalog_effects,
                     temp_effects,
                 )?;
@@ -2578,6 +2681,7 @@ impl Database {
                 .map(|(name, column)| column_desc(name, column.sql_type, true))
                 .collect(),
         };
+        let reloptions = create_view_reloptions(&create_stmt.options)?;
         let mut referenced_relation_oids = std::collections::BTreeSet::new();
         collect_direct_relation_oids_from_select(
             &create_stmt.query,
@@ -2585,9 +2689,35 @@ impl Database {
             &mut Vec::new(),
             &mut referenced_relation_oids,
         );
-        let existing_relation = catalog
-            .lookup_any_relation(&view_name)
-            .filter(|relation| relation.namespace_oid == namespace_oid);
+        let references_temporary_relation = referenced_relation_oids.iter().any(|oid| {
+            catalog
+                .relation_by_oid(*oid)
+                .or_else(|| catalog.lookup_relation_by_oid(*oid))
+                .is_some_and(|relation| relation.relpersistence == 't')
+        });
+        let effective_persistence = if create_stmt.persistence == TablePersistence::Permanent
+            && references_temporary_relation
+        {
+            push_notice(format!(
+                "view \"{}\" will be a temporary view",
+                create_stmt.view_name.to_ascii_lowercase()
+            ));
+            if create_stmt.schema_name.is_some() {
+                return Err(ExecError::Parse(ParseError::TempTableInNonTempSchema(
+                    view_name.clone(),
+                )));
+            }
+            TablePersistence::Temporary
+        } else {
+            create_stmt.persistence
+        };
+        let existing_relation = if effective_persistence == TablePersistence::Permanent {
+            catalog
+                .lookup_any_relation(&view_name)
+                .filter(|relation| relation.namespace_oid == namespace_oid)
+        } else {
+            None
+        };
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -2608,20 +2738,21 @@ impl Database {
                     expected: "view",
                 }));
             }
-            if !existing_view_prefix_matches(&existing_relation.desc, &desc) {
-                return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
-                    "CREATE OR REPLACE VIEW can only add new columns at the end of the view".into(),
-                )));
-            }
+            validate_create_or_replace_view_columns(&existing_relation.desc, &desc, &catalog)?;
             let replace_effect = self
                 .catalog
                 .write()
-                .alter_view_relation_desc_mvcc(existing_relation.relation_oid, desc, &ctx)
+                .alter_view_relation_desc_mvcc(
+                    existing_relation.relation_oid,
+                    desc,
+                    reloptions.clone(),
+                    &ctx,
+                )
                 .map_err(map_catalog_error)?;
             catalog_effects.push(replace_effect);
             existing_relation.relation_oid
         } else {
-            match create_stmt.persistence {
+            match effective_persistence {
                 TablePersistence::Permanent => {
                     let (entry, create_effect) = self
                         .catalog
@@ -2631,6 +2762,7 @@ impl Database {
                             desc,
                             namespace_oid,
                             self.auth_state(client_id).current_user_oid(),
+                            reloptions.clone(),
                             &ctx,
                         )
                         .map_err(map_catalog_error)?;
@@ -2640,12 +2772,13 @@ impl Database {
                 TablePersistence::Temporary => {
                     let created = self.create_temp_relation_with_relkind_in_transaction(
                         client_id,
-                        view_name.clone(),
+                        create_stmt.view_name.to_ascii_lowercase(),
                         desc,
                         OnCommitAction::PreserveRows,
                         xid,
                         cid,
                         'v',
+                        reloptions.clone(),
                         catalog_effects,
                         temp_effects,
                     )?;

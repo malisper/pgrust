@@ -216,9 +216,12 @@ fn execute_statement_with_source(
             }))
         }
         Statement::AlterTableRename(_)
+        | Statement::AlterTableSetSchema(_)
         | Statement::AlterIndexRename(_)
         | Statement::AlterIndexAttachPartition(_)
         | Statement::AlterViewRename(_)
+        | Statement::AlterViewRenameColumn(_)
+        | Statement::AlterViewSetSchema(_)
         | Statement::AlterIndexAlterColumnStatistics(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "ALTER TABLE/INDEX/VIEW handled by database/session layer",
@@ -275,6 +278,10 @@ fn execute_statement_with_source(
         Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON TABLE handled by database/session layer",
             actual: "COMMENT ON TABLE".into(),
+        })),
+        Statement::CommentOnView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COMMENT ON VIEW handled by database/session layer",
+            actual: "COMMENT ON VIEW".into(),
         })),
         Statement::CommentOnIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON INDEX handled by database/session layer",
@@ -563,7 +570,10 @@ pub fn execute_readonly_statement_with_config(
         | Statement::Set(_)
         | Statement::Reset(_)
         | Statement::AlterTableSet(_)
+        | Statement::AlterTableSetSchema(_)
         | Statement::AlterTableRenameColumn(_)
+        | Statement::AlterViewRenameColumn(_)
+        | Statement::AlterViewSetSchema(_)
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableDropColumn(_)
         | Statement::AlterTableAlterColumnType(_)
@@ -573,7 +583,9 @@ pub fn execute_readonly_statement_with_config(
         | Statement::AlterTableAlterColumnExpression(_)
         | Statement::AlterTableAttachPartition(_)
         | Statement::AlterTableDetachPartition(_) => Ok(StatementResult::AffectedRows(0)),
-        Statement::AlterTableRename(_) => Ok(StatementResult::AffectedRows(0)),
+        Statement::AlterTableRename(_) | Statement::AlterViewRename(_) => {
+            Ok(StatementResult::AffectedRows(0))
+        }
         Statement::Merge(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "MERGE".into(),
         ))),
@@ -581,6 +593,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "COMMENT ON TABLE".into(),
+        })),
+        Statement::CommentOnView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "COMMENT ON VIEW".into(),
         })),
         Statement::CommentOnIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
