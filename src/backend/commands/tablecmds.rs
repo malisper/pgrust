@@ -4138,7 +4138,6 @@ pub(crate) fn materialize_insert_rows(
                         ctx,
                     )?;
                 }
-                apply_overriding_user_identity_defaults(stmt, &mut values, ctx)?;
                 enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
                 Ok(values)
             })
@@ -4150,7 +4149,6 @@ pub(crate) fn materialize_insert_rows(
                 let value = eval_expr(expr, &mut slot, ctx)?;
                 apply_assignment_target(&stmt.desc, &mut values, target, value, &mut slot, ctx)?;
             }
-            apply_overriding_user_identity_defaults(stmt, &mut values, ctx)?;
             enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
             Ok(vec![values])
         }

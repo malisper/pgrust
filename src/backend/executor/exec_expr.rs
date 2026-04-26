@@ -1549,17 +1549,11 @@ fn eval_least(values: &[Value]) -> Result<Value, ExecError> {
 fn lookup_system_binding(
     bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
     varno: usize,
-) -> Result<Value, ExecError> {
+) -> Option<Value> {
     bindings
         .iter()
         .find(|binding| binding.varno == varno)
         .map(|binding| Value::Int64(i64::from(binding.table_oid)))
-        .ok_or(ExecError::DetailedError {
-            message: "tableoid is not available for this row".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        })
 }
 
 fn ctid_value(tid: crate::include::access::htup::ItemPointerData) -> Value {
@@ -1572,18 +1566,12 @@ fn ctid_value(tid: crate::include::access::htup::ItemPointerData) -> Value {
 fn lookup_ctid_binding(
     bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
     varno: usize,
-) -> Result<Value, ExecError> {
+) -> Option<Value> {
     bindings
         .iter()
         .find(|binding| binding.varno == varno)
         .and_then(|binding| binding.tid)
         .map(ctid_value)
-        .ok_or(ExecError::DetailedError {
-            message: "ctid is not available for this row".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        })
 }
 
 fn builtin_function_for_expr(funcid: u32) -> Result<BuiltinScalarFunction, ExecError> {
@@ -4007,14 +3995,13 @@ pub fn eval_expr(
                     sqlstate: "XX000",
                 })
             } else if var.varattno == TABLE_OID_ATTR_NO {
-                lookup_system_binding(&ctx.system_bindings, var.varno).or_else(|err| {
-                    slot.table_oid
-                        .map(|table_oid| Value::Int64(i64::from(table_oid)))
-                        .ok_or(err)
-                })
+                Ok(lookup_system_binding(&ctx.system_bindings, var.varno)
+                    .or_else(|| slot.table_oid.map(|table_oid| Value::Int64(i64::from(table_oid))))
+                    .unwrap_or(Value::Null))
             } else if var.varattno == SELF_ITEM_POINTER_ATTR_NO {
-                lookup_ctid_binding(&ctx.system_bindings, var.varno)
-                    .or_else(|err| slot.tid().map(ctid_value).ok_or(err))
+                Ok(lookup_ctid_binding(&ctx.system_bindings, var.varno)
+                    .or_else(|| slot.tid().map(ctid_value))
+                    .unwrap_or(Value::Null))
             } else {
                 let index = attrno_index(var.varattno).ok_or_else(|| {
                     malformed_expr_error("system attribute outside executor support")

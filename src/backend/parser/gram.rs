@@ -13639,6 +13639,7 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
             Ok(CteBody::Select(Box::new(build_select(pair)?)))
         }
         Rule::values_stmt => Ok(CteBody::Values(build_values_statement(pair)?)),
+        Rule::insert_stmt => Ok(CteBody::Insert(Box::new(build_insert(pair)?))),
         Rule::recursive_union_cte_body => {
             let all = contains_union_all(pair.as_str());
             let mut inner = pair.into_inner();
@@ -13662,7 +13663,7 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
             })
         }
         _ => Err(ParseError::UnexpectedToken {
-            expected: "SELECT or VALUES CTE body",
+            expected: "SELECT, VALUES, or INSERT CTE body",
             actual: pair.as_str().into(),
         }),
     }
