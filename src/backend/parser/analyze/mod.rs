@@ -2081,7 +2081,7 @@ fn group_by_target_ordinal_expr(
     if ordinal == 0 || ordinal > targets.len() {
         return Err(ParseError::UnexpectedToken {
             expected: "GROUP BY position in select list",
-            actual: value.clone(),
+            actual: format!("GROUP BY position {value} is not in select list"),
         });
     }
     Ok(Some(targets[ordinal - 1].expr.clone()))
@@ -4565,7 +4565,7 @@ fn bind_select_query_with_outer(
                             bind_order_by_items(&stmt.order_by, &targets, catalog, |expr| {
                                 bind_agg_output_expr_in_clause(
                                     expr,
-                                    UngroupedColumnClause::SelectTarget,
+                                    UngroupedColumnClause::OrderBy,
                                     &effective_group_by,
                                     &group_keys,
                                     &scope,

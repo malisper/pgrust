@@ -1889,7 +1889,9 @@ pub(super) fn bind_scalar_function_call(
                 ],
             ))
         }
-        BuiltinScalarFunction::Lower | BuiltinScalarFunction::Unistr => {
+        BuiltinScalarFunction::Lower
+        | BuiltinScalarFunction::Upper
+        | BuiltinScalarFunction::Unistr => {
             let arg_type = infer_sql_expr_type_with_ctes(
                 &args[0],
                 scope,

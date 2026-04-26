@@ -1072,6 +1072,14 @@ pub(super) fn bind_agg_output_expr_in_clause(
             return Ok(grouped_key_expr(group_key_exprs, i));
         }
     }
+    if let Ok(bound_expr) =
+        bind_grouped_plain_expr(expr, input_scope, catalog, outer_scopes, grouped_outer)
+        && let Some(i) = group_key_exprs
+            .iter()
+            .position(|group_key| group_key == &bound_expr)
+    {
+        return Ok(grouped_key_expr(group_key_exprs, i));
+    }
 
     match expr {
         SqlExpr::Collate { expr, collation } => {
