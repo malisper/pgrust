@@ -21,6 +21,7 @@ pub const BTREE_MACADDR_FAMILY_OID: u32 = 76040;
 pub const BTREE_MACADDR8_FAMILY_OID: u32 = 76041;
 pub const BTREE_DATETIME_FAMILY_OID: u32 = 434;
 pub const BTREE_FLOAT_FAMILY_OID: u32 = 1970;
+pub const BTREE_INTERVAL_FAMILY_OID: u32 = 1982;
 pub const BTREE_VARBIT_FAMILY_OID: u32 = 2002;
 pub const BTREE_RANGE_FAMILY_OID: u32 = 3901;
 pub const BTREE_MULTIRANGE_FAMILY_OID: u32 = 4199;
@@ -60,6 +61,7 @@ pub const HASH_CHAR_FAMILY_OID: u32 = 431;
 pub const HASH_DATE_FAMILY_OID: u32 = 435;
 pub const HASH_FLOAT_FAMILY_OID: u32 = 1971;
 pub const HASH_INTEGER_FAMILY_OID: u32 = 1977;
+pub const HASH_INTERVAL_FAMILY_OID: u32 = 1983;
 pub const HASH_NUMERIC_FAMILY_OID: u32 = 1998;
 pub const HASH_OID_FAMILY_OID: u32 = 1990;
 pub const HASH_TEXT_FAMILY_OID: u32 = 1995;
@@ -172,6 +174,13 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             oid: BTREE_INTEGER_FAMILY_OID,
             opfmethod: BTREE_AM_OID,
             opfname: "integer_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: BTREE_INTERVAL_FAMILY_OID,
+            opfmethod: BTREE_AM_OID,
+            opfname: "interval_ops".into(),
             opfnamespace: PG_CATALOG_NAMESPACE_OID,
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },
@@ -346,6 +355,7 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
         hash_row(HASH_DATE_FAMILY_OID, "date_ops"),
         hash_row(HASH_FLOAT_FAMILY_OID, "float_ops"),
         hash_row(HASH_INTEGER_FAMILY_OID, "integer_ops"),
+        hash_row(HASH_INTERVAL_FAMILY_OID, "interval_ops"),
         hash_row(HASH_NUMERIC_FAMILY_OID, "numeric_ops"),
         hash_row(HASH_OID_FAMILY_OID, "oid_ops"),
         hash_row(HASH_TEXT_FAMILY_OID, "text_ops"),

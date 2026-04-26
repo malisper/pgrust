@@ -43,6 +43,7 @@ pub fn compare_bt_values(left: &Value, right: &Value) -> Ordering {
         }
         (Value::InternalChar(a), Value::InternalChar(b)) => a.cmp(b),
         (Value::Range(a), Value::Range(b)) => compare_range_values(a, b),
+        (Value::Interval(a), Value::Interval(b)) => a.cmp_key().cmp(&b.cmp_key()),
         (Value::Multirange(a), Value::Multirange(b)) => compare_multirange_values(a, b),
         (Value::Inet(a) | Value::Cidr(a), Value::Inet(b) | Value::Cidr(b)) => {
             compare_network_values(a, b)

@@ -1790,7 +1790,9 @@ fn build_join_paths_internal(
     let allow_base_cross_swap = matches!(kind, JoinType::Cross)
         && !lateral_orientation_locked
         && path_relids(&left).len() == 1
-        && path_relids(&right).len() == 1;
+        && path_relids(&right).len() == 1
+        && !path_is_values_relation(&left)
+        && !path_is_values_relation(&right);
     let allow_swapped_orientation = matches!(kind, JoinType::Inner)
         && (!right_uses_immediate_outer || !lateral_orientation_locked)
         || allow_base_cross_swap;
@@ -1961,6 +1963,20 @@ fn cross_join_left_relid_count(path: &Path) -> Option<usize> {
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => cross_join_left_relid_count(input),
         _ => None,
+    }
+}
+
+fn path_is_values_relation(path: &Path) -> bool {
+    match path {
+        Path::Values { .. } => true,
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. } => path_is_values_relation(input),
+        _ => false,
     }
 }
 
@@ -2426,20 +2442,20 @@ fn estimate_nested_loop_join_internal(
 ) -> Path {
     let left_info = left.plan_info();
     let right_info = right.plan_info();
-    let join_sel =
-        selectivity_for_restrict_clauses(&restrict_clauses, left_info.plan_rows.as_f64());
-    let rows = estimate_join_rows(
-        left_info.plan_rows.as_f64(),
-        right_info.plan_rows.as_f64(),
-        kind,
-        join_sel,
-    );
+    let left_rows = clamp_rows(left_info.plan_rows.as_f64());
+    let right_rows = clamp_rows(right_info.plan_rows.as_f64());
+    let join_sel = selectivity_for_restrict_clauses(&restrict_clauses, left_rows);
+    let rows = estimate_join_rows(left_rows, right_rows, kind, join_sel);
+    let materialized_right = materialized_inner_first_scan_cost(right_info);
+    let materialized_right_rescan = materialized_inner_rescan_cost(right_info);
+    let join_tuples = left_rows * right_rows;
+    let join_cpu = join_tuple_cpu_cost(join_tuples, &restrict_clauses);
+    let output_cpu = output_tuple_cpu_cost(rows);
     let total = left_info.total_cost.as_f64()
-        + left_info.plan_rows.as_f64() * right_info.total_cost.as_f64()
-        + left_info.plan_rows.as_f64()
-            * right_info.plan_rows.as_f64()
-            * predicate_cost_for_restrict_clauses(&restrict_clauses)
-            * CPU_OPERATOR_COST;
+        + materialized_right
+        + (left_rows - 1.0).max(0.0) * materialized_right_rescan
+        + join_cpu
+        + output_cpu;
     Path::NestedLoopJoin {
         plan_info: PlanEstimate::new(
             left_info.startup_cost.as_f64() + right_info.startup_cost.as_f64(),
@@ -2497,6 +2513,24 @@ fn estimate_nested_loop_join_with_root(
         pathtarget,
         output_columns,
     )
+}
+
+fn materialized_inner_first_scan_cost(info: PlanEstimate) -> f64 {
+    let rows = clamp_rows(info.plan_rows.as_f64());
+    info.total_cost.as_f64() + 2.0 * CPU_OPERATOR_COST * rows
+}
+
+fn materialized_inner_rescan_cost(info: PlanEstimate) -> f64 {
+    CPU_OPERATOR_COST * clamp_rows(info.plan_rows.as_f64())
+}
+
+fn join_tuple_cpu_cost(tuples: f64, clauses: &[RestrictInfo]) -> f64 {
+    let qual_cost = predicate_cost_for_restrict_clauses(clauses) * CPU_OPERATOR_COST;
+    clamp_rows(tuples) * (CPU_TUPLE_COST + qual_cost)
+}
+
+fn output_tuple_cpu_cost(rows: f64) -> f64 {
+    clamp_rows(rows) * CPU_TUPLE_COST
 }
 
 fn hash_join_selectivity(hash_clauses: &[Expr], join_qual: &[Expr], left_rows: f64) -> f64 {
@@ -2573,24 +2607,27 @@ fn estimate_hash_join_internal(
 
     let left_info = left.plan_info();
     let right_info = right.plan_info();
+    let left_rows = clamp_rows(left_info.plan_rows.as_f64());
+    let right_rows = clamp_rows(right_info.plan_rows.as_f64());
+    let hash_sel = selectivity_for_restrict_clauses(&hash_clauses, left_rows);
     let join_sel = hash_join_selectivity(
         &clause_exprs(&hash_clauses),
         &clause_exprs(&join_clauses),
-        left_info.plan_rows.as_f64(),
+        left_rows,
     );
-    let rows = estimate_join_rows(
-        left_info.plan_rows.as_f64(),
-        right_info.plan_rows.as_f64(),
-        kind,
-        join_sel,
-    );
-    let build_cpu = right_info.plan_rows.as_f64()
-        * ((inner_hash_keys.len() as f64) * CPU_OPERATOR_COST + CPU_TUPLE_COST);
-    let probe_cpu =
-        left_info.plan_rows.as_f64() * (outer_hash_keys.len() as f64) * CPU_OPERATOR_COST;
-    let recheck_cpu = rows * predicate_cost_for_restrict_clauses(&join_clauses) * CPU_OPERATOR_COST;
+    let rows = estimate_join_rows(left_rows, right_rows, kind, join_sel);
+    let hash_candidate_rows = estimate_join_rows(left_rows, right_rows, kind, hash_sel);
+    let build_cpu =
+        right_rows * ((inner_hash_keys.len() as f64) * CPU_OPERATOR_COST + CPU_TUPLE_COST);
+    let probe_cpu = left_rows * (outer_hash_keys.len() as f64) * CPU_OPERATOR_COST;
+    let hash_qual_cpu = hash_candidate_rows
+        * predicate_cost_for_restrict_clauses(&hash_clauses)
+        * CPU_OPERATOR_COST;
+    let residual_cpu = join_tuple_cpu_cost(rows, &join_clauses);
+    let output_cpu = output_tuple_cpu_cost(rows);
     let startup = left_info.startup_cost.as_f64() + right_info.total_cost.as_f64() + build_cpu;
-    let total = startup + left_info.total_cost.as_f64() + probe_cpu + recheck_cpu;
+    let left_run_cost = left_info.total_cost.as_f64() - left_info.startup_cost.as_f64();
+    let total = startup + left_run_cost + probe_cpu + hash_qual_cpu + residual_cpu + output_cpu;
 
     Path::HashJoin {
         plan_info: PlanEstimate::new(
@@ -2670,28 +2707,29 @@ fn estimate_merge_join_internal(
     let right = ensure_path_sorted_for_merge(right, &inner_pathkeys);
     let left_info = left.plan_info();
     let right_info = right.plan_info();
+    let left_rows = clamp_rows(left_info.plan_rows.as_f64());
+    let right_rows = clamp_rows(right_info.plan_rows.as_f64());
+    let merge_sel = selectivity_for_restrict_clauses(&merge_clauses, left_rows);
     let join_sel = hash_join_selectivity(
         &clause_exprs(&merge_clauses),
         &clause_exprs(&join_clauses),
-        left_info.plan_rows.as_f64(),
+        left_rows,
     );
-    let rows = estimate_join_rows(
-        left_info.plan_rows.as_f64(),
-        right_info.plan_rows.as_f64(),
-        kind,
-        join_sel,
-    );
-    let key_compare_cpu = (left_info.plan_rows.as_f64() + right_info.plan_rows.as_f64())
-        * (outer_merge_keys.len() as f64)
+    let rows = estimate_join_rows(left_rows, right_rows, kind, join_sel);
+    let merge_candidate_rows = estimate_join_rows(left_rows, right_rows, kind, merge_sel);
+    let key_compare_cpu =
+        (left_rows + right_rows) * (outer_merge_keys.len() as f64) * CPU_OPERATOR_COST;
+    let merge_qual_cpu = merge_candidate_rows
+        * predicate_cost_for_restrict_clauses(&merge_clauses)
         * CPU_OPERATOR_COST;
-    let recheck_cpu = rows
-        * (predicate_cost_for_restrict_clauses(&merge_clauses)
-            + predicate_cost_for_restrict_clauses(&join_clauses))
-        * CPU_OPERATOR_COST;
+    let residual_cpu = join_tuple_cpu_cost(rows, &join_clauses);
+    let output_cpu = output_tuple_cpu_cost(rows);
     let total = left_info.total_cost.as_f64()
         + right_info.total_cost.as_f64()
         + key_compare_cpu
-        + recheck_cpu;
+        + merge_qual_cpu
+        + residual_cpu
+        + output_cpu;
 
     Path::MergeJoin {
         plan_info: PlanEstimate::new(

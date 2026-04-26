@@ -424,9 +424,7 @@ fn render_wrapped_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) 
 fn render_function(func: &FuncExpr, query: &Query, catalog: &dyn CatalogLookup) -> String {
     if matches!(
         func.implementation,
-        ScalarFunctionImpl::Builtin(
-            BuiltinScalarFunction::Timezone | BuiltinScalarFunction::TimeZone
-        )
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Timezone)
     ) {
         return render_timezone_function(func, query, catalog);
     }
@@ -672,7 +670,6 @@ fn render_builtin_function_name(func: BuiltinScalarFunction) -> &'static str {
         BuiltinScalarFunction::PgGetViewDef => "pg_get_viewdef",
         BuiltinScalarFunction::CurrentSetting => "current_setting",
         BuiltinScalarFunction::Timezone => "timezone",
-        BuiltinScalarFunction::TimeZone => "timezone",
         BuiltinScalarFunction::DatePart => "date_part",
         BuiltinScalarFunction::Extract => "extract",
         _ => "function",

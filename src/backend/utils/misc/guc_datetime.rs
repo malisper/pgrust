@@ -13,10 +13,19 @@ pub enum DateOrder {
     Ymd,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntervalStyle {
+    Postgres,
+    PostgresVerbose,
+    SqlStandard,
+    Iso8601,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DateTimeConfig {
     pub date_style_format: DateStyleFormat,
     pub date_order: DateOrder,
+    pub interval_style: IntervalStyle,
     pub time_zone: String,
     pub transaction_timestamp_usecs: Option<i64>,
     pub statement_timestamp_usecs: Option<i64>,
@@ -31,6 +40,7 @@ impl Default for DateTimeConfig {
         Self {
             date_style_format,
             date_order,
+            interval_style: IntervalStyle::Postgres,
             time_zone: default_timezone(),
             transaction_timestamp_usecs: None,
             statement_timestamp_usecs: None,
@@ -59,6 +69,10 @@ pub fn default_datetime_config() -> DateTimeConfig {
 
 pub fn default_timezone() -> String {
     std::env::var("PGTZ").unwrap_or_else(|_| "UTC".into())
+}
+
+pub fn default_intervalstyle() -> &'static str {
+    "postgres"
 }
 
 pub fn parse_datestyle(value: &str) -> Option<(DateStyleFormat, DateOrder)> {
@@ -107,6 +121,25 @@ pub fn format_datestyle(config: &DateTimeConfig) -> String {
         DateOrder::Ymd => "YMD",
     };
     format!("{format}, {order}")
+}
+
+pub fn parse_intervalstyle(value: &str) -> Option<IntervalStyle> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "postgres" => Some(IntervalStyle::Postgres),
+        "postgres_verbose" => Some(IntervalStyle::PostgresVerbose),
+        "sql_standard" => Some(IntervalStyle::SqlStandard),
+        "iso_8601" => Some(IntervalStyle::Iso8601),
+        _ => None,
+    }
+}
+
+pub fn format_intervalstyle(style: IntervalStyle) -> &'static str {
+    match style {
+        IntervalStyle::Postgres => "postgres",
+        IntervalStyle::PostgresVerbose => "postgres_verbose",
+        IntervalStyle::SqlStandard => "sql_standard",
+        IntervalStyle::Iso8601 => "iso_8601",
+    }
 }
 
 pub fn parse_timezone(value: &str) -> Option<String> {

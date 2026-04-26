@@ -8,10 +8,13 @@ use crate::backend::executor::exec_expr::{expect_float8_arg, float8_regr_accum_s
 use crate::backend::executor::expr_agg_support::execute_scalar_function_value_call;
 use crate::backend::executor::expr_ops::{
     bitwise_and_values, bitwise_or_values, bitwise_xor_values, compare_order_by_keys,
+    interval_div_float,
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue, Value};
+use crate::include::nodes::datum::{
+    ArrayDimension, ArrayValue, IntervalValue, NumericValue, Value,
+};
 use crate::include::nodes::primnodes::{AggAccum, AggFunc, HypotheticalAggFunc};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
@@ -87,6 +90,10 @@ pub(crate) enum AccumState {
         sum: Option<NumericAccum>,
         count: i64,
         result_type: SqlType,
+    },
+    IntervalAvg {
+        sum: Option<IntervalValue>,
+        count: i64,
     },
     FloatStats {
         count: f64,
@@ -185,6 +192,12 @@ impl AccumState {
                 sum: None,
                 result_type: sql_type,
             },
+            (AggFunc::Avg, _) if matches!(sql_type.kind, SqlTypeKind::Interval) => {
+                AccumState::IntervalAvg {
+                    sum: None,
+                    count: 0,
+                }
+            }
             (AggFunc::Avg, _) => AccumState::Avg {
                 sum: None,
                 count: 0,
@@ -421,16 +434,30 @@ impl AccumState {
                 Ok(())
             },
             (AggFunc::Avg, _, _) => |state, values| {
-                if let AccumState::Avg {
-                    sum,
-                    count,
-                    result_type,
-                } = state
-                {
-                    let value = values.first().unwrap_or(&Value::Null);
-                    if !matches!(value, Value::Null) {
-                        *sum = accumulate_value(sum.take(), *result_type, value);
-                        *count += 1;
+                let value = values.first().unwrap_or(&Value::Null);
+                if !matches!(value, Value::Null) {
+                    match state {
+                        AccumState::Avg {
+                            sum,
+                            count,
+                            result_type,
+                        } => {
+                            *sum = accumulate_value(sum.take(), *result_type, value);
+                            *count += 1;
+                        }
+                        AccumState::IntervalAvg { sum, count } => {
+                            let Value::Interval(next) = value else {
+                                return Ok(());
+                            };
+                            *sum = Some(match *sum {
+                                Some(current) => current
+                                    .checked_add(*next)
+                                    .ok_or_else(interval_avg_out_of_range)?,
+                                None => *next,
+                            });
+                            *count += 1;
+                        }
+                        _ => {}
                     }
                 }
                 Ok(())
@@ -732,6 +759,16 @@ impl AccumState {
                         }
                         None => Value::Null,
                     }
+                }
+            }
+            AccumState::IntervalAvg { sum, count } => {
+                if *count == 0 {
+                    Value::Null
+                } else {
+                    sum.as_ref()
+                        .and_then(|value| interval_div_float(*value, *count as f64))
+                        .map(Value::Interval)
+                        .unwrap_or(Value::Null)
                 }
             }
             AccumState::FloatStats {
@@ -1473,6 +1510,15 @@ fn accumulate_value(
             })
         }
         _ => sum,
+    }
+}
+
+fn interval_avg_out_of_range() -> ExecError {
+    ExecError::DetailedError {
+        message: "interval out of range".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
     }
 }
 
