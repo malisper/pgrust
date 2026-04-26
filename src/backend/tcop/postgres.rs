@@ -265,6 +265,18 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                     .or_else(|| (token == ";").then_some(sql.len() + 1))
             });
         }
+        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            actual, ..
+        }) if actual.starts_with("trailing junk after numeric literal at or near \"")
+            || actual.starts_with("trailing junk after parameter at or near \"")
+            || actual.starts_with("parameter number too large at or near \"")
+            || actual.starts_with("invalid binary integer at or near \"")
+            || actual.starts_with("invalid octal integer at or near \"")
+            || actual.starts_with("invalid hexadecimal integer at or near \"") =>
+        {
+            return extract_at_or_near_token(actual)
+                .and_then(|value| find_error_value_position(sql, value));
+        }
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. })
             if message == "duplicate trigger events specified at or near \"ON\"" =>
         {
@@ -301,6 +313,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         }
         ExecError::Parse(crate::backend::parser::ParseError::MissingKeyColumn(_)) => {
             return find_without_overlaps_constraint_position(sql);
+        }
+        ExecError::Parse(crate::backend::parser::ParseError::UnknownColumn(name)) => {
+            return find_error_value_position(sql, name);
         }
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. }) => {
             if let Some(position) = publication_where_error_position(sql, message, None) {
@@ -778,6 +793,11 @@ fn extract_quoted_error_value(message: &str) -> Option<&str> {
     }
 
     let (_, rest) = message.rsplit_once(": \"")?;
+    rest.strip_suffix('"')
+}
+
+fn extract_at_or_near_token(message: &str) -> Option<&str> {
+    let (_, rest) = message.rsplit_once(" at or near \"")?;
     rest.strip_suffix('"')
 }
 
@@ -8610,6 +8630,38 @@ mod tests {
             exec_error_position(sql, &err),
             sql.find("\"Foo\".\"Bar\"").map(|index| index + 1)
         );
+    }
+
+    #[test]
+    fn exec_error_position_points_at_numeric_and_parameter_lexer_errors() {
+        for (sql, actual, expected) in [
+            (
+                "SELECT 123abc;",
+                "trailing junk after numeric literal at or near \"123abc\"",
+                Some(8),
+            ),
+            (
+                "PREPARE p1 AS SELECT $1a;",
+                "trailing junk after parameter at or near \"$1a\"",
+                Some(22),
+            ),
+            (
+                "PREPARE p1 AS SELECT $2147483648;",
+                "parameter number too large at or near \"$2147483648\"",
+                Some(22),
+            ),
+            (
+                "SELECT 0b;",
+                "invalid binary integer at or near \"0b\"",
+                Some(8),
+            ),
+        ] {
+            let err = ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                expected: "statement",
+                actual: actual.into(),
+            });
+            assert_eq!(exec_error_position(sql, &err), expected);
+        }
     }
 
     #[test]

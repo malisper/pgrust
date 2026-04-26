@@ -2087,12 +2087,41 @@ fn group_by_target_ordinal_expr(
     Ok(Some(targets[ordinal - 1].expr.clone()))
 }
 
-fn normalize_group_by_exprs(stmt: &SelectStatement) -> Result<Vec<SqlExpr>, ParseError> {
+fn group_by_target_alias_expr(
+    expr: &SqlExpr,
+    targets: &[SelectItem],
+    input_scope: &BoundScope,
+) -> Option<SqlExpr> {
+    let SqlExpr::Column(name) = expr else {
+        return None;
+    };
+    if name.contains('.') {
+        return None;
+    }
+    match resolve_column(input_scope, name) {
+        Ok(_) => return None,
+        Err(ParseError::UnknownColumn(_)) => {}
+        Err(_) => return None,
+    }
+    let mut matches = targets
+        .iter()
+        .filter(|target| target.output_name.eq_ignore_ascii_case(name));
+    let first = matches.next()?;
+    matches.next().is_none().then(|| first.expr.clone())
+}
+
+fn normalize_group_by_exprs(
+    stmt: &SelectStatement,
+    input_scope: &BoundScope,
+) -> Result<Vec<SqlExpr>, ParseError> {
     stmt.group_by
         .iter()
         .map(|expr| {
-            group_by_target_ordinal_expr(expr, &stmt.targets)
-                .map(|resolved| resolved.unwrap_or_else(|| expr.clone()))
+            group_by_target_ordinal_expr(expr, &stmt.targets).map(|resolved| {
+                resolved
+                    .or_else(|| group_by_target_alias_expr(expr, &stmt.targets, input_scope))
+                    .unwrap_or_else(|| expr.clone())
+            })
         })
         .collect()
 }
@@ -3967,7 +3996,7 @@ fn bind_select_query_with_outer(
                 .map(|target| target.expr.clone())
                 .collect::<Vec<_>>()
         } else {
-            normalize_group_by_exprs(stmt)?
+            normalize_group_by_exprs(stmt, &scope)?
         };
 
         for group_expr in &effective_group_by {

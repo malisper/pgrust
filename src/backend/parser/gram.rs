@@ -1,3 +1,4 @@
+use num_bigint::BigUint;
 use pest::Parser as _;
 use pest::iterators::Pair;
 use pest_derive::Parser;
@@ -73,6 +74,7 @@ fn parse_statement_with_options_inner(
     let sql = strip_sql_comments_preserving_layout(&sql);
     validate_unicode_string_literals(&sql, options)?;
     let sql = normalize_position_syntax_preserving_layout(&sql);
+    validate_numeric_lexemes(&sql)?;
     if let Some(stmt) = try_parse_domain_statement(&sql)? {
         return Ok(stmt);
     }
@@ -219,6 +221,317 @@ fn is_select_with_trailing_operator(sql: &str) -> bool {
             | '|'
             | '~'
     )
+}
+
+fn validate_numeric_lexemes(sql: &str) -> Result<(), ParseError> {
+    let bytes = sql.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = skip_single_quoted_sql(sql, i);
+                continue;
+            }
+            b'"' => {
+                i = skip_double_quoted_sql(sql, i);
+                continue;
+            }
+            b'$' => {
+                if i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+                    i = validate_parameter_lexeme(sql, i)?;
+                    continue;
+                }
+                if let Some(next) = skip_dollar_quoted_sql(sql, i) {
+                    i = next;
+                    continue;
+                }
+            }
+            b'.' if i + 1 < bytes.len()
+                && bytes[i + 1].is_ascii_digit()
+                && !previous_is_identifier_part(bytes, i) =>
+            {
+                i = validate_numeric_lexeme(sql, i)?;
+                continue;
+            }
+            b'0'..=b'9' if !previous_is_identifier_part(bytes, i) => {
+                i = validate_numeric_lexeme(sql, i)?;
+                continue;
+            }
+            byte if is_identifier_start_byte(byte) && !previous_is_identifier_part(bytes, i) => {
+                i = validate_identifier_lexeme(sql, i)?;
+                continue;
+            }
+            _ => {}
+        }
+        i += sql[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+    }
+    Ok(())
+}
+
+fn previous_is_identifier_part(bytes: &[u8], index: usize) -> bool {
+    index > 0 && is_identifier_part_byte(bytes[index - 1])
+}
+
+fn validate_parameter_lexeme(sql: &str, start: usize) -> Result<usize, ParseError> {
+    let bytes = sql.as_bytes();
+    let mut end = start + 1;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end < bytes.len() && is_identifier_start_byte(bytes[end]) {
+        let junk_end = scan_identifier_junk(sql, end);
+        return Err(lexer_error(
+            "trailing junk after parameter",
+            &sql[start..junk_end],
+        ));
+    }
+    if sql[start + 1..end]
+        .parse::<i64>()
+        .map(|value| value > i64::from(i32::MAX))
+        .unwrap_or(true)
+    {
+        return Err(lexer_error("parameter number too large", &sql[start..end]));
+    }
+    Ok(end)
+}
+
+fn validate_numeric_lexeme(sql: &str, start: usize) -> Result<usize, ParseError> {
+    let bytes = sql.as_bytes();
+    if bytes[start] == b'.' {
+        let (mut end, _) = scan_decimal_integer(bytes, start + 1);
+        end = scan_exponent_or_error(sql, start, end)?;
+        return reject_numeric_junk(sql, start, end);
+    }
+
+    if bytes[start] == b'0' && start + 1 < bytes.len() {
+        match bytes[start + 1] {
+            b'x' | b'X' => return validate_prefixed_integer(sql, start, 16, "hexadecimal"),
+            b'o' | b'O' => return validate_prefixed_integer(sql, start, 8, "octal"),
+            b'b' | b'B' => return validate_prefixed_integer(sql, start, 2, "binary"),
+            _ => {}
+        }
+    }
+
+    let (mut end, _) = scan_decimal_integer(bytes, start);
+    if end < bytes.len() && bytes[end] == b'.' && !matches!(bytes.get(end + 1), Some(b'.')) {
+        end += 1;
+        let (after_frac, _) = scan_decimal_integer(bytes, end);
+        end = after_frac;
+    }
+    end = scan_exponent_or_error(sql, start, end)?;
+    reject_numeric_junk(sql, start, end)
+}
+
+fn validate_identifier_lexeme(sql: &str, start: usize) -> Result<usize, ParseError> {
+    let bytes = sql.as_bytes();
+    let end = scan_identifier_junk(sql, start);
+    if end < bytes.len()
+        && bytes[end] == b'.'
+        && matches!(bytes.get(end + 1), Some(next) if next.is_ascii_digit())
+    {
+        let (token_end, _) = scan_decimal_integer(bytes, end + 1);
+        return Err(ParseError::UnexpectedToken {
+            expected: "statement",
+            actual: format!("syntax error at or near \"{}\"", &sql[end..token_end]),
+        });
+    }
+    Ok(end)
+}
+
+fn validate_prefixed_integer(
+    sql: &str,
+    start: usize,
+    base: u32,
+    name: &'static str,
+) -> Result<usize, ParseError> {
+    let bytes = sql.as_bytes();
+    let (end, saw_digit) = scan_base_integer(bytes, start + 2, base);
+    if !saw_digit {
+        let fail_end = if matches!(bytes.get(start + 2), Some(b'_')) {
+            start + 3
+        } else {
+            start + 2
+        }
+        .min(bytes.len());
+        return Err(lexer_error(
+            match name {
+                "binary" => "invalid binary integer",
+                "octal" => "invalid octal integer",
+                _ => "invalid hexadecimal integer",
+            },
+            &sql[start..fail_end],
+        ));
+    }
+    reject_numeric_junk(sql, start, end)
+}
+
+fn scan_exponent_or_error(sql: &str, start: usize, mut end: usize) -> Result<usize, ParseError> {
+    let bytes = sql.as_bytes();
+    if !matches!(bytes.get(end), Some(b'e' | b'E')) {
+        return Ok(end);
+    }
+    end += 1;
+    let mut had_sign = false;
+    if matches!(bytes.get(end), Some(b'+' | b'-')) {
+        end += 1;
+        had_sign = true;
+    }
+    let (after_digits, saw_digit) = scan_decimal_integer(bytes, end);
+    if !saw_digit {
+        if !had_sign && matches!(bytes.get(end), Some(byte) if is_identifier_start_byte(*byte)) {
+            end = scan_identifier_junk(sql, end);
+        }
+        return Err(lexer_error(
+            "trailing junk after numeric literal",
+            &sql[start..end],
+        ));
+    }
+    Ok(after_digits)
+}
+
+fn reject_numeric_junk(sql: &str, start: usize, end: usize) -> Result<usize, ParseError> {
+    let bytes = sql.as_bytes();
+    if end < bytes.len() && is_identifier_start_byte(bytes[end]) {
+        let junk_end = scan_identifier_junk(sql, end);
+        return Err(lexer_error(
+            "trailing junk after numeric literal",
+            &sql[start..junk_end],
+        ));
+    }
+    Ok(end)
+}
+
+fn scan_decimal_integer(bytes: &[u8], start: usize) -> (usize, bool) {
+    if !matches!(bytes.get(start), Some(b'0'..=b'9')) {
+        return (start, false);
+    }
+    let mut end = start + 1;
+    while end < bytes.len() {
+        if bytes[end].is_ascii_digit() {
+            end += 1;
+        } else if bytes[end] == b'_'
+            && matches!(bytes.get(end + 1), Some(next) if next.is_ascii_digit())
+        {
+            end += 2;
+        } else {
+            break;
+        }
+    }
+    (end, true)
+}
+
+fn scan_base_integer(bytes: &[u8], start: usize, base: u32) -> (usize, bool) {
+    let mut end = start;
+    let mut saw_digit = false;
+    loop {
+        if end < bytes.len() && digit_matches_base(bytes[end], base) {
+            end += 1;
+            saw_digit = true;
+        } else if end < bytes.len()
+            && bytes[end] == b'_'
+            && matches!(bytes.get(end + 1), Some(next) if digit_matches_base(*next, base))
+        {
+            end += 2;
+            saw_digit = true;
+        } else {
+            break;
+        }
+    }
+    (end, saw_digit)
+}
+
+fn digit_matches_base(byte: u8, base: u32) -> bool {
+    match base {
+        2 => matches!(byte, b'0' | b'1'),
+        8 => matches!(byte, b'0'..=b'7'),
+        16 => byte.is_ascii_hexdigit(),
+        _ => false,
+    }
+}
+
+fn scan_identifier_junk(sql: &str, start: usize) -> usize {
+    let bytes = sql.as_bytes();
+    let mut end = start;
+    while end < bytes.len() && is_identifier_part_byte(bytes[end]) {
+        end += 1;
+    }
+    end
+}
+
+fn is_identifier_start_byte(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+fn is_identifier_part_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn lexer_error(message: &'static str, token: &str) -> ParseError {
+    ParseError::UnexpectedToken {
+        expected: "statement",
+        actual: format!("{message} at or near \"{token}\""),
+    }
+}
+
+fn skip_single_quoted_sql(sql: &str, start: usize) -> usize {
+    let bytes = sql.as_bytes();
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            if matches!(bytes.get(i + 1), Some(b'\'')) {
+                i += 2;
+            } else {
+                return i + 1;
+            }
+        } else {
+            i += sql[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+        }
+    }
+    bytes.len()
+}
+
+fn skip_double_quoted_sql(sql: &str, start: usize) -> usize {
+    let bytes = sql.as_bytes();
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            if matches!(bytes.get(i + 1), Some(b'"')) {
+                i += 2;
+            } else {
+                return i + 1;
+            }
+        } else {
+            i += sql[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+        }
+    }
+    bytes.len()
+}
+
+fn skip_dollar_quoted_sql(sql: &str, start: usize) -> Option<usize> {
+    let tag = dollar_quote_tag_at(sql, start)?;
+    let search_start = start + tag.len();
+    sql[search_start..]
+        .find(tag)
+        .map(|offset| search_start + offset + tag.len())
+}
+
+fn dollar_quote_tag_at(sql: &str, start: usize) -> Option<&str> {
+    let bytes = sql.as_bytes();
+    if !matches!(bytes.get(start), Some(b'$')) {
+        return None;
+    }
+    let mut end = start + 1;
+    if matches!(bytes.get(end), Some(b'$')) {
+        return Some(&sql[start..=end]);
+    }
+    if !matches!(bytes.get(end), Some(byte) if is_identifier_start_byte(*byte)) {
+        return None;
+    }
+    end += 1;
+    while end < bytes.len() && is_identifier_part_byte(bytes[end]) {
+        end += 1;
+    }
+    matches!(bytes.get(end), Some(b'$')).then_some(&sql[start..=end])
 }
 
 fn try_parse_alter_table_add_unnamed_constraint_statement(
@@ -2400,6 +2713,7 @@ pub fn parse_expr(sql: &str) -> Result<SqlExpr, ParseError> {
         let sql = sql.to_string();
         move || {
             let sql = strip_sql_comments_preserving_layout(&sql);
+            validate_numeric_lexemes(&sql)?;
             SqlParser::parse(Rule::expr, &sql)
                 .map_err(|e| map_pest_error("expression", &sql, e))
                 .and_then(|mut pairs| {
@@ -11416,13 +11730,10 @@ fn build_usize_clause(pair: Pair<'_, Rule>, expected: &'static str) -> Result<us
         .into_inner()
         .find(|part| part.as_rule() == Rule::integer)
         .ok_or(ParseError::UnexpectedEof)?;
-    integer
-        .as_str()
-        .parse::<usize>()
-        .map_err(|_| ParseError::UnexpectedToken {
-            expected,
-            actual: integer.as_str().into(),
-        })
+    parse_usize_literal(integer.as_str()).map_err(|_| ParseError::UnexpectedToken {
+        expected,
+        actual: integer.as_str().into(),
+    })
 }
 
 fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
@@ -15928,8 +16239,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
 }
 
 fn build_type_len(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
-    pair.as_str()
-        .parse::<i32>()
+    parse_i32_literal(pair.as_str())
         .map_err(|_| ParseError::InvalidInteger(pair.as_str().to_string()))
 }
 
@@ -16006,14 +16316,12 @@ fn interval_field_clause_name(field_clause: &str) -> String {
 }
 
 fn build_numeric_typemod_component(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
-    pair.as_str()
-        .parse::<i32>()
+    parse_i32_literal(pair.as_str())
         .map_err(|_| ParseError::InvalidInteger(pair.as_str().to_string()))
 }
 
 fn parse_i32(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
-    pair.as_str()
-        .parse::<i32>()
+    parse_i32_literal(pair.as_str())
         .map_err(|_| ParseError::InvalidInteger(pair.as_str().to_string()))
 }
 
@@ -16804,14 +17112,24 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         ),
         Rule::identifier => Ok(SqlExpr::Column(build_identifier(pair))),
         Rule::kw_default => Ok(SqlExpr::Default),
-        Rule::numeric_literal => Ok(SqlExpr::NumericLiteral(pair.as_str().to_string())),
-        Rule::hex_integer => {
-            let raw = pair.as_str();
-            let value = u128::from_str_radix(&raw[2..], 16)
-                .map_err(|_| ParseError::InvalidInteger(raw.to_string()))?;
-            Ok(SqlExpr::IntegerLiteral(value.to_string()))
-        }
-        Rule::integer => Ok(SqlExpr::IntegerLiteral(pair.as_str().to_string())),
+        Rule::numeric_literal => Ok(SqlExpr::NumericLiteral(normalize_numeric_literal_text(
+            pair.as_str(),
+        ))),
+        Rule::hex_integer => Ok(SqlExpr::IntegerLiteral(parse_prefixed_integer_literal(
+            pair.as_str(),
+            16,
+        )?)),
+        Rule::oct_integer => Ok(SqlExpr::IntegerLiteral(parse_prefixed_integer_literal(
+            pair.as_str(),
+            8,
+        )?)),
+        Rule::bin_integer => Ok(SqlExpr::IntegerLiteral(parse_prefixed_integer_literal(
+            pair.as_str(),
+            2,
+        )?)),
+        Rule::integer => Ok(SqlExpr::IntegerLiteral(normalize_numeric_literal_text(
+            pair.as_str(),
+        ))),
         Rule::quoted_string_literal
         | Rule::string_literal
         | Rule::unicode_string_literal
@@ -16861,6 +17179,25 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             actual: pair.as_str().into(),
         }),
     }
+}
+
+fn normalize_numeric_literal_text(raw: &str) -> String {
+    raw.chars().filter(|ch| *ch != '_').collect()
+}
+
+fn parse_i32_literal(raw: &str) -> Result<i32, std::num::ParseIntError> {
+    normalize_numeric_literal_text(raw).parse::<i32>()
+}
+
+fn parse_usize_literal(raw: &str) -> Result<usize, std::num::ParseIntError> {
+    normalize_numeric_literal_text(raw).parse::<usize>()
+}
+
+fn parse_prefixed_integer_literal(raw: &str, base: u32) -> Result<String, ParseError> {
+    let digits = normalize_numeric_literal_text(&raw[2..]);
+    BigUint::parse_bytes(digits.as_bytes(), base)
+        .map(|value| value.to_string())
+        .ok_or_else(|| ParseError::InvalidInteger(raw.to_string()))
 }
 
 fn build_array_literal(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {

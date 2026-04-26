@@ -4373,6 +4373,43 @@ fn select_without_from_returns_constant_row() {
 }
 
 #[test]
+fn prefixed_numeric_literal_has_postgres_value_and_default_name() {
+    let base = temp_dir("prefixed_numeric_literal");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 0b100101").unwrap() {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["?column?".to_string()]);
+            assert_eq!(rows, vec![vec![Value::Int32(37)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn plpgsql_integer_for_loop_accepts_underscored_bounds() {
+    let base = temp_dir("plpgsql_for_underscored_bounds");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "do $$
+         declare
+           i int;
+           total int := 0;
+         begin
+           for i in 1_001..1_003 loop
+             total := total + i;
+           end loop;
+           assert total = 3006, 'unexpected loop total';
+         end $$",
+    )
+    .unwrap();
+}
+
+#[test]
 fn select_case_without_from_uses_case_column_name() {
     let base = temp_dir("select_case_without_from");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -5192,6 +5229,65 @@ fn group_by_with_count() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn group_by_can_use_select_output_alias() {
+    let base = temp_dir("group_by_select_alias");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select f1 as two, max(f3) as max_float
+         from (values (1, 2.0::float8), (1, 3.5::float8), (2, -1.0::float8)) t(f1, f3)
+         group by two
+         order by two",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Float64(3.5)],
+                    vec![Value::Int32(2), Value::Float64(-1.0)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn grouped_float_aggregate_arithmetic_coerces_integer_literals() {
+    let base = temp_dir("grouped_float_aggregate_arithmetic");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select f1 as two,
+                (max(f3) + 1) as max_plus_1,
+                (min(f3) - 1) as min_minus_1
+         from (values (1, 2.5::float8), (1, -0.0::float8), (2, -4.0::float8)) t(f1, f3)
+         group by f1
+         order by two",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Float64(3.5), Value::Float64(-1.0)],
+                    vec![Value::Int32(2), Value::Float64(-3.0), Value::Float64(-5.0)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn sum_avg_min_max_aggregates() {
     let base = temp_dir("sum_avg_min_max");

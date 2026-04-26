@@ -994,6 +994,67 @@ pub(super) fn bind_agg_output_expr(
     )
 }
 
+fn bind_grouped_arithmetic_expr(
+    op: &'static str,
+    make: OpExprKind,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    clause: UngroupedColumnClause,
+    group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    agg_list: &[CollectedAggregate],
+    n_keys: usize,
+) -> Result<Expr, ParseError> {
+    let raw_left_type =
+        grouped_infer_sql_expr_type(left, input_scope, catalog, outer_scopes, grouped_outer);
+    let raw_right_type =
+        grouped_infer_sql_expr_type(right, input_scope, catalog, outer_scopes, grouped_outer);
+    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    let left = bind_agg_output_expr_in_clause(
+        left,
+        clause.clone(),
+        group_by_exprs,
+        group_key_exprs,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        agg_list,
+        n_keys,
+    )?;
+    let right = bind_agg_output_expr_in_clause(
+        right,
+        clause,
+        group_by_exprs,
+        group_key_exprs,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        agg_list,
+        n_keys,
+    )?;
+    if !left_type.is_array
+        && !right_type.is_array
+        && is_numeric_family(left_type)
+        && is_numeric_family(right_type)
+    {
+        let common = resolve_numeric_binary_type(op, left_type, right_type)?;
+        return Ok(Expr::binary_op(
+            make,
+            common,
+            coerce_bound_expr(left, raw_left_type, common),
+            coerce_bound_expr(right, raw_right_type, common),
+        ));
+    }
+    Ok(Expr::op_auto(make, vec![left, right]))
+}
+
 pub(super) fn bind_agg_output_expr_in_clause(
     expr: &SqlExpr,
     clause: UngroupedColumnClause,
@@ -1566,62 +1627,36 @@ pub(super) fn bind_agg_output_expr_in_clause(
             expected: "grouped expression",
             actual: format!("unsupported operator {op}"),
         }),
-        SqlExpr::Add(l, r) => Ok(Expr::op_auto(
+        SqlExpr::Add(l, r) => bind_grouped_arithmetic_expr(
+            "+",
             OpExprKind::Add,
-            vec![
-                bind_agg_output_expr_in_clause(
-                    l,
-                    clause.clone(),
-                    group_by_exprs,
-                    group_key_exprs,
-                    input_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    agg_list,
-                    n_keys,
-                )?,
-                bind_agg_output_expr_in_clause(
-                    r,
-                    clause,
-                    group_by_exprs,
-                    group_key_exprs,
-                    input_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    agg_list,
-                    n_keys,
-                )?,
-            ],
-        )),
-        SqlExpr::Sub(l, r) => Ok(Expr::op_auto(
+            l,
+            r,
+            clause,
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        ),
+        SqlExpr::Sub(l, r) => bind_grouped_arithmetic_expr(
+            "-",
             OpExprKind::Sub,
-            vec![
-                bind_agg_output_expr(
-                    l,
-                    group_by_exprs,
-                    group_key_exprs,
-                    input_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    agg_list,
-                    n_keys,
-                )?,
-                bind_agg_output_expr(
-                    r,
-                    group_by_exprs,
-                    group_key_exprs,
-                    input_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    agg_list,
-                    n_keys,
-                )?,
-            ],
-        )),
+            l,
+            r,
+            clause,
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        ),
         SqlExpr::BitAnd(l, r) => Ok(Expr::op_auto(
             OpExprKind::BitAnd,
             vec![
@@ -1757,87 +1792,51 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 )?,
             ],
         )),
-        SqlExpr::Mul(l, r) => Ok(Expr::op_auto(
+        SqlExpr::Mul(l, r) => bind_grouped_arithmetic_expr(
+            "*",
             OpExprKind::Mul,
-            vec![
-                bind_agg_output_expr(
-                    l,
-                    group_by_exprs,
-                    group_key_exprs,
-                    input_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    agg_list,
-                    n_keys,
-                )?,
-                bind_agg_output_expr(
-                    r,
-                    group_by_exprs,
-                    group_key_exprs,
-                    input_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    agg_list,
-                    n_keys,
-                )?,
-            ],
-        )),
-        SqlExpr::Div(l, r) => Ok(Expr::op_auto(
+            l,
+            r,
+            clause,
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        ),
+        SqlExpr::Div(l, r) => bind_grouped_arithmetic_expr(
+            "/",
             OpExprKind::Div,
-            vec![
-                bind_agg_output_expr(
-                    l,
-                    group_by_exprs,
-                    group_key_exprs,
-                    input_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    agg_list,
-                    n_keys,
-                )?,
-                bind_agg_output_expr(
-                    r,
-                    group_by_exprs,
-                    group_key_exprs,
-                    input_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    agg_list,
-                    n_keys,
-                )?,
-            ],
-        )),
-        SqlExpr::Mod(l, r) => Ok(Expr::op_auto(
+            l,
+            r,
+            clause,
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        ),
+        SqlExpr::Mod(l, r) => bind_grouped_arithmetic_expr(
+            "%",
             OpExprKind::Mod,
-            vec![
-                bind_agg_output_expr(
-                    l,
-                    group_by_exprs,
-                    group_key_exprs,
-                    input_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    agg_list,
-                    n_keys,
-                )?,
-                bind_agg_output_expr(
-                    r,
-                    group_by_exprs,
-                    group_key_exprs,
-                    input_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    agg_list,
-                    n_keys,
-                )?,
-            ],
-        )),
+            l,
+            r,
+            clause,
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        ),
         SqlExpr::Concat(l, r) => bind_grouped_concat_expr(
             l,
             r,

@@ -6637,6 +6637,139 @@ fn parse_unary_plus_numeric_literal_and_new_operators() {
 }
 
 #[test]
+fn parse_prefixed_and_underscored_numeric_literals() {
+    let stmt = parse_select(
+        "select 0b100101, 0o273, 0x1EEE_FFFF, 1_000_000, \
+                1_000.000_005, .000_005, 1_000.5e0_1",
+    )
+    .unwrap();
+    assert!(matches!(&stmt.targets[0].expr, SqlExpr::IntegerLiteral(value) if value == "37"));
+    assert!(matches!(&stmt.targets[1].expr, SqlExpr::IntegerLiteral(value) if value == "187"));
+    assert!(
+        matches!(&stmt.targets[2].expr, SqlExpr::IntegerLiteral(value) if value == "518979583")
+    );
+    assert!(matches!(&stmt.targets[3].expr, SqlExpr::IntegerLiteral(value) if value == "1000000"));
+    assert!(
+        matches!(&stmt.targets[4].expr, SqlExpr::NumericLiteral(value) if value == "1000.000005")
+    );
+    assert!(matches!(&stmt.targets[5].expr, SqlExpr::NumericLiteral(value) if value == ".000005"));
+    assert!(
+        matches!(&stmt.targets[6].expr, SqlExpr::NumericLiteral(value) if value == "1000.5e01")
+    );
+}
+
+#[test]
+fn parse_rejects_numeric_and_parameter_junk() {
+    for (sql, message) in [
+        (
+            "select 123abc",
+            "trailing junk after numeric literal at or near \"123abc\"",
+        ),
+        (
+            "select 0x0o",
+            "trailing junk after numeric literal at or near \"0x0o\"",
+        ),
+        (
+            "select 0.a",
+            "trailing junk after numeric literal at or near \"0.a\"",
+        ),
+        (
+            "select 0.0a",
+            "trailing junk after numeric literal at or near \"0.0a\"",
+        ),
+        (
+            "select .0a",
+            "trailing junk after numeric literal at or near \".0a\"",
+        ),
+        (
+            "select 0.0e1a",
+            "trailing junk after numeric literal at or near \"0.0e1a\"",
+        ),
+        (
+            "select 0.0e",
+            "trailing junk after numeric literal at or near \"0.0e\"",
+        ),
+        ("select 0b", "invalid binary integer at or near \"0b\""),
+        (
+            "select 1b",
+            "trailing junk after numeric literal at or near \"1b\"",
+        ),
+        (
+            "select 0b0x",
+            "trailing junk after numeric literal at or near \"0b0x\"",
+        ),
+        ("select 0o", "invalid octal integer at or near \"0o\""),
+        (
+            "select 1o",
+            "trailing junk after numeric literal at or near \"1o\"",
+        ),
+        (
+            "select 0o0x",
+            "trailing junk after numeric literal at or near \"0o0x\"",
+        ),
+        ("select 0x", "invalid hexadecimal integer at or near \"0x\""),
+        (
+            "select 1x",
+            "trailing junk after numeric literal at or near \"1x\"",
+        ),
+        (
+            "select 0x0y",
+            "trailing junk after numeric literal at or near \"0x0y\"",
+        ),
+        (
+            "select 0.0e+",
+            "trailing junk after numeric literal at or near \"0.0e+\"",
+        ),
+        (
+            "select 0.0e+a",
+            "trailing junk after numeric literal at or near \"0.0e+\"",
+        ),
+        (
+            "select 100_",
+            "trailing junk after numeric literal at or near \"100_\"",
+        ),
+        (
+            "select 100__000",
+            "trailing junk after numeric literal at or near \"100__000\"",
+        ),
+        ("select _1_000.5", "syntax error at or near \".5\""),
+        (
+            "select 1_000_.5",
+            "trailing junk after numeric literal at or near \"1_000_\"",
+        ),
+        (
+            "select 1_000._5",
+            "trailing junk after numeric literal at or near \"1_000._5\"",
+        ),
+        (
+            "select 1_000.5_",
+            "trailing junk after numeric literal at or near \"1_000.5_\"",
+        ),
+        (
+            "select 1_000.5e_1",
+            "trailing junk after numeric literal at or near \"1_000.5e_1\"",
+        ),
+        (
+            "prepare p1 as select $1a",
+            "trailing junk after parameter at or near \"$1a\"",
+        ),
+        (
+            "prepare p1 as select $0_1",
+            "trailing junk after parameter at or near \"$0_1\"",
+        ),
+        (
+            "prepare p1 as select $2147483648",
+            "parameter number too large at or near \"$2147483648\"",
+        ),
+    ] {
+        match parse_statement(sql) {
+            Err(ParseError::UnexpectedToken { actual, .. }) => assert_eq!(actual, message),
+            other => panic!("expected lexer error for {sql}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn float_mod_is_rejected_at_bind_time() {
     let err = build_plan(
         &parse_select("select 1.5::real % 1.0::real").unwrap(),
@@ -11788,6 +11921,48 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Text),
         })
+    );
+}
+
+#[test]
+fn analyze_group_by_resolves_select_alias_when_no_input_column_matches() {
+    let stmt = parse_select("select id as two, count(*) from people group by two").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+
+    assert_eq!(
+        query.group_by,
+        vec![Expr::Var(Var {
+            varno: 1,
+            varattno: 1,
+            varlevelsup: 0,
+            vartype: SqlType::new(SqlTypeKind::Int4),
+        })]
+    );
+}
+
+#[test]
+fn analyze_group_by_prefers_input_column_over_select_alias() {
+    let stmt = parse_select("select id as name from people group by name, id").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+
+    assert_eq!(
+        query.group_by,
+        vec![
+            Expr::Var(Var {
+                varno: 1,
+                varattno: 2,
+                varlevelsup: 0,
+                vartype: SqlType::new(SqlTypeKind::Text),
+            }),
+            Expr::Var(Var {
+                varno: 1,
+                varattno: 1,
+                varlevelsup: 0,
+                vartype: SqlType::new(SqlTypeKind::Int4),
+            }),
+        ]
     );
 }
 
