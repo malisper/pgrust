@@ -6310,7 +6310,10 @@ impl Session {
         } else if name == "session_replication_role" {
             db.install_session_replication_role(self.client_id, self.session_replication_role());
             db.plan_cache.invalidate_all();
-        } else if name == "enable_partitionwise_join" {
+        } else if matches!(
+            name.as_str(),
+            "enable_partitionwise_join" | "enable_seqscan"
+        ) {
             db.plan_cache.invalidate_all();
         }
         Ok(StatementResult::AffectedRows(0))
@@ -6360,7 +6363,10 @@ impl Session {
                     self.session_replication_role(),
                 );
                 db.plan_cache.invalidate_all();
-            } else if normalized == "enable_partitionwise_join" {
+            } else if matches!(
+                normalized.as_str(),
+                "enable_partitionwise_join" | "enable_seqscan"
+            ) {
                 db.plan_cache.invalidate_all();
             }
         } else {
@@ -9281,6 +9287,17 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_bool_guc_accepts_postgres_boolean_aliases() {
+        for value in ["on", "true", "yes", "1", "t"] {
+            assert_eq!(parse_bool_guc(value), Some(true));
+        }
+        for value in ["off", "false", "no", "0", "f"] {
+            assert_eq!(parse_bool_guc(value), Some(false));
+        }
+        assert_eq!(parse_bool_guc("maybe"), None);
     }
 
     #[test]

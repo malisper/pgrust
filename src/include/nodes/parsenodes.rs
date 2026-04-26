@@ -840,6 +840,7 @@ pub struct CreateRangeTypeStatement {
     pub schema_name: Option<String>,
     pub type_name: String,
     pub subtype: RawTypeName,
+    pub subtype_opclass: Option<String>,
     pub subtype_diff: Option<String>,
     pub collation: Option<String>,
     pub multirange_type_name: Option<String>,

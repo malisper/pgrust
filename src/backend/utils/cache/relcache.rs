@@ -188,6 +188,15 @@ impl IndexRelCacheEntry {
             .get(column_index)
             .copied()
             .filter(|oid| *oid != 0)
+            .filter(|oid| {
+                !matches!(
+                    *oid,
+                    crate::include::catalog::ANYOID
+                        | crate::include::catalog::ANYARRAYOID
+                        | crate::include::catalog::ANYRANGEOID
+                        | crate::include::catalog::ANYMULTIRANGEOID
+                )
+            })
             .or_else(|| {
                 desc.columns
                     .get(column_index)

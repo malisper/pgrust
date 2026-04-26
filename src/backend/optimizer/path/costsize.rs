@@ -18,9 +18,9 @@ use crate::include::catalog::{
     BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GIST_MULTIRANGE_FAMILY_OID,
     GIST_RANGE_FAMILY_OID, HASH_AM_OID, PgStatisticRow, SPG_BOX_QUAD_CONFIG_PROC_OID,
     SPG_KD_CONFIG_PROC_OID, SPG_NETWORK_CONFIG_PROC_OID, SPG_QUAD_CONFIG_PROC_OID,
-    SPG_TEXT_CONFIG_PROC_OID, SPGIST_AM_OID, SPGIST_TEXT_FAMILY_OID, bootstrap_pg_operator_rows,
-    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
-    relkind_has_storage,
+    SPG_RANGE_CONFIG_PROC_OID, SPG_TEXT_CONFIG_PROC_OID, SPGIST_AM_OID, SPGIST_TEXT_FAMILY_OID,
+    bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
+    proc_oid_for_builtin_scalar_function, range_type_ref_for_sql_type, relkind_has_storage,
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::pathnodes::{
@@ -2966,7 +2966,11 @@ pub(super) fn build_index_path_spec(
     let conjuncts = filter.map(flatten_and_conjuncts).unwrap_or_default();
     let parsed_quals = conjuncts
         .iter()
-        .filter_map(indexable_qual)
+        .filter_map(if is_gist_like_am(index.index_meta.am_oid) {
+            gist_indexable_qual
+        } else {
+            indexable_qual
+        })
         .collect::<Vec<_>>();
     let (keys, used_indexes, equality_prefix) = match index.index_meta.am_oid {
         BTREE_AM_OID => build_btree_index_keys(index, &parsed_quals),
@@ -3579,6 +3583,7 @@ fn spgist_config_proc_can_return_data(proc_oid: u32) -> bool {
             | SPG_NETWORK_CONFIG_PROC_OID
             | SPG_QUAD_CONFIG_PROC_OID
             | SPG_KD_CONFIG_PROC_OID
+            | SPG_RANGE_CONFIG_PROC_OID
             | SPG_TEXT_CONFIG_PROC_OID
     )
 }
@@ -3717,6 +3722,34 @@ fn index_key_argument(expr: &Expr) -> Option<IndexScanKeyArgument> {
     }
     (runtime_index_argument_expr(expr) && expr_contains_runtime_input(expr))
         .then(|| IndexScanKeyArgument::Runtime(expr.clone()))
+}
+
+fn gist_index_key_argument(expr: &Expr) -> Option<IndexScanKeyArgument> {
+    const_gist_argument_value(expr).map(IndexScanKeyArgument::Const)
+}
+
+fn const_gist_argument_value(expr: &Expr) -> Option<Value> {
+    if let Some(value) = const_argument(expr) {
+        return Some(value);
+    }
+    let Expr::Func(func) = strip_casts(expr) else {
+        return None;
+    };
+    let ScalarFunctionImpl::Builtin(builtin) = func.implementation else {
+        return None;
+    };
+    let values = func
+        .args
+        .iter()
+        .map(const_gist_argument_value)
+        .collect::<Option<Vec<_>>>()?;
+    crate::backend::executor::expr_range::eval_range_function(
+        builtin,
+        &values,
+        func.funcresulttype,
+        func.funcvariadic,
+    )?
+    .ok()
 }
 
 fn runtime_index_argument_expr(expr: &Expr) -> bool {
@@ -3923,6 +3956,13 @@ fn build_btree_index_keys(
                     return None;
                 }
                 let strategy = qual_strategy(index, index_pos, qual)?;
+                if strategy != 3
+                    && index.desc.columns.get(index_pos).is_some_and(|column| {
+                        range_type_ref_for_sql_type(column.sql_type).is_some()
+                    })
+                {
+                    return None;
+                }
                 Some((idx, strategy, qual.argument.clone(), qual.is_not_null))
             })
             .collect::<Vec<_>>();
@@ -4068,6 +4108,17 @@ fn build_hash_index_keys(
 }
 
 fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
+    indexable_qual_with_argument(expr, index_key_argument)
+}
+
+fn gist_indexable_qual(expr: &Expr) -> Option<IndexableQual> {
+    indexable_qual_with_argument(expr, gist_index_key_argument)
+}
+
+fn indexable_qual_with_argument(
+    expr: &Expr,
+    argument_for: fn(&Expr) -> Option<IndexScanKeyArgument>,
+) -> Option<IndexableQual> {
     fn mk(
         key_expr: &Expr,
         lookup: super::super::IndexStrategyLookup,
@@ -4092,7 +4143,7 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
         Expr::Op(op) if op.args.len() == 2 => {
             let left = strip_casts(&op.args[0]);
             let right = &op.args[1];
-            if let Some(argument) = index_key_argument(right) {
+            if let Some(argument) = argument_for(right) {
                 return mk(
                     left,
                     super::super::IndexStrategyLookup::Operator {
@@ -4104,7 +4155,7 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
                     false,
                 );
             }
-            if let Some(argument) = index_key_argument(&op.args[0]) {
+            if let Some(argument) = argument_for(&op.args[0]) {
                 return mk(
                     strip_casts(&op.args[1]),
                     super::super::IndexStrategyLookup::Operator {
@@ -4121,7 +4172,7 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
         Expr::Func(func) if func.args.len() == 2 => {
             let left = strip_casts(&func.args[0]);
             let right = &func.args[1];
-            if let Some(argument) = index_key_argument(right) {
+            if let Some(argument) = argument_for(right) {
                 let mut qual = mk(
                     left,
                     super::super::IndexStrategyLookup::Proc(func.funcid),
@@ -4142,7 +4193,7 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
                 }
                 return Some(qual);
             }
-            if let Some(argument) = index_key_argument(&func.args[0]) {
+            if let Some(argument) = argument_for(&func.args[0]) {
                 return mk(
                     strip_casts(&func.args[1]),
                     super::super::IndexStrategyLookup::Proc(commuted_function_proc_oid(

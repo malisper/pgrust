@@ -436,13 +436,10 @@ fn type_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<PgTypeRow> {
-    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::TypeOid, oid_key(oid))
+    super::syscache::backend_catcache(db, client_id, txn_ctx)
         .ok()?
-        .into_iter()
-        .find_map(|tuple| match tuple {
-            SysCacheTuple::Type(row) => Some(row),
-            _ => None,
-        })
+        .type_by_oid(oid)
+        .cloned()
 }
 
 fn type_row_by_name_namespace(
@@ -452,24 +449,15 @@ fn type_row_by_name_namespace(
     name: &str,
     namespace_oid: u32,
 ) -> Option<PgTypeRow> {
-    search_sys_cache2_db(
-        db,
-        client_id,
-        txn_ctx,
-        SysCacheId::TypeNameNsp,
-        catalog_name_key(name),
-        oid_key(namespace_oid),
-    )
-    .ok()?
-    .into_iter()
-    .find_map(|tuple| match tuple {
-        SysCacheTuple::Type(row)
-            if !db.other_session_temp_namespace_oid(client_id, row.typnamespace) =>
-        {
-            Some(row)
-        }
-        _ => None,
-    })
+    super::syscache::backend_catcache(db, client_id, txn_ctx)
+        .ok()?
+        .type_rows()
+        .into_iter()
+        .find(|row| {
+            row.typnamespace == namespace_oid
+                && row.typname.eq_ignore_ascii_case(name)
+                && !db.other_session_temp_namespace_oid(client_id, row.typnamespace)
+        })
 }
 
 pub(crate) fn dynamic_type_rows_for_search_path(
@@ -1067,6 +1055,22 @@ pub fn default_opclass_for_am_and_type(
         return Some(row.clone());
     }
     let input_type = type_row_by_oid(db, client_id, txn_ctx, input_type_oid)?;
+    if input_type.sql_type.is_range() {
+        let opclass_oid = match am_oid {
+            crate::include::catalog::BTREE_AM_OID => {
+                crate::include::catalog::RANGE_BTREE_OPCLASS_OID
+            }
+            crate::include::catalog::HASH_AM_OID => crate::include::catalog::RANGE_HASH_OPCLASS_OID,
+            crate::include::catalog::GIST_AM_OID => crate::include::catalog::RANGE_GIST_OPCLASS_OID,
+            crate::include::catalog::SPGIST_AM_OID => {
+                crate::include::catalog::RANGE_SPGIST_OPCLASS_OID
+            }
+            _ => 0,
+        };
+        if opclass_oid != 0 {
+            return opclasses.into_iter().find(|row| row.oid == opclass_oid);
+        }
+    }
     if input_type.sql_type.is_multirange() {
         return opclasses.into_iter().find(|row| {
             row.opcmethod == am_oid
@@ -1757,9 +1761,11 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
 
     fn type_rows(&self) -> Vec<PgTypeRow> {
         let mut rows = ensure_type_rows(self.db, self.client_id, self.txn_ctx);
-        rows.extend(self.db.domain_type_rows_for_search_path(&self.search_path));
-        rows.extend(self.db.enum_type_rows_for_search_path(&self.search_path));
-        rows.extend(self.db.range_type_rows_for_search_path(&self.search_path));
+        for row in dynamic_type_rows_for_search_path(self.db, &self.search_path) {
+            if rows.iter().all(|existing| existing.oid != row.oid) {
+                rows.push(row);
+            }
+        }
         rows
     }
 
@@ -1835,6 +1841,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
 
     fn domain_check_name(&self, domain_oid: u32) -> Option<String> {
         self.db.domain_check_name(domain_oid)
+    }
+
+    fn domain_check_by_type_oid(&self, domain_oid: u32) -> Option<String> {
+        self.db.domain_check_by_type_oid(domain_oid)
     }
 
     fn language_rows(&self) -> Vec<PgLanguageRow> {

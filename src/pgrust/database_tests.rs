@@ -14029,8 +14029,8 @@ fn create_spgist_rejects_multicolumn_indexes() {
 }
 
 #[test]
-fn create_spgist_rejects_expression_indexes() {
-    let base = temp_dir("spgist_reject_expression");
+fn create_spgist_rejects_non_range_expression_indexes() {
+    let base = temp_dir("spgist_reject_non_range_expression");
     let db = Database::open(&base, 16).unwrap();
 
     db.execute(1, "create table boxes (b box)").unwrap();
@@ -14048,8 +14048,54 @@ fn create_spgist_rejects_expression_indexes() {
             );
             assert_eq!(sqlstate, "0A000");
         }
-        other => panic!("expected expression SP-GiST rejection, got {:?}", other),
+        other => panic!(
+            "expected non-range expression SP-GiST rejection, got {:?}",
+            other
+        ),
     }
+}
+
+#[test]
+fn create_spgist_accepts_expression_indexes() {
+    let base = temp_dir("spgist_expression");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table test_range_elem (i int4)")
+        .unwrap();
+    db.execute(1, "insert into test_range_elem values (1), (20)")
+        .unwrap();
+    db.execute(
+        1,
+        "create index test_range_elem_expr_spgist on test_range_elem using spgist(int4range(i,i+10))",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indkey, indclass, indexprs \
+             from pg_index \
+             where indexrelid = (select oid from pg_class where relname = 'test_range_elem_expr_spgist')",
+        ),
+        vec![vec![
+            Value::Text("0".into()),
+            Value::Text(
+                crate::include::catalog::RANGE_SPGIST_OPCLASS_OID
+                    .to_string()
+                    .into()
+            ),
+            Value::Text("[\"int4range(i,i+10)\"]".into()),
+        ]]
+    );
+
+    db.execute(1, "set enable_seqscan to off").unwrap();
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select count(*) from test_range_elem where int4range(i,i+10) <@ int4range(10,30)",
+        "test_range_elem_expr_spgist",
+    );
 }
 
 #[test]
@@ -14834,6 +14880,401 @@ fn create_gist_range_index_with_explicit_opclass_uses_matching_type() {
                 .to_string()
                 .into()
         )]]
+    );
+}
+
+#[test]
+fn create_default_range_opclasses_for_btree_hash_and_spgist() {
+    let base = temp_dir("range_default_opclasses");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create type textrange as range (subtype = text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table range_index_inputs (\
+             id int4 not null, \
+             nr numrange, \
+             tr textrange, \
+             ir int4range\
+         )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into range_index_inputs values \
+         (1, '[1,5)'::numrange, '[a,m)'::textrange, '[1,5)'::int4range), \
+         (2, '[5,9)'::numrange, '[m,z)'::textrange, '[5,9)'::int4range)",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "create index range_inputs_nr_btree on range_index_inputs using btree (nr)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index range_inputs_nr_hash on range_index_inputs using hash (nr)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index range_inputs_tr_btree on range_index_inputs using btree (tr)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index range_inputs_ir_spgist on range_index_inputs using spgist (ir)",
+    )
+    .unwrap();
+
+    let rows = query_rows(
+        &db,
+        1,
+        "select c.relname, i.indclass \
+         from pg_class c \
+         join pg_index i on i.indexrelid = c.oid \
+         where c.relname like 'range_inputs_%' \
+         order by c.relname",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                Value::Text("range_inputs_ir_spgist".into()),
+                Value::Text(
+                    crate::include::catalog::RANGE_SPGIST_OPCLASS_OID
+                        .to_string()
+                        .into()
+                ),
+            ],
+            vec![
+                Value::Text("range_inputs_nr_btree".into()),
+                Value::Text(
+                    crate::include::catalog::RANGE_BTREE_OPCLASS_OID
+                        .to_string()
+                        .into()
+                ),
+            ],
+            vec![
+                Value::Text("range_inputs_nr_hash".into()),
+                Value::Text(
+                    crate::include::catalog::RANGE_HASH_OPCLASS_OID
+                        .to_string()
+                        .into()
+                ),
+            ],
+            vec![
+                Value::Text("range_inputs_tr_btree".into()),
+                Value::Text(
+                    crate::include::catalog::RANGE_BTREE_OPCLASS_OID
+                        .to_string()
+                        .into()
+                ),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn gist_range_index_handles_multirange_scan_keys() {
+    let base = temp_dir("gist_range_multirange_scan_keys");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table spans (id int4 not null, span int4range)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into spans values \
+         (1, '[1,5)'::int4range), \
+         (2, '[10,20)'::int4range), \
+         (3, '[30,40)'::int4range)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index spans_range_gist on spans using gist (span)",
+    )
+    .unwrap();
+    db.execute(1, "set enable_seqscan to off").unwrap();
+    db.execute(1, "set enable_bitmapscan to off").unwrap();
+
+    let overlap_sql = "select id from spans \
+                       where span && int4multirange(int4range(3,4), int4range(35,36)) \
+                       order by id";
+    assert_eq!(
+        query_rows(&db, 1, overlap_sql),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(3)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from spans \
+             where span @> int4multirange(int4range(2,3), int4range(4,5)) \
+             order by id",
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from spans \
+             where span <@ int4multirange(int4range(0,10), int4range(25,45)) \
+             order by id",
+        ),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(3)]]
+    );
+}
+
+#[test]
+fn gist_range_index_multirange_internal_pages_match_regression_counts() {
+    let base = temp_dir("gist_range_multirange_internal_pages");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table test_range_gist(ir int4range)")
+        .unwrap();
+    db.execute(
+        1,
+        "create index test_range_gist_idx on test_range_gist using gist (ir)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into test_range_gist select int4range(g, g+10) from generate_series(1,2000) g",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into test_range_gist select 'empty'::int4range from generate_series(1,500) g",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into test_range_gist select int4range(g, g+10000) from generate_series(1,1000) g",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into test_range_gist select 'empty'::int4range from generate_series(1,500) g",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into test_range_gist select int4range(NULL,g*10,'(]') from generate_series(1,100) g",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into test_range_gist select int4range(g*10,NULL,'(]') from generate_series(1,100) g",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into test_range_gist select int4range(g, g+10) from generate_series(1,2000) g",
+    )
+    .unwrap();
+    db.execute(1, "set enable_seqscan to off").unwrap();
+    db.execute(1, "set enable_bitmapscan to off").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from test_range_gist where ir @> '{}'::int4multirange",
+        ),
+        vec![vec![Value::Int64(6200)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from test_range_gist where ir <@ '{(10,30),(40,60),(70,90)}'::int4multirange",
+        ),
+        vec![vec![Value::Int64(1060)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from test_range_gist where ir -|- int4multirange(int4range(100,200), int4range(400,500))",
+        ),
+        vec![vec![Value::Int64(5)]]
+    );
+}
+
+#[test]
+fn spgist_range_index_supports_default_opclass_queries() {
+    let base = temp_dir("spgist_range_default_opclass_queries");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table spans (id int4 not null, span int4range)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into spans values \
+         (1, '[1,5)'::int4range), \
+         (2, '[5,9)'::int4range), \
+         (3, '[20,30)'::int4range)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index spans_range_spgist on spans using spgist (span)",
+    )
+    .unwrap();
+    db.execute(1, "set enable_seqscan to off").unwrap();
+    db.execute(1, "set enable_bitmapscan to off").unwrap();
+
+    let overlap_sql = "select id from spans where span && '[4,6)'::int4range order by id";
+    assert_explain_uses_index(&db, 1, overlap_sql, "spans_range_spgist");
+    assert_eq!(
+        query_rows(&db, 1, overlap_sql),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+}
+
+#[test]
+fn range_exclusion_constraints_enforce_equal_and_overlap_columns() {
+    let base = temp_dir("range_exclusion_constraints");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table test_range_excl(\
+             room int4range, \
+             speaker int4range, \
+             during tsrange, \
+             exclude using gist (room with =, during with &&), \
+             exclude using gist (speaker with =, during with &&)\
+         )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into test_range_excl values\
+             (int4range(123, 123, '[]'), int4range(1, 1, '[]'),\
+              '[2010-01-02 10:00, 2010-01-02 11:00)')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into test_range_excl values\
+             (int4range(123, 123, '[]'), int4range(2, 2, '[]'),\
+              '[2010-01-02 11:00, 2010-01-02 12:00)')",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "insert into test_range_excl values\
+             (int4range(123, 123, '[]'), int4range(3, 3, '[]'),\
+              '[2010-01-02 10:10, 2010-01-02 11:00)')",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23P01");
+            assert_eq!(
+                message,
+                "conflicting key value violates exclusion constraint \"test_range_excl_room_during_excl\""
+            );
+        }
+        other => panic!("expected room exclusion violation, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "insert into test_range_excl values\
+             (int4range(124, 124, '[]'), int4range(3, 3, '[]'),\
+              '[2010-01-02 10:10, 2010-01-02 11:10)')",
+    )
+    .unwrap();
+    match db.execute(
+        1,
+        "insert into test_range_excl values\
+             (int4range(125, 125, '[]'), int4range(1, 1, '[]'),\
+              '[2010-01-02 10:10, 2010-01-02 11:00)')",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23P01");
+            assert_eq!(
+                message,
+                "conflicting key value violates exclusion constraint \"test_range_excl_speaker_during_excl\""
+            );
+        }
+        other => panic!("expected speaker exclusion violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn polymorphic_range_sql_functions_infer_range_subtype() {
+    let base = temp_dir("polymorphic_range_sql_functions");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function anyarray_anyrange_func(a anyarray, r anyrange) \
+         returns anyelement as 'select $1[1] + lower($2);' language sql",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select anyarray_anyrange_func(ARRAY[1,2], int4range(10,20))",
+        ),
+        vec![vec![Value::Int32(11)]],
+    );
+    match db.execute(
+        1,
+        "select anyarray_anyrange_func(ARRAY[1,2], numrange(10,20))",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(sqlstate, "42883");
+            assert_eq!(
+                message,
+                "function anyarray_anyrange_func(integer[], numrange) does not exist"
+            );
+        }
+        other => panic!("expected polymorphic mismatch error, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "create function range_add_bounds(anyrange) \
+         returns anyelement as 'select lower($1) + upper($1)' language sql",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select range_add_bounds(int4range(1, 17))"),
+        vec![vec![Value::Int32(18)]],
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select range_add_bounds(numrange(1.0001, 123.123))"),
+        vec![vec![Value::Numeric("124.1231".into())]],
+    );
+    assert!(
+        db.execute(
+            1,
+            "create function bogus_range_result(anyelement) \
+             returns anyrange as 'select int4range(1,10)' language sql",
+        )
+        .is_err()
+    );
+    assert!(
+        db.execute(
+            1,
+            "create function bogus_range_result_int(int) \
+             returns anyrange as 'select int4range(1,10)' language sql",
+        )
+        .is_err()
     );
 }
 
@@ -31172,6 +31613,245 @@ fn create_range_type_exposes_pg_range_metadata() {
 }
 
 #[test]
+fn create_range_type_survives_database_reopen() {
+    let dir = temp_dir("create_range_type_reload");
+    {
+        let db = Database::open(&dir, 64).unwrap();
+        db.execute(
+            1,
+            "create type textrange as range (subtype = text, collation = \"C\")",
+        )
+        .unwrap();
+    }
+
+    let db = Database::open(&dir, 64).unwrap();
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    let type_row = visible
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typname == "textrange")
+        .unwrap();
+    let range_row = visible
+        .range_rows()
+        .into_iter()
+        .find(|row| row.rngtypid == type_row.oid)
+        .unwrap();
+
+    assert_eq!(range_row.rngsubtype, TEXT_TYPE_OID);
+    drop(visible);
+    db.execute(2, "create table text_spans (span textrange)")
+        .unwrap();
+    let relation_exists = db
+        .lazy_catalog_lookup(2, None, None)
+        .lookup_any_relation("text_spans")
+        .is_some();
+    assert!(relation_exists);
+    db.execute(2, "insert into text_spans values ('[a,z)'::textrange)")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 2, "select span::text from text_spans"),
+        vec![vec![Value::Text("[a,z)".into())]],
+    );
+}
+
+#[test]
+fn dynamic_domain_and_range_creation_after_user_range_table() {
+    let dir = temp_dir("domain_range_after_user_range_table");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create type float8range as range (subtype = float8, subtype_diff = float8mi)",
+    )
+    .unwrap();
+    db.execute(1, "create table float8range_test (span float8range)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into float8range_test values ('[1.0,2.0)'::float8range)",
+    )
+    .unwrap();
+
+    db.execute(1, "create domain mydomain as int4").unwrap();
+    db.execute(1, "create type mydomainrange as range(subtype = mydomain)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select '[4,50)'::mydomainrange @> 7::mydomain"),
+        vec![vec![Value::Bool(true)]],
+    );
+    clear_backend_notices();
+    db.execute(1, "drop domain mydomain cascade").unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec!["drop cascades to type mydomainrange".to_string()]
+    );
+    db.execute(1, "create domain mydomain as int4").unwrap();
+    db.execute(1, "create type mydomainrange as range(subtype = mydomain)")
+        .unwrap();
+    db.execute(
+        1,
+        "create domain restrictedrange as int4range check (upper(value) < 10)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select '[4,5)'::restrictedrange @> 7"),
+        vec![vec![Value::Bool(false)]],
+    );
+    match db.execute(1, "select '[4,50)'::restrictedrange @> 7") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "value for domain restrictedrange violates check constraint \"restrictedrange_check\""
+            );
+        }
+        other => panic!("expected restrictedrange check violation, got {other:?}"),
+    }
+    db.execute(1, "drop table float8range_test").unwrap();
+}
+
+#[test]
+fn create_range_rejects_subtype_diff_with_wrong_argument_types() {
+    let dir = temp_dir("range_subtype_diff_wrong_args");
+    let db = Database::open(&dir, 64).unwrap();
+
+    match db.execute(
+        1,
+        "create type bogus_float8range as range (subtype=float8, subtype_diff=float4mi)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "42883");
+            assert_eq!(
+                message,
+                "function float4mi(double precision, double precision) does not exist"
+            );
+        }
+        other => panic!("expected subtype_diff lookup error, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_range_accepts_subtype_opclass_option() {
+    let dir = temp_dir("range_subtype_opclass_option");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create type textrange_supp as range (subtype = text, subtype_opclass = text_pattern_ops)",
+    )
+    .unwrap();
+    db.execute(1, "create table text_support_test (t text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into text_support_test values ('a'), ('c'), ('d'), ('ch')",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select t from text_support_test where t <@ textrange_supp('a', 'd') order by t",
+        ),
+        vec![
+            vec![Value::Text("a".into())],
+            vec![Value::Text("c".into())],
+            vec![Value::Text("ch".into())],
+        ],
+    );
+}
+
+#[test]
+fn create_ranges_over_array_and_varbit_subtypes() {
+    let dir = temp_dir("range_array_varbit_subtypes");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type arrayrange as range (subtype=int4[])")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select \
+                array[1,1] <@ arrayrange(array[1,2], array[2,1]), \
+                array[1,3] <@ arrayrange(array[1,2], array[2,1])",
+        ),
+        vec![vec![Value::Bool(false), Value::Bool(true)]],
+    );
+    assert!(
+        db.execute(1, "select arrayrange(ARRAY[2,1], ARRAY[1,2])")
+            .is_err()
+    );
+
+    db.execute(1, "create type varbitrange as range (subtype = varbit)")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select '(01,10)'::varbitrange::text"),
+        vec![vec![Value::Text("(01,10)".into())]],
+    );
+}
+
+#[test]
+fn create_range_over_named_composite_subtype() {
+    let dir = temp_dir("range_composite_subtype");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type two_ints as (a int, b int)")
+        .unwrap();
+    db.execute(
+        1,
+        "create type two_ints_range as range (subtype = two_ints)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select row_to_json(upper(t))::text \
+             from (values \
+                 (two_ints_range(row(1,2), row(3,4))), \
+                 (two_ints_range(row(5,6), row(7,8)))\
+             ) v(t) \
+             order by 1",
+        ),
+        vec![
+            vec![Value::Text("{\"a\":3,\"b\":4}".into())],
+            vec![Value::Text("{\"a\":7,\"b\":8}".into())],
+        ],
+    );
+
+    match db.execute(1, "alter type two_ints add attribute c two_ints_range") {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(sqlstate, "42P16");
+            assert_eq!(
+                message,
+                "composite type two_ints cannot be made a member of itself"
+            );
+        }
+        other => panic!("expected composite self-inclusion rejection, got {other:?}"),
+    }
+
+    clear_backend_notices();
+    match db.execute(1, "drop type two_ints cascade") {
+        Ok(StatementResult::AffectedRows(1)) => {}
+        other => panic!("expected cascade drop of composite type, got {other:?}"),
+    }
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec!["drop cascades to type two_ints_range".to_string()]
+    );
+}
+
+#[test]
 fn user_defined_ranges_resolve_constructor_and_accessor_calls() {
     let dir = temp_dir("user_defined_range_function_resolution");
     let db = Database::open(&dir, 64).unwrap();
@@ -31794,10 +32474,11 @@ fn drop_type_enforces_restrict_and_if_exists() {
         .unwrap();
 
     match db.execute(1, "drop type widget cascade") {
-        Err(ExecError::Parse(ParseError::FeatureNotSupported(message)))
-            if message == "DROP TYPE CASCADE is not supported yet" => {}
-        other => panic!("expected drop-type cascade rejection, got {other:?}"),
+        Ok(StatementResult::AffectedRows(1)) => {}
+        other => panic!("expected drop-type cascade success, got {other:?}"),
     }
+    db.execute(1, "create type widget as (id int4, label text)")
+        .unwrap();
 
     db.execute(
         1,

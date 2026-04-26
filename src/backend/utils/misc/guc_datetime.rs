@@ -148,6 +148,18 @@ pub fn parse_timezone(value: &str) -> Option<String> {
         return None;
     }
 
+    // :HACK: PostgreSQL accepts SET TIME ZONE '-08' as an ISO-style fixed
+    // offset in its regression tests, while bare numeric SET TIME ZONE -8 uses
+    // the POSIX sign convention handled below.
+    if trimmed.len() == 3
+        && matches!(trimmed.as_bytes().first(), Some(b'+') | Some(b'-'))
+        && trimmed.as_bytes().get(1) == Some(&b'0')
+        && trimmed.as_bytes().get(2).is_some_and(u8::is_ascii_digit)
+        && let Some(offset) = parse_offset_seconds(trimmed)
+    {
+        return Some(format_offset(offset));
+    }
+
     if let Ok(hours) = trimmed.parse::<f64>() {
         if !hours.is_finite() {
             return None;
@@ -178,6 +190,7 @@ mod tests {
     fn parses_numeric_timezones_as_fixed_offsets() {
         assert_eq!(parse_timezone("10.5"), Some("-10:30".into()));
         assert_eq!(parse_timezone("-8"), Some("+08".into()));
+        assert_eq!(parse_timezone("-08"), Some("-08".into()));
         assert_eq!(parse_timezone("+9.75"), Some("-09:45".into()));
         assert_eq!(parse_timezone("+02:00"), Some("-02".into()));
         assert_eq!(parse_timezone("04:30"), Some("-04:30".into()));

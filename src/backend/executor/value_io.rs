@@ -238,7 +238,22 @@ pub(crate) fn format_exclusion_key_detail(
     proposed: &[Value],
     existing: &[Value],
 ) -> String {
-    format_exclusion_key_detail_with_existing_label(columns, proposed, existing, true)
+    format_exclusion_key_detail_with_config(columns, proposed, existing, &DateTimeConfig::default())
+}
+
+pub(crate) fn format_exclusion_key_detail_with_config(
+    columns: &[ColumnDesc],
+    proposed: &[Value],
+    existing: &[Value],
+    datetime_config: &DateTimeConfig,
+) -> String {
+    format_exclusion_key_detail_with_existing_label(
+        columns,
+        proposed,
+        existing,
+        true,
+        datetime_config,
+    )
 }
 
 pub(crate) fn format_exclusion_create_key_detail(
@@ -246,7 +261,27 @@ pub(crate) fn format_exclusion_create_key_detail(
     proposed: &[Value],
     existing: &[Value],
 ) -> String {
-    format_exclusion_key_detail_with_existing_label(columns, proposed, existing, false)
+    format_exclusion_create_key_detail_with_config(
+        columns,
+        proposed,
+        existing,
+        &DateTimeConfig::default(),
+    )
+}
+
+pub(crate) fn format_exclusion_create_key_detail_with_config(
+    columns: &[ColumnDesc],
+    proposed: &[Value],
+    existing: &[Value],
+    datetime_config: &DateTimeConfig,
+) -> String {
+    format_exclusion_key_detail_with_existing_label(
+        columns,
+        proposed,
+        existing,
+        false,
+        datetime_config,
+    )
 }
 
 fn format_exclusion_key_detail_with_existing_label(
@@ -254,8 +289,8 @@ fn format_exclusion_key_detail_with_existing_label(
     proposed: &[Value],
     existing: &[Value],
     existing_label: bool,
+    datetime_config: &DateTimeConfig,
 ) -> String {
-    let datetime_config = DateTimeConfig::default();
     let names = columns
         .iter()
         .map(|column| column.name.as_str())
@@ -264,13 +299,13 @@ fn format_exclusion_key_detail_with_existing_label(
     let proposed = proposed
         .iter()
         .take(columns.len())
-        .map(|value| format_failing_row_value(value, &datetime_config))
+        .map(|value| format_failing_row_value(value, datetime_config))
         .collect::<Vec<_>>()
         .join(", ");
     let existing = existing
         .iter()
         .take(columns.len())
-        .map(|value| format_failing_row_value(value, &datetime_config))
+        .map(|value| format_failing_row_value(value, datetime_config))
         .collect::<Vec<_>>()
         .join(", ");
     if existing_label {

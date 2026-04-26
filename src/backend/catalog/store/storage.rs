@@ -179,6 +179,7 @@ impl CatalogStore {
             oid_control_path,
             catalog,
             control: effective_control,
+            extra_type_rows: Vec::new(),
         })
     }
 
@@ -199,6 +200,7 @@ impl CatalogStore {
             oid_control_path: None,
             catalog,
             control,
+            extra_type_rows: Vec::new(),
         }
     }
 
@@ -489,6 +491,26 @@ impl CatalogStore {
             }
             CatalogStoreMode::Ephemeral => Ok(self.control.clone()),
         }
+    }
+
+    pub(crate) fn set_extra_type_rows(&mut self, rows: Vec<crate::include::catalog::PgTypeRow>) {
+        self.extra_type_rows = rows;
+    }
+
+    pub(crate) fn extra_type_rows(&self) -> &[crate::include::catalog::PgTypeRow] {
+        &self.extra_type_rows
+    }
+
+    pub fn allocate_oid_block(&mut self, count: u32, floor: u32) -> Result<u32, CatalogError> {
+        let mut control = self.control_state()?;
+        let oid = control.next_oid.max(floor);
+        control.next_oid = oid.saturating_add(count);
+        self.persist_control_values_without_relcache_invalidation(
+            control.next_oid,
+            control.next_rel_number,
+        )?;
+        self.control = control;
+        Ok(oid)
     }
 
     pub(super) fn allocate_next_oid(&mut self, requested_oid: u32) -> Result<u32, CatalogError> {

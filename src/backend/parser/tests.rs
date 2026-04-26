@@ -2563,6 +2563,38 @@ fn parse_create_index_with_expression_item() {
 }
 
 #[test]
+fn parse_create_index_with_function_expression_item() {
+    let stmt =
+        parse_statement("create index on test_range_elem using spgist(int4range(i,i+10))").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateIndex(CreateIndexStatement {
+            unique: false,
+            nulls_not_distinct: false,
+            concurrently: false,
+            only: false,
+            if_not_exists: false,
+            index_name: String::new(),
+            table_name: "test_range_elem".into(),
+            using_method: Some("spgist".into()),
+            columns: vec![IndexColumnDef {
+                name: String::new(),
+                expr_sql: Some("int4range(i,i+10)".into()),
+                expr_type: None,
+                collation: None,
+                opclass: None,
+                descending: false,
+                nulls_first: None,
+            }],
+            include_columns: Vec::new(),
+            predicate: None,
+            predicate_sql: None,
+            options: Vec::new(),
+        })
+    );
+}
+
+#[test]
 fn parse_create_partial_index_statement_captures_predicate_sql() {
     let stmt = parse_statement(
         "create index onek2_u1_prtl on onek2 using btree(unique1 int4_ops) where unique1 < 20 or unique1 > 980",
@@ -10529,6 +10561,22 @@ fn parse_create_drop_and_comment_on_domain_statements() {
     assert_eq!(create.check.as_deref(), Some("upper(value) < 10"));
     assert!(create.not_null);
 
+    let Statement::CreateDomain(create) =
+        parse_statement("create domain restrictedrange as int4range check (upper(value) < 10)")
+            .unwrap()
+    else {
+        panic!("expected create domain");
+    };
+    assert_eq!(create.domain_name, "restrictedrange");
+    assert_eq!(
+        create.ty,
+        RawTypeName::Named {
+            name: "int4range".into(),
+            array_bounds: 0
+        }
+    );
+    assert_eq!(create.check.as_deref(), Some("upper(value) < 10"));
+
     let Statement::DropDomain(drop_stmt) =
         parse_statement("drop domain if exists dom_int cascade").unwrap()
     else {
@@ -10828,7 +10876,7 @@ fn parse_create_type_supports_base_enum_and_range_forms() {
         other => panic!("expected enum create type, got {other:?}"),
     }
     match parse_statement(
-        "create type intr as range (subtype = int4, subtype_diff = int4mi, collation = \"C\")",
+        "create type intr as range (subtype = int4, subtype_opclass = int4_ops, subtype_diff = int4mi, collation = \"C\")",
     )
     .unwrap()
     {
@@ -10839,6 +10887,7 @@ fn parse_create_type_supports_base_enum_and_range_forms() {
                 stmt.subtype,
                 RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4))
             );
+            assert_eq!(stmt.subtype_opclass.as_deref(), Some("int4_ops"));
             assert_eq!(stmt.subtype_diff.as_deref(), Some("int4mi"));
             assert_eq!(stmt.collation.as_deref(), Some("C"));
         }

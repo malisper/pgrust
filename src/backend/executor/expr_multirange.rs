@@ -1076,7 +1076,9 @@ fn char_at(text: &str, idx: usize) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::parser::SqlTypeKind;
     use crate::include::catalog::{INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID};
+    use crate::include::nodes::primnodes::BuiltinScalarFunction;
 
     fn int4_multirange_type() -> SqlType {
         SqlType::multirange(INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID)
@@ -1108,6 +1110,75 @@ mod tests {
                 assert_eq!(detail.as_deref(), Some("Expected range start."));
             }
             other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn range_contained_by_multirange_counts_empty_and_component_ranges() {
+        let range_type = SqlType::new(SqlTypeKind::Int4Range);
+        let multirange =
+            parse_multirange_text("{(10,30),(40,60),(70,90)}", int4_multirange_type()).unwrap();
+        let contained = parse_range_text("[11,20)", range_type).unwrap();
+        let crossing_gap = parse_range_text("[20,45)", range_type).unwrap();
+        let empty = parse_range_text("empty", range_type).unwrap();
+
+        for value in [contained, empty] {
+            let result = eval_multirange_function(
+                BuiltinScalarFunction::RangeContainedBy,
+                &[value, multirange.clone()],
+                Some(SqlType::new(SqlTypeKind::Bool)),
+                false,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(result, Value::Bool(true));
+        }
+
+        let result = eval_multirange_function(
+            BuiltinScalarFunction::RangeContainedBy,
+            &[crossing_gap, multirange],
+            Some(SqlType::new(SqlTypeKind::Bool)),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn range_adjacent_multirange_only_checks_outer_edges() {
+        let range_type = SqlType::new(SqlTypeKind::Int4Range);
+        let multirange =
+            parse_multirange_text("{[100,200),[400,500)}", int4_multirange_type()).unwrap();
+
+        for value in ["[90,100)", "[500,510)"] {
+            let result = eval_multirange_function(
+                BuiltinScalarFunction::RangeAdjacent,
+                &[
+                    parse_range_text(value, range_type).unwrap(),
+                    multirange.clone(),
+                ],
+                Some(SqlType::new(SqlTypeKind::Bool)),
+                false,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(result, Value::Bool(true));
+        }
+
+        for value in ["[200,210)", "[390,400)"] {
+            let result = eval_multirange_function(
+                BuiltinScalarFunction::RangeAdjacent,
+                &[
+                    parse_range_text(value, range_type).unwrap(),
+                    multirange.clone(),
+                ],
+                Some(SqlType::new(SqlTypeKind::Bool)),
+                false,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(result, Value::Bool(false));
         }
     }
 }

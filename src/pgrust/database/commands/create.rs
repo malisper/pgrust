@@ -330,6 +330,67 @@ fn create_view_reloptions(options: &[RelOption]) -> Result<Option<Vec<String>>, 
     Ok((!reloptions.is_empty()).then_some(reloptions))
 }
 
+fn validate_polymorphic_range_return_type(
+    prorettype: u32,
+    callable_arg_oids: &[u32],
+) -> Result<(), ExecError> {
+    let (type_name, inputs, required_inputs) = match prorettype {
+        ANYRANGEOID => (
+            "anyrange",
+            "anyrange or anymultirange",
+            [ANYRANGEOID, ANYMULTIRANGEOID],
+        ),
+        ANYMULTIRANGEOID => (
+            "anymultirange",
+            "anyrange or anymultirange",
+            [ANYMULTIRANGEOID, ANYRANGEOID],
+        ),
+        ANYCOMPATIBLERANGEOID => (
+            "anycompatiblerange",
+            "anycompatiblerange or anycompatiblemultirange",
+            [ANYCOMPATIBLERANGEOID, ANYCOMPATIBLEMULTIRANGEOID],
+        ),
+        ANYCOMPATIBLEMULTIRANGEOID => (
+            "anycompatiblemultirange",
+            "anycompatiblerange or anycompatiblemultirange",
+            [ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID],
+        ),
+        _ => return Ok(()),
+    };
+    if callable_arg_oids
+        .iter()
+        .any(|oid| required_inputs.contains(oid))
+    {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: "cannot determine result data type".into(),
+        detail: Some(format!(
+            "A result of type {type_name} requires at least one input of type {inputs}."
+        )),
+        hint: None,
+        sqlstate: "42P13",
+    })
+}
+
+fn validate_polymorphic_range_output_types(
+    prorettype: u32,
+    proallargtypes: Option<&Vec<u32>>,
+    proargmodes: Option<&Vec<u8>>,
+    callable_arg_oids: &[u32],
+) -> Result<(), ExecError> {
+    validate_polymorphic_range_return_type(prorettype, callable_arg_oids)?;
+    let (Some(all_argtypes), Some(argmodes)) = (proallargtypes, proargmodes) else {
+        return Ok(());
+    };
+    for (type_oid, mode) in all_argtypes.iter().zip(argmodes.iter()) {
+        if matches!(*mode, b'o' | b'b' | b't') {
+            validate_polymorphic_range_return_type(*type_oid, callable_arg_oids)?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn normalize_create_proc_name_for_search_path(
     db: &Database,
     client_id: ClientId,
@@ -802,7 +863,9 @@ impl Database {
                         &table_entry,
                         &index_entry,
                         constraint_name,
-                        if action.primary {
+                        if action.exclusion {
+                            crate::include::catalog::CONSTRAINT_EXCLUSION
+                        } else if action.primary {
                             crate::include::catalog::CONSTRAINT_PRIMARY
                         } else if action.exclusion {
                             crate::include::catalog::CONSTRAINT_EXCLUSION
@@ -1409,6 +1472,9 @@ impl Database {
                 comment: None,
             },
         );
+        drop(domains);
+        self.refresh_catalog_store_dynamic_type_rows(client_id, configured_search_path);
+        self.invalidate_backend_cache_state(client_id);
         self.plan_cache.invalidate_all();
         Ok(StatementResult::AffectedRows(0))
     }
@@ -1772,6 +1838,13 @@ impl Database {
                 }
             }
         }
+
+        validate_polymorphic_range_output_types(
+            prorettype,
+            proallargtypes.as_ref(),
+            proargmodes.as_ref(),
+            &callable_arg_oids,
+        )?;
 
         let proargtypes = callable_arg_oids
             .iter()

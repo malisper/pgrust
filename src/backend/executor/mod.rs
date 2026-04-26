@@ -114,6 +114,7 @@ pub(crate) use expr_xml::validate_xml_input;
 pub(crate) use nodes::{
     render_explain_expr, render_explain_join_expr, render_explain_projection_expr_with_qualifier,
     render_index_order_by, render_index_scan_condition_with_key_names,
+    render_verbose_range_support_expr,
 };
 pub(crate) use sqlfunc::{render_sql_literal, substitute_named_arg, substitute_positional_args};
 pub(crate) use srf::set_returning_call_label;
