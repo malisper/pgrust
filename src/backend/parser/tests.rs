@@ -8586,11 +8586,11 @@ fn build_plan_wraps_order_by_and_limit() {
                 } => {
                     assert_eq!(limit, Some(2));
                     assert_eq!(offset, 1);
-                    match *input {
+                    match strip_projections(input.as_ref()) {
                         Plan::OrderBy { input, items, .. } => {
                             assert_eq!(items.len(), 1);
                             assert!(items[0].descending);
-                            assert!(matches!(*input, Plan::Filter { .. }));
+                            assert!(matches!(input.as_ref(), Plan::Filter { .. }));
                         }
                         other => panic!("expected order by, got {:?}", other),
                     }
@@ -8607,7 +8607,7 @@ fn build_plan_resolves_order_by_ordinal_against_target_list() {
     let stmt = parse_select("select name, id from people order by 2 desc").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
-        Plan::Projection { input, .. } => match *input {
+        Plan::Projection { input, .. } => match strip_projections(input.as_ref()) {
             Plan::OrderBy { items, .. } => {
                 assert_eq!(items.len(), 1);
                 assert!(items[0].descending);

@@ -41,6 +41,7 @@ mod node_mergejoin;
 mod nodes;
 mod permissions;
 mod pg_regex;
+mod random;
 mod sqlfunc;
 mod srf;
 mod startup;
@@ -118,6 +119,7 @@ pub(crate) use nodes::{
     render_index_order_by, render_index_scan_condition_with_key_names,
     render_verbose_range_support_expr,
 };
+pub use random::PgPrngState;
 pub(crate) use sqlfunc::{render_sql_literal, substitute_named_arg, substitute_positional_args};
 pub(crate) use srf::set_returning_call_label;
 pub use startup::executor_start;
@@ -412,6 +414,7 @@ pub struct ExecutorContext {
     pub transaction_lock_scope_id: Option<u64>,
     pub next_command_id: CommandId,
     pub default_toast_compression: crate::include::access::htup::AttributeCompression,
+    pub random_state: std::sync::Arc<parking_lot::Mutex<PgPrngState>>,
     pub expr_bindings: ExprEvalBindings,
     pub case_test_values: Vec<Value>,
     pub system_bindings: Vec<SystemVarBinding>,

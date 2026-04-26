@@ -215,6 +215,7 @@ fn analyze_executor_context(
         transaction_lock_scope_id: None,
         next_command_id: cid,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+        random_state: crate::backend::executor::PgPrngState::shared(),
         timed: false,
         allow_side_effects: false,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -261,6 +262,88 @@ fn ephemeral_database_executes_basic_sql() {
             vec![Value::Int32(1), Value::Text("a".into())],
             vec![Value::Int32(2), Value::Text("b".into())],
         ]
+    );
+}
+
+#[test]
+fn session_setseed_affects_following_random_statement() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select oid, prosrc from pg_proc where proname = 'setseed'",
+        ),
+        vec![vec![Value::Int64(1599), Value::Text("setseed".into())]]
+    );
+    session
+        .execute(&db, "select setseed(0.5)")
+        .expect("seed random state");
+    let result = session
+        .execute(&db, "select random() from generate_series(1, 3)")
+        .expect("read seeded random values");
+    let StatementResult::Query { rows, .. } = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(rows.len(), 3);
+    let expected = [0.9851677175347999, 0.825301858027981, 0.12974610012450416];
+    for (row, expected) in rows.iter().zip(expected) {
+        match row.first() {
+            Some(Value::Float64(actual)) => assert_eq!(*actual, expected),
+            other => panic!("expected float8 random value, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn cte_order_by_feeds_row_number_in_materialized_order() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "
+            with samples as (
+                select column1 r from (values (3), (1), (2)) v order by 1
+            ), indexed_samples as (
+                select row_number() over () i, r from samples
+            )
+            select i, r from indexed_samples
+            ",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Int64(1), Value::Int32(1)],
+            vec![Value::Int64(2), Value::Int32(2)],
+            vec![Value::Int64(3), Value::Int32(3)],
+        ],
+    );
+}
+
+#[test]
+fn order_by_ordinal_sorts_projected_volatile_value() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select random() r from generate_series(1, 50) order by 1",
+    );
+    let values = rows
+        .iter()
+        .map(|row| match row.as_slice() {
+            [Value::Float64(value)] => *value,
+            other => panic!("expected one float8 column, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        values.windows(2).all(|pair| pair[0] <= pair[1]),
+        "ORDER BY 1 must sort the projected random() values: {values:?}"
     );
 }
 
@@ -28394,6 +28477,112 @@ fn plpgsql_cte_select_into_assigns_target() {
         session_query_rows(&mut session, &db, "select cte_select_into_value()"),
         vec![vec![Value::Int32(3)]]
     );
+}
+
+#[test]
+fn plpgsql_cte_body_can_reference_local_generate_series_bound() {
+    let base = temp_dir("plpgsql_cte_local_generate_series");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            r#"
+            create function cte_local_series_count(n int4) returns int8 language plpgsql as $$
+            declare
+                total int8;
+            begin
+                with samples as (
+                    select generate_series from generate_series(1, n)
+                )
+                select into total count(*) from samples;
+                return total;
+            end
+            $$
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select cte_local_series_count(5)"),
+        vec![vec![Value::Int64(5)]]
+    );
+}
+
+#[test]
+fn plpgsql_cte_assignment_subquery_can_reference_local_generate_series_bound() {
+    let base = temp_dir("plpgsql_cte_assignment_local_generate_series");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            r#"
+            create function cte_assignment_local_series_count(n int4) returns bool language plpgsql as $$
+            declare
+                ok bool;
+            begin
+                ok := (
+                    with samples as (
+                        select generate_series from generate_series(1, n)
+                    )
+                    select count(*) = n from samples
+                );
+                return ok;
+            end
+            $$
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select cte_assignment_local_series_count(5)"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn plpgsql_cte_assignment_subquery_with_random_normal_ks_expr_returns() {
+    let base = temp_dir("plpgsql_cte_random_normal_ks_expr");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            r#"
+            create function cte_random_normal_ks_expr(n int4) returns bool language plpgsql as $$
+            declare
+                c float8 := 1.94947;
+                ok bool;
+            begin
+                ok := (
+                    with samples as (
+                        select random_normal() r from generate_series(1, n) order by 1
+                    ), indexed_samples as (
+                        select (row_number() over())-1.0 i, r from samples
+                    )
+                    select max(abs((1+erf(r/sqrt(2)))/2 - i/n)) < c / sqrt(n)
+                    from indexed_samples
+                );
+                return ok;
+            end
+            $$
+            "#,
+        )
+        .unwrap();
+
+    match session_query_rows(&mut session, &db, "select cte_random_normal_ks_expr(1000)").as_slice()
+    {
+        [row] => assert!(matches!(row.as_slice(), [Value::Bool(_)])),
+        rows => panic!("expected one boolean row, got {rows:?}"),
+    }
 }
 
 #[test]

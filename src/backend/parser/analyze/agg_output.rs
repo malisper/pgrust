@@ -1024,12 +1024,8 @@ fn bind_grouped_arithmetic_expr(
     agg_list: &[CollectedAggregate],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
-    let raw_left_type =
-        grouped_infer_sql_expr_type(left, input_scope, catalog, outer_scopes, grouped_outer);
-    let raw_right_type =
-        grouped_infer_sql_expr_type(right, input_scope, catalog, outer_scopes, grouped_outer);
-    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
-    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    let raw_left_expr = left;
+    let raw_right_expr = right;
     let left = bind_agg_output_expr_in_clause(
         left,
         clause.clone(),
@@ -1054,6 +1050,27 @@ fn bind_grouped_arithmetic_expr(
         agg_list,
         n_keys,
     )?;
+    let raw_left_type = expr_sql_type_hint(&left).unwrap_or_else(|| {
+        grouped_infer_sql_expr_type(
+            raw_left_expr,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+        )
+    });
+    let raw_right_type = expr_sql_type_hint(&right).unwrap_or_else(|| {
+        grouped_infer_sql_expr_type(
+            raw_right_expr,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+        )
+    });
+    let left_type =
+        coerce_unknown_string_literal_type(raw_left_expr, raw_left_type, raw_right_type);
+    let right_type = coerce_unknown_string_literal_type(raw_right_expr, raw_right_type, left_type);
     if !left_type.is_array
         && !right_type.is_array
         && is_numeric_family(left_type)

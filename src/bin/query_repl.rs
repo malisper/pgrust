@@ -766,6 +766,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -822,6 +823,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -878,6 +880,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -934,6 +937,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -1095,6 +1099,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -1151,6 +1156,7 @@ fn run_statement(
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
+                random_state: pgrust::backend::executor::PgPrngState::shared(),
                 expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
@@ -1210,6 +1216,7 @@ fn run_statement(
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,
+                    random_state: pgrust::backend::executor::PgPrngState::shared(),
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1280,6 +1287,7 @@ fn run_statement(
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,
+                    random_state: pgrust::backend::executor::PgPrngState::shared(),
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1350,6 +1358,7 @@ fn run_statement(
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,
+                    random_state: pgrust::backend::executor::PgPrngState::shared(),
                     expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),

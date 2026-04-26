@@ -37,18 +37,26 @@ fn lower_sublink_to_subplan(
         .target_list
         .first()
         .map(|target| target.sql_type);
-    let plan_id = append_planned_subquery(
-        planner(*sublink.subselect, catalog)
-            .expect("locking validation should complete before subplan lowering"),
-        subplans,
-    );
+    let planned_stmt = planner(*sublink.subselect, catalog)
+        .expect("locking validation should complete before subplan lowering");
+    let par_param = planned_stmt
+        .ext_params
+        .iter()
+        .map(|param| param.paramid)
+        .collect::<Vec<_>>();
+    let args = planned_stmt
+        .ext_params
+        .iter()
+        .map(|param| finalize_expr_subqueries(param.expr.clone(), catalog, subplans))
+        .collect::<Vec<_>>();
+    let plan_id = append_planned_subquery(planned_stmt, subplans);
     Expr::SubPlan(Box::new(SubPlan {
         sublink_type: sublink.sublink_type,
         testexpr,
         first_col_type,
         plan_id,
-        par_param: Vec::new(),
-        args: Vec::new(),
+        par_param,
+        args,
     }))
 }
 

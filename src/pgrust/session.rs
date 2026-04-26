@@ -503,6 +503,7 @@ pub struct Session {
     interrupts: Arc<InterruptState>,
     auth: AuthState,
     stats_state: Arc<RwLock<SessionStatsState>>,
+    random_state: Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
     portals: PortalManager,
     plpgsql_function_cache: Arc<RwLock<PlpgsqlFunctionCache>>,
 }
@@ -1219,6 +1220,7 @@ impl Session {
             interrupts: Arc::new(InterruptState::new()),
             auth: AuthState::default(),
             stats_state: Arc::new(RwLock::new(SessionStatsState::default())),
+            random_state: crate::backend::executor::PgPrngState::shared(),
             portals: PortalManager::default(),
             plpgsql_function_cache: Arc::new(RwLock::new(PlpgsqlFunctionCache::default())),
         }
@@ -1755,6 +1757,7 @@ impl Session {
             transaction_lock_scope_id: self.active_advisory_scope_id(),
             next_command_id: cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            random_state: Arc::clone(&self.random_state),
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
@@ -3972,7 +3975,15 @@ impl Session {
             Statement::Merge(ref merge_stmt) => {
                 let _ = merge_stmt;
                 let search_path = self.configured_search_path();
-                db.execute_statement_with_search_path(self.client_id, stmt, search_path.as_deref())
+                db.execute_statement_with_search_path_datetime_config_gucs_planner_config_and_random_state(
+                    self.client_id,
+                    stmt,
+                    search_path.as_deref(),
+                    &self.datetime_config,
+                    &self.gucs,
+                    self.planner_config(),
+                    Arc::clone(&self.random_state),
+                )
             }
             Statement::DeclareCursor(ref declare_stmt) => {
                 let options = cursor_options_from_declare(declare_stmt);
@@ -4142,13 +4153,14 @@ impl Session {
                     result
                 } else {
                     let search_path = self.configured_search_path();
-                    db.execute_statement_with_search_path_datetime_config_gucs_and_planner_config(
+                    db.execute_statement_with_search_path_datetime_config_gucs_planner_config_and_random_state(
                         self.client_id,
                         stmt,
                         search_path.as_deref(),
                         &self.datetime_config,
                         &self.gucs,
                         self.planner_config(),
+                        Arc::clone(&self.random_state),
                     )
                 }
             }
@@ -4328,7 +4340,7 @@ impl Session {
         let mut datetime_config = self.datetime_config.clone();
         datetime_config.transaction_timestamp_usecs = Some(transaction_timestamp_usecs);
         datetime_config.statement_timestamp_usecs = Some(statement_timestamp_usecs);
-        let mut guard = db.execute_streaming_with_config(
+        let mut guard = db.execute_streaming_with_config_and_random_state(
             self.client_id,
             select_stmt,
             txn_ctx,
@@ -4338,6 +4350,7 @@ impl Session {
             &datetime_config,
             snapshot_override,
             self.planner_config(),
+            Arc::clone(&self.random_state),
         )?;
         guard.interrupt_guard = Some(self.statement_interrupt_guard()?);
         Ok(guard)

@@ -288,6 +288,7 @@ mod tests {
             transaction_lock_scope_id: None,
             next_command_id: 0,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            random_state: crate::backend::executor::PgPrngState::shared(),
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
