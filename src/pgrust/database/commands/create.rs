@@ -1534,6 +1534,7 @@ impl Database {
                     foreign_key_action_code(action.on_delete),
                     foreign_key_match_code(action.match_type),
                     delete_set_attnums.as_deref(),
+                    action.period.is_some(),
                     &constraint_ctx,
                 )
                 .map_err(map_catalog_error)?;

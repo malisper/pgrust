@@ -29,6 +29,7 @@ pub(crate) mod expr_reg;
 mod expr_string;
 mod expr_txid;
 mod expr_xml;
+mod fmgr;
 mod foreign_keys;
 pub(crate) mod hashjoin;
 pub(crate) mod jsonb;
