@@ -156,7 +156,7 @@ fn schema_owner_default_acl(owner_name: &str) -> Vec<String> {
     )]
 }
 
-fn type_owner_default_acl(owner_name: &str) -> Vec<String> {
+pub(crate) fn type_owner_default_acl(owner_name: &str) -> Vec<String> {
     vec![
         format!("{owner_name}={TYPE_USAGE_PRIVILEGE_CHARS}/{owner_name}"),
         format!("={TYPE_USAGE_PRIVILEGE_CHARS}/{owner_name}"),
@@ -171,11 +171,7 @@ fn function_owner_default_acl(owner_name: &str) -> Vec<String> {
 }
 
 fn collapse_acl_defaults(acl: Vec<String>, defaults: &[String]) -> Option<Vec<String>> {
-    if acl.is_empty() || acl == defaults {
-        None
-    } else {
-        Some(acl)
-    }
+    if acl == defaults { None } else { Some(acl) }
 }
 
 fn grant_acl_entry(
@@ -1036,6 +1032,11 @@ impl Database {
                     sqlstate: "42704",
                 }
             })?;
+            if let Some(entry) = self.range_types.read().values().find(|entry| {
+                entry.multirange_oid == type_oid || entry.multirange_array_oid == type_oid
+            }) {
+                return Err(cannot_set_multirange_privileges_error(&entry.name));
+            }
             let row = catalog
                 .type_by_oid(type_oid)
                 .ok_or_else(|| ExecError::DetailedError {

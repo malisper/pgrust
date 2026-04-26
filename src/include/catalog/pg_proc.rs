@@ -9497,6 +9497,7 @@ mod tests {
                 "proargnames",
                 "prosrc",
                 "proargdefaults",
+                "proacl",
             ]
         );
     }
