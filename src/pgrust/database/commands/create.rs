@@ -1451,10 +1451,10 @@ impl Database {
             catalog_effects.push(constraint_effect);
         }
 
-        let foreign_key_base_cid =
+        let mut next_foreign_key_cid =
             check_base_cid.saturating_add(lowered.check_actions.len() as u32);
-        for (index, action) in lowered.foreign_key_actions.iter().enumerate() {
-            let constraint_cid = foreign_key_base_cid.saturating_add(index as u32);
+        for action in &lowered.foreign_key_actions {
+            let constraint_cid = next_foreign_key_cid;
             let catalog = self.lazy_catalog_lookup(
                 client_id,
                 Some((xid, constraint_cid)),
@@ -1549,7 +1549,7 @@ impl Database {
                 .map_err(map_catalog_error)?;
             self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
             catalog_effects.push(constraint_effect);
-            self.create_foreign_key_triggers_in_transaction(
+            next_foreign_key_cid = self.create_foreign_key_triggers_in_transaction(
                 client_id,
                 xid,
                 constraint_cid.saturating_add(1),

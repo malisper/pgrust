@@ -44,19 +44,21 @@ impl Database {
         cid: CommandId,
         constraint: &PgConstraintRow,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
-    ) -> Result<(), ExecError> {
+    ) -> Result<CommandId, ExecError> {
         let rows = foreign_key_trigger_rows(constraint);
         let interrupts = self.interrupt_state(client_id);
-        for (index, row) in rows.into_iter().enumerate() {
+        let mut next_cid = cid;
+        for row in rows {
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),
                 xid,
-                cid: cid.saturating_add(index as u32),
+                cid: next_cid,
                 client_id,
                 waiter: None,
                 interrupts: Arc::clone(&interrupts),
             };
+            next_cid = next_cid.saturating_add(1);
             let effect = self
                 .catalog
                 .write()
@@ -67,7 +69,7 @@ impl Database {
             catalog_effects.push(effect);
         }
         self.plan_cache.invalidate_all();
-        Ok(())
+        Ok(next_cid)
     }
 
     pub(super) fn drop_foreign_key_triggers_in_transaction(
