@@ -26453,6 +26453,18 @@ fn copy_to_rejects_header_match() {
 }
 
 #[test]
+fn copy_from_rejects_invalid_header_choice() {
+    match crate::pgrust::session::parse_copy_command(
+        "copy copy_out from stdin with (header wrong_choice)",
+    ) {
+        Some(Err(ExecError::DetailedError { message, .. })) => {
+            assert_eq!(message, "header requires a Boolean value or \"match\"");
+        }
+        other => panic!("expected invalid COPY HEADER error, got {other:?}"),
+    }
+}
+
+#[test]
 fn copy_errors_include_copy_context() {
     let base = temp_dir("copy_error_context");
     let db = Database::open(&base, 16).unwrap();
@@ -26524,6 +26536,35 @@ fn copy_to_unpopulated_materialized_view_uses_copy_error() {
             );
         }
         other => panic!("expected unpopulated matview COPY error, got {other:?}"),
+    }
+}
+
+#[test]
+fn copy_to_populated_materialized_view_outputs_rows() {
+    let base = temp_dir("copy_populated_matview");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create materialized view copy_mv as select 1 as id with no data",
+        )
+        .unwrap();
+    session
+        .execute(&db, "refresh materialized view copy_mv")
+        .unwrap();
+    let copy =
+        crate::pgrust::session::parse_copy_command("copy copy_mv(id) to stdout with (header)")
+            .unwrap()
+            .unwrap();
+
+    match session.execute_copy_command(&db, &copy).unwrap() {
+        crate::pgrust::session::CopyExecutionResult::Output { data, rows } => {
+            assert_eq!(rows, 1);
+            assert_eq!(String::from_utf8(data).unwrap(), "id\n1\n");
+        }
+        other => panic!("expected COPY output, got {other:?}"),
     }
 }
 

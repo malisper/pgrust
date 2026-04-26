@@ -8289,12 +8289,19 @@ impl Session {
         let Some(relation) = catalog.lookup_any_relation(table_name) else {
             return Ok(());
         };
-        if relation.relkind == 'r' {
+        if matches!(relation.relkind, 'r' | 'm') && relation.relispopulated {
             return Ok(());
+        }
+        if relation.relkind == 'm' {
+            return Err(ExecError::DetailedError {
+                message: format!("cannot copy from unpopulated materialized view \"{table_name}\""),
+                detail: None,
+                hint: Some("Use the REFRESH MATERIALIZED VIEW command.".into()),
+                sqlstate: "55000",
+            });
         }
         let object = match relation.relkind {
             'v' => "view",
-            'm' => "materialized view",
             'f' => "foreign table",
             _ => "relation",
         };
@@ -8854,7 +8861,13 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
         }
         if lower.starts_with("header") && copy_keyword_boundary(rest, 6) {
             let after_header = rest[6..].trim_start();
-            let (word, after) = take_copy_word(after_header);
+            let (word, after) = if let Some((value, after)) = parse_copy_string_token(after_header)
+            {
+                (value, after)
+            } else {
+                let (word, after) = take_copy_word(after_header);
+                (word.to_string(), after)
+            };
             match word.to_ascii_lowercase().as_str() {
                 "true" | "on" | "1" => {
                     options.header = CopyHeader::Present;
@@ -8868,9 +8881,17 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
                     options.header = CopyHeader::Match;
                     rest = after;
                 }
-                _ => {
+                "" => {
                     options.header = CopyHeader::Present;
                     rest = after_header;
+                }
+                _ => {
+                    return Err(ExecError::DetailedError {
+                        message: "header requires a Boolean value or \"match\"".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42601",
+                    });
                 }
             }
             continue;
