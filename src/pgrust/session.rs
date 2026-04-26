@@ -6450,6 +6450,7 @@ impl Session {
                                         column: column.name.clone(),
                                         ty: column.ty.clone(),
                                         attlen: column.storage.attlen,
+                                        actual_len: None,
                                     });
                                 }
                                 ScalarType::Bool => Value::Bool(parse_pg_bool_text(raw)?),

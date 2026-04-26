@@ -3198,6 +3198,8 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::TsQuery
         | SqlTypeKind::Void
         | SqlTypeKind::Internal
+        | SqlTypeKind::Shell
+        | SqlTypeKind::Cstring
         | SqlTypeKind::FdwHandler
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary

@@ -10,9 +10,10 @@ use crate::include::catalog::{
     ARRAYRANGE_TYPE_OID, BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
     BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
     BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID, CIDR_ARRAY_TYPE_OID, CIDR_TYPE_OID, CIRCLE_TYPE_OID,
-    DATE_ARRAY_TYPE_OID, DATE_TYPE_OID, DATEMULTIRANGE_ARRAY_TYPE_OID, DATEMULTIRANGE_TYPE_OID,
-    DATERANGE_ARRAY_TYPE_OID, DATERANGE_TYPE_OID, FDW_HANDLER_TYPE_OID, FLOAT4_ARRAY_TYPE_OID,
-    FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INET_ARRAY_TYPE_OID, INET_TYPE_OID,
+    CSTRING_ARRAY_TYPE_OID, CSTRING_TYPE_OID, DATE_ARRAY_TYPE_OID, DATE_TYPE_OID,
+    DATEMULTIRANGE_ARRAY_TYPE_OID, DATEMULTIRANGE_TYPE_OID, DATERANGE_ARRAY_TYPE_OID,
+    DATERANGE_TYPE_OID, FDW_HANDLER_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID,
+    FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INET_ARRAY_TYPE_OID, INET_TYPE_OID,
     INT2_ARRAY_TYPE_OID, INT2_TYPE_OID, INT2VECTOR_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
     INT4MULTIRANGE_ARRAY_TYPE_OID, INT4MULTIRANGE_TYPE_OID, INT4RANGE_ARRAY_TYPE_OID,
     INT4RANGE_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INT8MULTIRANGE_ARRAY_TYPE_OID,
@@ -125,6 +126,18 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "_record",
             RECORD_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::record(RECORD_TYPE_OID)),
+        ),
+        fixed_builtin_type_row(
+            "cstring",
+            CSTRING_TYPE_OID,
+            SqlType::new(SqlTypeKind::Cstring),
+            -2,
+            AttributeAlign::Char,
+        ),
+        builtin_type_row(
+            "_cstring",
+            CSTRING_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Cstring)),
         ),
         builtin_type_row("bool", BOOL_TYPE_OID, SqlType::new(SqlTypeKind::Bool)),
         builtin_type_row(
@@ -1080,8 +1093,11 @@ fn annotate_array_type_links(rows: &mut [PgTypeRow]) {
         if row.sql_type.is_array {
             row.typelem = snapshot
                 .iter()
-                .find(|type_row| type_row.sql_type == row.sql_type.element_type())
-                .map(|type_row| type_row.oid)
+                .find(|base_row| {
+                    !base_row.sql_type.is_array
+                        && SqlType::array_of(base_row.sql_type) == row.sql_type
+                })
+                .map(|base_row| base_row.oid)
                 .unwrap_or(row.sql_type.type_oid);
         } else if let Some(array_oid) = snapshot
             .iter()
@@ -1284,6 +1300,32 @@ mod tests {
         assert_eq!(row.typname, "fdw_handler");
         assert_eq!(row.typlen, 4);
         assert_eq!(row.sql_type, SqlType::new(SqlTypeKind::FdwHandler));
+    }
+
+    #[test]
+    fn builtin_types_include_cstring() {
+        let rows = builtin_type_rows();
+        let row = rows
+            .iter()
+            .find(|row| row.oid == CSTRING_TYPE_OID)
+            .expect("cstring row");
+        assert_eq!(row.typname, "cstring");
+        assert_eq!(row.typlen, -2);
+        assert_eq!(row.typalign, AttributeAlign::Char);
+        assert_eq!(row.typstorage, AttributeStorage::Plain);
+        assert_eq!(row.typarray, CSTRING_ARRAY_TYPE_OID);
+        assert_eq!(row.sql_type, SqlType::new(SqlTypeKind::Cstring));
+
+        let array_row = rows
+            .iter()
+            .find(|row| row.oid == CSTRING_ARRAY_TYPE_OID)
+            .expect("_cstring row");
+        assert_eq!(array_row.typname, "_cstring");
+        assert_eq!(array_row.typelem, CSTRING_TYPE_OID);
+        assert_eq!(
+            array_row.sql_type,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Cstring))
+        );
     }
 
     #[test]

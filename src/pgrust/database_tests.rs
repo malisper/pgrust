@@ -9,8 +9,9 @@ use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
 use crate::backend::utils::misc::notices::{
     clear_notices as clear_backend_notices, take_notices as take_backend_notices,
 };
+use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    BootstrapCatalogKind, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
+    BootstrapCatalogKind, CSTRING_TYPE_OID, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
     PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
     TEXT_TYPE_OID,
 };
@@ -11515,6 +11516,164 @@ fn regoperator_literal_cast_resolves_operator_signature() {
             "select oprleft, oprright from pg_operator where oid = '===(boolean,boolean)'::regoperator"
         ),
         vec![vec![Value::Int64(16), Value::Int64(16)]]
+    );
+}
+
+#[test]
+fn create_function_accepts_cstring_but_table_columns_reject_it() {
+    let base = temp_dir("cstring_type_signature");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function cstring_echo(cstring) returns cstring as 'textout' language internal strict immutable",
+    )
+    .unwrap();
+
+    let catalog = db.lazy_catalog_lookup(1, None, None);
+    let proc_row = catalog
+        .proc_rows_by_name("cstring_echo")
+        .into_iter()
+        .find(|row| row.proargtypes == CSTRING_TYPE_OID.to_string())
+        .expect("cstring_echo(cstring)");
+    assert_eq!(proc_row.prorettype, CSTRING_TYPE_OID);
+
+    match db.execute(1, "create table bad_cstring (value cstring)") {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(message, "column \"value\" has pseudo-type cstring");
+            assert_eq!(sqlstate, "42P16");
+        }
+        other => panic!("expected cstring column rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_type_shell_persists_and_drops() {
+    let base = temp_dir("shell_type_create_drop");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create type shell").unwrap();
+    let catalog = db.lazy_catalog_lookup(1, None, None);
+    let shell_row = catalog.type_by_name("shell").expect("shell type row");
+    assert_eq!(shell_row.sql_type.kind, SqlTypeKind::Shell);
+    assert_eq!(shell_row.typrelid, 0);
+    assert_eq!(shell_row.typarray, 0);
+
+    match db.execute(1, "create type shell") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "type \"shell\" already exists");
+            assert_eq!(sqlstate, "42710");
+        }
+        other => panic!("expected duplicate shell type rejection, got {other:?}"),
+    }
+
+    db.execute(1, "drop type shell").unwrap();
+    assert!(
+        db.lazy_catalog_lookup(1, None, None)
+            .type_by_name("shell")
+            .is_none()
+    );
+}
+
+#[test]
+fn create_function_creates_and_references_shell_return_type() {
+    let base = temp_dir("shell_type_function_signature");
+    let db = Database::open(&base, 16).unwrap();
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "create function widget_in(cstring) returns widget as 'pg_rust_test_widget_in' language internal strict immutable",
+    )
+    .unwrap();
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].message, "type \"widget\" is not yet defined");
+    assert_eq!(
+        notices[0].detail.as_deref(),
+        Some("Creating a shell type definition.")
+    );
+
+    let catalog = db.lazy_catalog_lookup(1, None, None);
+    let widget_row = catalog.type_by_name("widget").expect("widget shell type");
+    assert_eq!(widget_row.sql_type.kind, SqlTypeKind::Shell);
+    let proc_row = catalog
+        .proc_rows_by_name("widget_in")
+        .into_iter()
+        .find(|row| row.proargtypes == CSTRING_TYPE_OID.to_string())
+        .expect("widget_in(cstring)");
+    assert_eq!(proc_row.prorettype, widget_row.oid);
+    drop(catalog);
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "create function widget_out(widget) returns cstring as 'pg_rust_test_widget_out' language internal strict immutable",
+    )
+    .unwrap();
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].message, "argument type widget is only a shell");
+
+    match db.execute(1, "create table bad_widget (value widget)") {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(message, "type \"widget\" is only a shell");
+            assert_eq!(sqlstate, "42809");
+        }
+        other => panic!("expected shell column rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_type_base_completes_shell_and_applies_type_default() {
+    let base = temp_dir("base_type_create_default");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create type int42").unwrap();
+    db.execute(
+        1,
+        "create function int42_in(cstring) returns int42 as 'pg_rust_test_int42_in' language internal strict immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function int42_out(int42) returns cstring as 'pg_rust_test_int42_out' language internal strict immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create type int42 (internallength = 4, input = int42_in, output = int42_out, alignment = int4, default = 42, passedbyvalue)",
+    )
+    .unwrap();
+
+    let catalog = db.lazy_catalog_lookup(1, None, None);
+    let int42_type = catalog.type_by_name("int42").expect("int42 type row");
+    let int42_array = catalog
+        .type_by_name("_int42")
+        .expect("int42 array type row");
+    assert_eq!(int42_type.sql_type.kind, SqlTypeKind::Text);
+    assert_eq!(int42_type.sql_type.type_oid, int42_type.oid);
+    assert_eq!(int42_type.typlen, 4);
+    assert_eq!(int42_type.typalign, AttributeAlign::Int);
+    assert_eq!(int42_type.typstorage, AttributeStorage::Plain);
+    assert_eq!(int42_type.typelem, 0);
+    assert_eq!(int42_type.typarray, int42_array.oid);
+    assert_eq!(int42_array.typelem, int42_type.oid);
+    drop(catalog);
+
+    db.execute(1, "create table int42_rows (value int42)")
+        .unwrap();
+    db.execute(1, "insert into int42_rows default values")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select value from int42_rows"),
+        vec![vec![Value::Text("42".into())]]
     );
 }
 

@@ -3,9 +3,10 @@ use crate::backend::commands::partition::validate_new_partition_bound;
 use crate::backend::parser::{
     AggregateArgType, AggregateSignatureKind, CreateAggregateStatement, CreateFunctionReturnSpec,
     CreateFunctionStatement, FunctionArgMode, FunctionParallel, FunctionVolatility,
-    OwnedSequenceSpec, PartitionBoundSpec, SequenceOptionsSpec, SqlTypeKind,
+    OwnedSequenceSpec, PartitionBoundSpec, RawTypeName, SequenceOptionsSpec, SqlType, SqlTypeKind,
     pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
 };
+use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
 use crate::include::catalog::{
     ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
     BOOTSTRAP_SUPERUSER_OID, BYTEA_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
@@ -193,6 +194,33 @@ pub(super) fn aggregate_signature_arg_oids(
             })
             .collect(),
     }
+}
+
+fn raw_named_shell_type_name(raw: &RawTypeName) -> Option<&str> {
+    match raw {
+        RawTypeName::Named {
+            name,
+            array_bounds: 0,
+        } => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+fn create_function_type_oid(
+    catalog: &dyn CatalogLookup,
+    sql_type: SqlType,
+    fallback_name: impl Into<String>,
+) -> Result<u32, ExecError> {
+    catalog
+        .type_oid_for_sql_type(sql_type)
+        .or_else(|| matches!(sql_type.kind, SqlTypeKind::Record).then_some(RECORD_TYPE_OID))
+        .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(fallback_name.into())))
+}
+
+fn notice_name_for_type(raw: &RawTypeName, sql_type: SqlType) -> String {
+    raw_named_shell_type_name(raw)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{sql_type:?}"))
 }
 
 fn split_proc_name(name: &str) -> (Option<&str>, &str) {
@@ -1223,14 +1251,17 @@ impl Database {
 
         for arg in &create_stmt.args {
             let sql_type = resolve_raw_type_name(&arg.ty, &catalog).map_err(ExecError::Parse)?;
-            let type_oid = catalog
-                .type_oid_for_sql_type(sql_type)
-                .or_else(|| matches!(sql_type.kind, SqlTypeKind::Record).then_some(RECORD_TYPE_OID))
-                .ok_or_else(|| {
-                    ExecError::Parse(ParseError::UnsupportedType(
-                        arg.name.clone().unwrap_or_else(|| format!("{:?}", arg.ty)),
-                    ))
-                })?;
+            if matches!(sql_type.kind, SqlTypeKind::Shell) {
+                push_notice(format!(
+                    "argument type {} is only a shell",
+                    notice_name_for_type(&arg.ty, sql_type)
+                ));
+            }
+            let type_oid = create_function_type_oid(
+                &catalog,
+                sql_type,
+                arg.name.clone().unwrap_or_else(|| format!("{:?}", arg.ty)),
+            )?;
 
             if matches!(arg.mode, FunctionArgMode::In | FunctionArgMode::InOut) {
                 callable_arg_oids.push(type_oid);
@@ -1258,28 +1289,48 @@ impl Database {
 
         match &create_stmt.return_spec {
             CreateFunctionReturnSpec::Type { ty, setof } => {
-                let sql_type = resolve_raw_type_name(ty, &catalog).map_err(ExecError::Parse)?;
-                proretset = *setof;
-                prorettype = if matches!(sql_type.kind, SqlTypeKind::Record) {
-                    RECORD_TYPE_OID
-                } else {
-                    catalog.type_oid_for_sql_type(sql_type).ok_or_else(|| {
-                        ExecError::Parse(ParseError::UnsupportedType(format!("{sql_type:?}")))
-                    })?
+                let sql_type = match resolve_raw_type_name(ty, &catalog) {
+                    Ok(sql_type) => {
+                        if matches!(sql_type.kind, SqlTypeKind::Shell) {
+                            push_notice(format!(
+                                "return type {} is only a shell",
+                                notice_name_for_type(ty, sql_type)
+                            ));
+                        }
+                        sql_type
+                    }
+                    Err(ParseError::UnsupportedType(_)) => {
+                        let Some(type_name) = raw_named_shell_type_name(ty) else {
+                            return Err(ExecError::Parse(ParseError::UnsupportedType(format!(
+                                "{ty:?}"
+                            ))));
+                        };
+                        let (type_oid, object_name) = self
+                            .create_shell_type_for_name_in_transaction(
+                                client_id,
+                                type_name,
+                                xid,
+                                cid,
+                                configured_search_path,
+                                catalog_effects,
+                            )?;
+                        push_notice_with_detail(
+                            format!("type \"{object_name}\" is not yet defined"),
+                            "Creating a shell type definition.",
+                        );
+                        SqlType::new(SqlTypeKind::Shell).with_identity(type_oid, 0)
+                    }
+                    Err(err) => return Err(ExecError::Parse(err)),
                 };
+                proretset = *setof;
+                prorettype = create_function_type_oid(&catalog, sql_type, format!("{sql_type:?}"))?;
                 if !output_args.is_empty() {
                     let required_rettype = if output_args.len() == 1 {
-                        catalog
-                            .type_oid_for_sql_type(output_args[0].sql_type)
-                            .or_else(|| {
-                                matches!(output_args[0].sql_type.kind, SqlTypeKind::Record)
-                                    .then_some(RECORD_TYPE_OID)
-                            })
-                            .ok_or_else(|| {
-                                ExecError::Parse(ParseError::UnsupportedType(
-                                    output_args[0].name.clone(),
-                                ))
-                            })?
+                        create_function_type_oid(
+                            &catalog,
+                            output_args[0].sql_type,
+                            output_args[0].name.clone(),
+                        )?
                     } else {
                         RECORD_TYPE_OID
                     };
@@ -1360,17 +1411,11 @@ impl Database {
                     proretset = true;
                     prorettype = RECORD_TYPE_OID;
                 } else if output_args.len() == 1 {
-                    prorettype = catalog
-                        .type_oid_for_sql_type(output_args[0].sql_type)
-                        .or_else(|| {
-                            matches!(output_args[0].sql_type.kind, SqlTypeKind::Record)
-                                .then_some(RECORD_TYPE_OID)
-                        })
-                        .ok_or_else(|| {
-                            ExecError::Parse(ParseError::UnsupportedType(
-                                output_args[0].name.clone(),
-                            ))
-                        })?;
+                    prorettype = create_function_type_oid(
+                        &catalog,
+                        output_args[0].sql_type,
+                        output_args[0].name.clone(),
+                    )?;
                 } else {
                     prorettype = RECORD_TYPE_OID;
                 }
