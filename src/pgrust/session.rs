@@ -2276,6 +2276,13 @@ impl Session {
             )?
         };
 
+        if let Statement::AlterTableMulti(ref statements) = stmt {
+            for sql in statements {
+                self.execute_internal(db, sql, statement_lock_scope_id)?;
+            }
+            return Ok(StatementResult::AffectedRows(0));
+        }
+
         if self.active_txn.is_some()
             && !matches!(
                 stmt,
@@ -3229,6 +3236,7 @@ impl Session {
                         self.client_id,
                         alter_stmt,
                         search_path.as_deref(),
+                        Some(&self.datetime_config),
                     )
                 }
             }
@@ -3474,6 +3482,14 @@ impl Session {
                         search_path.as_deref(),
                     )
                 }
+            }
+            Statement::AlterTableReplicaIdentity(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_alter_table_replica_identity_stmt_with_search_path(
+                    self.client_id,
+                    alter_stmt,
+                    search_path.as_deref(),
+                )
             }
             Statement::AlterPolicy(ref alter_stmt) => {
                 if self.active_txn.is_some() {
@@ -4647,6 +4663,12 @@ impl Session {
         let client_id = self.client_id;
 
         let result = match stmt {
+            Statement::AlterTableMulti(ref statements) => {
+                for sql in statements {
+                    self.execute_internal(db, sql, _statement_lock_scope_id)?;
+                }
+                Ok(StatementResult::AffectedRows(0))
+            }
             Statement::Do(ref do_stmt) => self.execute_plpgsql_do(db, do_stmt, xid, cid),
             Statement::Show(ref show_stmt) => self.apply_show(db, show_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(db, set_stmt),
@@ -5454,6 +5476,7 @@ impl Session {
                     xid,
                     cid,
                     search_path.as_deref(),
+                    Some(&self.datetime_config),
                     &mut txn.catalog_effects,
                 )
             }
@@ -5830,6 +5853,11 @@ impl Session {
                     search_path.as_deref(),
                     &mut txn.catalog_effects,
                 )
+            }
+            Statement::AlterTableReplicaIdentity(_) => {
+                Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                    "ALTER TABLE REPLICA IDENTITY in transaction".into(),
+                )))
             }
             Statement::AlterPolicy(ref alter_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);

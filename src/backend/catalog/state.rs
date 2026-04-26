@@ -1109,6 +1109,7 @@ impl Catalog {
         confdeltype: char,
         confmatchtype: char,
         confdelsetcols: Option<&[i16]>,
+        conperiod: bool,
     ) -> Result<PgConstraintRow, CatalogError> {
         let table = self
             .get_by_oid(relation_oid)
@@ -1172,7 +1173,7 @@ impl Catalog {
             conislocal: true,
             coninhcount: 0,
             connoinherit: false,
-            conperiod: false,
+            conperiod,
         };
         self.next_oid = self.next_oid.saturating_add(1);
         self.constraints.push(row.clone());

@@ -10028,6 +10028,29 @@ fn pg_rust_test_enc_conversion_converts_euc_kr_to_utf8() {
 }
 
 #[test]
+fn pg_rust_is_catalog_text_unique_index_oid_matches_postgres_list() {
+    let base = temp_dir("pg_rust_is_catalog_text_unique_index_oid");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let result = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select pg_rust_is_catalog_text_unique_index_oid(6246::oid), \
+                pg_rust_is_catalog_text_unique_index_oid(6002::oid), \
+                pg_rust_is_catalog_text_unique_index_oid(2675::oid)",
+    )
+    .unwrap();
+    assert_query_rows(
+        result,
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+        ]],
+    );
+}
+
+#[test]
 fn pg_input_is_valid_reports_varchar_typmod_results() {
     let base = temp_dir("pg_input_is_valid_varchar");
     let txns = TransactionManager::new_durable(&base).unwrap();

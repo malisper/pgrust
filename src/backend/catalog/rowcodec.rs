@@ -16,7 +16,7 @@ use crate::include::catalog::{
     PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
     PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
     PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    bootstrap_composite_type_rows, builtin_type_rows,
+    bootstrap_composite_type_rows, builtin_type_rows, pg_type_desc,
 };
 use crate::include::nodes::datetime::TimestampTzADT;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, RecordValue, Value};
@@ -415,8 +415,20 @@ pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow,
         relpartbound: nullable_text(&values[23 + offset])?,
         reloptions: nullable_text_array(&values[24 + offset])?,
         relacl: nullable_text_array(&values[25 + offset])?,
+        relreplident: match values.get(26 + offset) {
+            Some(Value::InternalChar(_) | Value::Text(_)) => {
+                expect_char(&values[26 + offset], "relreplident")?
+            }
+            _ => 'd',
+        },
         reloftype: values
-            .get(26 + offset)
+            .get(
+                26 + offset
+                    + usize::from(matches!(
+                        values.get(26 + offset),
+                        Some(Value::InternalChar(_) | Value::Text(_))
+                    )),
+            )
             .map(expect_oid)
             .transpose()?
             .unwrap_or(0),
@@ -927,6 +939,11 @@ pub(crate) fn pg_attribute_row_from_values(
         .map(nullable_any_array)
         .transpose()?
         .flatten();
+    let attbyval = values
+        .get(21)
+        .map(expect_bool)
+        .transpose()?
+        .unwrap_or(false);
     Ok(PgAttributeRow {
         attrelid: expect_oid(&values[0])?,
         attname: expect_text(&values[1])?,
@@ -952,6 +969,7 @@ pub(crate) fn pg_attribute_row_from_values(
         attoptions,
         attfdwoptions,
         attmissingval,
+        attbyval,
         sql_type: SqlType::new(SqlTypeKind::Text),
     })
 }
@@ -1061,58 +1079,105 @@ pub(crate) fn pg_index_row_from_values(values: Vec<Value>) -> Result<PgIndexRow,
 }
 
 pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, CatalogError> {
+    let has_new_type_columns = values.len() >= pg_type_desc().columns.len();
+    let has_typtype = has_new_type_columns || values.len() >= 16;
+    let typbyval_idx = has_new_type_columns.then_some(5);
+    let typtype_idx = if has_new_type_columns { 6 } else { 5 };
+    let typisdefined_idx = if has_new_type_columns { 7 } else { 6 };
+    let typalign_idx = if has_new_type_columns {
+        8
+    } else if has_typtype {
+        7
+    } else {
+        5
+    };
+    let typstorage_idx = if has_new_type_columns {
+        9
+    } else if has_typtype {
+        8
+    } else {
+        6
+    };
+    let typrelid_idx = if has_new_type_columns {
+        10
+    } else if has_typtype {
+        9
+    } else {
+        7
+    };
+    let typsubscript_idx = has_new_type_columns.then_some(11);
+    let typelem_idx = if has_new_type_columns {
+        12
+    } else if has_typtype {
+        10
+    } else {
+        8
+    };
+    let typarray_idx = if has_new_type_columns {
+        13
+    } else if has_typtype {
+        11
+    } else {
+        9
+    };
+    let typinput_idx = if has_new_type_columns {
+        14
+    } else if has_typtype {
+        12
+    } else {
+        10
+    };
+    let typoutput_idx = if has_new_type_columns {
+        15
+    } else if has_typtype {
+        13
+    } else {
+        11
+    };
+    let typreceive_idx = has_new_type_columns.then_some(16);
+    let typsend_idx = has_new_type_columns.then_some(17);
+    let typmodin_idx = has_new_type_columns.then_some(18);
+    let typmodout_idx = if has_new_type_columns {
+        19
+    } else if has_typtype {
+        14
+    } else {
+        12
+    };
+    let typdelim_idx = has_new_type_columns.then_some(20);
+    let typanalyze_idx = has_new_type_columns.then_some(21);
+    let typbasetype_idx = has_new_type_columns.then_some(22);
+    let typcollation_idx = has_new_type_columns.then_some(23);
+    let typacl_idx = if has_new_type_columns {
+        24
+    } else if has_typtype {
+        15
+    } else {
+        13
+    };
     let oid = expect_oid(&values[0])?;
-    let typrelid = expect_oid(&values[7])?;
-    let typelem = expect_oid(&values[8])?;
-    let typarray = expect_oid(&values[9])?;
-    let typalign = AttributeAlign::from_char(expect_char(&values[5], "typalign")?)
+    let typrelid = expect_oid(&values[typrelid_idx])?;
+    let typelem = expect_oid(&values[typelem_idx])?;
+    let typarray = expect_oid(&values[typarray_idx])?;
+    let typalign = AttributeAlign::from_char(expect_char(&values[typalign_idx], "typalign")?)
         .ok_or(CatalogError::Corrupt("invalid typalign"))?;
-    let typstorage = AttributeStorage::from_char(expect_char(&values[6], "typstorage")?)
-        .ok_or(CatalogError::Corrupt("invalid typstorage"))?;
+    let typstorage =
+        AttributeStorage::from_char(expect_char(&values[typstorage_idx], "typstorage")?)
+            .ok_or(CatalogError::Corrupt("invalid typstorage"))?;
     let typinput = values
-        .get(10)
+        .get(typinput_idx)
         .map(expect_nullable_oid)
         .transpose()?
         .flatten()
         .unwrap_or(0);
     let typoutput = values
-        .get(11)
-        .map(expect_nullable_oid)
-        .transpose()?
-        .flatten()
-        .unwrap_or(0);
-    let typreceive = values
-        .get(12)
-        .map(expect_nullable_oid)
-        .transpose()?
-        .flatten()
-        .unwrap_or(0);
-    let typsend = values
-        .get(13)
-        .map(expect_nullable_oid)
-        .transpose()?
-        .flatten()
-        .unwrap_or(0);
-    let typmodin = values
-        .get(14)
+        .get(typoutput_idx)
         .map(expect_nullable_oid)
         .transpose()?
         .flatten()
         .unwrap_or(0);
     let typmodout = values
-        .get(15)
-        .map(expect_nullable_oid)
-        .transpose()?
-        .flatten()
-        .unwrap_or(0);
-    let typanalyze = values
-        .get(16)
-        .map(expect_nullable_oid)
-        .transpose()?
-        .flatten()
-        .unwrap_or(0);
-    let typsubscript = values
-        .get(17)
+        .get(typmodout_idx)
         .map(expect_nullable_oid)
         .transpose()?
         .flatten()
@@ -1123,20 +1188,70 @@ pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, C
         typnamespace: expect_oid(&values[2])?,
         typowner: expect_oid(&values[3])?,
         typlen: expect_int16(&values[4])?,
+        typbyval: typbyval_idx
+            .and_then(|idx| values.get(idx))
+            .map(expect_bool)
+            .transpose()?
+            .unwrap_or(false),
+        typtype: if has_typtype {
+            expect_char(&values[typtype_idx], "typtype")?
+        } else {
+            'b'
+        },
+        typisdefined: if has_typtype {
+            expect_bool(&values[typisdefined_idx])?
+        } else {
+            true
+        },
         typalign,
         typstorage,
         typrelid,
+        typsubscript: typsubscript_idx
+            .and_then(|idx| values.get(idx))
+            .map(expect_oid)
+            .transpose()?
+            .unwrap_or(0),
         typelem,
         typarray,
         typinput,
         typoutput,
-        typreceive,
-        typsend,
-        typmodin,
+        typreceive: typreceive_idx
+            .and_then(|idx| values.get(idx))
+            .map(expect_oid)
+            .transpose()?
+            .unwrap_or(0),
+        typsend: typsend_idx
+            .and_then(|idx| values.get(idx))
+            .map(expect_oid)
+            .transpose()?
+            .unwrap_or(0),
+        typmodin: typmodin_idx
+            .and_then(|idx| values.get(idx))
+            .map(expect_oid)
+            .transpose()?
+            .unwrap_or(0),
         typmodout,
-        typanalyze,
-        typsubscript,
-        typacl: nullable_text_array(&values[18])?,
+        typdelim: typdelim_idx
+            .and_then(|idx| values.get(idx))
+            .map(|value| expect_char(value, "typdelim"))
+            .transpose()?
+            .unwrap_or(','),
+        typanalyze: typanalyze_idx
+            .and_then(|idx| values.get(idx))
+            .map(expect_oid)
+            .transpose()?
+            .unwrap_or(0),
+        typbasetype: typbasetype_idx
+            .and_then(|idx| values.get(idx))
+            .map(expect_oid)
+            .transpose()?
+            .unwrap_or(0),
+        typcollation: typcollation_idx
+            .and_then(|idx| values.get(idx))
+            .map(expect_oid)
+            .transpose()?
+            .unwrap_or(0),
+        typacl: nullable_text_array(&values[typacl_idx])?,
         sql_type: decode_builtin_sql_type(oid).unwrap_or_else(|| {
             if typrelid != 0 {
                 SqlType::named_composite(oid, typrelid)
@@ -1311,6 +1426,7 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
                     .collect(),
             ))
         }),
+        Value::InternalChar(row.relreplident as u8),
         Value::Int32(row.reloftype as i32),
     ]
 }
@@ -1723,6 +1839,7 @@ fn pg_attribute_row_values(row: PgAttributeRow) -> Vec<Value> {
         row.attmissingval.map_or(Value::Null, |values| {
             Value::PgArray(ArrayValue::from_1d(values))
         }),
+        Value::Bool(row.attbyval),
     ]
 }
 
@@ -1742,9 +1859,13 @@ fn pg_type_row_values(row: PgTypeRow) -> Vec<Value> {
         Value::Int32(row.typnamespace as i32),
         Value::Int32(row.typowner as i32),
         Value::Int16(row.typlen),
+        Value::Bool(row.typbyval),
+        Value::InternalChar(row.typtype as u8),
+        Value::Bool(row.typisdefined),
         Value::InternalChar(row.typalign.as_char() as u8),
         Value::InternalChar(row.typstorage.as_char() as u8),
         Value::Int32(row.typrelid as i32),
+        Value::Int32(row.typsubscript as i32),
         Value::Int32(row.typelem as i32),
         Value::Int32(row.typarray as i32),
         Value::Int32(row.typinput as i32),
@@ -1753,8 +1874,10 @@ fn pg_type_row_values(row: PgTypeRow) -> Vec<Value> {
         Value::Int32(row.typsend as i32),
         Value::Int32(row.typmodin as i32),
         Value::Int32(row.typmodout as i32),
+        Value::InternalChar(row.typdelim as u8),
         Value::Int32(row.typanalyze as i32),
-        Value::Int32(row.typsubscript as i32),
+        Value::Int32(row.typbasetype as i32),
+        Value::Int32(row.typcollation as i32),
         nullable_array_value(row.typacl.map(text_array_value)),
     ]
 }

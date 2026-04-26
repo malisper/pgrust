@@ -34,6 +34,7 @@ pub struct VisibleCatalog {
     uncommitted_enum_label_oids: BTreeSet<u32>,
     domain_checks: BTreeMap<u32, (String, Vec<u32>)>,
     dynamic_type_rows: Vec<PgTypeRow>,
+    dynamic_range_rows: Vec<PgRangeRow>,
 }
 
 impl VisibleCatalog {
@@ -54,6 +55,7 @@ impl VisibleCatalog {
             uncommitted_enum_label_oids: BTreeSet::new(),
             domain_checks: BTreeMap::new(),
             dynamic_type_rows: Vec::new(),
+            dynamic_range_rows: Vec::new(),
         }
     }
 
@@ -78,6 +80,11 @@ impl VisibleCatalog {
 
     pub fn with_dynamic_type_rows(mut self, rows: Vec<PgTypeRow>) -> Self {
         self.dynamic_type_rows = rows;
+        self
+    }
+
+    pub fn with_dynamic_range_rows(mut self, rows: Vec<PgRangeRow>) -> Self {
+        self.dynamic_range_rows = rows;
         self
     }
 
@@ -527,7 +534,9 @@ impl CatalogLookup for VisibleCatalog {
     }
 
     fn range_rows(&self) -> Vec<PgRangeRow> {
-        builtin_range_rows()
+        let mut rows = builtin_range_rows();
+        rows.extend(self.dynamic_range_rows.clone());
+        rows
     }
 
     fn enum_label_oid(&self, type_oid: u32, label: &str) -> Option<u32> {

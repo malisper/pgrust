@@ -165,6 +165,12 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_partition_statement(&sql, options)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_alter_table_multi_action_statement(&sql, options)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_alter_table_replica_identity_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_alter_table_add_unnamed_constraint_statement(&sql, options)? {
         return Ok(stmt);
     }
@@ -534,6 +540,155 @@ fn lexer_error(message: &'static str, token: &str) -> ParseError {
         expected: "statement",
         actual: format!("{message} at or near \"{token}\""),
     }
+}
+
+fn try_parse_alter_table_multi_action_statement(
+    sql: &str,
+    options: ParseOptions,
+) -> Result<Option<Statement>, ParseError> {
+    // :HACK: Keep multi-action ALTER TABLE support as a splitter over the
+    // existing single-action parser until ALTER TABLE has a real action-list
+    // grammar node.
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(trimmed, "alter") {
+        return Ok(None);
+    }
+    let mut rest = consume_keyword(trimmed, "alter").trim_start();
+    if !keyword_at_start(rest, "table") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "table").trim_start();
+    let target_source = rest;
+
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        rest = next.trim_start();
+    }
+    if keyword_at_start(rest, "only") {
+        rest = consume_keyword(rest, "only").trim_start();
+    }
+    let (_, next) = parse_schema_qualified_name(rest)?;
+    rest = next.trim_start();
+    if rest.starts_with('*') {
+        rest = rest[1..].trim_start();
+    }
+    let consumed_target_len = target_source.len().saturating_sub(rest.len());
+    let target_sql = target_source[..consumed_target_len].trim();
+    let actions_sql = rest.trim();
+    if actions_sql.is_empty() {
+        return Ok(None);
+    }
+    let actions = split_top_level_commas(actions_sql)?;
+    if actions.len() <= 1 {
+        return Ok(None);
+    }
+    let mut statements = Vec::with_capacity(actions.len());
+    for action in actions {
+        let action = action.trim();
+        if action.is_empty() {
+            continue;
+        }
+        let sub_sql = format!("ALTER TABLE {target_sql} {action}");
+        parse_statement_with_options_inner(sub_sql.clone(), options)?;
+        statements.push(sub_sql);
+    }
+    Ok(Some(Statement::AlterTableMulti(statements)))
+}
+
+fn split_top_level_commas(input: &str) -> Result<Vec<String>, ParseError> {
+    let bytes = input.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => {
+                index = parse_delimited_token_end(bytes, index, b'\'');
+                continue;
+            }
+            b'"' => {
+                index = parse_delimited_token_end(bytes, index, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, index) {
+                    index = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                parts.push(input[start..index].trim().to_string());
+                start = index + 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    if depth != 0 {
+        return Err(ParseError::UnexpectedEof);
+    }
+    let trailing = input[start..].trim();
+    if !trailing.is_empty() {
+        parts.push(trailing.to_string());
+    }
+    Ok(parts)
+}
+
+fn try_parse_alter_table_replica_identity_statement(
+    sql: &str,
+) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(trimmed, "alter") {
+        return Ok(None);
+    }
+    let mut rest = consume_keyword(trimmed, "alter").trim_start();
+    if !keyword_at_start(rest, "table") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "table").trim_start();
+
+    let mut if_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        if_exists = true;
+        rest = next.trim_start();
+    }
+    let mut only = false;
+    if keyword_at_start(rest, "only") {
+        only = true;
+        rest = consume_keyword(rest, "only").trim_start();
+    }
+    let ((schema_name, table_name), next) = parse_schema_qualified_name(rest)?;
+    rest = next.trim_start();
+    if rest.starts_with('*') {
+        rest = rest[1..].trim_start();
+    }
+    if !consume_keywords(rest, &["replica", "identity", "using", "index"]).is_some() {
+        return Ok(None);
+    }
+    rest = consume_keywords(rest, &["replica", "identity", "using", "index"])
+        .expect("checked replica identity keywords")
+        .trim_start();
+    let (index_name, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER TABLE REPLICA IDENTITY statement",
+            actual: rest.trim().into(),
+        });
+    }
+    let table_name = match schema_name {
+        Some(schema_name) => format!("{schema_name}.{table_name}"),
+        None => table_name,
+    };
+    Ok(Some(Statement::AlterTableReplicaIdentity(
+        AlterTableReplicaIdentityStatement {
+            if_exists,
+            only,
+            table_name,
+            index_name,
+        },
+    )))
 }
 
 fn skip_single_quoted_sql(sql: &str, start: usize) -> usize {
@@ -14957,6 +15112,7 @@ fn build_table_constraint(pair: Pair<'_, Rule>) -> Result<TableConstraint, Parse
 struct ParsedReferencesClause {
     referenced_table: String,
     referenced_columns: Option<Vec<String>>,
+    referenced_period: Option<String>,
     match_type: ForeignKeyMatchType,
     on_delete: ForeignKeyAction,
     on_delete_set_columns: Option<Vec<String>>,
@@ -15067,11 +15223,14 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .find(|part| part.as_rule() == Rule::foreign_key_table_constraint_body)
                 .ok_or(ParseError::UnexpectedEof)?;
             let mut columns = None;
+            let mut period = None;
             let mut references = None;
             for part in body.into_inner() {
                 match part.as_rule() {
-                    Rule::ident_list if columns.is_none() => {
-                        columns = Some(part.into_inner().map(build_identifier).collect())
+                    Rule::foreign_key_column_list if columns.is_none() => {
+                        let (parsed_columns, parsed_period) = build_foreign_key_column_list(part)?;
+                        columns = Some(parsed_columns);
+                        period = parsed_period;
                     }
                     Rule::references_clause => references = Some(build_references_clause(part)?),
                     _ => {}
@@ -15081,8 +15240,10 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
             Ok(TableConstraint::ForeignKey {
                 attributes,
                 columns: columns.ok_or(ParseError::UnexpectedEof)?,
+                period,
                 referenced_table: references.referenced_table,
                 referenced_columns: references.referenced_columns,
+                referenced_period: references.referenced_period,
                 match_type: references.match_type,
                 on_delete: references.on_delete,
                 on_delete_set_columns: references.on_delete_set_columns,
@@ -15367,6 +15528,12 @@ fn build_column_constraint(pair: Pair<'_, Rule>) -> Result<ColumnConstraint, Par
                 .map(build_references_clause)
                 .transpose()?
                 .ok_or(ParseError::UnexpectedEof)?;
+            if references.referenced_period.is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "column REFERENCES column list",
+                    actual: "PERIOD in referenced column list".into(),
+                });
+            }
             Ok(ColumnConstraint::References {
                 attributes,
                 referenced_table: references.referenced_table,
@@ -15387,6 +15554,7 @@ fn build_column_constraint(pair: Pair<'_, Rule>) -> Result<ColumnConstraint, Par
 fn build_references_clause(pair: Pair<'_, Rule>) -> Result<ParsedReferencesClause, ParseError> {
     let mut referenced_table = None;
     let mut referenced_columns = None;
+    let mut referenced_period = None;
     let mut match_type = ForeignKeyMatchType::Simple;
     let mut on_delete = ForeignKeyAction::NoAction;
     let mut on_delete_set_columns = None;
@@ -15398,12 +15566,16 @@ fn build_references_clause(pair: Pair<'_, Rule>) -> Result<ParsedReferencesClaus
                 referenced_table = Some(build_identifier(part));
             }
             Rule::referenced_columns_clause => {
-                referenced_columns = Some(
-                    part.into_inner()
-                        .find(|inner| inner.as_rule() == Rule::ident_list)
-                        .map(|inner| inner.into_inner().map(build_identifier).collect())
-                        .unwrap_or_default(),
-                );
+                if let Some(list) = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::foreign_key_column_list)
+                {
+                    let (columns, period) = build_foreign_key_column_list(list)?;
+                    referenced_columns = Some(columns);
+                    referenced_period = period;
+                } else {
+                    referenced_columns = Some(Vec::new());
+                }
             }
             Rule::match_clause => {
                 let text = part.as_str();
@@ -15437,11 +15609,42 @@ fn build_references_clause(pair: Pair<'_, Rule>) -> Result<ParsedReferencesClaus
     Ok(ParsedReferencesClause {
         referenced_table: referenced_table.ok_or(ParseError::UnexpectedEof)?,
         referenced_columns,
+        referenced_period,
         match_type,
         on_delete,
         on_delete_set_columns,
         on_update,
     })
+}
+
+fn build_foreign_key_column_list(
+    pair: Pair<'_, Rule>,
+) -> Result<(Vec<String>, Option<String>), ParseError> {
+    let mut columns = Vec::new();
+    let mut period = None;
+    for item in pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::foreign_key_column)
+    {
+        let mut column = None;
+        let mut is_period = false;
+        for part in item.into_inner() {
+            match part.as_rule() {
+                Rule::identifier => column = Some(build_identifier(part)),
+                Rule::period_clause => is_period = true,
+                _ => {}
+            }
+        }
+        let column = column.ok_or(ParseError::UnexpectedEof)?;
+        if is_period && period.replace(column.clone()).is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "one PERIOD column",
+                actual: "multiple PERIOD columns".into(),
+            });
+        }
+        columns.push(column);
+    }
+    Ok((columns, period))
 }
 
 fn build_reference_action(pair: Pair<'_, Rule>) -> Result<ForeignKeyAction, ParseError> {
@@ -19384,7 +19587,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::kw_current_date => Ok(SqlExpr::CurrentDate),
         Rule::kw_current_catalog => Ok(SqlExpr::CurrentCatalog),
         Rule::kw_current_schema => Ok(SqlExpr::CurrentSchema),
-        Rule::kw_current_user => Ok(SqlExpr::CurrentUser),
+        Rule::kw_current_user | Rule::kw_user_value => Ok(SqlExpr::CurrentUser),
         Rule::kw_session_user => Ok(SqlExpr::SessionUser),
         Rule::kw_current_role => Ok(SqlExpr::CurrentRole),
         Rule::kw_current_time => Ok(SqlExpr::CurrentTime {

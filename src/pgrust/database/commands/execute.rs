@@ -29,6 +29,76 @@ fn statement_timestamp_usecs(config: &DateTimeConfig) -> i64 {
 }
 
 impl Database {
+    pub(crate) fn execute_alter_table_replica_identity_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &crate::backend::parser::AlterTableReplicaIdentityStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let Some(relation) =
+            crate::pgrust::database::ddl::lookup_table_or_partitioned_table_for_alter_table(
+                &catalog,
+                &stmt.table_name,
+                stmt.if_exists,
+            )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
+        let index = catalog
+            .index_relations_for_heap(relation.relation_oid)
+            .into_iter()
+            .find(|index| index.name.eq_ignore_ascii_case(&stmt.index_name))
+            .ok_or_else(|| {
+                ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                    expected: "index on table",
+                    actual: format!(
+                        "index \"{}\" does not exist for table \"{}\"",
+                        stmt.index_name, stmt.table_name
+                    ),
+                })
+            })?;
+        if !index.index_meta.indisunique {
+            return Err(ExecError::Parse(
+                crate::backend::parser::ParseError::DetailedError {
+                    message: format!(
+                        "cannot use non-unique index \"{}\" as replica identity",
+                        stmt.index_name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42809",
+                },
+            ));
+        }
+
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: 0,
+            client_id,
+            waiter: None,
+            interrupts,
+        };
+        let mut catalog_effects = Vec::new();
+        let result = self
+            .catalog
+            .write()
+            .set_replica_identity_index_mvcc(relation.relation_oid, index.relation_oid, &ctx)
+            .map(|effect| {
+                catalog_effects.push(effect);
+                StatementResult::AffectedRows(0)
+            })
+            .map_err(map_catalog_error);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
     pub(crate) fn execute_truncate_table_in_transaction_with_search_path(
         &self,
         client_id: ClientId,
@@ -344,6 +414,21 @@ impl Database {
         let session_replication_role = self.session_replication_role(client_id);
 
         match stmt {
+            Statement::AlterTableMulti(ref statements) => {
+                for sql in statements {
+                    let substmt = crate::backend::parser::parse_statement(sql)?;
+                    self.execute_statement_with_search_path_inner(
+                        client_id,
+                        substmt,
+                        statement_lock_scope_id,
+                        configured_search_path,
+                        datetime_config,
+                        gucs,
+                        planner_config,
+                    )?;
+                }
+                Ok(StatementResult::AffectedRows(0))
+            }
             Statement::Do(ref do_stmt) => execute_do_with_gucs(do_stmt, gucs),
             Statement::SetConstraints(_) => {
                 crate::backend::utils::misc::notices::push_warning(
@@ -558,6 +643,7 @@ impl Database {
                     client_id,
                     alter_stmt,
                     configured_search_path,
+                    None,
                 ),
             Statement::AlterTableDropConstraint(ref alter_stmt) => self
                 .execute_alter_table_drop_constraint_stmt_with_search_path(
@@ -633,6 +719,12 @@ impl Database {
                 ),
             Statement::AlterTableSetRowSecurity(ref alter_stmt) => self
                 .execute_alter_table_set_row_security_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTableReplicaIdentity(ref alter_stmt) => self
+                .execute_alter_table_replica_identity_stmt_with_search_path(
                     client_id,
                     alter_stmt,
                     configured_search_path,

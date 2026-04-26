@@ -518,6 +518,8 @@ fn run_statement(
         | Statement::CommentOnStatistics(_)
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableAddConstraint(_)
+        | Statement::AlterTableMulti(_)
+        | Statement::AlterTableReplicaIdentity(_)
         | Statement::AlterTableDropConstraint(_)
         | Statement::AlterTableAlterConstraint(_)
         | Statement::AlterTableRenameConstraint(_)
