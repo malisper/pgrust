@@ -173,6 +173,7 @@ fn execute_statement_with_source(
         Statement::Show(_)
         | Statement::Checkpoint(_)
         | Statement::Set(_)
+        | Statement::SetTransaction(_)
         | Statement::SetConstraints(_)
         | Statement::Reset(_)
         | Statement::SetRole(_)
@@ -536,7 +537,7 @@ fn execute_statement_with_source(
         }
         Statement::Delete(stmt) => execute_delete(bind_delete(&stmt, catalog)?, catalog, ctx, xid),
         Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
-        Statement::Begin
+        Statement::Begin(_)
         | Statement::Commit
         | Statement::Rollback
         | Statement::Savepoint(_)
