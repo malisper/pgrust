@@ -67,6 +67,7 @@ pub fn system_catalog_index_entry_for_db(
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,
+        relhasindex: false,
         relpersistence: 'p',
         relkind: 'i',
         am_oid: BTREE_AM_OID,

@@ -1368,7 +1368,7 @@ fn parse_partition_of_table_storage_clause(
     let pair = pairs
         .next()
         .ok_or(PartitionStatementParseError::Unsupported)?;
-    validate_table_storage_clause(pair)?;
+    build_table_storage_options(pair).map_err(|_| PartitionStatementParseError::Unsupported)?;
     Ok("")
 }
 
@@ -11799,6 +11799,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             inner,
         )?)),
         Rule::alter_table_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
+        Rule::alter_table_reset_stmt => {
+            Ok(Statement::AlterTableReset(build_alter_table_reset(inner)?))
+        }
         Rule::alter_table_set_row_security_stmt => Ok(Statement::AlterTableSetRowSecurity(
             build_alter_table_set_row_security(inner)?,
         )),
@@ -11982,6 +11985,33 @@ fn build_analyze_options(pair: Pair<'_, Rule>) -> Result<AnalyzeOptionsBuilder, 
             Rule::analyze_buffer_usage_limit_option => {
                 options.buffer_usage_limit = Some(parse_option_scalar(part)?);
             }
+            Rule::analyze_hyphen_option => {
+                let token = part
+                    .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::identifier)
+                    .next_back()
+                    .ok_or(ParseError::UnexpectedEof)?
+                    .as_str()
+                    .to_string();
+                return Err(ParseError::UnexpectedToken {
+                    expected: "ANALYZE option",
+                    actual: format!("syntax error at or near \"{token}\""),
+                });
+            }
+            Rule::analyze_unknown_option => {
+                let name = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::identifier)
+                    .ok_or(ParseError::UnexpectedEof)?
+                    .as_str()
+                    .to_ascii_lowercase();
+                return Err(ParseError::DetailedError {
+                    message: format!("unrecognized ANALYZE option \"{name}\""),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
+                });
+            }
             _ => {}
         }
     }
@@ -11989,14 +12019,18 @@ fn build_analyze_options(pair: Pair<'_, Rule>) -> Result<AnalyzeOptionsBuilder, 
 }
 
 fn parse_option_bool(pair: Pair<'_, Rule>) -> Result<bool, ParseError> {
-    let mut inner = pair.into_inner();
-    match inner.next() {
+    match pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::option_bool_value)
+    {
         None => Ok(true),
-        Some(part) if part.as_rule() == Rule::option_bool_value => {
+        Some(part) => {
             let value = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
-            Ok(!matches!(value.as_rule(), Rule::kw_false | Rule::kw_off))
+            Ok(!matches!(
+                value.as_rule(),
+                Rule::kw_false | Rule::kw_off | Rule::kw_no_value
+            ))
         }
-        Some(_) => Ok(true),
     }
 }
 
@@ -14431,6 +14465,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     let mut elements = Vec::new();
     let mut of_type_name = None;
     let mut inherits = Vec::new();
+    let mut options = Vec::new();
     let mut ctas_columns = Vec::new();
     let mut query = None;
     let mut query_sql = None;
@@ -14502,7 +14537,9 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                     .map(|inner| inner.into_inner().map(build_identifier).collect())
                     .unwrap_or_default();
             }
-            Rule::table_storage_clause => validate_table_storage_clause(part)?,
+            Rule::table_storage_clause => {
+                options.extend(build_table_storage_options(part)?);
+            }
             _ => {}
         }
     }
@@ -14533,6 +14570,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             persistence,
             on_commit,
             elements,
+            options,
             inherits,
             partition_spec: None,
             partition_of: None,
@@ -15890,6 +15928,33 @@ fn build_alter_table_set(pair: Pair<'_, Rule>) -> Result<AlterTableSetStatement,
     })
 }
 
+fn build_alter_table_reset(pair: Pair<'_, Rule>) -> Result<AlterTableResetStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut options = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::ident_list => options = part.into_inner().map(build_identifier).collect(),
+            _ => {}
+        }
+    }
+    Ok(AlterTableResetStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        options,
+    })
+}
+
 fn build_alter_table_set_row_security(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableSetRowSecurityStatement, ParseError> {
@@ -16138,11 +16203,12 @@ fn build_set_value_atom(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
     }
 }
 
-fn validate_table_storage_clause(pair: Pair<'_, Rule>) -> Result<(), ParseError> {
+fn build_table_storage_options(pair: Pair<'_, Rule>) -> Result<Vec<RelOption>, ParseError> {
     let part = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match part.as_rule() {
-        Rule::without_oids_clause => Ok(()),
+        Rule::without_oids_clause => Ok(Vec::new()),
         Rule::table_with_clause => {
+            let mut options = Vec::new();
             for item in part
                 .into_inner()
                 .filter(|inner| inner.as_rule() == Rule::table_with_item)
@@ -16162,8 +16228,12 @@ fn validate_table_storage_clause(pair: Pair<'_, Rule>) -> Result<(), ParseError>
                 {
                     return Err(ParseError::TablesDeclaredWithOidsNotSupported);
                 }
+                options.push(RelOption {
+                    name,
+                    value: value.unwrap_or_else(|| "true".into()),
+                });
             }
-            Ok(())
+            Ok(options)
         }
         _ => Err(ParseError::UnexpectedToken {
             expected: "table storage clause",
@@ -16453,12 +16523,31 @@ fn build_vacuum(pair: Pair<'_, Rule>) -> Result<VacuumStatement, ParseError> {
     let mut targets = Vec::new();
     let mut analyze = false;
     let mut full = false;
+    let mut freeze = false;
     let mut verbose = false;
     let mut skip_locked = false;
     let mut buffer_usage_limit = None;
+    let mut disable_page_skipping = false;
+    let mut index_cleanup = None;
+    let mut truncate = None;
+    let mut parallel = None;
+    let mut parallel_specified = false;
+    let mut process_main = None;
+    let mut process_toast = None;
+    let mut skip_database_stats = false;
+    let mut only_database_stats = false;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::kw_analyze => analyze = true,
+            Rule::vacuum_legacy_option => {
+                let opt = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+                match opt.as_rule() {
+                    Rule::vacuum_legacy_analyze_option => analyze = true,
+                    Rule::vacuum_legacy_full_option => full = true,
+                    Rule::vacuum_legacy_freeze_option => freeze = true,
+                    Rule::vacuum_legacy_verbose_option => verbose = true,
+                    _ => {}
+                }
+            }
             Rule::vacuum_option_block => {
                 for opt in part.into_inner() {
                     let opt = if opt.as_rule() == Rule::vacuum_option {
@@ -16469,6 +16558,30 @@ fn build_vacuum(pair: Pair<'_, Rule>) -> Result<VacuumStatement, ParseError> {
                     match opt.as_rule() {
                         Rule::vacuum_analyze_option => analyze = parse_option_bool(opt)?,
                         Rule::vacuum_full_option => full = parse_option_bool(opt)?,
+                        Rule::vacuum_freeze_option => freeze = parse_option_bool(opt)?,
+                        Rule::vacuum_disable_page_skipping_option => {
+                            disable_page_skipping = parse_option_bool(opt)?
+                        }
+                        Rule::vacuum_index_cleanup_option => {
+                            index_cleanup = parse_optional_option_scalar(opt)?
+                        }
+                        Rule::vacuum_truncate_option => truncate = Some(parse_option_bool(opt)?),
+                        Rule::vacuum_parallel_option => {
+                            parallel_specified = true;
+                            parallel = parse_optional_option_scalar(opt)?
+                        }
+                        Rule::vacuum_process_main_option => {
+                            process_main = Some(parse_option_bool(opt)?)
+                        }
+                        Rule::vacuum_process_toast_option => {
+                            process_toast = Some(parse_option_bool(opt)?)
+                        }
+                        Rule::vacuum_skip_database_stats_option => {
+                            skip_database_stats = parse_option_bool(opt)?
+                        }
+                        Rule::vacuum_only_database_stats_option => {
+                            only_database_stats = parse_option_bool(opt)?
+                        }
                         Rule::analyze_verbose_option => verbose = parse_option_bool(opt)?,
                         Rule::analyze_skip_locked_option => skip_locked = parse_option_bool(opt)?,
                         Rule::analyze_buffer_usage_limit_option => {
@@ -16486,10 +16599,30 @@ fn build_vacuum(pair: Pair<'_, Rule>) -> Result<VacuumStatement, ParseError> {
         targets,
         analyze,
         full,
+        freeze,
         verbose,
         skip_locked,
         buffer_usage_limit,
+        disable_page_skipping,
+        index_cleanup,
+        truncate,
+        parallel,
+        parallel_specified,
+        process_main,
+        process_toast,
+        skip_database_stats,
+        only_database_stats,
     })
+}
+
+fn parse_optional_option_scalar(pair: Pair<'_, Rule>) -> Result<Option<String>, ParseError> {
+    match pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::option_scalar_value)
+    {
+        Some(scalar) => build_option_scalar_value(scalar).map(Some),
+        None => Ok(None),
+    }
 }
 
 fn build_maintenance_target_list(

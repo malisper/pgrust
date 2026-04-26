@@ -640,6 +640,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableReset(ref alter_stmt) => self
+                .execute_alter_table_reset_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterIndexRename(ref rename_stmt) => self
                 .execute_alter_index_rename_stmt_with_search_path(
                     client_id,
@@ -2099,6 +2105,7 @@ impl Database {
                 client_id,
                 vacuum_stmt,
                 configured_search_path,
+                Some(gucs),
             ),
             Statement::SetTransaction(_)
             | Statement::Begin(_)

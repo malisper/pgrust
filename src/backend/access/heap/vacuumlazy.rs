@@ -8,8 +8,8 @@ use crate::backend::access::transam::xact::{
 };
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::page::bufpage::{
-    page_clear_all_visible, page_get_max_offset_number, page_is_all_visible, page_remove_item,
-    page_set_all_visible,
+    ItemIdFlags, page_clear_all_visible, page_get_item_id, page_get_max_offset_number,
+    page_is_all_visible, page_remove_item, page_set_all_visible,
 };
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
 use crate::include::access::itemptr::ItemPointerData;
@@ -21,7 +21,7 @@ use crate::{BufferPool, ClientId};
 use super::heapam::HeapError;
 use super::visibilitymap::{
     VisibilityMapBuffer, visibilitymap_clear, visibilitymap_get_status, visibilitymap_pin,
-    visibilitymap_set,
+    visibilitymap_prepare_truncate, visibilitymap_set,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +111,7 @@ pub fn vacuum_relation_pages(
     txns: &RwLock<TransactionManager>,
     scan: &VacuumScanState,
     previous_relfrozenxid: Option<TransactionId>,
+    truncate: bool,
 ) -> Result<VacuumRelationStats, HeapError> {
     let txns = txns.read();
     let oldest_xmin = txns.oldest_active_xid();
@@ -187,9 +188,17 @@ pub fn vacuum_relation_pages(
         relfrozenxid_candidate.unwrap_or(FROZEN_TRANSACTION_ID)
     };
 
+    let relpages = if truncate {
+        truncate_empty_tail(pool, client_id, rel, scan.relpages.max(0) as u32)? as i32
+    } else {
+        scan.relpages
+    };
+    relallvisible = relallvisible.min(relpages);
+    relallfrozen = relallfrozen.min(relpages);
+
     Ok(VacuumRelationStats {
         relation_oid,
-        relpages: scan.relpages,
+        relpages,
         relallvisible,
         relallfrozen,
         relfrozenxid,
@@ -215,8 +224,62 @@ pub fn vacuum_relation(
         txns,
         &scan,
         previous_relfrozenxid,
+        true,
     )?;
     Ok((scan, stats))
+}
+
+fn truncate_empty_tail(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    nblocks: u32,
+) -> Result<u32, HeapError> {
+    let mut new_nblocks = nblocks;
+    while new_nblocks > 0 {
+        let block = new_nblocks - 1;
+        let pin = pool.pin_existing_block(client_id, rel, ForkNumber::Main, block)?;
+        let guard = pool.lock_buffer_shared(pin.buffer_id())?;
+        let empty = page_has_no_tuple_storage(&guard)?;
+        drop(guard);
+        drop(pin);
+        if !empty {
+            break;
+        }
+        new_nblocks -= 1;
+    }
+
+    if new_nblocks < nblocks {
+        let visibility_map_blocks =
+            visibilitymap_prepare_truncate(pool, client_id, rel, new_nblocks)?;
+        pool.invalidate_relation(rel).map_err(HeapError::Buffer)?;
+        pool.with_storage_mut(|storage| {
+            storage.smgr.truncate(rel, ForkNumber::Main, new_nblocks)?;
+            if let Some(nblocks) = visibility_map_blocks
+                && storage.smgr.exists(rel, ForkNumber::VisibilityMap)
+            {
+                storage
+                    .smgr
+                    .truncate(rel, ForkNumber::VisibilityMap, nblocks)?;
+            }
+            Ok::<(), crate::backend::storage::smgr::SmgrError>(())
+        })?;
+    }
+
+    Ok(new_nblocks)
+}
+
+fn page_has_no_tuple_storage(
+    page: &crate::backend::storage::buffer::Page,
+) -> Result<bool, HeapError> {
+    let max_offset = page_get_max_offset_number(page)?;
+    for off in 1..=max_offset {
+        let item_id = page_get_item_id(page, off)?;
+        if item_id.lp_flags != ItemIdFlags::Unused && item_id.has_storage() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[allow(dead_code)]
