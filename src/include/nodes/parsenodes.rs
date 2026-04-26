@@ -862,7 +862,7 @@ pub enum OnCommitAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetStatement {
     pub name: String,
-    pub value: String,
+    pub value: Option<String>,
     pub is_local: bool,
 }
 
