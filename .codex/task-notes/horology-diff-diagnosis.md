@@ -23,6 +23,9 @@ src/include/catalog/pg_proc.rs
 src/include/nodes/parsenodes.rs
 src/include/nodes/primnodes.rs
 expression traversal call sites for SqlExpr::Overlaps
+Follow-up slice also touched:
+src/backend/parser/analyze/expr/ops.rs
+src/backend/executor/nodes.rs
 
 Tests run:
 cargo fmt
@@ -32,6 +35,19 @@ scripts/run_regression.sh --test horology --timeout 120 --results-dir /tmp/diffs
 scripts/run_regression.sh --test horology --timeout 120 --results-dir /tmp/diffs/horology-tokyo-v1-2
 scripts/run_regression.sh --test horology --timeout 120 --results-dir /tmp/diffs/horology-tokyo-v1-3
 scripts/run_regression.sh --test horology --timeout 120 --results-dir /tmp/diffs/horology-tokyo-v1-5
+Committed baseline as 525d095d2 (fix: align horology datetime behavior).
+Follow-up focused tests:
+scripts/cargo_isolated.sh test --lib --quiet analyze_mixed_date_timestamp_comparisons_keep_cross_type_ops
+scripts/cargo_isolated.sh test --lib --quiet parse_not_between_lowers_like_postgres
+scripts/cargo_isolated.sh test --lib --quiet mixed_date_timestamp_comparisons_execute_with_common_types
+scripts/cargo_isolated.sh test --lib --quiet mixed_date_timestamp_comparisons_do_not_cast_out_of_range_dates
+scripts/cargo_isolated.sh test --lib --quiet to_timestamp_text_format_supports_horology_templates
+scripts/cargo_isolated.sh test --lib --quiet to_timestamp_fractional_template_edges
+scripts/cargo_isolated.sh test --lib --quiet to_date_uses_postgres_template_parser_cases
+scripts/cargo_isolated.sh test --lib --quiet formats_bc_timestamp_in_iso_and_sql_styles
+scripts/cargo_isolated.sh check
+Bare horology follow-up:
+CARGO_TARGET_DIR=/tmp/pgrust-target-tokyo-horology scripts/run_regression.sh --test horology --jobs 1 --port 55446 --skip-build --timeout 300 --results-dir /tmp/diffs/horology-tokyo-v1-7
 
 Remaining:
-Latest useful horology run is /tmp/diffs/horology-tokyo-v1-5: 295/399 queries matched, 1223 diff lines. Remaining clusters are mostly to_timestamp/to_date template coverage and specific error messages, date-vs-timestamp/timestamptz comparisons for out-of-range dates, BC timestamp display under ISO/SQL DateStyle, EXPLAIN rendering for BETWEEN/NOT BETWEEN rewrites, and missing caret location lines for a couple unsupported cast errors.
+Latest bare horology run is /tmp/diffs/horology-tokyo-v1-7: 303/399 queries matched, 2495 diff lines. Diff-line count is inflated by missing dependency tables in bare mode, but the match count improved. The dependency-inclusive retry at /tmp/diffs/horology-tokyo-v1-6 timed out during timestamptz fixture setup after 120s, not on a Rust error; rerun with more disk headroom and longer timeout for final validation. Remaining real clusters include PostgreSQL-specific to_timestamp/to_date error wording and field-conflict rules, some template edge cases, and missing caret-location lines for unsupported casts.

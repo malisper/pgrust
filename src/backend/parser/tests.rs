@@ -7382,7 +7382,7 @@ fn analyze_timestamptz_date_time_constructor_overloads() {
 }
 
 #[test]
-fn analyze_mixed_date_timestamp_comparisons_coerce_to_postgres_common_types() {
+fn analyze_mixed_date_timestamp_comparisons_keep_cross_type_ops() {
     let stmt = parse_select(
         "select date '2001-01-02' < timestamp '2001-01-03', date '2001-01-02' <= timestamptz '2001-01-03 00:00+00', timestamp '2001-01-02' = timestamptz '2001-01-02 00:00+00'",
     )
@@ -7393,20 +7393,18 @@ fn analyze_mixed_date_timestamp_comparisons_coerce_to_postgres_common_types() {
     assert!(matches!(
         &query.target_list[0].expr,
         Expr::Op(op)
-            if op.args.iter().all(|arg| matches!(
-                arg,
-                Expr::Const(Value::Timestamp(_))
-                    | Expr::Cast(_, SqlType { kind: SqlTypeKind::Timestamp, .. })
-            ))
+            if matches!(op.args.as_slice(), [
+                Expr::Cast(_, SqlType { kind: SqlTypeKind::Date, .. }) | Expr::Const(Value::Date(_)),
+                Expr::Cast(_, SqlType { kind: SqlTypeKind::Timestamp, .. }) | Expr::Const(Value::Timestamp(_)),
+            ])
     ));
     assert!(matches!(
         &query.target_list[1].expr,
         Expr::Op(op)
-            if op.args.iter().all(|arg| matches!(
-                arg,
-                Expr::Const(Value::TimestampTz(_))
-                    | Expr::Cast(_, SqlType { kind: SqlTypeKind::TimestampTz, .. })
-            ))
+            if matches!(op.args.as_slice(), [
+                Expr::Cast(_, SqlType { kind: SqlTypeKind::Date, .. }) | Expr::Const(Value::Date(_)),
+                Expr::Cast(_, SqlType { kind: SqlTypeKind::TimestampTz, .. }) | Expr::Const(Value::TimestampTz(_)),
+            ])
     ));
     assert!(matches!(
         &query.target_list[2].expr,
@@ -9587,6 +9585,18 @@ fn parse_between_symmetric_expression() {
     let stmt = parse_select("select time '01:00' between symmetric time '02:00' and time '00:00'")
         .unwrap();
     assert!(matches!(stmt.targets[0].expr, SqlExpr::Or(_, _)));
+}
+
+#[test]
+fn parse_not_between_lowers_like_postgres() {
+    let stmt =
+        parse_select("select f1 not between date '1997-01-01' and date '1998-01-01'").unwrap();
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::Or(_, _)));
+
+    let stmt =
+        parse_select("select f1 not between symmetric date '1997-01-01' and date '1998-01-01'")
+            .unwrap();
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::And(_, _)));
 }
 
 #[test]

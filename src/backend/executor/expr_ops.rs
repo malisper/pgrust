@@ -30,9 +30,9 @@ use crate::backend::executor::jsonb::{
 use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::datetime::{
-    current_timezone_name, days_from_ymd, days_in_month, named_timezone_offset_seconds_for_local,
-    timestamp_parts_from_usecs, timezone_offset_seconds, timezone_offset_seconds_at_utc,
-    ymd_from_days,
+    current_timezone_name, days_from_ymd, days_in_month, named_timezone_offset_seconds,
+    named_timezone_offset_seconds_for_local, timestamp_parts_from_usecs, timezone_offset_seconds,
+    timezone_offset_seconds_at_utc, ymd_from_days,
 };
 use crate::backend::utils::time::timestamp::is_valid_finite_timestamp_usecs;
 use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
@@ -206,6 +206,13 @@ pub(crate) fn compare_values(
     if let Some((left, right)) = coerce_temporal_text_pair(&left, &right) {
         return compare_values(op, left, right, collation_oid);
     }
+    if let Some(ordering) = mixed_date_timestamp_ordering(&left, &right, None) {
+        return Ok(Value::Bool(match op {
+            "=" => ordering == Ordering::Equal,
+            "<>" => ordering != Ordering::Equal,
+            _ => unreachable!("comparison op not supported by compare_values"),
+        }));
+    }
     match (&left, &right) {
         (Value::Int16(l), Value::Int16(r)) => Ok(Value::Bool(l == r)),
         (Value::Int16(l), Value::Int32(r)) => Ok(Value::Bool((*l as i32) == *r)),
@@ -289,9 +296,17 @@ pub(crate) fn compare_values_with_type(
     right: Value,
     right_type: Option<SqlType>,
     collation_oid: Option<u32>,
+    datetime_config: Option<&DateTimeConfig>,
 ) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
+    }
+    if let Some(ordering) = mixed_date_timestamp_ordering(&left, &right, datetime_config) {
+        return Ok(Value::Bool(match op {
+            "=" => ordering == Ordering::Equal,
+            "<>" => ordering != Ordering::Equal,
+            _ => unreachable!("comparison op not supported by compare_values_with_type"),
+        }));
     }
     if let (Some(left_text), Some(right_text)) = (left.as_text(), right.as_text())
         && (is_bpchar_type(left_type) || is_bpchar_type(right_type))
@@ -325,11 +340,20 @@ pub(crate) fn not_equal_values_with_type(
     right: Value,
     right_type: Option<SqlType>,
     collation_oid: Option<u32>,
+    datetime_config: Option<&DateTimeConfig>,
 ) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
-    match compare_values_with_type("=", left, left_type, right, right_type, collation_oid)? {
+    match compare_values_with_type(
+        "=",
+        left,
+        left_type,
+        right,
+        right_type,
+        collation_oid,
+        datetime_config,
+    )? {
         Value::Bool(value) => Ok(Value::Bool(!value)),
         other => Err(ExecError::NonBoolQual(other)),
     }
@@ -697,6 +721,70 @@ fn date_timestamp_value(date: DateADT) -> i64 {
         DATEVAL_NOEND => TIMESTAMP_NOEND,
         days => i64::from(days) * USECS_PER_DAY,
     }
+}
+
+fn timestamp_sort_key(timestamp: TimestampADT) -> i128 {
+    match timestamp.0 {
+        TIMESTAMP_NOBEGIN => i128::MIN,
+        TIMESTAMP_NOEND => i128::MAX,
+        value => i128::from(value),
+    }
+}
+
+fn timestamptz_sort_key(timestamp: TimestampTzADT) -> i128 {
+    match timestamp.0 {
+        TIMESTAMP_NOBEGIN => i128::MIN,
+        TIMESTAMP_NOEND => i128::MAX,
+        value => i128::from(value),
+    }
+}
+
+fn date_timestamp_sort_key(date: DateADT) -> i128 {
+    match date.0 {
+        DATEVAL_NOBEGIN => i128::MIN,
+        DATEVAL_NOEND => i128::MAX,
+        days => i128::from(days) * i128::from(USECS_PER_DAY),
+    }
+}
+
+fn date_timestamptz_sort_key(date: DateADT, config: Option<&DateTimeConfig>) -> i128 {
+    let local_usecs = date_timestamp_sort_key(date);
+    if !date.is_finite() {
+        return local_usecs;
+    }
+    let Some(config) = config else {
+        return local_usecs;
+    };
+    let offset_seconds = i64::try_from(local_usecs)
+        .ok()
+        .and_then(|local| {
+            named_timezone_offset_seconds_for_local(current_timezone_name(config), local)
+                .or_else(|| named_timezone_offset_seconds(current_timezone_name(config)))
+        })
+        .unwrap_or_else(|| timezone_offset_seconds(config));
+    local_usecs - i128::from(offset_seconds) * i128::from(USECS_PER_SEC)
+}
+
+pub(crate) fn mixed_date_timestamp_ordering(
+    left: &Value,
+    right: &Value,
+    config: Option<&DateTimeConfig>,
+) -> Option<Ordering> {
+    Some(match (left, right) {
+        (Value::Date(left), Value::Timestamp(right)) => {
+            date_timestamp_sort_key(*left).cmp(&timestamp_sort_key(*right))
+        }
+        (Value::Timestamp(left), Value::Date(right)) => {
+            timestamp_sort_key(*left).cmp(&date_timestamp_sort_key(*right))
+        }
+        (Value::Date(left), Value::TimestampTz(right)) => {
+            date_timestamptz_sort_key(*left, config).cmp(&timestamptz_sort_key(*right))
+        }
+        (Value::TimestampTz(left), Value::Date(right)) => {
+            timestamptz_sort_key(*left).cmp(&date_timestamptz_sort_key(*right, config))
+        }
+        _ => return None,
+    })
 }
 
 fn checked_timestamp_usecs(usecs: i64) -> Result<TimestampADT, ExecError> {
@@ -1323,6 +1411,15 @@ pub(crate) fn order_values(
     }
     if let Some((left, right)) = coerce_temporal_text_pair(&left, &right) {
         return order_values(op, left, right, collation_oid);
+    }
+    if let Some(ordering) = mixed_date_timestamp_ordering(&left, &right, None) {
+        return Ok(Value::Bool(match op {
+            "<" => ordering == Ordering::Less,
+            "<=" => ordering != Ordering::Greater,
+            ">" => ordering == Ordering::Greater,
+            ">=" => ordering != Ordering::Less,
+            _ => unreachable!("comparison op not supported by order_values"),
+        }));
     }
     match (&left, &right) {
         (Value::Int16(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),

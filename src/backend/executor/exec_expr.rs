@@ -72,9 +72,10 @@ use super::expr_ops::compare_order_values;
 use super::expr_ops::{
     add_values, add_values_with_config, bitwise_and_values, bitwise_not_value, bitwise_or_values,
     bitwise_xor_values, compare_values, compare_values_with_type, concat_values,
-    concat_values_with_cast_context, div_values, eval_and, eval_or, mod_values, mul_values,
-    negate_value, not_equal_values, not_equal_values_with_type, order_values, shift_left_values,
-    shift_right_values, sub_values, sub_values_with_config, values_are_distinct,
+    concat_values_with_cast_context, div_values, eval_and, eval_or, mixed_date_timestamp_ordering,
+    mod_values, mul_values, negate_value, not_equal_values, not_equal_values_with_type,
+    order_values, shift_left_values, shift_right_values, sub_values, sub_values_with_config,
+    values_are_distinct,
 };
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
 use super::expr_range::eval_range_function;
@@ -3328,6 +3329,7 @@ fn eval_op_expr(
             eval_expr(right, slot, ctx)?,
             expr_sql_type_hint(right),
             op.collation_oid,
+            Some(&ctx.datetime_config),
         ),
         (OpExprKind::NotEq, [left, right]) => not_equal_values_with_type(
             eval_expr(left, slot, ctx)?,
@@ -3335,6 +3337,7 @@ fn eval_op_expr(
             eval_expr(right, slot, ctx)?,
             expr_sql_type_hint(right),
             op.collation_oid,
+            Some(&ctx.datetime_config),
         ),
         (OpExprKind::Lt, [left, right]) => order_values_with_type(
             "<",
@@ -3426,6 +3429,16 @@ fn order_values_with_type(
 ) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
+    }
+    if let Some(ordering) = mixed_date_timestamp_ordering(&left, &right, Some(&ctx.datetime_config))
+    {
+        return Ok(Value::Bool(match op {
+            "<" => ordering == Ordering::Less,
+            "<=" => ordering != Ordering::Greater,
+            ">" => ordering == Ordering::Greater,
+            ">=" => ordering != Ordering::Less,
+            _ => unreachable!("comparison op not supported by order_values_with_type"),
+        }));
     }
     if let (
         Value::EnumOid(left_oid),
@@ -4123,6 +4136,7 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 eval_plpgsql_expr(right, slot)?,
                 expr_sql_type_hint(right),
                 op.collation_oid,
+                None,
             ),
             (OpExprKind::NotEq, [left, right]) => not_equal_values_with_type(
                 eval_plpgsql_expr(left, slot)?,
@@ -4130,6 +4144,7 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 eval_plpgsql_expr(right, slot)?,
                 expr_sql_type_hint(right),
                 op.collation_oid,
+                None,
             ),
             (OpExprKind::Lt, [left, right]) => order_values(
                 "<",

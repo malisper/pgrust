@@ -6811,6 +6811,31 @@ fn mixed_date_timestamp_comparisons_execute_with_common_types() {
 }
 
 #[test]
+fn mixed_date_timestamp_comparisons_do_not_cast_out_of_range_dates() {
+    let base = temp_dir("mixed_date_timestamp_out_of_range_comparisons");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '2202020-10-05'::date > '2020-10-05'::timestamp,
+                    '2020-10-05'::timestamp > '2202020-10-05'::date,
+                    '2202020-10-05'::date > '2020-10-05'::timestamptz,
+                    '4714-11-24 BC'::date < '2020-10-05'::timestamptz",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(true),
+        ]],
+    );
+}
+
+#[test]
 fn overlaps_expression_lowers_for_horology_datetime_cases() {
     let base = temp_dir("overlaps_horology_datetime");
     let txns = TransactionManager::new_durable(&base).unwrap();

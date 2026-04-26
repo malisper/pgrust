@@ -996,6 +996,7 @@ pub(crate) fn bind_lowered_comparison_expr(
             if !left_type.is_array && !right_type.is_array {
                 if let Some(common) = resolve_common_scalar_type(left_type, right_type)
                     .filter(|ty| !is_numeric_family(*ty))
+                    .filter(|_| !is_mixed_date_timestamp_comparison(left_type, right_type))
                 {
                     (
                         coerce_bound_expr(left_bound, raw_left_type, common),
@@ -1325,16 +1326,29 @@ fn supports_array_comparison_operator(op: &str, left: SqlType, right: SqlType) -
 fn supports_builtin_datetime_comparison(op: &str, left: SqlType, right: SqlType) -> bool {
     !left.is_array
         && !right.is_array
-        && left.kind == right.kind
-        && matches!(
-            left.kind,
-            SqlTypeKind::Date
-                | SqlTypeKind::Time
-                | SqlTypeKind::TimeTz
-                | SqlTypeKind::Timestamp
-                | SqlTypeKind::TimestampTz
-        )
+        && (left.kind == right.kind
+            && matches!(
+                left.kind,
+                SqlTypeKind::Date
+                    | SqlTypeKind::Time
+                    | SqlTypeKind::TimeTz
+                    | SqlTypeKind::Timestamp
+                    | SqlTypeKind::TimestampTz
+            )
+            || is_mixed_date_timestamp_comparison(left, right))
         && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
+}
+
+fn is_mixed_date_timestamp_comparison(left: SqlType, right: SqlType) -> bool {
+    !left.is_array
+        && !right.is_array
+        && matches!(
+            (left.kind, right.kind),
+            (SqlTypeKind::Date, SqlTypeKind::Timestamp)
+                | (SqlTypeKind::Timestamp, SqlTypeKind::Date)
+                | (SqlTypeKind::Date, SqlTypeKind::TimestampTz)
+                | (SqlTypeKind::TimestampTz, SqlTypeKind::Date)
+        )
 }
 
 // :HACK: PostgreSQL exposes interval comparison operators through pg_operator.

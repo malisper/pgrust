@@ -17264,7 +17264,24 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     }
                     let low = bounds.first().cloned().ok_or(ParseError::UnexpectedEof)?;
                     let high = bounds.get(1).cloned().ok_or(ParseError::UnexpectedEof)?;
-                    let between = if symmetric {
+                    let between = if symmetric && negated {
+                        SqlExpr::And(
+                            Box::new(SqlExpr::Or(
+                                Box::new(SqlExpr::Lt(
+                                    Box::new(left.clone()),
+                                    Box::new(low.clone()),
+                                )),
+                                Box::new(SqlExpr::Gt(
+                                    Box::new(left.clone()),
+                                    Box::new(high.clone()),
+                                )),
+                            )),
+                            Box::new(SqlExpr::Or(
+                                Box::new(SqlExpr::Lt(Box::new(left.clone()), Box::new(high))),
+                                Box::new(SqlExpr::Gt(Box::new(left), Box::new(low))),
+                            )),
+                        )
+                    } else if symmetric {
                         SqlExpr::Or(
                             Box::new(SqlExpr::And(
                                 Box::new(SqlExpr::GtEq(
@@ -17281,17 +17298,18 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                                 Box::new(SqlExpr::LtEq(Box::new(left), Box::new(low))),
                             )),
                         )
+                    } else if negated {
+                        SqlExpr::Or(
+                            Box::new(SqlExpr::Lt(Box::new(left.clone()), Box::new(low))),
+                            Box::new(SqlExpr::Gt(Box::new(left), Box::new(high))),
+                        )
                     } else {
                         SqlExpr::And(
                             Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(low))),
                             Box::new(SqlExpr::LtEq(Box::new(left), Box::new(high))),
                         )
                     };
-                    Ok(if negated {
-                        SqlExpr::Not(Box::new(between))
-                    } else {
-                        between
-                    })
+                    Ok(between)
                 }
                 Rule::overlaps_suffix => {
                     let right = next

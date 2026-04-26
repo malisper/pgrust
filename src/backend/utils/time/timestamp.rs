@@ -3,13 +3,12 @@ use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat};
 use crate::backend::utils::time::datetime::{
     DateTimeKeyword, DateTimeParseError, TimeZoneSpec, current_postgres_timestamp_usecs,
     current_timezone_name, day_of_week_from_julian_day, days_from_ymd, expand_two_digit_year,
-    format_date_ymd, format_offset, format_time_usecs, is_bc_token, is_weekday_token,
-    julian_day_from_postgres_date, month_number, named_timezone_abbreviation_at_utc,
-    named_timezone_offset_seconds, named_timezone_offset_seconds_at_utc,
-    named_timezone_offset_seconds_for_local, parse_date_token_with_config, parse_fraction_to_usecs,
-    parse_keyword, parse_time_components, parse_timezone_spec, split_time_and_offset,
-    time_usecs_from_hms, timestamp_parts_from_usecs, timezone_offset_seconds,
-    timezone_offset_seconds_at_utc, today_pg_days, ymd_from_days,
+    format_offset, format_time_usecs, is_bc_token, is_weekday_token, julian_day_from_postgres_date,
+    month_number, named_timezone_abbreviation_at_utc, named_timezone_offset_seconds,
+    named_timezone_offset_seconds_at_utc, named_timezone_offset_seconds_for_local,
+    parse_date_token_with_config, parse_fraction_to_usecs, parse_keyword, parse_time_components,
+    parse_timezone_spec, split_time_and_offset, time_usecs_from_hms, timestamp_parts_from_usecs,
+    timezone_offset_seconds, timezone_offset_seconds_at_utc, today_pg_days, ymd_from_days,
 };
 use crate::include::nodes::datetime::{
     POSTGRES_EPOCH_JDATE, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
@@ -28,9 +27,11 @@ const MONTH_ABBREV: [&str; 12] = [
 ];
 
 fn format_timestamp_date(pg_days: i32, config: &DateTimeConfig, include_weekday: bool) -> String {
-    let (year, month, day) = ymd_from_days(pg_days);
-    let bc = year <= 0;
-    let rendered = match config.date_style_format {
+    let (mut year, month, day) = ymd_from_days(pg_days);
+    if year <= 0 {
+        year = 1 - year;
+    }
+    match config.date_style_format {
         DateStyleFormat::Postgres => {
             let month_name = MONTH_ABBREV[month.saturating_sub(1) as usize];
             if include_weekday {
@@ -48,14 +49,12 @@ fn format_timestamp_date(pg_days: i32, config: &DateTimeConfig, include_weekday:
             }
         }
         DateStyleFormat::German => format!("{day:02}.{month:02}.{year:04}"),
-        _ => format_date_ymd(pg_days),
-    };
-    if matches!(config.date_style_format, DateStyleFormat::Postgres) {
-        rendered
-    } else if bc {
-        format!("{rendered} BC")
-    } else {
-        rendered
+        DateStyleFormat::Iso => format!("{year:04}-{month:02}-{day:02}"),
+        DateStyleFormat::Sql => match config.date_order {
+            DateOrder::Ymd => format!("{year:04}-{month:02}-{day:02}"),
+            DateOrder::Dmy => format!("{day:02}/{month:02}/{year:04}"),
+            DateOrder::Mdy => format!("{month:02}/{day:02}/{year:04}"),
+        },
     }
 }
 
@@ -960,11 +959,19 @@ pub fn format_timestamp_text(value: TimestampADT, _config: &DateTimeConfig) -> S
             format_time_usecs(time_usecs),
             format_timestamp_year_suffix(days),
         ),
-        _ => format!(
-            "{} {}",
-            format_timestamp_date(days, _config, false),
-            format_time_usecs(time_usecs)
-        ),
+        _ => {
+            let (_, bc) = format_timestamp_year_parts(days);
+            let rendered = format!(
+                "{} {}",
+                format_timestamp_date(days, _config, false),
+                format_time_usecs(time_usecs)
+            );
+            if bc {
+                format!("{rendered} BC")
+            } else {
+                rendered
+            }
+        }
     }
 }
 
@@ -999,19 +1006,33 @@ pub fn format_timestamptz_text(value: TimestampTzADT, config: &DateTimeConfig) -
         DateStyleFormat::German => {
             let zone = timezone_abbrev_for_output(config, value.0, offset_seconds)
                 .unwrap_or_else(|| format_offset(offset_seconds));
-            format!(
+            let rendered = format!(
                 "{} {} {}",
                 format_timestamp_date(days, config, false),
                 format_time_usecs(time_usecs),
                 zone
-            )
+            );
+            let (_, bc) = format_timestamp_year_parts(days);
+            if bc {
+                format!("{rendered} BC")
+            } else {
+                rendered
+            }
         }
-        _ => format!(
-            "{} {}{}",
-            format_timestamp_date(days, config, false),
-            format_time_usecs(time_usecs),
-            format_offset(offset_seconds)
-        ),
+        _ => {
+            let rendered = format!(
+                "{} {}{}",
+                format_timestamp_date(days, config, false),
+                format_time_usecs(time_usecs),
+                format_offset(offset_seconds)
+            );
+            let (_, bc) = format_timestamp_year_parts(days);
+            if bc {
+                format!("{rendered} BC")
+            } else {
+                rendered
+            }
+        }
     }
 }
 
@@ -1052,6 +1073,26 @@ mod format_tests {
             format_timestamp_text(ts, &config),
             "Fri 27 Dec 00:00:00 1996"
         );
+    }
+
+    #[test]
+    fn formats_bc_timestamp_in_iso_and_sql_styles() {
+        let ts = TimestampADT(
+            i64::from(days_from_ymd(-96, 2, 16).unwrap()) * USECS_PER_DAY
+                + (17 * 3600 + 32 * 60 + 1) * USECS_PER_SEC,
+        );
+        let iso = DateTimeConfig {
+            date_style_format: DateStyleFormat::Iso,
+            date_order: DateOrder::Mdy,
+            ..DateTimeConfig::default()
+        };
+        assert_eq!(format_timestamp_text(ts, &iso), "0097-02-16 17:32:01 BC");
+        let sql = DateTimeConfig {
+            date_style_format: DateStyleFormat::Sql,
+            date_order: DateOrder::Mdy,
+            ..DateTimeConfig::default()
+        };
+        assert_eq!(format_timestamp_text(ts, &sql), "02/16/0097 17:32:01 BC");
     }
 
     #[test]
