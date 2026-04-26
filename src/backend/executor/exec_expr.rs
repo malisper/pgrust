@@ -96,7 +96,8 @@ use super::expr_string::{
     eval_text_starts_with_function, eval_text_substring, eval_to_bin_function,
     eval_to_char_float4_function, eval_to_char_function, eval_to_hex_function,
     eval_to_number_function, eval_to_oct_function, eval_translate_function, eval_trim_function,
-    eval_unistr_function,
+    eval_unicode_assigned_function, eval_unicode_is_normalized_function,
+    eval_unicode_normalize_function, eval_unicode_version_function, eval_unistr_function,
 };
 use super::expr_txid::eval_txid_builtin_function;
 use super::expr_xml::{eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function};
@@ -4331,6 +4332,10 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::PgSizeBytes => eval_pg_size_bytes_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
         BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
+        BuiltinScalarFunction::UnicodeVersion => eval_unicode_version_function(&values),
+        BuiltinScalarFunction::UnicodeAssigned => eval_unicode_assigned_function(&values),
+        BuiltinScalarFunction::Normalize => eval_unicode_normalize_function(&values),
+        BuiltinScalarFunction::IsNormalized => eval_unicode_is_normalized_function(&values),
         BuiltinScalarFunction::Initcap => eval_initcap_function(&values),
         BuiltinScalarFunction::BTrim => eval_trim_function("btrim", &values),
         BuiltinScalarFunction::LTrim => eval_trim_function("ltrim", &values),
@@ -5669,6 +5674,10 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(&values),
         BuiltinScalarFunction::IntervalHash => eval_interval_hash_function(&values),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
+        BuiltinScalarFunction::UnicodeVersion => eval_unicode_version_function(&values),
+        BuiltinScalarFunction::UnicodeAssigned => eval_unicode_assigned_function(&values),
+        BuiltinScalarFunction::Normalize => eval_unicode_normalize_function(&values),
+        BuiltinScalarFunction::IsNormalized => eval_unicode_is_normalized_function(&values),
         BuiltinScalarFunction::PgEncodingToChar => eval_pg_encoding_to_char(&values),
         BuiltinScalarFunction::PgMyTempSchema => Ok(Value::Int64(i64::from(
             current_temp_namespace_oid(ctx).unwrap_or(0),

@@ -1250,6 +1250,11 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::ToTimestamp => args.len() == 1,
             BuiltinScalarFunction::IntervalHash => args.len() == 1,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
+            BuiltinScalarFunction::UnicodeVersion => args.is_empty(),
+            BuiltinScalarFunction::UnicodeAssigned => args.len() == 1,
+            BuiltinScalarFunction::Normalize | BuiltinScalarFunction::IsNormalized => {
+                args.len() == 2
+            }
             BuiltinScalarFunction::PgEncodingToChar => args.len() == 1,
             BuiltinScalarFunction::PgMyTempSchema => args.is_empty(),
             BuiltinScalarFunction::PgRustInternalBinaryCoercible => args.len() == 2,
@@ -2250,6 +2255,12 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
         ),
+        ("unicode_version", BuiltinScalarFunction::UnicodeVersion),
+        ("unicode_assigned", BuiltinScalarFunction::UnicodeAssigned),
+        ("normalize", BuiltinScalarFunction::Normalize),
+        ("unicode_normalize_func", BuiltinScalarFunction::Normalize),
+        ("is_normalized", BuiltinScalarFunction::IsNormalized),
+        ("unicode_is_normalized", BuiltinScalarFunction::IsNormalized),
         (
             "pg_encoding_to_char",
             BuiltinScalarFunction::PgEncodingToChar,
@@ -3584,6 +3595,10 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgAdvisoryUnlockShared
             | BuiltinScalarFunction::PgAdvisoryUnlockAll
             | BuiltinScalarFunction::GetDatabaseEncoding
+            | BuiltinScalarFunction::UnicodeVersion
+            | BuiltinScalarFunction::UnicodeAssigned
+            | BuiltinScalarFunction::Normalize
+            | BuiltinScalarFunction::IsNormalized
             | BuiltinScalarFunction::PgEncodingToChar
             | BuiltinScalarFunction::PgMyTempSchema
             | BuiltinScalarFunction::PgRustTestFdwHandler

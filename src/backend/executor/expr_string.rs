@@ -38,6 +38,8 @@ use md5::{Digest, Md5};
 use num_bigint::BigInt;
 use num_traits::Signed;
 use sha2::{Sha224, Sha256, Sha384, Sha512};
+use unicode_general_category::{GeneralCategory, get_general_category};
+use unicode_normalization::{UnicodeNormalization, is_nfc, is_nfd, is_nfkc, is_nfkd};
 
 struct SizePrettyUnit {
     name: &'static str,
@@ -1596,6 +1598,113 @@ pub(super) fn eval_unistr_function(values: &[Value]) -> Result<Value, ExecError>
     Ok(Value::Text(CompactString::from_owned(decode_unistr_text(
         text,
     )?)))
+}
+
+pub(super) fn eval_unicode_version_function(values: &[Value]) -> Result<Value, ExecError> {
+    if !values.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "unicode_version()",
+            actual: format!("unicode_version({} args)", values.len()),
+        }));
+    }
+    let (major, minor, _) = unicode_normalization::UNICODE_VERSION;
+    Ok(Value::Text(format!("{major}.{minor}").into()))
+}
+
+pub(super) fn eval_unicode_assigned_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [value] => {
+            let text = expect_text_arg("unicode_assigned", value, &Value::Text("".into()))?;
+            Ok(Value::Bool(text.chars().all(|ch| {
+                get_general_category(ch) != GeneralCategory::Unassigned
+            })))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "unicode_assigned(text)",
+            actual: format!("unicode_assigned({} args)", values.len()),
+        })),
+    }
+}
+
+pub(super) fn eval_unicode_normalize_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [value, form] => {
+            let text = expect_text_arg("normalize", value, &Value::Text("".into()))?;
+            let form = expect_text_arg("normalize", form, &Value::Text("NFC".into()))?;
+            Ok(Value::Text(CompactString::from_owned(
+                unicode_normalize_text(text, parse_unicode_normal_form(form)?),
+            )))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "normalize(text, text)",
+            actual: format!("normalize({} args)", values.len()),
+        })),
+    }
+}
+
+pub(super) fn eval_unicode_is_normalized_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [value, form] => {
+            let text = expect_text_arg("is_normalized", value, &Value::Text("".into()))?;
+            let form = expect_text_arg("is_normalized", form, &Value::Text("NFC".into()))?;
+            Ok(Value::Bool(unicode_text_is_normalized(
+                text,
+                parse_unicode_normal_form(form)?,
+            )))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "is_normalized(text, text)",
+            actual: format!("is_normalized({} args)", values.len()),
+        })),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum UnicodeNormalForm {
+    Nfc,
+    Nfd,
+    Nfkc,
+    Nfkd,
+}
+
+fn parse_unicode_normal_form(form: &str) -> Result<UnicodeNormalForm, ExecError> {
+    if form.eq_ignore_ascii_case("NFC") {
+        Ok(UnicodeNormalForm::Nfc)
+    } else if form.eq_ignore_ascii_case("NFD") {
+        Ok(UnicodeNormalForm::Nfd)
+    } else if form.eq_ignore_ascii_case("NFKC") {
+        Ok(UnicodeNormalForm::Nfkc)
+    } else if form.eq_ignore_ascii_case("NFKD") {
+        Ok(UnicodeNormalForm::Nfkd)
+    } else {
+        Err(ExecError::DetailedError {
+            message: format!("invalid normalization form: {form}"),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        })
+    }
+}
+
+fn unicode_normalize_text(text: &str, form: UnicodeNormalForm) -> String {
+    match form {
+        UnicodeNormalForm::Nfc => text.nfc().collect(),
+        UnicodeNormalForm::Nfd => text.nfd().collect(),
+        UnicodeNormalForm::Nfkc => text.nfkc().collect(),
+        UnicodeNormalForm::Nfkd => text.nfkd().collect(),
+    }
+}
+
+fn unicode_text_is_normalized(text: &str, form: UnicodeNormalForm) -> bool {
+    match form {
+        UnicodeNormalForm::Nfc => is_nfc(text),
+        UnicodeNormalForm::Nfd => is_nfd(text),
+        UnicodeNormalForm::Nfkc => is_nfkc(text),
+        UnicodeNormalForm::Nfkd => is_nfkd(text),
+    }
 }
 
 pub(super) fn eval_initcap_function(values: &[Value]) -> Result<Value, ExecError> {
