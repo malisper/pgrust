@@ -250,6 +250,8 @@ fn execute_statement_with_source(
         | Statement::AlterTableValidateConstraint(_)
         | Statement::AlterTableInherit(_)
         | Statement::AlterTableNoInherit(_)
+        | Statement::AlterTableOf(_)
+        | Statement::AlterTableNotOf(_)
         | Statement::AlterTableAttachPartition(_)
         | Statement::AlterTableDetachPartition(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -613,6 +615,8 @@ pub fn execute_readonly_statement_with_config(
         | Statement::AlterTableAlterColumnStorage(_)
         | Statement::AlterTableAlterColumnDefault(_)
         | Statement::AlterTableAlterColumnExpression(_)
+        | Statement::AlterTableOf(_)
+        | Statement::AlterTableNotOf(_)
         | Statement::AlterTableAttachPartition(_)
         | Statement::AlterTableDetachPartition(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableRename(_) | Statement::AlterViewRename(_) => {

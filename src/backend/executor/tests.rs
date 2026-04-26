@@ -178,6 +178,7 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         relacl: None,
         reloptions: None,
+        of_type_oid: 0,
         row_type_oid: 60_000u32.saturating_add(rel.rel_number),
         array_type_oid: 61_000u32.saturating_add(rel.rel_number),
         reltoastrelid: 0,

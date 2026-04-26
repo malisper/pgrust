@@ -535,6 +535,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
                     relation_oid: index_entry.relation_oid,
                     namespace_oid: index_entry.namespace_oid,
                     owner_oid: index_entry.owner_oid,
+                    of_type_oid: index_entry.of_type_oid,
                     row_type_oid: index_entry.row_type_oid,
                     array_type_oid: index_entry.array_type_oid,
                     reltoastrelid: index_entry.reltoastrelid,

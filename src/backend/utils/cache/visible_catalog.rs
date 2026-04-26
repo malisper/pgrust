@@ -817,6 +817,7 @@ fn bound_relation_from_relcache_entry(
             }),
         namespace_oid: entry.namespace_oid,
         owner_oid: entry.owner_oid,
+        of_type_oid: entry.of_type_oid,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         relispopulated: entry.relispopulated,

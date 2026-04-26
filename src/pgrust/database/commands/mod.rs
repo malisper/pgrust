@@ -39,3 +39,4 @@ mod session_auth;
 mod tablespace;
 mod trigger;
 mod typecmds;
+mod typed_table;

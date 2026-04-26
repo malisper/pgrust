@@ -162,6 +162,7 @@ fn main() -> Result<(), ExecError> {
             relation_oid: 16_384,
             namespace_oid: 11,
             owner_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            of_type_oid: 0,
             row_type_oid: 16_385,
             array_type_oid: 16_386,
             reltoastrelid: 0,

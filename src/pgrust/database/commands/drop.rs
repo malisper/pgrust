@@ -141,6 +141,9 @@ fn catalog_entry_from_bound_relation(
         owner_oid: relation.owner_oid,
         relacl: class.and_then(|row| row.relacl.clone()),
         reloptions: class.and_then(|row| row.reloptions.clone()),
+        of_type_oid: class
+            .map(|row| row.reloftype)
+            .unwrap_or(relation.of_type_oid),
         row_type_oid,
         array_type_oid,
         reltoastrelid: relation.toast.map(|toast| toast.relation_oid).unwrap_or(0),
