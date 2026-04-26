@@ -5874,9 +5874,9 @@ fn new_indexes_report_never_analyzed_reltuples() {
         query_rows(
             &db,
             1,
-            "select reltuples from pg_class where relname = 'fresh_items_id_idx'",
+            "select relpages, reltuples from pg_class where relname = 'fresh_items_id_idx'",
         ),
-        vec![vec![Value::Float64(-1.0)]]
+        vec![vec![Value::Int32(1), Value::Float64(0.0)]]
     );
 }
 
