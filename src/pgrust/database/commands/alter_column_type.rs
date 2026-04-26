@@ -1,4 +1,5 @@
 use super::super::*;
+use super::typed_table::reject_typed_table_ddl;
 use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{
     collect_matching_rows_heap, insert_index_entry_for_row, reinitialize_index_relation,
@@ -229,6 +230,7 @@ fn collect_alter_column_type_targets(
                 actual: "system catalog".into(),
             }));
         }
+        reject_typed_table_ddl(&target_relation, "alter column type of")?;
         reject_relation_with_dependent_views(
             db,
             client_id,
@@ -341,6 +343,7 @@ impl Database {
                 actual: "system catalog".into(),
             }));
         }
+        reject_typed_table_ddl(&relation, "alter column type of")?;
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
         let targets = collect_alter_column_type_targets(
             self, &catalog, client_id, xid, cid, &relation, alter_stmt,
@@ -354,6 +357,7 @@ impl Database {
             lock_status_provider: Some(std::sync::Arc::new(self.clone())),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            stats_import_runtime: None,
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
             row_locks: std::sync::Arc::clone(&self.row_locks),
@@ -384,6 +388,8 @@ impl Database {
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),

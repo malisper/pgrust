@@ -7,7 +7,7 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
-    PG_REWRITE_RELATION_OID, PgConstraintRow, PgProcRow, PgRewriteRow,
+    PG_REWRITE_RELATION_OID, PgCastRow, PgConstraintRow, PgProcRow, PgRewriteRow,
 };
 use crate::include::nodes::parsenodes::{
     DropAggregateStatement, DropFunctionStatement, DropIndexStatement, DropProcedureStatement,
@@ -84,6 +84,42 @@ fn drop_format_name(catcache: &CatCache, namespace_oid: u32, object_name: &str) 
     }
 }
 
+fn cast_drop_notice(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    row: &PgCastRow,
+) -> String {
+    format!(
+        "drop cascades to cast from {} to {}",
+        format_type_text(row.castsource, None, catalog),
+        format_type_text(row.casttarget, None, catalog)
+    )
+}
+
+fn cast_dependency_detail(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    row: &PgCastRow,
+    function_display: &str,
+) -> String {
+    format!(
+        "cast from {} to {} depends on function {function_display}",
+        format_type_text(row.castsource, None, catalog),
+        format_type_text(row.casttarget, None, catalog)
+    )
+}
+
+fn drop_function_display(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    row: &crate::include::catalog::PgProcRow,
+) -> String {
+    let args = parse_proc_argtype_oids(&row.proargtypes)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|oid| format_type_text(oid, None, catalog))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{}({args})", row.proname)
+}
+
 fn catalog_entry_from_bound_relation(
     catcache: &CatCache,
     relation: &crate::backend::parser::BoundRelation,
@@ -105,6 +141,9 @@ fn catalog_entry_from_bound_relation(
         owner_oid: relation.owner_oid,
         relacl: class.and_then(|row| row.relacl.clone()),
         reloptions: class.and_then(|row| row.reloptions.clone()),
+        of_type_oid: class
+            .map(|row| row.reloftype)
+            .unwrap_or(relation.of_type_oid),
         row_type_oid,
         array_type_oid,
         reltoastrelid: relation.toast.map(|toast| toast.relation_oid).unwrap_or(0),
@@ -272,6 +311,7 @@ fn is_drop_table_relkind(relkind: char) -> bool {
 
 fn drop_table_relation_kind_name(relkind: char) -> &'static str {
     match relkind {
+        'c' => "type",
         'm' => "materialized view",
         'p' => "table",
         'S' => "sequence",
@@ -1076,14 +1116,61 @@ impl Database {
         {
             return Err(err);
         }
+        let mut dependent_casts = catalog
+            .cast_rows()
+            .into_iter()
+            .filter(|row| row.castfunc == proc_row.oid)
+            .collect::<Vec<_>>();
+        dependent_casts.sort_by_key(|row| (row.castsource, row.casttarget, row.oid));
+        if !dependent_casts.is_empty() && !drop_stmt.cascade {
+            let function_display = drop_function_display(&catalog, &proc_row);
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot drop {object_kind} {function_display} because other objects depend on it"
+                ),
+                detail: Some(
+                    dependent_casts
+                        .iter()
+                        .map(|row| cast_dependency_detail(&catalog, row, &function_display))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+                sqlstate: "2BP01",
+            });
+        }
+
+        let interrupts = self.interrupt_state(client_id);
+        let mut next_cid = cid;
+        for cast_row in dependent_casts {
+            push_notice(cast_drop_notice(&catalog, &cast_row));
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_cid,
+                client_id,
+                waiter: Some(self.txn_waiter.clone()),
+                interrupts: Arc::clone(&interrupts),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .drop_cast_by_oid_mvcc(cast_row.oid, &ctx)
+                .map(|(_, effect)| effect)
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+            next_cid = next_cid.saturating_add(1);
+        }
+
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
             xid,
-            cid,
+            cid: next_cid,
             client_id,
             waiter: Some(self.txn_waiter.clone()),
-            interrupts: self.interrupt_state(client_id),
+            interrupts,
         };
         let effect = self
             .catalog
@@ -1184,7 +1271,23 @@ impl Database {
             .collect::<Vec<_>>();
         let mut next_cid = cid;
 
-        for relation in relation_rows {
+        let mut relation_rows_by_drop_order = relation_rows
+            .iter()
+            .filter(|row| row.relkind != 'c')
+            .cloned()
+            .collect::<Vec<_>>();
+        relation_rows_by_drop_order.extend(
+            relation_rows
+                .iter()
+                .filter(|row| row.relkind == 'c')
+                .cloned(),
+        );
+
+        let mut dropped_relation_oids = BTreeSet::new();
+        for relation in relation_rows_by_drop_order {
+            if dropped_relation_oids.contains(&relation.oid) {
+                continue;
+            }
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),
@@ -1195,6 +1298,11 @@ impl Database {
                 interrupts: Arc::clone(&interrupts),
             };
             let drop_result = match relation.relkind {
+                'c' => self
+                    .catalog
+                    .write()
+                    .drop_composite_type_by_oid_mvcc(relation.oid, &ctx)
+                    .map(|(entry, effect)| (vec![entry], effect)),
                 'v' => self
                     .catalog
                     .write()
@@ -1211,6 +1319,7 @@ impl Database {
                     .drop_relation_by_oid_mvcc(relation.oid, &ctx),
             };
             let (dropped_relations, effect) = drop_result.map_err(map_catalog_error)?;
+            dropped_relation_oids.extend(dropped_relations.iter().map(|entry| entry.relation_oid));
             if relation.relkind != 'v' {
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
             }
@@ -1830,11 +1939,11 @@ impl Database {
                     .role_by_oid(auth.current_user_oid())
                     .map(|row| row.rolname.as_str())
                     .unwrap_or("");
-                for relation in relation_rows
-                    .iter()
-                    .filter(|row| matches!(row.relkind, 'r' | 'p' | 'm' | 'S' | 'v'))
-                {
-                    push_notice(format!(
+                let mut notices = Vec::new();
+                for relation in relation_rows.iter().filter(|row| {
+                    !row.relispartition && matches!(row.relkind, 'c' | 'r' | 'p' | 'm' | 'S' | 'v')
+                }) {
+                    notices.push(format!(
                         "drop cascades to {} {}",
                         drop_table_relation_kind_name(relation.relkind),
                         drop_schema_display_relation_name(
@@ -1843,6 +1952,14 @@ impl Database {
                             current_role_name
                         )
                     ));
+                }
+                match notices.as_slice() {
+                    [] => {}
+                    [notice] => push_notice(notice.clone()),
+                    notices => push_notice_with_detail(
+                        format!("drop cascades to {} other objects", notices.len()),
+                        notices.join("\n"),
+                    ),
                 }
             }
             if has_relations || has_procs {

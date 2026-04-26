@@ -906,23 +906,29 @@ pub(super) fn reject_type_with_dependents(
         .filter_map(|row| match row.classid {
             PG_CLASS_RELATION_OID => {
                 let class = catcache.class_by_oid(row.objid)?;
-                Some(format!(
-                    "{} {}",
-                    relation_kind_name(class.relkind),
-                    format_name(class.relnamespace, &class.relname)
+                Some((
+                    row.objid,
+                    format!(
+                        "{} {}",
+                        relation_kind_name(class.relkind),
+                        format_name(class.relnamespace, &class.relname)
+                    ),
                 ))
             }
             PG_PROC_RELATION_OID => {
                 let proc_row = catcache.proc_by_oid(row.objid)?;
-                Some(format!(
-                    "function {}",
-                    format_name(proc_row.pronamespace, &proc_row.proname)
+                Some((
+                    row.objid,
+                    format!(
+                        "function {}()",
+                        format_name(proc_row.pronamespace, &proc_row.proname)
+                    ),
                 ))
             }
             _ => None,
         })
         .collect::<Vec<_>>();
-    dependents.sort();
+    dependents.sort_by_key(|(oid, _)| *oid);
     dependents.dedup();
     if dependents.is_empty() {
         return Ok(());
@@ -933,11 +939,11 @@ pub(super) fn reject_type_with_dependents(
         detail: Some(
             dependents
                 .into_iter()
-                .map(|name| format!("{name} depends on type {display_name}"))
+                .map(|(_, name)| format!("{name} depends on type {display_name}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
-        hint: None,
+        hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
         sqlstate: "2BP01",
     })
 }

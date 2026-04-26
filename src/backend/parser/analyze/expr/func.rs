@@ -848,6 +848,23 @@ pub(super) fn bind_scalar_function_call(
             }
             Ok(build_func(false, args))
         }
+        BuiltinScalarFunction::TimestampTzConstructor => {
+            let second_type = match arg_types.get(1).map(|ty| ty.kind) {
+                Some(SqlTypeKind::TimeTz) => SqlType::new(SqlTypeKind::TimeTz),
+                _ => SqlType::new(SqlTypeKind::Time),
+            };
+            Ok(build_func(
+                false,
+                vec![
+                    coerce_bound_expr(
+                        bound_args[0].clone(),
+                        arg_types[0],
+                        SqlType::new(SqlTypeKind::Date),
+                    ),
+                    coerce_bound_expr(bound_args[1].clone(), arg_types[1], second_type),
+                ],
+            ))
+        }
         BuiltinScalarFunction::Age => Ok(build_func(false, bound_args)),
         BuiltinScalarFunction::IntervalHash => Ok(build_func(
             false,
@@ -2321,6 +2338,19 @@ pub(super) fn bind_scalar_function_call(
                 .map(|(ty, arg)| coerce_bound_expr(arg, ty, SqlType::new(SqlTypeKind::Text)))
                 .collect(),
         )),
+        BuiltinScalarFunction::ToTimestamp if bound_args.len() == 2 => {
+            Ok(Expr::resolved_builtin_func(
+                func,
+                func_oid,
+                Some(SqlType::new(SqlTypeKind::TimestampTz)),
+                false,
+                arg_types
+                    .into_iter()
+                    .zip(bound_args)
+                    .map(|(ty, arg)| coerce_bound_expr(arg, ty, SqlType::new(SqlTypeKind::Text)))
+                    .collect(),
+            ))
+        }
         BuiltinScalarFunction::ToTimestamp => Ok(Expr::resolved_builtin_func(
             func,
             func_oid,

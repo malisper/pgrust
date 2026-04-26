@@ -35,6 +35,7 @@ pub struct PgClassRow {
     pub reloptions: Option<Vec<String>>,
     pub relacl: Option<Vec<String>>,
     pub relreplident: char,
+    pub reloftype: u32,
 }
 
 pub fn pg_class_desc() -> RelationDesc {
@@ -90,6 +91,7 @@ pub fn pg_class_desc() -> RelationDesc {
                 SqlType::new(SqlTypeKind::InternalChar),
                 false,
             ),
+            column_desc("reloftype", SqlType::new(SqlTypeKind::Oid), false),
         ],
     }
 }
@@ -179,5 +181,6 @@ fn bootstrap_pg_class_row(kind: BootstrapCatalogKind) -> PgClassRow {
         reloptions: None,
         relacl: None,
         relreplident: 'd',
+        reloftype: 0,
     }
 }

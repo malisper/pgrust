@@ -408,11 +408,18 @@ pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow,
         relpartbound: nullable_text(&values[23])?,
         reloptions: nullable_text_array(&values[24])?,
         relacl: nullable_text_array(&values[25])?,
-        relreplident: values
-            .get(26)
-            .map(|value| expect_char(value, "relreplident"))
+        relreplident: match values.get(26) {
+            Some(Value::InternalChar(_) | Value::Text(_)) => {
+                expect_char(&values[26], "relreplident")?
+            }
+            _ => 'd',
+        },
+        reloftype: values
+            .get(27)
+            .map(expect_oid)
             .transpose()?
-            .unwrap_or('d'),
+            .or_else(|| values.get(26).and_then(|value| expect_oid(value).ok()))
+            .unwrap_or(0),
     })
 }
 
@@ -1407,6 +1414,7 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
             ))
         }),
         Value::InternalChar(row.relreplident as u8),
+        Value::Int32(row.reloftype as i32),
     ]
 }
 

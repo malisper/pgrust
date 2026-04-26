@@ -6,8 +6,8 @@ use crate::backend::storage::page::bufpage::max_align;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::AttributeAlign;
 use crate::include::catalog::{
-    INTERVAL_TYPE_OID, builtin_type_rows, multirange_type_ref_for_sql_type,
-    range_type_ref_for_sql_type,
+    FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, INTERVAL_TYPE_OID, builtin_type_rows,
+    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -1355,7 +1355,14 @@ fn format_array_values_nested(
             Value::Int64(v) => out.push_str(&v.to_string()),
             Value::Xid8(v) => out.push_str(&v.to_string()),
             Value::Money(v) => out.push_str(&crate::backend::executor::money_format_text(*v)),
-            Value::Float64(v) => out.push_str(&v.to_string()),
+            Value::Float64(v) => {
+                let rendered = match array.element_type_oid {
+                    Some(FLOAT4_TYPE_OID) => format_float4_text(*v, FloatFormatOptions::default()),
+                    Some(FLOAT8_TYPE_OID) => format_float8_text(*v, FloatFormatOptions::default()),
+                    _ => format_float8_text(*v, FloatFormatOptions::default()),
+                };
+                out.push_str(&rendered);
+            }
             Value::Numeric(v) => out.push_str(&v.render()),
             Value::Interval(v) => push_array_text_element(
                 &mut out,

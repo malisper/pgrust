@@ -334,6 +334,7 @@ impl Database {
                 relation_oid: namespace.oid,
                 namespace_oid: namespace.oid,
                 owner_oid: namespace.owner_oid,
+                of_type_oid: 0,
                 row_type_oid: 0,
                 array_type_oid: 0,
                 reltoastrelid: 0,
@@ -377,6 +378,7 @@ impl Database {
             xid,
             cid,
             'r',
+            0,
             None,
             catalog_effects,
             temp_effects,
@@ -392,6 +394,7 @@ impl Database {
         xid: TransactionId,
         mut cid: CommandId,
         relkind: char,
+        of_type_oid: u32,
         reloptions: Option<Vec<String>>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
@@ -417,7 +420,7 @@ impl Database {
         let (created, effect) = if relkind == 'r' {
             self.catalog
                 .write()
-                .create_table_mvcc_with_options(
+                .create_typed_table_mvcc_with_options(
                     format!("{}.{}", namespace.name, normalized),
                     desc,
                     namespace.oid,
@@ -426,6 +429,7 @@ impl Database {
                     namespace.toast_oid,
                     &namespace.toast_name,
                     self.auth_state(client_id).current_user_oid(),
+                    of_type_oid,
                     &ctx,
                 )
                 .map_err(map_catalog_error)?
@@ -457,6 +461,7 @@ impl Database {
             relation_oid: created.entry.relation_oid,
             namespace_oid: created.entry.namespace_oid,
             owner_oid: created.entry.owner_oid,
+            of_type_oid: created.entry.of_type_oid,
             row_type_oid: created.entry.row_type_oid,
             array_type_oid: created.entry.array_type_oid,
             reltoastrelid: created.entry.reltoastrelid,

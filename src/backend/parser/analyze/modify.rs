@@ -1857,7 +1857,7 @@ pub(crate) fn bind_insert_with_outer_scopes(
             ),
         ),
         InsertSource::Select(select) => {
-            let (query, _) = analyze_select_query_with_outer(
+            let (mut query, _) = analyze_select_query_with_outer(
                 select,
                 catalog,
                 outer_scopes,
@@ -1897,6 +1897,19 @@ pub(crate) fn bind_insert_with_outer_scopes(
                         target,
                         Some(&SqlExpr::Const(Value::Null)),
                     )?;
+                }
+            }
+            for (target_entry, target_column) in
+                query.target_list.iter_mut().zip(target_columns.iter())
+            {
+                let source_type = target_entry.sql_type;
+                if source_type != target_column.target_sql_type {
+                    target_entry.expr = coerce_bound_expr(
+                        target_entry.expr.clone(),
+                        source_type,
+                        target_column.target_sql_type,
+                    );
+                    target_entry.sql_type = target_column.target_sql_type;
                 }
             }
             (target_columns, BoundInsertSource::Select(Box::new(query)))

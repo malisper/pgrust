@@ -137,6 +137,7 @@ use crate::backend::access::transam::xact::{
 };
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::Catalog;
+use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::commands::tablecmds::*;
 use crate::backend::parser::{
     ParseError, Statement, bind_delete, bind_insert, bind_update, parse_statement, pg_plan_query,
@@ -146,6 +147,7 @@ use crate::backend::storage::lmgr::TableLockError;
 use crate::backend::storage::lmgr::{
     AdvisoryLockManager, RowLockError, RowLockManager, RowLockMode, RowLockOwner, RowLockTag,
 };
+use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
@@ -333,6 +335,42 @@ pub trait LockStatusProvider: Send + Sync {
     fn pg_lock_status_rows(&self, current_client_id: ClientId) -> Vec<Vec<Value>>;
 }
 
+#[derive(Debug, Clone)]
+pub struct TypedFunctionArg {
+    pub value: Value,
+    pub sql_type: Option<SqlType>,
+}
+
+pub trait StatsImportRuntime: Send + Sync {
+    fn pg_restore_relation_stats(
+        &self,
+        ctx: &mut ExecutorContext,
+        args: Vec<TypedFunctionArg>,
+    ) -> Result<Value, ExecError>;
+
+    fn pg_clear_relation_stats(
+        &self,
+        ctx: &mut ExecutorContext,
+        schemaname: Value,
+        relname: Value,
+    ) -> Result<Value, ExecError>;
+
+    fn pg_restore_attribute_stats(
+        &self,
+        ctx: &mut ExecutorContext,
+        args: Vec<TypedFunctionArg>,
+    ) -> Result<Value, ExecError>;
+
+    fn pg_clear_attribute_stats(
+        &self,
+        ctx: &mut ExecutorContext,
+        schemaname: Value,
+        relname: Value,
+        attname: Value,
+        inherited: Value,
+    ) -> Result<Value, ExecError>;
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SessionReplicationRole {
     #[default]
@@ -348,6 +386,7 @@ pub struct ExecutorContext {
     pub lock_status_provider: Option<std::sync::Arc<dyn LockStatusProvider>>,
     pub sequences: Option<std::sync::Arc<SequenceRuntime>>,
     pub large_objects: Option<std::sync::Arc<LargeObjectRuntime>>,
+    pub stats_import_runtime: Option<std::sync::Arc<dyn StatsImportRuntime>>,
     pub async_notify_runtime: Option<std::sync::Arc<AsyncNotifyRuntime>>,
     pub advisory_locks: std::sync::Arc<AdvisoryLockManager>,
     pub row_locks: std::sync::Arc<RowLockManager>,
@@ -378,6 +417,8 @@ pub struct ExecutorContext {
     pub timed: bool,
     pub allow_side_effects: bool,
     pub pending_async_notifications: Vec<PendingNotification>,
+    pub pending_catalog_effects: Vec<CatalogMutationEffect>,
+    pub pending_table_locks: Vec<RelFileLocator>,
     pub catalog: Option<VisibleCatalog>,
     pub compiled_functions: HashMap<u32, Arc<CompiledFunction>>,
     pub cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,
@@ -497,6 +538,16 @@ impl ExecutorContext {
                 hint: None,
                 sqlstate: "40P01",
             }),
+        }
+    }
+
+    pub fn record_catalog_effect(&mut self, effect: CatalogMutationEffect) {
+        self.pending_catalog_effects.push(effect);
+    }
+
+    pub fn record_table_lock(&mut self, rel: RelFileLocator) {
+        if !self.pending_table_locks.contains(&rel) {
+            self.pending_table_locks.push(rel);
         }
     }
 }

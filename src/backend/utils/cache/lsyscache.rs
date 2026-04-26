@@ -27,7 +27,7 @@ use crate::include::access::brin_page::{
 };
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PgAggregateRow, PgAmRow,
-    PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgCollationRow,
+    PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
     PgConstraintRow, PgEnumRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
     PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticExtDataRow,
     PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
@@ -1388,6 +1388,7 @@ pub fn lookup_any_relation(
             toast: toast_relation_from_entry(db, client_id, txn_ctx, &entry),
             namespace_oid: entry.namespace_oid,
             owner_oid: entry.owner_oid,
+            of_type_oid: entry.of_type_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
             relispopulated: entry.relispopulated,
@@ -1416,6 +1417,7 @@ pub fn lookup_any_relation(
             toast: toast_relation_from_entry(db, client_id, txn_ctx, &temp),
             namespace_oid: temp.namespace_oid,
             owner_oid: temp.owner_oid,
+            of_type_oid: temp.of_type_oid,
             relpersistence: temp.relpersistence,
             relkind: temp.relkind,
             relispopulated: temp.relispopulated,
@@ -1447,6 +1449,7 @@ pub fn lookup_any_relation(
             toast: toast_relation_from_entry(db, client_id, txn_ctx, entry),
             namespace_oid: entry.namespace_oid,
             owner_oid: entry.owner_oid,
+            of_type_oid: entry.of_type_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
             relispopulated: entry.relispopulated,
@@ -1590,6 +1593,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             toast: toast_relation_from_entry(self.db, self.client_id, self.txn_ctx, &entry),
             namespace_oid: entry.namespace_oid,
             owner_oid: entry.owner_oid,
+            of_type_oid: entry.of_type_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
             relispopulated: entry.relispopulated,
@@ -1639,6 +1643,23 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     fn operator_rows(&self) -> Vec<PgOperatorRow> {
         backend_catcache(self.db, self.client_id, self.txn_ctx)
             .map(|cache| cache.operator_rows())
+            .unwrap_or_default()
+    }
+
+    fn cast_by_source_target(
+        &self,
+        source_type_oid: u32,
+        target_type_oid: u32,
+    ) -> Option<PgCastRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .ok()?
+            .cast_by_source_target(source_type_oid, target_type_oid)
+            .cloned()
+    }
+
+    fn cast_rows(&self) -> Vec<PgCastRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .map(|cache| cache.cast_rows())
             .unwrap_or_default()
     }
 
@@ -2171,6 +2192,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         if let Some(temp_namespace) = owned_temp_namespace(self.db, self.client_id) {
             for (name, entry) in temp_namespace.tables {
                 relcache.insert(name.clone(), entry.entry.clone());
+                relcache.insert(format!("pg_temp.{name}"), entry.entry.clone());
                 relcache.insert(format!("{}.{}", temp_namespace.name, name), entry.entry);
             }
         }

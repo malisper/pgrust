@@ -1,4 +1,5 @@
 use super::super::*;
+use super::typed_table::reject_typed_table_ddl;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
     any_dependent_view_references_column, dependent_view_rewrites_for_relation,
@@ -72,6 +73,7 @@ impl Database {
                 actual: "temporary table".into(),
             }));
         }
+        reject_typed_table_ddl(&relation, "drop column from")?;
         ensure_relation_owner(self, client_id, &relation, &drop_stmt.table_name)?;
         reject_inheritance_tree_ddl(
             &catalog,

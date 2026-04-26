@@ -33,6 +33,7 @@ pub fn bootstrap_catalog_entry(kind: BootstrapCatalogKind) -> CatalogEntry {
         owner_oid: BOOTSTRAP_SUPERUSER_OID,
         relacl: None,
         reloptions: None,
+        of_type_oid: 0,
         row_type_oid: kind.row_type_oid(),
         array_type_oid: kind.array_type_oid(),
         reltoastrelid: kind.toast_relation_oid(),

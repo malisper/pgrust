@@ -290,6 +290,7 @@ impl CatCache {
                 reloptions: entry.reloptions.clone(),
                 relacl: entry.relacl.clone(),
                 relreplident: 'd',
+                reloftype: entry.of_type_oid,
             };
             cache.classes_by_name.insert(
                 normalize_catalog_name(name).to_ascii_lowercase(),
