@@ -388,6 +388,7 @@ pub enum Statement {
     DropTable(DropTableStatement),
     DropTrigger(DropTriggerStatement),
     DropIndex(DropIndexStatement),
+    ReindexIndex(ReindexIndexStatement),
     DropDomain(DropDomainStatement),
     DropForeignDataWrapper(DropForeignDataWrapperStatement),
     DropView(DropViewStatement),
@@ -2633,6 +2634,12 @@ pub struct DropIndexStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReindexIndexStatement {
+    pub concurrently: bool,
+    pub index_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropSequenceStatement {
     pub if_exists: bool,
     pub sequence_names: Vec<String>,
@@ -2978,8 +2985,9 @@ pub enum TableConstraint {
     },
     Exclusion {
         attributes: ConstraintAttributes,
-        access_method: String,
-        elements: Vec<ExclusionConstraintElement>,
+        using_method: String,
+        elements: Vec<ExclusionElement>,
+        include_columns: Vec<String>,
     },
     ForeignKey {
         attributes: ConstraintAttributes,
@@ -2994,7 +3002,7 @@ pub enum TableConstraint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExclusionConstraintElement {
+pub struct ExclusionElement {
     pub column: String,
     pub operator: String,
 }

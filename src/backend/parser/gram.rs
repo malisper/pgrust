@@ -157,6 +157,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_index_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_reindex_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_view_statement(&sql)? {
         return Ok(stmt);
     }
@@ -192,8 +195,8 @@ fn try_parse_alter_table_add_unnamed_constraint_statement(
         (" add unique", " add ".len()),
         (" add check", " add ".len()),
         (" add not null", " add ".len()),
-        (" add foreign key", " add ".len()),
         (" add exclude", " add ".len()),
+        (" add foreign key", " add ".len()),
     ]
     .into_iter()
     .find_map(|(needle, constraint_offset)| {
@@ -3182,6 +3185,40 @@ fn try_parse_index_statement(sql: &str) -> Result<Option<Statement>, ParseError>
             .map(|stmt| Some(Statement::AlterIndexAlterColumnStatistics(stmt)));
     }
     Ok(None)
+}
+
+fn try_parse_reindex_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("reindex ") {
+        return Ok(None);
+    }
+
+    let mut rest = consume_keyword(trimmed, "reindex").trim_start();
+    let concurrently = if keyword_at_start(rest, "concurrently") {
+        rest = consume_keyword(rest, "concurrently").trim_start();
+        true
+    } else {
+        false
+    };
+    if !keyword_at_start(rest, "index") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "REINDEX INDEX",
+            actual: rest.to_string(),
+        });
+    }
+    rest = consume_keyword(rest, "index").trim_start();
+    let (parts, tail) = parse_qualified_identifier_parts(rest)?;
+    if !tail.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of REINDEX INDEX statement",
+            actual: tail.trim().to_string(),
+        });
+    }
+    Ok(Some(Statement::ReindexIndex(ReindexIndexStatement {
+        concurrently,
+        index_name: parts.join("."),
+    })))
 }
 
 fn try_parse_view_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -12197,23 +12234,12 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .into_inner()
                 .find(|part| part.as_rule() == Rule::exclusion_table_constraint_body)
                 .ok_or(ParseError::UnexpectedEof)?;
-            let mut access_method = None;
-            let mut elements = Vec::new();
-            for part in body.into_inner() {
-                match part.as_rule() {
-                    Rule::identifier if access_method.is_none() => {
-                        access_method = Some(build_identifier(part));
-                    }
-                    Rule::exclusion_constraint_element => {
-                        elements.push(build_exclusion_constraint_element(part)?);
-                    }
-                    _ => {}
-                }
-            }
+            let (using_method, elements, include_columns) = build_exclusion_constraint_body(body)?;
             Ok(TableConstraint::Exclusion {
                 attributes,
-                access_method: access_method.ok_or(ParseError::UnexpectedEof)?,
+                using_method,
                 elements,
+                include_columns,
             })
         }
         Rule::check_table_constraint => {
@@ -12278,24 +12304,50 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
     }
 }
 
-fn build_exclusion_constraint_element(
+fn build_exclusion_constraint_body(
     pair: Pair<'_, Rule>,
-) -> Result<crate::include::nodes::parsenodes::ExclusionConstraintElement, ParseError> {
-    let mut column = None;
-    let mut operator = None;
+) -> Result<(String, Vec<ExclusionElement>, Vec<String>), ParseError> {
+    let mut using_method = None;
+    let mut elements = Vec::new();
+    let mut include_columns = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::identifier => column = Some(build_identifier(part)),
-            Rule::operator_token => operator = Some(part.as_str().to_string()),
+            Rule::identifier if using_method.is_none() => {
+                using_method = Some(build_identifier(part));
+            }
+            Rule::exclusion_element => {
+                let mut column = None;
+                let mut operator = None;
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::identifier => column = Some(build_identifier(inner)),
+                        Rule::operator_token => operator = Some(inner.as_str().to_string()),
+                        _ => {}
+                    }
+                }
+                elements.push(ExclusionElement {
+                    column: column.ok_or(ParseError::UnexpectedEof)?,
+                    operator: operator.ok_or(ParseError::UnexpectedEof)?,
+                });
+            }
+            Rule::create_index_include_clause => {
+                include_columns.extend(
+                    part.into_inner()
+                        .filter(|inner| inner.as_rule() == Rule::ident_list)
+                        .flat_map(|inner| inner.into_inner().map(build_identifier)),
+                );
+            }
             _ => {}
         }
     }
-    Ok(
-        crate::include::nodes::parsenodes::ExclusionConstraintElement {
-            column: column.ok_or(ParseError::UnexpectedEof)?,
-            operator: operator.ok_or(ParseError::UnexpectedEof)?,
-        },
-    )
+    if elements.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok((
+        using_method.ok_or(ParseError::UnexpectedEof)?,
+        elements,
+        include_columns,
+    ))
 }
 
 fn build_key_column_list(

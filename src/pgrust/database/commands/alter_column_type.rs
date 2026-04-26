@@ -43,6 +43,16 @@ fn reject_unsupported_alter_column_type_indexes(
         if !index.index_meta.indkey.contains(&target_attnum) {
             return false;
         }
+        let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or_default();
+        let target_is_key_column = index
+            .index_meta
+            .indkey
+            .iter()
+            .take(key_count)
+            .any(|attnum| *attnum == target_attnum);
+        if !target_is_key_column {
+            return false;
+        }
         // :HACK: Plain primary/unique key indexes survive the current heap
         // rewrite path well enough for the regression ALTER TYPE cases, but
         // general secondary-index metadata rewrites still need real support.
@@ -76,6 +86,7 @@ fn rewrite_bound_indexes_for_alter_column_type(
                 }
                 index.desc.columns[index_column_index] = new_column.clone();
                 if index.index_meta.am_oid == BTREE_AM_OID
+                    && index_column_index < index.index_meta.indclass.len()
                     && let Some(opclass_oid) = default_btree_opclass_oid(new_type_oid)
                 {
                     index.index_meta.indclass[index_column_index] = opclass_oid;

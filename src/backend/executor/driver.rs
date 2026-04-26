@@ -342,6 +342,10 @@ fn execute_statement_with_source(
         | Statement::ReassignOwned(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "role management".into(),
         ))),
+        Statement::ReindexIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "REINDEX handled by database/session layer",
+            actual: "REINDEX".into(),
+        })),
         Statement::CreateIndex(stmt) => execute_create_index(stmt, catalog, ctx),
         Statement::Call(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "CALL execution".into(),
@@ -633,6 +637,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::CreateIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE INDEX".into(),
+        })),
+        Statement::ReindexIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "REINDEX".into(),
         })),
         Statement::Call(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "CALL execution".into(),

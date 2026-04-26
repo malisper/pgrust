@@ -1569,6 +1569,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         })
     }
 
+    fn index_row_by_oid(&self, index_oid: u32) -> Option<PgIndexRow> {
+        index_row_by_indexrelid(self.db, self.client_id, self.txn_ctx, index_oid)
+    }
+
     fn operator_by_name_left_right(
         &self,
         name: &str,

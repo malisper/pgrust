@@ -6247,7 +6247,8 @@ fn build_index_entry_with_relkind(
     }
 
     let key_count = resolved_options.indclass.len();
-    if resolved_options.indcollation.len() != key_count
+    if key_count > columns.len()
+        || resolved_options.indcollation.len() != key_count
         || resolved_options.indoption.len() != key_count
     {
         return Err(CatalogError::Corrupt("index build options length mismatch"));

@@ -54,7 +54,7 @@ pub(crate) fn consistent(
     strategy: u16,
     key: &Value,
     query: &Value,
-    _is_leaf: bool,
+    is_leaf: bool,
 ) -> Result<GistConsistentResult, CatalogError> {
     if matches!(key, Value::Null) || matches!(query, Value::Null) {
         return Ok(GistConsistentResult {
@@ -64,20 +64,37 @@ pub(crate) fn consistent(
     }
     let key = expect_box(key)?;
     let query = expect_box(query)?;
-    let matches = match strategy {
-        1 => box_left(key, query),
-        2 => box_over_left(key, query),
-        3 => box_overlap(key, query),
-        4 => box_over_right(key, query),
-        5 => box_right(key, query),
-        6 => box_same(key, query),
-        7 => box_contains_box(key, query),
-        8 => box_contains_box(query, key),
-        9 => box_over_below(key, query),
-        10 => box_below(key, query),
-        11 => box_above(key, query),
-        12 => box_over_above(key, query),
-        _ => return Err(CatalogError::Corrupt("unsupported GiST box strategy")),
+    let matches = if is_leaf {
+        match strategy {
+            1 => box_left(key, query),
+            2 => box_over_left(key, query),
+            3 => box_overlap(key, query),
+            4 => box_over_right(key, query),
+            5 => box_right(key, query),
+            6 => box_same(key, query),
+            7 => box_contains_box(key, query),
+            8 => box_contains_box(query, key),
+            9 => box_over_below(key, query),
+            10 => box_below(key, query),
+            11 => box_above(key, query),
+            12 => box_over_above(key, query),
+            _ => return Err(CatalogError::Corrupt("unsupported GiST box strategy")),
+        }
+    } else {
+        match strategy {
+            1 => !box_over_right(key, query),
+            2 => !box_right(key, query),
+            3 => box_overlap(key, query),
+            4 => !box_left(key, query),
+            5 => !box_over_left(key, query),
+            6 | 7 => box_contains_box(key, query),
+            8 => box_overlap(key, query),
+            9 => !box_above(key, query),
+            10 => !box_over_above(key, query),
+            11 => !box_over_below(key, query),
+            12 => !box_below(key, query),
+            _ => return Err(CatalogError::Corrupt("unsupported GiST box strategy")),
+        }
     };
     Ok(GistConsistentResult {
         matches,

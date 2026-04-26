@@ -562,6 +562,25 @@ fn catalog() -> Catalog {
     catalog
 }
 
+fn catalog_with_operator_dispatch_table() -> Catalog {
+    let mut catalog = catalog();
+    catalog.insert(
+        "ops",
+        test_catalog_entry(
+            15003,
+            RelationDesc {
+                columns: vec![
+                    column_desc("left_box", SqlType::new(SqlTypeKind::Box), false),
+                    column_desc("right_box", SqlType::new(SqlTypeKind::Box), false),
+                    column_desc("left_range", SqlType::new(SqlTypeKind::Int4Range), false),
+                    column_desc("right_range", SqlType::new(SqlTypeKind::Int4Range), false),
+                ],
+            },
+        ),
+    );
+    catalog
+}
+
 fn catalog_with_pets() -> Catalog {
     let mut catalog = catalog();
     catalog.insert("pets", pets_entry());
@@ -6905,9 +6924,10 @@ fn build_plan_binds_pg_trigger_depth_as_builtin() {
 
 #[test]
 fn build_plan_dispatches_geometry_and_range_position_operators_independently() {
+    let catalog = catalog_with_operator_dispatch_table();
     let geometry_plan = build_plan(
-        &parse_select("select '(0,0),(1,1)'::box &< '(2,2),(3,3)'::box").unwrap(),
-        &catalog(),
+        &parse_select("select left_box &< right_box from ops").unwrap(),
+        &catalog,
     )
     .unwrap();
     let Plan::Projection {
@@ -6927,8 +6947,8 @@ fn build_plan_dispatches_geometry_and_range_position_operators_independently() {
     ));
 
     let overlap_plan = build_plan(
-        &parse_select("select '(0,0),(1,1)'::box && '(2,2),(3,3)'::box").unwrap(),
-        &catalog(),
+        &parse_select("select left_box && right_box from ops").unwrap(),
+        &catalog,
     )
     .unwrap();
     let Plan::Projection {
@@ -6948,8 +6968,8 @@ fn build_plan_dispatches_geometry_and_range_position_operators_independently() {
     ));
 
     let range_plan = build_plan(
-        &parse_select("select int4range(1, 4) &< int4range(2, 10)").unwrap(),
-        &catalog(),
+        &parse_select("select left_range &< right_range from ops").unwrap(),
+        &catalog,
     )
     .unwrap();
     let Plan::Projection {

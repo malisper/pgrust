@@ -232,7 +232,7 @@ pub fn build_pg_indexes_rows(
                 .get(&table.relnamespace)
                 .cloned()
                 .unwrap_or_else(|| "public".to_string());
-            let column_names = index
+            let all_column_names = index
                 .indkey
                 .iter()
                 .map(|attnum| {
@@ -246,6 +246,17 @@ pub fn build_pg_indexes_rows(
                             .unwrap_or_else(|| attnum.to_string())
                     }
                 })
+                .collect::<Vec<_>>();
+            let key_count = usize::try_from(index.indnkeyatts.max(0)).unwrap_or_default();
+            let key_column_names = all_column_names
+                .iter()
+                .take(key_count)
+                .cloned()
+                .collect::<Vec<_>>();
+            let include_column_names = all_column_names
+                .iter()
+                .skip(key_count)
+                .cloned()
                 .collect::<Vec<_>>();
             let unique = if index.indisunique { "UNIQUE " } else { "" };
             let only = if index_class.relkind == 'I' {
@@ -263,8 +274,13 @@ pub fn build_pg_indexes_rows(
                 index_class.relname,
                 table_name,
                 amname,
-                column_names.join(", ")
+                key_column_names.join(", ")
             );
+            if !include_column_names.is_empty() {
+                indexdef.push_str(" INCLUDE (");
+                indexdef.push_str(&include_column_names.join(", "));
+                indexdef.push(')');
+            }
             if let Some(predicate) = index.indpred.as_deref().filter(|sql| !sql.is_empty()) {
                 indexdef.push_str(" WHERE (");
                 indexdef.push_str(predicate);

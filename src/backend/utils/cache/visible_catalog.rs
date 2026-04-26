@@ -311,6 +311,10 @@ impl CatalogLookup for VisibleCatalog {
             .collect()
     }
 
+    fn index_row_by_oid(&self, index_oid: u32) -> Option<crate::include::catalog::PgIndexRow> {
+        self.relcache.index_row_by_oid(index_oid)
+    }
+
     fn current_user_oid(&self) -> u32 {
         BOOTSTRAP_SUPERUSER_OID
     }

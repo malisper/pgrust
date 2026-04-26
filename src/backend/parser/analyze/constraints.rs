@@ -16,10 +16,13 @@ use super::ParseError;
 pub struct IndexBackedConstraintAction {
     pub constraint_name: Option<String>,
     pub columns: Vec<String>,
+    pub include_columns: Vec<String>,
     pub primary: bool,
     pub exclusion: bool,
     pub nulls_not_distinct: bool,
     pub without_overlaps: Option<String>,
+    pub access_method: Option<String>,
+    pub exclusion_operators: Vec<String>,
     pub deferrable: bool,
     pub initially_deferred: bool,
 }
@@ -74,6 +77,7 @@ pub struct BoundRelationConstraints {
     pub checks: Vec<BoundCheckConstraint>,
     pub foreign_keys: Vec<BoundForeignKeyConstraint>,
     pub temporal: Vec<BoundTemporalConstraint>,
+    pub exclusions: Vec<BoundExclusionConstraint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +120,17 @@ pub struct BoundTemporalConstraint {
     pub column_indexes: Vec<usize>,
     pub period_column_index: usize,
     pub primary: bool,
+    pub enforced: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundExclusionConstraint {
+    pub constraint_oid: u32,
+    pub constraint_name: String,
+    pub column_names: Vec<String>,
+    pub column_indexes: Vec<usize>,
+    pub operator_oids: Vec<u32>,
+    pub operator_proc_oids: Vec<u32>,
     pub enforced: bool,
 }
 
@@ -167,10 +182,13 @@ struct PendingIndexConstraint {
     explicit_name: Option<String>,
     generated_base: String,
     columns: Vec<String>,
+    include_columns: Vec<String>,
     primary: bool,
     exclusion: bool,
     nulls_not_distinct: bool,
     without_overlaps: Option<String>,
+    access_method: Option<String>,
+    exclusion_operators: Vec<String>,
     deferrable: bool,
     initially_deferred: bool,
 }
@@ -297,10 +315,13 @@ pub fn normalize_create_table_constraints(
                         explicit_name: attributes.name.clone(),
                         generated_base: format!("{}_pkey", stmt.table_name),
                         columns: vec![column.name.clone()],
+                        include_columns: Vec::new(),
                         primary: true,
                         exclusion: false,
                         nulls_not_distinct: false,
                         without_overlaps: None,
+                        access_method: None,
+                        exclusion_operators: Vec::new(),
                         deferrable,
                         initially_deferred,
                     });
@@ -312,10 +333,13 @@ pub fn normalize_create_table_constraints(
                         explicit_name: attributes.name.clone(),
                         generated_base: format!("{}_{}_key", stmt.table_name, column.name),
                         columns: vec![column.name.clone()],
+                        include_columns: Vec::new(),
                         primary: false,
                         exclusion: false,
                         nulls_not_distinct: attributes.nulls_not_distinct,
                         without_overlaps: None,
+                        access_method: None,
+                        exclusion_operators: Vec::new(),
                         deferrable,
                         initially_deferred,
                     });
@@ -408,10 +432,13 @@ pub fn normalize_create_table_constraints(
                     explicit_name: attributes.name.clone(),
                     generated_base: format!("{}_pkey", stmt.table_name),
                     columns: resolved,
+                    include_columns: Vec::new(),
                     primary: true,
                     exclusion: false,
                     nulls_not_distinct: false,
                     without_overlaps: without_overlaps.clone(),
+                    access_method: None,
+                    exclusion_operators: Vec::new(),
                     deferrable,
                     initially_deferred,
                 });
@@ -440,44 +467,55 @@ pub fn normalize_create_table_constraints(
                     explicit_name: attributes.name.clone(),
                     generated_base: format!("{}_{}_key", stmt.table_name, resolved.join("_")),
                     columns: resolved,
+                    include_columns: Vec::new(),
                     primary: false,
                     exclusion: false,
                     nulls_not_distinct: attributes.nulls_not_distinct,
                     without_overlaps: without_overlaps.clone(),
+                    access_method: None,
+                    exclusion_operators: Vec::new(),
                     deferrable,
                     initially_deferred,
                 });
             }
             TableConstraint::Exclusion {
                 attributes,
-                access_method,
+                using_method,
                 elements,
+                include_columns,
             } => {
                 let (deferrable, initially_deferred) =
                     validate_key_attributes(attributes, "EXCLUDE")?;
-                let (exclusion_columns, period_column) =
-                    normalize_exclusion_constraint(access_method, elements)?;
-                let resolved = resolve_index_constraint_columns(
-                    &exclusion_columns,
-                    Some(period_column.as_str()),
-                    &columns,
-                    &column_lookup,
-                )?;
-                validate_without_overlaps_column(
-                    &resolved,
-                    Some(period_column.as_str()),
-                    &columns,
-                    &column_lookup,
-                    catalog,
-                )?;
+                let key_columns = elements
+                    .iter()
+                    .map(|element| element.column.clone())
+                    .collect::<Vec<_>>();
+                let resolved = resolve_constraint_columns(&key_columns, &columns, &column_lookup)?;
+                let resolved_include =
+                    resolve_constraint_columns(include_columns, &columns, &column_lookup)?;
+                let generated_columns = resolved
+                    .iter()
+                    .chain(resolved_include.iter())
+                    .cloned()
+                    .collect::<Vec<_>>();
                 index_constraints.push(PendingIndexConstraint {
                     explicit_name: attributes.name.clone(),
-                    generated_base: format!("{}_{}_excl", stmt.table_name, resolved.join("_")),
+                    generated_base: format!(
+                        "{}_{}_excl",
+                        stmt.table_name,
+                        generated_columns.join("_")
+                    ),
                     columns: resolved,
+                    include_columns: resolved_include,
                     primary: false,
-                    exclusion: true,
                     nulls_not_distinct: false,
-                    without_overlaps: Some(period_column),
+                    without_overlaps: None,
+                    exclusion: true,
+                    access_method: Some(using_method.clone()),
+                    exclusion_operators: elements
+                        .iter()
+                        .map(|element| element.operator.clone())
+                        .collect(),
                     deferrable,
                     initially_deferred,
                 });
@@ -614,10 +652,13 @@ pub fn normalize_create_table_constraints(
                 choose_generated_constraint_name(&constraint.generated_base, &mut used_names)
             })),
             columns: constraint.columns,
+            include_columns: constraint.include_columns,
             primary: constraint.primary,
             exclusion: constraint.exclusion,
             nulls_not_distinct: constraint.nulls_not_distinct,
             without_overlaps: constraint.without_overlaps,
+            access_method: constraint.access_method,
+            exclusion_operators: constraint.exclusion_operators,
             deferrable: constraint.deferrable,
             initially_deferred: constraint.initially_deferred,
         })
@@ -741,6 +782,7 @@ pub fn bind_relation_constraints(
     let mut checks = Vec::new();
     let mut foreign_keys = Vec::new();
     let mut temporal = Vec::new();
+    let mut exclusions = Vec::new();
 
     for row in rows {
         match row.contype {
@@ -784,6 +826,9 @@ pub fn bind_relation_constraints(
             {
                 temporal.push(bind_temporal_constraint(row, desc)?);
             }
+            crate::include::catalog::CONSTRAINT_EXCLUSION => {
+                exclusions.push(bind_exclusion_constraint(row, desc, catalog)?);
+            }
             _ => {}
         }
     }
@@ -793,6 +838,7 @@ pub fn bind_relation_constraints(
         checks,
         foreign_keys,
         temporal,
+        exclusions,
     })
 }
 
@@ -847,6 +893,85 @@ pub(crate) fn bind_temporal_constraint(
         column_indexes,
         period_column_index,
         primary: row.contype == crate::include::catalog::CONSTRAINT_PRIMARY,
+        enforced: row.conenforced,
+    })
+}
+
+pub(crate) fn bind_exclusion_constraint(
+    row: PgConstraintRow,
+    desc: &RelationDesc,
+    catalog: &dyn super::CatalogLookup,
+) -> Result<BoundExclusionConstraint, ParseError> {
+    let operator_oids = row
+        .conexclop
+        .clone()
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "exclusion constraint operators",
+            actual: format!("missing conexclop for constraint {}", row.conname),
+        })?;
+    let conkey = row
+        .conkey
+        .clone()
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "exclusion constraint columns",
+            actual: format!("missing conkey for constraint {}", row.conname),
+        })?;
+    let mut column_names = Vec::with_capacity(operator_oids.len());
+    let mut column_indexes = Vec::with_capacity(operator_oids.len());
+    for attnum in conkey.iter().take(operator_oids.len()) {
+        let index = usize::try_from(*attnum)
+            .ok()
+            .and_then(|attnum| attnum.checked_sub(1))
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "positive exclusion constraint attnum",
+                actual: format!("invalid attnum {attnum}"),
+            })?;
+        let column = desc
+            .columns
+            .get(index)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "exclusion constraint column",
+                actual: format!("attnum {attnum} out of range"),
+            })?;
+        if column.dropped {
+            return Err(ParseError::UnexpectedToken {
+                expected: "live exclusion constraint column",
+                actual: format!("constraint {} references dropped column", row.conname),
+            });
+        }
+        column_names.push(column.name.clone());
+        column_indexes.push(index);
+    }
+    if column_indexes.len() != operator_oids.len() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "one exclusion operator per key column",
+            actual: format!(
+                "constraint {} has {} columns and {} operators",
+                row.conname,
+                column_indexes.len(),
+                operator_oids.len()
+            ),
+        });
+    }
+    let operator_proc_oids = operator_oids
+        .iter()
+        .map(|operator_oid| {
+            catalog
+                .operator_by_oid(*operator_oid)
+                .map(|operator| operator.oprcode)
+                .ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "exclusion constraint operator",
+                    actual: format!("unknown operator oid {operator_oid}"),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(BoundExclusionConstraint {
+        constraint_oid: row.oid,
+        constraint_name: row.conname,
+        column_names,
+        column_indexes,
+        operator_oids,
+        operator_proc_oids,
         enforced: row.conenforced,
     })
 }
@@ -983,10 +1108,13 @@ pub fn normalize_alter_table_add_constraint(
                 IndexBackedConstraintAction {
                     constraint_name: Some(constraint_name),
                     columns: resolved,
+                    include_columns: Vec::new(),
                     primary: true,
                     exclusion: false,
                     nulls_not_distinct: false,
                     without_overlaps: without_overlaps.clone(),
+                    access_method: None,
+                    exclusion_operators: Vec::new(),
                     deferrable,
                     initially_deferred,
                 },
@@ -1019,10 +1147,13 @@ pub fn normalize_alter_table_add_constraint(
                 IndexBackedConstraintAction {
                     constraint_name: Some(constraint_name),
                     columns: resolved,
+                    include_columns: Vec::new(),
                     primary: false,
                     exclusion: false,
                     nulls_not_distinct: attributes.nulls_not_distinct,
                     without_overlaps: without_overlaps.clone(),
+                    access_method: None,
+                    exclusion_operators: Vec::new(),
                     deferrable,
                     initially_deferred,
                 },
@@ -1030,37 +1161,42 @@ pub fn normalize_alter_table_add_constraint(
         }
         TableConstraint::Exclusion {
             attributes,
-            access_method,
+            using_method,
             elements,
+            include_columns,
         } => {
             let (deferrable, initially_deferred) = validate_key_attributes(attributes, "EXCLUDE")?;
-            let (exclusion_columns, period_column) =
-                normalize_exclusion_constraint(access_method, elements)?;
-            let resolved = resolve_relation_index_constraint_columns(
-                &exclusion_columns,
-                Some(period_column.as_str()),
-                desc,
-                &column_lookup,
-            )?;
-            validate_without_overlaps_relation_column(
-                &resolved,
-                Some(period_column.as_str()),
-                desc,
-                &column_lookup,
-            )?;
+            let key_columns = elements
+                .iter()
+                .map(|element| element.column.clone())
+                .collect::<Vec<_>>();
+            let resolved = resolve_relation_constraint_columns(&key_columns, desc, &column_lookup)?;
+            let resolved_include =
+                resolve_relation_constraint_columns(include_columns, desc, &column_lookup)?;
+            let generated_columns = resolved
+                .iter()
+                .chain(resolved_include.iter())
+                .cloned()
+                .collect::<Vec<_>>();
             let constraint_name = assign_constraint_name(
                 attributes.name.clone(),
-                format!("{table_name}_{}_excl", resolved.join("_")),
+                format!("{table_name}_{}_excl", generated_columns.join("_")),
                 &mut used_names,
             )?;
             Ok(NormalizedAlterTableConstraint::IndexBacked(
                 IndexBackedConstraintAction {
                     constraint_name: Some(constraint_name),
                     columns: resolved,
+                    include_columns: resolved_include,
                     primary: false,
-                    exclusion: true,
                     nulls_not_distinct: false,
-                    without_overlaps: Some(period_column),
+                    without_overlaps: None,
+                    exclusion: true,
+                    access_method: Some(using_method.clone()),
+                    exclusion_operators: elements
+                        .iter()
+                        .map(|element| element.operator.clone())
+                        .collect(),
                     deferrable,
                     initially_deferred,
                 },
@@ -2045,52 +2181,6 @@ fn validate_without_overlaps_column(
         });
     }
     Ok(())
-}
-
-fn normalize_exclusion_constraint(
-    access_method: &str,
-    elements: &[crate::include::nodes::parsenodes::ExclusionConstraintElement],
-) -> Result<(Vec<String>, String), ParseError> {
-    if !access_method.eq_ignore_ascii_case("gist") {
-        return Err(ParseError::FeatureNotSupportedMessage(
-            "only GiST exclusion constraints are supported".into(),
-        ));
-    }
-    let mut period_column = None;
-    let mut columns = Vec::with_capacity(elements.len());
-    for element in elements {
-        match element.operator.as_str() {
-            "=" => {}
-            "&&" => {
-                if period_column.replace(element.column.clone()).is_some() {
-                    return Err(ParseError::FeatureNotSupportedMessage(
-                        "exclusion constraints support one overlapping range column".into(),
-                    ));
-                }
-            }
-            _ => {
-                return Err(ParseError::FeatureNotSupportedMessage(format!(
-                    "exclusion operator {} is not supported",
-                    element.operator
-                )));
-            }
-        }
-        columns.push(element.column.clone());
-    }
-    let period_column = period_column.ok_or_else(|| {
-        ParseError::FeatureNotSupportedMessage(
-            "exclusion constraints require one overlapping range column".into(),
-        )
-    })?;
-    if !columns
-        .last()
-        .is_some_and(|column| column.eq_ignore_ascii_case(&period_column))
-    {
-        return Err(ParseError::FeatureNotSupportedMessage(
-            "overlapping exclusion column must be last".into(),
-        ));
-    }
-    Ok((columns, period_column))
 }
 
 fn validate_without_overlaps_relation_column(

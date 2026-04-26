@@ -134,15 +134,48 @@ impl Database {
             &relation.desc.columns[column_index].name,
             (column_index + 1) as i16,
         )?;
+        let target_attnum = (column_index + 1) as i16;
+        let dependent_indexes = catalog
+            .index_relations_for_heap(relation.relation_oid)
+            .into_iter()
+            .filter(|index| index.index_meta.indkey.contains(&target_attnum))
+            .collect::<Vec<_>>();
         let mut next_cid = cid;
         self.drop_statistics_for_column_in_transaction(
             client_id,
             relation.relation_oid,
-            (column_index + 1) as i16,
+            target_attnum,
             xid,
             &mut next_cid,
             catalog_effects,
         )?;
+        for index in dependent_indexes {
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_cid,
+                client_id,
+                waiter: Some(self.txn_waiter.clone()),
+                interrupts: interrupts.clone(),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .drop_relation_entry_by_oid_mvcc(index.relation_oid, &ctx)
+                .map_err(|err| match err {
+                    CatalogError::UnknownTable(_) => ExecError::Parse(
+                        ParseError::TableDoesNotExist(index.relation_oid.to_string()),
+                    ),
+                    other => ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "dependent index for DROP COLUMN",
+                        actual: format!("{other:?}"),
+                    }),
+                })?
+                .1;
+            catalog_effects.push(effect);
+            next_cid = next_cid.saturating_add(1);
+        }
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
