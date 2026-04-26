@@ -6535,12 +6535,14 @@ fn build_index_entry_with_relkind(
             let expr_type = column_name
                 .expr_type
                 .ok_or(CatalogError::Corrupt("missing expression index sql type"))?;
+            let index_type =
+                index_column_opckey_sql_type(position, &resolved_options).unwrap_or(expr_type);
             push_unique_index_column(
                 &mut index_columns,
                 &mut used_index_column_names,
                 crate::backend::catalog::catalog::column_desc(
                     format!("expr{}", position + 1),
-                    expr_type,
+                    index_type,
                     true,
                 ),
             );
@@ -6562,6 +6564,14 @@ fn build_index_entry_with_relkind(
         column.not_null_primary_key_owned = false;
         column.attrdef_oid = None;
         column.default_expr = None;
+        if let Some(index_type) = index_column_opckey_sql_type(position, &resolved_options) {
+            let nullable = column.storage.nullable;
+            column = crate::backend::catalog::catalog::column_desc(
+                column.name.clone(),
+                index_type,
+                nullable,
+            );
+        }
         push_unique_index_column(&mut index_columns, &mut used_index_column_names, column);
     }
 
@@ -6646,6 +6656,20 @@ fn build_index_entry_with_relkind(
         .saturating_add(u32::from(relkind_has_storage(relkind)));
     control.next_oid = control.next_oid.saturating_add(1);
     Ok(entry)
+}
+
+fn index_column_opckey_sql_type(
+    position: usize,
+    options: &CatalogIndexBuildOptions,
+) -> Option<SqlType> {
+    let opclass_oid = *options.indclass.get(position)?;
+    let opclass = crate::include::catalog::bootstrap_pg_opclass_rows()
+        .into_iter()
+        .find(|row| row.oid == opclass_oid)?;
+    if opclass.opcmethod != crate::include::catalog::GIST_AM_OID || opclass.opckeytype == 0 {
+        return None;
+    }
+    crate::include::catalog::builtin_type_row_by_oid(opclass.opckeytype).map(|row| row.sql_type)
 }
 
 fn push_unique_index_column(

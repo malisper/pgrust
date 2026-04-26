@@ -226,6 +226,50 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         amopsortfamily: BTREE_FLOAT_FAMILY_OID,
     });
     oid = oid.saturating_add(1);
+    for (family, type_oid) in [
+        (GIST_POLY_FAMILY_OID, POLYGON_TYPE_OID),
+        (GIST_CIRCLE_FAMILY_OID, CIRCLE_TYPE_OID),
+    ] {
+        for (strategy, name) in [
+            (1_i16, "<<"),
+            (2, "&<"),
+            (3, "&&"),
+            (4, "&>"),
+            (5, ">>"),
+            (6, "~="),
+            (7, "@>"),
+            (8, "<@"),
+            (9, "&<|"),
+            (10, "<<|"),
+            (11, "|>>"),
+            (12, "|&>"),
+        ] {
+            rows.push(PgAmopRow {
+                oid,
+                amopfamily: family,
+                amoplefttype: type_oid,
+                amoprighttype: type_oid,
+                amopstrategy: strategy,
+                amoppurpose: 's',
+                amopopr: operator_oid(&operators, name, type_oid, type_oid),
+                amopmethod: GIST_AM_OID,
+                amopsortfamily: 0,
+            });
+            oid = oid.saturating_add(1);
+        }
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: family,
+            amoplefttype: type_oid,
+            amoprighttype: POINT_TYPE_OID,
+            amopstrategy: 15,
+            amoppurpose: 'o',
+            amopopr: operator_oid(&operators, "<->", type_oid, POINT_TYPE_OID),
+            amopmethod: GIST_AM_OID,
+            amopsortfamily: BTREE_FLOAT_FAMILY_OID,
+        });
+        oid = oid.saturating_add(1);
+    }
     for (strategy, name, righttype) in [
         (1_i16, "<<", POINT_TYPE_OID),
         (5, ">>", POINT_TYPE_OID),

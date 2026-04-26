@@ -543,18 +543,42 @@ fn resolve_exact_proc_row(
     match matches.as_slice() {
         [row] => Ok(row.clone()),
         [] => Err(ExecError::DetailedError {
-            message: format!("function {proc_name} does not exist"),
-            detail: Some(format!("expected argument OIDs {arg_oids:?}")),
+            message: format!(
+                "function {} does not exist",
+                exact_proc_signature(catalog, proc_name, arg_oids)
+            ),
+            detail: None,
             hint: None,
             sqlstate: "42883",
         }),
         _ => Err(ExecError::DetailedError {
-            message: format!("function name {proc_name} is ambiguous"),
-            detail: Some(format!("expected argument OIDs {arg_oids:?}")),
+            message: format!(
+                "function name {} is ambiguous",
+                exact_proc_signature(catalog, proc_name, arg_oids)
+            ),
+            detail: None,
             hint: None,
             sqlstate: "42725",
         }),
     }
+}
+
+fn exact_proc_signature(catalog: &dyn CatalogLookup, proc_name: &str, arg_oids: &[u32]) -> String {
+    let args = arg_oids
+        .iter()
+        .map(|oid| proc_signature_type_name(catalog, *oid))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{proc_name}({args})")
+}
+
+fn proc_signature_type_name(catalog: &dyn CatalogLookup, oid: u32) -> String {
+    if let Some(row) = catalog.type_by_oid(oid) {
+        let mut sql_type = row.sql_type;
+        sql_type.type_oid = 0;
+        return format_sql_type_name(sql_type);
+    }
+    oid.to_string()
 }
 
 pub(super) fn resolve_aggregate_proc_rows(

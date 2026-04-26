@@ -30,8 +30,9 @@ use crate::include::catalog::{
     PgPartitionedTableRow, PgPolicyRow, PgPublicationNamespaceRow, PgPublicationRelRow,
     PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgTablespaceRow,
     PgTriggerRow, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
-    bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows, builtin_range_name_for_sql_type,
-    builtin_type_name_for_oid, builtin_type_rows, relkind_has_storage, sort_pg_rewrite_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_opclass_rows, bootstrap_pg_tablespace_rows,
+    builtin_range_name_for_sql_type, builtin_type_name_for_oid, builtin_type_row_by_oid,
+    builtin_type_rows, relkind_has_storage, sort_pg_rewrite_rows,
 };
 
 const DEFAULT_SPC_OID: u32 = 0;
@@ -59,6 +60,7 @@ fn build_catalog_index_entry(
     let mut used_index_column_names = BTreeSet::new();
     let mut expr_sqls = Vec::new();
     for (position, column_name) in columns.iter().enumerate() {
+        let opckey_sql_type = index_column_opckey_sql_type(position, options);
         if let Some(expr_sql) = column_name.expr_sql.as_deref() {
             indkey.push(0);
             expr_sqls.push(expr_sql.to_string());
@@ -68,7 +70,11 @@ fn build_catalog_index_entry(
             push_unique_index_column(
                 &mut index_columns,
                 &mut used_index_column_names,
-                column_desc(format!("expr{}", position + 1), expr_type, true),
+                column_desc(
+                    format!("expr{}", position + 1),
+                    opckey_sql_type.unwrap_or(expr_type),
+                    true,
+                ),
             );
             continue;
         }
@@ -82,6 +88,13 @@ fn build_catalog_index_entry(
             .ok_or_else(|| CatalogError::UnknownColumn(column_name.name.clone()))?;
         indkey.push(attnum.saturating_add(1) as i16);
         let mut column = column.clone();
+        if let Some(opckey_sql_type) = opckey_sql_type {
+            column = column_desc(
+                column.name.clone(),
+                opckey_sql_type,
+                column.storage.nullable,
+            );
+        }
         column.not_null_constraint_oid = None;
         column.not_null_constraint_name = None;
         column.not_null_constraint_validated = false;
@@ -162,6 +175,20 @@ fn build_catalog_index_entry(
             hash_options: options.hash_options,
         }),
     })
+}
+
+fn index_column_opckey_sql_type(
+    position: usize,
+    options: &CatalogIndexBuildOptions,
+) -> Option<SqlType> {
+    let opclass_oid = *options.indclass.get(position)?;
+    let opclass = bootstrap_pg_opclass_rows()
+        .into_iter()
+        .find(|row| row.oid == opclass_oid)?;
+    if opclass.opcmethod != crate::include::catalog::GIST_AM_OID || opclass.opckeytype == 0 {
+        return None;
+    }
+    builtin_type_row_by_oid(opclass.opckeytype).map(|row| row.sql_type)
 }
 
 fn push_unique_index_column(

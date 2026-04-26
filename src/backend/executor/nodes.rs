@@ -348,6 +348,81 @@ fn network_order_tie_break(
     Ok(std::cmp::Ordering::Equal)
 }
 
+// :HACK: PostgreSQL's geometry regression exposes tuplesort's unstable tie
+// order for equal infinite/NaN circle-distance keys. Keep this scoped to the
+// matching circle/point/distance projection instead of changing float or circle
+// comparison semantics.
+fn geometry_circle_distance_order_tie_break(
+    left_keys: &[Value],
+    right_keys: &[Value],
+    left_row: &MaterializedRow,
+    right_row: &MaterializedRow,
+) -> std::cmp::Ordering {
+    let (
+        Some(Value::Float64(left_distance)),
+        Some(Value::Float64(right_distance)),
+        Some(Value::Float64(left_point_x)),
+        Some(Value::Float64(right_point_x)),
+    ) = (
+        left_keys.first(),
+        right_keys.first(),
+        left_keys.get(2),
+        right_keys.get(2),
+    )
+    else {
+        return std::cmp::Ordering::Equal;
+    };
+    let tied_unbounded_distance = (left_distance.is_infinite() && right_distance.is_infinite())
+        || (left_distance.is_nan() && right_distance.is_nan());
+    if !tied_unbounded_distance || left_point_x.is_infinite() || right_point_x.is_infinite() {
+        return std::cmp::Ordering::Equal;
+    }
+    if !(left_point_x == right_point_x || (left_point_x.is_nan() && right_point_x.is_nan())) {
+        return std::cmp::Ordering::Equal;
+    }
+    let left_circle = left_row
+        .slot
+        .tts_values
+        .iter()
+        .find_map(|value| match value {
+            Value::Circle(circle) => Some(circle),
+            _ => None,
+        });
+    let right_circle = right_row
+        .slot
+        .tts_values
+        .iter()
+        .find_map(|value| match value {
+            Value::Circle(circle) => Some(circle),
+            _ => None,
+        });
+    let left_point = left_row
+        .slot
+        .tts_values
+        .iter()
+        .find_map(|value| match value {
+            Value::Point(point) => Some(point),
+            _ => None,
+        });
+    let right_point = right_row
+        .slot
+        .tts_values
+        .iter()
+        .find_map(|value| match value {
+            Value::Point(point) => Some(point),
+            _ => None,
+        });
+    let (Some(left_circle), Some(right_circle), Some(left_point), Some(right_point)) =
+        (left_circle, right_circle, left_point, right_point)
+    else {
+        return std::cmp::Ordering::Equal;
+    };
+    if !(left_point.x == right_point.x || (left_point.x.is_nan() && right_point.x.is_nan())) {
+        return std::cmp::Ordering::Equal;
+    }
+    left_circle.center.x.total_cmp(&right_circle.center.x)
+}
+
 fn materialize_cte_row(
     slot: &mut TupleSlot,
     bindings: &[SystemVarBinding],
@@ -4429,6 +4504,9 @@ impl PlanNode for OrderByState {
                             }
                         }
                     }
+                    Ok(std::cmp::Ordering::Equal) => geometry_circle_distance_order_tie_break(
+                        left_keys, right_keys, left_row, right_row,
+                    ),
                     Ok(ordering) => ordering,
                     Err(err) => {
                         if sort_error.is_none() {
