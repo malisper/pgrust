@@ -284,10 +284,17 @@ impl CompiledTupleDecoder {
                             ScalarType::Enum => Value::EnumOid(u32::from_le_bytes([
                                 bytes[0], bytes[1], bytes[2], bytes[3],
                             ])),
-                            ScalarType::Int64 => Value::Int64(i64::from_le_bytes([
-                                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
-                                bytes[6], bytes[7],
-                            ])),
+                            ScalarType::Int64 => {
+                                let raw = [
+                                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+                                    bytes[6], bytes[7],
+                                ];
+                                if sql_type.type_oid == crate::include::catalog::XID8_TYPE_OID {
+                                    Value::Xid8(u64::from_le_bytes(raw))
+                                } else {
+                                    Value::Int64(i64::from_le_bytes(raw))
+                                }
+                            }
                             ScalarType::PgLsn => Value::PgLsn(u64::from_le_bytes([
                                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
                                 bytes[6], bytes[7],

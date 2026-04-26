@@ -735,6 +735,7 @@ pub enum Value {
     Int16(i16),
     Int32(i32),
     Int64(i64),
+    Xid8(u64),
     Money(i64),
     Date(DateADT),
     Time(TimeADT),
@@ -1110,6 +1111,7 @@ impl Value {
             Value::Int16(v) => Value::Int16(*v),
             Value::Int32(v) => Value::Int32(*v),
             Value::Int64(v) => Value::Int64(*v),
+            Value::Xid8(v) => Value::Xid8(*v),
             Value::Money(v) => Value::Money(*v),
             Value::Date(v) => Value::Date(*v),
             Value::Time(v) => Value::Time(*v),
@@ -1212,6 +1214,10 @@ impl Value {
             Value::Int16(_) => Some(SqlType::new(SqlTypeKind::Int2)),
             Value::Int32(_) => Some(SqlType::new(SqlTypeKind::Int4)),
             Value::Int64(_) => Some(SqlType::new(SqlTypeKind::Int8)),
+            Value::Xid8(_) => Some(
+                SqlType::new(SqlTypeKind::Int8)
+                    .with_identity(crate::include::catalog::XID8_TYPE_OID, 0),
+            ),
             Value::Money(_) => Some(SqlType::new(SqlTypeKind::Money)),
             Value::Date(_) => Some(SqlType::new(SqlTypeKind::Date)),
             Value::Time(_) => Some(SqlType::new(SqlTypeKind::Time)),
@@ -1286,6 +1292,7 @@ impl PartialEq for Value {
             (Value::Int16(a), Value::Int16(b)) => a == b,
             (Value::Int32(a), Value::Int32(b)) => a == b,
             (Value::Int64(a), Value::Int64(b)) => a == b,
+            (Value::Xid8(a), Value::Xid8(b)) => a == b,
             (Value::Money(a), Value::Money(b)) => a == b,
             (Value::Date(a), Value::Date(b)) => a == b,
             (Value::Time(a), Value::Time(b)) => a == b,
@@ -1388,6 +1395,10 @@ impl std::hash::Hash for Value {
             }
             Value::Int64(v) => {
                 2u8.hash(state);
+                v.hash(state);
+            }
+            Value::Xid8(v) => {
+                39u8.hash(state);
                 v.hash(state);
             }
             Value::Money(v) => {

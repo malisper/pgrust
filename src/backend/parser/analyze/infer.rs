@@ -199,6 +199,9 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::Int16(_)) => SqlType::new(SqlTypeKind::Int2),
         SqlExpr::Const(Value::Int32(_)) => SqlType::new(SqlTypeKind::Int4),
         SqlExpr::Const(Value::Int64(_)) => SqlType::new(SqlTypeKind::Int8),
+        SqlExpr::Const(Value::Xid8(_)) => {
+            SqlType::new(SqlTypeKind::Int8).with_identity(crate::include::catalog::XID8_TYPE_OID, 0)
+        }
         SqlExpr::Const(Value::Money(_)) => SqlType::new(SqlTypeKind::Money),
         SqlExpr::Const(Value::Date(_)) => SqlType::new(SqlTypeKind::Date),
         SqlExpr::Const(Value::Time(_)) => SqlType::new(SqlTypeKind::Time),
@@ -911,6 +914,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 Some(
                     BuiltinScalarFunction::MacAddrCmp
                     | BuiltinScalarFunction::MacAddr8Cmp
+                    | BuiltinScalarFunction::Xid8Cmp
                     | BuiltinScalarFunction::HashMacAddr
                     | BuiltinScalarFunction::HashMacAddr8,
                 ) => SqlType::new(SqlTypeKind::Int4),

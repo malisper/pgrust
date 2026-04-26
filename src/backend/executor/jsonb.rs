@@ -763,6 +763,7 @@ pub(crate) fn jsonb_from_value(
         Value::Int16(v) => JsonbValue::Numeric(NumericValue::from_i64(*v as i64)),
         Value::Int32(v) => JsonbValue::Numeric(NumericValue::from_i64(*v as i64)),
         Value::Int64(v) => JsonbValue::Numeric(NumericValue::from_i64(*v)),
+        Value::Xid8(v) => JsonbValue::Numeric(NumericValue::finite(BigInt::from(*v), 0)),
         Value::PgLsn(v) => JsonbValue::String(crate::backend::executor::render_pg_lsn_text(*v)),
         Value::Money(v) => JsonbValue::String(crate::backend::executor::money_format_text(*v)),
         Value::Float64(v) => JsonbValue::Numeric({
@@ -1065,6 +1066,7 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::Int16(v) => Ok(v.to_string()),
         Value::Int32(v) => Ok(v.to_string()),
         Value::Int64(v) => Ok(v.to_string()),
+        Value::Xid8(v) => Ok(v.to_string()),
         Value::PgLsn(v) => Ok(crate::backend::executor::render_pg_lsn_text(*v)),
         Value::Money(v) => Ok(crate::backend::executor::money_format_text(*v)),
         Value::Float64(v) => Ok(v.to_string()),

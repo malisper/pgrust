@@ -8,6 +8,7 @@ pub const BOOL_BTREE_OPCLASS_OID: u32 = 424;
 pub const INT2_BTREE_OPCLASS_OID: u32 = 1979;
 pub const INT4_BTREE_OPCLASS_OID: u32 = 1978;
 pub const INT8_BTREE_OPCLASS_OID: u32 = 3124;
+pub const XID8_BTREE_OPCLASS_OID: u32 = 5067;
 pub const OID_BTREE_OPCLASS_OID: u32 = 1989;
 pub const CHAR_BTREE_OPCLASS_OID: u32 = 10007;
 pub const NAME_BTREE_OPCLASS_OID: u32 = 10028;
@@ -88,6 +89,7 @@ pub const BOOL_HASH_OPCLASS_OID: u32 = 76200;
 pub const INT2_HASH_OPCLASS_OID: u32 = 76201;
 pub const INT4_HASH_OPCLASS_OID: u32 = 76202;
 pub const INT8_HASH_OPCLASS_OID: u32 = 76203;
+pub const XID8_HASH_OPCLASS_OID: u32 = 5070;
 pub const OID_HASH_OPCLASS_OID: u32 = 76204;
 pub const CHAR_HASH_OPCLASS_OID: u32 = 76205;
 pub const NAME_HASH_OPCLASS_OID: u32 = 76206;
@@ -193,6 +195,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             "int8_ops",
             BTREE_INTEGER_FAMILY_OID,
             INT8_TYPE_OID,
+        ),
+        row(
+            XID8_BTREE_OPCLASS_OID,
+            "xid8_ops",
+            BTREE_INTEGER_FAMILY_OID,
+            XID8_TYPE_OID,
         ),
         row(
             CHAR_BTREE_OPCLASS_OID,
@@ -725,6 +733,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             INT8_TYPE_OID,
         ),
         hash_row(
+            XID8_HASH_OPCLASS_OID,
+            "xid8_ops",
+            HASH_INTEGER_FAMILY_OID,
+            XID8_TYPE_OID,
+        ),
+        hash_row(
             CHAR_HASH_OPCLASS_OID,
             "char_ops",
             HASH_CHAR_FAMILY_OID,
@@ -961,6 +975,7 @@ pub fn default_btree_opclass_oid(type_oid: u32) -> Option<u32> {
         INT2_TYPE_OID => INT2_BTREE_OPCLASS_OID,
         INT4_TYPE_OID => INT4_BTREE_OPCLASS_OID,
         INT8_TYPE_OID => INT8_BTREE_OPCLASS_OID,
+        XID8_TYPE_OID => XID8_BTREE_OPCLASS_OID,
         OID_TYPE_OID => OID_BTREE_OPCLASS_OID,
         INTERNAL_CHAR_TYPE_OID => CHAR_BTREE_OPCLASS_OID,
         NAME_TYPE_OID => NAME_BTREE_OPCLASS_OID,
@@ -1000,6 +1015,7 @@ pub fn default_hash_opclass_oid(type_oid: u32) -> Option<u32> {
         INT2_TYPE_OID => INT2_HASH_OPCLASS_OID,
         INT4_TYPE_OID => INT4_HASH_OPCLASS_OID,
         INT8_TYPE_OID => INT8_HASH_OPCLASS_OID,
+        XID8_TYPE_OID => XID8_HASH_OPCLASS_OID,
         OID_TYPE_OID => OID_HASH_OPCLASS_OID,
         INTERNAL_CHAR_TYPE_OID => CHAR_HASH_OPCLASS_OID,
         NAME_TYPE_OID => NAME_HASH_OPCLASS_OID,

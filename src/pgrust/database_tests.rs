@@ -351,7 +351,7 @@ fn txid_snapshot_type_round_trips_and_validates_visibility() {
             &db,
             "select txid_snapshot_xmin(snap), txid_snapshot_xmax(snap), txid_snapshot_xip(snap) from snapshot_test",
         ),
-        vec![vec![Value::Int64(12), Value::Int64(16), Value::Int64(14)]]
+        vec![vec![Value::Xid8(12), Value::Xid8(16), Value::Xid8(14)]]
     );
     assert_eq!(
         session_query_rows(
@@ -404,15 +404,15 @@ fn txid_current_and_if_assigned_follow_lazy_xid_assignment() {
     let rows = session_query_rows(&mut session, &db, "select txid_current()");
     let txid = match &rows[..] {
         [row] => match &row[..] {
-            [Value::Int64(txid)] => *txid,
-            other => panic!("expected bigint txid_current result, got {other:?}"),
+            [Value::Xid8(txid)] => *txid,
+            other => panic!("expected xid8 txid_current result, got {other:?}"),
         },
         other => panic!("expected one txid_current row, got {other:?}"),
     };
 
     assert_eq!(
         session_query_rows(&mut session, &db, "select txid_current_if_assigned()"),
-        vec![vec![Value::Int64(txid)]]
+        vec![vec![Value::Xid8(txid)]]
     );
 
     session.execute(&db, "commit").unwrap();
@@ -425,8 +425,8 @@ fn txid_current_assigns_xid_in_autocommit_select() {
     let rows = query_rows(&db, 1, "select txid_current()");
     let txid = match &rows[..] {
         [row] => match &row[..] {
-            [Value::Int64(txid)] => *txid,
-            other => panic!("expected bigint txid_current result, got {other:?}"),
+            [Value::Xid8(txid)] => *txid,
+            other => panic!("expected xid8 txid_current result, got {other:?}"),
         },
         other => panic!("expected one txid_current row, got {other:?}"),
     };
@@ -443,7 +443,7 @@ fn txid_status_reports_recent_transaction_states() {
     session.execute(&db, "begin").unwrap();
     let committed = match &session_query_rows(&mut session, &db, "select txid_current()")[..] {
         [row] => match &row[..] {
-            [Value::Int64(txid)] => *txid,
+            [Value::Xid8(txid)] => *txid,
             other => panic!("expected committed txid row, got {other:?}"),
         },
         other => panic!("expected committed txid result, got {other:?}"),
@@ -453,7 +453,7 @@ fn txid_status_reports_recent_transaction_states() {
     session.execute(&db, "begin").unwrap();
     let rolled_back = match &session_query_rows(&mut session, &db, "select txid_current()")[..] {
         [row] => match &row[..] {
-            [Value::Int64(txid)] => *txid,
+            [Value::Xid8(txid)] => *txid,
             other => panic!("expected rolled back txid row, got {other:?}"),
         },
         other => panic!("expected rolled back txid result, got {other:?}"),
@@ -463,7 +463,7 @@ fn txid_status_reports_recent_transaction_states() {
     session.execute(&db, "begin").unwrap();
     let in_progress = match &session_query_rows(&mut session, &db, "select txid_current()")[..] {
         [row] => match &row[..] {
-            [Value::Int64(txid)] => *txid,
+            [Value::Xid8(txid)] => *txid,
             other => panic!("expected in-progress txid row, got {other:?}"),
         },
         other => panic!("expected in-progress txid result, got {other:?}"),

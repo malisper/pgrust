@@ -1051,6 +1051,11 @@ pub(crate) fn send_typed_data_row(
                 let text_len = (buf.len() - start - 4) as i32;
                 buf[start..start + 4].copy_from_slice(&text_len.to_be_bytes());
             }
+            Value::Xid8(v) => {
+                let rendered = v.to_string();
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
+            }
             Value::Money(v) => {
                 let rendered = crate::backend::executor::money_format_text(*v);
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
@@ -1383,6 +1388,9 @@ pub(crate) fn encode_binary_data_row_value(
             Ok(v.to_be_bytes().to_vec())
         }
         Value::Int64(v) if matches!(sql_type.kind, SqlTypeKind::Int8 | SqlTypeKind::Money) => {
+            Ok(v.to_be_bytes().to_vec())
+        }
+        Value::Xid8(v) if sql_type.type_oid == crate::include::catalog::XID8_TYPE_OID => {
             Ok(v.to_be_bytes().to_vec())
         }
         Value::Int64(v)

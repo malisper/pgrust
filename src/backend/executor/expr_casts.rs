@@ -41,8 +41,8 @@ use crate::backend::utils::time::datetime::{
 };
 use crate::backend::utils::time::timestamp::{parse_timestamp_text, parse_timestamptz_text};
 use crate::include::catalog::{
-    INT2_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows,
-    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    INT2_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID, XID8_TYPE_OID, bootstrap_pg_cast_rows,
+    builtin_type_rows, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT,
@@ -277,6 +277,41 @@ fn parse_pg_integer_text(text: &str, ty: &'static str) -> Result<i128, ExecError
     Ok(if negative { -magnitude } else { magnitude })
 }
 
+fn parse_xid_integer_text(text: &str, ty: &'static str) -> Result<i128, ExecError> {
+    let trimmed = text.trim_matches(|ch: char| ch.is_ascii_whitespace());
+    if trimmed.is_empty() {
+        return Err(ExecError::InvalidIntegerInput {
+            ty,
+            value: text.to_string(),
+        });
+    }
+    let (negative, rest) = if let Some(rest) = trimmed.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = trimmed.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, trimmed)
+    };
+    if rest.len() > 1
+        && rest.starts_with('0')
+        && !rest.starts_with("0x")
+        && !rest.starts_with("0X")
+        && !rest.starts_with("0o")
+        && !rest.starts_with("0O")
+        && !rest.starts_with("0b")
+        && !rest.starts_with("0B")
+    {
+        let magnitude =
+            i128::from_str_radix(rest, 8).map_err(|_| ExecError::InvalidIntegerInput {
+                ty,
+                value: text.to_string(),
+            })?;
+        Ok(if negative { -magnitude } else { magnitude })
+    } else {
+        parse_pg_integer_text(text, ty)
+    }
+}
+
 fn cast_text_to_int2(text: &str) -> Result<Value, ExecError> {
     let value = parse_pg_integer_text(text, "smallint")?;
     i16::try_from(value)
@@ -323,12 +358,33 @@ fn cast_text_to_oid(text: &str) -> Result<Value, ExecError> {
 }
 
 fn cast_text_to_xid(text: &str) -> Result<Value, ExecError> {
-    let value = parse_pg_integer_text(text, "xid")?;
-    let xid = u32::try_from(value).map_err(|_| ExecError::IntegerOutOfRange {
-        ty: "xid",
-        value: text.to_string(),
-    })?;
+    let value = parse_xid_integer_text(text, "xid")?;
+    let xid = if (0..=u32::MAX as i128).contains(&value) {
+        value as u32
+    } else if (i32::MIN as i128..=-1).contains(&value) {
+        (value as i32) as u32
+    } else {
+        return Err(ExecError::IntegerOutOfRange {
+            ty: "xid",
+            value: text.to_string(),
+        });
+    };
     Ok(Value::Int64(xid as i64))
+}
+
+fn cast_text_to_xid8(text: &str) -> Result<Value, ExecError> {
+    let value = parse_xid_integer_text(text, "xid8")?;
+    let xid = if (0..=u64::MAX as i128).contains(&value) {
+        value as u64
+    } else if (i64::MIN as i128..=-1).contains(&value) {
+        (value as i64) as u64
+    } else {
+        return Err(ExecError::IntegerOutOfRange {
+            ty: "xid8",
+            value: text.to_string(),
+        });
+    };
+    Ok(Value::Xid8(xid))
 }
 
 fn cast_text_to_regclass(
@@ -4271,6 +4327,39 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 right: Value::Null,
             }),
         },
+        Value::Xid8(value) => match ty {
+            ty if ty.is_range() => cast_text_value(&value.to_string(), ty, true),
+            ty if ty.is_multirange() => cast_text_value(&value.to_string(), ty, true),
+            SqlType {
+                kind: SqlTypeKind::Int8,
+                type_oid: XID8_TYPE_OID,
+                ..
+            } => Ok(Value::Xid8(value)),
+            SqlType {
+                kind: SqlTypeKind::Xid,
+                ..
+            } => Ok(Value::Int64((value as u32) as i64)),
+            SqlType {
+                kind: SqlTypeKind::Int8,
+                ..
+            } => i64::try_from(value)
+                .map(Value::Int64)
+                .map_err(|_| ExecError::Int8OutOfRange),
+            SqlType {
+                kind: SqlTypeKind::Numeric,
+                ..
+            } => Ok(Value::Numeric(NumericValue::finite(BigInt::from(value), 0))),
+            SqlType {
+                kind:
+                    SqlTypeKind::Text
+                    | SqlTypeKind::Cstring
+                    | SqlTypeKind::Name
+                    | SqlTypeKind::Char
+                    | SqlTypeKind::Varchar,
+                ..
+            } => Ok(Value::Text(CompactString::from_owned(value.to_string()))),
+            _ => cast_text_value(&value.to_string(), ty, true),
+        },
         Value::Bytea(bytes) => {
             match ty.kind {
                 SqlTypeKind::Bytea => Ok(Value::Bytea(bytes)),
@@ -4383,6 +4472,11 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             } => i32::try_from(v)
                 .map(Value::Int32)
                 .map_err(|_| ExecError::Int4OutOfRange),
+            SqlType {
+                kind: SqlTypeKind::Int8,
+                type_oid: XID8_TYPE_OID,
+                ..
+            } if v >= 0 => Ok(Value::Xid8(v as u64)),
             SqlType {
                 kind: SqlTypeKind::Int8,
                 ..
@@ -4944,6 +5038,9 @@ pub(crate) fn cast_text_value_with_config(
 ) -> Result<Value, ExecError> {
     if !ty.is_array && is_txid_snapshot_type_oid(ty.type_oid) {
         return cast_text_to_txid_snapshot(text);
+    }
+    if !ty.is_array && ty.type_oid == XID8_TYPE_OID {
+        return cast_text_to_xid8(text);
     }
     if ty.is_range() {
         return parse_range_text(text, ty);

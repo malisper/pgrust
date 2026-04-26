@@ -150,6 +150,7 @@ pub(crate) fn format_record_text_with_options(
                             Value::Int16(v) => v.to_string(),
                             Value::Int32(v) => v.to_string(),
                             Value::Int64(v) => v.to_string(),
+                            Value::Xid8(v) => v.to_string(),
                             Value::Money(v) => v.to_string(),
                             Value::Float64(v) => match field.sql_type.kind {
                                 SqlTypeKind::Float4 => format_float4_text(*v, float_format.clone()),
@@ -322,6 +323,7 @@ fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> 
         Value::Int32(v) => v.to_string(),
         Value::EnumOid(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
+        Value::Xid8(v) => v.to_string(),
         Value::Money(v) => v.to_string(),
         Value::Float64(v) => v.to_string(),
         Value::Bool(true) => "t".to_string(),
@@ -886,6 +888,10 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
             out.extend_from_slice(&v.to_le_bytes());
         }
         Value::Int64(v) => {
+            out.push(INTERNAL_VALUE_TAG_INT64);
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        Value::Xid8(v) => {
             out.push(INTERNAL_VALUE_TAG_INT64);
             out.extend_from_slice(&v.to_le_bytes());
         }
@@ -1529,6 +1535,7 @@ pub(crate) fn encode_value_with_config(
             Ok(TupleValue::Bytes(oid.to_le_bytes().to_vec()))
         }
         (ScalarType::Int64, Value::Int64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
+        (ScalarType::Int64, Value::Xid8(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Date, Value::Date(v)) => Ok(TupleValue::Bytes(v.0.to_le_bytes().to_vec())),
         (ScalarType::Time, Value::Time(v)) => Ok(TupleValue::Bytes(v.0.to_le_bytes().to_vec())),
         (ScalarType::TimeTz, Value::TimeTz(v)) => {
@@ -1860,6 +1867,9 @@ pub(crate) fn coerce_assignment_value_with_config(
         Value::Int64(v) => {
             cast_text_value_with_config(&v.to_string(), target, false, datetime_config)
         }
+        Value::Xid8(v) => {
+            cast_text_value_with_config(&v.to_string(), target, false, datetime_config)
+        }
         Value::PgLsn(v) => {
             cast_text_value_with_config(&render_pg_lsn_text(*v), target, false, datetime_config)
         }
@@ -2083,6 +2093,14 @@ pub(crate) fn decode_value_with_toast(
         ScalarType::Int64 => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
                 return Err(unsupported_storage_type(column, bytes));
+            }
+            if column.sql_type.type_oid == crate::include::catalog::XID8_TYPE_OID {
+                return Ok(Value::Xid8(u64::from_le_bytes(bytes.try_into().map_err(
+                    |_| ExecError::InvalidStorageValue {
+                        column: column.name.clone(),
+                        details: "xid8 must be exactly 8 bytes".into(),
+                    },
+                )?)));
             }
             Ok(Value::Int64(i64::from_le_bytes(bytes.try_into().map_err(
                 |_| ExecError::InvalidStorageValue {

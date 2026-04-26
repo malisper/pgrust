@@ -2,7 +2,7 @@ use super::{ExecError, ExecutorContext, Value};
 use crate::backend::access::transam::xact::{
     FIRST_NORMAL_TRANSACTION_ID, INVALID_TRANSACTION_ID, TransactionStatus,
 };
-use crate::include::catalog::TXID_SNAPSHOT_TYPE_OID;
+use crate::include::catalog::{PG_SNAPSHOT_TYPE_OID, TXID_SNAPSHOT_TYPE_OID};
 use crate::include::nodes::primnodes::BuiltinScalarFunction;
 use crate::pgrust::compact_string::CompactString;
 
@@ -183,7 +183,7 @@ fn eval_txid_status_value(xid: u64, ctx: &ExecutorContext) -> Result<Value, Exec
 }
 
 pub(crate) fn is_txid_snapshot_type_oid(type_oid: u32) -> bool {
-    type_oid == TXID_SNAPSHOT_TYPE_OID
+    matches!(type_oid, TXID_SNAPSHOT_TYPE_OID | PG_SNAPSHOT_TYPE_OID)
 }
 
 pub(crate) fn cast_text_to_txid_snapshot(text: &str) -> Result<Value, ExecError> {
@@ -197,18 +197,18 @@ pub(crate) fn eval_txid_builtin_function(
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     match func {
-        BuiltinScalarFunction::TxidCurrent => Ok(Value::Int64(i64::from(ctx.ensure_write_xid()?))),
+        BuiltinScalarFunction::TxidCurrent => Ok(Value::Xid8(u64::from(ctx.ensure_write_xid()?))),
         BuiltinScalarFunction::TxidCurrentIfAssigned => Ok(ctx
             .transaction_xid()
             .filter(|xid| *xid != INVALID_TRANSACTION_ID)
-            .map(|xid| Value::Int64(i64::from(xid)))
+            .map(|xid| Value::Xid8(u64::from(xid)))
             .unwrap_or(Value::Null)),
         BuiltinScalarFunction::TxidCurrentSnapshot => Ok(Value::Text(CompactString::from_owned(
             current_snapshot_value(ctx).render(),
         ))),
         BuiltinScalarFunction::TxidSnapshotXmin => match values {
             [value] => Ok(txid_snapshot_arg(value, "txid_snapshot_xmin")?
-                .map(|snapshot| Value::Int64(snapshot.xmin as i64))
+                .map(|snapshot| Value::Xid8(snapshot.xmin))
                 .unwrap_or(Value::Null)),
             _ => Err(ExecError::DetailedError {
                 message: "malformed txid builtin call".into(),
@@ -219,7 +219,7 @@ pub(crate) fn eval_txid_builtin_function(
         },
         BuiltinScalarFunction::TxidSnapshotXmax => match values {
             [value] => Ok(txid_snapshot_arg(value, "txid_snapshot_xmax")?
-                .map(|snapshot| Value::Int64(snapshot.xmax as i64))
+                .map(|snapshot| Value::Xid8(snapshot.xmax))
                 .unwrap_or(Value::Null)),
             _ => Err(ExecError::DetailedError {
                 message: "malformed txid builtin call".into(),
@@ -236,6 +236,13 @@ pub(crate) fn eval_txid_builtin_function(
                     return Ok(Value::Null);
                 };
                 Ok(Value::Bool(snapshot.xid_visible(*xid as u64)))
+            }
+            [Value::Xid8(xid), snapshot] => {
+                let Some(snapshot) = txid_snapshot_arg(snapshot, "txid_visible_in_snapshot")?
+                else {
+                    return Ok(Value::Null);
+                };
+                Ok(Value::Bool(snapshot.xid_visible(*xid)))
             }
             [Value::Int32(xid), snapshot] if *xid >= 0 => {
                 let Some(snapshot) = txid_snapshot_arg(snapshot, "txid_visible_in_snapshot")?
@@ -260,6 +267,7 @@ pub(crate) fn eval_txid_builtin_function(
             [Value::Null] => Ok(Value::Null),
             [Value::Int64(xid)] if *xid >= 0 => eval_txid_status_value(*xid as u64, ctx),
             [Value::Int32(xid)] if *xid >= 0 => eval_txid_status_value(*xid as u64, ctx),
+            [Value::Xid8(xid)] => eval_txid_status_value(*xid, ctx),
             [value] => Err(ExecError::TypeMismatch {
                 op: "txid_status",
                 left: value.clone(),
@@ -279,13 +287,7 @@ pub(crate) fn eval_txid_builtin_function(
 pub(crate) fn eval_txid_snapshot_xip_values(values: &[Value]) -> Result<Vec<Value>, ExecError> {
     match values {
         [value] => Ok(txid_snapshot_arg(value, "txid_snapshot_xip")?
-            .map(|snapshot| {
-                snapshot
-                    .in_progress
-                    .into_iter()
-                    .map(|xid| Value::Int64(xid as i64))
-                    .collect()
-            })
+            .map(|snapshot| snapshot.in_progress.into_iter().map(Value::Xid8).collect())
             .unwrap_or_default()),
         _ => Err(ExecError::DetailedError {
             message: "malformed txid builtin call".into(),
