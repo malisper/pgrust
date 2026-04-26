@@ -1,6 +1,7 @@
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::catalog::{ACLITEM_ARRAY_TYPE_OID, ACLITEM_TYPE_OID};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgLargeobjectMetadataRow {
@@ -16,7 +17,10 @@ pub fn pg_largeobject_metadata_desc() -> RelationDesc {
             column_desc("lomowner", SqlType::new(SqlTypeKind::Oid), false),
             column_desc(
                 "lomacl",
-                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                SqlType::array_of(
+                    SqlType::new(SqlTypeKind::Text).with_identity(ACLITEM_TYPE_OID, 0),
+                )
+                .with_identity(ACLITEM_ARRAY_TYPE_OID, 0),
                 true,
             ),
         ],

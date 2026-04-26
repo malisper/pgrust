@@ -29,8 +29,8 @@ use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, BootstrapCatalogKind, CatalogIndexDescriptor,
-    PG_CATALOG_NAMESPACE_OID, system_catalog_index_by_oid, system_catalog_indexes,
-    system_catalog_indexes_for_heap,
+    PG_CATALOG_NAMESPACE_OID, system_catalog_index_by_oid, system_catalog_index_is_primary,
+    system_catalog_indexes, system_catalog_indexes_for_heap,
 };
 use crate::include::nodes::datum::Value;
 
@@ -173,7 +173,7 @@ pub fn system_catalog_index_meta(
         indkey: descriptor.key_attnums.to_vec(),
         indisunique: descriptor.unique,
         indnullsnotdistinct: false,
-        indisprimary: false,
+        indisprimary: system_catalog_index_is_primary(&descriptor),
         indisexclusion: false,
         indimmediate: true,
         indisvalid: true,
@@ -201,7 +201,7 @@ pub fn system_catalog_index_relcache(
         indnkeyatts: meta.indclass.len() as i16,
         indisunique: meta.indisunique,
         indnullsnotdistinct: false,
-        indisprimary: false,
+        indisprimary: system_catalog_index_is_primary(&descriptor),
         indisexclusion: false,
         indimmediate: true,
         indisclustered: false,

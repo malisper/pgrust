@@ -121,7 +121,9 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(pg_collation_row_values)
             .collect(),
-        BootstrapCatalogKind::PgLargeobjectMetadata => Vec::new(),
+        BootstrapCatalogKind::PgLargeobject | BootstrapCatalogKind::PgLargeobjectMetadata => {
+            Vec::new()
+        }
         BootstrapCatalogKind::PgTablespace => rows
             .tablespaces
             .iter()
@@ -160,6 +162,7 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(pg_depend_row_values)
             .collect(),
+        BootstrapCatalogKind::PgShdepend | BootstrapCatalogKind::PgReplicationOrigin => Vec::new(),
         BootstrapCatalogKind::PgInherits => rows
             .inherits
             .iter()
@@ -553,6 +556,7 @@ pub(crate) fn pg_authid_row_from_values(values: Vec<Value>) -> Result<PgAuthIdRo
         rolreplication: expect_bool(&values[7])?,
         rolbypassrls: expect_bool(&values[8])?,
         rolconnlimit: expect_int32(&values[9])?,
+        rolpassword: values.get(10).map(nullable_text).transpose()?.flatten(),
     })
 }
 
@@ -885,6 +889,26 @@ pub(crate) fn pg_attribute_row_from_values(
         Some(Value::Null) | None => default_attcollation_for_type_oid(atttypid),
         Some(value) => expect_oid(value)?,
     };
+    let attacl = values
+        .get(17)
+        .map(nullable_text_array)
+        .transpose()?
+        .flatten();
+    let attoptions = values
+        .get(18)
+        .map(nullable_text_array)
+        .transpose()?
+        .flatten();
+    let attfdwoptions = values
+        .get(19)
+        .map(nullable_text_array)
+        .transpose()?
+        .flatten();
+    let attmissingval = values
+        .get(20)
+        .map(nullable_any_array)
+        .transpose()?
+        .flatten();
     Ok(PgAttributeRow {
         attrelid: expect_oid(&values[0])?,
         attname: expect_text(&values[1])?,
@@ -906,6 +930,10 @@ pub(crate) fn pg_attribute_row_from_values(
         attidentity,
         attgenerated,
         attcollation,
+        attacl,
+        attoptions,
+        attfdwoptions,
+        attmissingval,
         sql_type: SqlType::new(SqlTypeKind::Text),
     })
 }
@@ -1286,6 +1314,8 @@ fn pg_authid_row_values(row: PgAuthIdRow) -> Vec<Value> {
         Value::Bool(row.rolreplication),
         Value::Bool(row.rolbypassrls),
         Value::Int32(row.rolconnlimit),
+        row.rolpassword
+            .map_or(Value::Null, |value| Value::Text(value.into())),
     ]
 }
 
@@ -1605,6 +1635,33 @@ fn pg_attribute_row_values(row: PgAttributeRow) -> Vec<Value> {
         Value::InternalChar(row.attidentity as u8),
         Value::InternalChar(row.attgenerated as u8),
         Value::Int32(row.attcollation as i32),
+        row.attacl.map_or(Value::Null, |values| {
+            Value::PgArray(ArrayValue::from_1d(
+                values
+                    .into_iter()
+                    .map(|value| Value::Text(value.into()))
+                    .collect(),
+            ))
+        }),
+        row.attoptions.map_or(Value::Null, |values| {
+            Value::PgArray(ArrayValue::from_1d(
+                values
+                    .into_iter()
+                    .map(|value| Value::Text(value.into()))
+                    .collect(),
+            ))
+        }),
+        row.attfdwoptions.map_or(Value::Null, |values| {
+            Value::PgArray(ArrayValue::from_1d(
+                values
+                    .into_iter()
+                    .map(|value| Value::Text(value.into()))
+                    .collect(),
+            ))
+        }),
+        row.attmissingval.map_or(Value::Null, |values| {
+            Value::PgArray(ArrayValue::from_1d(values))
+        }),
     ]
 }
 
@@ -2020,6 +2077,13 @@ fn nullable_text_array(value: &Value) -> Result<Option<Vec<String>>, CatalogErro
         })
         .collect::<Result<Vec<_>, _>>()
         .map(Some)
+}
+
+fn nullable_any_array(value: &Value) -> Result<Option<Vec<Value>>, CatalogError> {
+    let Some(array) = expect_nullable_array(value)? else {
+        return Ok(None);
+    };
+    Ok(Some(array.elements))
 }
 
 fn nullable_char_array(value: &Value) -> Result<Option<Vec<u8>>, CatalogError> {

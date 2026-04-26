@@ -651,6 +651,7 @@ fn row_security_test_catalog(base: Catalog, current_user_oid: u32) -> RowSecurit
         rolreplication: false,
         rolbypassrls: false,
         rolconnlimit: -1,
+        rolpassword: None,
     });
     authid_rows.sort_by_key(|row| row.oid);
     RowSecurityTestCatalog {

@@ -434,6 +434,10 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
                     entry.relation_oid,
                     column.collation_oid,
                 ),
+                attacl: None,
+                attoptions: None,
+                attfdwoptions: None,
+                attmissingval: None,
                 sql_type: column.sql_type,
             }
         }));

@@ -148,8 +148,7 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Timestamp
         | SqlTypeKind::TimestampTz
         | SqlTypeKind::InternalChar
-        | SqlTypeKind::PgLsn
-        | SqlTypeKind::PgNodeTree => AttributeStorage::Plain,
+        | SqlTypeKind::PgLsn => AttributeStorage::Plain,
         SqlTypeKind::Bit
         | SqlTypeKind::VarBit
         | SqlTypeKind::Bytea
@@ -169,6 +168,7 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Tid
         | SqlTypeKind::TsVector
         | SqlTypeKind::TsQuery
+        | SqlTypeKind::PgNodeTree
         | SqlTypeKind::Text => AttributeStorage::Extended,
         SqlTypeKind::Bool
         | SqlTypeKind::Int2

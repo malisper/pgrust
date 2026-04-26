@@ -2,8 +2,8 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, BootstrapCatalogKind, HEAP_TABLE_AM_OID,
-    PG_CATALOG_NAMESPACE_OID, bootstrap_relation_desc,
+    ACLITEM_ARRAY_TYPE_OID, ACLITEM_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID,
+    BootstrapCatalogKind, HEAP_TABLE_AM_OID, PG_CATALOG_NAMESPACE_OID, bootstrap_relation_desc,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -78,7 +78,10 @@ pub fn pg_class_desc() -> RelationDesc {
             ),
             column_desc(
                 "relacl",
-                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                SqlType::array_of(
+                    SqlType::new(SqlTypeKind::Text).with_identity(ACLITEM_TYPE_OID, 0),
+                )
+                .with_identity(ACLITEM_ARRAY_TYPE_OID, 0),
                 true,
             ),
         ],
@@ -101,7 +104,7 @@ pub const fn relam_for_relkind(relkind: char) -> u32 {
     }
 }
 
-pub fn bootstrap_pg_class_rows() -> [PgClassRow; 32] {
+pub fn bootstrap_pg_class_rows() -> [PgClassRow; 35] {
     [
         bootstrap_pg_class_row(BootstrapCatalogKind::PgNamespace),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgType),
@@ -113,8 +116,11 @@ pub fn bootstrap_pg_class_rows() -> [PgClassRow; 32] {
         bootstrap_pg_class_row(BootstrapCatalogKind::PgAuthId),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgAuthMembers),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgCollation),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgLargeobject),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgDatabase),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgTablespace),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgShdepend),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgReplicationOrigin),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgAm),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgAttrdef),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgCast),
@@ -152,7 +158,7 @@ fn bootstrap_pg_class_row(kind: BootstrapCatalogKind) -> PgClassRow {
         reltuples: 0.0,
         relallvisible: 0,
         relallfrozen: 0,
-        reltoastrelid: 0,
+        reltoastrelid: kind.toast_relation_oid(),
         relpersistence: 'p',
         relkind: 'r',
         relnatts: bootstrap_relation_desc(kind).columns.len() as i16,

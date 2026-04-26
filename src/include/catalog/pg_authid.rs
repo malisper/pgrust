@@ -29,6 +29,7 @@ pub struct PgAuthIdRow {
     pub rolreplication: bool,
     pub rolbypassrls: bool,
     pub rolconnlimit: i32,
+    pub rolpassword: Option<String>,
 }
 
 pub fn pg_authid_desc() -> RelationDesc {
@@ -44,6 +45,7 @@ pub fn pg_authid_desc() -> RelationDesc {
             column_desc("rolreplication", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("rolbypassrls", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("rolconnlimit", SqlType::new(SqlTypeKind::Int4), false),
+            column_desc("rolpassword", SqlType::new(SqlTypeKind::Text), true),
         ],
     }
 }
@@ -61,6 +63,7 @@ pub fn bootstrap_pg_authid_rows() -> Vec<PgAuthIdRow> {
             rolreplication: true,
             rolbypassrls: true,
             rolconnlimit: -1,
+            rolpassword: None,
         },
         predefined_role(PG_DATABASE_OWNER_OID, "pg_database_owner"),
         predefined_role(PG_READ_ALL_DATA_OID, "pg_read_all_data"),
@@ -89,6 +92,7 @@ fn predefined_role(oid: u32, name: &str) -> PgAuthIdRow {
         rolreplication: false,
         rolbypassrls: false,
         rolconnlimit: -1,
+        rolpassword: None,
     }
 }
 
@@ -117,6 +121,7 @@ mod tests {
                 "rolreplication",
                 "rolbypassrls",
                 "rolconnlimit",
+                "rolpassword",
             ]
         );
     }

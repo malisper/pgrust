@@ -1,6 +1,9 @@
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::catalog::{
+    PG_CATALOG_NAMESPACE_OID, system_catalog_index_is_primary, system_catalog_indexes,
+};
 
 pub const CONSTRAINT_CHECK: char = 'c';
 pub const CONSTRAINT_FOREIGN: char = 'f';
@@ -117,8 +120,52 @@ pub fn pg_constraint_desc() -> RelationDesc {
     }
 }
 
-pub fn bootstrap_pg_constraint_rows() -> [PgConstraintRow; 0] {
-    []
+pub fn bootstrap_pg_constraint_rows() -> Vec<PgConstraintRow> {
+    system_catalog_indexes()
+        .iter()
+        .filter(|descriptor| descriptor.unique)
+        .map(|descriptor| {
+            let primary = system_catalog_index_is_primary(descriptor);
+            PgConstraintRow {
+                oid: synthetic_system_index_constraint_oid(descriptor.relation_oid),
+                conname: descriptor.relation_name.to_string(),
+                connamespace: PG_CATALOG_NAMESPACE_OID,
+                contype: if primary {
+                    CONSTRAINT_PRIMARY
+                } else {
+                    CONSTRAINT_UNIQUE
+                },
+                condeferrable: false,
+                condeferred: false,
+                conenforced: true,
+                convalidated: true,
+                conrelid: descriptor.heap_kind.relation_oid(),
+                contypid: 0,
+                conindid: descriptor.relation_oid,
+                conparentid: 0,
+                confrelid: 0,
+                confupdtype: ' ',
+                confdeltype: ' ',
+                confmatchtype: ' ',
+                conkey: Some(descriptor.key_attnums.to_vec()),
+                confkey: None,
+                conpfeqop: None,
+                conppeqop: None,
+                conffeqop: None,
+                confdelsetcols: None,
+                conexclop: None,
+                conbin: None,
+                conislocal: true,
+                coninhcount: 0,
+                connoinherit: true,
+                conperiod: false,
+            }
+        })
+        .collect()
+}
+
+fn synthetic_system_index_constraint_oid(index_oid: u32) -> u32 {
+    0x5c1c_0000 ^ index_oid
 }
 
 #[cfg(test)]

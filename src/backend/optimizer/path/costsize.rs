@@ -16,10 +16,10 @@ use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
 use crate::include::access::spgist::SPGIST_CONFIG_PROC;
 use crate::include::catalog::{
     BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GIST_MULTIRANGE_FAMILY_OID,
-    GIST_RANGE_FAMILY_OID, HASH_AM_OID, PgStatisticRow, SPG_BOX_QUAD_CONFIG_PROC_OID,
-    SPG_KD_CONFIG_PROC_OID, SPG_NETWORK_CONFIG_PROC_OID, SPG_QUAD_CONFIG_PROC_OID,
-    SPG_RANGE_CONFIG_PROC_OID, SPG_TEXT_CONFIG_PROC_OID, SPGIST_AM_OID, SPGIST_TEXT_FAMILY_OID,
-    bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
+    GIST_RANGE_FAMILY_OID, HASH_AM_OID, PG_LARGEOBJECT_METADATA_RELATION_OID, PgStatisticRow,
+    SPG_BOX_QUAD_CONFIG_PROC_OID, SPG_KD_CONFIG_PROC_OID, SPG_NETWORK_CONFIG_PROC_OID,
+    SPG_QUAD_CONFIG_PROC_OID, SPG_RANGE_CONFIG_PROC_OID, SPG_TEXT_CONFIG_PROC_OID, SPGIST_AM_OID,
+    SPGIST_TEXT_FAMILY_OID, bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
     proc_oid_for_builtin_scalar_function, range_type_ref_for_sql_type, relkind_has_storage,
 };
 use crate::include::nodes::datum::ArrayValue;
@@ -1108,7 +1108,7 @@ fn try_optimize_access_subtree(
         order_items.clone(),
         order_display_items.clone(),
     );
-    if relkind != 'r' || !config.enable_indexscan {
+    if relkind != 'r' || !config.enable_indexscan || relation_uses_virtual_scan(relation_oid) {
         return Ok(best.plan);
     }
     let indexes = catalog.index_relations_for_heap(relation_oid);
@@ -1141,6 +1141,10 @@ fn try_optimize_access_subtree(
         }
     }
     Ok(best.plan)
+}
+
+fn relation_uses_virtual_scan(relation_oid: u32) -> bool {
+    relation_oid == PG_LARGEOBJECT_METADATA_RELATION_OID
 }
 
 pub(super) fn relation_stats(
