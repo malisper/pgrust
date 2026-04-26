@@ -1025,6 +1025,160 @@ fn distinct_pathkeys(targets: &[TargetEntry]) -> Vec<PathKey> {
         .collect()
 }
 
+fn sort_group_pathkeys(
+    clauses: &[crate::include::nodes::primnodes::SortGroupClause],
+    target_list: &[TargetEntry],
+) -> Vec<PathKey> {
+    PathTarget::from_sort_clause(clauses, target_list)
+}
+
+fn pathkey_same_expr(left: &PathKey, right: &PathKey) -> bool {
+    (left.ressortgroupref != 0 && left.ressortgroupref == right.ressortgroupref)
+        || left.expr == right.expr
+}
+
+fn pathkey_position(target: &PathTarget, key: &PathKey) -> Option<usize> {
+    if key.ressortgroupref != 0
+        && let Some(index) = target
+            .sortgrouprefs
+            .iter()
+            .position(|ressortgroupref| *ressortgroupref == key.ressortgroupref)
+    {
+        return Some(index);
+    }
+    target.exprs.iter().position(|expr| *expr == key.expr)
+}
+
+fn unique_key_indices(path: &Path, key_pathkeys: &[PathKey]) -> Vec<usize> {
+    let target = path.semantic_output_target();
+    key_pathkeys
+        .iter()
+        .filter_map(|key| pathkey_position(&target, key))
+        .collect()
+}
+
+fn append_missing_distinct_pathkeys(required: &mut Vec<PathKey>, key_pathkeys: &[PathKey]) {
+    for key in key_pathkeys {
+        if !required
+            .iter()
+            .any(|existing| pathkey_same_expr(existing, key))
+        {
+            required.push(key.clone());
+        }
+    }
+}
+
+fn distinct_on_has_order_by_tiebreakers(root: &PlannerInfo, key_pathkeys: &[PathKey]) -> bool {
+    root.query_pathkeys.iter().any(|key| {
+        !key_pathkeys
+            .iter()
+            .any(|distinct_key| pathkey_same_expr(key, distinct_key))
+    })
+}
+
+fn reordered_distinct_pathkeys_for_path(
+    path: &Path,
+    key_pathkeys: &[PathKey],
+) -> Option<Vec<PathKey>> {
+    let actual = path.pathkeys();
+    if actual.len() < key_pathkeys.len() {
+        return None;
+    }
+    let mut required = Vec::with_capacity(key_pathkeys.len());
+    for actual_key in actual.iter().take(key_pathkeys.len()) {
+        let distinct_key = key_pathkeys
+            .iter()
+            .find(|key| pathkey_same_expr(actual_key, key))?;
+        if required
+            .iter()
+            .any(|existing: &PathKey| pathkey_same_expr(existing, distinct_key))
+        {
+            return None;
+        }
+        required.push(PathKey {
+            expr: distinct_key.expr.clone(),
+            ressortgroupref: distinct_key.ressortgroupref,
+            descending: actual_key.descending,
+            nulls_first: actual_key.nulls_first,
+            collation_oid: actual_key.collation_oid,
+        });
+    }
+    Some(required)
+}
+
+fn distinct_on_required_pathkeys_for_path(
+    root: &PlannerInfo,
+    path: &Path,
+    key_pathkeys: &[PathKey],
+) -> Vec<PathKey> {
+    if !root.query_pathkeys.is_empty() && distinct_on_has_order_by_tiebreakers(root, key_pathkeys) {
+        return root.query_pathkeys.clone();
+    }
+    if let Some(reordered) = reordered_distinct_pathkeys_for_path(path, key_pathkeys) {
+        return reordered;
+    }
+    let mut required = if root.query_pathkeys.is_empty() {
+        key_pathkeys.to_vec()
+    } else {
+        root.query_pathkeys.clone()
+    };
+    append_missing_distinct_pathkeys(&mut required, key_pathkeys);
+    required
+}
+
+fn distinct_on_index_pathkeys(key_pathkeys: &[PathKey]) -> Vec<Vec<PathKey>> {
+    let mut candidates = vec![key_pathkeys.to_vec()];
+    if key_pathkeys.len() == 2 {
+        candidates.push(vec![key_pathkeys[1].clone(), key_pathkeys[0].clone()]);
+    }
+    candidates
+}
+
+fn expr_equated_to_constant(predicate: &Expr, key: &Expr) -> bool {
+    match predicate {
+        Expr::Bool(bool_expr)
+            if matches!(
+                bool_expr.boolop,
+                crate::include::nodes::primnodes::BoolExprType::And
+            ) =>
+        {
+            bool_expr
+                .args
+                .iter()
+                .any(|arg| expr_equated_to_constant(arg, key))
+        }
+        Expr::Op(op)
+            if matches!(op.op, crate::include::nodes::primnodes::OpExprKind::Eq)
+                && op.args.len() == 2 =>
+        {
+            (op.args[0] == *key && matches!(op.args[1], Expr::Const(_)))
+                || (op.args[1] == *key && matches!(op.args[0], Expr::Const(_)))
+        }
+        _ => false,
+    }
+}
+
+fn distinct_on_keys_are_constant(root: &PlannerInfo, key_pathkeys: &[PathKey]) -> bool {
+    let Some(predicate) = root.parse.where_qual.as_ref() else {
+        return false;
+    };
+    key_pathkeys
+        .iter()
+        .all(|key| expr_equated_to_constant(predicate, &key.expr))
+}
+
+fn nonconstant_order_pathkeys(root: &PlannerInfo, key_pathkeys: &[PathKey]) -> Vec<PathKey> {
+    root.query_pathkeys
+        .iter()
+        .filter(|key| {
+            !key_pathkeys
+                .iter()
+                .any(|distinct_key| pathkey_same_expr(key, distinct_key))
+        })
+        .cloned()
+        .collect()
+}
+
 fn make_distinct_rel(
     root: &mut PlannerInfo,
     input_rel: RelOptInfo,
@@ -1065,6 +1219,116 @@ fn make_distinct_rel(
             Path::Unique {
                 plan_info: PlanEstimate::default(),
                 pathtarget: path.semantic_output_target(),
+                key_indices: (0..targets.len()).collect(),
+                input: Box::new(path),
+            },
+            catalog,
+            root.config,
+        ));
+    }
+    bestpath::set_cheapest(&mut rel);
+    root.upper_rels[upper_rel_index].rel = rel.clone();
+    rel
+}
+
+fn make_distinct_on_rel(
+    root: &mut PlannerInfo,
+    input_rel: RelOptInfo,
+    catalog: &dyn CatalogLookup,
+) -> RelOptInfo {
+    let reltarget = input_rel.reltarget.clone();
+    let upper_rel_index = upperrels::ensure_upper_rel_index(
+        root,
+        UpperRelKind::Distinct,
+        &input_rel.relids,
+        reltarget.clone(),
+    );
+    if !root.upper_rels[upper_rel_index].rel.pathlist.is_empty() {
+        return root.upper_rels[upper_rel_index].rel.clone();
+    }
+
+    let key_pathkeys = sort_group_pathkeys(&root.parse.distinct_on, &root.processed_tlist);
+    if distinct_on_keys_are_constant(root, &key_pathkeys) {
+        let required_pathkeys = nonconstant_order_pathkeys(root, &key_pathkeys);
+        let mut input_paths = input_rel.pathlist.clone();
+        if let [rtindex] = input_rel.relids.as_slice() {
+            for path in relation_ordered_index_paths(root, *rtindex, &required_pathkeys, catalog) {
+                if !input_paths.iter().any(|existing| existing == &path) {
+                    input_paths.push(path);
+                }
+            }
+        }
+        let mut rel = RelOptInfo::new(input_rel.relids.clone(), RelOptKind::UpperRel, reltarget);
+        for path in input_paths {
+            let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
+                let display_items = sort_key_display_items(root, &required_pathkeys);
+                optimize_path_with_config(
+                    Path::OrderBy {
+                        plan_info: PlanEstimate::default(),
+                        pathtarget: path.semantic_output_target(),
+                        items: pathkeys_to_order_items(&required_pathkeys),
+                        display_items,
+                        input: Box::new(path),
+                    },
+                    catalog,
+                    root.config,
+                )
+            } else {
+                path
+            };
+            rel.add_path(optimize_path_with_config(
+                Path::Limit {
+                    plan_info: PlanEstimate::default(),
+                    pathtarget: path.semantic_output_target(),
+                    input: Box::new(path),
+                    limit: Some(1),
+                    offset: 0,
+                },
+                catalog,
+                root.config,
+            ));
+        }
+        bestpath::set_cheapest(&mut rel);
+        root.upper_rels[upper_rel_index].rel = rel.clone();
+        return rel;
+    }
+
+    let mut input_paths = input_rel.pathlist.clone();
+    if let [rtindex] = input_rel.relids.as_slice() {
+        for pathkeys in distinct_on_index_pathkeys(&key_pathkeys) {
+            for path in relation_ordered_index_paths(root, *rtindex, &pathkeys, catalog) {
+                if !input_paths.iter().any(|existing| existing == &path) {
+                    input_paths.push(path);
+                }
+            }
+        }
+    }
+
+    let mut rel = RelOptInfo::new(input_rel.relids.clone(), RelOptKind::UpperRel, reltarget);
+    for path in input_paths {
+        let required_pathkeys = distinct_on_required_pathkeys_for_path(root, &path, &key_pathkeys);
+        let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
+            let display_items = sort_key_display_items(root, &required_pathkeys);
+            optimize_path_with_config(
+                Path::OrderBy {
+                    plan_info: PlanEstimate::default(),
+                    pathtarget: path.semantic_output_target(),
+                    items: pathkeys_to_order_items(&required_pathkeys),
+                    display_items,
+                    input: Box::new(path),
+                },
+                catalog,
+                root.config,
+            )
+        } else {
+            path
+        };
+        let key_indices = unique_key_indices(&path, &key_pathkeys);
+        rel.add_path(optimize_path_with_config(
+            Path::Unique {
+                plan_info: PlanEstimate::default(),
+                pathtarget: path.semantic_output_target(),
+                key_indices,
                 input: Box::new(path),
             },
             catalog,
@@ -1435,14 +1699,35 @@ pub(super) fn grouping_planner(
     }
 
     if root.parse.distinct {
-        if current_rel.reltarget != root.final_target {
-            current_rel = make_projection_rel(root, current_rel, &final_targets, catalog, false);
+        if !root.parse.distinct_on.is_empty() {
+            if current_rel.reltarget != root.sort_input_target {
+                current_rel = make_pathtarget_projection_rel(
+                    root,
+                    current_rel,
+                    &root.sort_input_target.clone(),
+                    catalog,
+                    false,
+                );
+            }
+            current_rel = make_distinct_on_rel(root, current_rel, catalog);
+            projection_done = current_rel.reltarget == root.final_target;
+        } else {
+            if current_rel.reltarget != root.final_target {
+                current_rel =
+                    make_projection_rel(root, current_rel, &final_targets, catalog, false);
+            }
+            current_rel = make_distinct_rel(root, current_rel, &final_targets, catalog);
+            projection_done = current_rel.reltarget == root.final_target;
         }
-        current_rel = make_distinct_rel(root, current_rel, &final_targets, catalog);
-        projection_done = current_rel.reltarget == root.final_target;
     }
 
-    if !root.query_pathkeys.is_empty() {
+    let distinct_on_constant = root.parse.distinct
+        && !root.parse.distinct_on.is_empty()
+        && distinct_on_keys_are_constant(
+            root,
+            &sort_group_pathkeys(&root.parse.distinct_on, &root.processed_tlist),
+        );
+    if !root.query_pathkeys.is_empty() && !distinct_on_constant {
         current_rel = make_ordered_rel(root, current_rel, catalog);
     }
 

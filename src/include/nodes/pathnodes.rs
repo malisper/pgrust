@@ -416,6 +416,7 @@ pub enum Path {
     Unique {
         plan_info: PlanEstimate,
         pathtarget: PathTarget,
+        key_indices: Vec<usize>,
         input: Box<Path>,
     },
     SeqScan {

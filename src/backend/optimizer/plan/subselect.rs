@@ -1096,8 +1096,13 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .map(|child| rebase_plan_subplan_ids(child, base))
                 .collect(),
         },
-        Plan::Unique { plan_info, input } => Plan::Unique {
+        Plan::Unique {
             plan_info,
+            key_indices,
+            input,
+        } => Plan::Unique {
+            plan_info,
+            key_indices,
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
         },
         Plan::BitmapIndexScan {
@@ -1538,8 +1543,13 @@ pub(super) fn finalize_plan_subqueries(
                 .map(|child| finalize_plan_subqueries(child, catalog, subplans))
                 .collect(),
         },
-        Plan::Unique { plan_info, input } => Plan::Unique {
+        Plan::Unique {
             plan_info,
+            key_indices,
+            input,
+        } => Plan::Unique {
+            plan_info,
+            key_indices,
             input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
         },
         Plan::BitmapHeapScan {
