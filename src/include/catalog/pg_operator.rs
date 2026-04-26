@@ -4,7 +4,6 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::*;
-use crate::include::nodes::primnodes::BuiltinScalarFunction;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgOperatorRow {
@@ -1144,6 +1143,7 @@ fn build_bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
     ];
     rows.extend(generic_btree_operator_rows());
     rows.extend(catalog_sanity_operator_rows());
+    rows.extend(enum_operator_rows());
     rows.extend(macaddr_operator_rows());
     rows.extend(geometry_operator_rows());
     rows.extend(range_operator_rows());
@@ -4641,51 +4641,98 @@ fn range_operator_rows() -> Vec<PgOperatorRow> {
     rows
 }
 
-fn multirange_operator_rows() -> Vec<PgOperatorRow> {
-    fn builtin_proc(func: BuiltinScalarFunction) -> u32 {
-        proc_oid_for_builtin_scalar_function(func).unwrap_or(0)
-    }
+fn enum_operator_rows() -> Vec<PgOperatorRow> {
+    vec![
+        operator_row(
+            3516,
+            "=",
+            ANYENUMOID,
+            ANYENUMOID,
+            3516,
+            3517,
+            ENUM_EQ_PROC_OID,
+            true,
+            true,
+        ),
+        operator_row(
+            3517,
+            "<>",
+            ANYENUMOID,
+            ANYENUMOID,
+            3517,
+            3516,
+            ENUM_NE_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            3518,
+            "<",
+            ANYENUMOID,
+            ANYENUMOID,
+            3519,
+            3521,
+            ENUM_LT_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            3519,
+            ">",
+            ANYENUMOID,
+            ANYENUMOID,
+            3518,
+            3520,
+            ENUM_GT_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            3520,
+            "<=",
+            ANYENUMOID,
+            ANYENUMOID,
+            3521,
+            3519,
+            ENUM_LE_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            3521,
+            ">=",
+            ANYENUMOID,
+            ANYENUMOID,
+            3520,
+            3518,
+            ENUM_GE_PROC_OID,
+            false,
+            false,
+        ),
+    ]
+}
 
+fn multirange_operator_rows() -> Vec<PgOperatorRow> {
     let mut next_oid = 72_200u32;
     let mut rows = Vec::new();
-    for (name, func, righttype) in [
-        (
-            "<<",
-            BuiltinScalarFunction::RangeStrictLeft,
-            ANYMULTIRANGEOID,
-        ),
-        ("<<", BuiltinScalarFunction::RangeStrictLeft, ANYRANGEOID),
-        ("&<", BuiltinScalarFunction::RangeOverLeft, ANYMULTIRANGEOID),
-        ("&<", BuiltinScalarFunction::RangeOverLeft, ANYRANGEOID),
-        ("&&", BuiltinScalarFunction::RangeOverlap, ANYMULTIRANGEOID),
-        ("&&", BuiltinScalarFunction::RangeOverlap, ANYRANGEOID),
-        (
-            "&>",
-            BuiltinScalarFunction::RangeOverRight,
-            ANYMULTIRANGEOID,
-        ),
-        ("&>", BuiltinScalarFunction::RangeOverRight, ANYRANGEOID),
-        (
-            ">>",
-            BuiltinScalarFunction::RangeStrictRight,
-            ANYMULTIRANGEOID,
-        ),
-        (">>", BuiltinScalarFunction::RangeStrictRight, ANYRANGEOID),
-        (
-            "-|-",
-            BuiltinScalarFunction::RangeAdjacent,
-            ANYMULTIRANGEOID,
-        ),
-        ("-|-", BuiltinScalarFunction::RangeAdjacent, ANYRANGEOID),
-        ("@>", BuiltinScalarFunction::RangeContains, ANYMULTIRANGEOID),
-        ("@>", BuiltinScalarFunction::RangeContains, ANYRANGEOID),
-        (
-            "<@",
-            BuiltinScalarFunction::RangeContainedBy,
-            ANYMULTIRANGEOID,
-        ),
-        ("<@", BuiltinScalarFunction::RangeContainedBy, ANYRANGEOID),
-        ("@>", BuiltinScalarFunction::RangeContains, ANYELEMENTOID),
+    for (name, righttype, proc_oid) in [
+        ("<<", ANYMULTIRANGEOID, 4260),
+        ("<<", ANYRANGEOID, 4259),
+        ("&<", ANYMULTIRANGEOID, 4266),
+        ("&<", ANYRANGEOID, 4265),
+        ("&&", ANYMULTIRANGEOID, 4248),
+        ("&&", ANYRANGEOID, 4247),
+        ("&>", ANYMULTIRANGEOID, 4269),
+        ("&>", ANYRANGEOID, 4268),
+        (">>", ANYMULTIRANGEOID, 4263),
+        (">>", ANYRANGEOID, 4262),
+        ("-|-", ANYMULTIRANGEOID, 4256),
+        ("-|-", ANYRANGEOID, 4257),
+        ("@>", ANYMULTIRANGEOID, 4251),
+        ("@>", ANYRANGEOID, 4250),
+        ("<@", ANYMULTIRANGEOID, 4254),
+        ("<@", ANYRANGEOID, 4542),
+        ("@>", ANYELEMENTOID, 4249),
     ] {
         rows.push(operator_row(
             next_oid,
@@ -4694,7 +4741,7 @@ fn multirange_operator_rows() -> Vec<PgOperatorRow> {
             righttype,
             0,
             0,
-            builtin_proc(func),
+            proc_oid,
             false,
             false,
         ));
@@ -4704,21 +4751,17 @@ fn multirange_operator_rows() -> Vec<PgOperatorRow> {
 }
 
 fn range_multirange_operator_rows() -> Vec<PgOperatorRow> {
-    fn builtin_proc(func: BuiltinScalarFunction) -> u32 {
-        proc_oid_for_builtin_scalar_function(func).unwrap_or(0)
-    }
-
     let mut next_oid = 72_180u32;
     let mut rows = Vec::new();
-    for (name, func) in [
-        ("<<", BuiltinScalarFunction::RangeStrictLeft),
-        ("&<", BuiltinScalarFunction::RangeOverLeft),
-        ("&&", BuiltinScalarFunction::RangeOverlap),
-        ("&>", BuiltinScalarFunction::RangeOverRight),
-        (">>", BuiltinScalarFunction::RangeStrictRight),
-        ("-|-", BuiltinScalarFunction::RangeAdjacent),
-        ("@>", BuiltinScalarFunction::RangeContains),
-        ("<@", BuiltinScalarFunction::RangeContainedBy),
+    for (name, proc_oid) in [
+        ("<<", 4258),
+        ("&<", 4264),
+        ("&&", 4246),
+        ("&>", 4267),
+        (">>", 4261),
+        ("-|-", 4255),
+        ("@>", 4541),
+        ("<@", 4253),
     ] {
         rows.push(operator_row(
             next_oid,
@@ -4727,7 +4770,7 @@ fn range_multirange_operator_rows() -> Vec<PgOperatorRow> {
             ANYMULTIRANGEOID,
             0,
             0,
-            builtin_proc(func),
+            proc_oid,
             false,
             false,
         ));
@@ -4747,7 +4790,7 @@ fn generic_range_operator_rows() -> Vec<PgOperatorRow> {
             3883,
             3855,
             true,
-            false,
+            true,
         ),
         operator_row(
             3883,

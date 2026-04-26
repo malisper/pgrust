@@ -15,6 +15,7 @@ pub const BTREE_BPCHAR_FAMILY_OID: u32 = 426;
 pub const BTREE_TEXT_PATTERN_FAMILY_OID: u32 = 2095;
 pub const BTREE_BPCHAR_PATTERN_FAMILY_OID: u32 = 2097;
 pub const BTREE_OID_FAMILY_OID: u32 = 1989;
+pub const BTREE_ENUM_FAMILY_OID: u32 = 3522;
 pub const BTREE_BOOL_FAMILY_OID: u32 = 424;
 pub const BTREE_NUMERIC_FAMILY_OID: u32 = 1988;
 pub const BTREE_INTERVAL_FAMILY_OID: u32 = 1982;
@@ -82,6 +83,7 @@ pub const HASH_INTEGER_FAMILY_OID: u32 = 1977;
 pub const HASH_INTERVAL_FAMILY_OID: u32 = 1983;
 pub const HASH_NUMERIC_FAMILY_OID: u32 = 1998;
 pub const HASH_OID_FAMILY_OID: u32 = 1990;
+pub const HASH_ENUM_FAMILY_OID: u32 = 3523;
 pub const HASH_TEXT_FAMILY_OID: u32 = 1995;
 pub const HASH_TIME_FAMILY_OID: u32 = 1997;
 pub const HASH_TIMESTAMPTZ_FAMILY_OID: u32 = 1999;
@@ -92,6 +94,7 @@ pub const HASH_BYTEA_FAMILY_OID: u32 = 2223;
 pub const HASH_UUID_FAMILY_OID: u32 = 2969;
 pub const HASH_RANGE_FAMILY_OID: u32 = 2224;
 pub const HASH_MULTIRANGE_FAMILY_OID: u32 = 4225;
+pub const HASH_JSONB_FAMILY_OID: u32 = 4034;
 pub const HASH_MACADDR_FAMILY_OID: u32 = 76230;
 pub const HASH_MACADDR8_FAMILY_OID: u32 = 76231;
 
@@ -230,6 +233,7 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             opfnamespace: PG_CATALOG_NAMESPACE_OID,
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },
+        btree_row(BTREE_ENUM_FAMILY_OID, "enum_ops"),
         PgOpfamilyRow {
             oid: BTREE_TEXT_FAMILY_OID,
             opfmethod: BTREE_AM_OID,
@@ -410,6 +414,7 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
         hash_row(HASH_INTERVAL_FAMILY_OID, "interval_ops"),
         hash_row(HASH_NUMERIC_FAMILY_OID, "numeric_ops"),
         hash_row(HASH_OID_FAMILY_OID, "oid_ops"),
+        hash_row(HASH_ENUM_FAMILY_OID, "enum_ops"),
         hash_row(HASH_TEXT_FAMILY_OID, "text_ops"),
         hash_row(HASH_TIME_FAMILY_OID, "time_ops"),
         hash_row(HASH_TIMESTAMPTZ_FAMILY_OID, "timestamptz_ops"),
@@ -420,6 +425,7 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
         hash_row(HASH_UUID_FAMILY_OID, "uuid_ops"),
         hash_row(HASH_RANGE_FAMILY_OID, "range_ops"),
         hash_row(HASH_MULTIRANGE_FAMILY_OID, "multirange_ops"),
+        hash_row(HASH_JSONB_FAMILY_OID, "jsonb_ops"),
         hash_row(HASH_MACADDR_FAMILY_OID, "macaddr_ops"),
         hash_row(HASH_MACADDR8_FAMILY_OID, "macaddr8_ops"),
     ]

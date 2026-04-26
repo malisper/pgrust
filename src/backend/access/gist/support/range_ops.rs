@@ -148,8 +148,9 @@ fn multirange_leaf_matches(
         4 => BuiltinScalarFunction::RangeOverRight,
         5 => BuiltinScalarFunction::RangeStrictRight,
         6 => BuiltinScalarFunction::RangeAdjacent,
-        7 => BuiltinScalarFunction::RangeContains,
+        7 | 16 => BuiltinScalarFunction::RangeContains,
         8 => BuiltinScalarFunction::RangeContainedBy,
+        18 => return Ok(false),
         _ => {
             return Err(CatalogError::Corrupt(
                 "unsupported GiST range multirange strategy",
@@ -180,13 +181,14 @@ fn multirange_internal_matches(
                 && (eval_multirange_bool(BuiltinScalarFunction::RangeAdjacent, key, query)?
                     || eval_multirange_bool(BuiltinScalarFunction::RangeOverlap, key, query)?)
         }
-        7 => eval_multirange_bool(BuiltinScalarFunction::RangeContains, key, query)?,
+        7 | 16 => eval_multirange_bool(BuiltinScalarFunction::RangeContains, key, query)?,
         // See the range contained-by case above: the simplified internal key
         // cannot distinguish pages containing empty ranges.
         8 => {
             key_range.empty
                 || eval_multirange_bool(BuiltinScalarFunction::RangeOverlap, key, query)?
         }
+        18 => false,
         _ => {
             return Err(CatalogError::Corrupt(
                 "unsupported GiST range multirange strategy",

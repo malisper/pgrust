@@ -109,6 +109,7 @@ pub const UUID_HASH_OPCLASS_OID: u32 = 76219;
 pub const ENUM_HASH_OPCLASS_OID: u32 = 76220;
 pub const MULTIRANGE_HASH_OPCLASS_OID: u32 = 76221;
 pub const RANGE_HASH_OPCLASS_OID: u32 = 76222;
+pub const JSONB_HASH_OPCLASS_OID: u32 = 76223;
 pub const MACADDR_HASH_OPCLASS_OID: u32 = 76232;
 pub const MACADDR8_HASH_OPCLASS_OID: u32 = 76233;
 pub const INTERVAL_HASH_OPCLASS_OID: u32 = 76234;
@@ -167,7 +168,7 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             opcname: "enum_ops".into(),
             opcnamespace: PG_CATALOG_NAMESPACE_OID,
             opcowner: BOOTSTRAP_SUPERUSER_OID,
-            opcfamily: BTREE_OID_FAMILY_OID,
+            opcfamily: BTREE_ENUM_FAMILY_OID,
             opcintype: ANYENUMOID,
             opcdefault: false,
             opckeytype: 0,
@@ -852,7 +853,7 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             opcname: "enum_ops".into(),
             opcnamespace: PG_CATALOG_NAMESPACE_OID,
             opcowner: BOOTSTRAP_SUPERUSER_OID,
-            opcfamily: HASH_OID_FAMILY_OID,
+            opcfamily: HASH_ENUM_FAMILY_OID,
             opcintype: ANYENUMOID,
             opcdefault: false,
             opckeytype: 0,
@@ -862,6 +863,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             "multirange_ops",
             HASH_MULTIRANGE_FAMILY_OID,
             ANYMULTIRANGEOID,
+        ),
+        hash_row(
+            JSONB_HASH_OPCLASS_OID,
+            "jsonb_ops",
+            HASH_JSONB_FAMILY_OID,
+            JSONB_TYPE_OID,
         ),
         hash_row(
             MACADDR_HASH_OPCLASS_OID,
