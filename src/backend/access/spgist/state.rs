@@ -8,7 +8,6 @@ use crate::include::access::spgist::{
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::RelationDesc;
 
-use super::quad_box;
 use super::support::{self, SpgistConfigResult};
 
 #[derive(Debug, Clone)]
@@ -30,8 +29,14 @@ impl SpgistState {
         desc: &RelationDesc,
         index_meta: &IndexRelCacheEntry,
     ) -> Result<Self, CatalogError> {
-        let mut columns = Vec::with_capacity(desc.columns.len());
-        for column_index in 0..desc.columns.len() {
+        let key_count = usize::try_from(index_meta.indnkeyatts)
+            .unwrap_or_default()
+            .min(desc.columns.len());
+        if key_count == 0 {
+            return Err(CatalogError::Corrupt("SP-GiST key column state missing"));
+        }
+        let mut columns = Vec::with_capacity(key_count);
+        for column_index in 0..key_count {
             let config_proc = index_meta
                 .amproc_oid(desc, column_index, SPGIST_CONFIG_PROC)
                 .ok_or(CatalogError::Corrupt("missing SP-GiST config support proc"))?;
@@ -112,6 +117,13 @@ impl SpgistState {
         let tuple_value = tuple_values
             .get(attno)
             .ok_or(CatalogError::Corrupt("spgist scan key attno out of range"))?;
+        if matches!(key.argument, Value::Null) {
+            return match key.strategy {
+                0 => Ok(matches!(tuple_value, Value::Null)),
+                1 => Ok(!matches!(tuple_value, Value::Null)),
+                _ => Ok(false),
+            };
+        }
         let column = self
             .columns
             .get(attno)
@@ -138,6 +150,6 @@ impl SpgistState {
             .get(attno)
             .ok_or(CatalogError::Corrupt("SP-GiST column state missing"))?;
         let _ = support::inner_consistent(column.inner_consistent_proc, tuple_value, &[])?;
-        quad_box::order_distance(tuple_value, &key.argument)
+        support::order_distance(column.leaf_consistent_proc, tuple_value, &key.argument)
     }
 }

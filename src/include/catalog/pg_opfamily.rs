@@ -34,6 +34,9 @@ pub const GIST_RANGE_FAMILY_OID: u32 = 3919;
 pub const GIST_NETWORK_FAMILY_OID: u32 = 76112;
 pub const GIST_MULTIRANGE_FAMILY_OID: u32 = 6158;
 pub const GIN_JSONB_FAMILY_OID: u32 = 4036;
+pub const SPGIST_QUAD_POINT_FAMILY_OID: u32 = 4015;
+pub const SPGIST_KD_POINT_FAMILY_OID: u32 = 4016;
+pub const SPGIST_TEXT_FAMILY_OID: u32 = 4017;
 pub const SPGIST_BOX_FAMILY_OID: u32 = 4001;
 pub const SPGIST_POLY_FAMILY_OID: u32 = 4002;
 pub const SPGIST_NETWORK_FAMILY_OID: u32 = 76113;
@@ -286,6 +289,27 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             oid: GIST_MULTIRANGE_FAMILY_OID,
             opfmethod: GIST_AM_OID,
             opfname: "multirange_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: SPGIST_QUAD_POINT_FAMILY_OID,
+            opfmethod: SPGIST_AM_OID,
+            opfname: "quad_point_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: SPGIST_KD_POINT_FAMILY_OID,
+            opfmethod: SPGIST_AM_OID,
+            opfname: "kd_point_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: SPGIST_TEXT_FAMILY_OID,
+            opfmethod: SPGIST_AM_OID,
+            opfname: "text_ops".into(),
             opfnamespace: PG_CATALOG_NAMESPACE_OID,
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },

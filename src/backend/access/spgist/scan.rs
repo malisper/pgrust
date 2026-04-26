@@ -8,6 +8,7 @@ use crate::include::access::relscan::{
 };
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::access::spgist::spgist_page_items;
+use crate::include::access::tidbitmap::TidBitmap;
 
 use super::page::{page_opaque, read_buffered_page, relation_nblocks};
 use super::state::SpgistState;
@@ -173,6 +174,20 @@ pub(crate) fn spggettuple(scan: &mut IndexScanDesc) -> Result<bool, CatalogError
         .map(|distance| (!distance.is_null).then_some(distance.value))
         .collect();
     Ok(true)
+}
+
+pub(crate) fn spggetbitmap(
+    scan: &mut IndexScanDesc,
+    bitmap: &mut TidBitmap,
+) -> Result<i64, CatalogError> {
+    let mut count = 0i64;
+    while spggettuple(scan)? {
+        if let Some(tid) = scan.xs_heaptid {
+            bitmap.add_tid(tid);
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 pub(crate) fn spgendscan(_scan: IndexScanDesc) -> Result<(), CatalogError> {

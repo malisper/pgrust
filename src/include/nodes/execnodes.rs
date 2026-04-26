@@ -450,8 +450,10 @@ impl std::fmt::Debug for IndexOnlyScanState {
 pub struct BitmapIndexScanState {
     pub(crate) rel: RelFileLocator,
     pub(crate) index_rel: RelFileLocator,
+    pub(crate) index_name: String,
     pub(crate) am_oid: u32,
     pub(crate) column_names: Vec<String>,
+    pub(crate) heap_desc: Rc<RelationDesc>,
     pub(crate) index_desc: Rc<RelationDesc>,
     pub(crate) index_meta: IndexRelCacheEntry,
     pub(crate) keys: Vec<IndexScanKey>,
@@ -467,6 +469,7 @@ impl std::fmt::Debug for BitmapIndexScanState {
         f.debug_struct("BitmapIndexScanState")
             .field("rel", &self.rel)
             .field("index_rel", &self.index_rel)
+            .field("index_name", &self.index_name)
             .field("am_oid", &self.am_oid)
             .finish()
     }
@@ -487,6 +490,8 @@ pub struct BitmapHeapScanState {
     pub(crate) current_page_pin: Option<Rc<OwnedBufferPin<SmgrStorageBackend>>>,
     pub(crate) recheck_qual: Option<Expr>,
     pub(crate) compiled_recheck: Option<crate::backend::executor::expr::CompiledPredicate>,
+    pub(crate) filter_qual: Option<Expr>,
+    pub(crate) compiled_filter: Option<crate::backend::executor::expr::CompiledPredicate>,
     pub(crate) slot: TupleSlot,
     pub(crate) source_id: usize,
     pub(crate) relation_oid: u32,

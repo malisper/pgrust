@@ -73,6 +73,7 @@ impl CatalogStore {
         relpersistence: char,
         relkind: char,
         owner_oid: u32,
+        reloptions: Option<Vec<String>>,
         ctx: &CatalogWriteContext,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let name = name.into();
@@ -85,7 +86,7 @@ impl CatalogStore {
             ));
         }
         let mut control = self.control_state()?;
-        let entry = build_relation_entry(
+        let mut entry = build_relation_entry(
             name.clone(),
             desc,
             namespace_oid,
@@ -95,6 +96,7 @@ impl CatalogStore {
             owner_oid,
             &mut control,
         )?;
+        entry.reloptions = reloptions;
         let kinds = create_table_sync_kinds(&entry);
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
         let rows = {
@@ -2766,6 +2768,7 @@ impl CatalogStore {
         desc: RelationDesc,
         namespace_oid: u32,
         owner_oid: u32,
+        reloptions: Option<Vec<String>>,
         ctx: &CatalogWriteContext,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let name = name.into();
@@ -2778,7 +2781,7 @@ impl CatalogStore {
             ));
         }
         let mut control = self.control_state()?;
-        let entry = build_relation_entry(
+        let mut entry = build_relation_entry(
             name.clone(),
             desc,
             namespace_oid,
@@ -2788,6 +2791,7 @@ impl CatalogStore {
             owner_oid,
             &mut control,
         )?;
+        entry.reloptions = reloptions;
         let kinds = create_view_sync_kinds();
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
         let rows = {
@@ -4897,7 +4901,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                if entry.relkind != 'r' {
+                if !matches!(entry.relkind, 'r' | 'v') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
@@ -5086,7 +5090,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                if entry.relkind != 'r' {
+                if !matches!(entry.relkind, 'r' | 'v') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
@@ -5110,7 +5114,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                if entry.relkind != 'r' {
+                if !matches!(entry.relkind, 'r' | 'v') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
@@ -5206,7 +5210,7 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let entry = catalog_entry_by_oid_mvcc(self, ctx, relation_oid)?;
-        if !matches!(entry.relkind, 'r' | 'p' | 'S' | 'i' | 'I') {
+        if !matches!(entry.relkind, 'r' | 'p' | 'S' | 'i' | 'I' | 'v') {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
         if self
@@ -5267,6 +5271,45 @@ impl CatalogStore {
         for oid in modified_type_oids {
             effect_record_oid(&mut effect.type_oids, oid);
         }
+        Ok(effect)
+    }
+
+    pub fn move_relation_to_namespace_mvcc(
+        &mut self,
+        relation_oid: u32,
+        namespace_oid: u32,
+        _extra_visible_type_rows: &[PgTypeRow],
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let current_name = class_row_by_oid_mvcc(self, ctx, relation_oid)?
+            .map(|row| row.relname)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if self
+            .get_relname_relid(ctx, &syscache_relname(&current_name), namespace_oid)?
+            .is_some_and(|oid| oid != relation_oid)
+        {
+            return Err(CatalogError::TableAlreadyExists(current_name.to_string()));
+        }
+        let (_old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                entry.namespace_oid = namespace_oid;
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgClass,
+                        BootstrapCatalogKind::PgType,
+                        BootstrapCatalogKind::PgConstraint,
+                        BootstrapCatalogKind::PgDepend,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.namespace_oids, namespace_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.array_type_oid);
         Ok(effect)
     }
 
@@ -5415,6 +5458,7 @@ impl CatalogStore {
         &mut self,
         relation_oid: u32,
         desc: RelationDesc,
+        reloptions: Option<Vec<String>>,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (old_entry, new_entry, _, kinds) =
@@ -5423,6 +5467,7 @@ impl CatalogStore {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 entry.desc = desc;
+                entry.reloptions = reloptions;
                 Ok((
                     (),
                     vec![
@@ -6046,6 +6091,7 @@ fn build_relation_entry(
         namespace_oid,
         owner_oid,
         relacl: None,
+        reloptions: None,
         row_type_oid,
         array_type_oid,
         reltoastrelid: 0,
@@ -6200,9 +6246,9 @@ fn build_index_entry_with_relkind(
         index_columns.push(column);
     }
 
-    if resolved_options.indclass.len() != columns.len()
-        || resolved_options.indcollation.len() != columns.len()
-        || resolved_options.indoption.len() != columns.len()
+    let key_count = resolved_options.indclass.len();
+    if resolved_options.indcollation.len() != key_count
+        || resolved_options.indoption.len() != key_count
     {
         return Err(CatalogError::Corrupt("index build options length mismatch"));
     }
@@ -6221,6 +6267,7 @@ fn build_index_entry_with_relkind(
         namespace_oid: table.namespace_oid,
         owner_oid: table.owner_oid,
         relacl: None,
+        reloptions: None,
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,
@@ -7106,6 +7153,7 @@ fn class_row_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> PgC
         relispartition: entry.relispartition,
         relfrozenxid: entry.relfrozenxid,
         relpartbound: entry.relpartbound.clone(),
+        reloptions: entry.reloptions.clone(),
         relacl: entry.relacl.clone(),
     }
 }
@@ -7158,7 +7206,7 @@ fn index_row_for_entry(entry: &CatalogEntry) -> Option<crate::include::catalog::
         indexrelid: entry.relation_oid,
         indrelid: index_meta.indrelid,
         indnatts: index_meta.indkey.len() as i16,
-        indnkeyatts: index_meta.indkey.len() as i16,
+        indnkeyatts: index_meta.indclass.len() as i16,
         indisunique: index_meta.indisunique,
         indnullsnotdistinct: index_meta.indnullsnotdistinct,
         indisprimary: index_meta.indisprimary,
@@ -7802,6 +7850,7 @@ fn catalog_entry_from_relation_row(
         namespace_oid: relation.namespace_oid,
         owner_oid: relation.owner_oid,
         relacl: class_row.relacl.clone(),
+        reloptions: class_row.reloptions.clone(),
         row_type_oid: relation.row_type_oid,
         array_type_oid: relation.array_type_oid,
         reltoastrelid: relation.reltoastrelid,
@@ -8179,6 +8228,7 @@ fn catalog_entry_from_visible_relation(
         namespace_oid: relation.namespace_oid,
         owner_oid: relation.owner_oid,
         relacl: class_row.relacl.clone(),
+        reloptions: class_row.reloptions.clone(),
         row_type_oid: relation.row_type_oid,
         array_type_oid: relation.array_type_oid,
         reltoastrelid: relation.reltoastrelid,
@@ -8229,6 +8279,7 @@ fn catalog_entry_from_relation(relation: &RelCacheEntry) -> CatalogEntry {
         namespace_oid: relation.namespace_oid,
         owner_oid: relation.owner_oid,
         relacl: None,
+        reloptions: None,
         row_type_oid: relation.row_type_oid,
         array_type_oid: relation.array_type_oid,
         reltoastrelid: relation.reltoastrelid,

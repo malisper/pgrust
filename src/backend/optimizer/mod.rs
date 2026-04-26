@@ -64,7 +64,10 @@ struct IndexableQual {
     key_expr: Expr,
     lookup: IndexStrategyLookup,
     argument: IndexScanKeyArgument,
+    index_expr: Expr,
+    recheck_expr: Option<Expr>,
     expr: Expr,
+    residual_expr: Option<Expr>,
     is_not_null: bool,
 }
 
@@ -75,6 +78,8 @@ struct IndexPathSpec {
     order_by_keys: Vec<IndexScanKey>,
     residual: Option<Expr>,
     used_quals: Vec<Expr>,
+    recheck_quals: Vec<Expr>,
+    filter_quals: Vec<Expr>,
     direction: crate::include::access::relscan::ScanDirection,
     removes_order: bool,
 }
@@ -308,6 +313,14 @@ fn aggregate_group_by(path: &Path) -> Option<&[Expr]> {
 
 fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
     path::optimize_path(plan, catalog)
+}
+
+fn optimize_path_with_config(
+    plan: Path,
+    catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
+) -> Path {
+    path::optimize_path_with_config(plan, catalog, config)
 }
 
 fn pull_up_sublinks(query: Query) -> Query {

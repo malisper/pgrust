@@ -23,7 +23,7 @@ pub fn spgist_am_handler() -> IndexAmRoutine {
         amcanmulticol: false,
         amoptionalkey: true,
         amsearcharray: false,
-        amsearchnulls: false,
+        amsearchnulls: true,
         amstorage: true,
         amclusterable: false,
         ampredlocks: false,
@@ -34,7 +34,7 @@ pub fn spgist_am_handler() -> IndexAmRoutine {
         ambeginscan: Some(scan::spgbeginscan),
         amrescan: Some(scan::spgrescan),
         amgettuple: Some(scan::spggettuple),
-        amgetbitmap: None,
+        amgetbitmap: Some(scan::spggetbitmap),
         amendscan: Some(scan::spgendscan),
         ambulkdelete: Some(vacuum::spgbulkdelete),
         amvacuumcleanup: Some(vacuum::spgvacuumcleanup),
@@ -56,7 +56,8 @@ mod tests {
         assert!(!am.amclusterable);
         assert!(!am.amcanunique);
         assert!(am.amoptionalkey);
-        assert!(!am.amsearchnulls);
+        assert!(am.amsearchnulls);
         assert!(am.amstorage);
+        assert!(am.amgetbitmap.is_some());
     }
 }

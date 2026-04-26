@@ -791,7 +791,7 @@ fn from_catalog_entry(entry: &CatalogEntry, support_lookup: &IndexSupportLookup)
                 indexrelid: entry.relation_oid,
                 indrelid: index.indrelid,
                 indnatts: index.indkey.len() as i16,
-                indnkeyatts: index.indkey.len() as i16,
+                indnkeyatts: index.indclass.len() as i16,
                 indisunique: index.indisunique,
                 indnullsnotdistinct: index.indnullsnotdistinct,
                 indisprimary: index.indisprimary,

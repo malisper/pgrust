@@ -31,6 +31,9 @@ pub struct AppendRelInfo {
 pub struct PlannerConfig {
     pub enable_partitionwise_join: bool,
     pub enable_seqscan: bool,
+    pub enable_indexscan: bool,
+    pub enable_indexonlyscan: bool,
+    pub enable_bitmapscan: bool,
 }
 
 impl Default for PlannerConfig {
@@ -38,6 +41,9 @@ impl Default for PlannerConfig {
         Self {
             enable_partitionwise_join: false,
             enable_seqscan: true,
+            enable_indexscan: true,
+            enable_indexonlyscan: true,
+            enable_bitmapscan: true,
         }
     }
 }
@@ -470,6 +476,7 @@ pub enum Path {
         rel: RelFileLocator,
         relation_oid: u32,
         index_rel: RelFileLocator,
+        index_name: String,
         am_oid: u32,
         desc: RelationDesc,
         index_desc: RelationDesc,
@@ -488,6 +495,7 @@ pub enum Path {
         desc: RelationDesc,
         bitmapqual: Box<Path>,
         recheck_qual: Vec<Expr>,
+        filter_qual: Vec<Expr>,
     },
     Filter {
         plan_info: PlanEstimate,

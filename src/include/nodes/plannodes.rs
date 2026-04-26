@@ -209,6 +209,7 @@ pub enum Plan {
         rel: RelFileLocator,
         relation_oid: u32,
         index_rel: RelFileLocator,
+        index_name: String,
         am_oid: u32,
         desc: RelationDesc,
         index_desc: RelationDesc,
@@ -226,6 +227,7 @@ pub enum Plan {
         desc: RelationDesc,
         bitmapqual: Box<Plan>,
         recheck_qual: Vec<Expr>,
+        filter_qual: Vec<Expr>,
     },
     Hash {
         plan_info: PlanEstimate,
@@ -494,7 +496,13 @@ impl Plan {
                     return left.columns();
                 }
                 let mut cols = left.columns();
-                cols.extend(right.columns());
+                if !matches!(
+                    kind,
+                    crate::include::nodes::primnodes::JoinType::Semi
+                        | crate::include::nodes::primnodes::JoinType::Anti
+                ) {
+                    cols.extend(right.columns());
+                }
                 cols
             }
             Plan::FunctionScan { call, .. } => call.output_columns().to_vec(),

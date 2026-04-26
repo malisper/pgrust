@@ -6,17 +6,26 @@ use crate::backend::executor::expr_range::{
     range_contains_element, range_contains_range, range_overlap, range_strict_left,
     range_strict_right,
 };
-use crate::backend::executor::{compare_network_values, network_contains};
+use crate::backend::executor::{
+    compare_network_values,
+    expr_geometry::{GEOMETRY_EPSILON, box_contains_point},
+    network_contains,
+};
 use crate::include::catalog::{
     SPG_BOX_QUAD_CHOOSE_PROC_OID, SPG_BOX_QUAD_CONFIG_PROC_OID,
     SPG_BOX_QUAD_INNER_CONSISTENT_PROC_OID, SPG_BOX_QUAD_LEAF_CONSISTENT_PROC_OID,
-    SPG_BOX_QUAD_PICKSPLIT_PROC_OID, SPG_NETWORK_CHOOSE_PROC_OID, SPG_NETWORK_CONFIG_PROC_OID,
-    SPG_NETWORK_INNER_CONSISTENT_PROC_OID, SPG_NETWORK_LEAF_CONSISTENT_PROC_OID,
-    SPG_NETWORK_PICKSPLIT_PROC_OID, SPG_RANGE_CHOOSE_PROC_OID, SPG_RANGE_CONFIG_PROC_OID,
-    SPG_RANGE_INNER_CONSISTENT_PROC_OID, SPG_RANGE_LEAF_CONSISTENT_PROC_OID,
-    SPG_RANGE_PICKSPLIT_PROC_OID,
+    SPG_BOX_QUAD_PICKSPLIT_PROC_OID, SPG_KD_CHOOSE_PROC_OID, SPG_KD_CONFIG_PROC_OID,
+    SPG_KD_INNER_CONSISTENT_PROC_OID, SPG_KD_PICKSPLIT_PROC_OID, SPG_NETWORK_CHOOSE_PROC_OID,
+    SPG_NETWORK_CONFIG_PROC_OID, SPG_NETWORK_INNER_CONSISTENT_PROC_OID,
+    SPG_NETWORK_LEAF_CONSISTENT_PROC_OID, SPG_NETWORK_PICKSPLIT_PROC_OID, SPG_QUAD_CHOOSE_PROC_OID,
+    SPG_QUAD_CONFIG_PROC_OID, SPG_QUAD_INNER_CONSISTENT_PROC_OID,
+    SPG_QUAD_LEAF_CONSISTENT_PROC_OID, SPG_QUAD_PICKSPLIT_PROC_OID, SPG_RANGE_CHOOSE_PROC_OID,
+    SPG_RANGE_CONFIG_PROC_OID, SPG_RANGE_INNER_CONSISTENT_PROC_OID,
+    SPG_RANGE_LEAF_CONSISTENT_PROC_OID, SPG_RANGE_PICKSPLIT_PROC_OID, SPG_TEXT_CHOOSE_PROC_OID,
+    SPG_TEXT_CONFIG_PROC_OID, SPG_TEXT_INNER_CONSISTENT_PROC_OID,
+    SPG_TEXT_LEAF_CONSISTENT_PROC_OID, SPG_TEXT_PICKSPLIT_PROC_OID,
 };
-use crate::include::nodes::datum::{GeoBox, InetValue, RangeValue, Value};
+use crate::include::nodes::datum::{GeoBox, GeoPoint, InetValue, RangeValue, Value};
 use crate::include::nodes::primnodes::BuiltinScalarFunction;
 
 use super::quad_box;
@@ -28,11 +37,14 @@ pub(crate) struct SpgistConfigResult {
 
 pub(crate) fn config(proc_oid: u32) -> Result<SpgistConfigResult, CatalogError> {
     match proc_oid {
-        SPG_BOX_QUAD_CONFIG_PROC_OID | SPG_NETWORK_CONFIG_PROC_OID | SPG_RANGE_CONFIG_PROC_OID => {
-            Ok(SpgistConfigResult {
-                can_return_data: true,
-            })
-        }
+        SPG_BOX_QUAD_CONFIG_PROC_OID
+        | SPG_NETWORK_CONFIG_PROC_OID
+        | SPG_QUAD_CONFIG_PROC_OID
+        | SPG_KD_CONFIG_PROC_OID
+        | SPG_RANGE_CONFIG_PROC_OID
+        | SPG_TEXT_CONFIG_PROC_OID => Ok(SpgistConfigResult {
+            can_return_data: true,
+        }),
         _ => Err(CatalogError::Io(format!(
             "unsupported SP-GiST config proc {proc_oid}"
         ))),
@@ -42,7 +54,11 @@ pub(crate) fn config(proc_oid: u32) -> Result<SpgistConfigResult, CatalogError> 
 pub(crate) fn choose(proc_oid: u32, centroid: &Value, leaf: &Value) -> Result<u8, CatalogError> {
     match proc_oid {
         SPG_BOX_QUAD_CHOOSE_PROC_OID => quad_box::choose(proc_oid, centroid, leaf),
-        SPG_NETWORK_CHOOSE_PROC_OID | SPG_RANGE_CHOOSE_PROC_OID => {
+        SPG_NETWORK_CHOOSE_PROC_OID
+        | SPG_QUAD_CHOOSE_PROC_OID
+        | SPG_KD_CHOOSE_PROC_OID
+        | SPG_RANGE_CHOOSE_PROC_OID
+        | SPG_TEXT_CHOOSE_PROC_OID => {
             let _ = (centroid, leaf);
             Ok(0)
         }
@@ -58,7 +74,11 @@ pub(crate) fn picksplit(
 ) -> Result<Option<(GeoBox, Vec<u8>)>, CatalogError> {
     match proc_oid {
         SPG_BOX_QUAD_PICKSPLIT_PROC_OID => quad_box::picksplit(proc_oid, values),
-        SPG_NETWORK_PICKSPLIT_PROC_OID | SPG_RANGE_PICKSPLIT_PROC_OID => {
+        SPG_NETWORK_PICKSPLIT_PROC_OID
+        | SPG_QUAD_PICKSPLIT_PROC_OID
+        | SPG_KD_PICKSPLIT_PROC_OID
+        | SPG_RANGE_PICKSPLIT_PROC_OID
+        | SPG_TEXT_PICKSPLIT_PROC_OID => {
             let _ = values;
             Ok(None)
         }
@@ -80,7 +100,10 @@ pub(crate) fn inner_consistent(
         // beyond append-only leaf pages.
         SPG_BOX_QUAD_INNER_CONSISTENT_PROC_OID
         | SPG_NETWORK_INNER_CONSISTENT_PROC_OID
-        | SPG_RANGE_INNER_CONSISTENT_PROC_OID => Ok((0u8..16).collect()),
+        | SPG_QUAD_INNER_CONSISTENT_PROC_OID
+        | SPG_KD_INNER_CONSISTENT_PROC_OID
+        | SPG_RANGE_INNER_CONSISTENT_PROC_OID
+        | SPG_TEXT_INNER_CONSISTENT_PROC_OID => Ok((0u8..16).collect()),
         _ => Err(CatalogError::Io(format!(
             "unsupported SP-GiST inner consistent proc {proc_oid}"
         ))),
@@ -96,11 +119,112 @@ pub(crate) fn leaf_consistent(
     match proc_oid {
         SPG_BOX_QUAD_LEAF_CONSISTENT_PROC_OID => quad_box::leaf_consistent(strategy, key, query),
         SPG_NETWORK_LEAF_CONSISTENT_PROC_OID => network_leaf_consistent(strategy, key, query),
+        SPG_QUAD_LEAF_CONSISTENT_PROC_OID => point_leaf_consistent(strategy, key, query),
         SPG_RANGE_LEAF_CONSISTENT_PROC_OID => range_leaf_consistent(strategy, key, query),
+        SPG_TEXT_LEAF_CONSISTENT_PROC_OID => text_leaf_consistent(strategy, key, query),
         _ => Err(CatalogError::Io(format!(
             "unsupported SP-GiST leaf consistent proc {proc_oid}"
         ))),
     }
+}
+
+pub(crate) fn order_distance(
+    proc_oid: u32,
+    key: &Value,
+    query: &Value,
+) -> Result<Option<f64>, CatalogError> {
+    match proc_oid {
+        SPG_BOX_QUAD_LEAF_CONSISTENT_PROC_OID => quad_box::order_distance(key, query),
+        SPG_QUAD_LEAF_CONSISTENT_PROC_OID => point_order_distance(key, query),
+        _ => Err(CatalogError::Io(format!(
+            "unsupported SP-GiST order-by proc {proc_oid}"
+        ))),
+    }
+}
+
+fn expect_point(value: &Value) -> Result<&GeoPoint, CatalogError> {
+    match value {
+        Value::Point(value) => Ok(value),
+        Value::Null => Err(CatalogError::Io(
+            "SP-GiST point support cannot index NULL".into(),
+        )),
+        other => Err(CatalogError::Io(format!(
+            "SP-GiST point support expected point value, got {other:?}"
+        ))),
+    }
+}
+
+fn point_eq(left: f64, right: f64) -> bool {
+    left == right || (left - right).abs() <= GEOMETRY_EPSILON
+}
+
+fn point_same(left: &GeoPoint, right: &GeoPoint) -> bool {
+    if left.x.is_nan() || left.y.is_nan() || right.x.is_nan() || right.y.is_nan() {
+        return left.x.to_bits() == right.x.to_bits() && left.y.to_bits() == right.y.to_bits();
+    }
+    point_eq(left.x, right.x) && point_eq(left.y, right.y)
+}
+
+fn point_leaf_consistent(strategy: u16, key: &Value, query: &Value) -> Result<bool, CatalogError> {
+    if matches!(key, Value::Null) || matches!(query, Value::Null) {
+        return Ok(false);
+    }
+    let key = expect_point(key)?;
+    Ok(match strategy {
+        1 => key.x + GEOMETRY_EPSILON < expect_point(query)?.x,
+        5 => key.x > expect_point(query)?.x + GEOMETRY_EPSILON,
+        6 => point_same(key, expect_point(query)?),
+        8 => match query {
+            Value::Box(geo_box) => box_contains_point(geo_box, key),
+            other => {
+                return Err(CatalogError::Io(format!(
+                    "SP-GiST point contained-by strategy expected box value, got {other:?}"
+                )));
+            }
+        },
+        10 | 29 => key.y + GEOMETRY_EPSILON < expect_point(query)?.y,
+        11 | 30 => key.y > expect_point(query)?.y + GEOMETRY_EPSILON,
+        _ => {
+            return Err(CatalogError::Corrupt("unsupported SP-GiST point strategy"));
+        }
+    })
+}
+
+fn point_order_distance(key: &Value, query: &Value) -> Result<Option<f64>, CatalogError> {
+    if matches!(key, Value::Null) || matches!(query, Value::Null) {
+        return Ok(None);
+    }
+    let key = expect_point(key)?;
+    let query = expect_point(query)?;
+    Ok(Some((key.x - query.x).hypot(key.y - query.y)))
+}
+
+fn expect_text(value: &Value) -> Result<&str, CatalogError> {
+    value.as_text().ok_or_else(|| {
+        CatalogError::Io(format!(
+            "SP-GiST text support expected text value, got {value:?}"
+        ))
+    })
+}
+
+fn text_leaf_consistent(strategy: u16, key: &Value, query: &Value) -> Result<bool, CatalogError> {
+    if matches!(key, Value::Null) || matches!(query, Value::Null) {
+        return Ok(false);
+    }
+    let key = expect_text(key)?;
+    let query = expect_text(query)?;
+    let cmp = key.as_bytes().cmp(query.as_bytes());
+    Ok(match strategy {
+        1 | 11 => cmp.is_lt(),
+        2 | 12 => cmp.is_le(),
+        3 => cmp.is_eq(),
+        4 | 14 => cmp.is_ge(),
+        5 | 15 => cmp.is_gt(),
+        28 => key.starts_with(query),
+        _ => {
+            return Err(CatalogError::Corrupt("unsupported SP-GiST text strategy"));
+        }
+    })
 }
 
 fn expect_network(value: &Value) -> Result<&InetValue, CatalogError> {
