@@ -620,7 +620,16 @@ pub(crate) fn pg_proc_row_from_values(values: Vec<Value>) -> Result<PgProcRow, C
         proargmodes: nullable_char_array(&values[21])?,
         proargnames: nullable_text_array(&values[22])?,
         prosrc: expect_text(&values[23])?,
-        proacl: nullable_text_array(&values[24])?,
+        proargdefaults: values
+            .get(24)
+            .map(nullable_text_array)
+            .transpose()?
+            .flatten(),
+        proacl: values
+            .get(25)
+            .map(nullable_text_array)
+            .transpose()?
+            .flatten(),
     })
 }
 
@@ -1339,6 +1348,15 @@ fn pg_proc_row_values(row: PgProcRow) -> Vec<Value> {
             .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID)
         })),
         Value::Text(row.prosrc.into()),
+        nullable_array_value(row.proargdefaults.map(|defaults| {
+            ArrayValue::from_1d(
+                defaults
+                    .into_iter()
+                    .map(|default| Value::Text(default.into()))
+                    .collect(),
+            )
+            .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID)
+        })),
         nullable_array_value(row.proacl.map(text_array_value)),
     ]
 }

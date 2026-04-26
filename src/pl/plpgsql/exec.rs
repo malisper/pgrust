@@ -288,6 +288,24 @@ pub fn execute_user_defined_set_returning_function(
     result
 }
 
+pub fn execute_user_defined_procedure_values(
+    proc_oid: u32,
+    arg_values: &[Value],
+    output_columns: &[QueryColumn],
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let compiled = compiled_procedure_for_proc(proc_oid, ctx)?;
+    let track_stats = ctx.session_stats.read().track_functions.tracks_plpgsql();
+    if track_stats {
+        ctx.session_stats.write().begin_function_call(proc_oid);
+    }
+    let result = execute_compiled_function(&compiled, arg_values, Some(output_columns), ctx);
+    if track_stats {
+        ctx.session_stats.write().finish_function_call(proc_oid);
+    }
+    result
+}
+
 pub fn execute_user_defined_trigger_function(
     proc_oid: u32,
     call: &TriggerCallContext,
@@ -533,6 +551,54 @@ fn is_polymorphic_type_oid(oid: u32) -> bool {
             | ANYCOMPATIBLERANGEOID
             | ANYCOMPATIBLEMULTIRANGEOID
     )
+}
+
+fn compiled_procedure_for_proc(
+    proc_oid: u32,
+    ctx: &mut ExecutorContext,
+) -> Result<Arc<CompiledFunction>, ExecError> {
+    if let Some(compiled) = ctx.compiled_functions.get(&proc_oid) {
+        return Ok(Arc::clone(compiled));
+    }
+
+    let compiled = {
+        let catalog = ctx.catalog.as_ref().ok_or_else(|| {
+            function_runtime_error(
+                "user-defined procedures require executor catalog context",
+                None,
+                "0A000",
+            )
+        })?;
+        let row = catalog.proc_row_by_oid(proc_oid).ok_or_else(|| {
+            function_runtime_error(&format!("unknown procedure oid {proc_oid}"), None, "42883")
+        })?;
+        if row.prokind != 'p' {
+            return Err(function_runtime_error(
+                "only procedures are executable through CALL",
+                Some(format!("prokind = {}", row.prokind)),
+                "0A000",
+            ));
+        }
+        let language = catalog.language_row_by_oid(row.prolang).ok_or_else(|| {
+            function_runtime_error(
+                &format!("unknown language oid {}", row.prolang),
+                None,
+                "42883",
+            )
+        })?;
+        if !language.lanname.eq_ignore_ascii_case("plpgsql") {
+            return Err(function_runtime_error(
+                "only LANGUAGE plpgsql procedures are supported",
+                Some(format!("procedure language is {}", language.lanname)),
+                "0A000",
+            ));
+        }
+        Arc::new(compile_function_from_proc(&row, catalog).map_err(ExecError::Parse)?)
+    };
+
+    ctx.compiled_functions
+        .insert(proc_oid, Arc::clone(&compiled));
+    Ok(compiled)
 }
 
 fn execute_compiled_function(

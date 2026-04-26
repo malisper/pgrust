@@ -340,9 +340,16 @@ fn execute_statement_with_source(
             "role management".into(),
         ))),
         Statement::CreateIndex(stmt) => execute_create_index(stmt, catalog, ctx),
+        Statement::Call(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "CALL execution".into(),
+        ))),
         Statement::CreateFunction(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE FUNCTION handled by database/session layer",
             actual: "CREATE FUNCTION".into(),
+        })),
+        Statement::CreateProcedure(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE PROCEDURE handled by database/session layer",
+            actual: "CREATE PROCEDURE".into(),
         })),
         Statement::CreateAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE AGGREGATE handled by database/session layer",
@@ -355,6 +362,10 @@ fn execute_statement_with_source(
         Statement::DropFunction(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP FUNCTION handled by database/session layer",
             actual: "DROP FUNCTION".into(),
+        })),
+        Statement::DropProcedure(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP PROCEDURE handled by database/session layer",
+            actual: "DROP PROCEDURE".into(),
         })),
         Statement::DropAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP AGGREGATE handled by database/session layer",
@@ -372,6 +383,9 @@ fn execute_statement_with_source(
             expected: "ALTER OPERATOR handled by database/session layer",
             actual: "ALTER OPERATOR".into(),
         })),
+        Statement::AlterProcedure(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "ALTER PROCEDURE".into(),
+        ))),
         Statement::CreateDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE DATABASE handled by database/session layer",
             actual: "CREATE DATABASE".into(),
@@ -612,9 +626,16 @@ pub fn execute_readonly_statement_with_config(
             expected: "read-only statement",
             actual: "CREATE INDEX".into(),
         })),
+        Statement::Call(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "CALL execution".into(),
+        ))),
         Statement::CreateFunction(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE FUNCTION".into(),
+        })),
+        Statement::CreateProcedure(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE PROCEDURE".into(),
         })),
         Statement::CreateAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
@@ -627,6 +648,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::DropFunction(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "DROP FUNCTION".into(),
+        })),
+        Statement::DropProcedure(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP PROCEDURE".into(),
         })),
         Statement::DropAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
@@ -644,6 +669,9 @@ pub fn execute_readonly_statement_with_config(
             expected: "read-only statement",
             actual: "ALTER OPERATOR".into(),
         })),
+        Statement::AlterProcedure(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "ALTER PROCEDURE".into(),
+        ))),
         Statement::CreateDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE DATABASE".into(),
