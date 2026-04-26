@@ -116,6 +116,7 @@ const COPY_TEXT_NULL_SENTINEL: &str = "\0pgrust_copy_text_null";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CopyOptions {
     pub format: CopyFormat,
+    pub encoding: Option<String>,
     pub header: CopyHeader,
     pub quote: char,
     pub escape: char,
@@ -130,6 +131,7 @@ impl Default for CopyOptions {
     fn default() -> Self {
         Self {
             format: CopyFormat::Text,
+            encoding: None,
             header: CopyHeader::None,
             quote: '"',
             escape: '"',
@@ -6769,7 +6771,11 @@ impl Session {
     ) -> Result<CopyExecutionResult, ExecError> {
         match &copy.direction {
             CopyDirection::From(CopyEndpoint::File(path)) => {
-                let text = read_copy_text_file(path)?;
+                let text = read_copy_text_file(
+                    path,
+                    &copy_command_encoding_name(&copy.options, self.gucs.get("client_encoding")),
+                    copy_relation_table_name(&copy.relation),
+                )?;
                 let inserted = self.copy_from_text(db, copy, &text)?;
                 Ok(CopyExecutionResult::AffectedRows(inserted))
             }
@@ -6801,6 +6807,10 @@ impl Session {
                 let catalog = self.catalog_lookup(db);
                 let enum_labels = copy_enum_label_map(&catalog);
                 let data = render_copy_output(&columns, &rows, &copy.options, Some(&enum_labels));
+                let data = encode_copy_output_bytes(
+                    data,
+                    &copy_command_encoding_name(&copy.options, self.gucs.get("client_encoding")),
+                )?;
                 if let CopyEndpoint::File(path) = endpoint {
                     let resolved = resolve_copy_output_path(path);
                     if let Some(parent) = std::path::Path::new(&resolved).parent() {
@@ -7582,9 +7592,18 @@ fn copy_to_encoding_name(
     options: &crate::include::nodes::parsenodes::CopyToOptions,
     client_encoding: Option<&String>,
 ) -> String {
-    options
-        .encoding
-        .as_deref()
+    effective_copy_encoding_name(options.encoding.as_deref(), client_encoding)
+}
+
+fn copy_command_encoding_name(options: &CopyOptions, client_encoding: Option<&String>) -> String {
+    effective_copy_encoding_name(options.encoding.as_deref(), client_encoding)
+}
+
+fn effective_copy_encoding_name(
+    option_encoding: Option<&str>,
+    client_encoding: Option<&String>,
+) -> String {
+    option_encoding
         .or(client_encoding.map(String::as_str))
         .unwrap_or("UTF8")
         .to_ascii_uppercase()
@@ -7651,6 +7670,16 @@ fn encode_copy_file_text(text: &str, encoding_name: &str) -> Result<Vec<u8>, Exe
         });
     }
     Ok(encoded.into_owned())
+}
+
+fn encode_copy_output_bytes(bytes: Vec<u8>, encoding_name: &str) -> Result<Vec<u8>, ExecError> {
+    let text = String::from_utf8(bytes).map_err(|err| ExecError::DetailedError {
+        message: format!("could not encode COPY data: {err}"),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    encode_copy_file_text(&text, encoding_name)
 }
 
 fn is_latin1_copy_encoding(name: &str) -> bool {
@@ -8382,6 +8411,13 @@ fn parse_copy_table_target(target: &str) -> Result<(String, Option<Vec<String>>)
     }
 }
 
+fn copy_relation_table_name(relation: &CopyRelation) -> Option<&str> {
+    match relation {
+        CopyRelation::Table { name, .. } => Some(name.as_str()),
+        CopyRelation::Query(_) => None,
+    }
+}
+
 fn parse_copy_endpoint(input: &str, from: bool) -> Result<(CopyEndpoint, &str), ExecError> {
     let input = input.trim_start();
     let lower = input.to_ascii_lowercase();
@@ -8452,6 +8488,18 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
                     }));
                 }
             }
+            rest = after;
+            continue;
+        }
+        if lower.starts_with("encoding") && copy_keyword_boundary(rest, 8) {
+            let (value, after) =
+                parse_copy_string_token(rest[8..].trim_start()).ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "COPY encoding string",
+                        actual: rest.into(),
+                    })
+                })?;
+            options.encoding = Some(value);
             rest = after;
             continue;
         }
@@ -8563,6 +8611,9 @@ fn merge_copy_options(options: &mut CopyOptions, nested: CopyOptions) {
     if nested.format != CopyFormat::Text {
         options.format = nested.format;
     }
+    if nested.encoding.is_some() {
+        options.encoding = nested.encoding;
+    }
     if nested.header != CopyHeader::None {
         options.header = nested.header;
     }
@@ -8581,14 +8632,19 @@ fn merge_copy_options(options: &mut CopyOptions, nested: CopyOptions) {
     options.where_clause = options.where_clause.take().or(nested.where_clause);
 }
 
-fn read_copy_text_file(file_path: &str) -> Result<String, ExecError> {
+fn read_copy_text_file(
+    file_path: &str,
+    encoding_name: &str,
+    table_name: Option<&str>,
+) -> Result<String, ExecError> {
     let resolved = resolve_copy_file_path(file_path);
-    fs::read_to_string(&resolved).map_err(|err| {
+    let bytes = fs::read(&resolved).map_err(|err| {
         ExecError::Parse(ParseError::UnexpectedToken {
             expected: "readable COPY source file",
             actual: format!("{file_path}: {err}"),
         })
-    })
+    })?;
+    decode_copy_file_bytes(&bytes, encoding_name, table_name.unwrap_or(""))
 }
 
 pub(crate) fn parse_copy_input_rows(
