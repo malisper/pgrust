@@ -2002,15 +2002,123 @@ pub(crate) fn polygon_overlap(left: &GeoPolygon, right: &GeoPolygon) -> bool {
 }
 
 pub(crate) fn polygon_contains_polygon(outer: &GeoPolygon, inner: &GeoPolygon) -> bool {
-    inner
-        .points
-        .iter()
-        .all(|point| point_in_polygon(point, outer) != 0)
-        && !edges_intersect(&outer.points, true, &inner.points, true)
+    if outer.points.is_empty() || inner.points.is_empty() {
+        return false;
+    }
+    if !box_contains_box(&outer.bound_box, &inner.bound_box) {
+        return false;
+    }
+    let mut previous = &inner.points[inner.points.len() - 1];
+    for point in &inner.points {
+        if !lseg_inside_polygon(previous, point, outer, 0) {
+            return false;
+        }
+        previous = point;
+    }
+    true
 }
 
 fn point_in_polygon(point: &GeoPoint, poly: &GeoPolygon) -> i32 {
     point_inside(point, &poly.points)
+}
+
+// PostgreSQL polygon containment checks every contained edge so boundary
+// touches count as contained while true crossings are rejected.
+fn touched_lseg_inside_polygon(
+    a: &GeoPoint,
+    b: &GeoPoint,
+    segment: &GeoLseg,
+    poly: &GeoPolygon,
+    start: usize,
+) -> bool {
+    let test_segment = GeoLseg {
+        p: [a.clone(), b.clone()],
+    };
+
+    if point_same(a, &segment.p[0]) {
+        if lseg_contains_point(&test_segment, &segment.p[1]) {
+            return lseg_inside_polygon(b, &segment.p[1], poly, start);
+        }
+    } else if point_same(a, &segment.p[1]) {
+        if lseg_contains_point(&test_segment, &segment.p[0]) {
+            return lseg_inside_polygon(b, &segment.p[0], poly, start);
+        }
+    } else if lseg_contains_point(&test_segment, &segment.p[0]) {
+        return lseg_inside_polygon(b, &segment.p[0], poly, start);
+    } else if lseg_contains_point(&test_segment, &segment.p[1]) {
+        return lseg_inside_polygon(b, &segment.p[1], poly, start);
+    }
+
+    true
+}
+
+fn lseg_inside_polygon(a: &GeoPoint, b: &GeoPoint, poly: &GeoPolygon, start: usize) -> bool {
+    if poly.points.is_empty() {
+        return false;
+    }
+    let mut result = true;
+    let mut intersection = false;
+    let test_segment = GeoLseg {
+        p: [a.clone(), b.clone()],
+    };
+    let previous_idx = if start == 0 {
+        poly.points.len() - 1
+    } else {
+        start - 1
+    };
+    let mut poly_segment = GeoLseg {
+        p: [
+            poly.points[previous_idx].clone(),
+            poly.points[previous_idx].clone(),
+        ],
+    };
+
+    for idx in start..poly.points.len() {
+        if !result {
+            break;
+        }
+        poly_segment.p[1] = poly.points[idx].clone();
+
+        if lseg_contains_point(&poly_segment, &test_segment.p[0]) {
+            if lseg_contains_point(&poly_segment, &test_segment.p[1]) {
+                return true;
+            }
+            result = touched_lseg_inside_polygon(
+                &test_segment.p[0],
+                &test_segment.p[1],
+                &poly_segment,
+                poly,
+                idx + 1,
+            );
+        } else if lseg_contains_point(&poly_segment, &test_segment.p[1]) {
+            result = touched_lseg_inside_polygon(
+                &test_segment.p[1],
+                &test_segment.p[0],
+                &poly_segment,
+                poly,
+                idx + 1,
+            );
+        } else if let Some(intersection_point) = lseg_intersection(&test_segment, &poly_segment) {
+            intersection = true;
+            result = lseg_inside_polygon(&test_segment.p[0], &intersection_point, poly, idx + 1);
+            if result {
+                result =
+                    lseg_inside_polygon(&test_segment.p[1], &intersection_point, poly, idx + 1);
+            }
+        }
+
+        poly_segment.p[0] = poly_segment.p[1].clone();
+    }
+
+    if result && !intersection {
+        let midpoint = GeoPoint {
+            x: (test_segment.p[0].x + test_segment.p[1].x) / 2.0,
+            y: (test_segment.p[0].y + test_segment.p[1].y) / 2.0,
+        };
+        result = point_in_polygon(&midpoint, poly) != 0;
+    }
+
+    result
 }
 
 fn path_to_polygon(path: &GeoPath) -> Result<GeoPolygon, ExecError> {
@@ -3011,7 +3119,8 @@ impl<'a> GeometryParser<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_lseg_text;
+    use super::{circle_to_polygon, make_polygon, parse_lseg_text, polygon_contains_polygon};
+    use crate::include::nodes::datum::{GeoCircle, GeoPoint};
 
     #[test]
     fn parse_lseg_accepts_flat_text_input() {
@@ -3029,5 +3138,23 @@ mod tests {
         assert_eq!(lseg.p[0].y, 0.0);
         assert_eq!(lseg.p[1].x, 6.0);
         assert_eq!(lseg.p[1].y, 6.0);
+    }
+
+    #[test]
+    fn polygon_contains_boundary_touching_regression_rows() {
+        let outer = make_polygon(vec![
+            GeoPoint { x: 300.0, y: 300.0 },
+            GeoPoint { x: 400.0, y: 600.0 },
+            GeoPoint { x: 600.0, y: 500.0 },
+            GeoPoint { x: 700.0, y: 200.0 },
+        ]);
+
+        for (center, radius) in [
+            (GeoPoint { x: 480.0, y: 260.0 }, 5.0),
+            (GeoPoint { x: 540.0, y: 250.0 }, 10.0),
+        ] {
+            let inner = circle_to_polygon(12, &GeoCircle { center, radius }).unwrap();
+            assert!(polygon_contains_polygon(&outer, &inner));
+        }
     }
 }

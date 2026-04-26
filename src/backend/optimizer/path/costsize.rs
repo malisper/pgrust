@@ -15,11 +15,11 @@ use crate::include::access::brin_page::REVMAP_PAGE_MAXITEMS;
 use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
 use crate::include::access::spgist::SPGIST_CONFIG_PROC;
 use crate::include::catalog::{
-    BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GIST_MULTIRANGE_FAMILY_OID,
-    GIST_RANGE_FAMILY_OID, HASH_AM_OID, PgStatisticRow, SPG_BOX_QUAD_CONFIG_PROC_OID,
-    SPG_KD_CONFIG_PROC_OID, SPG_NETWORK_CONFIG_PROC_OID, SPG_QUAD_CONFIG_PROC_OID,
-    SPG_RANGE_CONFIG_PROC_OID, SPG_TEXT_CONFIG_PROC_OID, SPGIST_AM_OID, SPGIST_TEXT_FAMILY_OID,
-    bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
+    ANYARRAYOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID,
+    GIST_AM_OID, GIST_MULTIRANGE_FAMILY_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID, PgStatisticRow,
+    SPG_BOX_QUAD_CONFIG_PROC_OID, SPG_KD_CONFIG_PROC_OID, SPG_NETWORK_CONFIG_PROC_OID,
+    SPG_QUAD_CONFIG_PROC_OID, SPG_RANGE_CONFIG_PROC_OID, SPG_TEXT_CONFIG_PROC_OID, SPGIST_AM_OID,
+    SPGIST_TEXT_FAMILY_OID, bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
     proc_oid_for_builtin_scalar_function, range_type_ref_for_sql_type, relkind_has_storage,
 };
 use crate::include::nodes::datum::ArrayValue;
@@ -3831,13 +3831,20 @@ fn const_gist_argument_value(expr: &Expr) -> Option<Value> {
         .iter()
         .map(const_gist_argument_value)
         .collect::<Option<Vec<_>>>()?;
-    crate::backend::executor::expr_range::eval_range_function(
+    if let Some(result) = crate::backend::executor::expr_range::eval_range_function(
         builtin,
         &values,
         func.funcresulttype,
         func.funcvariadic,
-    )?
-    .ok()
+    ) {
+        return result.ok();
+    }
+    if let Some(result) =
+        crate::backend::executor::expr_geometry::eval_geometry_function(builtin, &values)
+    {
+        return result.ok();
+    }
+    None
 }
 
 fn runtime_index_argument_expr(expr: &Expr) -> bool {
@@ -4476,19 +4483,7 @@ fn gist_order_match(
                 return None;
             }
             let right_type_oid = value_type_oid(&argument);
-            let left_type_oid = index
-                .index_meta
-                .opckeytype_oids
-                .get(index_pos)
-                .copied()
-                .filter(|oid| *oid != 0)
-                .or_else(|| {
-                    index
-                        .desc
-                        .columns
-                        .get(index_pos)
-                        .map(|column| sql_type_oid(column.sql_type))
-                });
+            let left_type_oid = index_operator_type_oid(index, index_pos);
             let strategy = left_type_oid
                 .zip(right_type_oid)
                 .and_then(|(left_type_oid, right_type_oid)| {
@@ -4530,16 +4525,35 @@ fn gist_order_match(
     )
 }
 
+fn index_operator_type_oid(index: &BoundIndexRelation, index_pos: usize) -> Option<u32> {
+    index
+        .index_meta
+        .opcintype_oids
+        .get(index_pos)
+        .copied()
+        .filter(|oid| *oid != 0)
+        .filter(|oid| !matches!(*oid, ANYOID | ANYARRAYOID | ANYRANGEOID | ANYMULTIRANGEOID))
+        .or_else(|| {
+            index
+                .desc
+                .columns
+                .get(index_pos)
+                .map(|column| sql_type_oid(column.sql_type))
+        })
+}
+
 fn gist_order_item(item: &OrderByEntry) -> Option<(usize, u32, Value)> {
     match strip_casts(&item.expr) {
         Expr::Func(func) if func.args.len() == 2 => {
             let left = strip_casts(&func.args[0]);
             let right = &func.args[1];
-            if let (Some(column), Some(value)) = (expr_column_index(left), const_argument(right)) {
+            if let (Some(column), Some(value)) =
+                (expr_column_index(left), const_gist_argument_value(right))
+            {
                 return Some((column, func.funcid, value));
             }
             if let (Some(value), Some(column)) = (
-                const_argument(&func.args[0]),
+                const_gist_argument_value(&func.args[0]),
                 expr_column_index(strip_casts(&func.args[1])),
             ) {
                 return Some((column, commuted_function_proc_oid(func.funcid)?, value));
