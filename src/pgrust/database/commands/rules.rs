@@ -594,6 +594,7 @@ pub(crate) fn execute_bound_insert_with_rules(
                         &stmt.rls_write_checks,
                         &stmt.indexes,
                         std::slice::from_ref(&row),
+                        None,
                         ctx,
                         xid,
                         cid,

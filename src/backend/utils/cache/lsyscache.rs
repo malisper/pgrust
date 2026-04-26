@@ -52,19 +52,16 @@ fn namespace_row_by_name(
     txn_ctx: Option<(TransactionId, CommandId)>,
     name: &str,
 ) -> Option<crate::include::catalog::PgNamespaceRow> {
-    search_sys_cache1_db(
-        db,
-        client_id,
-        txn_ctx,
-        SysCacheId::NamespaceName,
-        catalog_name_key(name),
+    select_namespace_row(
+        search_sys_cache1_db(
+            db,
+            client_id,
+            txn_ctx,
+            SysCacheId::NamespaceName,
+            catalog_name_key(name),
+        )
+        .ok()?,
     )
-    .ok()?
-    .into_iter()
-    .find_map(|tuple| match tuple {
-        SysCacheTuple::Namespace(row) => Some(row),
-        _ => None,
-    })
 }
 
 fn namespace_row_by_oid(
@@ -73,18 +70,29 @@ fn namespace_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<crate::include::catalog::PgNamespaceRow> {
-    search_sys_cache1_db(
-        db,
-        client_id,
-        txn_ctx,
-        SysCacheId::NamespaceOid,
-        oid_key(oid),
+    select_namespace_row(
+        search_sys_cache1_db(
+            db,
+            client_id,
+            txn_ctx,
+            SysCacheId::NamespaceOid,
+            oid_key(oid),
+        )
+        .ok()?,
     )
-    .ok()?
-    .into_iter()
-    .find_map(|tuple| match tuple {
-        SysCacheTuple::Namespace(row) => Some(row),
-        _ => None,
+}
+
+fn select_namespace_row(
+    tuples: Vec<SysCacheTuple>,
+) -> Option<crate::include::catalog::PgNamespaceRow> {
+    tuples.into_iter().fold(None, |selected, tuple| {
+        let SysCacheTuple::Namespace(row) = tuple else {
+            return selected;
+        };
+        match selected {
+            Some(existing) if existing.nspacl.is_some() && row.nspacl.is_none() => Some(existing),
+            _ => Some(row),
+        }
     })
 }
 

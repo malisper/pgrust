@@ -688,9 +688,9 @@ pub(super) fn bind_scalar_function_call(
                 SqlType::new(SqlTypeKind::TimestampTz)
             };
             let source_target = if source_is_timetz {
-                SqlType::new(SqlTypeKind::TimeTz)
+                source_type
             } else if source_is_time {
-                SqlType::new(SqlTypeKind::Time)
+                source_type
             } else if source_is_timestamptz {
                 SqlType::new(SqlTypeKind::TimestampTz)
             } else {
@@ -3085,7 +3085,11 @@ pub(super) fn bind_scalar_function_call(
         | BuiltinScalarFunction::HashMacAddr
         | BuiltinScalarFunction::HashMacAddrExtended
         | BuiltinScalarFunction::HashMacAddr8
-        | BuiltinScalarFunction::HashMacAddr8Extended => {
+        | BuiltinScalarFunction::HashMacAddr8Extended
+        | BuiltinScalarFunction::TxidSnapshotXmin
+        | BuiltinScalarFunction::TxidSnapshotXmax
+        | BuiltinScalarFunction::TxidVisibleInSnapshot
+        | BuiltinScalarFunction::TxidStatus => {
             let coerced = bound_args
                 .into_iter()
                 .zip(arg_types)

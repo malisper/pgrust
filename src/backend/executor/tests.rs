@@ -4160,7 +4160,48 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                 "dtitle".into(),
             ],
         ),
-        "((dlevel <= (InitPlan 1).col1 AND f_leak(dtitle) AND pguser = CURRENT_USER))"
+        "((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle) AND (pguser = CURRENT_USER))"
+    );
+}
+
+#[test]
+fn explain_expr_parenthesizes_boolean_clause_args() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::{BoolExprType, OpExprKind};
+
+    let int4 = SqlType::new(SqlTypeKind::Int4);
+    let bool_ty = SqlType::new(SqlTypeKind::Bool);
+    let expr = Expr::bool_expr(
+        BoolExprType::Or,
+        vec![
+            Expr::binary_op(
+                OpExprKind::Eq,
+                bool_ty,
+                Expr::Var(Var {
+                    varno: 1,
+                    varattno: user_attrno(0),
+                    varlevelsup: 0,
+                    vartype: int4,
+                }),
+                Expr::Const(Value::Int32(1)),
+            ),
+            Expr::binary_op(
+                OpExprKind::LtEq,
+                bool_ty,
+                Expr::Var(Var {
+                    varno: 1,
+                    varattno: user_attrno(0),
+                    varlevelsup: 0,
+                    vartype: int4,
+                }),
+                Expr::Const(Value::Int32(3)),
+            ),
+        ],
+    );
+
+    assert_eq!(
+        render_explain_expr(&expr, &["a".into()]),
+        "((a = 1) OR (a <= 3))"
     );
 }
 
@@ -11096,8 +11137,8 @@ fn cte_filtered_self_join_aliases_keep_distinct_columns() {
 }
 
 #[test]
-fn cte_filtered_self_join_materializes_filtered_inner_order() {
-    let base = temp_dir("cte_filtered_self_join_outer_order");
+fn cte_filtered_values_self_join_matches_postgres_outer_order() {
+    let base = temp_dir("cte_filtered_values_self_join_pg_order");
     let txns = TransactionManager::new_durable(&base).unwrap();
     match run_sql(
         &base,
@@ -11112,10 +11153,10 @@ fn cte_filtered_self_join_materializes_filtered_inner_order() {
                 rows,
                 vec![
                     vec![Value::Numeric("0".into()), Value::Numeric("1".into())],
-                    vec![Value::Numeric("0".into()), Value::Numeric("2".into())],
                     vec![Value::Numeric("1".into()), Value::Numeric("1".into())],
-                    vec![Value::Numeric("1".into()), Value::Numeric("2".into())],
                     vec![Value::Numeric("2".into()), Value::Numeric("1".into())],
+                    vec![Value::Numeric("0".into()), Value::Numeric("2".into())],
+                    vec![Value::Numeric("1".into()), Value::Numeric("2".into())],
                     vec![Value::Numeric("2".into()), Value::Numeric("2".into())],
                 ]
             );
@@ -19206,6 +19247,56 @@ fn getdatabaseencoding_and_jsonpath_unicode_work() {
     )
     .unwrap_err();
     assert!(matches!(err, ExecError::InvalidStorageValue { column, .. } if column == "jsonpath"));
+}
+
+#[test]
+fn unicode_normalization_functions_work() {
+    let base = temp_dir("unicode_normalization");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select unicode_version() is not null,
+                unicode_assigned(U&'abc'),
+                unicode_assigned(U&'abc\\+10FFFF'),
+                normalize(U&'\\0061\\0308\\24D1c') = U&'\\00E4\\24D1c' collate \"C\",
+                normalize(U&'\\0061\\0308\\24D1c', NFKC) = U&'\\00E4bc' collate \"C\",
+                U&'\\00E4\\24D1c' is normalized,
+                U&'\\0061\\0308bc' is nfd normalized",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(false),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select \"normalize\"('abc', 'def')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "invalid normalization form: def" && sqlstate == "22023"
+    ));
 }
 
 #[test]

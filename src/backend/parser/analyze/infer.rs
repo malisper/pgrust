@@ -358,6 +358,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 )
             {
                 SqlType::new(SqlTypeKind::Timestamp)
+            } else if matches!(source.kind, SqlTypeKind::Time | SqlTypeKind::TimeTz) {
+                SqlType::new(SqlTypeKind::TimeTz)
             } else {
                 SqlType::new(SqlTypeKind::TimestampTz)
             }
@@ -1373,6 +1375,10 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::TxidCurrentIfAssigned) => {
                     SqlType::new(SqlTypeKind::Int8)
                 }
+                Some(BuiltinScalarFunction::TxidCurrentSnapshot) => SqlType::new(SqlTypeKind::Text),
+                Some(BuiltinScalarFunction::TxidSnapshotXmin)
+                | Some(BuiltinScalarFunction::TxidSnapshotXmax) => SqlType::new(SqlTypeKind::Int8),
+                Some(BuiltinScalarFunction::TxidStatus) => SqlType::new(SqlTypeKind::Text),
                 Some(BuiltinScalarFunction::ToDate) => SqlType::new(SqlTypeKind::Date),
                 Some(BuiltinScalarFunction::ToNumber) => SqlType::new(SqlTypeKind::Numeric),
                 Some(BuiltinScalarFunction::ToChar)

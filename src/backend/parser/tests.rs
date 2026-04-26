@@ -3460,6 +3460,51 @@ fn parse_create_database_statement() {
         stmt,
         Statement::CreateDatabase(CreateDatabaseStatement {
             database_name: "analytics".into(),
+            options: CreateDatabaseOptions::default(),
+        })
+    );
+}
+
+#[test]
+fn parse_create_database_options() {
+    let stmt = parse_statement(
+        "create database analytics encoding utf8 lc_collate \"C\" lc_ctype \"C\" template template0",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateDatabase(CreateDatabaseStatement {
+            database_name: "analytics".into(),
+            options: CreateDatabaseOptions {
+                encoding: Some("utf8".into()),
+                lc_collate: Some("C".into()),
+                lc_ctype: Some("C".into()),
+                template: Some("template0".into()),
+                ..CreateDatabaseOptions::default()
+            },
+        })
+    );
+}
+
+#[test]
+fn parse_alter_database_statement() {
+    let stmt = parse_statement("alter database analytics rename to warehouse").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterDatabase(AlterDatabaseStatement {
+            database_name: "analytics".into(),
+            action: AlterDatabaseAction::Rename {
+                new_name: "warehouse".into(),
+            },
+        })
+    );
+
+    let stmt = parse_statement("alter database warehouse connection_limit 123").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterDatabase(AlterDatabaseStatement {
+            database_name: "warehouse".into(),
+            action: AlterDatabaseAction::ConnectionLimit { limit: 123 },
         })
     );
 }
@@ -5242,6 +5287,24 @@ fn parse_copy_query_to_program_with_legacy_options() {
 }
 
 #[test]
+fn parse_copy_insert_returning_to_stdout_keeps_inner_insert_statement() {
+    let stmt =
+        parse_statement("copy (insert into items values (1) returning id) to stdout").unwrap();
+    match stmt {
+        Statement::CopyTo(copy) => {
+            assert_eq!(copy.destination, CopyToDestination::Stdout);
+            match copy.source {
+                CopyToSource::Query { statement, .. } => {
+                    assert!(matches!(*statement, Statement::Insert(_)));
+                }
+                other => panic!("expected query source, got {other:?}"),
+            }
+        }
+        other => panic!("expected copy to statement, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_copy_query_rejects_from_direction() {
     let err = parse_statement("copy (select 1) from '/tmp/in'").unwrap_err();
     assert!(matches!(
@@ -6874,6 +6937,45 @@ fn analyze_at_time_zone_uses_timezone_function_types() {
             )
                 && func.funcresulttype == Some(SqlType::new(SqlTypeKind::Timestamp))
                 && func.args.len() == 2
+    ));
+}
+
+#[test]
+fn analyze_timetz_at_time_zone_keeps_timetz_and_interval_types() {
+    let stmt = parse_select("select timetz '00:01-07' at time zone interval '00:00'").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+
+    let Expr::Func(func) = &query.target_list[0].expr else {
+        panic!("expected timezone function");
+    };
+    assert_eq!(
+        func.implementation,
+        crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+            crate::include::nodes::primnodes::BuiltinScalarFunction::Timezone
+        )
+    );
+    assert_eq!(func.funcresulttype, Some(SqlType::new(SqlTypeKind::TimeTz)));
+    assert!(matches!(
+        func.args.as_slice(),
+        [
+            Expr::Const(Value::Interval(_))
+                | Expr::Cast(
+                    _,
+                    SqlType {
+                        kind: SqlTypeKind::Interval,
+                        ..
+                    }
+                ),
+            Expr::Const(Value::TimeTz(_))
+                | Expr::Cast(
+                    _,
+                    SqlType {
+                        kind: SqlTypeKind::TimeTz,
+                        ..
+                    }
+                )
+        ]
     ));
 }
 
@@ -13815,6 +13917,44 @@ fn parse_unicode_string_and_identifier_literals() {
             assert_eq!(stmt.targets[0].output_name, "data");
         }
         other => panic!("expected select statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_unicode_normalization_syntax_lowers_to_function_calls() {
+    let stmt = parse_statement(
+        "select normalize(U&'\\0061\\0308', nfd) as n, U&'\\00E4' is not nfkc normalized as ok",
+    )
+    .unwrap();
+    let Statement::Select(stmt) = stmt else {
+        panic!("expected select statement");
+    };
+
+    match &stmt.targets[0].expr {
+        SqlExpr::FuncCall { name, args, .. } => {
+            assert_eq!(name, "normalize");
+            assert_eq!(args.args().len(), 2);
+            assert_eq!(
+                args.args()[1].value,
+                SqlExpr::Const(Value::Text("NFD".into()))
+            );
+        }
+        other => panic!("expected normalize call, got {other:?}"),
+    }
+
+    match &stmt.targets[1].expr {
+        SqlExpr::Not(inner) => match inner.as_ref() {
+            SqlExpr::FuncCall { name, args, .. } => {
+                assert_eq!(name, "is_normalized");
+                assert_eq!(args.args().len(), 2);
+                assert_eq!(
+                    args.args()[1].value,
+                    SqlExpr::Const(Value::Text("NFKC".into()))
+                );
+            }
+            other => panic!("expected is_normalized call, got {other:?}"),
+        },
+        other => panic!("expected negated normalization predicate, got {other:?}"),
     }
 }
 

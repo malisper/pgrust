@@ -10,7 +10,10 @@ use std::time::Duration;
 use crate::backend::access::transam::xact::{CommandId, INVALID_TRANSACTION_ID, TransactionId};
 use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::commands::copyfrom::parse_text_array_literal_with_catalog;
-use crate::backend::commands::copyto::{CopyToSink, IoCopyToSink, write_copy_to};
+use crate::backend::commands::copyto::{
+    CopyToDmlEvent, CopyToSink, IoCopyToSink, begin_copy_to, begin_copy_to_dml_capture,
+    finish_copy_to, finish_copy_to_dml_capture, write_copy_to, write_copy_to_row,
+};
 use crate::backend::commands::tablecmds::{execute_merge, execute_prepared_insert_row};
 use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
@@ -74,7 +77,9 @@ use crate::pgrust::portal::{
     CursorOptions, CursorViewRow, Portal, PortalFetchDirection, PortalFetchLimit, PortalManager,
     PortalRunResult,
 };
-use crate::pl::plpgsql::{execute_do_with_gucs, execute_user_defined_procedure_values};
+use crate::pl::plpgsql::{
+    execute_do_with_context, execute_do_with_gucs, execute_user_defined_procedure_values,
+};
 use crate::{ClientId, RelFileLocator};
 use parking_lot::RwLock;
 
@@ -116,6 +121,7 @@ const COPY_TEXT_NULL_SENTINEL: &str = "\0pgrust_copy_text_null";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CopyOptions {
     pub format: CopyFormat,
+    pub encoding: Option<String>,
     pub header: CopyHeader,
     pub quote: char,
     pub escape: char,
@@ -124,12 +130,15 @@ pub(crate) struct CopyOptions {
     pub on_error_ignore: bool,
     pub freeze: bool,
     pub where_clause: Option<String>,
+    pub force_quote_all: bool,
+    pub force_quote_columns: Vec<String>,
 }
 
 impl Default for CopyOptions {
     fn default() -> Self {
         Self {
             format: CopyFormat::Text,
+            encoding: None,
             header: CopyHeader::None,
             quote: '"',
             escape: '"',
@@ -138,6 +147,8 @@ impl Default for CopyOptions {
             on_error_ignore: false,
             freeze: false,
             where_clause: None,
+            force_quote_all: false,
+            force_quote_columns: Vec::new(),
         }
     }
 }
@@ -1486,6 +1497,37 @@ impl Session {
         })
     }
 
+    fn execute_plpgsql_do(
+        &mut self,
+        db: &Database,
+        do_stmt: &crate::include::nodes::parsenodes::DoStatement,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.catalog_lookup_for_command(db, xid, cid);
+        let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+        let deferred_foreign_keys = self
+            .active_txn
+            .as_ref()
+            .map(|txn| txn.deferred_foreign_keys.clone());
+        let mut ctx = self.executor_context_for_catalog(
+            db,
+            snapshot,
+            cid,
+            &catalog,
+            deferred_foreign_keys,
+            None,
+        );
+        let result = execute_do_with_context(do_stmt, &catalog, &mut ctx);
+        if let Some(xid) = ctx.transaction_xid()
+            && let Some(txn) = self.active_txn.as_mut()
+        {
+            txn.xid = Some(xid);
+        }
+        self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+        result
+    }
+
     fn evaluate_call_input_args(
         &mut self,
         db: &Database,
@@ -2190,6 +2232,19 @@ impl Session {
                     result
                 } else {
                     db.execute_create_database_stmt(self.client_id, create_stmt)
+                }
+            }
+            Statement::AlterDatabase(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    db.execute_alter_database_stmt(self.client_id, alter_stmt)
                 }
             }
             Statement::CreateSchema(ref create_stmt) => {
@@ -4078,7 +4133,7 @@ impl Session {
         let client_id = self.client_id;
 
         let result = match stmt {
-            Statement::Do(ref do_stmt) => execute_do_with_gucs(do_stmt, &self.gucs),
+            Statement::Do(ref do_stmt) => self.execute_plpgsql_do(db, do_stmt, xid, cid),
             Statement::Show(ref show_stmt) => self.apply_show(db, show_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(db, set_stmt),
             Statement::SetConstraints(ref set_constraints_stmt) => {
@@ -5208,6 +5263,17 @@ impl Session {
             Statement::CreateDatabase(_) => Err(ExecError::Parse(
                 ParseError::ActiveSqlTransaction("CREATE DATABASE"),
             )),
+            Statement::AlterDatabase(ref alter_stmt) => {
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_database_stmt_in_transaction(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    false,
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::AlterRole(ref alter_stmt) => {
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_role_stmt_in_transaction(
@@ -5233,25 +5299,47 @@ impl Session {
             ))),
             Statement::GrantObject(ref grant_stmt) => {
                 let search_path = self.configured_search_path();
-                db.execute_grant_object_stmt_with_search_path(
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_grant_object_stmt_in_transaction_with_search_path(
                     client_id,
                     grant_stmt,
+                    xid,
+                    cid,
                     search_path.as_deref(),
+                    &mut txn.catalog_effects,
                 )
             }
             Statement::RevokeObject(ref revoke_stmt) => {
                 let search_path = self.configured_search_path();
-                db.execute_revoke_object_stmt_with_search_path(
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_revoke_object_stmt_in_transaction_with_search_path(
                     client_id,
                     revoke_stmt,
+                    xid,
+                    cid,
                     search_path.as_deref(),
+                    &mut txn.catalog_effects,
                 )
             }
             Statement::GrantRoleMembership(ref grant_stmt) => {
-                db.execute_grant_role_membership_stmt(client_id, grant_stmt)
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_grant_role_membership_stmt_in_transaction(
+                    client_id,
+                    grant_stmt,
+                    xid,
+                    cid,
+                    &mut txn.catalog_effects,
+                )
             }
             Statement::RevokeRoleMembership(ref revoke_stmt) => {
-                db.execute_revoke_role_membership_stmt(client_id, revoke_stmt)
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_revoke_role_membership_stmt_in_transaction(
+                    client_id,
+                    revoke_stmt,
+                    xid,
+                    cid,
+                    &mut txn.catalog_effects,
+                )
             }
             Statement::DropOwned(ref drop_stmt) => {
                 let txn = self.active_txn.as_mut().unwrap();
@@ -5340,7 +5428,9 @@ impl Session {
                 )
             }
             Statement::SetSessionAuthorization(ref set_stmt) => {
-                self.auth = db.execute_set_session_authorization_stmt(client_id, set_stmt)?;
+                self.auth = db.execute_set_session_authorization_stmt_in_transaction(
+                    client_id, set_stmt, xid, cid,
+                )?;
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::ResetSessionAuthorization(ref reset_stmt) => {
@@ -5348,7 +5438,8 @@ impl Session {
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::SetRole(ref set_stmt) => {
-                self.auth = db.execute_set_role_stmt(client_id, set_stmt)?;
+                self.auth =
+                    db.execute_set_role_stmt_in_transaction(client_id, set_stmt, xid, cid)?;
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::ResetRole(ref reset_stmt) => {
@@ -6771,7 +6862,11 @@ impl Session {
     ) -> Result<CopyExecutionResult, ExecError> {
         match &copy.direction {
             CopyDirection::From(CopyEndpoint::File(path)) => {
-                let text = read_copy_text_file(path)?;
+                let text = read_copy_text_file(
+                    path,
+                    &copy_command_encoding_name(&copy.options, self.gucs.get("client_encoding")),
+                    copy_relation_table_name(&copy.relation),
+                )?;
                 let inserted = self.copy_from_text(db, copy, &text)?;
                 Ok(CopyExecutionResult::AffectedRows(inserted))
             }
@@ -6803,6 +6898,10 @@ impl Session {
                 let catalog = self.catalog_lookup(db);
                 let enum_labels = copy_enum_label_map(&catalog);
                 let data = render_copy_output(&columns, &rows, &copy.options, Some(&enum_labels));
+                let data = encode_copy_output_bytes(
+                    data,
+                    &copy_command_encoding_name(&copy.options, self.gucs.get("client_encoding")),
+                )?;
                 if let CopyEndpoint::File(path) = endpoint {
                     let resolved = resolve_copy_output_path(path);
                     if let Some(parent) = std::path::Path::new(&resolved).parent() {
@@ -6832,6 +6931,157 @@ impl Session {
                 })
             }
         }
+    }
+
+    pub(crate) fn copy_command_needs_interleaved_stdout(
+        &self,
+        db: &Database,
+        copy: &CopyCommand,
+    ) -> Result<bool, ExecError> {
+        if !matches!(copy.direction, CopyDirection::To(CopyEndpoint::Stdout)) {
+            return Ok(false);
+        }
+        let CopyRelation::Query(query) = &copy.relation else {
+            return Ok(false);
+        };
+        let stmt = self.parse_copy_query_statement(db, query.trim())?;
+        Ok(match stmt {
+            Statement::Insert(insert) => !insert.returning.is_empty(),
+            Statement::Update(update) => !update.returning.is_empty(),
+            Statement::Delete(delete) => !delete.returning.is_empty(),
+            _ => false,
+        })
+    }
+
+    pub(crate) fn execute_copy_command_to_stdout_sink(
+        &mut self,
+        db: &Database,
+        copy: &CopyCommand,
+        sink: &mut dyn CopyToSink,
+    ) -> Result<usize, ExecError> {
+        if matches!(copy.options.header, CopyHeader::Match) {
+            return Err(ExecError::DetailedError {
+                message: "cannot use \"match\" with HEADER in COPY TO".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            });
+        }
+        if self.copy_command_needs_interleaved_stdout(db, copy)? {
+            let CopyRelation::Query(query) = &copy.relation else {
+                unreachable!("COPY DML stdout path requires a query source");
+            };
+            return self.execute_copy_query_dml_to_stdout_sink(
+                db,
+                query.trim(),
+                &copy.options,
+                sink,
+            );
+        }
+        let (columns, rows) = self.copy_query_rows(db, &copy.relation)?;
+        self.write_copy_command_rows_to_stdout_sink(db, &copy.options, &columns, &rows, sink)
+    }
+
+    fn execute_copy_query_dml_to_stdout_sink(
+        &mut self,
+        db: &Database,
+        query: &str,
+        options: &CopyOptions,
+        sink: &mut dyn CopyToSink,
+    ) -> Result<usize, ExecError> {
+        let stmt = self.parse_copy_query_statement(db, query)?;
+        self.validate_copy_to_query(db, &stmt, query)?;
+        begin_copy_to_dml_capture();
+        let result = self.execute(db, query);
+        let events = finish_copy_to_dml_capture();
+        let (columns, rows) = match result? {
+            StatementResult::Query { columns, rows, .. } => (columns, rows),
+            StatementResult::AffectedRows(_) => {
+                return Err(copy_to_feature_error(
+                    "COPY query must have a RETURNING clause",
+                ));
+            }
+        };
+        let catalog = self.catalog_lookup(db);
+        let enum_labels = copy_enum_label_map(&catalog);
+        let row_options = CopyOptions {
+            header: CopyHeader::None,
+            ..options.clone()
+        };
+        let first_row_index = events
+            .iter()
+            .position(|event| matches!(event, CopyToDmlEvent::Row(_)))
+            .unwrap_or(events.len());
+
+        for event in events.iter().take(first_row_index) {
+            if let CopyToDmlEvent::Notice(notice) = event {
+                sink.notice(
+                    notice.severity,
+                    notice.sqlstate,
+                    &notice.message,
+                    notice.detail.as_deref(),
+                    notice.position,
+                )?;
+            }
+        }
+        sink.begin(copy_command_output_format(options.format), columns.len())?;
+        if !matches!(options.header, CopyHeader::None) {
+            let header = render_copy_output(&columns, &[], options, Some(&enum_labels));
+            sink.write_all(&header)?;
+        }
+        let mut row_count = 0usize;
+        for event in events.into_iter().skip(first_row_index) {
+            match event {
+                CopyToDmlEvent::Notice(notice) => sink.notice(
+                    notice.severity,
+                    notice.sqlstate,
+                    &notice.message,
+                    notice.detail.as_deref(),
+                    notice.position,
+                )?,
+                CopyToDmlEvent::Row(row) => {
+                    let rendered = render_copy_output(
+                        &columns,
+                        std::slice::from_ref(&row),
+                        &row_options,
+                        Some(&enum_labels),
+                    );
+                    sink.write_all(&rendered)?;
+                    row_count += 1;
+                }
+            }
+        }
+        if row_count == 0 && !rows.is_empty() {
+            for row in &rows {
+                let rendered = render_copy_output(
+                    &columns,
+                    std::slice::from_ref(row),
+                    &row_options,
+                    Some(&enum_labels),
+                );
+                sink.write_all(&rendered)?;
+                row_count += 1;
+            }
+        }
+        sink.finish()?;
+        Ok(row_count)
+    }
+
+    fn write_copy_command_rows_to_stdout_sink(
+        &self,
+        db: &Database,
+        options: &CopyOptions,
+        columns: &[crate::backend::executor::QueryColumn],
+        rows: &[Vec<Value>],
+        sink: &mut dyn CopyToSink,
+    ) -> Result<usize, ExecError> {
+        let catalog = self.catalog_lookup(db);
+        let enum_labels = copy_enum_label_map(&catalog);
+        sink.begin(copy_command_output_format(options.format), columns.len())?;
+        let rendered = render_copy_output(columns, rows, options, Some(&enum_labels));
+        sink.write_all(&rendered)?;
+        sink.finish()?;
+        Ok(rows.len())
     }
 
     pub(crate) fn copy_from_text(
@@ -7093,6 +7343,7 @@ impl Session {
                         sqlstate: "55000",
                     });
                 }
+                self.ensure_copy_to_relation_source(db, name)?;
                 let select_list = columns
                     .as_ref()
                     .map(|columns| columns.join(", "))
@@ -7584,9 +7835,18 @@ fn copy_to_encoding_name(
     options: &crate::include::nodes::parsenodes::CopyToOptions,
     client_encoding: Option<&String>,
 ) -> String {
-    options
-        .encoding
-        .as_deref()
+    effective_copy_encoding_name(options.encoding.as_deref(), client_encoding)
+}
+
+fn copy_command_encoding_name(options: &CopyOptions, client_encoding: Option<&String>) -> String {
+    effective_copy_encoding_name(options.encoding.as_deref(), client_encoding)
+}
+
+fn effective_copy_encoding_name(
+    option_encoding: Option<&str>,
+    client_encoding: Option<&String>,
+) -> String {
+    option_encoding
         .or(client_encoding.map(String::as_str))
         .unwrap_or("UTF8")
         .to_ascii_uppercase()
@@ -7653,6 +7913,16 @@ fn encode_copy_file_text(text: &str, encoding_name: &str) -> Result<Vec<u8>, Exe
         });
     }
     Ok(encoded.into_owned())
+}
+
+fn encode_copy_output_bytes(bytes: Vec<u8>, encoding_name: &str) -> Result<Vec<u8>, ExecError> {
+    let text = String::from_utf8(bytes).map_err(|err| ExecError::DetailedError {
+        message: format!("could not encode COPY data: {err}"),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    encode_copy_file_text(&text, encoding_name)
 }
 
 fn is_latin1_copy_encoding(name: &str) -> bool {
@@ -7741,6 +8011,20 @@ impl Session {
             CopyToDestination::Program(_) => self.ensure_copy_to_program_allowed(db)?,
             CopyToDestination::Stdout => {}
         }
+        if let (CopyToDestination::Stdout, CopyToSource::Query { statement, .. }) =
+            (&stmt.destination, &stmt.source)
+            && matches!(
+                &**statement,
+                Statement::Insert(_) | Statement::Update(_) | Statement::Delete(_)
+            )
+        {
+            let sink = stdout_sink.ok_or_else(|| {
+                ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                    "COPY TO STDOUT requires a frontend/backend protocol sink".into(),
+                ))
+            })?;
+            return self.execute_copy_to_dml_stdout(db, stmt, sink);
+        }
         let (columns, rows) = self.collect_copy_to_rows(db, stmt)?;
         let float_format = FloatFormatOptions {
             extra_float_digits: self.extra_float_digits(),
@@ -7819,6 +8103,83 @@ impl Session {
                 Ok(rows.len())
             }
         }
+    }
+
+    fn execute_copy_to_dml_stdout(
+        &mut self,
+        db: &Database,
+        stmt: &CopyToStatement,
+        sink: &mut dyn CopyToSink,
+    ) -> Result<usize, ExecError> {
+        let CopyToSource::Query { statement, sql } = &stmt.source else {
+            return Err(ExecError::DetailedError {
+                message: "COPY DML stdout path requires a query source".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            });
+        };
+        self.validate_copy_to_query(db, statement, sql)?;
+        begin_copy_to_dml_capture();
+        let result = self.execute(db, sql);
+        let mut events = finish_copy_to_dml_capture();
+        let (columns, rows) = match result? {
+            StatementResult::Query { columns, rows, .. } => (columns, rows),
+            StatementResult::AffectedRows(_) => {
+                return Err(copy_to_feature_error(
+                    "COPY query must have a RETURNING clause",
+                ));
+            }
+        };
+        if !events
+            .iter()
+            .any(|event| matches!(event, CopyToDmlEvent::Row(_)))
+            && !rows.is_empty()
+        {
+            let insert_at = usize::from(!events.is_empty());
+            for (offset, row) in rows.into_iter().enumerate() {
+                events.insert(insert_at + offset, CopyToDmlEvent::Row(row));
+            }
+        }
+        let float_format = FloatFormatOptions {
+            extra_float_digits: self.extra_float_digits(),
+            bytea_output: self.bytea_output(),
+            datetime_config: self.datetime_config().clone(),
+        };
+        let first_row_index = events
+            .iter()
+            .position(|event| matches!(event, CopyToDmlEvent::Row(_)));
+        let first_row_index = first_row_index.unwrap_or(events.len());
+        let mut row_count = 0usize;
+        for event in events.iter().take(first_row_index) {
+            if let CopyToDmlEvent::Notice(notice) = event {
+                sink.notice(
+                    notice.severity,
+                    notice.sqlstate,
+                    &notice.message,
+                    notice.detail.as_deref(),
+                    notice.position,
+                )?;
+            }
+        }
+        begin_copy_to(sink, &columns, &stmt.options)?;
+        for event in events.into_iter().skip(first_row_index) {
+            match event {
+                CopyToDmlEvent::Notice(notice) => sink.notice(
+                    notice.severity,
+                    notice.sqlstate,
+                    &notice.message,
+                    notice.detail.as_deref(),
+                    notice.position,
+                )?,
+                CopyToDmlEvent::Row(row) => {
+                    write_copy_to_row(sink, &columns, &row, &stmt.options, &float_format)?;
+                    row_count += 1;
+                }
+            }
+        }
+        finish_copy_to(sink, &stmt.options)?;
+        Ok(row_count)
     }
 
     fn serialize_copy_to_bytes(
@@ -8300,6 +8661,21 @@ fn parse_copy_command_inner(sql: &str) -> Result<CopyCommand, ExecError> {
     let body = sql[4..].trim_start();
     let (relation, rest) = parse_copy_relation(body)?;
     let rest = rest.trim_start();
+    if matches!(relation, CopyRelation::Query(_)) {
+        let lower = rest.to_ascii_lowercase();
+        if lower.starts_with("from") && copy_keyword_boundary(rest, 4) {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "TO",
+                actual: "syntax error at or near \"from\"".into(),
+            }));
+        }
+        if rest.starts_with('(') {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "TO",
+                actual: "syntax error at or near \"(\"".into(),
+            }));
+        }
+    }
     let lower = rest.to_ascii_lowercase();
     let (direction, option_text) = if lower.starts_with("from") && copy_keyword_boundary(rest, 4) {
         let (endpoint, options) = parse_copy_endpoint(rest[4..].trim_start(), true)?;
@@ -8384,6 +8760,13 @@ fn parse_copy_table_target(target: &str) -> Result<(String, Option<Vec<String>>)
     }
 }
 
+fn copy_relation_table_name(relation: &CopyRelation) -> Option<&str> {
+    match relation {
+        CopyRelation::Table { name, .. } => Some(name.as_str()),
+        CopyRelation::Query(_) => None,
+    }
+}
+
 fn parse_copy_endpoint(input: &str, from: bool) -> Result<(CopyEndpoint, &str), ExecError> {
     let input = input.trim_start();
     let lower = input.to_ascii_lowercase();
@@ -8457,11 +8840,23 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
             rest = after;
             continue;
         }
+        if lower.starts_with("encoding") && copy_keyword_boundary(rest, 8) {
+            let (value, after) =
+                parse_copy_string_token(rest[8..].trim_start()).ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "COPY encoding string",
+                        actual: rest.into(),
+                    })
+                })?;
+            options.encoding = Some(value);
+            rest = after;
+            continue;
+        }
         if lower.starts_with("header") && copy_keyword_boundary(rest, 6) {
             let after_header = rest[6..].trim_start();
             let (word, after) = take_copy_word(after_header);
             match word.to_ascii_lowercase().as_str() {
-                "" | "true" | "on" | "1" => {
+                "true" | "on" | "1" => {
                     options.header = CopyHeader::Present;
                     rest = after;
                 }
@@ -8474,14 +8869,27 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
                     rest = after;
                 }
                 _ => {
-                    return Err(ExecError::DetailedError {
-                        message: "header requires a Boolean value or \"match\"".into(),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "22023",
-                    });
+                    options.header = CopyHeader::Present;
+                    rest = after_header;
                 }
             }
+            continue;
+        }
+        if lower.starts_with("force") && copy_keyword_boundary(rest, 5) {
+            let after_force = rest[5..].trim_start();
+            if !after_force.to_ascii_lowercase().starts_with("quote")
+                || !copy_keyword_boundary(after_force, 5)
+            {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "QUOTE",
+                    actual: after_force.into(),
+                }));
+            }
+            rest = parse_copy_force_quote_option(&mut options, after_force[5..].trim_start())?;
+            continue;
+        }
+        if lower.starts_with("force_quote") && copy_keyword_boundary(rest, 11) {
+            rest = parse_copy_force_quote_option(&mut options, rest[11..].trim_start())?;
             continue;
         }
         if lower.starts_with("quote") && copy_keyword_boundary(rest, 5) {
@@ -8561,9 +8969,46 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
     Ok(options)
 }
 
+fn parse_copy_force_quote_option<'a>(
+    options: &mut CopyOptions,
+    input: &'a str,
+) -> Result<&'a str, ExecError> {
+    let input = input.trim_start();
+    if let Some(rest) = input.strip_prefix('*') {
+        options.force_quote_all = true;
+        return Ok(rest);
+    }
+    if input.starts_with('(') {
+        let close = find_matching_paren(input, 0).ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "COPY FORCE QUOTE column list",
+                actual: input.into(),
+            })
+        })?;
+        options.force_quote_columns.extend(
+            split_copy_list(&input[1..close])
+                .into_iter()
+                .map(|part| unquote_identifier(part.trim())),
+        );
+        return Ok(input[close + 1..].trim_start());
+    }
+    let (word, after) = take_copy_word(input);
+    if word.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COPY FORCE QUOTE column",
+            actual: input.into(),
+        }));
+    }
+    options.force_quote_columns.push(unquote_identifier(&word));
+    Ok(after)
+}
+
 fn merge_copy_options(options: &mut CopyOptions, nested: CopyOptions) {
     if nested.format != CopyFormat::Text {
         options.format = nested.format;
+    }
+    if nested.encoding.is_some() {
+        options.encoding = nested.encoding;
     }
     if nested.header != CopyHeader::None {
         options.header = nested.header;
@@ -8581,16 +9026,25 @@ fn merge_copy_options(options: &mut CopyOptions, nested: CopyOptions) {
     options.on_error_ignore |= nested.on_error_ignore;
     options.freeze |= nested.freeze;
     options.where_clause = options.where_clause.take().or(nested.where_clause);
+    options.force_quote_all |= nested.force_quote_all;
+    options
+        .force_quote_columns
+        .extend(nested.force_quote_columns);
 }
 
-fn read_copy_text_file(file_path: &str) -> Result<String, ExecError> {
+fn read_copy_text_file(
+    file_path: &str,
+    encoding_name: &str,
+    table_name: Option<&str>,
+) -> Result<String, ExecError> {
     let resolved = resolve_copy_file_path(file_path);
-    fs::read_to_string(&resolved).map_err(|err| {
+    let bytes = fs::read(&resolved).map_err(|err| {
         ExecError::Parse(ParseError::UnexpectedToken {
             expected: "readable COPY source file",
             actual: format!("{file_path}: {err}"),
         })
-    })
+    })?;
+    decode_copy_file_bytes(&bytes, encoding_name, table_name.unwrap_or(""))
 }
 
 pub(crate) fn parse_copy_input_rows(
@@ -8761,7 +9215,7 @@ pub(crate) fn render_copy_output(
             .map(|column| match options.format {
                 CopyFormat::Text => escape_copy_text_field(&column.name),
                 CopyFormat::Csv => {
-                    escape_copy_csv_field(&column.name, options.quote, options.escape)
+                    escape_copy_csv_field(&column.name, options.quote, options.escape, false)
                 }
             })
             .collect::<Vec<_>>()
@@ -8777,7 +9231,13 @@ pub(crate) fn render_copy_output(
             .iter()
             .zip(columns.iter())
             .map(|(value, column)| {
-                copy_value_to_field(value, column.sql_type, options, enum_labels)
+                copy_value_to_field(
+                    value,
+                    column,
+                    options,
+                    enum_labels,
+                    copy_options_force_quote_column(options, column),
+                )
             })
             .collect::<Vec<_>>();
         let line = fields.join(match options.format {
@@ -8790,12 +9250,21 @@ pub(crate) fn render_copy_output(
     out
 }
 
+fn copy_command_output_format(format: CopyFormat) -> ParserCopyFormat {
+    match format {
+        CopyFormat::Text => ParserCopyFormat::Text,
+        CopyFormat::Csv => ParserCopyFormat::Csv,
+    }
+}
+
 fn copy_value_to_field(
     value: &Value,
-    sql_type: crate::backend::parser::SqlType,
+    column: &crate::backend::executor::QueryColumn,
     options: &CopyOptions,
     enum_labels: Option<&HashMap<(u32, u32), String>>,
+    force_quote: bool,
 ) -> String {
+    let sql_type = column.sql_type;
     let enum_label_type_oid = || {
         (matches!(sql_type.kind, crate::backend::parser::SqlTypeKind::Enum)
             && sql_type.type_oid != 0)
@@ -8895,8 +9364,19 @@ fn copy_value_to_field(
     };
     match options.format {
         CopyFormat::Text => escape_copy_text_field(&raw),
-        CopyFormat::Csv => escape_copy_csv_field(&raw, options.quote, options.escape),
+        CopyFormat::Csv => escape_copy_csv_field(&raw, options.quote, options.escape, force_quote),
     }
+}
+
+fn copy_options_force_quote_column(
+    options: &CopyOptions,
+    column: &crate::backend::executor::QueryColumn,
+) -> bool {
+    options.force_quote_all
+        || options
+            .force_quote_columns
+            .iter()
+            .any(|name| name == &column.name)
 }
 
 fn copy_enum_label_map(catalog: &dyn CatalogLookup) -> HashMap<(u32, u32), String> {
@@ -8946,8 +9426,9 @@ fn unescape_copy_text_field(value: &str) -> String {
     out
 }
 
-fn escape_copy_csv_field(value: &str, quote: char, escape: char) -> String {
-    let needs_quote = value.contains(',')
+fn escape_copy_csv_field(value: &str, quote: char, escape: char, force_quote: bool) -> String {
+    let needs_quote = force_quote
+        || value.contains(',')
         || value.contains(quote)
         || value.contains('\n')
         || value.contains('\r')

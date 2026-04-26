@@ -1777,6 +1777,19 @@ fn lower_set_returning_call(
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::TxidSnapshotXip {
+            func_oid,
+            func_variadic,
+            arg,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::TxidSnapshotXip {
+            func_oid,
+            func_variadic,
+            arg: lower_expr(ctx, arg, mode),
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,
@@ -1959,6 +1972,19 @@ fn fix_set_returning_call_upper_exprs(
         } => SetReturningCall::PgLockStatus {
             func_oid,
             func_variadic,
+            output_columns,
+            with_ordinality,
+        },
+        SetReturningCall::TxidSnapshotXip {
+            func_oid,
+            func_variadic,
+            arg,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::TxidSnapshotXip {
+            func_oid,
+            func_variadic,
+            arg: fix_upper_expr_for_input(root, arg, path, input_tlist),
             output_columns,
             with_ordinality,
         },
@@ -2768,6 +2794,9 @@ fn validate_set_returning_call(
             validate_executable_expr(relid, plan_node, field);
         }
         SetReturningCall::PgLockStatus { .. } => {}
+        SetReturningCall::TxidSnapshotXip { arg, .. } => {
+            validate_executable_expr(arg, plan_node, field);
+        }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
@@ -3190,6 +3219,9 @@ fn validate_planner_set_returning_call(
             validate_planner_expr(relid, path_node, field);
         }
         SetReturningCall::PgLockStatus { .. } => {}
+        SetReturningCall::TxidSnapshotXip { arg, .. } => {
+            validate_planner_expr(arg, path_node, field);
+        }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }

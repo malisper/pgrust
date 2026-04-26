@@ -1,6 +1,7 @@
 use super::exec_expr::{eval_string_to_table_rows, normalize_array_value};
 use super::expr_date::add_interval_to_local_timestamp;
 use super::expr_json::{eval_json_record_set_returning_function, eval_json_table_function};
+use super::expr_txid::eval_txid_snapshot_xip_values;
 use super::pg_regex::{eval_regexp_matches_rows, eval_regexp_split_to_table_rows};
 use super::sqlfunc::execute_user_defined_sql_set_returning_function;
 use super::{ExecError, ExecutorContext, Expr, SetReturningCall, TupleSlot, Value, eval_expr};
@@ -72,6 +73,7 @@ pub(crate) fn eval_set_returning_call(
             eval_partition_ancestors(relid, slot, ctx)
         }
         SetReturningCall::PgLockStatus { .. } => eval_pg_lock_status(ctx),
+        SetReturningCall::TxidSnapshotXip { arg, .. } => eval_txid_snapshot_xip(arg, slot, ctx),
         SetReturningCall::TextSearchTableFunction { .. } => Err(ExecError::Parse(
             crate::backend::parser::ParseError::UnexpectedToken {
                 expected: "implemented text search table function",
@@ -208,6 +210,7 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &'static str 
         SetReturningCall::PartitionTree { .. } => "pg_partition_tree",
         SetReturningCall::PartitionAncestors { .. } => "pg_partition_ancestors",
         SetReturningCall::PgLockStatus { .. } => "pg_lock_status",
+        SetReturningCall::TxidSnapshotXip { .. } => "txid_snapshot_xip",
         SetReturningCall::TextSearchTableFunction { kind, .. } => match kind {
             crate::include::nodes::primnodes::TextSearchTableFunction::TokenType => "ts_token_type",
             crate::include::nodes::primnodes::TextSearchTableFunction::Parse => "ts_parse",
@@ -225,6 +228,18 @@ fn eval_pg_lock_status(ctx: &ExecutorContext) -> Result<Vec<TupleSlot>, ExecErro
         .unwrap_or_default()
         .into_iter()
         .map(TupleSlot::virtual_row)
+        .collect())
+}
+
+fn eval_txid_snapshot_xip(
+    arg: &Expr,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let value = eval_expr(arg, slot, ctx)?;
+    Ok(eval_txid_snapshot_xip_values(&[value])?
+        .into_iter()
+        .map(|value| TupleSlot::virtual_row(vec![value]))
         .collect())
 }
 

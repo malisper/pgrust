@@ -349,6 +349,14 @@ fn txid_snapshot_type_round_trips_and_validates_visibility() {
         session_query_rows(
             &mut session,
             &db,
+            "select txid_snapshot_xmin(snap), txid_snapshot_xmax(snap), txid_snapshot_xip(snap) from snapshot_test",
+        ),
+        vec![vec![Value::Int64(12), Value::Int64(16), Value::Int64(14)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
             "select txid_visible_in_snapshot(13, '12:20:13,15,18'::txid_snapshot), \
                     txid_visible_in_snapshot(14, '12:20:13,15,18'::txid_snapshot), \
                     pg_input_is_valid('12:16:14,13', 'txid_snapshot')",
@@ -358,6 +366,26 @@ fn txid_snapshot_type_round_trips_and_validates_visibility() {
             Value::Bool(true),
             Value::Bool(false),
         ]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select txid_visible_in_snapshot('1000100010001012', \
+                    '1000100010001000:1000100010001100:1000100010001012,1000100010001013'), \
+                    txid_visible_in_snapshot('1000100010001015', \
+                    '1000100010001000:1000100010001100:1000100010001012,1000100010001013')",
+        ),
+        vec![vec![Value::Bool(false), Value::Bool(true)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select txid_current() >= txid_snapshot_xmin(txid_current_snapshot()), \
+                    txid_visible_in_snapshot(txid_current(), txid_current_snapshot())",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(false)]]
     );
 }
 
@@ -386,6 +414,91 @@ fn txid_current_and_if_assigned_follow_lazy_xid_assignment() {
         session_query_rows(&mut session, &db, "select txid_current_if_assigned()"),
         vec![vec![Value::Int64(txid)]]
     );
+
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn txid_current_assigns_xid_in_autocommit_select() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    let rows = query_rows(&db, 1, "select txid_current()");
+    let txid = match &rows[..] {
+        [row] => match &row[..] {
+            [Value::Int64(txid)] => *txid,
+            other => panic!("expected bigint txid_current result, got {other:?}"),
+        },
+        other => panic!("expected one txid_current row, got {other:?}"),
+    };
+    assert!(txid >= 3);
+}
+
+#[test]
+fn txid_status_reports_recent_transaction_states() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session_query_rows(&mut session, &db, "select txid_current()");
+
+    session.execute(&db, "begin").unwrap();
+    let committed = match &session_query_rows(&mut session, &db, "select txid_current()")[..] {
+        [row] => match &row[..] {
+            [Value::Int64(txid)] => *txid,
+            other => panic!("expected committed txid row, got {other:?}"),
+        },
+        other => panic!("expected committed txid result, got {other:?}"),
+    };
+    session.execute(&db, "commit").unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    let rolled_back = match &session_query_rows(&mut session, &db, "select txid_current()")[..] {
+        [row] => match &row[..] {
+            [Value::Int64(txid)] => *txid,
+            other => panic!("expected rolled back txid row, got {other:?}"),
+        },
+        other => panic!("expected rolled back txid result, got {other:?}"),
+    };
+    session.execute(&db, "rollback").unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    let in_progress = match &session_query_rows(&mut session, &db, "select txid_current()")[..] {
+        [row] => match &row[..] {
+            [Value::Int64(txid)] => *txid,
+            other => panic!("expected in-progress txid row, got {other:?}"),
+        },
+        other => panic!("expected in-progress txid result, got {other:?}"),
+    };
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            &format!(
+                "select txid_status({committed}), txid_status({rolled_back}), \
+                        txid_status({in_progress}), txid_status(1), \
+                        txid_status(2), txid_status(3)"
+            ),
+        ),
+        vec![vec![
+            Value::Text("committed".into()),
+            Value::Text("aborted".into()),
+            Value::Text("in progress".into()),
+            Value::Text("committed".into()),
+            Value::Text("committed".into()),
+            Value::Null,
+        ]]
+    );
+
+    let err = session
+        .execute(&db, &format!("select txid_status({})", in_progress + 10000))
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            sqlstate: "22023",
+            ..
+        }
+    ));
 
     session.execute(&db, "commit").unwrap();
 }
@@ -16320,6 +16433,59 @@ fn explain_bootstrap_seqscan_shows_relation_name_and_filter() {
 }
 
 #[test]
+fn explain_bootstrap_anchored_regex_uses_proname_index_range() {
+    let base = temp_dir("explain_bootstrap_regex_index_range");
+    let db = Database::open(&base, 16).unwrap();
+
+    let lines = explain_lines(&db, 1, "select * from pg_proc where proname ~ '^abc'");
+    assert!(
+        lines.iter().any(|line| {
+            line.starts_with("Index Scan using pg_proc_proname_args_nsp_index on pg_proc  (cost=")
+        }),
+        "expected anchored regex to use pg_proc proname index, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line
+                == "  Index Cond: ((proname >= 'abc'::text) AND (proname < 'abd'::text))"),
+        "expected regex prefix range index condition, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "  Filter: (proname ~ '^abc'::text)"),
+        "expected original regex filter to remain, got {lines:?}"
+    );
+}
+
+#[test]
+fn explain_bootstrap_exact_regex_uses_proname_index_equality() {
+    let base = temp_dir("explain_bootstrap_regex_index_exact");
+    let db = Database::open(&base, 16).unwrap();
+
+    let lines = explain_lines(&db, 1, "select * from pg_proc where proname ~ '^abc$'");
+    assert!(
+        lines.iter().any(|line| {
+            line.starts_with("Index Scan using pg_proc_proname_args_nsp_index on pg_proc  (cost=")
+        }),
+        "expected exact regex to use pg_proc proname index, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "  Index Cond: (proname = 'abc'::text)"),
+        "expected regex exact index condition, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "  Filter: (proname ~ '^abc$'::text)"),
+        "expected original regex filter to remain, got {lines:?}"
+    );
+}
+
+#[test]
 fn explain_heap_seqscan_shows_relation_name() {
     let base = temp_dir("explain_heap_seqscan_relation_name");
     let db = Database::open(&base, 16).unwrap();
@@ -22091,6 +22257,42 @@ fn timestamp_tz_now_literal_applies_declared_precision() {
             &mut session,
             &db,
             "select count(*) from timestamptz_tbl where d1 = timestamp(2) with time zone 'now'",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn timestamp_now_literal_applies_declared_precision() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table timestamp_tbl (d1 timestamp(2) without time zone)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into timestamp_tbl values ('now')")
+        .unwrap();
+    session.execute(&db, "select pg_sleep(0.1)").unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into timestamp_tbl values ('now')")
+        .unwrap();
+    session.execute(&db, "select pg_sleep(0.1)").unwrap();
+    session
+        .execute(&db, "insert into timestamp_tbl values ('now')")
+        .unwrap();
+    session.execute(&db, "select pg_sleep(0.1)").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from timestamp_tbl where d1 = timestamp(2) without time zone 'now'",
         ),
         vec![vec![Value::Int64(2)]]
     );

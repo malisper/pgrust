@@ -337,6 +337,19 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::TxidSnapshotXip {
+            func_oid,
+            func_variadic,
+            arg,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::TxidSnapshotXip {
+            func_oid,
+            func_variadic,
+            arg: simplify_expr(arg, None)?,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::TextSearchTableFunction {
             kind,
             args,
@@ -751,12 +764,20 @@ fn cast_is_const_fold_safe(value: &Value, target: SqlType) -> bool {
     let Some(source) = value.sql_type_hint() else {
         return true;
     };
-    if matches!(target.element_type().kind, SqlTypeKind::Interval)
-        && matches!(
-            source.element_type().kind,
-            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
-        )
-    {
+    // Datetime text input can depend on DateStyle, TimeZone, IntervalStyle, or
+    // the transaction timestamp for special values like now/today.
+    if matches!(
+        target.element_type().kind,
+        SqlTypeKind::Date
+            | SqlTypeKind::Time
+            | SqlTypeKind::TimeTz
+            | SqlTypeKind::Timestamp
+            | SqlTypeKind::TimestampTz
+            | SqlTypeKind::Interval
+    ) && matches!(
+        source.element_type().kind,
+        SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
+    ) {
         return false;
     }
     !matches!(

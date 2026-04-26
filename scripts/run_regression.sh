@@ -838,7 +838,7 @@ if [[ "$SKIP_SERVER" == false && "$ISOLATED_PARALLEL" == false ]]; then
 fi
 
 setup_pg_regress_env
-export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=${STATEMENT_TIMEOUT}s"
+export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c intervalstyle=postgres_verbose -c statement_timeout=${STATEMENT_TIMEOUT}s"
 # PG18 psql adds a verbose \d+ Compression column by default. Keep the
 # regression client surface aligned with the checked-in expected files until
 # the repo moves those fixtures to the new default shape.
@@ -1479,7 +1479,9 @@ run_one_regression_test() {
     query_expected_file="$expected_file"
 
     candidates=("$expected_file")
-    if [[ "$expected_file" == "$EXPECTED_DIR/${test_name}.out" ]]; then
+    # pgrust always reports UTF8 today; keep unicode failures diffed against
+    # the UTF8 expected output instead of the short non-UTF8 skip alternate.
+    if [[ "$expected_file" == "$EXPECTED_DIR/${test_name}.out" && "$test_name" != "unicode" ]]; then
         shopt -s nullglob
         for candidate in "$EXPECTED_DIR/${test_name}_"[0-9]*.out; do
             candidates+=("$candidate")

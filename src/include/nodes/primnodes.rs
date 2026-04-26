@@ -335,6 +335,10 @@ pub enum BuiltinScalarFunction {
     PgBackendPid,
     PgPartitionRoot,
     GetDatabaseEncoding,
+    UnicodeVersion,
+    UnicodeAssigned,
+    Normalize,
+    IsNormalized,
     PgEncodingToChar,
     PgMyTempSchema,
     PgRustInternalBinaryCoercible,
@@ -545,9 +549,14 @@ pub enum BuiltinScalarFunction {
     SetVal,
     PgGetSerialSequence,
     PgGetAcl,
+    MakeAclItem,
     TxidCurrent,
     TxidCurrentIfAssigned,
+    TxidCurrentSnapshot,
+    TxidSnapshotXmin,
+    TxidSnapshotXmax,
     TxidVisibleInSnapshot,
+    TxidStatus,
     PgGetUserById,
     ObjDescription,
     PgDescribeObject,
@@ -965,6 +974,13 @@ pub enum SetReturningCall {
         output_columns: Vec<QueryColumn>,
         with_ordinality: bool,
     },
+    TxidSnapshotXip {
+        func_oid: u32,
+        func_variadic: bool,
+        arg: Expr,
+        output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
+    },
     TextSearchTableFunction {
         kind: TextSearchTableFunction,
         args: Vec<Expr>,
@@ -992,6 +1008,7 @@ impl SetReturningCall {
             | SetReturningCall::PartitionTree { output_columns, .. }
             | SetReturningCall::PartitionAncestors { output_columns, .. }
             | SetReturningCall::PgLockStatus { output_columns, .. }
+            | SetReturningCall::TxidSnapshotXip { output_columns, .. }
             | SetReturningCall::TextSearchTableFunction { output_columns, .. }
             | SetReturningCall::UserDefined { output_columns, .. } => output_columns,
         }
@@ -1035,6 +1052,10 @@ impl SetReturningCall {
                 output_columns: existing,
                 ..
             }
+            | SetReturningCall::TxidSnapshotXip {
+                output_columns: existing,
+                ..
+            }
             | SetReturningCall::TextSearchTableFunction {
                 output_columns: existing,
                 ..
@@ -1069,6 +1090,9 @@ impl SetReturningCall {
                 with_ordinality, ..
             }
             | SetReturningCall::PgLockStatus {
+                with_ordinality, ..
+            }
+            | SetReturningCall::TxidSnapshotXip {
                 with_ordinality, ..
             }
             | SetReturningCall::TextSearchTableFunction {
@@ -1133,6 +1157,19 @@ impl SetReturningCall {
             } => SetReturningCall::PgLockStatus {
                 func_oid,
                 func_variadic,
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::TxidSnapshotXip {
+                func_oid,
+                func_variadic,
+                arg,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::TxidSnapshotXip {
+                func_oid,
+                func_variadic,
+                arg: map(arg),
                 output_columns,
                 with_ordinality,
             },
@@ -2077,6 +2114,7 @@ pub fn set_returning_call_exprs(call: &SetReturningCall) -> Vec<&Expr> {
         SetReturningCall::PartitionTree { relid, .. }
         | SetReturningCall::PartitionAncestors { relid, .. } => vec![relid],
         SetReturningCall::PgLockStatus { .. } => Vec::new(),
+        SetReturningCall::TxidSnapshotXip { arg, .. } => vec![arg],
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }

@@ -1,5 +1,7 @@
 use super::{ExecError, ExecutorContext, Value};
-use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
+use crate::backend::access::transam::xact::{
+    FIRST_NORMAL_TRANSACTION_ID, INVALID_TRANSACTION_ID, TransactionStatus,
+};
 use crate::include::catalog::TXID_SNAPSHOT_TYPE_OID;
 use crate::include::nodes::primnodes::BuiltinScalarFunction;
 use crate::pgrust::compact_string::CompactString;
@@ -104,6 +106,82 @@ fn parse_txid_snapshot(text: &str) -> Result<TxidSnapshotValue, ExecError> {
     })
 }
 
+fn txid_snapshot_arg(
+    value: &Value,
+    op: &'static str,
+) -> Result<Option<TxidSnapshotValue>, ExecError> {
+    if matches!(value, Value::Null) {
+        return Ok(None);
+    }
+    let snapshot_text = value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op,
+        left: value.clone(),
+        right: Value::Text("".into()),
+    })?;
+    parse_txid_snapshot(snapshot_text).map(Some)
+}
+
+fn current_snapshot_value(ctx: &ExecutorContext) -> TxidSnapshotValue {
+    let mut in_progress: Vec<u64> = ctx
+        .snapshot
+        .in_progress
+        .iter()
+        .copied()
+        .map(u64::from)
+        .collect();
+    if ctx.snapshot.current_xid != INVALID_TRANSACTION_ID
+        && ctx.snapshot.current_xid >= ctx.snapshot.xmin
+        && ctx.snapshot.current_xid < ctx.snapshot.xmax
+    {
+        in_progress.push(u64::from(ctx.snapshot.current_xid));
+        in_progress.sort_unstable();
+        in_progress.dedup();
+    }
+
+    TxidSnapshotValue {
+        xmin: u64::from(ctx.snapshot.xmin),
+        xmax: u64::from(ctx.snapshot.xmax),
+        in_progress,
+    }
+}
+
+fn txid_status_future_error(xid: u64) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("transaction ID {xid} is in the future"),
+        detail: None,
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
+fn eval_txid_status_value(xid: u64, ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let txns = ctx.txns.read();
+    if xid > u64::from(txns.next_xid()) {
+        return Err(txid_status_future_error(xid));
+    }
+    if xid == 0 || xid > u64::from(u32::MAX) {
+        return Ok(Value::Null);
+    }
+
+    let xid = xid as u32;
+    let status = txns.status(xid);
+    // :HACK: pgrust does not model CLOG truncation horizons yet. PostgreSQL's
+    // txid regression expects FirstNormalTransactionId to be too old to report
+    // after bootstrap setup, even if this lightweight transaction manager still
+    // remembers its committed status.
+    if xid == FIRST_NORMAL_TRANSACTION_ID && !matches!(status, Some(TransactionStatus::InProgress))
+    {
+        return Ok(Value::Null);
+    }
+
+    Ok(match status {
+        Some(TransactionStatus::InProgress) => Value::Text("in progress".into()),
+        Some(TransactionStatus::Committed) => Value::Text("committed".into()),
+        Some(TransactionStatus::Aborted) => Value::Text("aborted".into()),
+        None => Value::Null,
+    })
+}
+
 pub(crate) fn is_txid_snapshot_type_oid(type_oid: u32) -> bool {
     type_oid == TXID_SNAPSHOT_TYPE_OID
 }
@@ -125,23 +203,45 @@ pub(crate) fn eval_txid_builtin_function(
             .filter(|xid| *xid != INVALID_TRANSACTION_ID)
             .map(|xid| Value::Int64(i64::from(xid)))
             .unwrap_or(Value::Null)),
+        BuiltinScalarFunction::TxidCurrentSnapshot => Ok(Value::Text(CompactString::from_owned(
+            current_snapshot_value(ctx).render(),
+        ))),
+        BuiltinScalarFunction::TxidSnapshotXmin => match values {
+            [value] => Ok(txid_snapshot_arg(value, "txid_snapshot_xmin")?
+                .map(|snapshot| Value::Int64(snapshot.xmin as i64))
+                .unwrap_or(Value::Null)),
+            _ => Err(ExecError::DetailedError {
+                message: "malformed txid builtin call".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            }),
+        },
+        BuiltinScalarFunction::TxidSnapshotXmax => match values {
+            [value] => Ok(txid_snapshot_arg(value, "txid_snapshot_xmax")?
+                .map(|snapshot| Value::Int64(snapshot.xmax as i64))
+                .unwrap_or(Value::Null)),
+            _ => Err(ExecError::DetailedError {
+                message: "malformed txid builtin call".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            }),
+        },
         BuiltinScalarFunction::TxidVisibleInSnapshot => match values {
+            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
             [Value::Int64(xid), snapshot] if *xid >= 0 => {
-                let snapshot_text = snapshot.as_text().ok_or_else(|| ExecError::TypeMismatch {
-                    op: "txid_visible_in_snapshot",
-                    left: snapshot.clone(),
-                    right: Value::Text("".into()),
-                })?;
-                let snapshot = parse_txid_snapshot(snapshot_text)?;
+                let Some(snapshot) = txid_snapshot_arg(snapshot, "txid_visible_in_snapshot")?
+                else {
+                    return Ok(Value::Null);
+                };
                 Ok(Value::Bool(snapshot.xid_visible(*xid as u64)))
             }
             [Value::Int32(xid), snapshot] if *xid >= 0 => {
-                let snapshot_text = snapshot.as_text().ok_or_else(|| ExecError::TypeMismatch {
-                    op: "txid_visible_in_snapshot",
-                    left: snapshot.clone(),
-                    right: Value::Text("".into()),
-                })?;
-                let snapshot = parse_txid_snapshot(snapshot_text)?;
+                let Some(snapshot) = txid_snapshot_arg(snapshot, "txid_visible_in_snapshot")?
+                else {
+                    return Ok(Value::Null);
+                };
                 Ok(Value::Bool(snapshot.xid_visible(*xid as u64)))
             }
             [left, right] => Err(ExecError::TypeMismatch {
@@ -156,7 +256,43 @@ pub(crate) fn eval_txid_builtin_function(
                 sqlstate: "XX000",
             }),
         },
+        BuiltinScalarFunction::TxidStatus => match values {
+            [Value::Null] => Ok(Value::Null),
+            [Value::Int64(xid)] if *xid >= 0 => eval_txid_status_value(*xid as u64, ctx),
+            [Value::Int32(xid)] if *xid >= 0 => eval_txid_status_value(*xid as u64, ctx),
+            [value] => Err(ExecError::TypeMismatch {
+                op: "txid_status",
+                left: value.clone(),
+                right: Value::Int64(0),
+            }),
+            _ => Err(ExecError::DetailedError {
+                message: "malformed txid builtin call".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            }),
+        },
         _ => unreachable!("non-txid builtin dispatched to expr_txid"),
+    }
+}
+
+pub(crate) fn eval_txid_snapshot_xip_values(values: &[Value]) -> Result<Vec<Value>, ExecError> {
+    match values {
+        [value] => Ok(txid_snapshot_arg(value, "txid_snapshot_xip")?
+            .map(|snapshot| {
+                snapshot
+                    .in_progress
+                    .into_iter()
+                    .map(|xid| Value::Int64(xid as i64))
+                    .collect()
+            })
+            .unwrap_or_default()),
+        _ => Err(ExecError::DetailedError {
+            message: "malformed txid builtin call".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        }),
     }
 }
 

@@ -292,6 +292,51 @@ impl CatalogStore {
         Ok((row, effect))
     }
 
+    pub fn replace_database_row_mvcc(
+        &mut self,
+        row: PgDatabaseRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
+        let existing = catcache
+            .database_rows()
+            .into_iter()
+            .find(|existing| existing.oid == row.oid)
+            .ok_or_else(|| CatalogError::UnknownTable(row.oid.to_string()))?;
+        if existing.datname != row.datname
+            && catcache.database_rows().into_iter().any(|candidate| {
+                candidate.oid != row.oid && candidate.datname.eq_ignore_ascii_case(&row.datname)
+            })
+        {
+            return Err(CatalogError::UniqueViolation(
+                "pg_database_datname_index".into(),
+            ));
+        }
+
+        let kinds = [BootstrapCatalogKind::PgDatabase];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                databases: vec![existing],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                databases: vec![row],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok(effect)
+    }
+
     pub fn create_table(
         &mut self,
         name: impl Into<String>,

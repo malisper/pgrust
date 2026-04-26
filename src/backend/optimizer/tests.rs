@@ -34,6 +34,10 @@ fn box_ty() -> SqlType {
     SqlType::new(SqlTypeKind::Box)
 }
 
+fn polygon_ty() -> SqlType {
+    SqlType::new(SqlTypeKind::Polygon)
+}
+
 fn oid() -> SqlType {
     SqlType::new(SqlTypeKind::Oid)
 }
@@ -145,6 +149,22 @@ fn values_path_with_rows(slot_id: usize, startup_cost: f64, total_cost: f64, row
             crate::include::nodes::primnodes::Expr::Const(Value::Int32(2)),
         ]],
         output_columns,
+    }
+}
+
+fn filtered_values_path_with_rows(
+    slot_id: usize,
+    startup_cost: f64,
+    total_cost: f64,
+    rows: f64,
+) -> Path {
+    let input = values_path_with_rows(slot_id, 0.0, 0.03, 3.0);
+    let pathtarget = input.semantic_output_target();
+    Path::Filter {
+        plan_info: PlanEstimate::new(startup_cost, total_cost, rows, 2),
+        pathtarget,
+        predicate: gt(var(slot_id, 1), Expr::Const(Value::Int32(0))),
+        input: Box::new(input),
     }
 }
 
@@ -683,6 +703,21 @@ fn box_spgist_options(num_keys: usize) -> CatalogIndexBuildOptions {
     CatalogIndexBuildOptions {
         am_oid: crate::include::catalog::SPGIST_AM_OID,
         indclass: vec![crate::include::catalog::BOX_SPGIST_OPCLASS_OID; num_keys],
+        indcollation: vec![0; num_keys],
+        indoption: vec![0; num_keys],
+        indnullsnotdistinct: false,
+        indisexclusion: false,
+        indimmediate: true,
+        brin_options: None,
+        gin_options: None,
+        hash_options: None,
+    }
+}
+
+fn polygon_spgist_options(num_keys: usize) -> CatalogIndexBuildOptions {
+    CatalogIndexBuildOptions {
+        am_oid: crate::include::catalog::SPGIST_AM_OID,
+        indclass: vec![crate::include::catalog::POLY_SPGIST_OPCLASS_OID; num_keys],
         indcollation: vec![0; num_keys],
         indoption: vec![0; num_keys],
         indnullsnotdistinct: false,
@@ -2932,6 +2967,81 @@ fn planner_uses_spgist_box_index_only_when_opclass_can_return_data() {
 }
 
 #[test]
+fn planner_uses_spgist_polygon_distance_ordering_for_window_input() {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "quad_poly_tbl",
+            RelationDesc {
+                columns: vec![
+                    column_desc("id", int4(), false),
+                    column_desc("p", polygon_ty(), true),
+                ],
+            },
+        )
+        .expect("create test catalog relation");
+    let index = catalog
+        .create_index_for_relation_with_options_and_flags(
+            "quad_poly_tbl_idx",
+            table.relation_oid,
+            false,
+            false,
+            &[IndexColumnDef::from("p")],
+            &polygon_spgist_options(1),
+            None,
+        )
+        .expect("create test catalog index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark test catalog index usable");
+    catalog
+        .set_relation_stats(table.relation_oid, 512, 11_003.0)
+        .expect("seed test catalog table stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 64, 11_003.0)
+        .expect("seed test catalog index stats");
+
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select rank() over (order by p <-> point '123,456') n, \
+                p <-> point '123,456' dist, id \
+         from quad_poly_tbl \
+         where p <@ polygon '((300,300),(400,600),(600,500),(700,200))'",
+        &catalog,
+        PlannerConfig {
+            enable_seqscan: false,
+            enable_bitmapscan: false,
+            ..PlannerConfig::default()
+        },
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::IndexScan {
+                index_name,
+                order_by_keys,
+                ..
+            } if index_name == "quad_poly_tbl_idx" && !order_by_keys.is_empty()
+        )),
+        "expected ordered polygon SP-GiST index scan, got {lines:?}"
+    );
+    assert!(
+        !plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::OrderBy { .. }
+        )),
+        "expected no explicit sort, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Order By: (p <-> '(123,456)'::point)")),
+        "expected distance operator in ordered index explain, got {lines:?}"
+    );
+}
+
+#[test]
 fn explain_shows_initplan_for_rewritten_minmax_aggregate() {
     let catalog = catalog_with_indexed_items();
     let stmt = parse_select("select max(id) from items where id < 42").expect("parse");
@@ -3507,6 +3617,98 @@ fn swapped_join_candidate_keeps_logical_pathtarget_order() {
         swapped.output_vars(),
         vec![var(2, 1), var(2, 2), var(1, 1), var(1, 2)]
     );
+}
+
+#[test]
+fn cross_values_join_emits_swapped_candidate_with_logical_pathtarget_order() {
+    let paths = super::build_join_paths(
+        values_path_with_rows(1, 0.0, 0.03, 3.0),
+        values_path_with_rows(2, 0.0, 0.03, 3.0),
+        &[1],
+        &[2],
+        JoinType::Cross,
+        vec![],
+    );
+
+    let swapped = paths
+        .into_iter()
+        .find(|path| match path {
+            Path::NestedLoopJoin {
+                left,
+                kind: JoinType::Cross,
+                ..
+            } => left.output_vars().first() == Some(&var(2, 1)),
+            _ => false,
+        })
+        .expect("swapped values cross join");
+
+    assert_eq!(
+        swapped.semantic_output_vars(),
+        vec![var(1, 1), var(1, 2), var(2, 1), var(2, 2)]
+    );
+    assert_eq!(
+        swapped.output_vars(),
+        vec![var(2, 1), var(2, 2), var(1, 1), var(1, 2)]
+    );
+}
+
+#[test]
+fn cross_values_join_prefers_filtered_values_side_as_outer() {
+    let paths = super::build_join_paths(
+        values_path_with_rows(1, 0.0, 0.03, 3.0),
+        filtered_values_path_with_rows(2, 0.0, 0.0475, 2.985),
+        &[1],
+        &[2],
+        JoinType::Cross,
+        vec![],
+    );
+
+    let default = paths
+        .iter()
+        .find(|path| match path {
+            Path::NestedLoopJoin { left, .. } => left.output_vars().first() == Some(&var(1, 1)),
+            _ => false,
+        })
+        .expect("default values cross join");
+    let swapped = paths
+        .iter()
+        .find(|path| match path {
+            Path::NestedLoopJoin {
+                left,
+                kind: JoinType::Cross,
+                ..
+            } => left.output_vars().first() == Some(&var(2, 1)),
+            _ => false,
+        })
+        .expect("swapped values cross join");
+
+    assert!(
+        swapped.plan_info().total_cost.as_f64() < default.plan_info().total_cost.as_f64(),
+        "expected filtered values side as cheaper outer: default={:?}, swapped={:?}",
+        default.plan_info(),
+        swapped.plan_info()
+    );
+
+    let best = paths
+        .iter()
+        .min_by(|left, right| {
+            left.plan_info()
+                .total_cost
+                .as_f64()
+                .partial_cmp(&right.plan_info().total_cost.as_f64())
+                .unwrap()
+        })
+        .expect("best values cross join path");
+    match best {
+        Path::NestedLoopJoin {
+            left,
+            kind: JoinType::Cross,
+            ..
+        } => {
+            assert_eq!(left.output_vars().first(), Some(&var(2, 1)));
+        }
+        other => panic!("expected swapped values cross join best path, got {other:?}"),
+    }
 }
 
 #[test]

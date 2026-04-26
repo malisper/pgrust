@@ -39,6 +39,7 @@ pub(super) enum ResolvedSrfImpl {
     PartitionTree,
     PartitionAncestors,
     PgLockStatus,
+    TxidSnapshotXip,
     JsonTable(JsonTableFunction),
     RegexTable(RegexTableFunction),
     StringTable(StringTableFunction),
@@ -373,6 +374,7 @@ fn builtin_srf_impl_for_proc_row(row: &PgProcRow) -> Option<ResolvedSrfImpl> {
         "pg_partition_tree" => Some(ResolvedSrfImpl::PartitionTree),
         "pg_partition_ancestors" => Some(ResolvedSrfImpl::PartitionAncestors),
         "pg_lock_status" => Some(ResolvedSrfImpl::PgLockStatus),
+        "txid_snapshot_xip" | "pg_snapshot_xip" => Some(ResolvedSrfImpl::TxidSnapshotXip),
         other => resolve_json_table_function(other)
             .map(ResolvedSrfImpl::JsonTable)
             .or_else(|| resolve_regex_table_function(other).map(ResolvedSrfImpl::RegexTable))
@@ -1242,7 +1244,12 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::Version
             | BuiltinScalarFunction::PgBackendPid
             | BuiltinScalarFunction::TxidCurrent
-            | BuiltinScalarFunction::TxidCurrentIfAssigned => args.is_empty(),
+            | BuiltinScalarFunction::TxidCurrentIfAssigned
+            | BuiltinScalarFunction::TxidCurrentSnapshot => args.is_empty(),
+            BuiltinScalarFunction::TxidSnapshotXmin | BuiltinScalarFunction::TxidSnapshotXmax => {
+                args.len() == 1
+            }
+            BuiltinScalarFunction::TxidStatus => args.len() == 1,
             BuiltinScalarFunction::PgGetTriggerDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgTriggerDepth => args.is_empty(),
             BuiltinScalarFunction::PgPartitionRoot => args.len() == 1,
@@ -1264,6 +1271,11 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::ToTimestamp => args.len() == 1,
             BuiltinScalarFunction::IntervalHash => args.len() == 1,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
+            BuiltinScalarFunction::UnicodeVersion => args.is_empty(),
+            BuiltinScalarFunction::UnicodeAssigned => args.len() == 1,
+            BuiltinScalarFunction::Normalize | BuiltinScalarFunction::IsNormalized => {
+                args.len() == 2
+            }
             BuiltinScalarFunction::PgEncodingToChar => args.len() == 1,
             BuiltinScalarFunction::PgMyTempSchema => args.is_empty(),
             BuiltinScalarFunction::PgRustInternalBinaryCoercible => args.len() == 2,
@@ -1291,6 +1303,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
             BuiltinScalarFunction::PgGetAcl => args.len() == 3,
+            BuiltinScalarFunction::MakeAclItem => args.len() == 4,
             BuiltinScalarFunction::PgGetUserById => args.len() == 1,
             BuiltinScalarFunction::ObjDescription => args.len() == 2,
             BuiltinScalarFunction::PgDescribeObject => args.len() == 3,
@@ -1852,8 +1865,17 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::TxidCurrent | BuiltinScalarFunction::TxidCurrentIfAssigned => {
             return Some(SqlType::new(SqlTypeKind::Int8));
         }
+        BuiltinScalarFunction::TxidCurrentSnapshot => {
+            return Some(SqlType::new(SqlTypeKind::Text));
+        }
+        BuiltinScalarFunction::TxidSnapshotXmin | BuiltinScalarFunction::TxidSnapshotXmax => {
+            return Some(SqlType::new(SqlTypeKind::Int8));
+        }
         BuiltinScalarFunction::TxidVisibleInSnapshot => {
             return Some(SqlType::new(SqlTypeKind::Bool));
+        }
+        BuiltinScalarFunction::TxidStatus => {
+            return Some(SqlType::new(SqlTypeKind::Text));
         }
         BuiltinScalarFunction::TextStartsWith => {
             return Some(SqlType::new(SqlTypeKind::Bool));
@@ -2207,14 +2229,43 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pgsql_version", BuiltinScalarFunction::Version),
         ("pg_backend_pid", BuiltinScalarFunction::PgBackendPid),
         ("txid_current", BuiltinScalarFunction::TxidCurrent),
+        ("pg_current_xact_id", BuiltinScalarFunction::TxidCurrent),
         (
             "txid_current_if_assigned",
             BuiltinScalarFunction::TxidCurrentIfAssigned,
         ),
         (
+            "pg_current_xact_id_if_assigned",
+            BuiltinScalarFunction::TxidCurrentIfAssigned,
+        ),
+        (
+            "txid_current_snapshot",
+            BuiltinScalarFunction::TxidCurrentSnapshot,
+        ),
+        (
+            "pg_current_snapshot",
+            BuiltinScalarFunction::TxidCurrentSnapshot,
+        ),
+        (
+            "txid_snapshot_xmin",
+            BuiltinScalarFunction::TxidSnapshotXmin,
+        ),
+        ("pg_snapshot_xmin", BuiltinScalarFunction::TxidSnapshotXmin),
+        (
+            "txid_snapshot_xmax",
+            BuiltinScalarFunction::TxidSnapshotXmax,
+        ),
+        ("pg_snapshot_xmax", BuiltinScalarFunction::TxidSnapshotXmax),
+        (
             "txid_visible_in_snapshot",
             BuiltinScalarFunction::TxidVisibleInSnapshot,
         ),
+        (
+            "pg_visible_in_snapshot",
+            BuiltinScalarFunction::TxidVisibleInSnapshot,
+        ),
+        ("txid_status", BuiltinScalarFunction::TxidStatus),
+        ("pg_xact_status", BuiltinScalarFunction::TxidStatus),
         ("cashlarger", BuiltinScalarFunction::CashLarger),
         ("cashsmaller", BuiltinScalarFunction::CashSmaller),
         ("cash_words", BuiltinScalarFunction::CashWords),
@@ -2264,6 +2315,12 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
         ),
+        ("unicode_version", BuiltinScalarFunction::UnicodeVersion),
+        ("unicode_assigned", BuiltinScalarFunction::UnicodeAssigned),
+        ("normalize", BuiltinScalarFunction::Normalize),
+        ("unicode_normalize_func", BuiltinScalarFunction::Normalize),
+        ("is_normalized", BuiltinScalarFunction::IsNormalized),
+        ("unicode_is_normalized", BuiltinScalarFunction::IsNormalized),
         (
             "pg_encoding_to_char",
             BuiltinScalarFunction::PgEncodingToChar,
@@ -2853,6 +2910,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("regrole_to_text", BuiltinScalarFunction::RegRoleToText),
         ("regroleout", BuiltinScalarFunction::RegRoleToText),
         ("pg_get_acl", BuiltinScalarFunction::PgGetAcl),
+        ("makeaclitem", BuiltinScalarFunction::MakeAclItem),
         ("pg_get_userbyid", BuiltinScalarFunction::PgGetUserById),
         (
             "pg_indexam_has_property",
@@ -3563,6 +3621,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::PgGetSerialSequence
             | BuiltinScalarFunction::PgGetAcl
+            | BuiltinScalarFunction::MakeAclItem
             | BuiltinScalarFunction::PgGetUserById
             | BuiltinScalarFunction::ObjDescription
             | BuiltinScalarFunction::PgDescribeObject
@@ -3598,6 +3657,10 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgAdvisoryUnlockShared
             | BuiltinScalarFunction::PgAdvisoryUnlockAll
             | BuiltinScalarFunction::GetDatabaseEncoding
+            | BuiltinScalarFunction::UnicodeVersion
+            | BuiltinScalarFunction::UnicodeAssigned
+            | BuiltinScalarFunction::Normalize
+            | BuiltinScalarFunction::IsNormalized
             | BuiltinScalarFunction::PgEncodingToChar
             | BuiltinScalarFunction::PgMyTempSchema
             | BuiltinScalarFunction::PgRustTestFdwHandler

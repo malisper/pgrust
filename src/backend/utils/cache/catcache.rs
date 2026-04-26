@@ -121,7 +121,26 @@ pub struct CatCache {
     types_by_oid: BTreeMap<u32, PgTypeRow>,
 }
 
+fn namespace_row_prefer_replacement(
+    existing: &PgNamespaceRow,
+    replacement: &PgNamespaceRow,
+) -> bool {
+    replacement.nspacl.is_some() && existing.nspacl.is_none()
+}
+
 impl CatCache {
+    fn insert_namespace_row(&mut self, row: PgNamespaceRow) {
+        let name_key = row.nspname.to_ascii_lowercase();
+        let should_replace = self
+            .namespaces_by_oid
+            .get(&row.oid)
+            .is_none_or(|existing| namespace_row_prefer_replacement(existing, &row));
+        if should_replace {
+            self.namespaces_by_name.insert(name_key, row.clone());
+            self.namespaces_by_oid.insert(row.oid, row);
+        }
+    }
+
     fn normalize_composite_array_types(&mut self) {
         let composite_rows = self
             .types_by_oid
@@ -147,10 +166,7 @@ impl CatCache {
         let mut cache = Self::default();
 
         for row in bootstrap_pg_namespace_rows() {
-            cache
-                .namespaces_by_name
-                .insert(row.nspname.to_ascii_lowercase(), row.clone());
-            cache.namespaces_by_oid.insert(row.oid, row);
+            cache.insert_namespace_row(row);
         }
 
         for row in builtin_type_rows() {
@@ -547,10 +563,7 @@ impl CatCache {
     ) -> Self {
         let mut cache = Self::default();
         for row in namespace_rows {
-            cache
-                .namespaces_by_name
-                .insert(row.nspname.to_ascii_lowercase(), row.clone());
-            cache.namespaces_by_oid.insert(row.oid, row);
+            cache.insert_namespace_row(row);
         }
         for row in type_rows {
             cache

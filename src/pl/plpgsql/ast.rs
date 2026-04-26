@@ -120,6 +120,7 @@ pub enum Stmt {
     },
     Raise {
         level: RaiseLevel,
+        sqlstate: Option<String>,
         message: String,
         params: Vec<String>,
     },

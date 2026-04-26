@@ -2,6 +2,7 @@ use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 use std::cmp::Ordering;
 
+use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
 use crate::backend::utils::trigger::format_trigger_definition;
@@ -96,7 +97,8 @@ use super::expr_string::{
     eval_text_starts_with_function, eval_text_substring, eval_to_bin_function,
     eval_to_char_float4_function, eval_to_char_function, eval_to_hex_function,
     eval_to_number_function, eval_to_oct_function, eval_translate_function, eval_trim_function,
-    eval_unistr_function,
+    eval_unicode_assigned_function, eval_unicode_is_normalized_function,
+    eval_unicode_normalize_function, eval_unicode_version_function, eval_unistr_function,
 };
 use super::expr_txid::eval_txid_builtin_function;
 use super::expr_xml::{eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function};
@@ -1794,6 +1796,72 @@ fn eval_pg_get_acl(values: &[Value], ctx: &ExecutorContext) -> Result<Value, Exe
     }
 }
 
+fn eval_make_acl_item(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _, _, _]
+        | [_, Value::Null, _, _]
+        | [_, _, Value::Null, _]
+        | [_, _, _, Value::Null] => Ok(Value::Null),
+        [grantee, grantor, privileges, grant_option] => {
+            let grantee = oid_arg_to_u32(grantee, "makeaclitem")?;
+            let grantor = oid_arg_to_u32(grantor, "makeaclitem")?;
+            let Some(privileges) = privileges.as_text() else {
+                return Err(ExecError::TypeMismatch {
+                    op: "makeaclitem",
+                    left: privileges.clone(),
+                    right: Value::Text("".into()),
+                });
+            };
+            let Value::Bool(grant_option) = grant_option else {
+                return Err(ExecError::TypeMismatch {
+                    op: "makeaclitem",
+                    left: grant_option.clone(),
+                    right: Value::Bool(false),
+                });
+            };
+            let mut privilege_bits = acl_privilege_abbrev(privileges);
+            if *grant_option {
+                privilege_bits = privilege_bits
+                    .chars()
+                    .flat_map(|ch| [ch, '*'])
+                    .collect::<String>();
+            }
+            Ok(Value::Text(
+                format!("{grantee}={privilege_bits}/{grantor}").into(),
+            ))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "makeaclitem(grantee, grantor, privileges, grant_option)",
+            actual: format!("MakeAclItem({} args)", values.len()),
+        })),
+    }
+}
+
+fn acl_privilege_abbrev(privileges: &str) -> String {
+    privileges
+        .split(|ch: char| ch == ',' || ch.is_ascii_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let lower = part.to_ascii_lowercase();
+            match lower.as_str() {
+                "select" => "r",
+                "insert" => "a",
+                "update" => "w",
+                "delete" => "d",
+                "truncate" => "D",
+                "references" => "x",
+                "trigger" => "t",
+                "execute" => "X",
+                "usage" => "U",
+                "create" => "C",
+                "connect" => "c",
+                "temporary" | "temp" => "T",
+                _ => part,
+            }
+        })
+        .collect()
+}
+
 fn eval_obj_description(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
     match values {
         [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
@@ -2641,8 +2709,18 @@ fn eval_pg_relation_size(values: &[Value], ctx: &ExecutorContext) -> Result<Valu
         return Ok(Value::Null);
     }
 
-    let relation_oid = oid_arg_to_u32(value, "pg_relation_size")?;
     let catalog = executor_catalog(ctx)?;
+    let relation_oid = match oid_arg_to_u32(value, "pg_relation_size") {
+        Ok(oid) => oid,
+        Err(err) if value.as_text().is_some() => {
+            let relation_name = value.as_text().expect("guarded above");
+            catalog
+                .lookup_any_relation(relation_name)
+                .map(|relation| relation.relation_oid)
+                .ok_or(err)?
+        }
+        Err(err) => return Err(err),
+    };
     let Some(relation) = catalog.relcache().get_by_oid(relation_oid) else {
         return Err(ExecError::DetailedError {
             message: format!("could not open relation with OID {relation_oid}"),
@@ -2665,18 +2743,13 @@ fn eval_pg_relation_size(values: &[Value], ctx: &ExecutorContext) -> Result<Valu
             },
         ));
     }
-    let mut scan =
-        heap_scan_begin_visible(&ctx.pool, ctx.client_id, relation.rel, ctx.snapshot.clone())?;
-    let txns = ctx.txns.read();
-    let mut tuples = 0_i64;
-    while heap_scan_next_visible(&ctx.pool, ctx.client_id, &txns, &mut scan)?.is_some() {
-        tuples += 1;
-    }
-    Ok(Value::Int64(if tuples == 0 {
-        0
-    } else {
-        i64::from(crate::backend::storage::smgr::smgr::BLCKSZ as i32)
-    }))
+    let nblocks = ctx
+        .pool
+        .with_storage_mut(|s| s.smgr.nblocks(relation.rel, ForkNumber::Main))
+        .map_err(crate::backend::access::heap::heapam::HeapError::Storage)?;
+    Ok(Value::Int64(
+        i64::from(nblocks) * i64::from(crate::backend::storage::smgr::smgr::BLCKSZ as i32),
+    ))
 }
 
 fn parent_references_toast_relation(
@@ -4331,6 +4404,10 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::PgSizeBytes => eval_pg_size_bytes_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
         BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
+        BuiltinScalarFunction::UnicodeVersion => eval_unicode_version_function(&values),
+        BuiltinScalarFunction::UnicodeAssigned => eval_unicode_assigned_function(&values),
+        BuiltinScalarFunction::Normalize => eval_unicode_normalize_function(&values),
+        BuiltinScalarFunction::IsNormalized => eval_unicode_is_normalized_function(&values),
         BuiltinScalarFunction::Initcap => eval_initcap_function(&values),
         BuiltinScalarFunction::BTrim => eval_trim_function("btrim", &values),
         BuiltinScalarFunction::LTrim => eval_trim_function("ltrim", &values),
@@ -5525,9 +5602,11 @@ fn eval_builtin_function(
         BuiltinScalarFunction::RandomNormal => eval_random_normal_function(&values),
         BuiltinScalarFunction::TxidCurrent
         | BuiltinScalarFunction::TxidCurrentIfAssigned
-        | BuiltinScalarFunction::TxidVisibleInSnapshot => {
-            eval_txid_builtin_function(func, &values, ctx)
-        }
+        | BuiltinScalarFunction::TxidCurrentSnapshot
+        | BuiltinScalarFunction::TxidSnapshotXmin
+        | BuiltinScalarFunction::TxidSnapshotXmax
+        | BuiltinScalarFunction::TxidVisibleInSnapshot
+        | BuiltinScalarFunction::TxidStatus => eval_txid_builtin_function(func, &values, ctx),
         BuiltinScalarFunction::UuidIn
         | BuiltinScalarFunction::UuidOut
         | BuiltinScalarFunction::UuidRecv
@@ -5597,6 +5676,7 @@ fn eval_builtin_function(
         }
         BuiltinScalarFunction::PgGetUserById => eval_pg_get_userbyid(&values, ctx),
         BuiltinScalarFunction::PgGetAcl => eval_pg_get_acl(&values, ctx),
+        BuiltinScalarFunction::MakeAclItem => eval_make_acl_item(&values),
         BuiltinScalarFunction::PgGetStatisticsObjDef => eval_pg_get_statisticsobjdef(&values, ctx),
         BuiltinScalarFunction::PgGetStatisticsObjDefColumns => {
             eval_pg_get_statisticsobjdef_columns(&values, ctx)
@@ -5669,6 +5749,10 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(&values),
         BuiltinScalarFunction::IntervalHash => eval_interval_hash_function(&values),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
+        BuiltinScalarFunction::UnicodeVersion => eval_unicode_version_function(&values),
+        BuiltinScalarFunction::UnicodeAssigned => eval_unicode_assigned_function(&values),
+        BuiltinScalarFunction::Normalize => eval_unicode_normalize_function(&values),
+        BuiltinScalarFunction::IsNormalized => eval_unicode_is_normalized_function(&values),
         BuiltinScalarFunction::PgEncodingToChar => eval_pg_encoding_to_char(&values),
         BuiltinScalarFunction::PgMyTempSchema => Ok(Value::Int64(i64::from(
             current_temp_namespace_oid(ctx).unwrap_or(0),

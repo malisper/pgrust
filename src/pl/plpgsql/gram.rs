@@ -511,6 +511,7 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
     let mut level = RaiseLevel::Exception;
     let mut message = None;
     let mut message_sql = None::<String>;
+    let mut sqlstate = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::raise_level => {
@@ -525,19 +526,53 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
                     RaiseLevel::Exception
                 };
             }
-            Rule::sql_string => {
-                message_sql = Some(part.as_str().to_string());
-                let expr = parse_expr(part.as_str())?;
-                let text = match expr {
-                    SqlExpr::Const(Value::Text(text)) => text.to_string(),
-                    other => {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "RAISE format string literal",
-                            actual: format!("{other:?}"),
-                        });
+            Rule::raise_message_clause => {
+                for inner in part.into_inner() {
+                    if inner.as_rule() == Rule::sql_string {
+                        message_sql = Some(inner.as_str().to_string());
+                        message = Some(raise_string_literal_text(inner.as_str())?);
                     }
-                };
-                message = Some(text);
+                }
+            }
+            Rule::raise_condition_clause => {
+                let mut condition_name = None;
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::ident => condition_name = Some(build_ident(inner)),
+                        Rule::raise_using_clause => {
+                            for item in inner.into_inner() {
+                                let mut item_name = None;
+                                let mut item_value = None;
+                                for item_part in item.into_inner() {
+                                    match item_part.as_rule() {
+                                        Rule::ident => item_name = Some(build_ident(item_part)),
+                                        Rule::expr_until_comma_or_semi => {
+                                            item_value = Some(item_part.as_str().trim().to_string())
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                if item_name
+                                    .as_deref()
+                                    .is_some_and(|name| name.eq_ignore_ascii_case("message"))
+                                {
+                                    let value = item_value.ok_or(ParseError::UnexpectedEof)?;
+                                    message = Some(raise_string_literal_text(&value)?);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let condition_name = condition_name.ok_or(ParseError::UnexpectedEof)?;
+                sqlstate = Some(
+                    exception_condition_name_sqlstate(&condition_name)
+                        .unwrap_or("P0001")
+                        .to_string(),
+                );
+                if message.is_none() {
+                    message = Some(condition_name);
+                }
             }
             _ => {}
         }
@@ -545,9 +580,33 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
     let params = raise_params_from_raw_sql(&raw, message_sql.as_deref())?;
     Ok(Stmt::Raise {
         level,
+        sqlstate,
         message: message.ok_or(ParseError::UnexpectedEof)?,
         params,
     })
+}
+
+fn raise_string_literal_text(sql: &str) -> Result<String, ParseError> {
+    let expr = parse_expr(sql)?;
+    match expr {
+        SqlExpr::Const(Value::Text(text)) => Ok(text.to_string()),
+        other => Err(ParseError::UnexpectedToken {
+            expected: "RAISE format string literal",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "assert_failure" => Some("P0004"),
+        "data_corrupted" => Some("XX001"),
+        "division_by_zero" => Some("22012"),
+        "feature_not_supported" => Some("0A000"),
+        "raise_exception" => Some("P0001"),
+        "reading_sql_data_not_permitted" => Some("2F003"),
+        _ => None,
+    }
 }
 
 fn build_assert_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
@@ -1324,6 +1383,7 @@ mod tests {
             level,
             message,
             params,
+            ..
         } = &block.statements[0]
         else {
             panic!("expected first RAISE statement");
@@ -1357,6 +1417,7 @@ mod tests {
             level,
             message,
             params,
+            ..
         } = &block.statements[0]
         else {
             panic!("expected RAISE statement");

@@ -141,6 +141,18 @@ impl<W: Write> CopyToSink for ProtocolCopyToSink<'_, W> {
         send_copy_out_response(self.stream, format, column_count).map_err(protocol_copy_io_error)
     }
 
+    fn notice(
+        &mut self,
+        severity: &'static str,
+        sqlstate: &'static str,
+        message: &str,
+        detail: Option<&str>,
+        position: Option<usize>,
+    ) -> Result<(), ExecError> {
+        send_notice_with_severity(self.stream, severity, sqlstate, message, detail, position)
+            .map_err(protocol_copy_io_error)
+    }
+
     fn write_all(&mut self, data: &[u8]) -> Result<(), ExecError> {
         send_copy_data(self.stream, data).map_err(protocol_copy_io_error)
     }
@@ -1956,31 +1968,76 @@ fn execute_query_statement(
 
     if let Some(copy) = parse_copy_command(&sql) {
         match copy {
-            Ok(copy) => match &copy.direction {
-                CopyDirection::From(CopyEndpoint::Stdin) => {
-                    if let Err(e) = state.session.validate_copy_from_stdin_start(db, &copy) {
-                        send_exec_error(stream, &sql, &e)?;
-                        return Ok(QueryStatementFlow::Continue);
-                    }
-                    state.copy_in = Some(CopyInState {
-                        copy,
-                        pending: Vec::new(),
-                        continuation: Vec::new(),
-                    });
-                    send_copy_in_response(stream)?;
-                    return Ok(QueryStatementFlow::CopyInStarted);
-                }
-                CopyDirection::To(CopyEndpoint::Stdout) => {
-                    match state.session.execute_copy_command(db, &copy) {
-                        Ok(CopyExecutionResult::Output { data, rows }) => {
-                            flush_pending_backend_messages(stream, db, &state.session)?;
-                            send_copy_out_response(stream, CopyFormat::Text, 0)?;
-                            send_copy_data(stream, &data)?;
-                            send_copy_done(stream)?;
-                            send_command_complete(stream, &format!("COPY {rows}"))?;
+            Ok(copy) => {
+                clear_backend_notices();
+                clear_notices();
+                match &copy.direction {
+                    CopyDirection::From(CopyEndpoint::Stdin) => {
+                        if let Err(e) = state.session.validate_copy_from_stdin_start(db, &copy) {
+                            send_exec_error(stream, &sql, &e)?;
                             return Ok(QueryStatementFlow::Continue);
                         }
-                        Ok(CopyExecutionResult::AffectedRows(rows)) => {
+                        state.copy_in = Some(CopyInState {
+                            copy,
+                            pending: Vec::new(),
+                            continuation: Vec::new(),
+                        });
+                        send_copy_in_response(stream)?;
+                        return Ok(QueryStatementFlow::CopyInStarted);
+                    }
+                    CopyDirection::To(CopyEndpoint::Stdout) => {
+                        let needs_interleaved_stdout = match state
+                            .session
+                            .copy_command_needs_interleaved_stdout(db, &copy)
+                        {
+                            Ok(needs_interleaved_stdout) => needs_interleaved_stdout,
+                            Err(e) => {
+                                send_exec_error(stream, &sql, &e)?;
+                                return Ok(QueryStatementFlow::Stop);
+                            }
+                        };
+                        if needs_interleaved_stdout {
+                            let rows = {
+                                let mut sink = ProtocolCopyToSink { stream };
+                                state
+                                    .session
+                                    .execute_copy_command_to_stdout_sink(db, &copy, &mut sink)
+                            };
+                            match rows {
+                                Ok(rows) => {
+                                    flush_pending_backend_messages(stream, db, &state.session)?;
+                                    send_command_complete(stream, &format!("COPY {rows}"))?;
+                                    return Ok(QueryStatementFlow::Continue);
+                                }
+                                Err(e) => {
+                                    send_exec_error(stream, &sql, &e)?;
+                                    return Ok(QueryStatementFlow::Stop);
+                                }
+                            }
+                        }
+                        match state.session.execute_copy_command(db, &copy) {
+                            Ok(CopyExecutionResult::Output { data, rows }) => {
+                                flush_pending_backend_messages(stream, db, &state.session)?;
+                                send_copy_out_response(stream, CopyFormat::Text, 0)?;
+                                send_copy_data(stream, &data)?;
+                                send_copy_done(stream)?;
+                                send_command_complete(stream, &format!("COPY {rows}"))?;
+                                return Ok(QueryStatementFlow::Continue);
+                            }
+                            Ok(CopyExecutionResult::AffectedRows(rows)) => {
+                                flush_pending_backend_messages(stream, db, &state.session)?;
+                                send_command_complete(stream, &format!("COPY {rows}"))?;
+                                return Ok(QueryStatementFlow::Continue);
+                            }
+                            Err(e) => {
+                                send_exec_error(stream, &sql, &e)?;
+                                return Ok(QueryStatementFlow::Stop);
+                            }
+                        }
+                    }
+                    _ => match state.session.execute_copy_command(db, &copy) {
+                        Ok(CopyExecutionResult::AffectedRows(rows))
+                        | Ok(CopyExecutionResult::Output { rows, .. }) => {
                             flush_pending_backend_messages(stream, db, &state.session)?;
                             send_command_complete(stream, &format!("COPY {rows}"))?;
                             return Ok(QueryStatementFlow::Continue);
@@ -1989,21 +2046,9 @@ fn execute_query_statement(
                             send_exec_error(stream, &sql, &e)?;
                             return Ok(QueryStatementFlow::Stop);
                         }
-                    }
+                    },
                 }
-                _ => match state.session.execute_copy_command(db, &copy) {
-                    Ok(CopyExecutionResult::AffectedRows(rows))
-                    | Ok(CopyExecutionResult::Output { rows, .. }) => {
-                        flush_pending_backend_messages(stream, db, &state.session)?;
-                        send_command_complete(stream, &format!("COPY {rows}"))?;
-                        return Ok(QueryStatementFlow::Continue);
-                    }
-                    Err(e) => {
-                        send_exec_error(stream, &sql, &e)?;
-                        return Ok(QueryStatementFlow::Stop);
-                    }
-                },
-            },
+            }
             Err(e) => {
                 send_exec_error(stream, &sql, &e)?;
                 return Ok(QueryStatementFlow::Stop);
@@ -2051,6 +2096,7 @@ fn execute_query_statement(
     }
     if let Ok(Statement::Select(ref select_stmt)) = parsed
         && !raw_select_contains_pg_notify(select_stmt)
+        && !select_sql_requires_command_end_xid_handling(&sql)
     {
         let max_stack_depth_kb = state.session.datetime_config().max_stack_depth_kb;
         return stacker::grow(32 * 1024 * 1024, || {
@@ -5165,6 +5211,17 @@ fn raw_select_contains_pg_notify(select_stmt: &crate::backend::parser::SelectSta
             .is_some_and(|set_operation| raw_set_operation_contains_pg_notify(set_operation))
 }
 
+fn select_sql_requires_command_end_xid_handling(sql: &str) -> bool {
+    // :HACK: The streaming SELECT path does not yet have command-end hooks to
+    // propagate/finish lazy XID assignment, so route XID-assigning functions
+    // through Session::execute until SelectGuard owns that finalization.
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)\b(txid_current|pg_current_xact_id)\s*\(").unwrap()
+    });
+    re.is_match(sql)
+}
+
 fn raw_cte_contains_pg_notify(cte: &crate::backend::parser::CommonTableExpr) -> bool {
     raw_cte_body_contains_pg_notify(&cte.body)
 }
@@ -6812,6 +6869,62 @@ mod tests {
             }
             other => panic!("expected query result, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn simple_query_rejects_query_copy_from_stdin_before_copy_in() {
+        let db = Database::open(temp_dir("query_copy_from_stdin_reject"), 16).unwrap();
+        db.execute(1, "create table test1 (id int)").unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "copy (select * from test1) from stdin;",
+        )
+        .unwrap();
+
+        assert!(state.copy_in.is_none());
+        assert_eq!(backend_message_count(&output, b'G'), 0);
+        assert!(output_contains_message(
+            &output,
+            "syntax error at or near \"from\""
+        ));
+    }
+
+    #[test]
+    fn simple_query_copy_to_rejects_view_relation() {
+        let db = Database::open(temp_dir("copy_to_view_reject"), 16).unwrap();
+        db.execute(1, "create table test1 (t text)").unwrap();
+        db.execute(1, "insert into test1 values ('a')").unwrap();
+        db.execute(1, "create view v_test1 as select 'v_' || t from test1")
+            .unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(&mut output, &db, &mut state, "copy v_test1 to stdout;").unwrap();
+
+        assert_eq!(backend_message_count(&output, b'H'), 0);
+        assert!(output_contains_message(
+            &output,
+            "cannot copy from view \"v_test1\""
+        ));
+        assert!(output_contains_message(
+            &output,
+            "Try the COPY (SELECT ...) TO variant."
+        ));
     }
 
     #[test]

@@ -2052,15 +2052,31 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     expr.as_ref(),
                     SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
                 );
-            let target_source_type = if source_is_timestamptz {
+            let source_is_time = matches!(source_type.kind, SqlTypeKind::Time);
+            let source_is_timetz = matches!(source_type.kind, SqlTypeKind::TimeTz);
+            let target_source_type = if source_is_timetz {
+                source_type
+            } else if source_is_time {
+                source_type
+            } else if source_is_timestamptz {
                 SqlType::new(SqlTypeKind::TimestampTz)
             } else {
                 SqlType::new(SqlTypeKind::Timestamp)
             };
-            let result_type = if source_is_timestamptz {
+            let result_type = if source_is_timetz || source_is_time {
+                SqlType::new(SqlTypeKind::TimeTz)
+            } else if source_is_timestamptz {
                 SqlType::new(SqlTypeKind::Timestamp)
             } else {
                 SqlType::new(SqlTypeKind::TimestampTz)
+            };
+            let zone_target_type = if matches!(
+                zone_type.kind,
+                SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
+            ) {
+                SqlType::new(SqlTypeKind::Text)
+            } else {
+                SqlType::new(SqlTypeKind::Interval)
             };
             let bound_expr = bind_expr_with_outer_and_ctes(
                 expr,
@@ -2083,7 +2099,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 Some(result_type),
                 false,
                 vec![
-                    coerce_bound_expr(bound_zone, zone_type, SqlType::new(SqlTypeKind::Text)),
+                    coerce_bound_expr(bound_zone, zone_type, zone_target_type),
                     coerce_bound_expr(bound_expr, source_type, target_source_type),
                 ],
             )
