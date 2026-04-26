@@ -2566,6 +2566,12 @@ fn apply_function_rte_alias(plan: &mut AnalyzedFrom, alias: &str, desc: &Relatio
         })
         .collect::<Vec<_>>();
     rte.alias = Some(alias.to_string());
+    rte.alias_preserves_source_names = false;
+    rte.eref.aliasname = alias.to_string();
+    rte.eref.colnames = output_columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect();
     rte.desc = desc.clone();
     call.set_output_columns(output_columns.clone());
     plan.output_columns = output_columns;
@@ -2614,6 +2620,8 @@ fn apply_relation_alias(
     let mut renamed = false;
     if let Some(rte) = plan.rtable.last_mut() {
         rte.alias = Some(alias.to_string());
+        rte.alias_preserves_source_names = preserve_source_names;
+        rte.eref.aliasname = alias.to_string();
     }
 
     if alias_single_function_output && column_aliases.is_empty() && visible_positions.len() == 1 {
@@ -2784,22 +2792,24 @@ fn apply_relation_alias(
 
     let function_alias_applied = apply_function_rte_alias(&mut plan, alias, &desc);
 
-    if renamed && !function_alias_applied {
-        plan = plan.with_projection(
-            columns
+    if !function_alias_applied {
+        let output_columns = desc
+            .columns
+            .iter()
+            .map(|column| QueryColumn {
+                name: column.name.clone(),
+                sql_type: column.sql_type,
+                wire_type_oid: None,
+            })
+            .collect::<Vec<_>>();
+        if let Some(rte) = plan.rtable.last_mut() {
+            rte.desc = desc.clone();
+            rte.eref.colnames = output_columns
                 .iter()
-                .enumerate()
-                .map(|(index, column)| {
-                    TargetEntry::new(
-                        column.output_name.clone(),
-                        scope.output_exprs[index].clone(),
-                        desc.columns[index].sql_type,
-                        index + 1,
-                    )
-                    .with_input_resno(index + 1)
-                })
-                .collect(),
-        );
+                .map(|column| column.name.clone())
+                .collect();
+        }
+        plan.output_columns = output_columns;
     }
 
     let output_exprs = if renamed {

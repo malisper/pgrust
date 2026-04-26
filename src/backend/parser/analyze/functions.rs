@@ -91,8 +91,15 @@ pub(crate) fn resolve_function_call(
 ) -> Result<ResolvedFunctionCall, ParseError> {
     let mut best: Option<(ResolvedFunctionCall, usize, bool, bool)> = None;
     let mut ambiguous = false;
+    let Some((lookup_name, namespace_oid)) = function_lookup_name_and_namespace(catalog, name)
+    else {
+        return Err(undefined_function_error(catalog, name, actual_types));
+    };
 
-    for row in catalog.proc_rows_by_name(name) {
+    for row in catalog.proc_rows_by_name(lookup_name) {
+        if namespace_oid.is_some_and(|oid| row.pronamespace != oid) {
+            continue;
+        }
         let scalar_impl = builtin_scalar_function_for_proc_row(&row);
         let srf_impl = builtin_srf_impl_for_proc_row(&row);
         let agg_impl = aggregate_func_for_proname(&row.proname);
@@ -175,6 +182,21 @@ pub(crate) fn resolve_function_call(
 
     best.map(|(resolved, _, _, _)| resolved)
         .ok_or_else(|| undefined_function_error(catalog, name, actual_types))
+}
+
+fn function_lookup_name_and_namespace<'a>(
+    catalog: &dyn CatalogLookup,
+    name: &'a str,
+) -> Option<(&'a str, Option<u32>)> {
+    let Some((schema_name, base_name)) = name.rsplit_once('.') else {
+        return Some((name, None));
+    };
+    let namespace_oid = catalog
+        .namespace_rows()
+        .into_iter()
+        .find(|row| row.nspname.eq_ignore_ascii_case(schema_name))
+        .map(|row| row.oid);
+    namespace_oid.map(|oid| (base_name, Some(oid)))
 }
 
 fn undefined_function_error(
@@ -1367,6 +1389,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgGetConstraintDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgGetIndexDef => matches!(args.len(), 1 | 3),
             BuiltinScalarFunction::PgGetViewDef => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::PgGetRuleDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgGetStatisticsObjDef
             | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
             | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
@@ -2604,6 +2627,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pg_get_expr", BuiltinScalarFunction::PgGetExpr),
         ("pg_get_expr_ext", BuiltinScalarFunction::PgGetExpr),
         ("pg_get_viewdef", BuiltinScalarFunction::PgGetViewDef),
+        ("pg_get_ruledef", BuiltinScalarFunction::PgGetRuleDef),
+        ("pg_get_ruledef_ext", BuiltinScalarFunction::PgGetRuleDef),
         (
             "pg_get_statisticsobjdef",
             BuiltinScalarFunction::PgGetStatisticsObjDef,
@@ -3656,6 +3681,7 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             BuiltinScalarFunction::PgGetConstraintDef,
             BuiltinScalarFunction::PgGetIndexDef,
             BuiltinScalarFunction::PgGetViewDef,
+            BuiltinScalarFunction::PgGetRuleDef,
             BuiltinScalarFunction::PgGetStatisticsObjDef,
             BuiltinScalarFunction::PgGetStatisticsObjDefColumns,
         ] {
@@ -3882,6 +3908,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgGetConstraintDef
             | BuiltinScalarFunction::PgGetIndexDef
             | BuiltinScalarFunction::PgGetViewDef
+            | BuiltinScalarFunction::PgGetRuleDef
             | BuiltinScalarFunction::PgGetStatisticsObjDef
             | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
             | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions

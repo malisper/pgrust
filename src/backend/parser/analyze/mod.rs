@@ -1036,6 +1036,10 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn rewrite_rows(&self) -> Vec<PgRewriteRow> {
+        Vec::new()
+    }
+
     fn statistic_ext_rows(&self) -> Vec<PgStatisticExtRow> {
         Vec::new()
     }
@@ -1218,6 +1222,10 @@ pub trait CatalogLookup {
     }
 
     fn pg_stat_activity_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_stat_all_tables_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }
 
@@ -1800,6 +1808,10 @@ impl CatalogLookup for Catalog {
 
     fn rewrite_rows_for_relation(&self, relation_oid: u32) -> Vec<PgRewriteRow> {
         self.rewrite_rows_for_relation(relation_oid).to_vec()
+    }
+
+    fn rewrite_rows(&self) -> Vec<PgRewriteRow> {
+        self.rewrite_rows().to_vec()
     }
 
     fn trigger_rows_for_relation(

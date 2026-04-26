@@ -9,9 +9,10 @@ use crate::backend::parser::{
     AlterAggregateRenameStatement, CreateAggregateStatement, CreateFunctionArg,
     CreateFunctionReturnSpec, CreateFunctionStatement, CreateProcedureStatement, FunctionArgMode,
     FunctionParallel, FunctionVolatility, OwnedSequenceSpec, PartitionBoundSpec, RawTypeName,
-    RelOption, SqlType, SqlTypeKind, Statement, parse_statement, pg_partitioned_table_row,
-    resolve_raw_type_name, serialize_partition_bound,
+    RelOption, SqlType, SqlTypeKind, Statement, analyze_select_query_with_outer, parse_statement,
+    pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
 };
+use crate::backend::rewrite::render_view_query_sql;
 use crate::backend::utils::cache::syscache::{
     SysCacheId, SysCacheTuple, search_sys_cache_list1_db, search_sys_cache1_db,
 };
@@ -27,7 +28,7 @@ use crate::include::catalog::{
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::include::nodes::primnodes::{QueryColumn, RelationDesc};
-use crate::pgrust::database::ddl::format_sql_type_name;
+use crate::pgrust::database::ddl::{append_view_check_option, format_sql_type_name};
 use crate::pgrust::database::{
     SequenceData, SequenceRuntime, default_sequence_name_base, format_nextval_default_oid,
     initial_sequence_state, resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
@@ -365,6 +366,20 @@ fn create_view_reloptions(options: &[RelOption]) -> Result<Option<Vec<String>>, 
             }
         };
         reloptions.push(format!("{name}={value}"));
+    }
+    Ok((!reloptions.is_empty()).then_some(reloptions))
+}
+
+fn create_table_reloptions(options: &[RelOption]) -> Result<Option<Vec<String>>, ExecError> {
+    let mut reloptions = Vec::new();
+    for option in options {
+        let name = option.name.to_ascii_lowercase();
+        if option.name != name {
+            return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                option.name.clone(),
+            )));
+        }
+        reloptions.push(format!("{name}={}", option.value.to_ascii_lowercase()));
     }
     Ok((!reloptions.is_empty()).then_some(reloptions))
 }
@@ -1267,7 +1282,7 @@ impl Database {
         lowered: &crate::backend::parser::LoweredCreateTable,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
-    ) -> Result<(), ExecError> {
+    ) -> Result<CommandId, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let mut next_cid = table_cid.saturating_add(1);
         if relation.relkind == 'p' || relation.relispartition {
@@ -1394,8 +1409,8 @@ impl Database {
                         &catalog,
                     )?)
                 } else if action.without_overlaps.is_some() {
-                    Some(self.temporal_constraint_operator_oids_for_relation(
-                        relation.relation_oid,
+                    Some(self.temporal_constraint_operator_oids_for_desc(
+                        &relation.desc,
                         &action.columns,
                         action.without_overlaps.as_deref(),
                         &catalog,
@@ -1582,7 +1597,7 @@ impl Database {
             )?;
         }
 
-        Ok(())
+        Ok(next_foreign_key_cid)
     }
 
     pub(super) fn refresh_partitioned_relation_metadata(
@@ -3187,6 +3202,7 @@ impl Database {
 
         let table_cid = cid;
         let relation_relkind = created_relkind(&lowered);
+        let reloptions = create_table_reloptions(&create_stmt.options)?;
         match persistence {
             TablePersistence::Permanent => {
                 let mut catalog_guard = self.catalog.write();
@@ -3210,6 +3226,7 @@ impl Database {
                         crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                         self.auth_state(client_id).current_user_oid(),
                         lowered.of_type_oid,
+                        reloptions.clone(),
                         &ctx,
                     )
                 } else {
@@ -3222,7 +3239,7 @@ impl Database {
                             'p',
                             relation_relkind,
                             self.auth_state(client_id).current_user_oid(),
-                            None,
+                            reloptions.clone(),
                             &ctx,
                         )
                         .map(|(entry, effect)| {
@@ -3348,7 +3365,7 @@ impl Database {
                             constraint_cid_base =
                                 constraint_cid_base.max(table_cid.saturating_add(4));
                         }
-                        self.install_create_table_constraints_in_transaction(
+                        let next_cid = self.install_create_table_constraints_in_transaction(
                             client_id,
                             xid,
                             constraint_cid_base,
@@ -3363,7 +3380,7 @@ impl Database {
                             &relation,
                             &lowered,
                             xid,
-                            constraint_cid_base.saturating_add(1),
+                            next_cid,
                             catalog_effects,
                         )?;
                         if let Some(parent_oid) = lowered.partition_parent_oid {
@@ -3401,7 +3418,7 @@ impl Database {
                     table_cid,
                     relation_relkind,
                     lowered.of_type_oid,
-                    None,
+                    reloptions.clone(),
                     catalog_effects,
                     temp_effects,
                 )?;
@@ -3503,7 +3520,7 @@ impl Database {
                 {
                     constraint_cid_base = constraint_cid_base.max(table_cid.saturating_add(4));
                 }
-                self.install_create_table_constraints_in_transaction(
+                let next_cid = self.install_create_table_constraints_in_transaction(
                     client_id,
                     xid,
                     constraint_cid_base,
@@ -3519,7 +3536,7 @@ impl Database {
                         .reconcile_partitioned_parent_indexes_for_attached_child_in_transaction(
                             client_id,
                             xid,
-                            constraint_cid_base.saturating_add(1),
+                            next_cid,
                             parent_oid,
                             relation.relation_oid,
                             configured_search_path,
@@ -3696,6 +3713,28 @@ impl Database {
         )?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let plan = crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)?.plan_tree;
+        let (analyzed_query, _) = analyze_select_query_with_outer(
+            &create_stmt.query,
+            &catalog,
+            &[],
+            None,
+            None,
+            &[],
+            &[],
+        )?;
+        let canonical_sql = if create_stmt.query.with.is_empty() {
+            render_view_query_sql(&analyzed_query, &catalog)
+        } else {
+            // :HACK: The analyzed `Query` does not yet retain enough CTE
+            // structure to deparse WITH clauses. Keep the original SELECT text
+            // for those views so later updatability checks still see WITH.
+            create_stmt
+                .query_sql
+                .trim()
+                .trim_end_matches(';')
+                .to_string()
+        };
+        let canonical_query_sql = append_view_check_option(canonical_sql, create_stmt.check_option);
         let desc = crate::backend::executor::RelationDesc {
             columns: plan
                 .column_names()
@@ -3847,7 +3886,7 @@ impl Database {
                 '1',
                 true,
                 String::new(),
-                create_stmt.query_sql.clone(),
+                canonical_query_sql,
                 &referenced_relation_oids.into_iter().collect::<Vec<_>>(),
                 crate::backend::catalog::store::RuleOwnerDependency::Internal,
                 &rule_ctx,
@@ -4016,6 +4055,7 @@ impl Database {
                             )
                         })
                         .collect(),
+                    options: Vec::new(),
                     inherits: Vec::new(),
                     partition_spec: None,
                     partition_of: None,
@@ -4042,6 +4082,7 @@ impl Database {
                         crate::include::catalog::PG_TOAST_NAMESPACE_OID,
                         crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                         self.auth_state(client_id).current_user_oid(),
+                        None,
                         &write_ctx,
                     )
                     .map_err(map_catalog_error)?;

@@ -810,6 +810,7 @@ impl CatalogStore {
             crate::include::catalog::PG_TOAST_NAMESPACE_OID,
             crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
             owner_oid,
+            None,
             ctx,
         )
     }
@@ -824,6 +825,7 @@ impl CatalogStore {
         toast_namespace_oid: u32,
         toast_namespace_name: &str,
         owner_oid: u32,
+        reloptions: Option<Vec<String>>,
         ctx: &CatalogWriteContext,
     ) -> Result<(CreateTableResult, CatalogMutationEffect), CatalogError> {
         self.create_storage_relation_mvcc_with_options(
@@ -838,6 +840,7 @@ impl CatalogStore {
             toast_namespace_name,
             owner_oid,
             0,
+            reloptions,
             ctx,
         )
     }
@@ -853,6 +856,7 @@ impl CatalogStore {
         toast_namespace_name: &str,
         owner_oid: u32,
         of_type_oid: u32,
+        reloptions: Option<Vec<String>>,
         ctx: &CatalogWriteContext,
     ) -> Result<(CreateTableResult, CatalogMutationEffect), CatalogError> {
         self.create_storage_relation_mvcc_with_options(
@@ -867,6 +871,7 @@ impl CatalogStore {
             toast_namespace_name,
             owner_oid,
             of_type_oid,
+            reloptions,
             ctx,
         )
     }
@@ -896,6 +901,7 @@ impl CatalogStore {
             toast_namespace_name,
             owner_oid,
             0,
+            None,
             ctx,
         )
     }
@@ -913,6 +919,7 @@ impl CatalogStore {
         toast_namespace_name: &str,
         owner_oid: u32,
         of_type_oid: u32,
+        reloptions: Option<Vec<String>>,
         ctx: &CatalogWriteContext,
     ) -> Result<(CreateTableResult, CatalogMutationEffect), CatalogError> {
         let name = name.into();
@@ -937,6 +944,7 @@ impl CatalogStore {
             &mut control,
         )?;
         entry.relispopulated = relispopulated;
+        entry.reloptions = reloptions;
         let toast = build_toast_catalog_changes(
             &name,
             &entry,
@@ -2651,24 +2659,12 @@ impl CatalogStore {
                 })
                 .collect::<Vec<_>>();
 
-        let mut rows_to_delete = PhysicalCatalogRows {
+        let rows_to_delete = PhysicalCatalogRows {
             inherits: vec![removed_inherit],
             depends: removed_depends,
             ..PhysicalCatalogRows::default()
         };
-        let mut rows_to_insert = PhysicalCatalogRows::default();
-        if let Some(old_parent) = class_row_by_oid_mvcc(self, ctx, parent_oid)? {
-            let has_remaining_children = relation_inherited_by_mvcc(self, ctx, parent_oid)?
-                .into_iter()
-                .any(|row| row.inhrelid != relation_oid);
-            if old_parent.relhassubclass != has_remaining_children {
-                rows_to_delete.classes.push(old_parent.clone());
-                rows_to_insert.classes.push(PgClassRow {
-                    relhassubclass: has_remaining_children,
-                    ..old_parent
-                });
-            }
-        }
+        let rows_to_insert = PhysicalCatalogRows::default();
 
         let mut kinds = vec![
             BootstrapCatalogKind::PgDepend,
@@ -2829,31 +2825,18 @@ impl CatalogStore {
                 })
                 .collect::<Vec<_>>();
 
-        let mut rows_to_delete = PhysicalCatalogRows {
+        let rows_to_delete = PhysicalCatalogRows {
             attributes: old_attributes,
             constraints: old_constraints,
             inherits: vec![removed_inherit],
             depends: removed_depends,
             ..PhysicalCatalogRows::default()
         };
-        let mut rows_to_insert = PhysicalCatalogRows {
+        let rows_to_insert = PhysicalCatalogRows {
             attributes: new_attributes,
             constraints: new_constraints,
             ..PhysicalCatalogRows::default()
         };
-
-        if let Some(old_parent) = class_row_by_oid_mvcc(self, ctx, parent_oid)? {
-            let has_remaining_children = relation_inherited_by_mvcc(self, ctx, parent_oid)?
-                .into_iter()
-                .any(|row| row.inhparent == parent_oid && row.inhrelid != relation_oid);
-            if old_parent.relhassubclass != has_remaining_children {
-                rows_to_delete.classes.push(old_parent.clone());
-                rows_to_insert.classes.push(PgClassRow {
-                    relhassubclass: has_remaining_children,
-                    ..old_parent
-                });
-            }
-        }
 
         let mut kinds = vec![
             BootstrapCatalogKind::PgAttribute,
@@ -3438,7 +3421,20 @@ impl CatalogStore {
         )?;
         let kinds = create_index_sync_kinds();
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
-        let rows = rows_for_new_relation_entry(&type_lookup, &index_name, &entry)?;
+        let mut rows = rows_for_new_relation_entry(&type_lookup, &index_name, &entry)?;
+        let mut rows_to_delete = PhysicalCatalogRows::default();
+        if let Some(old_class) = class_row_by_oid_mvcc(self, ctx, table.relation_oid)?
+            && !old_class.relhasindex
+        {
+            rows_to_delete.classes.push(old_class.clone());
+            rows.classes.push(PgClassRow {
+                relhasindex: true,
+                ..old_class
+            });
+        }
+        if !rows_to_delete.classes.is_empty() {
+            delete_catalog_rows_subset_mvcc(ctx, &rows_to_delete, self.scope_db_oid(), &kinds)?;
+        }
         insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
         self.control = control;
 
@@ -3491,7 +3487,20 @@ impl CatalogStore {
         )?;
         let kinds = create_index_sync_kinds();
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
-        let rows = rows_for_new_relation_entry(&type_lookup, &index_name, &entry)?;
+        let mut rows = rows_for_new_relation_entry(&type_lookup, &index_name, &entry)?;
+        let mut rows_to_delete = PhysicalCatalogRows::default();
+        if let Some(old_class) = class_row_by_oid_mvcc(self, ctx, table_entry.relation_oid)?
+            && !old_class.relhasindex
+        {
+            rows_to_delete.classes.push(old_class.clone());
+            rows.classes.push(PgClassRow {
+                relhasindex: true,
+                ..old_class
+            });
+        }
+        if !rows_to_delete.classes.is_empty() {
+            delete_catalog_rows_subset_mvcc(ctx, &rows_to_delete, self.scope_db_oid(), &kinds)?;
+        }
         insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
         self.control = control;
 
@@ -3544,7 +3553,20 @@ impl CatalogStore {
         )?;
         let kinds = create_index_sync_kinds();
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
-        let rows = rows_for_new_relation_entry(&type_lookup, &index_name, &entry)?;
+        let mut rows = rows_for_new_relation_entry(&type_lookup, &index_name, &entry)?;
+        let mut rows_to_delete = PhysicalCatalogRows::default();
+        if let Some(old_class) = class_row_by_oid_mvcc(self, ctx, relation_oid)?
+            && !old_class.relhasindex
+        {
+            rows_to_delete.classes.push(old_class.clone());
+            rows.classes.push(PgClassRow {
+                relhasindex: true,
+                ..old_class
+            });
+        }
+        if !rows_to_delete.classes.is_empty() {
+            delete_catalog_rows_subset_mvcc(ctx, &rows_to_delete, self.scope_db_oid(), &kinds)?;
+        }
         insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
         self.control = control;
 
@@ -4362,17 +4384,25 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let entry = catalog_entry_by_oid_mvcc(self, ctx, relation_oid)?;
-        let old_rows = rows_for_drop_relation_entry_mvcc(self, ctx, &entry)?;
+        let index_parent_oid = index_parent_oid_for_entry_mvcc(self, ctx, &entry)?;
+        let mut old_rows = rows_for_drop_relation_entry_mvcc(self, ctx, &entry)?;
+        let new_rows = relhasindex_rows_after_index_drop(self, ctx, &entry, &mut old_rows)?;
         let kinds = drop_relation_delete_kinds();
         let control = self.control_state()?;
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
         delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        if !new_rows.classes.is_empty() {
+            insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
+        }
         self.control = control;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_rel(&mut effect.dropped_rels, entry.rel);
         effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
+        if let Some(parent_oid) = index_parent_oid {
+            effect_record_oid(&mut effect.relation_oids, parent_oid);
+        }
         effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
         if entry.row_type_oid != 0 {
             effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
@@ -4385,17 +4415,25 @@ impl CatalogStore {
         entry: CatalogEntry,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        let old_rows = rows_for_drop_relation_entry_mvcc(self, ctx, &entry)?;
+        let index_parent_oid = index_parent_oid_for_entry_mvcc(self, ctx, &entry)?;
+        let mut old_rows = rows_for_drop_relation_entry_mvcc(self, ctx, &entry)?;
+        let new_rows = relhasindex_rows_after_index_drop(self, ctx, &entry, &mut old_rows)?;
         let kinds = drop_relation_delete_kinds();
         let control = self.control_state()?;
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
         delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        if !new_rows.classes.is_empty() {
+            insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
+        }
         self.control = control;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_rel(&mut effect.dropped_rels, entry.rel);
         effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
+        if let Some(parent_oid) = index_parent_oid {
+            effect_record_oid(&mut effect.relation_oids, parent_oid);
+        }
         effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
         if entry.row_type_oid != 0 {
             effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
@@ -5800,7 +5838,7 @@ impl CatalogStore {
 
         for &relation_oid in relation_oids {
             let old_entry = catalog_entry_by_oid_mvcc(self, ctx, relation_oid)?;
-            if !matches!(old_entry.relkind, 'r' | 't' | 'i') {
+            if !matches!(old_entry.relkind, 'r' | 'm' | 't' | 'i') {
                 return Err(CatalogError::UnknownTable(relation_oid.to_string()));
             }
             let relation_name = class_row_by_oid_mvcc(self, ctx, relation_oid)?
@@ -5821,8 +5859,8 @@ impl CatalogStore {
         }
 
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
-        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
-        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
         self.control = control;
         Ok(effect)
     }
@@ -5960,6 +5998,27 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_relation_reloptions_mvcc(
+        &mut self,
+        relation_oid: u32,
+        reloptions: Option<Vec<String>>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, _new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                if !matches!(entry.relkind, 'r' | 'p' | 'm') {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                entry.reloptions = reloptions;
+                Ok(((), vec![BootstrapCatalogKind::PgClass]))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
     pub fn replace_relation_partitioning_mvcc(
         &mut self,
         relation_oid: u32,
@@ -5998,12 +6057,16 @@ impl CatalogStore {
         relation_oid: u32,
         relpages: i32,
         reltuples: f64,
+        clear_relhassubclass: bool,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, _new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
                 entry.relpages = relpages;
                 entry.reltuples = reltuples;
+                if clear_relhassubclass {
+                    entry.relhassubclass = false;
+                }
                 Ok(((), vec![BootstrapCatalogKind::PgClass]))
             })?;
 
@@ -6045,6 +6108,7 @@ impl CatalogStore {
         relallvisible: i32,
         relallfrozen: i32,
         relfrozenxid: u32,
+        clear_relhassubclass: bool,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, _new_entry, _, kinds) =
@@ -6054,6 +6118,9 @@ impl CatalogStore {
                 entry.relallvisible = relallvisible;
                 entry.relallfrozen = relallfrozen;
                 entry.relfrozenxid = relfrozenxid;
+                if clear_relhassubclass {
+                    entry.relhassubclass = false;
+                }
                 Ok(((), vec![BootstrapCatalogKind::PgClass]))
             })?;
 
@@ -6824,6 +6891,7 @@ fn build_relation_entry(
         row_type_oid,
         array_type_oid,
         reltoastrelid: 0,
+        relhasindex: false,
         relpersistence,
         relkind,
         am_oid: crate::include::catalog::relam_for_relkind(relkind),
@@ -7013,6 +7081,7 @@ fn build_index_entry_with_relkind(
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,
+        relhasindex: false,
         relpersistence: table.relpersistence,
         relkind,
         am_oid: resolved_options.am_oid,
@@ -7943,6 +8012,7 @@ fn class_row_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> PgC
         relallvisible: entry.relallvisible,
         relallfrozen: entry.relallfrozen,
         reltoastrelid: entry.reltoastrelid,
+        relhasindex: entry.relhasindex,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         relnatts: entry.desc.columns.len() as i16,
@@ -8491,6 +8561,70 @@ fn index_rows_for_relation_mvcc(
         .collect())
 }
 
+fn index_row_by_index_oid_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    index_oid: u32,
+) -> Result<Option<crate::include::catalog::PgIndexRow>, CatalogError> {
+    Ok(store
+        .search_sys_cache1(ctx, SysCacheId::IndexRelId, oid_key(index_oid))?
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Index(row) => Some(row),
+            _ => None,
+        }))
+}
+
+fn relhasindex_rows_after_index_drop(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    entry: &CatalogEntry,
+    old_rows: &mut PhysicalCatalogRows,
+) -> Result<PhysicalCatalogRows, CatalogError> {
+    let Some(indrelid) = index_parent_oid_for_entry_mvcc(store, ctx, entry)? else {
+        return Ok(PhysicalCatalogRows::default());
+    };
+    let has_other_live_indexes = store
+        .search_sys_cache_list1(ctx, SysCacheId::IndexIndRelId, oid_key(indrelid))?
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Index(row) => Some(row),
+            _ => None,
+        })
+        .any(|row| row.indexrelid != entry.relation_oid && row.indislive);
+    if has_other_live_indexes {
+        return Ok(PhysicalCatalogRows::default());
+    }
+    let Some(old_class) = class_row_by_oid_mvcc(store, ctx, indrelid)? else {
+        return Ok(PhysicalCatalogRows::default());
+    };
+    if !old_class.relhasindex {
+        return Ok(PhysicalCatalogRows::default());
+    }
+    old_rows.classes.push(old_class.clone());
+    Ok(PhysicalCatalogRows {
+        classes: vec![PgClassRow {
+            relhasindex: false,
+            ..old_class
+        }],
+        ..PhysicalCatalogRows::default()
+    })
+}
+
+fn index_parent_oid_for_entry_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    entry: &CatalogEntry,
+) -> Result<Option<u32>, CatalogError> {
+    if let Some(index_meta) = &entry.index_meta {
+        return Ok(Some(index_meta.indrelid));
+    }
+    if !matches!(entry.relkind, 'i' | 'I') {
+        return Ok(None);
+    }
+    Ok(index_row_by_index_oid_mvcc(store, ctx, entry.relation_oid)?.map(|row| row.indrelid))
+}
+
 fn publication_row_by_oid_mvcc(
     store: &CatalogStore,
     ctx: &CatalogWriteContext,
@@ -8722,6 +8856,7 @@ fn catalog_entry_from_relation_row(
         row_type_oid: relation.row_type_oid,
         array_type_oid: relation.array_type_oid,
         reltoastrelid: relation.reltoastrelid,
+        relhasindex: class_row.relhasindex,
         relpersistence: relation.relpersistence,
         relkind: relation.relkind,
         am_oid: class_row.relam,
@@ -9101,6 +9236,7 @@ fn catalog_entry_from_visible_relation(
         row_type_oid: relation.row_type_oid,
         array_type_oid: relation.array_type_oid,
         reltoastrelid: relation.reltoastrelid,
+        relhasindex: relation.relhasindex,
         relpersistence: relation.relpersistence,
         relkind: relation.relkind,
         am_oid: class_row.relam,
@@ -9153,6 +9289,7 @@ fn catalog_entry_from_relation(relation: &RelCacheEntry) -> CatalogEntry {
         row_type_oid: relation.row_type_oid,
         array_type_oid: relation.array_type_oid,
         reltoastrelid: relation.reltoastrelid,
+        relhasindex: false,
         relpersistence: relation.relpersistence,
         relkind: relation.relkind,
         am_oid: relation
@@ -9323,12 +9460,12 @@ fn drop_relation_entries_visible(
             .inherit_rows()
             .into_iter()
             .any(|row| row.inhparent == *parent_oid && !dropped_oids.contains(&row.inhrelid));
-        if old_parent.relhassubclass == has_remaining {
+        if old_parent.relhassubclass || !has_remaining {
             continue;
         }
         rows_to_delete.classes.push(old_parent.clone());
         rows_to_insert.classes.push(PgClassRow {
-            relhassubclass: has_remaining,
+            relhassubclass: true,
             ..old_parent
         });
     }
@@ -9395,12 +9532,12 @@ fn drop_relation_entries_mvcc(
         let has_remaining = relation_inherited_by_mvcc(store, ctx, *parent_oid)?
             .into_iter()
             .any(|row| !dropped_oids.contains(&row.inhrelid));
-        if old_parent.relhassubclass == has_remaining {
+        if old_parent.relhassubclass || !has_remaining {
             continue;
         }
         rows_to_delete.classes.push(old_parent.clone());
         rows_to_insert.classes.push(PgClassRow {
-            relhassubclass: has_remaining,
+            relhassubclass: true,
             ..old_parent
         });
     }

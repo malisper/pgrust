@@ -1064,6 +1064,7 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         "track_counts" => Some("on"),
         "track_functions" => Some("none"),
         "stats_fetch_consistency" => Some("cache"),
+        "restrict_nonsystem_relation_kind" => Some(""),
         "enable_seqscan"
         | "enable_indexscan"
         | "enable_indexonlyscan"
@@ -2283,7 +2284,9 @@ impl Session {
             .len()
             .saturating_sub(effect_start)
             .max(1);
-        let next_cid = base_cid.saturating_add(consumed_catalog_cids as u32);
+        let next_cid = base_cid
+            .saturating_add(consumed_catalog_cids as u32)
+            .saturating_add(1);
         txn.next_command_id = txn.next_command_id.max(next_cid);
     }
 
@@ -3774,6 +3777,24 @@ impl Session {
                 } else {
                     self.auth = db.execute_reset_role_stmt(self.client_id, reset_stmt)?;
                     Ok(StatementResult::AffectedRows(0))
+                }
+            }
+            Statement::AlterTableReset(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_reset_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
                 }
             }
             Statement::AlterTableSet(ref alter_stmt) => self.apply_alter_table_set(db, alter_stmt),
@@ -5999,6 +6020,27 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::AlterTableReset(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.table_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_table_reset_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::AlterTableSet(ref alter_stmt) => self.apply_alter_table_set(db, alter_stmt),
             Statement::AlterIndexSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CreateRole(ref create_stmt) => {
@@ -7623,6 +7665,15 @@ impl Session {
             }
             "plpgsql.extra_warnings" | "plpgsql.extra_errors" => {
                 stored_value = parse_plpgsql_extra_checks(value)?;
+            }
+            "restrict_nonsystem_relation_kind" => {
+                let normalized_value = value.trim().trim_matches('\'').to_ascii_lowercase();
+                if !normalized_value.is_empty() && normalized_value != "view" {
+                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                        value.to_string(),
+                    )));
+                }
+                stored_value = normalized_value;
             }
             _ => {}
         }
