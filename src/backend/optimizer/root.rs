@@ -451,6 +451,19 @@ fn prepare_set_returning_call_for_locking(
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::TxidSnapshotXip {
+            func_oid,
+            func_variadic,
+            arg,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::TxidSnapshotXip {
+            func_oid,
+            func_variadic,
+            arg: prepare_expr_for_locking(arg)?,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,
@@ -2603,6 +2616,9 @@ fn collect_set_returning_call_outer_refs(
             collect_query_outer_refs_expr(relid, levelsup, exprs);
         }
         SetReturningCall::PgLockStatus { .. } => {}
+        SetReturningCall::TxidSnapshotXip { arg, .. } => {
+            collect_query_outer_refs_expr(arg, levelsup, exprs);
+        }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }

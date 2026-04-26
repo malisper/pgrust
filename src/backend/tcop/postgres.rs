@@ -2051,6 +2051,7 @@ fn execute_query_statement(
     }
     if let Ok(Statement::Select(ref select_stmt)) = parsed
         && !raw_select_contains_pg_notify(select_stmt)
+        && !select_sql_requires_command_end_xid_handling(&sql)
     {
         let max_stack_depth_kb = state.session.datetime_config().max_stack_depth_kb;
         return stacker::grow(32 * 1024 * 1024, || {
@@ -5163,6 +5164,17 @@ fn raw_select_contains_pg_notify(select_stmt: &crate::backend::parser::SelectSta
             .set_operation
             .as_ref()
             .is_some_and(|set_operation| raw_set_operation_contains_pg_notify(set_operation))
+}
+
+fn select_sql_requires_command_end_xid_handling(sql: &str) -> bool {
+    // :HACK: The streaming SELECT path does not yet have command-end hooks to
+    // propagate/finish lazy XID assignment, so route XID-assigning functions
+    // through Session::execute until SelectGuard owns that finalization.
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)\b(txid_current|pg_current_xact_id)\s*\(").unwrap()
+    });
+    re.is_match(sql)
 }
 
 fn raw_cte_contains_pg_notify(cte: &crate::backend::parser::CommonTableExpr) -> bool {

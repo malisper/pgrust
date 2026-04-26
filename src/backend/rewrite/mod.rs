@@ -540,6 +540,19 @@ fn rewrite_set_returning_call(
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::TxidSnapshotXip {
+            func_oid,
+            func_variadic,
+            arg,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::TxidSnapshotXip {
+            func_oid,
+            func_variadic,
+            arg: rewrite_semantic_expr(arg, catalog, expanded_views, active_policy_relations)?,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,

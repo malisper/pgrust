@@ -173,6 +173,7 @@ fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
         SetReturningCall::PartitionTree { relid, .. }
         | SetReturningCall::PartitionAncestors { relid, .. } => expr_uses_outer_columns(relid),
         SetReturningCall::PgLockStatus { .. } => false,
+        SetReturningCall::TxidSnapshotXip { arg, .. } => expr_uses_outer_columns(arg),
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }

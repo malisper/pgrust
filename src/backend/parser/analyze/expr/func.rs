@@ -3085,7 +3085,11 @@ pub(super) fn bind_scalar_function_call(
         | BuiltinScalarFunction::HashMacAddr
         | BuiltinScalarFunction::HashMacAddrExtended
         | BuiltinScalarFunction::HashMacAddr8
-        | BuiltinScalarFunction::HashMacAddr8Extended => {
+        | BuiltinScalarFunction::HashMacAddr8Extended
+        | BuiltinScalarFunction::TxidSnapshotXmin
+        | BuiltinScalarFunction::TxidSnapshotXmax
+        | BuiltinScalarFunction::TxidVisibleInSnapshot
+        | BuiltinScalarFunction::TxidStatus => {
             let coerced = bound_args
                 .into_iter()
                 .zip(arg_types)
