@@ -793,9 +793,15 @@ impl Database {
                 Some((xid, current_cid)),
                 configured_search_path,
             );
-            let relation = catalog.lookup_relation(object_name).ok_or_else(|| {
+            let relation = catalog.lookup_any_relation(object_name).ok_or_else(|| {
                 ExecError::Parse(ParseError::TableDoesNotExist(object_name.to_string()))
             })?;
+            if !matches!(relation.relkind, 'r' | 'p') {
+                return Err(ExecError::Parse(ParseError::WrongObjectType {
+                    name: object_name.to_string(),
+                    expected: "table",
+                }));
+            }
             let auth_catalog = self
                 .auth_catalog(client_id, Some((xid, current_cid)))
                 .map_err(map_catalog_error)?;
@@ -899,9 +905,15 @@ impl Database {
                 Some((xid, current_cid)),
                 configured_search_path,
             );
-            let relation = catalog.lookup_relation(object_name).ok_or_else(|| {
+            let relation = catalog.lookup_any_relation(object_name).ok_or_else(|| {
                 ExecError::Parse(ParseError::TableDoesNotExist(object_name.to_string()))
             })?;
+            if !matches!(relation.relkind, 'r' | 'p') {
+                return Err(ExecError::Parse(ParseError::WrongObjectType {
+                    name: object_name.to_string(),
+                    expected: "table",
+                }));
+            }
             let auth_catalog = self
                 .auth_catalog(client_id, Some((xid, current_cid)))
                 .map_err(map_catalog_error)?;

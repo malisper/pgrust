@@ -516,6 +516,7 @@ fn run_statement(
         | Statement::DropStatistics(_)
         | Statement::CommentOnStatistics(_)
         | Statement::AlterTableAddColumn(_)
+        | Statement::AlterTableAddColumns(_)
         | Statement::AlterTableAddConstraint(_)
         | Statement::AlterTableDropConstraint(_)
         | Statement::AlterTableAlterConstraint(_)

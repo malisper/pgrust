@@ -5053,7 +5053,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, control| {
-                if entry.relkind != 'r' {
+                if !matches!(entry.relkind, 'r' | 'p') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 if entry

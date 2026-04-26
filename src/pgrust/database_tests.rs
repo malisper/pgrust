@@ -15,7 +15,7 @@ use crate::include::catalog::{
     PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID,
     PG_TYPE_RELATION_OID, PgAggregateRow, TEXT_TYPE_OID,
 };
-use crate::include::nodes::datum::{ArrayValue, IntervalValue};
+use crate::include::nodes::datum::{ArrayValue, IntervalValue, RecordValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
@@ -13501,6 +13501,73 @@ fn alter_table_add_column_propagates_to_temp_inherited_child() {
         }
         other => panic!("expected query result, got {other:?}"),
     }
+}
+
+#[test]
+fn alter_table_multi_add_column_updates_partitioned_table() {
+    let base = temp_dir("alter_table_multi_add_partitioned");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table returningwrtest (a int) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table returningwrtest1 partition of returningwrtest for values in (1)",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into returningwrtest values (1) returning returningwrtest",
+        ),
+        vec![vec![Value::Record(RecordValue::anonymous(vec![(
+            "a".into(),
+            Value::Int32(1),
+        )]))]]
+    );
+    session
+        .execute(&db, "alter table returningwrtest add b text, add c int")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table returningwrtest2 partition of returningwrtest for values in (2)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select attname from pg_attribute
+             where attrelid = 'returningwrtest'::regclass and attnum > 0
+             order by attnum",
+        ),
+        vec![
+            vec![Value::Text("a".into())],
+            vec![Value::Text("b".into())],
+            vec![Value::Text("c".into())],
+        ]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into returningwrtest values (1, 'x', 10) returning returningwrtest",
+        ),
+        vec![vec![Value::Record(RecordValue::anonymous(vec![
+            ("a".into(), Value::Int32(1)),
+            ("b".into(), Value::Text("x".into())),
+            ("c".into(), Value::Int32(10)),
+        ]))]]
+    );
 }
 
 #[test]

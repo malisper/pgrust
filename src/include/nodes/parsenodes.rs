@@ -361,6 +361,7 @@ pub enum Statement {
     AlterIndexAttachPartition(AlterIndexAttachPartitionStatement),
     AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
+    AlterTableAddColumns(AlterTableAddColumnsStatement),
     AlterTableAddConstraint(AlterTableAddConstraintStatement),
     AlterTableDropColumn(AlterTableDropColumnStatement),
     AlterTableDropConstraint(AlterTableDropConstraintStatement),
@@ -2168,6 +2169,14 @@ pub struct AlterTableAddColumnStatement {
     pub only: bool,
     pub table_name: String,
     pub column: ColumnDef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAddColumnsStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub columns: Vec<ColumnDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

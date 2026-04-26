@@ -3107,6 +3107,7 @@ struct PartitionResultRelInfo {
     relation_constraints: BoundRelationConstraints,
     indexes: Vec<BoundIndexRelation>,
     toast_index: Option<BoundIndexRelation>,
+    parent_rows: Vec<Vec<Value>>,
     rows: Vec<Vec<Value>>,
 }
 
@@ -3151,6 +3152,7 @@ impl PartitionResultRelInfo {
             relation_constraints,
             indexes,
             toast_index,
+            parent_rows: Vec::new(),
             rows: Vec::new(),
         })
     }
@@ -3217,7 +3219,11 @@ fn execute_insert_rows_with_routing(
         let leaf = exec_find_partition(catalog, &mut proute, &target_relation, row, ctx)?;
         let leaf_row = remap_partition_row(row, &target_relation.desc, &leaf.desc)?;
         match routed.entry(leaf.relation_oid) {
-            Entry::Occupied(mut entry) => entry.get_mut().rows.push(leaf_row),
+            Entry::Occupied(mut entry) => {
+                let entry = entry.get_mut();
+                entry.parent_rows.push(row.clone());
+                entry.rows.push(leaf_row);
+            }
             Entry::Vacant(entry) => {
                 let mut result_rel_info = PartitionResultRelInfo::new(
                     catalog,
@@ -3228,6 +3234,7 @@ fn execute_insert_rows_with_routing(
                     toast_index,
                     leaf,
                 )?;
+                result_rel_info.parent_rows.push(row.clone());
                 result_rel_info.rows.push(leaf_row);
                 entry.insert(result_rel_info);
             }
@@ -3236,7 +3243,7 @@ fn execute_insert_rows_with_routing(
 
     let mut inserted_rows = Vec::new();
     for (_, result_rel_info) in routed {
-        inserted_rows.extend(execute_insert_rows(
+        let leaf_inserted_rows = execute_insert_rows(
             &result_rel_info.relation_name,
             result_rel_info.relation.relation_oid,
             result_rel_info.relation.rel,
@@ -3247,11 +3254,27 @@ fn execute_insert_rows_with_routing(
             rls_write_checks,
             &result_rel_info.indexes,
             &result_rel_info.rows,
-            returning,
+            None,
             ctx,
             xid,
             cid,
-        )?);
+        )?;
+        if let Some(returning) = returning {
+            for (parent_row, leaf_row) in result_rel_info
+                .parent_rows
+                .iter()
+                .zip(leaf_inserted_rows.iter())
+            {
+                let projected_row =
+                    remap_child_row_to_parent(leaf_row, &result_rel_info.relation.desc, desc)
+                        .unwrap_or_else(|| parent_row.clone());
+                let row = project_returning_row(returning, &projected_row, ctx)?;
+                capture_copy_to_dml_returning_row(row.clone());
+                inserted_rows.push(row);
+            }
+        } else {
+            inserted_rows.extend(leaf_inserted_rows);
+        }
     }
     Ok(inserted_rows)
 }
@@ -3317,6 +3340,29 @@ fn remap_partition_row(
         remapped[child_idx] = row.get(*parent_idx).cloned().unwrap_or(Value::Null);
     }
     Ok(remapped)
+}
+
+fn remap_child_row_to_parent(
+    row: &[Value],
+    child_desc: &RelationDesc,
+    parent_desc: &RelationDesc,
+) -> Option<Vec<Value>> {
+    parent_desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .map(|parent_column| {
+            child_desc
+                .columns
+                .iter()
+                .enumerate()
+                .find(|(_, child_column)| {
+                    !child_column.dropped
+                        && child_column.name.eq_ignore_ascii_case(&parent_column.name)
+                })
+                .and_then(|(index, _)| row.get(index).cloned())
+        })
+        .collect()
 }
 
 fn parse_tid_text(value: &Value) -> Result<Option<ItemPointerData>, ExecError> {

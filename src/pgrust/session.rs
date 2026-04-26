@@ -28,11 +28,11 @@ use crate::backend::executor::{
 };
 use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::parser::{
-    CallStatement, CatalogLookup, CopyFormat as ParserCopyFormat, CopyFromStatement,
-    CopyOptions as ParserCopyOptions, CopySource, CopyToDestination, CopyToSource, CopyToStatement,
-    DetachPartitionMode, ParseError, ParseOptions, PreparedInsert, SelectStatement, Statement,
-    bind_delete, bind_insert, bind_insert_prepared, bind_update, pg_plan_query_with_config,
-    plan_merge,
+    AlterTableAddColumnStatement, CallStatement, CatalogLookup, CopyFormat as ParserCopyFormat,
+    CopyFromStatement, CopyOptions as ParserCopyOptions, CopySource, CopyToDestination,
+    CopyToSource, CopyToStatement, DetachPartitionMode, ParseError, ParseOptions, PreparedInsert,
+    SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared, bind_update,
+    pg_plan_query_with_config, plan_merge,
 };
 use crate::backend::rewrite::relation_has_row_security;
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
@@ -3050,6 +3050,35 @@ impl Session {
                     )
                 }
             }
+            Statement::AlterTableAddColumns(ref alter_stmt) => {
+                let mut result = Ok(StatementResult::AffectedRows(0));
+                for column in &alter_stmt.columns {
+                    let single_stmt = AlterTableAddColumnStatement {
+                        if_exists: alter_stmt.if_exists,
+                        only: alter_stmt.only,
+                        table_name: alter_stmt.table_name.clone(),
+                        column: column.clone(),
+                    };
+                    result = if self.active_txn.is_some() {
+                        self.execute_in_transaction(
+                            db,
+                            Statement::AlterTableAddColumn(single_stmt),
+                            statement_lock_scope_id,
+                        )
+                    } else {
+                        let search_path = self.configured_search_path();
+                        db.execute_alter_table_add_column_stmt_with_search_path(
+                            self.client_id,
+                            &single_stmt,
+                            search_path.as_deref(),
+                        )
+                    };
+                    if result.is_err() {
+                        break;
+                    }
+                }
+                result
+            }
             Statement::AlterTableDropColumn(ref drop_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -5201,14 +5230,13 @@ impl Session {
             }
             Statement::AlterTableAddColumn(ref alter_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                let relation =
-                    catalog
-                        .lookup_relation(&alter_stmt.table_name)
-                        .ok_or_else(|| {
-                            ExecError::Parse(ParseError::TableDoesNotExist(
-                                alter_stmt.table_name.clone(),
-                            ))
-                        })?;
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.table_name.clone(),
+                        ))
+                    })?;
                 self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
@@ -5222,6 +5250,25 @@ impl Session {
                     &mut txn.temp_effects,
                     &mut txn.sequence_effects,
                 )
+            }
+            Statement::AlterTableAddColumns(ref alter_stmt) => {
+                let mut result = Ok(StatementResult::AffectedRows(0));
+                for column in &alter_stmt.columns {
+                    result = self.execute_in_transaction(
+                        db,
+                        Statement::AlterTableAddColumn(AlterTableAddColumnStatement {
+                            if_exists: alter_stmt.if_exists,
+                            only: alter_stmt.only,
+                            table_name: alter_stmt.table_name.clone(),
+                            column: column.clone(),
+                        }),
+                        _statement_lock_scope_id,
+                    );
+                    if result.is_err() {
+                        break;
+                    }
+                }
+                result
             }
             Statement::AlterTableDropColumn(ref drop_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);

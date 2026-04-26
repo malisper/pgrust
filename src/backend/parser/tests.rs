@@ -2725,6 +2725,43 @@ fn parse_alter_table_add_column_statement() {
 }
 
 #[test]
+fn parse_alter_table_multi_add_column_statement() {
+    let stmt = parse_statement("alter table mlparted add d int, add e text").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddColumns(AlterTableAddColumnsStatement {
+            if_exists: false,
+            only: false,
+            table_name: "mlparted".into(),
+            columns: vec![
+                ColumnDef {
+                    name: "d".into(),
+                    ty: builtin_type(SqlType::new(SqlTypeKind::Int4)),
+                    collation: None,
+                    default_expr: None,
+                    generated: None,
+                    identity: None,
+                    storage: None,
+                    compression: None,
+                    constraints: vec![],
+                },
+                ColumnDef {
+                    name: "e".into(),
+                    ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
+                    collation: None,
+                    default_expr: None,
+                    generated: None,
+                    identity: None,
+                    storage: None,
+                    compression: None,
+                    constraints: vec![],
+                },
+            ],
+        })
+    );
+}
+
+#[test]
 fn parse_alter_table_constraint_statements() {
     let stmt =
         parse_statement("alter table items add constraint items_id_check check (id > 0) not valid")
@@ -4243,6 +4280,17 @@ fn parse_grant_multiple_table_privileges_statement() {
             object_names: vec!["grantor_test3".into()],
             grantee_names: vec!["regress_grantor3".into()],
             with_grant_option: false,
+        })
+    );
+
+    let stmt = parse_statement("revoke select on brtrigpartcon from regress_coldesc_role").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::SelectOnTable,
+            object_names: vec!["brtrigpartcon".into()],
+            grantee_names: vec!["regress_coldesc_role".into()],
+            cascade: false,
         })
     );
 }
@@ -9523,6 +9571,26 @@ fn bind_insert_matches_on_conflict_columns_order_insensitively() {
     assert_eq!(on_conflict.arbiter_indexes.len(), 1);
     assert_eq!(on_conflict.arbiter_indexes[0].name, "people_id_name_key");
     assert!(matches!(on_conflict.action, BoundOnConflictAction::Nothing));
+}
+
+#[test]
+fn bind_insert_returning_relation_name_as_whole_row() {
+    let catalog = catalog();
+    let mut stmt = people_insert_with_on_conflict(
+        None,
+        crate::include::nodes::parsenodes::OnConflictAction::Nothing,
+        vec![],
+        None,
+    );
+    stmt.on_conflict = None;
+    stmt.returning = vec![SelectItem {
+        expr: SqlExpr::Column("people".into()),
+        output_name: "people".into(),
+    }];
+
+    let bound =
+        stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || bind_insert(&stmt, &catalog)).unwrap();
+    assert!(matches!(bound.returning[0].expr, Expr::Row { .. }));
 }
 
 #[test]

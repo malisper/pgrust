@@ -493,6 +493,25 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableAddColumns(ref alter_stmt) => {
+                let mut result = Ok(StatementResult::AffectedRows(0));
+                for column in &alter_stmt.columns {
+                    result = self.execute_alter_table_add_column_stmt_with_search_path(
+                        client_id,
+                        &AlterTableAddColumnStatement {
+                            if_exists: alter_stmt.if_exists,
+                            only: alter_stmt.only,
+                            table_name: alter_stmt.table_name.clone(),
+                            column: column.clone(),
+                        },
+                        configured_search_path,
+                    );
+                    if result.is_err() {
+                        break;
+                    }
+                }
+                result
+            }
             Statement::AlterTableDropColumn(ref drop_stmt) => self
                 .execute_alter_table_drop_column_stmt_with_search_path(
                     client_id,
