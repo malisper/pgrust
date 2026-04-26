@@ -109,8 +109,6 @@ type_name_chunk = _{
 expr_chunk = _{
     sql_string
     | quoted_ident
-    | "(" ~ expr_until_semi? ~ ")"
-    | "[" ~ expr_until_semi? ~ "]"
     | !semi ~ ANY
 }
 

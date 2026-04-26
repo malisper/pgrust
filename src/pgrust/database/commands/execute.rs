@@ -242,6 +242,27 @@ impl Database {
         gucs: &std::collections::HashMap<String, String>,
         planner_config: PlannerConfig,
     ) -> Result<StatementResult, ExecError> {
+        self.execute_statement_with_search_path_datetime_config_gucs_planner_config_and_random_state(
+            client_id,
+            stmt,
+            configured_search_path,
+            datetime_config,
+            gucs,
+            planner_config,
+            crate::backend::executor::PgPrngState::shared(),
+        )
+    }
+
+    pub(crate) fn execute_statement_with_search_path_datetime_config_gucs_planner_config_and_random_state(
+        &self,
+        client_id: ClientId,
+        stmt: Statement,
+        configured_search_path: Option<&[String]>,
+        datetime_config: &DateTimeConfig,
+        gucs: &std::collections::HashMap<String, String>,
+        planner_config: PlannerConfig,
+        random_state: std::sync::Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
+    ) -> Result<StatementResult, ExecError> {
         let datetime_config = autocommit_datetime_config(datetime_config);
         let statement_lock_scope_id = Some(self.allocate_statement_lock_scope_id());
         let stats_state = self.session_stats_state(client_id);
@@ -256,6 +277,7 @@ impl Database {
             &datetime_config,
             gucs,
             planner_config,
+            random_state,
         );
         if let Some(scope_id) = statement_lock_scope_id {
             advisory_locks.unlock_all_statement(client_id, scope_id);
@@ -337,6 +359,7 @@ impl Database {
         datetime_config: &DateTimeConfig,
         gucs: &std::collections::HashMap<String, String>,
         planner_config: PlannerConfig,
+        random_state: std::sync::Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
     ) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::commands::tablecmds::execute_truncate_table;
@@ -838,6 +861,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1087,6 +1111,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1209,6 +1234,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1317,6 +1343,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1426,6 +1453,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1830,6 +1858,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1950,6 +1979,33 @@ impl Database {
         snapshot_override: Option<crate::backend::access::transam::xact::Snapshot>,
         planner_config: PlannerConfig,
     ) -> Result<SelectGuard, ExecError> {
+        self.execute_streaming_with_config_and_random_state(
+            client_id,
+            select_stmt,
+            txn_ctx,
+            statement_lock_scope_id,
+            transaction_lock_scope_id,
+            configured_search_path,
+            datetime_config,
+            snapshot_override,
+            planner_config,
+            crate::backend::executor::PgPrngState::shared(),
+        )
+    }
+
+    pub(crate) fn execute_streaming_with_config_and_random_state(
+        &self,
+        client_id: ClientId,
+        select_stmt: &crate::backend::parser::SelectStatement,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+        statement_lock_scope_id: Option<u64>,
+        transaction_lock_scope_id: Option<u64>,
+        configured_search_path: Option<&[String]>,
+        datetime_config: &DateTimeConfig,
+        snapshot_override: Option<crate::backend::access::transam::xact::Snapshot>,
+        planner_config: PlannerConfig,
+        random_state: std::sync::Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
+    ) -> Result<SelectGuard, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::executor::executor_start;
 
@@ -2015,6 +2071,7 @@ impl Database {
             transaction_lock_scope_id,
             next_command_id: command_id,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            random_state,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),

@@ -2584,8 +2584,9 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
         let empty_outer = Vec::new();
         let bound =
             bind_expr_with_outer_and_ctes(expr, &empty_scope, catalog, &empty_outer, None, ctes)?;
-        let sql_type =
-            infer_sql_expr_type_with_ctes(expr, &empty_scope, catalog, &empty_outer, None, ctes);
+        let sql_type = expr_sql_type_hint(&bound).unwrap_or_else(|| {
+            infer_sql_expr_type_with_ctes(expr, &empty_scope, catalog, &empty_outer, None, ctes)
+        });
         return Ok((bound, sql_type));
     }
 
@@ -2651,7 +2652,9 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
     // to see the same named-slot scope as the enclosing expression.
     let outer_scopes = vec![scope.clone()];
     let bound = bind_expr_with_outer_and_ctes(expr, &scope, catalog, &outer_scopes, None, ctes)?;
-    let sql_type = infer_sql_expr_type_with_ctes(expr, &scope, catalog, &outer_scopes, None, ctes);
+    let sql_type = expr_sql_type_hint(&bound).unwrap_or_else(|| {
+        infer_sql_expr_type_with_ctes(expr, &scope, catalog, &outer_scopes, None, ctes)
+    });
     Ok((bound, sql_type))
 }
 
@@ -4500,9 +4503,9 @@ fn bind_select_query_with_outer(
                                             build_bound_order_by_entry(item, bound_expr, 0, catalog)
                                         })
                                         .collect::<Result<Vec<_>, ParseError>>()?;
-                                    let resolved = resolved
-                                        .as_ref()
-                                        .expect("non-hypothetical aggregate resolution should exist");
+                                    let resolved = resolved.as_ref().expect(
+                                        "non-hypothetical aggregate resolution should exist",
+                                    );
                                     let coerced_args = bound_args
                                         .into_iter()
                                         .zip(arg_types.iter().copied())
@@ -4696,28 +4699,33 @@ fn bind_select_query_with_outer(
                                     .iter()
                                     .enumerate()
                                     .map(|(index, item)| {
+                                        let expr = bind_agg_output_expr_in_clause(
+                                            &item.expr,
+                                            UngroupedColumnClause::SelectTarget,
+                                            &effective_group_by,
+                                            &group_keys,
+                                            &scope,
+                                            catalog,
+                                            outer_scopes,
+                                            grouped_outer.as_ref(),
+                                            &aggs,
+                                            n_keys,
+                                        )?;
+                                        let sql_type =
+                                            expr_sql_type_hint(&expr).unwrap_or_else(|| {
+                                                infer_sql_expr_type_with_ctes(
+                                                    &item.expr,
+                                                    &scope,
+                                                    catalog,
+                                                    outer_scopes,
+                                                    grouped_outer.as_ref(),
+                                                    &visible_ctes,
+                                                )
+                                            });
                                         Ok(TargetEntry::new(
                                             item.output_name.clone(),
-                                            bind_agg_output_expr_in_clause(
-                                                &item.expr,
-                                                UngroupedColumnClause::SelectTarget,
-                                                &effective_group_by,
-                                                &group_keys,
-                                                &scope,
-                                                catalog,
-                                                outer_scopes,
-                                                grouped_outer.as_ref(),
-                                                &aggs,
-                                                n_keys,
-                                            )?,
-                                            infer_sql_expr_type_with_ctes(
-                                                &item.expr,
-                                                &scope,
-                                                catalog,
-                                                outer_scopes,
-                                                grouped_outer.as_ref(),
-                                                &visible_ctes,
-                                            ),
+                                            expr,
+                                            sql_type,
                                             index + 1,
                                         ))
                                     })

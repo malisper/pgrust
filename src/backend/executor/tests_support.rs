@@ -14,6 +14,7 @@ pub(crate) struct SeededSqlHarness {
     pub base: PathBuf,
     pub txns: TransactionManager,
     catalog: Catalog,
+    random_state: Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
 }
 
 impl SeededSqlHarness {
@@ -26,6 +27,7 @@ impl SeededSqlHarness {
             base,
             txns,
             catalog,
+            random_state: crate::backend::executor::PgPrngState::shared(),
         }
     }
 
@@ -38,6 +40,7 @@ impl SeededSqlHarness {
         let txns = self.txns.clone();
         let sql = sql.to_string();
         let mut catalog = std::mem::take(&mut self.catalog);
+        let random_state = Arc::clone(&self.random_state);
 
         let (catalog, result) = run_with_large_stack_result("executor-test-sql", move || {
             let smgr = MdStorageManager::new(&base);
@@ -89,6 +92,7 @@ impl SeededSqlHarness {
                 transaction_lock_scope_id: None,
                 next_command_id: 0,
                 default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+                random_state,
                 expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),

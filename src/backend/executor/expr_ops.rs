@@ -111,6 +111,12 @@ pub(crate) fn compare_order_values(
         (Value::Float64(a), Value::Int16(b)) => Ok(pg_float_cmp(*a, f64::from(*b))),
         (Value::Float64(a), Value::Int32(b)) => Ok(pg_float_cmp(*a, f64::from(*b))),
         (Value::Float64(a), Value::Int64(b)) => Ok(pg_float_cmp(*a, *b as f64)),
+        (a, Value::Float64(b)) if parsed_numeric_float_value(a).is_some() => {
+            Ok(pg_float_cmp(parsed_numeric_float_value(a).unwrap(), *b))
+        }
+        (Value::Float64(a), b) if parsed_numeric_float_value(b).is_some() => {
+            Ok(pg_float_cmp(*a, parsed_numeric_float_value(b).unwrap()))
+        }
         (Value::Date(a), Value::Date(b)) => Ok(a.cmp(b)),
         (Value::Time(a), Value::Time(b)) => Ok(a.cmp(b)),
         (Value::TimeTz(a), Value::TimeTz(b)) => Ok(timetz_order_key(*a).cmp(&timetz_order_key(*b))),
@@ -256,6 +262,12 @@ pub(crate) fn compare_values(
         (Value::Float64(l), Value::Int32(r)) => Ok(Value::Bool(pg_float_eq(*l, f64::from(*r)))),
         (Value::Float64(l), Value::Int64(r)) => Ok(Value::Bool(pg_float_eq(*l, *r as f64))),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(*l, *r))),
+        (l, Value::Float64(r)) if parsed_numeric_float_value(l).is_some() => Ok(Value::Bool(
+            pg_float_eq(parsed_numeric_float_value(l).unwrap(), *r),
+        )),
+        (Value::Float64(l), r) if parsed_numeric_float_value(r).is_some() => Ok(Value::Bool(
+            pg_float_eq(*l, parsed_numeric_float_value(r).unwrap()),
+        )),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             Ok(Value::Bool(
                 parsed_numeric_value(l)
@@ -1517,6 +1529,26 @@ pub(crate) fn order_values(
             ">=" => pg_float_cmp(*l, *r) != Ordering::Less,
             _ => unreachable!(),
         })),
+        (l, Value::Float64(r)) if parsed_numeric_float_value(l).is_some() => {
+            let ordering = pg_float_cmp(parsed_numeric_float_value(l).unwrap(), *r);
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
+        (Value::Float64(l), r) if parsed_numeric_float_value(r).is_some() => {
+            let ordering = pg_float_cmp(*l, parsed_numeric_float_value(r).unwrap());
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
         (Value::Bool(_), Value::Bool(_)) => order_bool_values(op, &left, &right),
         (Value::Record(l), Value::Record(r)) => order_record_values(op, l, r, collation_oid),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
@@ -2461,6 +2493,19 @@ fn parsed_numeric_value(value: &Value) -> Option<NumericValue> {
         Value::Numeric(v) => Some(v.clone()),
         Value::Float64(_) => None,
         _ => None,
+    }
+}
+
+fn parsed_numeric_float_value(value: &Value) -> Option<f64> {
+    match parsed_numeric_value(value)? {
+        NumericValue::PosInf => Some(f64::INFINITY),
+        NumericValue::NegInf => Some(f64::NEG_INFINITY),
+        NumericValue::NaN => Some(f64::NAN),
+        NumericValue::Finite { coeff, scale, .. } => {
+            let coeff = coeff.to_f64()?;
+            let scale = i32::try_from(scale).ok()?;
+            Some(coeff / 10f64.powi(scale))
+        }
     }
 }
 

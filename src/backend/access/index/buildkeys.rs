@@ -168,6 +168,7 @@ impl IndexBuildKeyProjector {
                 deferred_foreign_keys: None,
                 trigger_depth: 0,
                 default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+                random_state: crate::backend::executor::PgPrngState::shared(),
             }),
         })
     }

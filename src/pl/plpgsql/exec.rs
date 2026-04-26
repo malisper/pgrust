@@ -2637,7 +2637,9 @@ fn eval_function_expr(
                 return eval_expr(expr, &mut slot, ctx);
             }
             let saved_subplans = std::mem::replace(&mut ctx.subplans, subplans.clone());
+            let saved_outer_tuple = ctx.expr_bindings.outer_tuple.replace(values.to_vec());
             let result = eval_expr(expr, &mut slot, ctx);
+            ctx.expr_bindings.outer_tuple = saved_outer_tuple;
             ctx.subplans = saved_subplans;
             result
         }

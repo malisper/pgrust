@@ -367,6 +367,7 @@ pub enum HashFunctionKind {
 pub enum BuiltinScalarFunction {
     Random,
     RandomNormal,
+    SetSeed,
     CurrentDatabase,
     Version,
     PgBackendPid,
