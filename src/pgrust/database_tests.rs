@@ -31987,6 +31987,19 @@ fn explicit_multirange_name_renames_existing_range_array_type() {
         ),
         vec![vec![Value::Bool(true)]]
     );
+
+    match db.execute(1, "select multirange_of_text(textrange2('a','Z'))") {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(sqlstate, "42883");
+            assert_eq!(
+                message,
+                "function multirange_of_text(textrange2) does not exist"
+            );
+        }
+        other => panic!("expected missing multirange constructor function, got {other:?}"),
+    }
 }
 
 #[test]
@@ -32096,6 +32109,16 @@ fn range_owner_and_usage_privileges_apply_to_multirange_columns() {
 
     db.execute(1, "revoke usage on type textrange1 from public")
         .unwrap();
+    let type_rows = db.lazy_catalog_lookup(1, None, None).type_rows();
+    assert_eq!(
+        type_rows
+            .iter()
+            .find(|row| row.typname == "textrange1")
+            .unwrap()
+            .typacl
+            .as_deref(),
+        Some(&["regress_multirange_owner=U/regress_multirange_owner".into()][..])
+    );
     db.execute(1, "create temp table owner_can_use(f1 multitextrange1[])")
         .unwrap();
     db.execute(

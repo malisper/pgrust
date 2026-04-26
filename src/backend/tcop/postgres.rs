@@ -2747,11 +2747,14 @@ fn psql_describe_types_query(
             Value::Text(String::new().into()),
             Value::Text(entry.comment.clone().unwrap_or_default().into()),
         ]);
-        let acl = if !entry.public_usage && entry.owner_usage {
-            format!("{owner}=U/{owner}")
-        } else {
-            String::new()
-        };
+        let acl = entry
+            .typacl
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| !item.starts_with('='))
+            .collect::<Vec<_>>()
+            .join("\n");
         rows.push(vec![
             Value::Text("public".into()),
             Value::Text(entry.name.clone().into()),
