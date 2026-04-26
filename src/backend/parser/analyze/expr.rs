@@ -3350,15 +3350,16 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     grouped_outer,
                     ctes,
                 )?;
-                validate_catalog_backed_explicit_cast(arg_type, target_type, catalog)?;
-                return Ok(Expr::Cast(
-                    Box::new(bound_arg),
-                    if arg_type == target_type {
-                        arg_type
-                    } else {
-                        target_type
-                    },
-                ));
+                if catalog_backed_explicit_cast_allowed(arg_type, target_type, catalog) {
+                    return Ok(Expr::Cast(
+                        Box::new(bound_arg),
+                        if arg_type == target_type {
+                            arg_type
+                        } else {
+                            target_type
+                        },
+                    ));
+                }
             }
             let actual_types = args_list
                 .iter()
@@ -4126,16 +4127,7 @@ fn validate_catalog_backed_explicit_cast(
     target_type: SqlType,
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ParseError> {
-    if source_type.element_type() == target_type.element_type() {
-        return Ok(());
-    }
-    if source_type.is_array || !is_text_like_type(source_type) {
-        return Ok(());
-    }
-    if target_type.is_array {
-        return Ok(());
-    }
-    if explicit_text_input_cast_exists(catalog, target_type) {
+    if catalog_backed_explicit_cast_allowed(source_type, target_type, catalog) {
         return Ok(());
     }
     Err(ParseError::UnexpectedToken {
@@ -4146,6 +4138,32 @@ fn validate_catalog_backed_explicit_cast(
             sql_type_name(target_type)
         ),
     })
+}
+
+fn catalog_backed_explicit_cast_allowed(
+    source_type: SqlType,
+    target_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    if source_type.element_type() == target_type.element_type() {
+        return true;
+    }
+    if source_type.is_range()
+        && target_type.is_multirange()
+        && let Some(multirange_type) = multirange_type_ref_for_sql_type(target_type)
+    {
+        return source_type == multirange_type.range_type.sql_type;
+    }
+    if source_type.is_array || !is_text_like_type(source_type) {
+        return true;
+    }
+    if target_type.is_array {
+        return true;
+    }
+    if explicit_text_input_cast_exists(catalog, target_type) {
+        return true;
+    }
+    false
 }
 
 fn bind_regprocedure_literal_cast(

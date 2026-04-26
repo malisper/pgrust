@@ -173,13 +173,17 @@ pub(super) fn resolve_function_call(
     }
 
     best.map(|(resolved, _, _, _)| resolved)
-        .ok_or_else(|| undefined_function_error(name, actual_types))
+        .ok_or_else(|| undefined_function_error(catalog, name, actual_types))
 }
 
-fn undefined_function_error(name: &str, actual_types: &[SqlType]) -> ParseError {
+fn undefined_function_error(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    actual_types: &[SqlType],
+) -> ParseError {
     let signature = actual_types
         .iter()
-        .map(|ty| sql_type_name(*ty))
+        .map(|ty| function_signature_type_name(catalog, *ty))
         .collect::<Vec<_>>()
         .join(", ");
     ParseError::DetailedError {
@@ -191,6 +195,16 @@ fn undefined_function_error(name: &str, actual_types: &[SqlType]) -> ParseError 
         ),
         sqlstate: "42883",
     }
+}
+
+fn function_signature_type_name(catalog: &dyn CatalogLookup, ty: SqlType) -> String {
+    if !ty.is_array
+        && ty.type_oid != 0
+        && let Some(row) = catalog.type_by_oid(ty.type_oid)
+    {
+        return row.typname;
+    }
+    sql_type_name(ty)
 }
 
 fn polymorphic_candidate_is_consistent(
