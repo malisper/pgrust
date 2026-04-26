@@ -5525,6 +5525,7 @@ fn build_revoke_schema_all(sql: &str) -> Result<RevokeObjectStatement, ParseErro
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::AllPrivilegesOnSchema,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade,
