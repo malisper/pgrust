@@ -367,6 +367,7 @@ pub enum HashFunctionKind {
 pub enum BuiltinScalarFunction {
     Random,
     RandomNormal,
+    SetSeed,
     Pi,
     CurrentDatabase,
     Version,
@@ -616,6 +617,7 @@ pub enum BuiltinScalarFunction {
     PgGetConstraintDef,
     PgGetIndexDef,
     PgGetViewDef,
+    PgGetRuleDef,
     PgGetTriggerDef,
     PgTriggerDepth,
     PgGetStatisticsObjDef,
@@ -1038,12 +1040,14 @@ pub enum SetReturningCall {
         func_variadic: bool,
         relid: Expr,
         output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
     },
     PartitionAncestors {
         func_oid: u32,
         func_variadic: bool,
         relid: Expr,
         output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
     },
     PgLockStatus {
         func_oid: u32,
@@ -1174,6 +1178,12 @@ impl SetReturningCall {
             | SetReturningCall::StringTableFunction {
                 with_ordinality, ..
             }
+            | SetReturningCall::PartitionTree {
+                with_ordinality, ..
+            }
+            | SetReturningCall::PartitionAncestors {
+                with_ordinality, ..
+            }
             | SetReturningCall::PgLockStatus {
                 with_ordinality, ..
             }
@@ -1186,8 +1196,6 @@ impl SetReturningCall {
             | SetReturningCall::UserDefined {
                 with_ordinality, ..
             } => *with_ordinality,
-            SetReturningCall::PartitionTree { .. }
-            | SetReturningCall::PartitionAncestors { .. } => false,
         }
     }
 
@@ -1234,22 +1242,26 @@ impl SetReturningCall {
                 func_variadic,
                 relid,
                 output_columns,
+                with_ordinality,
             } => SetReturningCall::PartitionTree {
                 func_oid,
                 func_variadic,
                 relid: map(relid),
                 output_columns,
+                with_ordinality,
             },
             SetReturningCall::PartitionAncestors {
                 func_oid,
                 func_variadic,
                 relid,
                 output_columns,
+                with_ordinality,
             } => SetReturningCall::PartitionAncestors {
                 func_oid,
                 func_variadic,
                 relid: map(relid),
                 output_columns,
+                with_ordinality,
             },
             SetReturningCall::PgLockStatus {
                 func_oid,

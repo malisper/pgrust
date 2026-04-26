@@ -577,6 +577,49 @@ mod tests {
     }
 
     #[test]
+    fn dml_returning_uses_dml_command_tag() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+
+        send_query(&mut stream, "create table t (id int)");
+        let _ = read_until_ready(&mut stream, "create");
+
+        send_query(&mut stream, "insert into t values (1), (2) returning id");
+        let insert = read_until_ready(&mut stream, "insert returning");
+        assert_eq!(
+            insert
+                .iter()
+                .find(|(kind, _)| *kind == b'C')
+                .map(|(_, body)| command_tag(body)),
+            Some("INSERT 0 2".to_string())
+        );
+
+        send_query(&mut stream, "update t set id = id + 10 returning id");
+        let update = read_until_ready(&mut stream, "update returning");
+        assert_eq!(
+            update
+                .iter()
+                .find(|(kind, _)| *kind == b'C')
+                .map(|(_, body)| command_tag(body)),
+            Some("UPDATE 2".to_string())
+        );
+
+        send_query(&mut stream, "delete from t returning id");
+        let delete = read_until_ready(&mut stream, "delete returning");
+        assert_eq!(
+            delete
+                .iter()
+                .find(|(kind, _)| *kind == b'C')
+                .map(|(_, body)| command_tag(body)),
+            Some("DELETE 2".to_string())
+        );
+
+        let _ = stream.shutdown(Shutdown::Both);
+        server.join().unwrap();
+    }
+
+    #[test]
     fn copy_to_stdout_with_returning_emits_row_before_after_trigger_notice() {
         let (mut stream, server) = start_test_connection();
         send_startup(&mut stream);

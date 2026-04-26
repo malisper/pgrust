@@ -571,6 +571,30 @@ fn cast_regnamespace_to_text(
         .unwrap_or_else(|| Value::Text(oid.to_string().into())))
 }
 
+fn cast_regclass_to_text(
+    value: &Value,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    let oid = match value {
+        Value::Int32(oid) if *oid >= 0 => *oid as u32,
+        Value::Int64(oid) if *oid >= 0 && *oid <= i64::from(u32::MAX) => *oid as u32,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "::text",
+                left: other.clone(),
+                right: Value::Text("".into()),
+            });
+        }
+    };
+    if oid == 0 {
+        return Ok(Value::Text("-".into()));
+    }
+    Ok(catalog
+        .and_then(|catalog| catalog.class_row_by_oid(oid))
+        .map(|row| Value::Text(expr_reg::quote_identifier_if_needed(&row.relname).into()))
+        .unwrap_or_else(|| Value::Text(oid.to_string().into())))
+}
+
 const NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL: i32 = 131072;
 
 fn numeric_typmod_overflow_error(precision: i32, scale: i32) -> ExecError {
@@ -3712,6 +3736,22 @@ pub(crate) fn cast_value_with_source_type_and_config(
     cast_value_with_source_type_catalog_and_config(value, source_type, ty, None, config)
 }
 
+fn cast_text_input_for_source_type(
+    text: &str,
+    source_type: Option<SqlType>,
+    target_type: SqlType,
+) -> &str {
+    let source_is_bpchar =
+        source_type.is_some_and(|ty| !ty.is_array && matches!(ty.kind, SqlTypeKind::Char));
+    let target_trims_bpchar = !target_type.is_array
+        && matches!(target_type.kind, SqlTypeKind::Text | SqlTypeKind::Varchar);
+    if source_is_bpchar && target_trims_bpchar {
+        text.trim_end_matches(' ')
+    } else {
+        text
+    }
+}
+
 fn enforce_domain_check(
     value: Value,
     ty: SqlType,
@@ -3920,6 +3960,14 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         })
     {
         return cast_regnamespace_to_text(&value, catalog);
+    }
+    if matches!(ty.kind, SqlTypeKind::Text)
+        && !ty.is_array
+        && source_type.is_some_and(|source| {
+            matches!(source.element_type().kind, SqlTypeKind::RegClass) && !source.is_array
+        })
+    {
+        return cast_regclass_to_text(&value, catalog);
     }
 
     if let Some(result) = cast_geometry_value(value.clone(), ty) {
@@ -4567,18 +4615,20 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             }),
         },
         Value::Text(text) => {
+            let text = cast_text_input_for_source_type(text.as_str(), source_type, ty);
             if matches!(ty.kind, SqlTypeKind::Enum) {
-                cast_text_to_enum(text.as_str(), ty, catalog)
+                cast_text_to_enum(text, ty, catalog)
             } else if matches!(ty.kind, SqlTypeKind::RegType) {
-                cast_text_to_regtype(text.as_str(), catalog)
+                cast_text_to_regtype(text, catalog)
             } else {
-                cast_text_value_with_config(text.as_str(), ty, true, config)
+                cast_text_value_with_config(text, ty, true, config)
             }
         }
         Value::TextRef(ptr, len) => {
             let text = unsafe {
                 std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize))
             };
+            let text = cast_text_input_for_source_type(text, source_type, ty);
             if matches!(ty.kind, SqlTypeKind::Enum) {
                 cast_text_to_enum(text, ty, catalog)
             } else if matches!(ty.kind, SqlTypeKind::RegType) {
@@ -6725,6 +6775,31 @@ mod tests {
             )
             .unwrap(),
             Value::Text("WS".into())
+        );
+    }
+
+    #[test]
+    fn bpchar_to_varchar_and_text_trims_padding() {
+        let source = Some(SqlType::with_char_len(SqlTypeKind::Char, 4));
+        assert_eq!(
+            cast_value_with_source_type_and_config(
+                Value::Text("a   ".into()),
+                source,
+                SqlType::new(SqlTypeKind::Varchar),
+                &DateTimeConfig::default(),
+            )
+            .unwrap(),
+            Value::Text("a".into())
+        );
+        assert_eq!(
+            cast_value_with_source_type_and_config(
+                Value::Text("ab  ".into()),
+                source,
+                SqlType::new(SqlTypeKind::Text),
+                &DateTimeConfig::default(),
+            )
+            .unwrap(),
+            Value::Text("ab".into())
         );
     }
 

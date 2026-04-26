@@ -140,8 +140,8 @@ pub fn lower_create_table(
                     return Err(ParseError::UnexpectedToken {
                         expected: "generated column without DEFAULT",
                         actual: format!(
-                            "both default and generation expression specified for column \"{}\"",
-                            column.name
+                            "both default and generation expression specified for column \"{}\" of table \"{}\"",
+                            column.name, stmt.table_name
                         ),
                     });
                 }
@@ -150,12 +150,17 @@ pub fn lower_create_table(
                         || column.default_expr.is_some()
                         || serial_kind.is_some())
                 {
+                    let actual = if column.generated.is_some() {
+                        format!(
+                            "both identity and generation expression specified for column \"{}\" of table \"{}\"",
+                            column.name, stmt.table_name
+                        )
+                    } else {
+                        format!("conflicting identity definition for column \"{}\"", column.name)
+                    };
                     return Err(ParseError::UnexpectedToken {
                         expected: "identity column without DEFAULT, generated expression, or serial type",
-                        actual: format!(
-                            "conflicting identity definition for column \"{}\"",
-                            column.name
-                        ),
+                        actual,
                     });
                 }
                 if serial_kind.is_some() && column.generated.is_some() {
@@ -783,6 +788,7 @@ mod tests {
                 compression: None,
                 constraints: vec![],
             })],
+            options: Vec::new(),
             inherits: Vec::new(),
             partition_spec: None,
             partition_of: None,
@@ -840,6 +846,7 @@ mod tests {
                     }],
                 }),
             ],
+            options: Vec::new(),
             inherits: Vec::new(),
             partition_spec: None,
             partition_of: None,
@@ -974,6 +981,7 @@ mod tests {
                 relation_name: "source_table".into(),
                 options: vec![CreateTableLikeOption::IncludingAll],
             })],
+            options: Vec::new(),
             inherits: Vec::new(),
             partition_spec: None,
             partition_of: None,
@@ -1037,6 +1045,7 @@ mod tests {
                 relation_name: "source_table".into(),
                 options: vec![CreateTableLikeOption::IncludingDefaults],
             })],
+            options: Vec::new(),
             inherits: Vec::new(),
             partition_spec: None,
             partition_of: None,
@@ -1097,6 +1106,7 @@ mod tests {
                     column: "id".into(),
                 }),
             ],
+            options: Vec::new(),
             inherits: Vec::new(),
             partition_spec: None,
             partition_of: None,
@@ -1135,6 +1145,7 @@ mod tests {
                 compression: None,
                 constraints: vec![],
             })],
+            options: Vec::new(),
             inherits: Vec::new(),
             partition_spec: None,
             partition_of: None,
@@ -1177,6 +1188,7 @@ mod tests {
                 compression: None,
                 constraints: vec![],
             })],
+            options: Vec::new(),
             inherits: Vec::new(),
             partition_spec: None,
             partition_of: None,
@@ -1215,6 +1227,7 @@ mod tests {
                 compression: Some(AttributeCompression::Pglz),
                 constraints: vec![],
             })],
+            options: Vec::new(),
             inherits: Vec::new(),
             partition_spec: None,
             partition_of: None,
@@ -1252,6 +1265,7 @@ mod tests {
                 compression: Some(AttributeCompression::Pglz),
                 constraints: vec![],
             })],
+            options: Vec::new(),
             inherits: Vec::new(),
             partition_spec: None,
             partition_of: None,

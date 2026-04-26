@@ -3,11 +3,103 @@ use crate::backend::executor::{
     ExecutorTransactionState, SharedExecutorTransactionState, execute_planned_stmt,
     execute_readonly_statement_with_config,
 };
-use crate::backend::parser::ParseOptions;
+use crate::backend::parser::{
+    CatalogLookup, CteBody, FromItem, InsertSource, InsertStatement, ParseOptions, SelectStatement,
+};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::stack_depth::StackDepthGuard;
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::pl::plpgsql::execute_do_with_gucs;
+
+fn restrict_nonsystem_view_enabled(gucs: &std::collections::HashMap<String, String>) -> bool {
+    gucs.get("restrict_nonsystem_relation_kind")
+        .map(|value| {
+            value
+                .split(',')
+                .any(|part| part.trim().trim_matches('\'').eq_ignore_ascii_case("view"))
+        })
+        .unwrap_or(false)
+}
+
+fn reject_restricted_view_access(name: &str, catalog: &dyn CatalogLookup) -> Result<(), ExecError> {
+    let Some(entry) = catalog.lookup_any_relation(name) else {
+        return Ok(());
+    };
+    if entry.relkind == 'v'
+        && entry.namespace_oid != crate::include::catalog::PG_CATALOG_NAMESPACE_OID
+    {
+        return Err(ExecError::DetailedError {
+            message: format!("access to non-system view \"{name}\" is restricted"),
+            detail: None,
+            hint: None,
+            sqlstate: "42501",
+        });
+    }
+    Ok(())
+}
+
+fn reject_restricted_views_in_select(
+    select: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    for cte in &select.with {
+        reject_restricted_views_in_cte_body(&cte.body, catalog)?;
+    }
+    if let Some(from) = &select.from {
+        reject_restricted_views_in_from_item(from, catalog)?;
+    }
+    if let Some(set_op) = &select.set_operation {
+        for input in &set_op.inputs {
+            reject_restricted_views_in_select(input, catalog)?;
+        }
+    }
+    Ok(())
+}
+
+fn reject_restricted_views_in_cte_body(
+    body: &CteBody,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    match body {
+        CteBody::Select(select) => reject_restricted_views_in_select(select, catalog),
+        CteBody::Values(_) => Ok(()),
+        CteBody::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            reject_restricted_views_in_cte_body(anchor, catalog)?;
+            reject_restricted_views_in_select(recursive, catalog)
+        }
+    }
+}
+
+fn reject_restricted_views_in_from_item(
+    item: &FromItem,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    match item {
+        FromItem::Table { name, .. } => reject_restricted_view_access(name, catalog),
+        FromItem::DerivedTable(select) => reject_restricted_views_in_select(select, catalog),
+        FromItem::Join { left, right, .. } => {
+            reject_restricted_views_in_from_item(left, catalog)?;
+            reject_restricted_views_in_from_item(right, catalog)
+        }
+        FromItem::Alias { source, .. } | FromItem::Lateral(source) => {
+            reject_restricted_views_in_from_item(source, catalog)
+        }
+        FromItem::Values { .. } | FromItem::FunctionCall { .. } => Ok(()),
+    }
+}
+
+fn reject_restricted_views_in_insert(
+    insert: &InsertStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    reject_restricted_view_access(&insert.table_name, catalog)?;
+    if let InsertSource::Select(select) = &insert.source {
+        reject_restricted_views_in_select(select, catalog)?;
+    }
+    Ok(())
+}
 
 fn autocommit_datetime_config(config: &DateTimeConfig) -> DateTimeConfig {
     let statement_timestamp_usecs = config
@@ -312,6 +404,27 @@ impl Database {
         gucs: &std::collections::HashMap<String, String>,
         planner_config: PlannerConfig,
     ) -> Result<StatementResult, ExecError> {
+        self.execute_statement_with_search_path_datetime_config_gucs_planner_config_and_random_state(
+            client_id,
+            stmt,
+            configured_search_path,
+            datetime_config,
+            gucs,
+            planner_config,
+            crate::backend::executor::PgPrngState::shared(),
+        )
+    }
+
+    pub(crate) fn execute_statement_with_search_path_datetime_config_gucs_planner_config_and_random_state(
+        &self,
+        client_id: ClientId,
+        stmt: Statement,
+        configured_search_path: Option<&[String]>,
+        datetime_config: &DateTimeConfig,
+        gucs: &std::collections::HashMap<String, String>,
+        planner_config: PlannerConfig,
+        random_state: std::sync::Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
+    ) -> Result<StatementResult, ExecError> {
         let datetime_config = autocommit_datetime_config(datetime_config);
         let statement_lock_scope_id = Some(self.allocate_statement_lock_scope_id());
         let stats_state = self.session_stats_state(client_id);
@@ -326,6 +439,7 @@ impl Database {
             &datetime_config,
             gucs,
             planner_config,
+            random_state,
         );
         if let Some(scope_id) = statement_lock_scope_id {
             advisory_locks.unlock_all_statement(client_id, scope_id);
@@ -407,6 +521,7 @@ impl Database {
         datetime_config: &DateTimeConfig,
         gucs: &std::collections::HashMap<String, String>,
         planner_config: PlannerConfig,
+        random_state: std::sync::Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
     ) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::commands::tablecmds::execute_truncate_table;
@@ -425,6 +540,7 @@ impl Database {
                         datetime_config,
                         gucs,
                         planner_config,
+                        std::sync::Arc::clone(&random_state),
                     )?;
                 }
                 Ok(StatementResult::AffectedRows(0))
@@ -520,6 +636,12 @@ impl Database {
                 ),
             Statement::AlterTableSetSchema(ref alter_stmt) => self
                 .execute_alter_table_set_schema_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTableReset(ref alter_stmt) => self
+                .execute_alter_table_reset_stmt_with_search_path(
                     client_id,
                     alter_stmt,
                     configured_search_path,
@@ -930,6 +1052,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -940,7 +1063,8 @@ impl Database {
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
@@ -1102,6 +1226,19 @@ impl Database {
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let visible_catalog =
                     self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                if restrict_nonsystem_view_enabled(gucs) {
+                    match &stmt {
+                        Statement::Select(select) => {
+                            reject_restricted_views_in_select(select, &visible_catalog)?;
+                        }
+                        Statement::Explain(explain) => {
+                            if let Statement::Select(select) = explain.statement.as_ref() {
+                                reject_restricted_views_in_select(select, &visible_catalog)?;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 let (stmt, planned_select, rels) = {
                     let mut rels = std::collections::BTreeSet::new();
                     let mut planned_select = None;
@@ -1179,6 +1316,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1189,7 +1327,8 @@ impl Database {
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
                     catalog: visible_catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
@@ -1250,6 +1389,9 @@ impl Database {
             }
             Statement::Insert(ref insert_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                if restrict_nonsystem_view_enabled(gucs) {
+                    reject_restricted_views_in_insert(insert_stmt, &catalog)?;
+                }
                 let bound = bind_insert(insert_stmt, &catalog)?;
                 let prepared = super::rules::prepare_bound_insert_for_execution(bound, &catalog)?;
                 let lock_requests = merge_table_lock_requests(
@@ -1301,6 +1443,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1311,7 +1454,8 @@ impl Database {
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
@@ -1409,6 +1553,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1419,7 +1564,8 @@ impl Database {
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
@@ -1518,6 +1664,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1528,7 +1675,8 @@ impl Database {
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
@@ -1922,6 +2070,7 @@ impl Database {
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
                     expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                     case_test_values: Vec::new(),
                     system_bindings: Vec::new(),
@@ -1932,7 +2081,8 @@ impl Database {
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
+                    plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+                    pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
@@ -1955,6 +2105,7 @@ impl Database {
                 client_id,
                 vacuum_stmt,
                 configured_search_path,
+                Some(gucs),
             ),
             Statement::SetTransaction(_)
             | Statement::Begin(_)
@@ -2042,6 +2193,33 @@ impl Database {
         snapshot_override: Option<crate::backend::access::transam::xact::Snapshot>,
         planner_config: PlannerConfig,
     ) -> Result<SelectGuard, ExecError> {
+        self.execute_streaming_with_config_and_random_state(
+            client_id,
+            select_stmt,
+            txn_ctx,
+            statement_lock_scope_id,
+            transaction_lock_scope_id,
+            configured_search_path,
+            datetime_config,
+            snapshot_override,
+            planner_config,
+            crate::backend::executor::PgPrngState::shared(),
+        )
+    }
+
+    pub(crate) fn execute_streaming_with_config_and_random_state(
+        &self,
+        client_id: ClientId,
+        select_stmt: &crate::backend::parser::SelectStatement,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+        statement_lock_scope_id: Option<u64>,
+        transaction_lock_scope_id: Option<u64>,
+        configured_search_path: Option<&[String]>,
+        datetime_config: &DateTimeConfig,
+        snapshot_override: Option<crate::backend::access::transam::xact::Snapshot>,
+        planner_config: PlannerConfig,
+        random_state: std::sync::Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
+    ) -> Result<SelectGuard, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::executor::executor_start;
 
@@ -2107,6 +2285,7 @@ impl Database {
             transaction_lock_scope_id,
             next_command_id: command_id,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            random_state,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
@@ -2117,7 +2296,8 @@ impl Database {
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             catalog: visible_catalog_snapshot,
-            compiled_functions: std::collections::HashMap::new(),
+            plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+            pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),

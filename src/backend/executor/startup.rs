@@ -1137,6 +1137,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
         Plan::Aggregate {
             plan_info,
             strategy,
+            disabled,
             input,
             group_by,
             passthrough_exprs,
@@ -1149,6 +1150,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             Box::new(AggregateState {
                 input: executor_start(*input),
                 strategy,
+                disabled,
                 group_by,
                 passthrough_exprs,
                 accumulators,
@@ -1275,12 +1277,14 @@ pub fn executor_start(plan: Plan) -> PlanState {
         Plan::SetOp {
             plan_info,
             op,
+            strategy,
             output_columns,
             children,
         } => {
             let width = output_columns.len();
             Box::new(SetOpState {
                 op,
+                strategy,
                 children: children.into_iter().map(executor_start).collect(),
                 output_columns: output_columns.into_iter().map(|c| c.name).collect(),
                 result_rows: None,

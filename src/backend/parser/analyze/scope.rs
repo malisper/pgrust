@@ -1694,11 +1694,6 @@ fn bind_function_from_item_with_ctes(
                     | ResolvedSrfImpl::PartitionAncestors),
                 ) = resolved.srf_impl
                 {
-                    if with_ordinality {
-                        return Err(ParseError::FeatureNotSupported(format!(
-                            "WITH ORDINALITY on {other}"
-                        )));
-                    }
                     let bound_args = bind_user_defined_table_function_args(
                         &args,
                         &call_scope,
@@ -1742,11 +1737,18 @@ fn bind_function_from_item_with_ctes(
                                     "partition SRF branch only handles partition builtins"
                                 ),
                             });
+                    let mut output_columns = output_columns;
+                    let mut desc_columns = output_columns
+                        .iter()
+                        .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                        .collect::<Vec<_>>();
+                    maybe_append_function_ordinality(
+                        with_ordinality,
+                        &mut output_columns,
+                        &mut desc_columns,
+                    );
                     let desc = RelationDesc {
-                        columns: output_columns
-                            .iter()
-                            .map(|col| column_desc(col.name.clone(), col.sql_type, true))
-                            .collect(),
+                        columns: desc_columns,
                     };
                     let scope = scope_for_relation(Some(name), &desc);
                     let relid = bound_args.into_iter().next().ok_or_else(|| {
@@ -1761,6 +1763,7 @@ fn bind_function_from_item_with_ctes(
                             func_variadic: resolved.func_variadic,
                             relid,
                             output_columns,
+                            with_ordinality,
                         },
                         ResolvedSrfImpl::PartitionAncestors => {
                             SetReturningCall::PartitionAncestors {
@@ -1768,6 +1771,7 @@ fn bind_function_from_item_with_ctes(
                                 func_variadic: resolved.func_variadic,
                                 relid,
                                 output_columns,
+                                with_ordinality,
                             }
                         }
                         _ => unreachable!("partition SRF branch only handles partition builtins"),
@@ -2629,6 +2633,12 @@ fn apply_function_rte_alias(plan: &mut AnalyzedFrom, alias: &str, desc: &Relatio
         })
         .collect::<Vec<_>>();
     rte.alias = Some(alias.to_string());
+    rte.alias_preserves_source_names = false;
+    rte.eref.aliasname = alias.to_string();
+    rte.eref.colnames = output_columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect();
     rte.desc = desc.clone();
     call.set_output_columns(output_columns.clone());
     plan.output_columns = output_columns;
@@ -2677,6 +2687,8 @@ fn apply_relation_alias(
     let mut renamed = false;
     if let Some(rte) = plan.rtable.last_mut() {
         rte.alias = Some(alias.to_string());
+        rte.alias_preserves_source_names = preserve_source_names;
+        rte.eref.aliasname = alias.to_string();
     }
 
     if alias_single_function_output && column_aliases.is_empty() && visible_positions.len() == 1 {
@@ -2847,22 +2859,24 @@ fn apply_relation_alias(
 
     let function_alias_applied = apply_function_rte_alias(&mut plan, alias, &desc);
 
-    if renamed && !function_alias_applied {
-        plan = plan.with_projection(
-            columns
+    if !function_alias_applied {
+        let output_columns = desc
+            .columns
+            .iter()
+            .map(|column| QueryColumn {
+                name: column.name.clone(),
+                sql_type: column.sql_type,
+                wire_type_oid: None,
+            })
+            .collect::<Vec<_>>();
+        if let Some(rte) = plan.rtable.last_mut() {
+            rte.desc = desc.clone();
+            rte.eref.colnames = output_columns
                 .iter()
-                .enumerate()
-                .map(|(index, column)| {
-                    TargetEntry::new(
-                        column.output_name.clone(),
-                        scope.output_exprs[index].clone(),
-                        desc.columns[index].sql_type,
-                        index + 1,
-                    )
-                    .with_input_resno(index + 1)
-                })
-                .collect(),
-        );
+                .map(|column| column.name.clone())
+                .collect();
+        }
+        plan.output_columns = output_columns;
     }
 
     let output_exprs = if renamed {

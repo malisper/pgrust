@@ -338,6 +338,7 @@ impl Database {
                 row_type_oid: 0,
                 array_type_oid: 0,
                 reltoastrelid: 0,
+                relhasindex: false,
                 relpersistence: 't',
                 relkind: 'n',
                 relispopulated: true,
@@ -430,6 +431,7 @@ impl Database {
                     &namespace.toast_name,
                     self.auth_state(client_id).current_user_oid(),
                     of_type_oid,
+                    reloptions.clone(),
                     &ctx,
                 )
                 .map_err(map_catalog_error)?
@@ -465,6 +467,7 @@ impl Database {
             row_type_oid: created.entry.row_type_oid,
             array_type_oid: created.entry.array_type_oid,
             reltoastrelid: created.entry.reltoastrelid,
+            relhasindex: false,
             relpersistence: created.entry.relpersistence,
             relkind: created.entry.relkind,
             relispopulated: created.entry.relispopulated,

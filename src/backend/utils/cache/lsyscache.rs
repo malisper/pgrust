@@ -17,9 +17,9 @@ use crate::backend::utils::cache::syscache::{
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
-    build_pg_rules_rows, build_pg_stat_io_rows, build_pg_stat_user_functions_rows,
-    build_pg_stat_user_tables_rows, build_pg_statio_user_tables_rows, build_pg_stats_rows,
-    build_pg_views_rows,
+    build_pg_rules_rows, build_pg_stat_all_tables_rows, build_pg_stat_io_rows,
+    build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
+    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_views_rows,
 };
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::access::brin_page::{
@@ -1937,6 +1937,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         .unwrap_or_default()
     }
 
+    fn rewrite_rows(&self) -> Vec<PgRewriteRow> {
+        ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx)
+    }
+
     fn trigger_rows_for_relation(&self, relation_oid: u32) -> Vec<PgTriggerRow> {
         trigger_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
     }
@@ -2088,6 +2092,30 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
 
     fn pg_stat_activity_rows(&self) -> Vec<Vec<Value>> {
         self.db.pg_stat_activity_rows()
+    }
+
+    fn pg_stat_all_tables_rows(&self) -> Vec<Vec<Value>> {
+        let namespaces = ensure_namespace_rows(self.db, self.client_id, self.txn_ctx);
+        let classes = ensure_class_rows(self.db, self.client_id, self.txn_ctx);
+        let indexes = ensure_index_rows(self.db, self.client_id, self.txn_ctx);
+        let relation_oids = classes
+            .iter()
+            .flat_map(|class| {
+                std::iter::once(class.oid)
+                    .chain((class.reltoastrelid != 0).then_some(class.reltoastrelid))
+            })
+            .chain(indexes.iter().map(|row| row.indexrelid))
+            .collect::<BTreeSet<_>>();
+        let relation_stats = self
+            .db
+            .session_stats_state(self.client_id)
+            .write()
+            .visible_relation_entries(&self.db.stats, relation_oids);
+        let stats = DatabaseStatsStore {
+            relations: relation_stats,
+            ..DatabaseStatsStore::default()
+        };
+        build_pg_stat_all_tables_rows(namespaces, classes, indexes, &stats)
     }
 
     fn pg_stat_user_tables_rows(&self) -> Vec<Vec<Value>> {

@@ -3,6 +3,65 @@ use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{ANYOID, range_type_ref_for_sql_type};
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 
+fn signed_integer_literal_type(expr: &SqlExpr) -> Option<SqlTypeKind> {
+    let (negative, value) = match expr {
+        SqlExpr::IntegerLiteral(value) => (false, value.as_str()),
+        SqlExpr::Negate(inner) => match inner.as_ref() {
+            SqlExpr::IntegerLiteral(value) => (true, value.as_str()),
+            _ => return None,
+        },
+        SqlExpr::UnaryPlus(inner) => match inner.as_ref() {
+            SqlExpr::IntegerLiteral(value) => (false, value.as_str()),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if !value.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let signed = if negative {
+        format!("-{value}")
+    } else {
+        value.to_string()
+    };
+    if signed.parse::<i32>().is_ok() {
+        Some(SqlTypeKind::Int4)
+    } else if signed.parse::<i64>().is_ok() {
+        Some(SqlTypeKind::Int8)
+    } else {
+        None
+    }
+}
+
+fn random_bound_target_type(args: &[SqlExpr], arg_types: &[SqlType]) -> SqlType {
+    if args.len() == 2
+        && let (Some(left), Some(right)) = (
+            signed_integer_literal_type(&args[0]),
+            signed_integer_literal_type(&args[1]),
+        )
+    {
+        return if matches!(left, SqlTypeKind::Int8) || matches!(right, SqlTypeKind::Int8) {
+            SqlType::new(SqlTypeKind::Int8)
+        } else {
+            SqlType::new(SqlTypeKind::Int4)
+        };
+    }
+
+    let left_type = arg_types[0];
+    let right_type = arg_types[1];
+    if matches!(left_type.kind, SqlTypeKind::Numeric)
+        || matches!(right_type.kind, SqlTypeKind::Numeric)
+    {
+        SqlType::new(SqlTypeKind::Numeric)
+    } else if matches!(left_type.kind, SqlTypeKind::Int8)
+        || matches!(right_type.kind, SqlTypeKind::Int8)
+    {
+        SqlType::new(SqlTypeKind::Int8)
+    } else {
+        SqlType::new(SqlTypeKind::Int4)
+    }
+}
+
 pub(super) fn bind_row_to_json_call(
     name: &str,
     args: &[SqlFunctionArg],
@@ -260,32 +319,38 @@ pub(super) fn bind_user_defined_scalar_function_call(
             "named arguments are not supported for user-defined function calls".into(),
         ));
     }
-    let arg_types = args
+    let bound_args_with_types = args
         .iter()
         .map(|arg| {
-            infer_sql_expr_type_with_ctes(
+            let bound = bind_expr_with_outer_and_ctes(
                 &arg.value,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            )
+            )?;
+            let sql_type = expr_sql_type_hint(&bound).unwrap_or_else(|| {
+                infer_sql_expr_type_with_ctes(
+                    &arg.value,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+            });
+            Ok((bound, sql_type))
         })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    let arg_types = bound_args_with_types
+        .iter()
+        .map(|(_, sql_type)| *sql_type)
         .collect::<Vec<_>>();
-    let bound_args = args
-        .iter()
-        .map(|arg| {
-            bind_expr_with_outer_and_ctes(
-                &arg.value,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let bound_args = bound_args_with_types
+        .into_iter()
+        .map(|(bound, _)| bound)
+        .collect::<Vec<_>>();
     let coerced_args = bound_args
         .into_iter()
         .zip(arg_types)
@@ -386,14 +451,6 @@ pub(super) fn bind_scalar_function_call(
     } else {
         args.iter()
             .map(|arg| {
-                let sql_type = infer_sql_expr_type_with_ctes(
-                    arg,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
                 let bound = bind_expr_with_outer_and_ctes(
                     arg,
                     scope,
@@ -402,6 +459,16 @@ pub(super) fn bind_scalar_function_call(
                     grouped_outer,
                     ctes,
                 )?;
+                let sql_type = expr_sql_type_hint(&bound).unwrap_or_else(|| {
+                    infer_sql_expr_type_with_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                });
                 Ok((bound, sql_type))
             })
             .collect::<Result<Vec<_>, ParseError>>()?
@@ -466,19 +533,7 @@ pub(super) fn bind_scalar_function_call(
             let target_types = if matches!(func, BuiltinScalarFunction::RandomNormal) {
                 vec![SqlType::new(SqlTypeKind::Float8); bound_args.len()]
             } else if bound_args.len() == 2 {
-                let left_type = arg_types[0];
-                let right_type = arg_types[1];
-                let target = if matches!(left_type.kind, SqlTypeKind::Numeric)
-                    || matches!(right_type.kind, SqlTypeKind::Numeric)
-                {
-                    SqlType::new(SqlTypeKind::Numeric)
-                } else if matches!(left_type.kind, SqlTypeKind::Int8)
-                    || matches!(right_type.kind, SqlTypeKind::Int8)
-                {
-                    SqlType::new(SqlTypeKind::Int8)
-                } else {
-                    SqlType::new(SqlTypeKind::Int4)
-                };
+                let target = random_bound_target_type(args, &arg_types);
                 vec![target; 2]
             } else if declared_arg_types.len() == bound_args.len() {
                 declared_arg_types.to_vec()

@@ -56,6 +56,11 @@ pub(crate) fn execute_user_defined_sql_scalar_function_values(
     if let Some(value) = execute_known_lightweight_sql_function(row, arg_values)? {
         return Ok(value);
     }
+    if let Some(value) = execute_sql_utility_function(row, ctx)
+        .map_err(|err| sql_function_context_error(row, err))?
+    {
+        return Ok(value);
+    }
 
     let catalog = ctx.catalog.clone().ok_or_else(|| {
         sql_function_runtime_error(
@@ -64,7 +69,8 @@ pub(crate) fn execute_user_defined_sql_scalar_function_values(
             "0A000",
         )
     })?;
-    let result = execute_sql_function_query(row, &arg_values, &catalog, ctx)?;
+    let result = execute_sql_function_query(row, &arg_values, &catalog, ctx)
+        .map_err(|err| sql_function_context_error(row, err))?;
     match result {
         StatementResult::Query { rows, .. } => match rows.as_slice() {
             [] => Ok(Value::Null),
@@ -106,7 +112,8 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
             "0A000",
         )
     })?;
-    let result = execute_sql_function_query(row, &arg_values, &catalog, ctx)?;
+    let result = execute_sql_function_query(row, &arg_values, &catalog, ctx)
+        .map_err(|err| sql_function_context_error(row, err))?;
     match result {
         StatementResult::Query { rows, .. } => rows
             .into_iter()
@@ -142,6 +149,57 @@ fn execute_sql_function_query(
     )?;
     let result = execute_readonly_statement(stmt, catalog, ctx)?;
     Ok(result)
+}
+
+fn execute_sql_utility_function(
+    row: &PgProcRow,
+    ctx: &ExecutorContext,
+) -> Result<Option<Value>, ExecError> {
+    let body = normalized_sql_function_body(&row.prosrc);
+    let lower = body.to_ascii_lowercase();
+    let command = if starts_with_sql_command(&lower, "analyze") {
+        Some("ANALYZE")
+    } else if starts_with_sql_command(&lower, "vacuum") {
+        Some("VACUUM")
+    } else {
+        None
+    };
+    let Some(command) = command else {
+        return Ok(None);
+    };
+    // :HACK: SQL functions need a utility-statement execution path with a
+    // dedicated maintenance-depth flag. For now, model PostgreSQL's visible
+    // VACUUM/ANALYZE recursion guard for expression-index analysis.
+    if !ctx.allow_side_effects {
+        return Err(ExecError::DetailedError {
+            message: format!("{command} cannot be executed from VACUUM or ANALYZE"),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    Ok(Some(Value::Null))
+}
+
+fn starts_with_sql_command(sql: &str, command: &str) -> bool {
+    let Some(rest) = sql.strip_prefix(command) else {
+        return false;
+    };
+    rest.chars()
+        .next()
+        .map(|ch| ch.is_whitespace() || ch == '(' || ch == ';')
+        .unwrap_or(true)
+}
+
+fn sql_function_context_error(row: &PgProcRow, err: ExecError) -> ExecError {
+    ExecError::WithContext {
+        source: Box::new(err),
+        context: format!("SQL function \"{}\" statement 1", row.proname),
+    }
+}
+
+fn normalized_sql_function_body(source: &str) -> &str {
+    source.trim().trim_end_matches(';').trim()
 }
 
 fn execute_known_lightweight_sql_function(
@@ -334,7 +392,7 @@ fn inline_sql_function_body(
     catalog: &dyn CatalogLookup,
     datetime_config: &DateTimeConfig,
 ) -> Result<String, ExecError> {
-    let body = row.prosrc.trim().trim_end_matches(';').trim();
+    let body = normalized_sql_function_body(&row.prosrc);
     // :HACK: This is a narrow compatibility path for regression setup helpers.
     // Full PostgreSQL SQL-language functions need dedicated planning/execution
     // rather than text substitution plus a readonly single-SELECT execution.

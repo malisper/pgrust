@@ -489,6 +489,7 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         row_type_oid: 60_000u32.saturating_add(rel_number),
         array_type_oid: 61_000u32.saturating_add(rel_number),
         reltoastrelid: 0,
+        relhasindex: false,
         relpersistence: 'p',
         relkind: 'r',
         relispopulated: true,
@@ -551,6 +552,7 @@ fn people_view_entry() -> CatalogEntry {
         row_type_oid: 60020,
         array_type_oid: 60021,
         reltoastrelid: 0,
+        relhasindex: false,
         relpersistence: 'p',
         relkind: 'v',
         relispopulated: true,
@@ -766,6 +768,7 @@ fn catalog_with_people_id_index() -> Catalog {
             row_type_oid: 60010,
             array_type_oid: 0,
             reltoastrelid: 0,
+            relhasindex: false,
             relpersistence: 'p',
             relkind: 'i',
             relispopulated: true,
@@ -833,6 +836,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
             row_type_oid: 60011,
             array_type_oid: 0,
             reltoastrelid: 0,
+            relhasindex: false,
             relpersistence: 'p',
             relkind: 'i',
             relispopulated: true,
@@ -929,6 +933,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             row_type_oid: 60013,
             array_type_oid: 0,
             reltoastrelid: 0,
+            relhasindex: false,
             relpersistence: 'p',
             relkind: 'i',
             relispopulated: true,
@@ -993,6 +998,7 @@ fn catalog_with_people_ctid_partial_unique_index() -> Catalog {
             row_type_oid: 60015,
             array_type_oid: 0,
             reltoastrelid: 0,
+            relhasindex: false,
             relpersistence: 'p',
             relkind: 'i',
             relispopulated: true,
@@ -1057,6 +1063,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
             row_type_oid: 60014,
             array_type_oid: 0,
             reltoastrelid: 0,
+            relhasindex: false,
             relpersistence: 'p',
             relkind: 'i',
             relispopulated: true,
@@ -1236,6 +1243,7 @@ fn bind_expression_index_metadata_does_not_discover_heap_indexes() {
             row_type_oid: 60041,
             array_type_oid: 0,
             reltoastrelid: 0,
+            relhasindex: false,
             relpersistence: 'p',
             relkind: 'i',
             relispopulated: true,
@@ -1308,6 +1316,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
             row_type_oid: 60015,
             array_type_oid: 0,
             reltoastrelid: 0,
+            relhasindex: false,
             relpersistence: 'p',
             relkind: 'i',
             relispopulated: true,
@@ -1380,6 +1389,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             row_type_oid: 60031,
             array_type_oid: 0,
             reltoastrelid: 0,
+            relhasindex: false,
             relpersistence: 'p',
             relkind: 'i',
             relispopulated: true,
@@ -3216,6 +3226,17 @@ fn parse_alter_table_set_statement() {
         })
     );
 
+    let stmt = parse_statement("alter table vac_truncate_test reset (vacuum_truncate)").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableReset(AlterTableResetStatement {
+            if_exists: false,
+            only: false,
+            table_name: "vac_truncate_test".into(),
+            options: vec!["vacuum_truncate".into()],
+        })
+    );
+
     let stmt = parse_statement(
         "alter table attmp alter column i set (n_distinct = 1, n_distinct_inherited = 2)",
     )
@@ -3662,6 +3683,19 @@ fn parse_alter_table_drop_column_statement() {
             only: false,
             table_name: "items".into(),
             column_name: "note".into(),
+            cascade: false,
+        })
+    );
+
+    let stmt = parse_statement("alter table items drop column note cascade").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableDropColumn(AlterTableDropColumnStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            column_name: "note".into(),
+            cascade: true,
         })
     );
 }
@@ -4873,6 +4907,20 @@ fn parse_create_instead_of_trigger_statement() {
             func_args: Vec::new(),
         })
     );
+}
+
+#[test]
+fn parse_create_trigger_statement_for_statement_without_each() {
+    let stmt = parse_statement(
+        "create trigger audit_stmt after insert on public.people for statement execute function public.audit_people()",
+    )
+    .unwrap();
+    match stmt {
+        Statement::CreateTrigger(CreateTriggerStatement { level, .. }) => {
+            assert_eq!(level, TriggerLevel::Statement);
+        }
+        other => panic!("expected create trigger, got {other:?}"),
+    }
 }
 
 #[test]
@@ -8559,11 +8607,11 @@ fn build_plan_wraps_order_by_and_limit() {
                 } => {
                     assert_eq!(limit, Some(2));
                     assert_eq!(offset, 1);
-                    match *input {
+                    match strip_projections(input.as_ref()) {
                         Plan::OrderBy { input, items, .. } => {
                             assert_eq!(items.len(), 1);
                             assert!(items[0].descending);
-                            assert!(matches!(*input, Plan::Filter { .. }));
+                            assert!(matches!(input.as_ref(), Plan::Filter { .. }));
                         }
                         other => panic!("expected order by, got {:?}", other),
                     }
@@ -8580,7 +8628,7 @@ fn build_plan_resolves_order_by_ordinal_against_target_list() {
     let stmt = parse_select("select name, id from people order by 2 desc").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
-        Plan::Projection { input, .. } => match *input {
+        Plan::Projection { input, .. } => match strip_projections(input.as_ref()) {
             Plan::OrderBy { items, .. } => {
                 assert_eq!(items.len(), 1);
                 assert!(items[0].descending);
@@ -8672,6 +8720,18 @@ fn parse_insert_update_delete() {
     );
     assert!(
         matches!(parse_statement("analyze (verbose, skip_locked, buffer_usage_limit '512 kB') vacparted").unwrap(), Statement::Analyze(AnalyzeStatement { verbose: true, skip_locked: true, buffer_usage_limit: Some(limit), .. }) if limit == "512 kB")
+    );
+    assert!(
+        matches!(
+            parse_statement("analyze (nonexistentarg) does_not_exit"),
+            Err(ParseError::DetailedError { message, .. }) if message == "unrecognized ANALYZE option \"nonexistentarg\""
+        )
+    );
+    assert!(
+        matches!(
+            parse_statement("analyze (nonexistent-arg) does_not_exist"),
+            Err(ParseError::UnexpectedToken { actual, .. }) if actual == "syntax error at or near \"arg\""
+        )
     );
     assert!(
         matches!(parse_statement("insert into people (id, name) values (1, 'alice')").unwrap(), Statement::Insert(InsertStatement { table_name, .. }) if table_name == "people")
@@ -9021,6 +9081,20 @@ fn parse_insert_update_delete() {
     );
     assert!(
         matches!(parse_statement("vacuum (analyze, full) vactst").unwrap(), Statement::Vacuum(VacuumStatement { analyze: true, full: true, targets, .. }) if targets == vec![MaintenanceTarget { table_name: "vactst".into(), columns: vec![], only: false }])
+    );
+    assert!(
+        matches!(parse_statement("vacuum full freeze verbose vactst").unwrap(), Statement::Vacuum(VacuumStatement { full: true, freeze: true, verbose: true, targets, .. }) if targets == vec![MaintenanceTarget { table_name: "vactst".into(), columns: vec![], only: false }])
+    );
+    assert!(
+        matches!(parse_statement("vacuum (freeze, disable_page_skipping, parallel -1) vactst").unwrap(), Statement::Vacuum(VacuumStatement { freeze: true, disable_page_skipping: true, parallel: Some(parallel), targets, .. }) if parallel == "-1" && targets == vec![MaintenanceTarget { table_name: "vactst".into(), columns: vec![], only: false }])
+    );
+    let parsed_vacuum_options = parse_statement("vacuum (index_cleanup auto, truncate false, process_main false, process_toast yes, skip_database_stats, only_database_stats off)").unwrap();
+    assert!(
+        matches!(&parsed_vacuum_options, Statement::Vacuum(VacuumStatement { index_cleanup: Some(index_cleanup), truncate: Some(false), process_main: Some(false), process_toast: Some(true), skip_database_stats: true, only_database_stats: false, targets, .. }) if index_cleanup == "auto" && targets.is_empty()),
+        "{parsed_vacuum_options:?}"
+    );
+    assert!(
+        matches!(parse_statement("vacuum (parallel) pvactst").unwrap(), Statement::Vacuum(VacuumStatement { parallel: None, targets, .. }) if targets == vec![MaintenanceTarget { table_name: "pvactst".into(), columns: vec![], only: false }])
     );
     assert!(
         matches!(parse_statement("update people set note = 'x' where id = 1").unwrap(), Statement::Update(UpdateStatement { table_name, target_alias, only, from, .. }) if table_name == "people" && target_alias.is_none() && !only && from.is_none())
@@ -10132,6 +10206,7 @@ fn create_table_temp_name_validation() {
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![],
+            options: Vec::new(),
             inherits: Vec::new(),
             partition_spec: None,
             partition_of: None,
@@ -10149,6 +10224,7 @@ fn create_table_temp_name_validation() {
         persistence: TablePersistence::Temporary,
         on_commit: OnCommitAction::PreserveRows,
         elements: vec![],
+        options: Vec::new(),
         inherits: Vec::new(),
         partition_spec: None,
         partition_of: None,
@@ -10165,6 +10241,7 @@ fn create_table_temp_name_validation() {
         persistence: TablePersistence::Permanent,
         on_commit: OnCommitAction::DeleteRows,
         elements: vec![],
+        options: Vec::new(),
         inherits: Vec::new(),
         partition_spec: None,
         partition_of: None,
@@ -10854,6 +10931,25 @@ fn parse_scalar_subquery_with_parenthesized_union_input() {
 }
 
 #[test]
+fn parse_empty_select_set_operations() {
+    for sql in [
+        "select union select",
+        "select intersect select",
+        "select except select",
+    ] {
+        let stmt = parse_select(sql).unwrap();
+        let set_operation = stmt.set_operation.expect("set operation");
+        assert_eq!(set_operation.inputs.len(), 2);
+        assert!(
+            set_operation
+                .inputs
+                .iter()
+                .all(|input| input.targets.is_empty())
+        );
+    }
+}
+
+#[test]
 fn parse_select_distinct_clause() {
     let stmt = parse_select("select distinct x from items").unwrap();
     assert!(stmt.distinct);
@@ -10939,6 +11035,63 @@ fn parse_intersect_with_derived_union_inputs() {
         SetOperator::Intersect { all: false }
     ));
     assert_eq!(set_operation.inputs.len(), 2);
+}
+
+#[test]
+fn parse_parenthesized_select_statement() {
+    let stmt = parse_select("((select * from int8_tbl))").unwrap();
+    assert!(matches!(
+        stmt.from,
+        Some(FromItem::Table { ref name, .. }) if name == "int8_tbl"
+    ));
+}
+
+#[test]
+fn parse_parenthesized_set_operation_operand_with_order_limit() {
+    let stmt = parse_select(
+        "select q1 from int8_tbl except (((select q2 from int8_tbl order by q2 limit 1))) order by 1",
+    )
+    .unwrap();
+    assert_eq!(stmt.order_by.len(), 1);
+    let set_operation = stmt.set_operation.expect("set operation");
+    assert!(matches!(
+        set_operation.op,
+        SetOperator::Except { all: false }
+    ));
+    assert_eq!(set_operation.inputs.len(), 2);
+    assert_eq!(set_operation.inputs[1].order_by.len(), 1);
+    assert_eq!(set_operation.inputs[1].limit, Some(1));
+}
+
+#[test]
+fn parse_parenthesized_values_set_operation_operand() {
+    let stmt = parse_select("select 1 union all (values (2)) limit 1").unwrap();
+    assert_eq!(stmt.limit, Some(1));
+    let set_operation = stmt.set_operation.expect("set operation");
+    assert!(matches!(set_operation.op, SetOperator::Union { all: true }));
+    assert!(matches!(
+        set_operation.inputs[1].from,
+        Some(FromItem::Values { .. })
+    ));
+}
+
+#[test]
+fn parse_cte_materialization_markers() {
+    for sql in [
+        "with cte as materialized (select 1) select * from cte",
+        "with cte as not materialized (select 1) select * from cte",
+    ] {
+        match parse_statement(sql).unwrap() {
+            Statement::Select(SelectStatement { with, .. }) => {
+                assert_eq!(with.len(), 1);
+                assert!(matches!(
+                    with[0].body,
+                    crate::backend::parser::CteBody::Select(_)
+                ));
+            }
+            other => panic!("expected Select with CTE, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -14489,14 +14642,10 @@ fn parse_values_from_item() {
 fn build_plan_partial_derived_table_column_aliases_preserve_suffix() {
     let stmt = parse_select("select p.x, p.name from (select id, name from people) p(x)").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
-    match plan {
-        Plan::Projection { targets, .. } => {
-            assert_eq!(targets.len(), 2);
-            assert_eq!(targets[0].name, "x");
-            assert_eq!(targets[1].name, "name");
-        }
-        other => panic!("expected projection, got {:?}", other),
-    }
+    assert_eq!(
+        plan.column_names(),
+        vec!["x".to_string(), "name".to_string()]
+    );
 }
 
 #[test]

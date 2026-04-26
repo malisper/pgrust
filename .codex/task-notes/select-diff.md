@@ -68,3 +68,19 @@ PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet inherited_minm
 PGRUST_TARGET_SLOT=6 scripts/cargo_isolated.sh test --lib --quiet index_matrix_or_predicate_falls_back_to_seqscan
 PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet planner_rewrites_inherited_minmax_with_directional_index_only_subplans
 PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh check
+
+Latest PR update:
+Merged the advanced origin/perf-optimization into the PR branch after the PR
+became dirty again. Resolved conflicts by preserving BitmapOr planning,
+select.diff's empty-partition Result collapse, the upstream index-only path
+collection, setrefs path-index-only handling, and TABLE/VALUES set-operation
+grammar support. Fixed the merged expression-index ordering code so NULL-order
+elision only uses a proven base-column ORDER BY expression.
+
+Latest PR update tests run:
+PGRUST_TARGET_SLOT=5 scripts/cargo_isolated.sh test --lib --quiet index_predicates
+PGRUST_TARGET_SLOT=6 scripts/cargo_isolated.sh test --lib --quiet bind_insert_rejects_partial_index_when_inference_predicate_is_missing_or_weaker
+PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet bind_delete_ignores_partial_index_when_filter_does_not_imply_predicate
+PGRUST_TARGET_SLOT=5 scripts/cargo_isolated.sh test --lib --quiet sql_set_returning_function_accepts_values_body
+PGRUST_TARGET_SLOT=6 scripts/cargo_isolated.sh test --lib --quiet inherited_minmax_explain_uses_desc_and_partial_child_indexes
+PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh check

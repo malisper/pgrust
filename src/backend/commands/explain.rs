@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::backend::executor::{
     executor_start, render_explain_expr, render_index_order_by,
@@ -138,7 +138,15 @@ fn format_explain_plan_with_subplans_inner(
         push_explain_plan_line(plan, state.as_ref(), indent, is_child, show_costs, lines);
         push_verbose_plan_details(plan, indent, ctx, lines);
     } else {
-        push_explain_plan_state_line(plan, state.as_ref(), indent, is_child, show_costs, lines);
+        push_explain_plan_state_line(
+            plan,
+            state.as_ref(),
+            indent,
+            is_child,
+            show_costs,
+            ctx,
+            lines,
+        );
         if !push_nonverbose_plan_details(plan, indent, ctx, lines) {
             state.explain_details(indent, false, show_costs, lines);
         }
@@ -297,10 +305,11 @@ fn push_explain_plan_state_line(
     indent: usize,
     is_child: bool,
     show_costs: bool,
+    ctx: &VerboseExplainContext,
     lines: &mut Vec<String>,
 ) {
     let prefix = explain_node_prefix(indent, is_child);
-    let label = nonverbose_plan_label(plan).unwrap_or_else(|| state.node_label());
+    let label = nonverbose_plan_label(plan, ctx).unwrap_or_else(|| state.node_label());
     push_explain_line(
         &format!("{prefix}{label}"),
         state.plan_info(),
@@ -324,10 +333,10 @@ fn push_nonverbose_plan_details(
             ..
         } => {
             let sort_items = if display_items.is_empty() {
-                let input_names = verbose_plan_output_exprs(input, ctx, true);
+                let input_names = plan_join_output_exprs(input, ctx, true);
                 items
                     .iter()
-                    .map(|item| render_verbose_expr(&item.expr, &input_names, ctx))
+                    .map(|item| render_nonverbose_order_by_item(item, &input_names, ctx))
                     .collect::<Vec<_>>()
             } else {
                 display_items.clone()
@@ -335,6 +344,43 @@ fn push_nonverbose_plan_details(
             let sort_key = sort_items.join(", ");
             if !sort_key.is_empty() {
                 lines.push(format!("{prefix}Sort Key: {sort_key}"));
+            }
+            true
+        }
+        Plan::Aggregate {
+            input,
+            disabled,
+            group_by,
+            having,
+            output_columns,
+            ..
+        } => {
+            let input_names = plan_join_output_exprs(input, ctx, true);
+            if *disabled {
+                lines.push(format!("{prefix}Disabled: true"));
+            }
+            if !group_by.is_empty() {
+                let group_key = group_by
+                    .iter()
+                    .enumerate()
+                    .map(|(index, expr)| {
+                        render_nonverbose_group_key_expr(
+                            expr,
+                            output_columns.get(index).map(|column| column.sql_type),
+                            &input_names,
+                            ctx,
+                            *disabled,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push(format!("{prefix}Group Key: {group_key}"));
+            }
+            if let Some(having) = having {
+                lines.push(format!(
+                    "{prefix}Filter: {}",
+                    render_verbose_expr(having, &plan_join_output_exprs(plan, ctx, true), ctx)
+                ));
             }
             true
         }
@@ -468,6 +514,79 @@ fn render_window_order_by_for_explain(
         .join(", ")
 }
 
+fn render_nonverbose_order_by_item(
+    item: &crate::backend::executor::OrderByEntry,
+    input_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> String {
+    let mut rendered = render_verbose_expr(&item.expr, input_names, ctx);
+    if item.descending {
+        rendered.push_str(" DESC");
+    }
+    if let Some(nulls_first) = item.nulls_first {
+        rendered.push_str(if nulls_first {
+            " NULLS FIRST"
+        } else {
+            " NULLS LAST"
+        });
+    }
+    rendered
+}
+
+fn render_nonverbose_group_key_expr(
+    expr: &Expr,
+    sql_type: Option<crate::backend::parser::SqlType>,
+    input_names: &[String],
+    ctx: &VerboseExplainContext,
+    force_xid_const: bool,
+) -> String {
+    if (force_xid_const
+        || sql_type.is_some_and(|ty| matches!(ty.kind, crate::backend::parser::SqlTypeKind::Xid)))
+        && let Some(rendered) = render_xid_group_key_expr(expr)
+    {
+        return rendered;
+    }
+    let rendered = render_verbose_expr(expr, input_names, ctx);
+    if (force_xid_const
+        || sql_type.is_some_and(|ty| matches!(ty.kind, crate::backend::parser::SqlTypeKind::Xid)))
+        && rendered.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return format!("('{rendered}'::xid)");
+    }
+    if matches!(expr, Expr::Var(_)) {
+        let name = rendered
+            .rsplit_once('.')
+            .map(|(_, name)| name)
+            .unwrap_or(&rendered);
+        return format!("({name})");
+    }
+    if (matches!(expr, Expr::Op(_)) || rendered.contains(" || "))
+        && rendered.starts_with('(')
+        && rendered.ends_with(')')
+    {
+        return format!("({rendered})");
+    }
+    rendered
+}
+
+fn render_xid_group_key_expr(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Const(Value::Int16(value)) => Some(format!("('{value}'::xid)")),
+        Expr::Const(Value::Int32(value)) => Some(format!("('{value}'::xid)")),
+        Expr::Const(Value::Int64(value)) => Some(format!("('{value}'::xid)")),
+        Expr::Const(Value::Xid8(value)) => Some(format!("('{value}'::xid)")),
+        Expr::Const(Value::EnumOid(value)) => Some(format!("('{value}'::xid)")),
+        Expr::Const(Value::Text(value)) => Some(format!("('{}'::xid)", value.replace('\'', "''"))),
+        Expr::Const(value @ Value::TextRef(_, _)) => value
+            .as_text()
+            .map(|value| format!("('{}'::xid)", value.replace('\'', "''"))),
+        Expr::Cast(inner, ty) if matches!(ty.kind, crate::backend::parser::SqlTypeKind::Xid) => {
+            render_xid_group_key_expr(inner)
+        }
+        _ => None,
+    }
+}
+
 fn render_ordered_index_child_order_by(input: &Plan) -> Option<String> {
     match input {
         Plan::IndexOnlyScan {
@@ -594,7 +713,7 @@ fn explain_detail_prefix(indent: usize) -> String {
     if indent == 0 {
         "  ".into()
     } else {
-        format!("{}        ", "  ".repeat(indent - 1))
+        " ".repeat(2 + indent * 6)
     }
 }
 
@@ -608,6 +727,7 @@ fn verbose_plan_label(plan: &Plan) -> Option<String> {
             AggregateStrategy::Sorted => Some("GroupAggregate".into()),
             AggregateStrategy::Hashed => Some("HashAggregate".into()),
         },
+        Plan::SetOp { op, strategy, .. } => Some(set_op_plan_label(*op, *strategy)),
         Plan::Projection { input, .. } if matches!(input.as_ref(), Plan::Result { .. }) => {
             Some("Result".into())
         }
@@ -618,12 +738,88 @@ fn verbose_plan_label(plan: &Plan) -> Option<String> {
     }
 }
 
-fn nonverbose_plan_label(plan: &Plan) -> Option<String> {
+fn set_op_plan_label(
+    op: crate::include::nodes::parsenodes::SetOperator,
+    strategy: crate::include::nodes::plannodes::SetOpStrategy,
+) -> String {
+    let op_name = match op {
+        crate::include::nodes::parsenodes::SetOperator::Union { all: true } => "Union All",
+        crate::include::nodes::parsenodes::SetOperator::Union { all: false } => "Union",
+        crate::include::nodes::parsenodes::SetOperator::Intersect { all: true } => "Intersect All",
+        crate::include::nodes::parsenodes::SetOperator::Intersect { all: false } => "Intersect",
+        crate::include::nodes::parsenodes::SetOperator::Except { all: true } => "Except All",
+        crate::include::nodes::parsenodes::SetOperator::Except { all: false } => "Except",
+    };
+    let prefix = match strategy {
+        crate::include::nodes::plannodes::SetOpStrategy::Hashed => "HashSetOp",
+        crate::include::nodes::plannodes::SetOpStrategy::Sorted => "SetOp",
+    };
+    format!("{prefix} {op_name}")
+}
+
+fn nonverbose_plan_label(plan: &Plan, ctx: &VerboseExplainContext) -> Option<String> {
     match plan {
         Plan::Projection { input, .. } if matches!(input.as_ref(), Plan::Result { .. }) => {
             Some("Result".into())
         }
+        Plan::Values { .. } => Some(format!(
+            "Values Scan on {}",
+            ctx.values_scan_name.as_deref().unwrap_or("\"*VALUES*\"")
+        )),
+        Plan::FunctionScan {
+            call,
+            table_alias: None,
+            ..
+        } => ctx.function_scan_alias.as_ref().map(|alias| {
+            format!(
+                "Function Scan on {} {alias}",
+                set_returning_call_label(call)
+            )
+        }),
+        Plan::SeqScan { relation_name, .. } => ctx
+            .relation_scan_alias
+            .as_ref()
+            .map(|alias| format!("Seq Scan on {relation_name} {alias}")),
+        Plan::IndexOnlyScan {
+            relation_name,
+            index_name,
+            direction,
+            ..
+        } => ctx.relation_scan_alias.as_ref().map(|alias| {
+            let direction = scan_direction_label(*direction);
+            format!("Index Only Scan{direction} using {index_name} on {relation_name} {alias}")
+        }),
+        Plan::IndexScan {
+            relation_name,
+            index_name,
+            direction,
+            index_only,
+            ..
+        } => ctx.relation_scan_alias.as_ref().map(|alias| {
+            let direction = scan_direction_label(*direction);
+            let scan_name = if *index_only {
+                "Index Only Scan"
+            } else {
+                "Index Scan"
+            };
+            format!("{scan_name}{direction} using {index_name} on {relation_name} {alias}")
+        }),
+        Plan::BitmapHeapScan { relation_name, .. } => ctx
+            .relation_scan_alias
+            .as_ref()
+            .map(|alias| format!("Bitmap Heap Scan on {relation_name} {alias}")),
         _ => None,
+    }
+}
+
+fn scan_direction_label(direction: crate::include::access::relscan::ScanDirection) -> &'static str {
+    if matches!(
+        direction,
+        crate::include::access::relscan::ScanDirection::Backward
+    ) {
+        " Backward"
+    } else {
+        ""
     }
 }
 
@@ -825,6 +1021,9 @@ fn verbose_relation_name(relation_name: &str) -> String {
 #[derive(Clone, Default)]
 struct VerboseExplainContext {
     exec_params: Vec<VerboseExecParam>,
+    values_scan_name: Option<String>,
+    function_scan_alias: Option<String>,
+    relation_scan_alias: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1074,7 +1273,7 @@ fn explain_plan_children_with_context(
             );
         }
         Plan::BitmapHeapScan { bitmapqual, .. } => {
-            let child_indent = if indent == 0 { 1 } else { indent + 3 };
+            let child_indent = indent + 1;
             format_explain_plan_with_subplans_inner(
                 bitmapqual,
                 subplans,
@@ -1087,20 +1286,25 @@ fn explain_plan_children_with_context(
             );
         }
         _ => {
-            let child_indent = if matches!(plan, Plan::SetOp { .. }) {
-                indent
-            } else {
-                indent + 1
-            };
+            let mut values_seen = 0usize;
+            let mut functions_seen = BTreeMap::<String, usize>::new();
+            let mut relations_seen = BTreeMap::<String, usize>::new();
             for child in direct_plan_children(plan) {
+                let child_ctx = context_for_sibling_scan(
+                    ctx,
+                    child,
+                    &mut values_seen,
+                    &mut functions_seen,
+                    &mut relations_seen,
+                );
                 format_explain_plan_with_subplans_inner(
                     child,
                     subplans,
-                    child_indent,
+                    indent + 1,
                     show_costs,
                     verbose,
                     true,
-                    ctx,
+                    &child_ctx,
                     lines,
                 );
             }
@@ -1108,9 +1312,83 @@ fn explain_plan_children_with_context(
     }
 }
 
+fn context_for_sibling_scan(
+    ctx: &VerboseExplainContext,
+    child: &Plan,
+    values_seen: &mut usize,
+    functions_seen: &mut BTreeMap<String, usize>,
+    relations_seen: &mut BTreeMap<String, usize>,
+) -> VerboseExplainContext {
+    let mut child_ctx = ctx.clone();
+    match child_leaf_scan_source(child) {
+        Some(LeafScanSource::Values) => {
+            if child_ctx.values_scan_name.is_none() {
+                child_ctx.values_scan_name = Some(values_scan_name(*values_seen));
+                *values_seen += 1;
+            }
+        }
+        Some(LeafScanSource::Function(function_name)) => {
+            if child_ctx.function_scan_alias.is_none() {
+                let seen = functions_seen.entry(function_name.clone()).or_default();
+                child_ctx.function_scan_alias =
+                    (*seen > 0).then(|| format!("{function_name}_{seen}"));
+                *seen += 1;
+            }
+        }
+        Some(LeafScanSource::Relation(relation_name)) => {
+            if child_ctx.relation_scan_alias.is_none() {
+                let seen = relations_seen.entry(relation_name.clone()).or_default();
+                child_ctx.relation_scan_alias =
+                    (*seen > 0).then(|| format!("{relation_name}_{seen}"));
+                *seen += 1;
+            }
+        }
+        None => {}
+    }
+    child_ctx
+}
+
+enum LeafScanSource {
+    Values,
+    Function(String),
+    Relation(String),
+}
+
+fn child_leaf_scan_source(plan: &Plan) -> Option<LeafScanSource> {
+    match plan {
+        Plan::Values { .. } => Some(LeafScanSource::Values),
+        Plan::FunctionScan {
+            call,
+            table_alias: None,
+            ..
+        } => Some(LeafScanSource::Function(
+            set_returning_call_label(call).to_string(),
+        )),
+        Plan::SeqScan { relation_name, .. }
+        | Plan::IndexOnlyScan { relation_name, .. }
+        | Plan::IndexScan { relation_name, .. }
+        | Plan::BitmapHeapScan { relation_name, .. } => unaliased_relation_name(relation_name)
+            .map(|name| LeafScanSource::Relation(name.to_string())),
+        Plan::Hash { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::SubqueryScan { input, .. } => child_leaf_scan_source(input),
+        _ => None,
+    }
+}
+
 fn explain_node_prefix(indent: usize, is_child: bool) -> String {
     if is_child {
-        format!("{}->  ", "  ".repeat(indent))
+        let spaces = if indent <= 1 {
+            indent * 2
+        } else {
+            2 + (indent - 1) * 6
+        };
+        format!("{}->  ", " ".repeat(spaces))
     } else {
         "  ".repeat(indent)
     }
@@ -1154,6 +1432,48 @@ fn qualified_base_scan_output_exprs(
         .collect()
 }
 
+fn qualified_scan_output_exprs_with_context(
+    relation_name: &str,
+    desc: &crate::include::nodes::primnodes::RelationDesc,
+    ctx: &VerboseExplainContext,
+) -> Vec<String> {
+    if let Some(alias) = &ctx.relation_scan_alias {
+        return desc
+            .columns
+            .iter()
+            .map(|column| format!("{alias}.{}", column.name))
+            .collect();
+    }
+    qualified_base_scan_output_exprs(relation_name, desc)
+}
+
+fn unaliased_relation_name(relation_name: &str) -> Option<&str> {
+    if relation_name.split_once(' ').is_some() {
+        None
+    } else {
+        Some(
+            relation_name
+                .rsplit_once('.')
+                .map(|(_, name)| name)
+                .unwrap_or(relation_name),
+        )
+    }
+}
+
+fn values_scan_name(occurrence: usize) -> String {
+    if occurrence == 0 {
+        "\"*VALUES*\"".to_string()
+    } else {
+        format!("\"*VALUES*_{occurrence}\"")
+    }
+}
+
+fn values_scan_output_exprs(column_count: usize, scan_name: &str) -> Vec<String> {
+    (1..=column_count)
+        .map(|index| format!("{scan_name}.column{index}"))
+        .collect()
+}
+
 fn strip_partition_child_alias_suffix(alias: &str) -> &str {
     alias
         .rsplit_once('_')
@@ -1177,24 +1497,22 @@ fn append_parent_output_exprs(
     {
         return None;
     }
-    let mut derived = Vec::with_capacity(first.len());
-    for index in 0..first.len() {
-        let (first_qualifier, first_column) = first[index].split_once('.')?;
-        let parent_qualifier = strip_partition_child_alias_suffix(first_qualifier);
-        if child_outputs.iter().skip(1).any(|output| {
-            output[index]
-                .split_once('.')
-                .map(|(qualifier, column)| {
-                    column != first_column
-                        || strip_partition_child_alias_suffix(qualifier) != parent_qualifier
-                })
-                .unwrap_or(true)
-        }) {
-            return None;
-        }
-        derived.push(format!("{parent_qualifier}.{first_column}"));
-    }
-    Some(derived)
+    Some(
+        first
+            .iter()
+            .map(|name| {
+                name.split_once('.')
+                    .map(|(qualifier, column)| {
+                        format!(
+                            "{}.{}",
+                            strip_partition_child_alias_suffix(qualifier),
+                            column
+                        )
+                    })
+                    .unwrap_or_else(|| name.clone())
+            })
+            .collect(),
+    )
 }
 
 fn plan_join_output_exprs(
@@ -1236,7 +1554,7 @@ fn plan_join_output_exprs(
             relation_name,
             desc,
             ..
-        } => qualified_base_scan_output_exprs(relation_name, desc),
+        } => qualified_scan_output_exprs_with_context(relation_name, desc, ctx),
         Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => Vec::new(),
         Plan::Hash { input, .. }
         | Plan::Unique { input, .. }
@@ -1286,12 +1604,36 @@ fn plan_join_output_exprs(
         Plan::WindowAgg { output_columns, .. }
         | Plan::CteScan { output_columns, .. }
         | Plan::WorkTableScan { output_columns, .. }
-        | Plan::RecursiveUnion { output_columns, .. }
-        | Plan::SetOp { output_columns, .. }
-        | Plan::Values { output_columns, .. } => output_columns
+        | Plan::RecursiveUnion { output_columns, .. } => output_columns
             .iter()
             .map(|column| column.name.clone())
             .collect(),
+        Plan::SetOp {
+            output_columns,
+            children,
+            ..
+        } => {
+            if for_parent_ref && let Some(first) = children.first() {
+                let output = plan_join_output_exprs(first, ctx, true);
+                if output.len() == output_columns.len() {
+                    output
+                } else {
+                    output_columns
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect()
+                }
+            } else {
+                output_columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect()
+            }
+        }
+        Plan::Values { output_columns, .. } => values_scan_output_exprs(
+            output_columns.len(),
+            ctx.values_scan_name.as_deref().unwrap_or("\"*VALUES*\""),
+        ),
         Plan::NestedLoopJoin {
             left,
             right,
@@ -1315,11 +1657,20 @@ fn plan_join_output_exprs(
             output.extend(plan_join_output_exprs(right, ctx, for_parent_ref));
             output
         }
-        Plan::FunctionScan { call, .. } => call
-            .output_columns()
-            .iter()
-            .map(|column| format!("{}.{}", column.name, column.name))
-            .collect(),
+        Plan::FunctionScan {
+            call, table_alias, ..
+        } => {
+            let qualifier = table_alias
+                .as_deref()
+                .or(ctx.function_scan_alias.as_deref());
+            call.output_columns()
+                .iter()
+                .map(|column| match qualifier {
+                    Some(alias) => format!("{alias}.{}", column.name),
+                    None => format!("{}.{}", column.name, column.name),
+                })
+                .collect()
+        }
         Plan::ProjectSet { targets, .. } => targets
             .iter()
             .map(|target| match target {
@@ -1702,9 +2053,11 @@ fn render_verbose_expr(
         return rendered;
     }
     match expr {
-        Expr::Var(var) => {
-            render_var_name(var.varattno, column_names).unwrap_or_else(|| format!("{expr:?}"))
-        }
+        Expr::Var(var) => render_var_name(var.varattno, column_names).unwrap_or_else(|| {
+            crate::include::nodes::primnodes::attrno_index(var.varattno)
+                .map(|index| format!("column{}", index + 1))
+                .unwrap_or_else(|| strip_outer_parens(&render_explain_expr(expr, column_names)))
+        }),
         Expr::Param(param) if param.paramkind == ParamKind::Exec => ctx
             .exec_params
             .iter()

@@ -34,6 +34,7 @@ use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
 use crate::backend::utils::time::instant::Instant;
+use crate::include::executor::execdesc::CommandType;
 use crate::pgrust::database::TransactionWaiter;
 use crate::pl::plpgsql::TriggerOperation;
 
@@ -69,7 +70,7 @@ use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
-use crate::include::nodes::primnodes::{QueryColumn, TargetEntry};
+use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, expr_sql_type_hint};
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::database::commands::privilege::{
     acl_grants_privilege, effective_acl_grantee_names,
@@ -87,6 +88,15 @@ fn finalize_bound_insert(
         .collect();
     stmt.source = match stmt.source {
         BoundInsertSource::Values(rows) => BoundInsertSource::Values(
+            rows.into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans))
+                        .collect()
+                })
+                .collect(),
+        ),
+        BoundInsertSource::ProjectSetValues(rows) => BoundInsertSource::ProjectSetValues(
             rows.into_iter()
                 .map(|row| {
                     row.into_iter()
@@ -1182,11 +1192,12 @@ pub(crate) fn write_insert_heap_row(
         None,
         ctx,
     )?;
-    crate::backend::executor::enforce_outbound_foreign_keys(
+    crate::backend::executor::enforce_outbound_foreign_keys_for_insert(
         relation_name,
+        rel,
         &relation_constraints.foreign_keys,
-        None,
         values,
+        crate::backend::executor::InsertForeignKeyCheckPhase::BeforeHeapInsert,
         ctx,
     )?;
     let (tuple, _toasted) = toast_tuple_for_write(desc, values, toast, toast_index, ctx, xid, cid)?;
@@ -2524,6 +2535,10 @@ fn apply_inbound_foreign_key_actions_on_update(
         {
             continue;
         }
+        if !crate::backend::executor::foreign_key_action_trigger_enabled_on_update(constraint, ctx)
+        {
+            continue;
+        }
         match constraint.on_update {
             ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => {
                 crate::backend::executor::enforce_inbound_foreign_keys_on_update(
@@ -2605,6 +2620,10 @@ fn apply_inbound_foreign_key_actions_on_delete(
     let mut pending = Vec::new();
     for constraint in constraints {
         if !constraint.enforced {
+            continue;
+        }
+        if !crate::backend::executor::foreign_key_action_trigger_enabled_on_delete(constraint, ctx)
+        {
             continue;
         }
         match constraint.on_delete {
@@ -2730,7 +2749,20 @@ pub fn collect_vacuum_stats(
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
+    collect_vacuum_stats_with_options(targets, catalog, ctx, true, true, Some(true), true)
+}
+
+pub fn collect_vacuum_stats_with_options(
+    targets: &[MaintenanceTarget],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    process_main: bool,
+    process_toast: bool,
+    truncate: Option<bool>,
+    default_truncate: bool,
+) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
     let mut relations = Vec::with_capacity(targets.len());
+    let mut seen = BTreeSet::new();
     for target in targets {
         let Some(entry) = catalog
             .lookup_any_relation(&target.table_name)
@@ -2738,15 +2770,81 @@ pub fn collect_vacuum_stats(
         else {
             continue;
         };
-        relations.push(entry);
+        if process_main && seen.insert(entry.relation_oid) {
+            relations.push(entry.clone());
+        }
+        if process_toast
+            && let Some(toast) = entry.toast
+            && seen.insert(toast.relation_oid)
+            && let Some(toast_relation) = catalog.relation_by_oid(toast.relation_oid)
+        {
+            relations.push(toast_relation);
+        }
     }
-    collect_vacuum_stats_for_relations(&relations, catalog, ctx)
+    collect_vacuum_stats_for_relations_with_truncate_policy(
+        &relations,
+        catalog,
+        ctx,
+        truncate,
+        default_truncate,
+    )
 }
 
 pub(crate) fn collect_vacuum_stats_for_relations(
     relations: &[BoundRelation],
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
+) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
+    collect_vacuum_stats_for_relations_with_truncate(relations, catalog, ctx, true)
+}
+
+pub(crate) fn collect_vacuum_stats_for_relations_with_truncate(
+    relations: &[BoundRelation],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    truncate: bool,
+) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
+    collect_vacuum_stats_for_relations_with_truncate_policy(
+        relations,
+        catalog,
+        ctx,
+        Some(truncate),
+        true,
+    )
+}
+
+fn relation_vacuum_truncate(
+    relation_oid: u32,
+    catalog: &dyn CatalogLookup,
+    truncate: Option<bool>,
+    default_truncate: bool,
+) -> bool {
+    if let Some(truncate) = truncate {
+        return truncate;
+    }
+    catalog
+        .class_row_by_oid(relation_oid)
+        .and_then(|row| row.reloptions)
+        .and_then(|options| {
+            options.into_iter().find_map(|option| {
+                let (name, value) = option.split_once('=')?;
+                name.eq_ignore_ascii_case("vacuum_truncate").then(|| {
+                    !matches!(
+                        value.to_ascii_lowercase().as_str(),
+                        "false" | "off" | "no" | "0"
+                    )
+                })
+            })
+        })
+        .unwrap_or(default_truncate)
+}
+
+fn collect_vacuum_stats_for_relations_with_truncate_policy(
+    relations: &[BoundRelation],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    truncate: Option<bool>,
+    default_truncate: bool,
 ) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
     let mut processed = 0u64;
     let mut stats = Vec::with_capacity(relations.len());
@@ -2761,6 +2859,14 @@ pub(crate) fn collect_vacuum_stats_for_relations(
         let indexes = catalog.index_relations_for_heap(entry.relation_oid);
         let dead_items = &scan.dead_tids;
         for index in indexes {
+            let index_blocks = ctx
+                .pool
+                .with_storage_mut(|storage| storage.smgr.nblocks(index.rel, ForkNumber::Main))
+                .map_err(HeapError::Storage)
+                .map_err(ExecError::Heap)?;
+            if index_blocks == 0 {
+                continue;
+            }
             let vacuum_ctx = crate::include::access::amapi::IndexVacuumContext {
                 pool: ctx.pool.clone(),
                 txns: ctx.txns.clone(),
@@ -2806,6 +2912,7 @@ pub(crate) fn collect_vacuum_stats_for_relations(
             &ctx.txns,
             &scan,
             previous_relfrozenxid,
+            relation_vacuum_truncate(entry.relation_oid, catalog, truncate, default_truncate),
         )
         .map_err(ExecError::Heap)?;
         stats.push(relation_stats);
@@ -3951,6 +4058,33 @@ pub(crate) fn materialize_insert_rows(
                 Ok(values)
             })
             .collect::<Result<Vec<_>, ExecError>>(),
+        BoundInsertSource::ProjectSetValues(rows) => {
+            let mut materialized = Vec::new();
+            for row in rows {
+                for (row_values, mut slot) in
+                    execute_insert_project_set_row(row, stmt, catalog, ctx)?
+                {
+                    let (_, mut values) = eval_implicit_insert_defaults(
+                        &stmt.column_defaults,
+                        &stmt.target_columns,
+                        stmt.desc.columns.len(),
+                        ctx,
+                    )?;
+                    for (target, value) in stmt.target_columns.iter().zip(row_values.into_iter()) {
+                        apply_assignment_target(
+                            &stmt.desc,
+                            &mut values,
+                            target,
+                            value,
+                            &mut slot,
+                            ctx,
+                        )?;
+                    }
+                    materialized.push(values);
+                }
+            }
+            Ok(materialized)
+        }
         BoundInsertSource::DefaultValues(defaults) => {
             let mut slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
             let mut values = vec![Value::Null; stmt.desc.columns.len()];
@@ -3993,6 +4127,60 @@ pub(crate) fn materialize_insert_rows(
             result
         }
     }
+}
+
+fn execute_insert_project_set_row(
+    row: &[Expr],
+    stmt: &BoundInsertStatement,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<(Vec<Value>, TupleSlot)>, ExecError> {
+    let target_list = row
+        .iter()
+        .zip(stmt.target_columns.iter())
+        .enumerate()
+        .map(|(index, (expr, target))| {
+            let column = &stmt.desc.columns[target.column_index];
+            TargetEntry::new(
+                column.name.clone(),
+                expr.clone(),
+                expr_sql_type_hint(expr).unwrap_or(target.target_sql_type),
+                index + 1,
+            )
+        })
+        .collect::<Vec<_>>();
+    let query = crate::include::nodes::parsenodes::Query {
+        command_type: CommandType::Select,
+        depends_on_row_security: false,
+        rtable: Vec::new(),
+        jointree: None,
+        target_list,
+        distinct: false,
+        distinct_on: Vec::new(),
+        where_qual: None,
+        group_by: Vec::new(),
+        accumulators: Vec::new(),
+        window_clauses: Vec::new(),
+        having_qual: None,
+        sort_clause: Vec::new(),
+        limit_count: None,
+        limit_offset: 0,
+        locking_clause: None,
+        row_marks: Vec::new(),
+        has_target_srfs: true,
+        recursive_union: None,
+        set_operation: None,
+    };
+    let query = crate::backend::optimizer::fold_query_constants(query).map_err(ExecError::Parse)?;
+    let planned = planner(query, catalog).map_err(ExecError::Parse)?;
+    let mut state = executor_start(planned.plan_tree);
+    let mut rows = Vec::new();
+    while let Some(slot) = state.exec_proc_node(ctx)? {
+        ctx.check_for_interrupts()?;
+        let row_values = slot.values()?.to_vec();
+        rows.push((row_values, slot.clone()));
+    }
+    Ok(rows)
 }
 
 pub(crate) fn apply_assignment_target(
@@ -5145,51 +5333,72 @@ pub(crate) fn execute_insert_rows(
         .map(|triggers| triggers.new_transition_capture());
 
     let mut inserted_rows = Vec::new();
+    let mut inserted_tids = Vec::new();
     let mut returned_rows = Vec::new();
     for values in rows {
-        let Some(mut values) = (match &triggers {
-            Some(triggers) => triggers.before_row_insert(values.clone(), ctx)?,
-            None => Some(values.clone()),
-        }) else {
-            continue;
-        };
-        capture_copy_to_dml_notices();
-        materialize_generated_columns(desc, &mut values, ctx)?;
-        coerce_user_defined_base_assignments(desc, &mut values, ctx)?;
-        enforce_exclusion_constraints_against_values(
-            relation_name,
-            desc,
-            relation_constraints,
-            &values,
-            &inserted_rows,
-        )?;
-        let heap_tid = write_insert_heap_row(
+        let row_result = (|| -> Result<(), ExecError> {
+            let Some(mut values) = (match &triggers {
+                Some(triggers) => triggers.before_row_insert(values.clone(), ctx)?,
+                None => Some(values.clone()),
+            }) else {
+                return Ok(());
+            };
+            capture_copy_to_dml_notices();
+            materialize_generated_columns(desc, &mut values, ctx)?;
+            coerce_user_defined_base_assignments(desc, &mut values, ctx)?;
+            enforce_exclusion_constraints_against_values(
+                relation_name,
+                desc,
+                relation_constraints,
+                &values,
+                &inserted_rows,
+            )?;
+            let heap_tid = write_insert_heap_row(
+                relation_name,
+                rel,
+                toast,
+                toast_index,
+                desc,
+                relation_constraints,
+                rls_write_checks,
+                &values,
+                ctx,
+                xid,
+                cid,
+            )?;
+            inserted_tids.push(heap_tid);
+            maintain_indexes_for_row(rel, desc, indexes, &values, heap_tid, ctx)?;
+            inserted_rows.push(values.clone());
+            if let Some(returning) = returning {
+                let row = project_returning_row(returning, &values, ctx)?;
+                capture_copy_to_dml_returning_row(row.clone());
+                returned_rows.push(row);
+            }
+            if let Some(triggers) = &triggers {
+                if let Some(capture) = transition_capture.as_mut() {
+                    triggers.capture_insert_row(capture, &values);
+                }
+                triggers.after_row_insert(&values, ctx)?;
+                capture_copy_to_dml_notices();
+            }
+            Ok(())
+        })();
+        if let Err(err) = row_result {
+            for heap_tid in inserted_tids.iter().rev().copied() {
+                let _ = rollback_inserted_row(rel, toast, desc, heap_tid, ctx, xid);
+            }
+            return Err(err);
+        }
+    }
+    for values in &inserted_rows {
+        crate::backend::executor::enforce_outbound_foreign_keys_for_insert(
             relation_name,
             rel,
-            toast,
-            toast_index,
-            desc,
-            relation_constraints,
-            rls_write_checks,
-            &values,
+            &relation_constraints.foreign_keys,
+            values,
+            crate::backend::executor::InsertForeignKeyCheckPhase::AfterIndexInsert,
             ctx,
-            xid,
-            cid,
         )?;
-        maintain_indexes_for_row(rel, desc, indexes, &values, heap_tid, ctx)?;
-        inserted_rows.push(values.clone());
-        if let Some(returning) = returning {
-            let row = project_returning_row(returning, &values, ctx)?;
-            capture_copy_to_dml_returning_row(row.clone());
-            returned_rows.push(row);
-        }
-        if let Some(triggers) = &triggers {
-            if let Some(capture) = transition_capture.as_mut() {
-                triggers.capture_insert_row(capture, &values);
-            }
-            triggers.after_row_insert(&values, ctx)?;
-            capture_copy_to_dml_notices();
-        }
     }
 
     if let Some(triggers) = &triggers {
@@ -5372,6 +5581,14 @@ pub fn execute_prepared_insert_row(
         &prepared.indexes,
         &values,
         heap_tid,
+        ctx,
+    )?;
+    crate::backend::executor::enforce_outbound_foreign_keys_for_insert(
+        &prepared.relation_name,
+        prepared.rel,
+        &prepared.relation_constraints.foreign_keys,
+        &values,
+        crate::backend::executor::InsertForeignKeyCheckPhase::AfterIndexInsert,
         ctx,
     )?;
     ctx.session_stats

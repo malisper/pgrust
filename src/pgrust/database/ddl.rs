@@ -495,7 +495,7 @@ pub(crate) fn rewrite_dependent_views(
     Ok(())
 }
 
-fn append_view_check_option(
+pub(crate) fn append_view_check_option(
     sql: String,
     check_option: crate::include::nodes::parsenodes::ViewCheckOption,
 ) -> String {
@@ -1041,12 +1041,20 @@ pub(super) fn validate_alter_table_add_column(
     if column.identity.is_some()
         && (column.generated.is_some() || column.default_expr.is_some() || serial_kind.is_some())
     {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "identity column without DEFAULT, generated expression, or serial type",
-            actual: format!(
+        let actual = if column.generated.is_some() {
+            format!(
+                "both identity and generation expression specified for column \"{}\"",
+                column.name
+            )
+        } else {
+            format!(
                 "conflicting identity definition for column \"{}\"",
                 column.name
-            ),
+            )
+        };
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "identity column without DEFAULT, generated expression, or serial type",
+            actual,
         }));
     }
     if serial_kind.is_some() && column.generated.is_some() {

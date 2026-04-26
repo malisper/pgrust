@@ -41,6 +41,7 @@ mod node_mergejoin;
 mod nodes;
 mod permissions;
 mod pg_regex;
+mod random;
 mod sqlfunc;
 mod srf;
 mod startup;
@@ -118,6 +119,7 @@ pub(crate) use nodes::{
     render_index_order_by, render_index_scan_condition_with_key_names,
     render_verbose_range_support_expr,
 };
+pub use random::PgPrngState;
 pub(crate) use sqlfunc::{render_sql_literal, substitute_named_arg, substitute_positional_args};
 pub(crate) use srf::set_returning_call_label;
 pub use startup::executor_start;
@@ -162,7 +164,7 @@ use crate::pgrust::database::{
     AsyncNotifyRuntime, DatabaseStatsStore, LargeObjectRuntime, PendingNotification,
     SequenceRuntime, SessionStatsState, TransactionWaiter,
 };
-use crate::pl::plpgsql::CompiledFunction;
+use crate::pl::plpgsql::PlpgsqlFunctionCache;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -173,8 +175,10 @@ pub(crate) use constraints::{enforce_relation_constraints, enforce_row_security_
 pub(crate) use expr_ops::compare_order_values;
 use expr_ops::parse_numeric_text;
 pub(crate) use foreign_keys::{
-    enforce_inbound_foreign_key_reference, enforce_inbound_foreign_keys_on_delete,
-    enforce_inbound_foreign_keys_on_update, enforce_outbound_foreign_keys,
+    InsertForeignKeyCheckPhase, enforce_inbound_foreign_key_reference,
+    enforce_inbound_foreign_keys_on_delete, enforce_inbound_foreign_keys_on_update,
+    enforce_outbound_foreign_keys, enforce_outbound_foreign_keys_for_insert,
+    foreign_key_action_trigger_enabled_on_delete, foreign_key_action_trigger_enabled_on_update,
 };
 pub(crate) use permissions::relation_values_visible_for_error_detail;
 
@@ -411,6 +415,7 @@ pub struct ExecutorContext {
     pub transaction_lock_scope_id: Option<u64>,
     pub next_command_id: CommandId,
     pub default_toast_compression: crate::include::access::htup::AttributeCompression,
+    pub random_state: std::sync::Arc<parking_lot::Mutex<PgPrngState>>,
     pub expr_bindings: ExprEvalBindings,
     pub case_test_values: Vec<Value>,
     pub system_bindings: Vec<SystemVarBinding>,
@@ -422,7 +427,8 @@ pub struct ExecutorContext {
     pub pending_catalog_effects: Vec<CatalogMutationEffect>,
     pub pending_table_locks: Vec<RelFileLocator>,
     pub catalog: Option<VisibleCatalog>,
-    pub compiled_functions: HashMap<u32, Arc<CompiledFunction>>,
+    pub plpgsql_function_cache: Arc<parking_lot::RwLock<PlpgsqlFunctionCache>>,
+    pub pinned_cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,
     pub cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,
     pub cte_producers: HashMap<usize, Rc<RefCell<PlanState>>>,
     pub recursive_worktables: HashMap<usize, Rc<RefCell<RecursiveWorkTable>>>,

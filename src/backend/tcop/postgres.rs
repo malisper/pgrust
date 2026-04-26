@@ -13,8 +13,8 @@ use crate::backend::libpq::pqcomm::{
 };
 use crate::backend::libpq::pqformat::{
     FloatFormatOptions, format_bytea_text, format_exec_error, format_exec_error_hint,
-    infer_command_tag, send_auth_ok, send_backend_key_data, send_bind_complete,
-    send_close_complete, send_command_complete, send_copy_data, send_copy_done,
+    infer_command_tag, infer_dml_returning_command_tag, send_auth_ok, send_backend_key_data,
+    send_bind_complete, send_close_complete, send_command_complete, send_copy_data, send_copy_done,
     send_copy_in_response, send_copy_out_response, send_empty_query, send_error,
     send_error_with_fields, send_error_with_hint, send_no_data, send_notice, send_notice_with_hint,
     send_notice_with_severity, send_notification_response, send_parameter_description,
@@ -384,7 +384,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::Parse(crate::backend::parser::ParseError::MissingKeyColumn(_)) => {
             return find_without_overlaps_constraint_position(sql);
         }
-        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. }) => {
+        ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message,
+            detail,
+            ..
+        }) => {
             if message == "cannot determine type of empty array" {
                 return find_case_insensitive_token_position(sql, "array[]");
             }
@@ -392,8 +396,22 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return find_case_insensitive_token_position(sql, "any")
                     .or_else(|| find_case_insensitive_token_position(sql, "all"));
             }
+            if let Some(option) = message
+                .strip_prefix("unrecognized ANALYZE option \"")
+                .and_then(|rest| rest.strip_suffix('"'))
+            {
+                return find_case_insensitive_token_position(sql, option);
+            }
             if let Some(position) = publication_where_error_position(sql, message, None) {
                 return Some(position);
+            }
+            if detail.as_deref().is_some_and(|detail| {
+                detail.contains("cannot be referenced from this part of the query")
+            }) && message.starts_with("column \"")
+                && message.ends_with("\" does not exist")
+                && let Some(name) = extract_missing_column_name(message)
+            {
+                return find_last_case_insensitive_token_position(sql, name);
             }
             if let Some(position) = routine_definition_error_position(sql, message) {
                 return Some(position);
@@ -507,6 +525,13 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::DetailedError {
             message, detail, ..
         } => {
+            if matches!(
+                message.as_str(),
+                "parallel option requires a value between 0 and 1024"
+                    | "parallel workers for vacuum must be between 0 and 1024"
+            ) {
+                return find_case_insensitive_token_position(sql, "PARALLEL");
+            }
             if message.starts_with("invalid input syntax for type numeric time zone: ") {
                 return None;
             }
@@ -921,6 +946,12 @@ fn extract_quoted_error_value(message: &str) -> Option<&str> {
 
     let (_, rest) = message.rsplit_once(": \"")?;
     rest.strip_suffix('"')
+}
+
+fn extract_missing_column_name(message: &str) -> Option<&str> {
+    message
+        .strip_prefix("column \"")?
+        .strip_suffix("\" does not exist")
 }
 
 fn extract_at_or_near_token(message: &str) -> Option<&str> {
@@ -2493,11 +2524,13 @@ fn execute_query_statement(
             let enum_labels = enum_label_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             flush_pending_backend_messages_with_sql(stream, db, &state.session, &sql)?;
+            let command_tag = infer_dml_returning_command_tag(&sql, rows.len())
+                .unwrap_or_else(|| format!("SELECT {}", rows.len()));
             send_query_result(
                 stream,
                 &columns,
                 &rows,
-                &format!("SELECT {}", rows.len()),
+                &command_tag,
                 FloatFormatOptions {
                     extra_float_digits: state.session.extra_float_digits(),
                     bytea_output: state.session.bytea_output(),
@@ -4455,13 +4488,70 @@ fn foreign_key_constraint_def(
         referenced_relation_name,
         referenced_columns.join(", ")
     );
-    if row.confdeltype == 'r' {
-        def.push_str(" ON DELETE RESTRICT");
-    }
-    if row.confupdtype == 'r' {
-        def.push_str(" ON UPDATE RESTRICT");
+    append_foreign_key_match_type(&mut def, row.confmatchtype);
+    append_foreign_key_action(&mut def, "ON UPDATE", row.confupdtype);
+    let appended_delete = append_foreign_key_action(&mut def, "ON DELETE", row.confdeltype);
+    if appended_delete
+        && let Some(set_columns) = row
+            .confdelsetcols
+            .as_ref()
+            .and_then(|attnums| relation_column_names_for_attnums(relation, attnums))
+        && !set_columns.is_empty()
+    {
+        def.push_str(" (");
+        def.push_str(&set_columns.join(", "));
+        def.push(')');
     }
     Some(def)
+}
+
+fn relation_column_names_for_attnums(
+    relation: &crate::backend::utils::cache::relcache::RelCacheEntry,
+    attnums: &[i16],
+) -> Option<Vec<String>> {
+    attnums
+        .iter()
+        .map(|attnum| {
+            (*attnum > 0)
+                .then(|| {
+                    relation
+                        .desc
+                        .columns
+                        .get((*attnum as usize).saturating_sub(1))
+                })
+                .flatten()
+                .map(|column| column.name.clone())
+        })
+        .collect()
+}
+
+fn append_foreign_key_match_type(def: &mut String, match_type: char) {
+    match match_type {
+        'f' => def.push_str(" MATCH FULL"),
+        'p' => def.push_str(" MATCH PARTIAL"),
+        _ => {}
+    }
+}
+
+fn append_foreign_key_action(def: &mut String, clause: &str, action: char) -> bool {
+    let Some(keyword) = foreign_key_action_keyword(action) else {
+        return false;
+    };
+    def.push(' ');
+    def.push_str(clause);
+    def.push(' ');
+    def.push_str(keyword);
+    true
+}
+
+fn foreign_key_action_keyword(action: char) -> Option<&'static str> {
+    match action {
+        'r' => Some("RESTRICT"),
+        'c' => Some("CASCADE"),
+        'n' => Some("SET NULL"),
+        'd' => Some("SET DEFAULT"),
+        _ => None,
+    }
 }
 
 fn psql_describe_indexes_query(
@@ -5619,7 +5709,10 @@ fn handle_execute(
                     )?;
                 }
                 if result.completed {
-                    send_command_complete(stream, &format!("SELECT {}", result.processed))
+                    let tag = result
+                        .command_tag
+                        .unwrap_or_else(|| format!("SELECT {}", result.processed));
+                    send_command_complete(stream, &tag)
                 } else {
                     send_portal_suspended(stream)
                 }

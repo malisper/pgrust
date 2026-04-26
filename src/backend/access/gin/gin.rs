@@ -20,8 +20,8 @@ use crate::include::access::amapi::{
 };
 use crate::include::access::gin::{
     GIN_DATA, GIN_DELETED, GIN_ENTRY, GIN_INVALID_BLOCKNO, GIN_LEAF, GIN_LIST, GIN_METAPAGE_BLKNO,
-    GIN_ROOT_BLKNO, GinEntryKey, GinEntryTupleData, GinMetaPageData, GinOptions, GinPageError,
-    GinPendingTupleData, GinPostingTupleData, gin_metapage_data, gin_metapage_init,
+    GIN_ROOT_BLKNO, GinEntryKey, GinEntryTupleData, GinMetaPageData, GinNullCategory, GinOptions,
+    GinPageError, GinPendingTupleData, GinPostingTupleData, gin_metapage_data, gin_metapage_init,
     gin_metapage_set_data, gin_page_append_item, gin_page_get_opaque, gin_page_init,
     gin_page_items, gin_page_set_opaque,
 };
@@ -422,9 +422,41 @@ fn extract_row_entries(
     for (index, value) in values.iter().enumerate() {
         let attnum = u16::try_from(index + 1)
             .map_err(|_| CatalogError::Corrupt("GIN key attnum out of range"))?;
-        entries.extend(jsonb_ops::extract_value(attnum, value)?);
+        entries.extend(extract_value_entries(attnum, value)?);
     }
     Ok(entries)
+}
+
+fn extract_value_entries(attnum: u16, value: &Value) -> Result<Vec<GinEntryKey>, CatalogError> {
+    if let Some(array) = value.as_array_value() {
+        if array.elements.is_empty() {
+            return Ok(vec![GinEntryKey {
+                attnum,
+                category: GinNullCategory::EmptyItem,
+                bytes: Vec::new(),
+            }]);
+        }
+        let mut entries = Vec::new();
+        for element in array.elements {
+            if matches!(element, Value::Null) {
+                entries.push(GinEntryKey {
+                    attnum,
+                    category: GinNullCategory::NullKey,
+                    bytes: Vec::new(),
+                });
+            } else {
+                entries.push(GinEntryKey {
+                    attnum,
+                    category: GinNullCategory::NormalKey,
+                    bytes: format!("{element:?}").into_bytes(),
+                });
+            }
+        }
+        entries.sort();
+        entries.dedup();
+        return Ok(entries);
+    }
+    jsonb_ops::extract_value(attnum, value)
 }
 
 fn cleanup_pending_into_entries(image: &mut GinIndexImage) {

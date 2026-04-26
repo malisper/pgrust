@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
@@ -8,13 +8,13 @@ use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
 use crate::backend::catalog::rowcodec::{
     namespace_row_from_values, pg_aggregate_row_from_values, pg_am_row_from_values,
     pg_amop_row_from_values, pg_amproc_row_from_values, pg_attrdef_row_from_values,
-    pg_attribute_row_from_values, pg_class_row_from_values, pg_collation_row_from_values,
-    pg_constraint_row_from_values, pg_depend_row_from_values, pg_description_row_from_values,
-    pg_index_row_from_values, pg_inherits_row_from_values, pg_language_row_from_values,
-    pg_opclass_row_from_values, pg_operator_row_from_values, pg_opfamily_row_from_values,
-    pg_partitioned_table_row_from_values, pg_policy_row_from_values, pg_proc_row_from_values,
-    pg_publication_namespace_row_from_values, pg_publication_rel_row_from_values,
-    pg_publication_row_from_values, pg_rewrite_row_from_values,
+    pg_attribute_row_from_values, pg_auth_members_row_from_values, pg_authid_row_from_values,
+    pg_class_row_from_values, pg_collation_row_from_values, pg_constraint_row_from_values,
+    pg_depend_row_from_values, pg_description_row_from_values, pg_index_row_from_values,
+    pg_inherits_row_from_values, pg_language_row_from_values, pg_opclass_row_from_values,
+    pg_operator_row_from_values, pg_opfamily_row_from_values, pg_partitioned_table_row_from_values,
+    pg_policy_row_from_values, pg_proc_row_from_values, pg_publication_namespace_row_from_values,
+    pg_publication_rel_row_from_values, pg_publication_row_from_values, pg_rewrite_row_from_values,
     pg_statistic_ext_data_row_from_values, pg_statistic_ext_row_from_values,
     pg_statistic_row_from_values, pg_trigger_row_from_values, pg_type_row_from_values,
 };
@@ -31,11 +31,12 @@ use crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
     PG_CONSTRAINT_RELATION_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
-    PgAttributeRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDependRow, PgDescriptionRow,
-    PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
-    PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
-    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
-    PgStatisticRow, PgTriggerRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
+    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgCollationRow, PgConstraintRow,
+    PgDependRow, PgDescriptionRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
+    bootstrap_composite_type_rows, builtin_type_rows, system_catalog_index_by_oid,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::SqlType;
@@ -50,6 +51,12 @@ const PG_AM_NAME_INDEX_OID: u32 = 2651;
 const PG_AM_OID_INDEX_OID: u32 = 2652;
 const PG_AMOP_FAM_STRAT_INDEX_OID: u32 = 2653;
 const PG_AMPROC_FAM_PROC_INDEX_OID: u32 = 2655;
+const PG_AUTHID_ROLNAME_INDEX_OID: u32 = 2676;
+const PG_AUTHID_OID_INDEX_OID: u32 = 2677;
+const PG_AUTH_MEMBERS_OID_INDEX_OID: u32 = 6303;
+const PG_AUTH_MEMBERS_ROLE_MEMBER_INDEX_OID: u32 = 2694;
+const PG_AUTH_MEMBERS_MEMBER_ROLE_INDEX_OID: u32 = 2695;
+const PG_AUTH_MEMBERS_GRANTOR_INDEX_OID: u32 = 6302;
 const PG_CLASS_OID_INDEX_OID: u32 = 2662;
 const PG_CLASS_RELNAME_NSP_INDEX_OID: u32 = 2663;
 const PG_COLLATION_OID_INDEX_OID: u32 = 3085;
@@ -95,7 +102,7 @@ const PG_TRIGGER_OID_INDEX_OID: u32 = 2702;
 const PG_TYPE_OID_INDEX_OID: u32 = 2703;
 const PG_TYPE_TYPNAME_NSP_INDEX_OID: u32 = 2704;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SysCacheId {
     // PostgreSQL syscache name: AGGFNOID.
     AggFnoid,
@@ -111,6 +118,18 @@ pub enum SysCacheId {
     AttrName,
     // PostgreSQL syscache name: ATTNUM.
     AttrNum,
+    // PostgreSQL syscache name: AUTHNAME.
+    AuthIdRolname,
+    // PostgreSQL syscache name: AUTHOID.
+    AuthIdOid,
+    // PostgreSQL systable scan index: AuthMemOidIndexId.
+    AuthMembersOid,
+    // PostgreSQL systable scan index: AuthMemRoleMemIndexId.
+    AuthMembersRoleMember,
+    // PostgreSQL systable scan index: AuthMemMemRoleIndexId.
+    AuthMembersMemberRole,
+    // PostgreSQL systable scan index: AuthMemGrantorIndexId.
+    AuthMembersGrantor,
     // PostgreSQL systable scan index: AttrDefaultIndexId.
     AttrDefault,
     // PostgreSQL systable scan index: AttrDefaultOidIndexId.
@@ -213,6 +232,12 @@ impl SysCacheId {
             Self::AmOid => PG_AM_OID_INDEX_OID,
             Self::AmopStrategy => PG_AMOP_FAM_STRAT_INDEX_OID,
             Self::AmprocNum => PG_AMPROC_FAM_PROC_INDEX_OID,
+            Self::AuthIdRolname => PG_AUTHID_ROLNAME_INDEX_OID,
+            Self::AuthIdOid => PG_AUTHID_OID_INDEX_OID,
+            Self::AuthMembersOid => PG_AUTH_MEMBERS_OID_INDEX_OID,
+            Self::AuthMembersRoleMember => PG_AUTH_MEMBERS_ROLE_MEMBER_INDEX_OID,
+            Self::AuthMembersMemberRole => PG_AUTH_MEMBERS_MEMBER_ROLE_INDEX_OID,
+            Self::AuthMembersGrantor => PG_AUTH_MEMBERS_GRANTOR_INDEX_OID,
             Self::AttrName => PG_ATTRIBUTE_RELID_ATTNAM_INDEX_OID,
             Self::AttrNum => PG_ATTRIBUTE_RELID_ATTNUM_INDEX_OID,
             Self::AttrDefault => PG_ATTRDEF_ADRELID_ADNUM_INDEX_OID,
@@ -269,6 +294,10 @@ impl SysCacheId {
             Self::AggFnoid
             | Self::AmName
             | Self::AmOid
+            | Self::AuthIdRolname
+            | Self::AuthIdOid
+            | Self::AuthMembersOid
+            | Self::AuthMembersGrantor
             | Self::CollOid
             | Self::LangName
             | Self::LangOid
@@ -315,10 +344,15 @@ impl SysCacheId {
             | Self::DescriptionObj
             | Self::ProcNameArgsNsp
             | Self::StatRelAttInh => 3,
+            Self::AuthMembersRoleMember | Self::AuthMembersMemberRole => 3,
             Self::ClaAmNameNsp => 3,
             Self::AmprocNum | Self::OperNameNsp => 4,
             Self::AmopStrategy => 5,
         }
+    }
+
+    fn catalog_kind(self) -> Option<crate::include::catalog::BootstrapCatalogKind> {
+        system_catalog_index_by_oid(self.index_oid()).map(|descriptor| descriptor.heap_kind)
     }
 }
 
@@ -330,6 +364,8 @@ pub enum SysCacheTuple {
     Amproc(PgAmprocRow),
     Attrdef(PgAttrdefRow),
     Attribute(PgAttributeRow),
+    AuthId(PgAuthIdRow),
+    AuthMembers(PgAuthMembersRow),
     Class(PgClassRow),
     Collation(PgCollationRow),
     Constraint(PgConstraintRow),
@@ -447,6 +483,15 @@ fn sys_cache_tuple_from_values(
         }
         SysCacheId::AttrName | SysCacheId::AttrNum => {
             pg_attribute_row_from_values(values).map(SysCacheTuple::Attribute)
+        }
+        SysCacheId::AuthIdRolname | SysCacheId::AuthIdOid => {
+            pg_authid_row_from_values(values).map(SysCacheTuple::AuthId)
+        }
+        SysCacheId::AuthMembersOid
+        | SysCacheId::AuthMembersRoleMember
+        | SysCacheId::AuthMembersMemberRole
+        | SysCacheId::AuthMembersGrantor => {
+            pg_auth_members_row_from_values(values).map(SysCacheTuple::AuthMembers)
         }
         SysCacheId::CollOid => pg_collation_row_from_values(values).map(SysCacheTuple::Collation),
         SysCacheId::ConstraintOid | SysCacheId::ConstraintRelId => {
@@ -715,6 +760,166 @@ impl From<Option<(TransactionId, CommandId)>> for BackendCacheContext {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum SysCacheKeyPart {
+    Int16(i16),
+    Int32(i32),
+    Int64(i64),
+    Text(String),
+    InternalChar(u8),
+    Bool(bool),
+    Array(Vec<SysCacheKeyPart>),
+    Null,
+}
+
+impl SysCacheKeyPart {
+    fn from_value(value: &Value) -> Option<Self> {
+        match value.to_owned_value() {
+            Value::Int16(value) => Some(Self::Int16(value)),
+            Value::Int32(value) => Some(Self::Int32(value)),
+            Value::Int64(value) => Some(Self::Int64(value)),
+            Value::Text(value) => Some(Self::Text(value.to_string())),
+            Value::InternalChar(value) => Some(Self::InternalChar(value)),
+            Value::Bool(value) => Some(Self::Bool(value)),
+            Value::Array(values) => values
+                .iter()
+                .map(Self::from_value)
+                .collect::<Option<Vec<_>>>()
+                .map(Self::Array),
+            Value::PgArray(array) => array
+                .elements
+                .iter()
+                .map(Self::from_value)
+                .collect::<Option<Vec<_>>>()
+                .map(Self::Array),
+            Value::Null => Some(Self::Null),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SysCacheQueryKey {
+    cache_id: SysCacheId,
+    keys: Vec<SysCacheKeyPart>,
+}
+
+impl SysCacheQueryKey {
+    fn new(cache_id: SysCacheId, keys: &[Value]) -> Option<Self> {
+        keys.iter()
+            .map(SysCacheKeyPart::from_value)
+            .collect::<Option<Vec<_>>>()
+            .map(|keys| Self { cache_id, keys })
+    }
+
+    fn invalidated_by(&self, invalidation: &CatalogInvalidation) -> bool {
+        if invalidation.full_reset {
+            return true;
+        }
+        if invalidation.touched_catalogs.is_empty() {
+            return !invalidation.is_empty();
+        }
+        self.cache_id
+            .catalog_kind()
+            .is_none_or(|kind| invalidation.touched_catalogs.contains(&kind))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SysCacheLookupMode {
+    Exact,
+    List,
+}
+
+#[derive(Debug, Default, Clone)]
+struct BackendSysCacheMaps {
+    exact: HashMap<SysCacheQueryKey, Vec<SysCacheTuple>>,
+    list: HashMap<SysCacheQueryKey, Vec<SysCacheTuple>>,
+}
+
+impl BackendSysCacheMaps {
+    fn get(&self, mode: SysCacheLookupMode, key: &SysCacheQueryKey) -> Option<Vec<SysCacheTuple>> {
+        match mode {
+            SysCacheLookupMode::Exact => self.exact.get(key),
+            SysCacheLookupMode::List => self.list.get(key),
+        }
+        .cloned()
+    }
+
+    fn insert(
+        &mut self,
+        mode: SysCacheLookupMode,
+        key: SysCacheQueryKey,
+        value: Vec<SysCacheTuple>,
+    ) {
+        match mode {
+            SysCacheLookupMode::Exact => self.exact.insert(key, value),
+            SysCacheLookupMode::List => self.list.insert(key, value),
+        };
+    }
+
+    fn invalidate(&mut self, invalidation: &CatalogInvalidation) {
+        self.exact
+            .retain(|key, _| !key.invalidated_by(invalidation));
+        self.list.retain(|key, _| !key.invalidated_by(invalidation));
+    }
+
+    fn clear(&mut self) {
+        self.exact.clear();
+        self.list.clear();
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub(crate) struct BackendSysCache {
+    autocommit: BackendSysCacheMaps,
+    transaction: BackendSysCacheMaps,
+    transaction_ctx: Option<BackendCacheContext>,
+}
+
+impl BackendSysCache {
+    fn maps_mut(&mut self, cache_ctx: BackendCacheContext) -> &mut BackendSysCacheMaps {
+        match cache_ctx {
+            BackendCacheContext::Autocommit => &mut self.autocommit,
+            BackendCacheContext::Transaction { .. } => {
+                if self.transaction_ctx != Some(cache_ctx) {
+                    self.transaction.clear();
+                    self.transaction_ctx = Some(cache_ctx);
+                }
+                &mut self.transaction
+            }
+        }
+    }
+
+    fn get(
+        &mut self,
+        cache_ctx: BackendCacheContext,
+        mode: SysCacheLookupMode,
+        key: &SysCacheQueryKey,
+    ) -> Option<Vec<SysCacheTuple>> {
+        self.maps_mut(cache_ctx).get(mode, key)
+    }
+
+    fn insert(
+        &mut self,
+        cache_ctx: BackendCacheContext,
+        mode: SysCacheLookupMode,
+        key: SysCacheQueryKey,
+        value: Vec<SysCacheTuple>,
+    ) {
+        self.maps_mut(cache_ctx).insert(mode, key, value);
+    }
+
+    pub(crate) fn invalidate(&mut self, invalidation: &CatalogInvalidation) {
+        if invalidation.full_reset {
+            *self = Self::default();
+            return;
+        }
+        self.autocommit.invalidate(invalidation);
+        self.transaction.invalidate(invalidation);
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct BackendCacheState {
     pub catalog_snapshot: Option<Snapshot>,
@@ -723,6 +928,7 @@ pub struct BackendCacheState {
     pub catcache: Option<CatCache>,
     pub relcache: Option<RelCache>,
     pub cache_ctx: Option<BackendCacheContext>,
+    pub(crate) syscache: BackendSysCache,
     pub pending_invalidations: Vec<CatalogInvalidation>,
 }
 
@@ -1106,6 +1312,7 @@ impl CatalogStore {
             row_type_oid: class_row.reltype,
             array_type_oid,
             reltoastrelid: class_row.reltoastrelid,
+            relhasindex: class_row.relhasindex,
             relpersistence: class_row.relpersistence,
             relkind: class_row.relkind,
             relispopulated: class_row.relispopulated,
@@ -1424,6 +1631,7 @@ pub(crate) fn relation_id_get_relation_db(
         row_type_oid: class_row.reltype,
         array_type_oid,
         reltoastrelid: class_row.reltoastrelid,
+        relhasindex: class_row.relhasindex,
         relpersistence: class_row.relpersistence,
         relkind: class_row.relkind,
         relispopulated: class_row.relispopulated,
@@ -1436,6 +1644,37 @@ pub(crate) fn relation_id_get_relation_db(
         partitioned_table,
         index,
     }))
+}
+
+fn backend_syscache_get(
+    db: &Database,
+    client_id: ClientId,
+    cache_ctx: BackendCacheContext,
+    mode: SysCacheLookupMode,
+    key: &SysCacheQueryKey,
+) -> Option<Vec<SysCacheTuple>> {
+    db.backend_cache_states
+        .write()
+        .entry(client_id)
+        .or_default()
+        .syscache
+        .get(cache_ctx, mode, key)
+}
+
+fn backend_syscache_insert(
+    db: &Database,
+    client_id: ClientId,
+    cache_ctx: BackendCacheContext,
+    mode: SysCacheLookupMode,
+    key: SysCacheQueryKey,
+    value: Vec<SysCacheTuple>,
+) {
+    db.backend_cache_states
+        .write()
+        .entry(client_id)
+        .or_default()
+        .syscache
+        .insert(cache_ctx, mode, key, value);
 }
 
 pub(crate) fn search_sys_cache_db(
@@ -1453,6 +1692,18 @@ pub(crate) fn search_sys_cache_db(
         return Ok(vec![tuple]);
     }
 
+    let cache_key = SysCacheQueryKey::new(cache_id, &keys);
+    let cache_ctx = BackendCacheContext::from(txn_ctx);
+    if txn_ctx.is_none() {
+        db.accept_invalidation_messages(client_id);
+    }
+    if let Some(key) = cache_key.as_ref()
+        && let Some(cached) =
+            backend_syscache_get(db, client_id, cache_ctx, SysCacheLookupMode::Exact, key)
+    {
+        return Ok(cached);
+    }
+
     let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
         .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
     let rows = probe_system_catalog_rows_visible_in_db(
@@ -1465,9 +1716,21 @@ pub(crate) fn search_sys_cache_db(
         equality_scan_keys(&keys),
     )?;
 
-    rows.into_iter()
+    let tuples = rows
+        .into_iter()
         .map(|values| sys_cache_tuple_from_values(cache_id, values))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(key) = cache_key {
+        backend_syscache_insert(
+            db,
+            client_id,
+            cache_ctx,
+            SysCacheLookupMode::Exact,
+            key,
+            tuples.clone(),
+        );
+    }
+    Ok(tuples)
 }
 
 pub(crate) fn search_sys_cache1_db(
@@ -1535,6 +1798,18 @@ fn search_sys_cache_list_db(
         return Err(CatalogError::Corrupt("syscache list key count mismatch"));
     }
 
+    let cache_key = SysCacheQueryKey::new(cache_id, &keys);
+    let cache_ctx = BackendCacheContext::from(txn_ctx);
+    if txn_ctx.is_none() {
+        db.accept_invalidation_messages(client_id);
+    }
+    if let Some(key) = cache_key.as_ref()
+        && let Some(cached) =
+            backend_syscache_get(db, client_id, cache_ctx, SysCacheLookupMode::List, key)
+    {
+        return Ok(cached);
+    }
+
     let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
         .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
     let rows = probe_system_catalog_rows_visible_in_db(
@@ -1547,9 +1822,21 @@ fn search_sys_cache_list_db(
         equality_scan_keys(&keys),
     )?;
 
-    rows.into_iter()
+    let tuples = rows
+        .into_iter()
         .map(|values| sys_cache_tuple_from_values(cache_id, values))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(key) = cache_key {
+        backend_syscache_insert(
+            db,
+            client_id,
+            cache_ctx,
+            SysCacheLookupMode::List,
+            key,
+            tuples.clone(),
+        );
+    }
+    Ok(tuples)
 }
 
 pub fn backend_catcache(
@@ -1817,4 +2104,114 @@ pub fn ensure_proc_rows(
     backend_catcache(db, client_id, txn_ctx)
         .map(|catcache| catcache.proc_rows())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::include::catalog::BootstrapCatalogKind;
+
+    #[test]
+    fn backend_syscache_caches_empty_exact_and_list_results() {
+        let mut cache = BackendSysCache::default();
+        let exact_key = SysCacheQueryKey::new(SysCacheId::RelOid, &[oid_key(42)]).unwrap();
+        let list_key = SysCacheQueryKey::new(SysCacheId::AttrNum, &[oid_key(42)]).unwrap();
+
+        cache.insert(
+            BackendCacheContext::Autocommit,
+            SysCacheLookupMode::Exact,
+            exact_key.clone(),
+            Vec::new(),
+        );
+        cache.insert(
+            BackendCacheContext::Autocommit,
+            SysCacheLookupMode::List,
+            list_key.clone(),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            cache.get(
+                BackendCacheContext::Autocommit,
+                SysCacheLookupMode::Exact,
+                &exact_key
+            ),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            cache.get(
+                BackendCacheContext::Autocommit,
+                SysCacheLookupMode::List,
+                &list_key
+            ),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn backend_syscache_invalidates_by_catalog_kind() {
+        let mut cache = BackendSysCache::default();
+        let rel_key = SysCacheQueryKey::new(SysCacheId::RelOid, &[oid_key(42)]).unwrap();
+        let type_key = SysCacheQueryKey::new(
+            SysCacheId::TypeNameNsp,
+            &[Value::Text("t".into()), oid_key(11)],
+        )
+        .unwrap();
+
+        cache.insert(
+            BackendCacheContext::Autocommit,
+            SysCacheLookupMode::Exact,
+            rel_key.clone(),
+            Vec::new(),
+        );
+        cache.insert(
+            BackendCacheContext::Autocommit,
+            SysCacheLookupMode::Exact,
+            type_key.clone(),
+            Vec::new(),
+        );
+
+        let mut invalidation = CatalogInvalidation::default();
+        invalidation
+            .touched_catalogs
+            .insert(BootstrapCatalogKind::PgClass);
+        cache.invalidate(&invalidation);
+
+        assert_eq!(
+            cache.get(
+                BackendCacheContext::Autocommit,
+                SysCacheLookupMode::Exact,
+                &rel_key
+            ),
+            None
+        );
+        assert_eq!(
+            cache.get(
+                BackendCacheContext::Autocommit,
+                SysCacheLookupMode::Exact,
+                &type_key
+            ),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn backend_syscache_keeps_only_current_transaction_context() {
+        let mut cache = BackendSysCache::default();
+        let key = SysCacheQueryKey::new(SysCacheId::RelOid, &[oid_key(42)]).unwrap();
+        let first = BackendCacheContext::Transaction { xid: 1, cid: 1 };
+        let second = BackendCacheContext::Transaction { xid: 1, cid: 2 };
+
+        cache.insert(first, SysCacheLookupMode::Exact, key.clone(), Vec::new());
+        assert_eq!(
+            cache.get(first, SysCacheLookupMode::Exact, &key),
+            Some(Vec::new())
+        );
+        assert_eq!(cache.get(second, SysCacheLookupMode::Exact, &key), None);
+    }
+
+    #[test]
+    fn syscache_query_key_skips_unsupported_value_shapes() {
+        assert!(SysCacheQueryKey::new(SysCacheId::TypeOid, &[Value::Float64(1.0)]).is_none());
+    }
 }

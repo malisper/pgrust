@@ -1036,6 +1036,10 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn rewrite_rows(&self) -> Vec<PgRewriteRow> {
+        Vec::new()
+    }
+
     fn statistic_ext_rows(&self) -> Vec<PgStatisticExtRow> {
         Vec::new()
     }
@@ -1218,6 +1222,10 @@ pub trait CatalogLookup {
     }
 
     fn pg_stat_activity_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_stat_all_tables_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }
 
@@ -1800,6 +1808,10 @@ impl CatalogLookup for Catalog {
 
     fn rewrite_rows_for_relation(&self, relation_oid: u32) -> Vec<PgRewriteRow> {
         self.rewrite_rows_for_relation(relation_oid).to_vec()
+    }
+
+    fn rewrite_rows(&self) -> Vec<PgRewriteRow> {
+        self.rewrite_rows().to_vec()
     }
 
     fn trigger_rows_for_relation(
@@ -2584,8 +2596,9 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
         let empty_outer = Vec::new();
         let bound =
             bind_expr_with_outer_and_ctes(expr, &empty_scope, catalog, &empty_outer, None, ctes)?;
-        let sql_type =
-            infer_sql_expr_type_with_ctes(expr, &empty_scope, catalog, &empty_outer, None, ctes);
+        let sql_type = expr_sql_type_hint(&bound).unwrap_or_else(|| {
+            infer_sql_expr_type_with_ctes(expr, &empty_scope, catalog, &empty_outer, None, ctes)
+        });
         return Ok((bound, sql_type));
     }
 
@@ -2651,7 +2664,9 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
     // to see the same named-slot scope as the enclosing expression.
     let outer_scopes = vec![scope.clone()];
     let bound = bind_expr_with_outer_and_ctes(expr, &scope, catalog, &outer_scopes, None, ctes)?;
-    let sql_type = infer_sql_expr_type_with_ctes(expr, &scope, catalog, &outer_scopes, None, ctes);
+    let sql_type = expr_sql_type_hint(&bound).unwrap_or_else(|| {
+        infer_sql_expr_type_with_ctes(expr, &scope, catalog, &outer_scopes, None, ctes)
+    });
     Ok((bound, sql_type))
 }
 
@@ -4500,9 +4515,9 @@ fn bind_select_query_with_outer(
                                             build_bound_order_by_entry(item, bound_expr, 0, catalog)
                                         })
                                         .collect::<Result<Vec<_>, ParseError>>()?;
-                                    let resolved = resolved
-                                        .as_ref()
-                                        .expect("non-hypothetical aggregate resolution should exist");
+                                    let resolved = resolved.as_ref().expect(
+                                        "non-hypothetical aggregate resolution should exist",
+                                    );
                                     let coerced_args = bound_args
                                         .into_iter()
                                         .zip(arg_types.iter().copied())
@@ -4696,28 +4711,33 @@ fn bind_select_query_with_outer(
                                     .iter()
                                     .enumerate()
                                     .map(|(index, item)| {
+                                        let expr = bind_agg_output_expr_in_clause(
+                                            &item.expr,
+                                            UngroupedColumnClause::SelectTarget,
+                                            &effective_group_by,
+                                            &group_keys,
+                                            &scope,
+                                            catalog,
+                                            outer_scopes,
+                                            grouped_outer.as_ref(),
+                                            &aggs,
+                                            n_keys,
+                                        )?;
+                                        let sql_type =
+                                            expr_sql_type_hint(&expr).unwrap_or_else(|| {
+                                                infer_sql_expr_type_with_ctes(
+                                                    &item.expr,
+                                                    &scope,
+                                                    catalog,
+                                                    outer_scopes,
+                                                    grouped_outer.as_ref(),
+                                                    &visible_ctes,
+                                                )
+                                            });
                                         Ok(TargetEntry::new(
                                             item.output_name.clone(),
-                                            bind_agg_output_expr_in_clause(
-                                                &item.expr,
-                                                UngroupedColumnClause::SelectTarget,
-                                                &effective_group_by,
-                                                &group_keys,
-                                                &scope,
-                                                catalog,
-                                                outer_scopes,
-                                                grouped_outer.as_ref(),
-                                                &aggs,
-                                                n_keys,
-                                            )?,
-                                            infer_sql_expr_type_with_ctes(
-                                                &item.expr,
-                                                &scope,
-                                                catalog,
-                                                outer_scopes,
-                                                grouped_outer.as_ref(),
-                                                &visible_ctes,
-                                            ),
+                                            expr,
+                                            sql_type,
                                             index + 1,
                                         ))
                                     })
@@ -4917,6 +4937,29 @@ fn set_operation_target_is_unknown_string_literal(stmt: &SelectStatement, index:
     })
 }
 
+fn set_operation_order_by_error_with_input_detail(err: ParseError, inputs: &[Query]) -> ParseError {
+    let ParseError::UnknownColumn(name) = err else {
+        return err;
+    };
+    let Some((input_index, _)) = inputs.iter().enumerate().skip(1).find(|(_, query)| {
+        query
+            .target_list
+            .iter()
+            .any(|target| target.name.eq_ignore_ascii_case(&name))
+    }) else {
+        return ParseError::UnknownColumn(name);
+    };
+    ParseError::DetailedError {
+        message: format!("column \"{name}\" does not exist"),
+        detail: Some(format!(
+            "There is a column named \"{name}\" in table \"*SELECT* {}\", but it cannot be referenced from this part of the query.",
+            input_index + 1
+        )),
+        hint: None,
+        sqlstate: "42703",
+    }
+}
+
 fn bind_set_operation_query_with_outer(
     stmt: &SelectStatement,
     catalog: &dyn CatalogLookup,
@@ -4971,39 +5014,53 @@ fn bind_set_operation_query_with_outer(
 
     let mut output_types = Vec::with_capacity(width);
     for index in 0..width {
-        let mut common = None;
-        let mut common_is_unknown = false;
-        for (input_stmt, query) in set_operation.inputs.iter().zip(inputs.iter()) {
-            let target = &query.target_list[index];
-            if matches!(target.expr, Expr::Const(Value::Null)) {
+        let mut column_types = inputs
+            .iter()
+            .map(|query| query.target_list[index].sql_type)
+            .collect::<Vec<_>>();
+        for input_index in 0..column_types.len() {
+            let Some(raw_expr) = set_operation.inputs[input_index]
+                .targets
+                .get(index)
+                .map(|target| &target.expr)
+            else {
                 continue;
-            }
-            let next = target.sql_type;
-            let next_is_unknown = set_operation_target_is_unknown_string_literal(input_stmt, index);
-            common = Some(match common {
-                None => {
-                    common_is_unknown = next_is_unknown;
-                    next
-                }
-                Some(_) if next_is_unknown => continue,
-                Some(_) if common_is_unknown => {
-                    common_is_unknown = false;
-                    next
-                }
-                Some(current) => resolve_common_scalar_type(current, next).ok_or_else(|| {
-                    ParseError::UnexpectedToken {
-                        expected: "set-operation column types with a common type",
-                        actual: format!(
-                            "set-operation column {} has types {} and {}",
-                            index + 1,
-                            sql_type_name(current),
-                            sql_type_name(next)
-                        ),
-                    }
-                })?,
-            });
+            };
+            let Some(peer_type) = column_types
+                .iter()
+                .enumerate()
+                .find(|(peer_index, peer_type)| {
+                    *peer_index != input_index && !is_text_like_type(**peer_type)
+                })
+                .or_else(|| {
+                    column_types
+                        .iter()
+                        .enumerate()
+                        .find(|(peer_index, _)| *peer_index != input_index)
+                })
+                .map(|(_, peer_type)| *peer_type)
+            else {
+                continue;
+            };
+            column_types[input_index] =
+                coerce_unknown_string_literal_type(raw_expr, column_types[input_index], peer_type);
         }
-        output_types.push(common.unwrap_or_else(|| SqlType::new(SqlTypeKind::Text)));
+
+        let mut common = column_types[0];
+        for next in column_types.iter().copied().skip(1) {
+            common = resolve_common_scalar_type(common, next).ok_or_else(|| {
+                ParseError::UnexpectedToken {
+                    expected: "set-operation column types with a common type",
+                    actual: format!(
+                        "set-operation column {} has types {} and {}",
+                        index + 1,
+                        sql_type_name(common),
+                        sql_type_name(next)
+                    ),
+                }
+            })?;
+        }
+        output_types.push(common);
     }
 
     for query in &mut inputs {
@@ -5060,6 +5117,7 @@ fn bind_set_operation_query_with_outer(
                 grouped_outer.as_ref(),
                 visible_ctes,
             )
+            .map_err(|err| set_operation_order_by_error_with_input_detail(err, &inputs))
         })?
     };
     let sort_clause = build_sort_clause(sort_inputs, &target_list);

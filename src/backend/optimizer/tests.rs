@@ -1644,6 +1644,21 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
     }
 }
 
+fn strip_projections(plan: &Plan) -> &Plan {
+    let mut current = plan;
+    while let Plan::Projection { input, .. } = current {
+        current = input;
+    }
+    current
+}
+
+fn validate_planned_stmt_for_tests(planned: &PlannedStmt) {
+    super::setrefs::validate_executable_plan_for_tests_with_params(
+        &planned.plan_tree,
+        &planned.ext_params,
+    );
+}
+
 #[test]
 fn comma_join_with_equality_predicate_can_choose_hash_or_merge_join() {
     let planned = planned_stmt_for_sql(
@@ -2237,6 +2252,7 @@ fn aggregate_pathkeys_follow_strategy() {
         pathtarget: PathTarget::new(vec![var(10, 1)]),
         slot_id: 20,
         strategy: AggregateStrategy::Hashed,
+        disabled: false,
         pathkeys: vec![key.clone()],
         input: Box::new(values_path(10, 1.0, 1.0)),
         group_by: vec![var(10, 1)],
@@ -2256,6 +2272,7 @@ fn aggregate_pathkeys_follow_strategy() {
         pathtarget: PathTarget::new(vec![var(10, 1)]),
         slot_id: 20,
         strategy: AggregateStrategy::Sorted,
+        disabled: false,
         pathkeys: vec![key.clone()],
         input: Box::new(values_path(10, 1.0, 1.0)),
         group_by: vec![var(10, 1)],
@@ -2696,7 +2713,7 @@ fn planner_places_lock_rows_between_order_by_and_limit() {
         .expect("analyze");
     let planned = super::planner(query, &catalog).expect("plan");
 
-    let Plan::Limit { input, .. } = &planned.plan_tree else {
+    let Plan::Limit { input, .. } = strip_projections(&planned.plan_tree) else {
         panic!("expected limit at top, got {:?}", planned.plan_tree);
     };
     let Plan::LockRows {
@@ -2705,7 +2722,10 @@ fn planner_places_lock_rows_between_order_by_and_limit() {
     else {
         panic!("expected lock rows below limit, got {:?}", input);
     };
-    assert!(matches!(input.as_ref(), Plan::OrderBy { .. }));
+    assert!(matches!(
+        strip_projections(input.as_ref()),
+        Plan::OrderBy { .. }
+    ));
     assert_eq!(row_marks.len(), 1);
     assert_eq!(row_marks[0].rtindex, 1);
     assert_eq!(
@@ -2765,7 +2785,7 @@ fn planner_keeps_recursive_project_set_scalar_semantic_until_setrefs() {
 }
 
 #[test]
-fn planner_lowers_setop_children_with_their_own_roots() {
+fn planner_lowers_union_all_append_children_with_their_own_roots() {
     let planned = planned_stmt_for_sql(
         "select x
          from (values (1)) base(x)
@@ -2775,7 +2795,7 @@ fn planner_lowers_setop_children_with_their_own_roots() {
          join (values (2)) r(y) on true",
     );
 
-    assert!(matches!(planned.plan_tree, Plan::SetOp { .. }));
+    assert!(matches!(planned.plan_tree, Plan::Append { .. }));
 }
 
 #[test]
@@ -3312,9 +3332,7 @@ fn planner_uses_runtime_index_key_for_correlated_limit_subplan() {
                 _ => false,
             })
     }));
-    for subplan in &planned.subplans {
-        super::setrefs::validate_executable_plan_for_tests(subplan);
-    }
+    validate_planned_stmt_for_tests(&planned);
 }
 
 #[test]
@@ -3347,10 +3365,7 @@ fn planner_simplifies_outer_max_of_unique_scalar_sublink() {
         "expected the remaining scalar lookup subplan to use the unique index: {planned:#?}"
     );
 
-    super::setrefs::validate_executable_plan_for_tests(&planned.plan_tree);
-    for subplan in &planned.subplans {
-        super::setrefs::validate_executable_plan_for_tests(subplan);
-    }
+    validate_planned_stmt_for_tests(&planned);
 }
 
 #[test]
@@ -3364,10 +3379,7 @@ fn planner_lowers_outer_aggregate_refs_in_correlated_subqueries() {
         .expect("analyze");
     let planned = super::planner(query, &catalog).expect("plan");
 
-    super::setrefs::validate_executable_plan_for_tests(&planned.plan_tree);
-    for subplan in &planned.subplans {
-        super::setrefs::validate_executable_plan_for_tests(subplan);
-    }
+    validate_planned_stmt_for_tests(&planned);
 
     let debug = format!("{planned:#?}");
     assert!(debug.contains("paramkind: Exec"), "{debug}");

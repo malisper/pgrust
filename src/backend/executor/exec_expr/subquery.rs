@@ -54,6 +54,11 @@ fn with_scoped_subquery_runtime<T>(
     let saved_cte_producers = ctx.cte_producers.clone();
     let saved_recursive_worktables = ctx.recursive_worktables.clone();
     ctx.cte_tables = saved_cte_tables.clone();
+    ctx.cte_tables.extend(
+        ctx.pinned_cte_tables
+            .iter()
+            .map(|(cte_id, table)| (*cte_id, table.clone())),
+    );
     ctx.cte_producers = saved_cte_producers.clone();
     ctx.recursive_worktables = saved_recursive_worktables.clone();
     let result = f(ctx);

@@ -1,4 +1,3 @@
-use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 use std::cmp::Ordering;
 
@@ -11,7 +10,7 @@ use crate::include::nodes::datetime::{
     MAX_TIME_PRECISION, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_SEC,
 };
 use crate::include::nodes::primnodes::expr_sql_type_hint;
-use rand::{Rng, RngCore};
+use rand::RngCore;
 use std::sync::Mutex;
 
 use super::expr_agg_support::{
@@ -124,7 +123,7 @@ use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
 };
-use crate::backend::rewrite::format_view_definition;
+use crate::backend::rewrite::{format_stored_rule_definition, format_view_definition};
 use crate::backend::statistics::{
     render_pg_dependencies_text, render_pg_mcv_list_text, render_pg_ndistinct_text,
 };
@@ -2653,14 +2652,51 @@ fn format_foreign_key_constraintdef_for_catalog(
         referenced_name,
         referenced_columns.join(", ")
     );
-    if row.confdeltype == 'r' {
-        def.push_str(" ON DELETE RESTRICT");
-    }
-    if row.confupdtype == 'r' {
-        def.push_str(" ON UPDATE RESTRICT");
+    append_foreign_key_match_type(&mut def, row.confmatchtype);
+    append_foreign_key_action(&mut def, "ON UPDATE", row.confupdtype);
+    let appended_delete = append_foreign_key_action(&mut def, "ON DELETE", row.confdeltype);
+    if appended_delete
+        && let Some(set_columns) = row
+            .confdelsetcols
+            .as_ref()
+            .and_then(|attnums| index_column_names_for_heap(&relation.desc, attnums))
+        && !set_columns.is_empty()
+    {
+        def.push_str(" (");
+        def.push_str(&set_columns.join(", "));
+        def.push(')');
     }
     append_constraint_deferrability(&mut def, row);
     Some(def)
+}
+
+fn append_foreign_key_match_type(def: &mut String, match_type: char) {
+    match match_type {
+        'f' => def.push_str(" MATCH FULL"),
+        'p' => def.push_str(" MATCH PARTIAL"),
+        _ => {}
+    }
+}
+
+fn append_foreign_key_action(def: &mut String, clause: &str, action: char) -> bool {
+    let Some(keyword) = foreign_key_action_keyword(action) else {
+        return false;
+    };
+    def.push(' ');
+    def.push_str(clause);
+    def.push(' ');
+    def.push_str(keyword);
+    true
+}
+
+fn foreign_key_action_keyword(action: char) -> Option<&'static str> {
+    match action {
+        'r' => Some("RESTRICT"),
+        'c' => Some("CASCADE"),
+        'n' => Some("SET NULL"),
+        'd' => Some("SET DEFAULT"),
+        _ => None,
+    }
 }
 
 fn append_constraint_deferrability(
@@ -2858,6 +2894,37 @@ fn eval_pg_get_viewdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value,
     let definition =
         format_view_definition(relation_oid, &relation.desc, catalog).map_err(ExecError::Parse)?;
     Ok(Value::Text(definition.into()))
+}
+
+fn eval_pg_get_ruledef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let catalog = executor_catalog(ctx)?;
+    let rule_oid = match values {
+        [Value::Null] | [Value::Null, _] | [_, Value::Null] => return Ok(Value::Null),
+        [value] | [value, _] => oid_arg_to_u32(value, "pg_get_ruledef")?,
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "pg_get_ruledef(rule [, pretty])",
+                actual: format!("PgGetRuleDef({} args)", values.len()),
+            }));
+        }
+    };
+    if rule_oid == 0 {
+        return Ok(Value::Null);
+    }
+    let Some(rule) = catalog
+        .rewrite_rows()
+        .into_iter()
+        .find(|row| row.oid == rule_oid)
+    else {
+        return Ok(Value::Null);
+    };
+    let relation_name = catalog
+        .class_row_by_oid(rule.ev_class)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| rule.ev_class.to_string());
+    Ok(Value::Text(
+        format_stored_rule_definition(&rule, &relation_name).into(),
+    ))
 }
 
 fn eval_pg_get_triggerdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -4118,7 +4185,7 @@ pub fn eval_expr(
             let value = eval_expr(array, slot, ctx)?;
             eval_array_subscript(value, subscripts, slot, ctx)
         }
-        Expr::Random => Ok(Value::Float64(rand::random::<f64>())),
+        Expr::Random => Ok(Value::Float64(ctx.random_state.lock().double())),
         Expr::CurrentDate => Ok(current_date_value_from_timestamp_with_config(
             &ctx.datetime_config,
             ctx.statement_timestamp_usecs,
@@ -6370,8 +6437,9 @@ pub(crate) fn eval_builtin_function(
         | BuiltinScalarFunction::PhraseToTsQuery
         | BuiltinScalarFunction::WebSearchToTsQuery
         | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(func, &values),
-        BuiltinScalarFunction::Random => eval_random_function(&values),
-        BuiltinScalarFunction::RandomNormal => eval_random_normal_function(&values),
+        BuiltinScalarFunction::Random => eval_random_function(&values, ctx),
+        BuiltinScalarFunction::RandomNormal => eval_random_normal_function(&values, ctx),
+        BuiltinScalarFunction::SetSeed => eval_setseed_function(&values, ctx),
         BuiltinScalarFunction::TxidCurrent
         | BuiltinScalarFunction::TxidCurrentIfAssigned
         | BuiltinScalarFunction::TxidCurrentSnapshot
@@ -6832,6 +6900,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgGetConstraintDef => eval_pg_get_constraintdef(&values, ctx),
         BuiltinScalarFunction::PgGetIndexDef => eval_pg_get_indexdef(&values, ctx),
         BuiltinScalarFunction::PgGetViewDef => eval_pg_get_viewdef(&values, ctx),
+        BuiltinScalarFunction::PgGetRuleDef => eval_pg_get_ruledef(&values, ctx),
         BuiltinScalarFunction::PgGetTriggerDef => eval_pg_get_triggerdef(&values, ctx),
         BuiltinScalarFunction::PgTriggerDepth => Ok(Value::Int32(ctx.trigger_depth as i32)),
         BuiltinScalarFunction::PgRelationIsPublishable => {
@@ -7393,16 +7462,20 @@ fn render_current_timestamp() -> String {
     }
 }
 
-fn eval_random_function(values: &[Value]) -> Result<Value, ExecError> {
+fn eval_random_function(values: &[Value], ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
     match values {
-        [] => Ok(Value::Float64(rand::random::<f64>())),
+        [] => Ok(Value::Float64(ctx.random_state.lock().double())),
         [Value::Int32(min), Value::Int32(max)] => {
             if min > max {
                 return Err(invalid_random_bound_error(
                     "lower bound must be less than or equal to upper bound",
                 ));
             }
-            Ok(Value::Int32(rand::thread_rng().gen_range(*min..=*max)))
+            Ok(Value::Int32(
+                ctx.random_state
+                    .lock()
+                    .int64_range(i64::from(*min), i64::from(*max)) as i32,
+            ))
         }
         [Value::Int64(min), Value::Int64(max)] => {
             if min > max {
@@ -7410,9 +7483,11 @@ fn eval_random_function(values: &[Value]) -> Result<Value, ExecError> {
                     "lower bound must be less than or equal to upper bound",
                 ));
             }
-            Ok(Value::Int64(rand::thread_rng().gen_range(*min..=*max)))
+            Ok(Value::Int64(
+                ctx.random_state.lock().int64_range(*min, *max),
+            ))
         }
-        [Value::Numeric(min), Value::Numeric(max)] => eval_random_numeric_range(min, max),
+        [Value::Numeric(min), Value::Numeric(max)] => eval_random_numeric_range(min, max, ctx),
         [left, right] => Err(ExecError::TypeMismatch {
             op: "random",
             left: left.clone(),
@@ -7655,7 +7730,10 @@ fn uuid_hash_extended(value: &[u8; 16], seed: u64) -> u64 {
     crate::backend::access::hash::support::hash_bytes_extended(value, seed)
 }
 
-fn eval_random_normal_function(values: &[Value]) -> Result<Value, ExecError> {
+fn eval_random_normal_function(
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
     let (mean, stddev) = match values {
         [] => (0.0, 1.0),
         [Value::Float64(mean), Value::Float64(stddev)] => (*mean, *stddev),
@@ -7678,10 +7756,39 @@ fn eval_random_normal_function(values: &[Value]) -> Result<Value, ExecError> {
         return Ok(Value::Float64(mean));
     }
 
-    Ok(Value::Float64((sample_standard_normal() * stddev) + mean))
+    Ok(Value::Float64(
+        (ctx.random_state.lock().double_normal() * stddev) + mean,
+    ))
 }
 
-fn eval_random_numeric_range(min: &NumericValue, max: &NumericValue) -> Result<Value, ExecError> {
+fn eval_setseed_function(values: &[Value], ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
+    match values {
+        [value] => {
+            let seed = expect_float8_arg("setseed", value)?;
+            if !seed.is_finite() || !(-1.0..=1.0).contains(&seed) {
+                return Err(ExecError::DetailedError {
+                    message: format!("setseed parameter {seed} is out of allowed range [-1,1]")
+                        .into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: INVALID_PARAMETER_VALUE_SQLSTATE,
+                });
+            }
+            ctx.random_state.lock().fseed(seed);
+            Ok(Value::Null)
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "valid builtin function arity",
+            actual: format!("SetSeed({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_random_numeric_range(
+    min: &NumericValue,
+    max: &NumericValue,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
     match min {
         NumericValue::NaN => return Err(invalid_random_bound_error("lower bound cannot be NaN")),
         NumericValue::PosInf | NumericValue::NegInf => {
@@ -7701,37 +7808,8 @@ fn eval_random_numeric_range(min: &NumericValue, max: &NumericValue) -> Result<V
             "lower bound must be less than or equal to upper bound",
         ));
     }
-
-    let (
-        NumericValue::Finite {
-            coeff: min_coeff,
-            scale: min_scale,
-            ..
-        },
-        NumericValue::Finite {
-            coeff: max_coeff,
-            scale: max_scale,
-            ..
-        },
-    ) = (min, max)
-    else {
-        unreachable!();
-    };
-
-    let scale = (*min_scale).max(*max_scale);
-    let min_aligned = align_numeric_coeff(min_coeff.clone(), *min_scale, scale);
-    let max_aligned = align_numeric_coeff(max_coeff.clone(), *max_scale, scale);
-
-    if min_aligned == max_aligned {
-        return Ok(Value::Numeric(min.clone()));
-    }
-
-    let span = (&max_aligned - &min_aligned) + BigInt::from(1u8);
-    let offset = random_bigint_below(&span, &mut rand::thread_rng());
     Ok(Value::Numeric(
-        NumericValue::finite(min_aligned + offset, scale)
-            .with_dscale(scale)
-            .normalize(),
+        ctx.random_state.lock().numeric_range(min, max),
     ))
 }
 
@@ -7741,51 +7819,5 @@ fn invalid_random_bound_error(message: &str) -> ExecError {
         detail: None,
         hint: None,
         sqlstate: INVALID_PARAMETER_VALUE_SQLSTATE,
-    }
-}
-
-fn sample_standard_normal() -> f64 {
-    let mut rng = rand::thread_rng();
-    loop {
-        let u1 = rng.r#gen::<f64>();
-        if u1 == 0.0 {
-            continue;
-        }
-        let u2 = rng.r#gen::<f64>();
-        let radius = (-2.0 * u1.ln()).sqrt();
-        let theta = 2.0 * std::f64::consts::PI * u2;
-        return radius * theta.cos();
-    }
-}
-
-fn align_numeric_coeff(coeff: BigInt, from_scale: u32, to_scale: u32) -> BigInt {
-    coeff * pow10_bigint(to_scale.saturating_sub(from_scale))
-}
-
-fn pow10_bigint(exp: u32) -> BigInt {
-    let mut value = BigInt::from(1u8);
-    for _ in 0..exp {
-        value *= 10u8;
-    }
-    value
-}
-
-fn random_bigint_below(upper_exclusive: &BigInt, rng: &mut impl RngCore) -> BigInt {
-    debug_assert!(*upper_exclusive > BigInt::from(0u8));
-    let (_, upper_bytes) = upper_exclusive.to_bytes_be();
-    let mut candidate_bytes = vec![0u8; upper_bytes.len().max(1)];
-    let high_mask = if upper_bytes.is_empty() {
-        0xff
-    } else {
-        0xff_u8 >> upper_bytes[0].leading_zeros()
-    };
-
-    loop {
-        rng.fill_bytes(&mut candidate_bytes);
-        candidate_bytes[0] &= high_mask;
-        let candidate = BigInt::from_bytes_be(Sign::Plus, &candidate_bytes);
-        if candidate < *upper_exclusive {
-            return candidate;
-        }
     }
 }

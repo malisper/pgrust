@@ -1,25 +1,26 @@
-use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::{cmp::Ordering, collections::BTreeSet};
 
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::compare_order_values;
 use crate::backend::parser::{
-    CatalogLookup, PartitionBoundSpec, PartitionRangeDatumValue, PartitionStrategy,
-    SerializedPartitionValue, deserialize_partition_bound, partition_value_to_value,
-    relation_partition_spec,
+    BoundIndexRelation, CatalogLookup, PartitionBoundSpec, PartitionRangeDatumValue,
+    PartitionStrategy, SerializedPartitionValue, deserialize_partition_bound,
+    partition_value_to_value, relation_partition_spec,
 };
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
+use crate::include::nodes::parsenodes::{
+    JoinTreeNode, Query, RangeTblEntryKind, SetOperator, SqlType, SqlTypeKind,
+};
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, PlannerSubroot, RelOptInfo, RelOptKind,
     RestrictInfo, SpecialJoinInfo,
 };
-use crate::include::nodes::plannodes::PlanEstimate;
+use crate::include::nodes::plannodes::{AggregateStrategy, PlanEstimate, SetOpStrategy};
 use crate::include::nodes::primnodes::{
-    BoolExprType, Expr, JoinType, OrderByEntry, QueryColumn, RelationDesc, ToastRelationRef, Var,
-    attrno_index, user_attrno,
+    BoolExprType, Expr, JoinType, OrderByEntry, QueryColumn, RelationDesc, SortGroupClause,
+    ToastRelationRef, Var, attrno_index, expr_contains_set_returning, is_system_attr, user_attrno,
 };
 
 use super::super::bestpath;
@@ -30,7 +31,9 @@ use super::super::inherit::{
 use super::super::joininfo;
 use super::super::partition_prune::partition_may_satisfy_filter;
 use super::super::partitionwise;
-use super::super::pathnodes::{next_synthetic_slot_id, rte_slot_id, slot_output_target};
+use super::super::pathnodes::{
+    next_synthetic_slot_id, rte_slot_id, rte_slot_varno, slot_output_target,
+};
 use super::super::plan::grouping_planner;
 use super::super::util::{
     normalize_rte_path, pathkeys_to_order_items, project_to_slot_layout,
@@ -43,8 +46,8 @@ use super::super::{
 };
 use super::{
     build_index_path_spec, build_join_paths_with_root, estimate_bitmap_candidate,
-    estimate_index_candidate, estimate_seqscan_candidate, optimize_path_with_config,
-    relation_stats,
+    estimate_index_candidate, estimate_seqscan_candidate, index_supports_index_only_attrs,
+    optimize_path_with_config, relation_stats,
 };
 
 fn collect_inner_join_clauses(root: &PlannerInfo) -> Vec<RestrictInfo> {
@@ -583,6 +586,163 @@ fn collect_bitmap_or_paths(
     }]
 }
 
+fn collect_required_index_only_attrs_for_root(
+    root: &PlannerInfo,
+    rtindex: usize,
+    filter: Option<&Expr>,
+    order_items: Option<&[OrderByEntry]>,
+) -> Vec<usize> {
+    let mut attrs = BTreeSet::new();
+    for target in [
+        &root.scanjoin_target,
+        &root.final_target,
+        &root.sort_input_target,
+        &root.group_input_target,
+    ] {
+        for expr in &target.exprs {
+            collect_expr_attrs_for_rel(expr, rtindex, &mut attrs);
+        }
+    }
+    if let Some(filter) = filter {
+        collect_expr_attrs_for_rel(filter, rtindex, &mut attrs);
+    }
+    if let Some(order_items) = order_items {
+        for item in order_items {
+            collect_expr_attrs_for_rel(&item.expr, rtindex, &mut attrs);
+        }
+    }
+    attrs.into_iter().collect()
+}
+
+fn collect_expr_attrs_for_rel(expr: &Expr, rtindex: usize, attrs: &mut BTreeSet<usize>) {
+    match expr {
+        Expr::Var(var) => {
+            if var.varlevelsup == 0
+                && (var.varno == rtindex || rte_slot_varno(var.varno) == Some(rtindex))
+                && !is_system_attr(var.varattno)
+                && let Some(index) = attrno_index(var.varattno)
+            {
+                attrs.insert(index);
+            }
+        }
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .for_each(|arg| collect_expr_attrs_for_rel(arg, rtindex, attrs)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .for_each(|arg| collect_expr_attrs_for_rel(arg, rtindex, attrs)),
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_expr_attrs_for_rel(arg, rtindex, attrs);
+            }
+            for arm in &case_expr.args {
+                collect_expr_attrs_for_rel(&arm.expr, rtindex, attrs);
+                collect_expr_attrs_for_rel(&arm.result, rtindex, attrs);
+            }
+            collect_expr_attrs_for_rel(&case_expr.defresult, rtindex, attrs);
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .for_each(|arg| collect_expr_attrs_for_rel(arg, rtindex, attrs)),
+        Expr::ScalarArrayOp(saop) => {
+            collect_expr_attrs_for_rel(&saop.left, rtindex, attrs);
+            collect_expr_attrs_for_rel(&saop.right, rtindex, attrs);
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .for_each(|child| collect_expr_attrs_for_rel(child, rtindex, attrs)),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => collect_expr_attrs_for_rel(inner, rtindex, attrs),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_expr_attrs_for_rel(expr, rtindex, attrs);
+            collect_expr_attrs_for_rel(pattern, rtindex, attrs);
+            if let Some(escape) = escape.as_deref() {
+                collect_expr_attrs_for_rel(escape, rtindex, attrs);
+            }
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            collect_expr_attrs_for_rel(left, rtindex, attrs);
+            collect_expr_attrs_for_rel(right, rtindex, attrs);
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .for_each(|element| collect_expr_attrs_for_rel(element, rtindex, attrs)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .for_each(|(_, expr)| collect_expr_attrs_for_rel(expr, rtindex, attrs)),
+        Expr::FieldSelect { expr, .. } => collect_expr_attrs_for_rel(expr, rtindex, attrs),
+        Expr::ArraySubscript { array, subscripts } => {
+            collect_expr_attrs_for_rel(array, rtindex, attrs);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_expr_attrs_for_rel(lower, rtindex, attrs);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_expr_attrs_for_rel(upper, rtindex, attrs);
+                }
+            }
+        }
+        Expr::Aggref(_)
+        | Expr::WindowFunc(_)
+        | Expr::SetReturning(_)
+        | Expr::SubLink(_)
+        | Expr::SubPlan(_) => {
+            attrs.insert(usize::MAX);
+        }
+        Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => {}
+    }
+}
+
+fn full_index_scan_spec(
+    index: &BoundIndexRelation,
+    filter: Option<Expr>,
+) -> crate::backend::optimizer::IndexPathSpec {
+    let filter_quals = filter.iter().cloned().collect::<Vec<_>>();
+    crate::backend::optimizer::IndexPathSpec {
+        index: index.clone(),
+        keys: Vec::new(),
+        order_by_keys: Vec::new(),
+        residual: filter,
+        used_quals: Vec::new(),
+        recheck_quals: Vec::new(),
+        filter_quals,
+        direction: crate::include::access::relscan::ScanDirection::Forward,
+        removes_order: false,
+        row_prefix: false,
+    }
+}
+
 fn collect_relation_access_paths(
     rtindex: usize,
     heap_rel: RelFileLocator,
@@ -594,6 +754,7 @@ fn collect_relation_access_paths(
     desc: RelationDesc,
     filter: Option<Expr>,
     query_order_items: Option<Vec<OrderByEntry>>,
+    required_index_only_attrs: &[usize],
     config: PlannerConfig,
     catalog: &dyn CatalogLookup,
 ) -> Vec<Path> {
@@ -652,6 +813,8 @@ fn collect_relation_access_paths(
                 && !index.index_meta.indkey.is_empty()
         })
     {
+        let target_index_only =
+            filter.is_none() && index_supports_index_only_attrs(index, required_index_only_attrs);
         if let Some(spec) = build_index_path_spec(
             filter.as_ref(),
             None,
@@ -671,6 +834,7 @@ fn collect_relation_access_paths(
                         &stats,
                         spec.clone(),
                         None,
+                        target_index_only,
                         config,
                         catalog,
                     )
@@ -698,6 +862,31 @@ fn collect_relation_access_paths(
             }
         }
         if config.enable_indexscan
+            && config.enable_indexonlyscan
+            && query_order_items.is_none()
+            && filter.is_none()
+            && target_index_only
+            && access_method_supports_index_scan(index.index_meta.am_oid)
+        {
+            paths.push(
+                estimate_index_candidate(
+                    rtindex,
+                    heap_rel,
+                    relation_name.clone(),
+                    relation_oid,
+                    toast,
+                    desc.clone(),
+                    &stats,
+                    full_index_scan_spec(index, filter.clone()),
+                    None,
+                    true,
+                    config,
+                    catalog,
+                )
+                .plan,
+            );
+        }
+        if config.enable_indexscan
             && let Some(order_items) = query_order_items.as_ref()
             && let Some(spec) = build_index_path_spec(
                 filter.as_ref(),
@@ -718,6 +907,7 @@ fn collect_relation_access_paths(
                     &stats,
                     spec,
                     Some(order_items.clone()),
+                    false,
                     config,
                     catalog,
                 )
@@ -752,6 +942,7 @@ fn collect_relation_ordered_index_paths(
     desc: RelationDesc,
     filter: Option<Expr>,
     order_items: &[OrderByEntry],
+    _required_index_only_attrs: &[usize],
     config: PlannerConfig,
     catalog: &dyn CatalogLookup,
 ) -> Vec<Path> {
@@ -792,6 +983,7 @@ fn collect_relation_ordered_index_paths(
                     &stats,
                     spec,
                     Some(order_items.to_vec()),
+                    false,
                     config,
                     catalog,
                 )
@@ -828,18 +1020,28 @@ pub(super) fn relation_ordered_index_paths(
             relkind,
             relispopulated: _,
             toast,
-        } if *relkind == 'r' => collect_relation_ordered_index_paths(
-            rtindex,
-            *heap_rel,
-            relation_display_name(catalog, rte, *relation_oid, *heap_rel),
-            *relation_oid,
-            *toast,
-            rte.desc.clone(),
-            base_filter_expr(rel),
-            &order_items,
-            root.config,
-            catalog,
-        ),
+        } if *relkind == 'r' => {
+            let filter = base_filter_expr(rel);
+            let required_index_only_attrs = collect_required_index_only_attrs_for_root(
+                root,
+                rtindex,
+                filter.as_ref(),
+                Some(&order_items),
+            );
+            collect_relation_ordered_index_paths(
+                rtindex,
+                *heap_rel,
+                relation_display_name(catalog, rte, *relation_oid, *heap_rel),
+                *relation_oid,
+                *toast,
+                rte.desc.clone(),
+                filter,
+                &order_items,
+                &required_index_only_attrs,
+                root.config,
+                catalog,
+            )
+        }
         _ => Vec::new(),
     }
 }
@@ -868,6 +1070,7 @@ fn cheapest_relation_access_path(
         desc,
         filter,
         None,
+        &[],
         config,
         catalog,
     )
@@ -903,6 +1106,80 @@ fn plan_query_path(
             pathtarget: PathTarget::new(Vec::new()),
         });
     (root, path)
+}
+
+fn plan_set_operation_child_path(
+    mut query: crate::include::nodes::parsenodes::Query,
+    sorted: bool,
+    catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
+) -> (PlannerInfo, Path) {
+    if sorted
+        && set_operation_child_can_accept_required_order(&query)
+        && set_operation_child_ordering_is_worthwhile(&query)
+    {
+        query.sort_clause = set_operation_child_sort_clause(&query);
+    }
+    plan_query_path(query, catalog, config)
+}
+
+fn set_operation_child_can_accept_required_order(query: &Query) -> bool {
+    query.sort_clause.is_empty()
+        && query.limit_count.is_none()
+        && query.limit_offset == 0
+        && query.locking_clause.is_none()
+        && query.row_marks.is_empty()
+}
+
+fn set_operation_child_ordering_is_worthwhile(query: &Query) -> bool {
+    fn walk(query: &Query, node: &JoinTreeNode) -> bool {
+        match node {
+            JoinTreeNode::RangeTblRef(rtindex) => query
+                .rtable
+                .get(rtindex.saturating_sub(1))
+                .is_some_and(|rte| match &rte.kind {
+                    RangeTblEntryKind::Relation { .. } | RangeTblEntryKind::WorkTable { .. } => {
+                        true
+                    }
+                    RangeTblEntryKind::Subquery { query }
+                    | RangeTblEntryKind::Cte { query, .. } => {
+                        set_operation_child_ordering_is_worthwhile(query)
+                    }
+                    RangeTblEntryKind::Join { .. }
+                    | RangeTblEntryKind::Values { .. }
+                    | RangeTblEntryKind::Function { .. }
+                    | RangeTblEntryKind::Result => false,
+                }),
+            JoinTreeNode::JoinExpr { left, right, .. } => walk(query, left) || walk(query, right),
+        }
+    }
+
+    query
+        .jointree
+        .as_ref()
+        .is_some_and(|jointree| walk(query, jointree))
+}
+
+fn set_operation_child_sort_clause(query: &Query) -> Vec<SortGroupClause> {
+    query
+        .target_list
+        .iter()
+        .filter(|target| !target.resjunk)
+        .enumerate()
+        .map(|(index, target)| SortGroupClause {
+            expr: target.expr.clone(),
+            tle_sort_group_ref: if target.ressortgroupref != 0 {
+                target.ressortgroupref
+            } else if target.resno != 0 {
+                target.resno
+            } else {
+                index + 1
+            },
+            descending: false,
+            nulls_first: None,
+            collation_oid: None,
+        })
+        .collect()
 }
 
 fn build_recursive_union_path(
@@ -955,11 +1232,23 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
         .expect("set-operation rel requested without set_operation query");
     let source_id = 1usize;
     let desc = set_operation.output_desc;
+    let output_columns = desc
+        .columns
+        .iter()
+        .map(|column| QueryColumn {
+            name: column.name.clone(),
+            sql_type: column.sql_type,
+            wire_type_oid: None,
+        })
+        .collect::<Vec<_>>();
+    let sorted_children =
+        set_operation_needs_ordered_children(set_operation.op, &output_columns, root.config);
     let (child_roots, children) = set_operation
         .inputs
         .into_iter()
         .map(|query| {
-            let (child_root, path) = plan_query_path(query, catalog, root.config);
+            let (child_root, path) =
+                plan_set_operation_child_path(query, sorted_children, catalog, root.config);
             (
                 Some(PlannerSubroot::new(child_root)),
                 project_to_slot_layout(
@@ -972,25 +1261,13 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
             )
         })
         .unzip::<_, _, Vec<_>, Vec<_>>();
-    let output_columns = desc
-        .columns
-        .iter()
-        .map(|column| QueryColumn {
-            name: column.name.clone(),
-            sql_type: column.sql_type,
-            wire_type_oid: None,
-        })
-        .collect::<Vec<_>>();
-    let set_op = optimize_path_with_config(
-        Path::SetOp {
-            plan_info: PlanEstimate::default(),
-            pathtarget: slot_output_target(source_id, &output_columns, |column| column.sql_type),
-            slot_id: source_id,
-            op: set_operation.op,
-            output_columns,
-            child_roots,
-            children,
-        },
+    let set_op = build_set_operation_path(
+        set_operation.op,
+        source_id,
+        desc.clone(),
+        output_columns,
+        child_roots,
+        children,
         catalog,
         root.config,
     );
@@ -1002,6 +1279,347 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
     rel.add_path(set_op);
     bestpath::set_cheapest(&mut rel);
     rel
+}
+
+fn set_operation_needs_ordered_children(
+    op: SetOperator,
+    output_columns: &[QueryColumn],
+    config: PlannerConfig,
+) -> bool {
+    match op {
+        SetOperator::Union { all: true } => false,
+        SetOperator::Union { all: false } => {
+            if output_columns.is_empty() {
+                return false;
+            }
+            let can_hash = set_op_columns_hashable(output_columns);
+            let can_sort = set_op_columns_sortable(output_columns);
+            can_sort && !(can_hash && (config.enable_hashagg || !can_sort))
+        }
+        SetOperator::Intersect { .. } | SetOperator::Except { .. } => {
+            set_operation_strategy(op, output_columns, config) == SetOpStrategy::Sorted
+                && !output_columns.is_empty()
+        }
+    }
+}
+
+fn set_operation_strategy(
+    _op: SetOperator,
+    output_columns: &[QueryColumn],
+    config: PlannerConfig,
+) -> SetOpStrategy {
+    if output_columns.is_empty() {
+        return SetOpStrategy::Sorted;
+    }
+    let can_hash = set_op_columns_hashable(output_columns);
+    let can_sort = set_op_columns_sortable(output_columns);
+    if can_hash && (config.enable_hashagg || !can_sort) {
+        SetOpStrategy::Hashed
+    } else {
+        SetOpStrategy::Sorted
+    }
+}
+
+fn build_set_operation_path(
+    op: SetOperator,
+    source_id: usize,
+    desc: RelationDesc,
+    output_columns: Vec<QueryColumn>,
+    child_roots: Vec<Option<PlannerSubroot>>,
+    children: Vec<Path>,
+    catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
+) -> Path {
+    match op {
+        SetOperator::Union { all: true } => optimize_path_with_config(
+            set_op_append_path(source_id, desc, &output_columns, child_roots, children),
+            catalog,
+            config,
+        ),
+        SetOperator::Union { all: false } => {
+            let can_hash = set_op_columns_hashable(&output_columns);
+            let can_sort = set_op_columns_sortable(&output_columns);
+            if can_hash && (config.enable_hashagg || !can_sort) {
+                let append =
+                    set_op_append_path(source_id, desc, &output_columns, child_roots, children);
+                optimize_path_with_config(
+                    Path::Aggregate {
+                        plan_info: PlanEstimate::default(),
+                        pathtarget: slot_output_target(source_id, &output_columns, |column| {
+                            column.sql_type
+                        }),
+                        slot_id: source_id,
+                        strategy: AggregateStrategy::Hashed,
+                        disabled: !config.enable_hashagg && !can_sort,
+                        pathkeys: Vec::new(),
+                        input: Box::new(append),
+                        group_by: set_op_output_exprs(source_id, &output_columns),
+                        passthrough_exprs: Vec::new(),
+                        accumulators: Vec::new(),
+                        having: None,
+                        output_columns,
+                    },
+                    catalog,
+                    config,
+                )
+            } else {
+                let input = if output_columns.is_empty() {
+                    set_op_append_path(source_id, desc, &output_columns, child_roots, children)
+                } else if set_op_children_have_ordered_path(source_id, &output_columns, &children) {
+                    set_op_merge_append_path(source_id, desc, &output_columns, children)
+                } else {
+                    let children = children
+                        .into_iter()
+                        .map(strip_set_op_child_sort)
+                        .collect::<Vec<_>>();
+                    let append =
+                        set_op_append_path(source_id, desc, &output_columns, child_roots, children);
+                    set_op_sort_path(source_id, &output_columns, append)
+                };
+                optimize_path_with_config(
+                    Path::Unique {
+                        plan_info: PlanEstimate::default(),
+                        pathtarget: slot_output_target(source_id, &output_columns, |column| {
+                            column.sql_type
+                        }),
+                        key_indices: (0..output_columns.len()).collect(),
+                        input: Box::new(input),
+                    },
+                    catalog,
+                    config,
+                )
+            }
+        }
+        SetOperator::Intersect { .. } | SetOperator::Except { .. } => {
+            let strategy = set_operation_strategy(op, &output_columns, config);
+            let children = if matches!(strategy, SetOpStrategy::Sorted) {
+                children
+                    .into_iter()
+                    .map(|child| ensure_set_op_sorted_path(source_id, &output_columns, child))
+                    .collect()
+            } else {
+                children
+            };
+            optimize_path_with_config(
+                Path::SetOp {
+                    plan_info: PlanEstimate::default(),
+                    pathtarget: slot_output_target(source_id, &output_columns, |column| {
+                        column.sql_type
+                    }),
+                    slot_id: source_id,
+                    op,
+                    strategy,
+                    output_columns,
+                    child_roots,
+                    children,
+                },
+                catalog,
+                config,
+            )
+        }
+    }
+}
+
+fn set_op_append_path(
+    source_id: usize,
+    desc: RelationDesc,
+    output_columns: &[QueryColumn],
+    child_roots: Vec<Option<PlannerSubroot>>,
+    children: Vec<Path>,
+) -> Path {
+    Path::Append {
+        plan_info: PlanEstimate::default(),
+        pathtarget: slot_output_target(source_id, output_columns, |column| column.sql_type),
+        relids: Vec::new(),
+        source_id,
+        desc,
+        child_roots,
+        children,
+    }
+}
+
+fn set_op_merge_append_path(
+    source_id: usize,
+    desc: RelationDesc,
+    output_columns: &[QueryColumn],
+    children: Vec<Path>,
+) -> Path {
+    Path::MergeAppend {
+        plan_info: PlanEstimate::default(),
+        pathtarget: slot_output_target(source_id, output_columns, |column| column.sql_type),
+        source_id,
+        desc,
+        items: set_op_order_items(source_id, output_columns),
+        children: children
+            .into_iter()
+            .map(|child| ensure_set_op_sorted_path(source_id, output_columns, child))
+            .collect(),
+    }
+}
+
+fn set_op_children_have_ordered_path(
+    source_id: usize,
+    output_columns: &[QueryColumn],
+    children: &[Path],
+) -> bool {
+    let required = set_op_order_pathkeys(source_id, output_columns);
+    children.iter().any(|child| {
+        bestpath::pathkeys_satisfy(&child.pathkeys(), &required)
+            && path_contains_native_ordered_index_scan(child)
+    })
+}
+
+fn path_contains_native_ordered_index_scan(path: &Path) -> bool {
+    match path {
+        Path::IndexOnlyScan { pathkeys, .. } | Path::IndexScan { pathkeys, .. } => {
+            !pathkeys.is_empty()
+        }
+        Path::Projection { input, .. }
+        | Path::Filter { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. } => path_contains_native_ordered_index_scan(input),
+        _ => false,
+    }
+}
+
+fn strip_set_op_child_sort(path: Path) -> Path {
+    match path {
+        Path::OrderBy { input, .. } => *input,
+        Path::Projection {
+            plan_info,
+            pathtarget,
+            slot_id,
+            input,
+            targets,
+        } => Path::Projection {
+            plan_info,
+            pathtarget,
+            slot_id,
+            input: Box::new(strip_set_op_child_sort(*input)),
+            targets,
+        },
+        other => other,
+    }
+}
+
+fn ensure_set_op_sorted_path(
+    source_id: usize,
+    output_columns: &[QueryColumn],
+    input: Path,
+) -> Path {
+    if output_columns.is_empty()
+        || bestpath::pathkeys_satisfy(
+            &input.pathkeys(),
+            &set_op_order_pathkeys(source_id, output_columns),
+        )
+    {
+        input
+    } else {
+        set_op_sort_path(source_id, output_columns, input)
+    }
+}
+
+fn set_op_sort_path(source_id: usize, output_columns: &[QueryColumn], input: Path) -> Path {
+    if output_columns.is_empty() {
+        return input;
+    }
+    Path::OrderBy {
+        plan_info: PlanEstimate::default(),
+        pathtarget: slot_output_target(source_id, output_columns, |column| column.sql_type),
+        input: Box::new(input),
+        items: set_op_order_items(source_id, output_columns),
+        display_items: output_columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect(),
+    }
+}
+
+fn set_op_order_pathkeys(source_id: usize, output_columns: &[QueryColumn]) -> Vec<PathKey> {
+    set_op_order_items(source_id, output_columns)
+        .into_iter()
+        .map(|item| PathKey {
+            expr: item.expr,
+            ressortgroupref: item.ressortgroupref,
+            descending: item.descending,
+            nulls_first: item.nulls_first,
+            collation_oid: item.collation_oid,
+        })
+        .collect()
+}
+
+fn set_op_order_items(source_id: usize, output_columns: &[QueryColumn]) -> Vec<OrderByEntry> {
+    set_op_output_exprs(source_id, output_columns)
+        .into_iter()
+        .enumerate()
+        .map(|(index, expr)| OrderByEntry {
+            expr,
+            ressortgroupref: index + 1,
+            descending: false,
+            nulls_first: None,
+            collation_oid: None,
+        })
+        .collect()
+}
+
+fn set_op_output_exprs(source_id: usize, output_columns: &[QueryColumn]) -> Vec<Expr> {
+    output_columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            Expr::Var(Var {
+                varno: source_id,
+                varattno: user_attrno(index),
+                varlevelsup: 0,
+                vartype: column.sql_type,
+            })
+        })
+        .collect()
+}
+
+fn set_op_columns_hashable(output_columns: &[QueryColumn]) -> bool {
+    output_columns
+        .iter()
+        .all(|column| set_op_type_hashable(column.sql_type))
+}
+
+fn set_op_columns_sortable(output_columns: &[QueryColumn]) -> bool {
+    output_columns
+        .iter()
+        .all(|column| set_op_type_sortable(column.sql_type))
+}
+
+fn set_op_type_hashable(sql_type: SqlType) -> bool {
+    if sql_type.is_array {
+        return set_op_type_hashable(sql_type.element_type());
+    }
+    !matches!(
+        sql_type.kind,
+        SqlTypeKind::VarBit
+            | SqlTypeKind::Bit
+            | SqlTypeKind::Record
+            | SqlTypeKind::Composite
+            | SqlTypeKind::Json
+            | SqlTypeKind::JsonPath
+            | SqlTypeKind::Xml
+    )
+}
+
+fn set_op_type_sortable(sql_type: SqlType) -> bool {
+    if sql_type.is_array {
+        return set_op_type_sortable(sql_type.element_type());
+    }
+    !matches!(
+        sql_type.kind,
+        SqlTypeKind::Xid
+            | SqlTypeKind::Json
+            | SqlTypeKind::Jsonb
+            | SqlTypeKind::JsonPath
+            | SqlTypeKind::Xml
+            | SqlTypeKind::TsVector
+            | SqlTypeKind::TsQuery
+    )
 }
 
 fn build_cte_scan_path(
@@ -1128,6 +1746,22 @@ fn subquery_filter_pushdown_is_safe(query: &Query) -> bool {
         && query.set_operation.is_none()
 }
 
+fn set_operation_filter_pushdown_is_safe(query: &Query) -> bool {
+    !query.distinct
+        && query.group_by.is_empty()
+        && query.accumulators.is_empty()
+        && query.window_clauses.is_empty()
+        && query.having_qual.is_none()
+        && query.sort_clause.is_empty()
+        && query.limit_count.is_none()
+        && query.limit_offset == 0
+        && query.locking_clause.is_none()
+        && query.row_marks.is_empty()
+        && !query.has_target_srfs
+        && query.recursive_union.is_none()
+        && query.set_operation.is_some()
+}
+
 fn push_subquery_filter(
     rtindex: usize,
     mut query: Query,
@@ -1136,6 +1770,9 @@ fn push_subquery_filter(
     let Some(filter) = filter else {
         return (query, None);
     };
+    if query.set_operation.is_some() {
+        return push_set_operation_filter(rtindex, query, filter);
+    }
     if !subquery_filter_pushdown_is_safe(&query) {
         return (query, Some(filter));
     }
@@ -1154,6 +1791,256 @@ fn push_subquery_filter(
         None => pushed,
     });
     (query, None)
+}
+
+fn visible_query_targets(query: &Query) -> Vec<&crate::include::nodes::primnodes::TargetEntry> {
+    query
+        .target_list
+        .iter()
+        .filter(|target| !target.resjunk)
+        .collect()
+}
+
+fn push_set_operation_filter(
+    rtindex: usize,
+    mut query: Query,
+    filter: Expr,
+) -> (Query, Option<Expr>) {
+    if !set_operation_filter_pushdown_is_safe(&query) {
+        return (query, Some(filter));
+    }
+    let Some(mut set_operation) = query.set_operation.take() else {
+        return (query, Some(filter));
+    };
+    let original_set_operation = set_operation.clone();
+    let visible_targets = visible_query_targets(&query);
+    let Some(setop_filter) =
+        rewrite_filter_for_subquery(filter.clone(), rtindex, &visible_targets, &query)
+    else {
+        query.set_operation = Some(set_operation);
+        return (query, Some(filter));
+    };
+
+    let push_distinct = matches!(set_operation.op, SetOperator::Union { all: false })
+        && set_operation_filter_is_safe_for_distinct(&setop_filter, &set_operation.inputs);
+    let push_all = matches!(set_operation.op, SetOperator::Union { all: true });
+    if !push_all && !push_distinct {
+        query.set_operation = Some(set_operation);
+        return (query, Some(filter));
+    }
+
+    let mut pushed_inputs = Vec::with_capacity(set_operation.inputs.len());
+    for child in set_operation.inputs {
+        let child_targets = visible_query_targets(&child);
+        let Some(child_filter) =
+            rewrite_filter_for_subquery_relaxed(setop_filter.clone(), 1, &child_targets)
+        else {
+            query.set_operation = Some(original_set_operation);
+            return (query, Some(filter));
+        };
+        let Some(child) = push_filter_into_child_query(child, child_filter, push_all) else {
+            continue;
+        };
+        pushed_inputs.push(child);
+    }
+
+    set_operation.inputs = pushed_inputs;
+    query.set_operation = Some(set_operation);
+    (query, None)
+}
+
+fn set_operation_filter_is_safe_for_distinct(filter: &Expr, inputs: &[Query]) -> bool {
+    !expr_contains_set_returning(filter)
+        && !expr_contains_planner_volatile(filter)
+        && inputs.iter().all(|input| {
+            visible_query_targets(input).iter().all(|target| {
+                !expr_contains_set_returning(&target.expr)
+                    && !expr_contains_planner_volatile(&target.expr)
+            })
+        })
+}
+
+fn push_filter_into_child_query(
+    mut query: Query,
+    filter: Expr,
+    prune_false: bool,
+) -> Option<Query> {
+    query.where_qual = Some(match query.where_qual.take() {
+        Some(existing) => Expr::and(existing, filter),
+        None => filter,
+    });
+    let mut folded = super::super::fold_query_constants(query.clone()).unwrap_or(query);
+    match folded.where_qual.as_ref() {
+        Some(Expr::Const(Value::Bool(false))) if prune_false => None,
+        Some(Expr::Const(Value::Bool(true))) => {
+            folded.where_qual = None;
+            Some(folded)
+        }
+        _ => Some(folded),
+    }
+}
+
+fn rewrite_filter_for_subquery_relaxed(
+    expr: Expr,
+    rtindex: usize,
+    targets: &[&crate::include::nodes::primnodes::TargetEntry],
+) -> Option<Expr> {
+    match expr {
+        Expr::Var(var) => {
+            if var.varlevelsup != 0 || var.varno != rtindex {
+                return None;
+            }
+            let index = crate::include::nodes::primnodes::attrno_index(var.varattno)?;
+            Some(targets.get(index)?.expr.clone())
+        }
+        Expr::Param(_) | Expr::Const(_) => Some(expr),
+        Expr::Op(mut op) => {
+            op.args = op
+                .args
+                .into_iter()
+                .map(|arg| rewrite_filter_for_subquery_relaxed(arg, rtindex, targets))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Expr::Op(op))
+        }
+        Expr::Bool(mut bool_expr) => {
+            bool_expr.args = bool_expr
+                .args
+                .into_iter()
+                .map(|arg| rewrite_filter_for_subquery_relaxed(arg, rtindex, targets))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Expr::Bool(bool_expr))
+        }
+        Expr::Func(mut func) => {
+            func.args = func
+                .args
+                .into_iter()
+                .map(|arg| rewrite_filter_for_subquery_relaxed(arg, rtindex, targets))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Expr::Func(func))
+        }
+        Expr::Cast(inner, ty) => Some(Expr::Cast(
+            Box::new(rewrite_filter_for_subquery_relaxed(
+                *inner, rtindex, targets,
+            )?),
+            ty,
+        )),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Some(Expr::Collate {
+            expr: Box::new(rewrite_filter_for_subquery_relaxed(
+                *expr, rtindex, targets,
+            )?),
+            collation_oid,
+        }),
+        Expr::IsNull(inner) => Some(Expr::IsNull(Box::new(rewrite_filter_for_subquery_relaxed(
+            *inner, rtindex, targets,
+        )?))),
+        Expr::IsNotNull(inner) => Some(Expr::IsNotNull(Box::new(
+            rewrite_filter_for_subquery_relaxed(*inner, rtindex, targets)?,
+        ))),
+        Expr::IsDistinctFrom(left, right) => Some(Expr::IsDistinctFrom(
+            Box::new(rewrite_filter_for_subquery_relaxed(
+                *left, rtindex, targets,
+            )?),
+            Box::new(rewrite_filter_for_subquery_relaxed(
+                *right, rtindex, targets,
+            )?),
+        )),
+        Expr::IsNotDistinctFrom(left, right) => Some(Expr::IsNotDistinctFrom(
+            Box::new(rewrite_filter_for_subquery_relaxed(
+                *left, rtindex, targets,
+            )?),
+            Box::new(rewrite_filter_for_subquery_relaxed(
+                *right, rtindex, targets,
+            )?),
+        )),
+        Expr::Coalesce(left, right) => Some(Expr::Coalesce(
+            Box::new(rewrite_filter_for_subquery_relaxed(
+                *left, rtindex, targets,
+            )?),
+            Box::new(rewrite_filter_for_subquery_relaxed(
+                *right, rtindex, targets,
+            )?),
+        )),
+        _ => None,
+    }
+}
+
+fn expr_contains_planner_volatile(expr: &Expr) -> bool {
+    match expr {
+        Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => true,
+        Expr::Op(op) => op.args.iter().any(expr_contains_planner_volatile),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_planner_volatile),
+        Expr::Func(func) => func.args.iter().any(expr_contains_planner_volatile),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            expr_contains_planner_volatile(inner)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_planner_volatile(expr)
+                || expr_contains_planner_volatile(pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_planner_volatile(expr))
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_contains_planner_volatile(inner),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_planner_volatile(left) || expr_contains_planner_volatile(right)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_planner_volatile(&saop.left)
+                || expr_contains_planner_volatile(&saop.right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_planner_volatile),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_planner_volatile(expr)),
+        Expr::FieldSelect { expr, .. } => expr_contains_planner_volatile(expr),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_planner_volatile(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_planner_volatile)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_planner_volatile)
+                })
+        }
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|expr| expr_contains_planner_volatile(expr))
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_planner_volatile(&arm.expr)
+                        || expr_contains_planner_volatile(&arm.result)
+                })
+                || expr_contains_planner_volatile(&case_expr.defresult)
+        }
+        Expr::SetReturning(_) => true,
+        _ => false,
+    }
 }
 
 fn subquery_target_preserves_simple_source_name(
@@ -1450,6 +2337,12 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             .get(rtindex)
             .and_then(Option::as_ref)
             .and_then(base_filter_expr);
+        let required_index_only_attrs = collect_required_index_only_attrs_for_root(
+            root,
+            rtindex,
+            filter.as_ref(),
+            query_order_items.as_deref(),
+        );
         let mut children = Vec::new();
         let mut ordered_children = Vec::new();
         let mut ordered_ok = query_order_items.is_some();
@@ -1484,6 +2377,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     rte.desc.clone(),
                     filter.clone(),
                     order_items,
+                    &required_index_only_attrs,
                     root.config,
                     catalog,
                 ))
@@ -1584,6 +2478,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                         relids: vec![rtindex],
                         source_id: rtindex,
                         desc: rte.desc.clone(),
+                        child_roots: Vec::new(),
                         children: Vec::new(),
                     }),
                 },
@@ -1598,6 +2493,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     relids: vec![rtindex],
                     source_id: rtindex,
                     desc: rte.desc.clone(),
+                    child_roots: Vec::new(),
                     children,
                 },
                 catalog,
@@ -1632,6 +2528,17 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         return;
     }
     let query_order_items = query_order_items_for_base_rel(root, rtindex);
+    let base_filter = root
+        .simple_rel_array
+        .get(rtindex)
+        .and_then(Option::as_ref)
+        .and_then(base_filter_expr);
+    let required_index_only_attrs = collect_required_index_only_attrs_for_root(
+        root,
+        rtindex,
+        base_filter.as_ref(),
+        query_order_items.as_deref(),
+    );
     let Some(rel) = root
         .simple_rel_array
         .get_mut(rtindex)
@@ -1664,8 +2571,9 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             relispopulated,
             toast,
             rte.desc.clone(),
-            base_filter_expr(rel),
+            base_filter,
             query_order_items,
+            &required_index_only_attrs,
             root.config,
             catalog,
         )),
@@ -2609,6 +3517,7 @@ fn collect_partitionwise_join_candidate_path(
             relids: relids_union(&left_rel.relids, &right_rel.relids),
             source_id: next_synthetic_slot_id(),
             desc: query_columns_desc(output_columns),
+            child_roots: Vec::new(),
             children,
         },
         catalog,
@@ -2831,6 +3740,7 @@ fn prefer_partitionwise_path_cost(path: Path, existing_paths: &[Path]) -> Path {
             relids,
             source_id,
             desc,
+            child_roots,
             children,
         } => Path::Append {
             plan_info: PlanEstimate::new(
@@ -2843,6 +3753,7 @@ fn prefer_partitionwise_path_cost(path: Path, existing_paths: &[Path]) -> Path {
             relids,
             source_id,
             desc,
+            child_roots,
             children,
         },
         other => other,

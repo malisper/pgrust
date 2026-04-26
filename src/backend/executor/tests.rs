@@ -182,6 +182,7 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         row_type_oid: 60_000u32.saturating_add(rel.rel_number),
         array_type_oid: 61_000u32.saturating_add(rel.rel_number),
         reltoastrelid: 0,
+        relhasindex: false,
         relpersistence: 'p',
         relkind: 'r',
         relispopulated: true,
@@ -920,6 +921,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         transaction_lock_scope_id: None,
         next_command_id: 0,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+        random_state: crate::backend::executor::PgPrngState::shared(),
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
         system_bindings: Vec::new(),
@@ -930,7 +932,10 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
         catalog: None,
-        compiled_functions: std::collections::HashMap::new(),
+        plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
+            crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
+        )),
+        pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
@@ -991,6 +996,7 @@ fn run_plan(
         transaction_lock_scope_id: None,
         next_command_id: 0,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+        random_state: crate::backend::executor::PgPrngState::shared(),
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
         system_bindings: Vec::new(),
@@ -1001,7 +1007,10 @@ fn run_plan(
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
         catalog: None,
-        compiled_functions: std::collections::HashMap::new(),
+        plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
+            crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
+        )),
+        pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
@@ -1098,6 +1107,7 @@ fn first_tuple_slot_kind_for_sql(
             transaction_lock_scope_id: None,
             next_command_id: 0,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            random_state: crate::backend::executor::PgPrngState::shared(),
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
@@ -1108,7 +1118,10 @@ fn first_tuple_slot_kind_for_sql(
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
-            compiled_functions: std::collections::HashMap::new(),
+            plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
+                crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
+            )),
+            pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
@@ -1187,6 +1200,7 @@ fn first_tuple_slot_kind_for_plan(
             transaction_lock_scope_id: None,
             next_command_id: 0,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            random_state: crate::backend::executor::PgPrngState::shared(),
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
@@ -1197,7 +1211,10 @@ fn first_tuple_slot_kind_for_plan(
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             catalog: None,
-            compiled_functions: std::collections::HashMap::new(),
+            plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
+                crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
+            )),
+            pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
@@ -1290,6 +1307,7 @@ fn run_sql_with_catalog(
             transaction_lock_scope_id: None,
             next_command_id: 0,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            random_state: crate::backend::executor::PgPrngState::shared(),
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
@@ -1300,7 +1318,10 @@ fn run_sql_with_catalog(
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
-            compiled_functions: std::collections::HashMap::new(),
+            plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
+                crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
+            )),
+            pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
@@ -2958,6 +2979,102 @@ fn setop_join_branch_executes_with_child_local_vars() {
         vec![vec![Value::Int32(1)], vec![Value::Int32(3)]],
     );
 }
+
+#[test]
+fn union_deduplicates_bpchar_cast_to_varchar_padding() {
+    let base = temp_dir("union_bpchar_varchar_padding");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 'a'::varchar union select 'a   '::char(4)::varchar order by 1",
+        )
+        .unwrap(),
+        vec![vec![Value::Text("a".into())]],
+    );
+}
+
+#[test]
+fn empty_select_set_operations_execute() {
+    let base = temp_dir("empty_select_setops");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select union select").unwrap(),
+        vec![vec![]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select intersect select",
+        )
+        .unwrap(),
+        vec![vec![]],
+    );
+    assert_query_rows(
+        run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select except select").unwrap(),
+        Vec::new(),
+    );
+}
+
+#[test]
+fn set_operation_accepts_parenthesized_values_operand() {
+    let base = temp_dir("setop_parenthesized_values");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 1 union all (values (2)) order by 1",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]],
+    );
+}
+
+#[test]
+fn cte_materialization_markers_are_accepted_for_zero_column_setops() {
+    let base = temp_dir("cte_materialized_zero_column_setops");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    for sql in [
+        "with cte as materialized (select s from generate_series(1,2) s)
+         select from cte union select from cte",
+        "with cte as not materialized (select s from generate_series(1,2) s)
+         select from cte union select from cte",
+    ] {
+        assert_query_rows(
+            run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap(),
+            vec![vec![]],
+        );
+    }
+}
+
+#[test]
+fn set_operation_string_literal_follows_numeric_peer_type() {
+    let base = temp_dir("setop_unknown_literal_numeric_peer");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '3.4'::numeric union select 'foo'",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "invalid input syntax for type numeric: \"foo\""
+    );
+}
+
 #[test]
 fn select_sql_plain_varchar_cast_preserves_text() {
     let base = temp_dir("select_sql_plain_varchar_cast");
@@ -3129,6 +3246,70 @@ fn insert_sql_inserts_multiple_rows() {
                 ]
             );
         }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn insert_values_generate_series_expands_rows() {
+    let mut harness = SeededSqlHarness::new("insert_values_generate_series", catalog());
+    let xid = harness.txns.begin();
+    assert_eq!(
+        harness
+            .execute(
+                xid,
+                "insert into people (id, name) values (generate_series(1, 3), repeat('x', 2))",
+            )
+            .unwrap(),
+        StatementResult::AffectedRows(3)
+    );
+    harness.txns.commit(xid).unwrap();
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select id, name from people order by id",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => assert_eq!(
+            rows,
+            vec![
+                vec![Value::Int32(1), Value::Text("xx".into())],
+                vec![Value::Int32(2), Value::Text("xx".into())],
+                vec![Value::Int32(3), Value::Text("xx".into())],
+            ]
+        ),
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn insert_values_mixed_project_set_rows_preserve_order() {
+    let mut harness = SeededSqlHarness::new("insert_values_mixed_project_set", catalog());
+    let xid = harness.txns.begin();
+    assert_eq!(
+        harness
+            .execute(
+                xid,
+                "insert into people (id, name) values (1, 'a'), (generate_series(2, 3), 'b'), (4, 'c')",
+            )
+            .unwrap(),
+        StatementResult::AffectedRows(4)
+    );
+    harness.txns.commit(xid).unwrap();
+    match harness
+        .execute(INVALID_TRANSACTION_ID, "select id, name from people")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => assert_eq!(
+            rows,
+            vec![
+                vec![Value::Int32(1), Value::Text("a".into())],
+                vec![Value::Int32(2), Value::Text("b".into())],
+                vec![Value::Int32(3), Value::Text("b".into())],
+                vec![Value::Int32(4), Value::Text("c".into())],
+            ]
+        ),
         other => panic!("expected query result, got {:?}", other),
     }
 }
@@ -10845,6 +11026,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         transaction_lock_scope_id: None,
         next_command_id: 0,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+        random_state: crate::backend::executor::PgPrngState::shared(),
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
         system_bindings: Vec::new(),
@@ -10855,7 +11037,10 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
         catalog: catalog.materialize_visible_catalog(),
-        compiled_functions: std::collections::HashMap::new(),
+        plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
+            crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
+        )),
+        pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
@@ -12906,6 +13091,28 @@ fn select_list_generate_series_expands_rows() {
             vec![Value::Int32(3)],
         ],
     );
+}
+
+#[test]
+fn select_list_generate_series_preserves_output_alias() {
+    let base = temp_dir("project_set_generate_series_alias");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select generate_series(1, 2) as x",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["x"]);
+            assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
 }
 
 #[test]
@@ -16369,6 +16576,220 @@ fn random_returns_float_in_range() {
     }
 }
 
+fn single_column_values(result: StatementResult) -> Vec<Value> {
+    match result {
+        StatementResult::Query { rows, .. } => rows
+            .into_iter()
+            .map(|mut row| {
+                assert_eq!(row.len(), 1);
+                row.remove(0)
+            })
+            .collect(),
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+fn assert_float_sequence(values: &[Value], expected: &[f64], tolerance: f64) {
+    assert_eq!(values.len(), expected.len());
+    for (value, expected) in values.iter().zip(expected) {
+        match value {
+            Value::Float64(actual) => assert!(
+                (actual - expected).abs() <= tolerance,
+                "expected {expected}, got {actual}"
+            ),
+            other => panic!("expected Float64, got {:?}", other),
+        }
+    }
+}
+
+#[test]
+fn setseed_drives_postgres_compatible_random_sequence() {
+    let mut harness = SeededSqlHarness::new("setseed_random_sequence", catalog());
+
+    assert_eq!(
+        single_column_values(
+            harness
+                .execute(INVALID_TRANSACTION_ID, "select setseed(0.5)")
+                .unwrap()
+        ),
+        vec![Value::Null]
+    );
+
+    let random_values = single_column_values(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select random() from generate_series(1, 10)",
+            )
+            .unwrap(),
+    );
+    assert_float_sequence(
+        &random_values,
+        &[
+            0.9851677175347999,
+            0.825301858027981,
+            0.12974610012450416,
+            0.16356291958601088,
+            0.6476186144084,
+            0.8822771983038762,
+            0.1404566845227775,
+            0.15619865764623442,
+            0.5145227426983392,
+            0.7712969548127826,
+        ],
+        0.0,
+    );
+
+    let normal_values = single_column_values(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select random_normal() from generate_series(1, 10)",
+            )
+            .unwrap(),
+    );
+    assert_float_sequence(
+        &normal_values,
+        &[
+            0.20853464493838,
+            0.26453024054096,
+            -0.60675246790043,
+            0.82579942785265,
+            1.7011161173536,
+            -0.22344546371619,
+            0.249712419191,
+            -1.2494722990669,
+            0.12562715204368,
+            0.47539161454401,
+        ],
+        1e-13,
+    );
+
+    let shifted_normal_values = single_column_values(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select random_normal(mean => 1, stddev => 0.1) from generate_series(1, 10)",
+            )
+            .unwrap(),
+    );
+    assert_float_sequence(
+        &shifted_normal_values,
+        &[
+            1.0060597281173,
+            1.09685453015,
+            1.0286920613201,
+            0.90947567671234,
+            0.98372476313426,
+            0.93934454957762,
+            1.1871350020636,
+            0.96225768429293,
+            0.91444120680041,
+            0.96403105557543,
+        ],
+        1e-13,
+    );
+
+    assert_eq!(
+        single_column_values(
+            harness
+                .execute(
+                    INVALID_TRANSACTION_ID,
+                    "select random(1, 6) from generate_series(1, 10)"
+                )
+                .unwrap()
+        ),
+        vec![
+            Value::Int32(5),
+            Value::Int32(4),
+            Value::Int32(5),
+            Value::Int32(1),
+            Value::Int32(6),
+            Value::Int32(1),
+            Value::Int32(1),
+            Value::Int32(3),
+            Value::Int32(6),
+            Value::Int32(5),
+        ]
+    );
+    assert_eq!(
+        single_column_values(
+            harness
+                .execute(
+                    INVALID_TRANSACTION_ID,
+                    "select random(-2147483648, 2147483647) from generate_series(1, 10)"
+                )
+                .unwrap()
+        ),
+        vec![
+            Value::Int32(-84380014),
+            Value::Int32(1287883594),
+            Value::Int32(-1927252904),
+            Value::Int32(13516867),
+            Value::Int32(-1902961616),
+            Value::Int32(-1824286201),
+            Value::Int32(-871264469),
+            Value::Int32(-1225880415),
+            Value::Int32(229836730),
+            Value::Int32(-116039023),
+        ]
+    );
+    assert_eq!(
+        single_column_values(
+            harness
+                .execute(
+                    INVALID_TRANSACTION_ID,
+                    "select random(-9223372036854775808, 9223372036854775807) from generate_series(1, 10)"
+                )
+                .unwrap()
+        ),
+        vec![
+            Value::Int64(-6205280962992680052),
+            Value::Int64(-3583519428011353337),
+            Value::Int64(511801786318122700),
+            Value::Int64(4672737727839409655),
+            Value::Int64(-6674868801536280768),
+            Value::Int64(-7816052100626646489),
+            Value::Int64(-4340613370136007199),
+            Value::Int64(-5873174504107419786),
+            Value::Int64(-2249910101649817824),
+            Value::Int64(-4493828993910792325),
+        ]
+    );
+    assert_eq!(
+        single_column_values(
+            harness
+                .execute(
+                    INVALID_TRANSACTION_ID,
+                    "select random(-1e30, 1e30) from generate_series(1, 3)"
+                )
+                .unwrap()
+        ),
+        vec![
+            Value::Numeric("-732116469803315942112255539315".into()),
+            Value::Numeric("794641423514877972798449289857".into()),
+            Value::Numeric("-576932746026123093304638334719".into()),
+        ]
+    );
+}
+
+#[test]
+fn setseed_rejects_invalid_values() {
+    let base = temp_dir("setseed_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    for sql in [
+        "select setseed(1.1)",
+        "select setseed(-1.1)",
+        "select setseed('NaN'::float8)",
+    ] {
+        let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::DetailedError { sqlstate, .. } if sqlstate == "22023"
+        ));
+    }
+}
+
 #[test]
 fn bounded_random_uses_requested_result_types_and_ranges() {
     let base = temp_dir("bounded_random_ranges");
@@ -16398,6 +16819,24 @@ fn bounded_random_uses_requested_result_types_and_ranges() {
 }
 
 #[test]
+fn bounded_random_results_work_in_typed_comparisons() {
+    let base = temp_dir("bounded_random_comparisons");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    for sql in [
+        "select count(*) filter (where r <= 2::int4) >= 0 from (select random(1::int4, 2::int4) r from generate_series(1, 20)) ss",
+        "select count(*) filter (where r < 0::int8) >= 0 from (select random(-9223372036854775808, 9223372036854775807) r from generate_series(1, 20)) ss",
+        "select count(*) filter (where r < 0::numeric) >= 0 from (select random(-1.5, 1.5) r from generate_series(1, 20)) ss",
+        "select max(abs((random(0, 999999) / 1000000.0) - 0.5)) < 1.0::float8 from generate_series(1, 20)",
+        "select max(abs(random(0, 0.999999) - 0.5)) < 1.0::float8 from generate_series(1, 20)",
+    ] {
+        assert_query_rows(
+            run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap(),
+            vec![vec![Value::Bool(true)]],
+        );
+    }
+}
+
+#[test]
 fn bounded_random_reports_invalid_ranges() {
     let base = temp_dir("bounded_random_errors");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -16421,6 +16860,19 @@ fn bounded_random_reports_invalid_ranges() {
         err,
         ExecError::DetailedError { message, sqlstate, .. }
             if message == "lower bound cannot be NaN" && sqlstate == "22023"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select random(0, 'NaN'::numeric)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "upper bound cannot be NaN" && sqlstate == "22023"
     ));
 
     let err = run_sql(
@@ -22515,6 +22967,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
             transaction_lock_scope_id: None,
             next_command_id: 0,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            random_state: crate::backend::executor::PgPrngState::shared(),
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
@@ -22525,7 +22978,10 @@ fn large_object_metadata_tracks_create_and_unlink() {
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
-            compiled_functions: std::collections::HashMap::new(),
+            plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
+                crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
+            )),
+            pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),

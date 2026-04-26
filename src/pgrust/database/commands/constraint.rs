@@ -85,6 +85,7 @@ fn ddl_executor_context(
         transaction_lock_scope_id: None,
         next_command_id: cid,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+        random_state: crate::backend::executor::PgPrngState::shared(),
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
         system_bindings: Vec::new(),
@@ -95,7 +96,8 @@ fn ddl_executor_context(
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
         catalog: catalog.materialize_visible_catalog(),
-        compiled_functions: std::collections::HashMap::new(),
+        plpgsql_function_cache: db.plpgsql_function_cache(client_id),
+        pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
@@ -1485,7 +1487,7 @@ impl Database {
                     waiter: None,
                     interrupts,
                 };
-                let effect = self
+                let (constraint_row, effect) = self
                     .catalog
                     .write()
                     .create_foreign_key_constraint_mvcc(
@@ -1508,6 +1510,13 @@ impl Database {
                     )
                     .map_err(map_catalog_error)?;
                 catalog_effects.push(effect);
+                self.create_foreign_key_triggers_in_transaction(
+                    client_id,
+                    xid,
+                    cid.saturating_add(1),
+                    &constraint_row,
+                    catalog_effects,
+                )?;
             }
         }
 
@@ -1715,11 +1724,21 @@ impl Database {
 
         match row.contype {
             CONSTRAINT_CHECK | CONSTRAINT_FOREIGN => {
+                if row.contype == CONSTRAINT_FOREIGN {
+                    self.drop_foreign_key_triggers_in_transaction(
+                        client_id,
+                        xid,
+                        cid,
+                        &row,
+                        &catalog,
+                        catalog_effects,
+                    )?;
+                }
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
                     xid,
-                    cid,
+                    cid: cid.saturating_add(catalog_effects.len() as u32),
                     client_id,
                     waiter: None,
                     interrupts,

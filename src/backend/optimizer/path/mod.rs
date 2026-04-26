@@ -106,6 +106,7 @@ pub(super) fn estimate_index_candidate(
     stats: &RelationStats,
     spec: crate::backend::optimizer::IndexPathSpec,
     order_items: Option<Vec<OrderByEntry>>,
+    target_index_only: bool,
     config: PlannerConfig,
     catalog: &dyn CatalogLookup,
 ) -> AccessCandidate {
@@ -120,9 +121,17 @@ pub(super) fn estimate_index_candidate(
         spec,
         order_items,
         None,
+        target_index_only,
         config,
         catalog,
     )
+}
+
+pub(super) fn index_supports_index_only_attrs(
+    index: &BoundIndexRelation,
+    required_attrs: &[usize],
+) -> bool {
+    costsize::index_supports_index_only_attrs(index, required_attrs)
 }
 
 pub(super) fn estimate_bitmap_candidate(

@@ -1,6 +1,8 @@
 use super::*;
 use crate::include::executor::execdesc::CommandType;
-use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
+use crate::include::nodes::parsenodes::{
+    JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RangeTblEref,
+};
 use crate::include::nodes::primnodes::{
     Aggref, BoolExpr, FuncExpr, OpExpr, OrderByEntry, ScalarArrayOpExpr, SetReturningExpr, SubLink,
     attrno_index, is_system_attr, user_attrno,
@@ -22,6 +24,13 @@ pub(super) struct JoinAliasInfo {
     pub(super) joinmergedcols: usize,
     pub(super) joinleftcols: Vec<usize>,
     pub(super) joinrightcols: Vec<usize>,
+}
+
+fn rte_eref(aliasname: impl Into<String>, columns: &[QueryColumn]) -> RangeTblEref {
+    RangeTblEref {
+        aliasname: aliasname.into(),
+        colnames: columns.iter().map(|column| column.name.clone()).collect(),
+    }
 }
 
 pub(crate) fn analyze_select_query_with_outer(
@@ -93,7 +102,9 @@ impl AnalyzedFrom {
             .collect::<Vec<_>>();
         Self {
             rtable: vec![RangeTblEntry {
-                alias: Some(relation_name),
+                alias: Some(relation_name.clone()),
+                alias_preserves_source_names: false,
+                eref: rte_eref(relation_name, &output_columns),
                 desc,
                 inh,
                 security_quals: Vec::new(),
@@ -121,6 +132,8 @@ impl AnalyzedFrom {
         Self {
             rtable: vec![RangeTblEntry {
                 alias: None,
+                alias_preserves_source_names: false,
+                eref: rte_eref("*VALUES*", &output_columns),
                 desc,
                 inh: false,
                 security_quals: Vec::new(),
@@ -146,6 +159,8 @@ impl AnalyzedFrom {
         Self {
             rtable: vec![RangeTblEntry {
                 alias: None,
+                alias_preserves_source_names: false,
+                eref: rte_eref("function_call", &output_columns),
                 desc,
                 inh: false,
                 security_quals: Vec::new(),
@@ -167,6 +182,8 @@ impl AnalyzedFrom {
         Self {
             rtable: vec![RangeTblEntry {
                 alias: None,
+                alias_preserves_source_names: false,
+                eref: rte_eref(format!("worktable {worktable_id}"), &output_columns),
                 desc,
                 inh: false,
                 security_quals: Vec::new(),
@@ -189,6 +206,8 @@ impl AnalyzedFrom {
         Self {
             rtable: vec![RangeTblEntry {
                 alias: None,
+                alias_preserves_source_names: false,
+                eref: rte_eref(format!("cte {cte_id}"), &output_columns),
                 desc,
                 inh: false,
                 security_quals: Vec::new(),
@@ -214,6 +233,8 @@ impl AnalyzedFrom {
         Self {
             rtable: vec![RangeTblEntry {
                 alias: None,
+                alias_preserves_source_names: false,
+                eref: rte_eref("subquery", &output_columns),
                 desc,
                 inh: false,
                 security_quals: Vec::new(),
@@ -279,6 +300,8 @@ impl AnalyzedFrom {
         };
         rtable.push(RangeTblEntry {
             alias: None,
+            alias_preserves_source_names: false,
+            eref: rte_eref("join", &output_columns),
             desc,
             inh: false,
             security_quals: Vec::new(),

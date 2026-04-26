@@ -109,8 +109,57 @@ fn validate_inherit_columns(
                 sqlstate: "42804",
             });
         }
+        match (parent_column.generated, child_column.generated) {
+            (Some(_), None) => {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "column \"{}\" in child table must be a generated column",
+                        parent_column.name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42804",
+                });
+            }
+            (None, Some(_)) => {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "column \"{}\" in child table must not be a generated column",
+                        parent_column.name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42804",
+                });
+            }
+            (Some(parent_kind), Some(child_kind)) if parent_kind != child_kind => {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "column \"{}\" inherits from generated column of different kind",
+                        parent_column.name
+                    ),
+                    detail: Some(format!(
+                        "Parent column is {}, child column is {}.",
+                        generated_kind_name(parent_kind),
+                        generated_kind_name(child_kind)
+                    )),
+                    hint: None,
+                    sqlstate: "42804",
+                });
+            }
+            _ => {}
+        }
     }
     Ok(())
+}
+
+fn generated_kind_name(
+    kind: crate::include::nodes::parsenodes::ColumnGeneratedKind,
+) -> &'static str {
+    match kind {
+        crate::include::nodes::parsenodes::ColumnGeneratedKind::Virtual => "VIRTUAL",
+        crate::include::nodes::parsenodes::ColumnGeneratedKind::Stored => "STORED",
+    }
 }
 
 fn validate_inherit_constraints(

@@ -740,7 +740,7 @@ mod tests {
     use crate::backend::parser::SqlTypeKind;
     use crate::include::executor::execdesc::CommandType;
     use crate::include::nodes::parsenodes::{
-        JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind,
+        JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RangeTblEref,
     };
     use crate::include::nodes::primnodes::{
         Expr, JoinType, OpExpr, OpExprKind, RelationDesc, TargetEntry, Var,
@@ -784,6 +784,11 @@ mod tests {
     fn base_rte() -> RangeTblEntry {
         RangeTblEntry {
             alias: None,
+            alias_preserves_source_names: false,
+            eref: RangeTblEref {
+                aliasname: "result".into(),
+                colnames: Vec::new(),
+            },
             desc: RelationDesc {
                 columns: Vec::new(),
             },
