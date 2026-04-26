@@ -22081,6 +22081,42 @@ fn timestamp_tz_now_literal_applies_declared_precision() {
 }
 
 #[test]
+fn timestamp_now_literal_applies_declared_precision() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table timestamp_tbl (d1 timestamp(2) without time zone)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into timestamp_tbl values ('now')")
+        .unwrap();
+    session.execute(&db, "select pg_sleep(0.1)").unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into timestamp_tbl values ('now')")
+        .unwrap();
+    session.execute(&db, "select pg_sleep(0.1)").unwrap();
+    session
+        .execute(&db, "insert into timestamp_tbl values ('now')")
+        .unwrap();
+    session.execute(&db, "select pg_sleep(0.1)").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from timestamp_tbl where d1 = timestamp(2) without time zone 'now'",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
 fn at_time_zone_uses_named_timezone_rules() {
     let db = Database::open_ephemeral(16).unwrap();
     let mut session = Session::new(1);
