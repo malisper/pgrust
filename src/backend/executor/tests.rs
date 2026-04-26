@@ -886,6 +886,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         large_objects: Some(std::sync::Arc::new(
             crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
         )),
+        stats_import_runtime: None,
         async_notify_runtime: None,
         advisory_locks: std::sync::Arc::new(
             crate::backend::storage::lmgr::AdvisoryLockManager::new(),
@@ -925,6 +926,8 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         timed: false,
         allow_side_effects: true,
         pending_async_notifications: Vec::new(),
+        pending_catalog_effects: Vec::new(),
+        pending_table_locks: Vec::new(),
         catalog: None,
         compiled_functions: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
@@ -954,6 +957,7 @@ fn run_plan(
         large_objects: Some(std::sync::Arc::new(
             crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
         )),
+        stats_import_runtime: None,
         async_notify_runtime: None,
         advisory_locks: std::sync::Arc::new(
             crate::backend::storage::lmgr::AdvisoryLockManager::new(),
@@ -993,6 +997,8 @@ fn run_plan(
         timed: false,
         allow_side_effects: true,
         pending_async_notifications: Vec::new(),
+        pending_catalog_effects: Vec::new(),
+        pending_table_locks: Vec::new(),
         catalog: None,
         compiled_functions: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
@@ -1058,6 +1064,7 @@ fn first_tuple_slot_kind_for_sql(
             large_objects: Some(std::sync::Arc::new(
                 crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
             )),
+            stats_import_runtime: None,
             async_notify_runtime: None,
             advisory_locks: std::sync::Arc::new(
                 crate::backend::storage::lmgr::AdvisoryLockManager::new(),
@@ -1097,6 +1104,8 @@ fn first_tuple_slot_kind_for_sql(
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -1144,6 +1153,7 @@ fn first_tuple_slot_kind_for_plan(
             large_objects: Some(std::sync::Arc::new(
                 crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
             )),
+            stats_import_runtime: None,
             async_notify_runtime: None,
             advisory_locks: std::sync::Arc::new(
                 crate::backend::storage::lmgr::AdvisoryLockManager::new(),
@@ -1183,6 +1193,8 @@ fn first_tuple_slot_kind_for_plan(
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             catalog: None,
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -1244,6 +1256,7 @@ fn run_sql_with_catalog(
             large_objects: Some(std::sync::Arc::new(
                 crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
             )),
+            stats_import_runtime: None,
             async_notify_runtime: None,
             advisory_locks: std::sync::Arc::new(
                 crate::backend::storage::lmgr::AdvisoryLockManager::new(),
@@ -1283,6 +1296,8 @@ fn run_sql_with_catalog(
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -10477,6 +10492,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         large_objects: Some(std::sync::Arc::new(
             crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
         )),
+        stats_import_runtime: None,
         async_notify_runtime: None,
         advisory_locks: std::sync::Arc::new(
             crate::backend::storage::lmgr::AdvisoryLockManager::new(),
@@ -10516,6 +10532,8 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         timed: false,
         allow_side_effects: true,
         pending_async_notifications: Vec::new(),
+        pending_catalog_effects: Vec::new(),
+        pending_table_locks: Vec::new(),
         catalog: catalog.materialize_visible_catalog(),
         compiled_functions: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
@@ -21897,6 +21915,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
                 crate::pgrust::database::SequenceRuntime::new_ephemeral(),
             )),
             large_objects: Some(large_objects.clone()),
+            stats_import_runtime: None,
             async_notify_runtime: None,
             advisory_locks: std::sync::Arc::new(
                 crate::backend::storage::lmgr::AdvisoryLockManager::new(),
@@ -21936,6 +21955,8 @@ fn large_object_metadata_tracks_create_and_unlink() {
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),

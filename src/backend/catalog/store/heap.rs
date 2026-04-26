@@ -5750,6 +5750,38 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn set_relation_import_stats_mvcc(
+        &mut self,
+        relation_oid: u32,
+        relpages: Option<i32>,
+        reltuples: Option<f64>,
+        relallvisible: Option<i32>,
+        relallfrozen: Option<i32>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, _new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                if let Some(relpages) = relpages {
+                    entry.relpages = relpages;
+                }
+                if let Some(reltuples) = reltuples {
+                    entry.reltuples = reltuples;
+                }
+                if let Some(relallvisible) = relallvisible {
+                    entry.relallvisible = relallvisible;
+                }
+                if let Some(relallfrozen) = relallfrozen {
+                    entry.relallfrozen = relallfrozen;
+                }
+                Ok(((), vec![BootstrapCatalogKind::PgClass]))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
     pub fn replace_relation_statistics_mvcc(
         &mut self,
         relation_oid: u32,
@@ -5775,6 +5807,74 @@ impl CatalogStore {
                 ctx,
                 &PhysicalCatalogRows {
                     statistics,
+                    ..PhysicalCatalogRows::default()
+                },
+                self.scope_db_oid(),
+                &kinds,
+            )?;
+        }
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
+    pub fn upsert_relation_statistic_mvcc(
+        &mut self,
+        row: PgStatisticRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let existing = relation_statistics_mvcc(self, ctx, row.starelid)?
+            .into_iter()
+            .find(|candidate| {
+                candidate.staattnum == row.staattnum && candidate.stainherit == row.stainherit
+            });
+
+        let kinds = vec![BootstrapCatalogKind::PgStatistic];
+        if let Some(existing) = existing {
+            delete_catalog_rows_subset_mvcc(
+                ctx,
+                &PhysicalCatalogRows {
+                    statistics: vec![existing],
+                    ..PhysicalCatalogRows::default()
+                },
+                self.scope_db_oid(),
+                &kinds,
+            )?;
+        }
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                statistics: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, row.starelid);
+        Ok(effect)
+    }
+
+    pub fn delete_relation_statistic_mvcc(
+        &mut self,
+        relation_oid: u32,
+        attnum: i16,
+        inherited: bool,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let existing = relation_statistics_mvcc(self, ctx, relation_oid)?
+            .into_iter()
+            .find(|candidate| candidate.staattnum == attnum && candidate.stainherit == inherited);
+        let kinds = vec![BootstrapCatalogKind::PgStatistic];
+        if let Some(existing) = existing {
+            delete_catalog_rows_subset_mvcc(
+                ctx,
+                &PhysicalCatalogRows {
+                    statistics: vec![existing],
                     ..PhysicalCatalogRows::default()
                 },
                 self.scope_db_oid(),
@@ -6540,11 +6640,7 @@ fn build_index_entry_with_relkind(
             push_unique_index_column(
                 &mut index_columns,
                 &mut used_index_column_names,
-                crate::backend::catalog::catalog::column_desc(
-                    format!("expr{}", position + 1),
-                    index_type,
-                    true,
-                ),
+                crate::backend::catalog::catalog::column_desc("expr", index_type, true),
             );
             continue;
         }
@@ -6611,12 +6707,8 @@ fn build_index_entry_with_relkind(
         relpartbound: None,
         relrowsecurity: false,
         relforcerowsecurity: false,
-        relpages: 0,
-        reltuples: if relkind_has_storage(relkind) {
-            -1.0
-        } else {
-            0.0
-        },
+        relpages: if relkind_has_storage(relkind) { 1 } else { 0 },
+        reltuples: 0.0,
         relallvisible: 0,
         relallfrozen: 0,
         relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,

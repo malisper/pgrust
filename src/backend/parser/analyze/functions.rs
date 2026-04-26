@@ -1390,6 +1390,10 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgStatGetXactFunctionCalls
             | BuiltinScalarFunction::PgStatGetXactFunctionTotalTime
             | BuiltinScalarFunction::PgStatGetXactFunctionSelfTime => args.len() == 1,
+            BuiltinScalarFunction::PgRestoreRelationStats
+            | BuiltinScalarFunction::PgRestoreAttributeStats => true,
+            BuiltinScalarFunction::PgClearRelationStats => args.len() == 2,
+            BuiltinScalarFunction::PgClearAttributeStats => args.len() == 4,
             BuiltinScalarFunction::ParseIdent => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
             BuiltinScalarFunction::ArrayLength
@@ -2128,6 +2132,16 @@ fn scalar_named_arg_signature(func: BuiltinScalarFunction) -> Option<NamedArgSig
                 Some(NamedArgDefault::Text("use_json_null")),
             ],
         }),
+        BuiltinScalarFunction::PgClearRelationStats => Some(NamedArgSignature {
+            params: &["schemaname", "relname"],
+            required: 2,
+            defaults: &[None, None],
+        }),
+        BuiltinScalarFunction::PgClearAttributeStats => Some(NamedArgSignature {
+            params: &["schemaname", "relname", "attname", "inherited"],
+            required: 4,
+            defaults: &[None, None, None, None],
+        }),
         _ => None,
     }
 }
@@ -2834,6 +2848,22 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_stat_get_xact_function_self_time",
             BuiltinScalarFunction::PgStatGetXactFunctionSelfTime,
+        ),
+        (
+            "pg_restore_relation_stats",
+            BuiltinScalarFunction::PgRestoreRelationStats,
+        ),
+        (
+            "pg_clear_relation_stats",
+            BuiltinScalarFunction::PgClearRelationStats,
+        ),
+        (
+            "pg_restore_attribute_stats",
+            BuiltinScalarFunction::PgRestoreAttributeStats,
+        ),
+        (
+            "pg_clear_attribute_stats",
+            BuiltinScalarFunction::PgClearAttributeStats,
         ),
         ("to_json", BuiltinScalarFunction::ToJson),
         ("to_jsonb", BuiltinScalarFunction::ToJsonb),
@@ -3842,6 +3872,10 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgStatGetCheckpointerWriteTime
             | BuiltinScalarFunction::PgStatGetCheckpointerSyncTime
             | BuiltinScalarFunction::PgStatGetCheckpointerStatResetTime
+            | BuiltinScalarFunction::PgRestoreRelationStats
+            | BuiltinScalarFunction::PgClearRelationStats
+            | BuiltinScalarFunction::PgRestoreAttributeStats
+            | BuiltinScalarFunction::PgClearAttributeStats
             | BuiltinScalarFunction::ToJson
             | BuiltinScalarFunction::ToJsonb
             | BuiltinScalarFunction::ArrayToJson
@@ -4213,9 +4247,70 @@ mod tests {
             resolve_scalar_function("trunc"),
             Some(BuiltinScalarFunction::Trunc)
         );
+        assert_eq!(
+            resolve_scalar_function("pg_catalog.pg_restore_relation_stats"),
+            Some(BuiltinScalarFunction::PgRestoreRelationStats)
+        );
+        assert_eq!(
+            resolve_scalar_function("pg_clear_attribute_stats"),
+            Some(BuiltinScalarFunction::PgClearAttributeStats)
+        );
         assert_eq!(resolve_scalar_function("count"), None);
         assert_eq!(resolve_scalar_function("json_array_elements"), None);
         assert_eq!(resolve_scalar_function("int4"), None);
+    }
+
+    #[test]
+    fn resolve_stats_import_calls_as_builtin_proc_rows() {
+        let catalog = Catalog::default();
+        let text = SqlType::new(SqlTypeKind::Text);
+        let int4 = SqlType::new(SqlTypeKind::Int4);
+        let bool_ty = SqlType::new(SqlTypeKind::Bool);
+        let float4 = SqlType::new(SqlTypeKind::Float4);
+
+        let restore = resolve_function_call(
+            &catalog,
+            "pg_catalog.pg_restore_relation_stats",
+            &[text, text, text, text, text, int4, text, float4],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            restore.scalar_impl,
+            Some(BuiltinScalarFunction::PgRestoreRelationStats)
+        );
+
+        let clear = resolve_function_call(
+            &catalog,
+            "pg_clear_attribute_stats",
+            &[text, text, text, bool_ty],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            clear.scalar_impl,
+            Some(BuiltinScalarFunction::PgClearAttributeStats)
+        );
+
+        let stmt = crate::backend::parser::parse_select(
+            "select pg_catalog.pg_restore_relation_stats(
+                'schemaname', 'stats_import',
+                'relname', 'test',
+                'relpages', 18::integer,
+                'reltuples', 21::real)",
+        )
+        .unwrap();
+        let planned = pg_plan_query(&stmt, &catalog).unwrap();
+        let Plan::Projection { targets, .. } = planned.plan_tree else {
+            panic!("expected projection plan");
+        };
+        let Expr::Func(func) = &targets[0].expr else {
+            panic!("expected function target");
+        };
+        assert_eq!(
+            crate::include::nodes::primnodes::expr_sql_type_hint(&func.args[7]).map(|ty| ty.kind),
+            Some(SqlTypeKind::Float4)
+        );
     }
 
     #[test]

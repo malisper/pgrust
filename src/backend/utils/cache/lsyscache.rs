@@ -2161,6 +2161,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         if let Some(temp_namespace) = owned_temp_namespace(self.db, self.client_id) {
             for (name, entry) in temp_namespace.tables {
                 relcache.insert(name.clone(), entry.entry.clone());
+                relcache.insert(format!("pg_temp.{name}"), entry.entry.clone());
                 relcache.insert(format!("{}.{}", temp_namespace.name, name), entry.entry);
             }
         }

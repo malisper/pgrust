@@ -1184,12 +1184,30 @@ fn parse_partition_of_clause(
     rest = next.trim_start();
     let partition_spec = if rest.is_empty() {
         None
-    } else {
+    } else if keyword_at_start(rest, "partition") {
         let (partition_spec, next) = parse_partition_spec_clause(rest)?;
         rest = next.trim_start();
         Some(partition_spec)
+    } else {
+        None
     };
+    if !rest.is_empty() && (keyword_at_start(rest, "with") || keyword_at_start(rest, "without")) {
+        rest = parse_partition_of_table_storage_clause(rest)?;
+    }
     Ok((parts.join("."), elements, bound, partition_spec, rest))
+}
+
+fn parse_partition_of_table_storage_clause(
+    input: &str,
+) -> Result<&str, PartitionStatementParseError> {
+    let trimmed = input.trim_start();
+    let mut pairs = SqlParser::parse(Rule::table_storage_clause, trimmed)
+        .map_err(|_| PartitionStatementParseError::Unsupported)?;
+    let pair = pairs
+        .next()
+        .ok_or(PartitionStatementParseError::Unsupported)?;
+    validate_table_storage_clause(pair)?;
+    Ok("")
 }
 
 fn parse_partition_of_elements(
@@ -15271,7 +15289,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::SessionUser => "session_user".to_string(),
         SqlExpr::CurrentRole => "current_role".to_string(),
         SqlExpr::AtTimeZone { .. } => "timezone".to_string(),
-        SqlExpr::FuncCall { name, .. } => name.clone(),
+        SqlExpr::FuncCall { name, .. } => name.rsplit('.').next().unwrap_or(name).to_string(),
         _ => "?column?".to_string(),
     }
 }

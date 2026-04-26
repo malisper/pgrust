@@ -9682,6 +9682,34 @@ fn parse_create_table_partition_of_with_subpartition_spec() {
 }
 
 #[test]
+fn parse_create_table_partition_of_with_storage_clause() {
+    match parse_statement(
+        "create table measurement_lo partition of measurement \
+         for values from (0) to (10) with (autovacuum_enabled = false)",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.partition_of.as_deref(), Some("measurement"));
+            assert_eq!(
+                ct.partition_bound,
+                Some(RawPartitionBoundSpec::Range {
+                    from: vec![RawPartitionRangeDatum::Value(SqlExpr::IntegerLiteral(
+                        "0".into()
+                    ))],
+                    to: vec![RawPartitionRangeDatum::Value(SqlExpr::IntegerLiteral(
+                        "10".into()
+                    ))],
+                    is_default: false,
+                })
+            );
+            assert_eq!(ct.partition_spec, None);
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
 fn parse_create_table_partition_of_with_table_elements() {
     match parse_statement(
         "create table measurement_lo partition of measurement \

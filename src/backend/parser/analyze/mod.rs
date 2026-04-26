@@ -1117,6 +1117,14 @@ impl CatalogLookup for IndexExpressionCatalogLookup<'_> {
         None
     }
 
+    fn lookup_relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        self.inner.lookup_relation_by_oid(relation_oid)
+    }
+
+    fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        self.inner.relation_by_oid(relation_oid)
+    }
+
     fn current_user_oid(&self) -> u32 {
         self.inner.current_user_oid()
     }
@@ -4746,22 +4754,29 @@ fn bind_set_operation_query_with_outer(
 
     let mut output_types = Vec::with_capacity(width);
     for index in 0..width {
-        let mut common = inputs[0].target_list[index].sql_type;
-        for query in &inputs[1..] {
-            let next = query.target_list[index].sql_type;
-            common = resolve_common_scalar_type(common, next).ok_or_else(|| {
-                ParseError::UnexpectedToken {
-                    expected: "set-operation column types with a common type",
-                    actual: format!(
-                        "set-operation column {} has types {} and {}",
-                        index + 1,
-                        sql_type_name(common),
-                        sql_type_name(next)
-                    ),
-                }
-            })?;
+        let mut common = None;
+        for query in &inputs {
+            let target = &query.target_list[index];
+            if matches!(target.expr, Expr::Const(Value::Null)) {
+                continue;
+            }
+            let next = target.sql_type;
+            common = Some(match common {
+                None => next,
+                Some(current) => resolve_common_scalar_type(current, next).ok_or_else(|| {
+                    ParseError::UnexpectedToken {
+                        expected: "set-operation column types with a common type",
+                        actual: format!(
+                            "set-operation column {} has types {} and {}",
+                            index + 1,
+                            sql_type_name(current),
+                            sql_type_name(next)
+                        ),
+                    }
+                })?,
+            });
         }
-        output_types.push(common);
+        output_types.push(common.unwrap_or_else(|| SqlType::new(SqlTypeKind::Text)));
     }
 
     for query in &mut inputs {

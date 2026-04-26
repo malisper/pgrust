@@ -110,7 +110,7 @@ use super::pg_regex::{
     eval_similar, eval_similar_substring, eval_sql_regex_substring,
 };
 pub(crate) use super::value_io::{format_array_text, format_array_value_text};
-use super::{ExecError, ExecutorContext, exec_next, executor_start};
+use super::{ExecError, ExecutorContext, TypedFunctionArg, exec_next, executor_start};
 use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
 use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
 use crate::backend::catalog::rowcodec::pg_description_row_from_values;
@@ -1871,6 +1871,10 @@ fn ensure_builtin_side_effects_allowed(
             | BuiltinScalarFunction::PgAdvisoryUnlock
             | BuiltinScalarFunction::PgAdvisoryUnlockShared
             | BuiltinScalarFunction::PgAdvisoryUnlockAll
+            | BuiltinScalarFunction::PgRestoreRelationStats
+            | BuiltinScalarFunction::PgClearRelationStats
+            | BuiltinScalarFunction::PgRestoreAttributeStats
+            | BuiltinScalarFunction::PgClearAttributeStats
     ) && !ctx.allow_side_effects
     {
         return Err(ExecError::DetailedError {
@@ -1903,6 +1907,10 @@ fn ensure_builtin_side_effects_allowed(
                         "pg_advisory_unlock_shared"
                     }
                     BuiltinScalarFunction::PgAdvisoryUnlockAll => "pg_advisory_unlock_all",
+                    BuiltinScalarFunction::PgRestoreRelationStats => "pg_restore_relation_stats",
+                    BuiltinScalarFunction::PgClearRelationStats => "pg_clear_relation_stats",
+                    BuiltinScalarFunction::PgRestoreAttributeStats => "pg_restore_attribute_stats",
+                    BuiltinScalarFunction::PgClearAttributeStats => "pg_clear_attribute_stats",
                     _ => unreachable!(),
                 }
             ),
@@ -4392,6 +4400,9 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
 }
 
 fn eval_record_field(value: Value, field: &str) -> Result<Value, ExecError> {
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
     let Value::Record(record) = value else {
         return Err(ExecError::DetailedError {
             message: format!("cannot select field \"{field}\" from non-record value"),
@@ -6072,6 +6083,69 @@ fn eval_builtin_function(
     ensure_builtin_side_effects_allowed(func, ctx)?;
     if let Some(result) = eval_json_record_builtin_function(func, result_type, args, slot, ctx) {
         return result;
+    }
+    if matches!(
+        func,
+        BuiltinScalarFunction::PgRestoreRelationStats
+            | BuiltinScalarFunction::PgClearRelationStats
+            | BuiltinScalarFunction::PgRestoreAttributeStats
+            | BuiltinScalarFunction::PgClearAttributeStats
+    ) {
+        let runtime = ctx
+            .stats_import_runtime
+            .clone()
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("{func:?} requires database executor context"),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            })?;
+        let typed_args = args
+            .iter()
+            .map(|arg| {
+                Ok(TypedFunctionArg {
+                    value: eval_expr(arg, slot, ctx)?,
+                    sql_type: expr_sql_type_hint(arg),
+                })
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?;
+        return match func {
+            BuiltinScalarFunction::PgRestoreRelationStats => {
+                runtime.pg_restore_relation_stats(ctx, typed_args)
+            }
+            BuiltinScalarFunction::PgClearRelationStats => {
+                if typed_args.len() != 2 {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "pg_clear_relation_stats(schemaname, relname)",
+                        actual: format!("{} args", typed_args.len()),
+                    }));
+                }
+                runtime.pg_clear_relation_stats(
+                    ctx,
+                    typed_args[0].value.clone(),
+                    typed_args[1].value.clone(),
+                )
+            }
+            BuiltinScalarFunction::PgRestoreAttributeStats => {
+                runtime.pg_restore_attribute_stats(ctx, typed_args)
+            }
+            BuiltinScalarFunction::PgClearAttributeStats => {
+                if typed_args.len() != 4 {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "pg_clear_attribute_stats(schemaname, relname, attname, inherited)",
+                        actual: format!("{} args", typed_args.len()),
+                    }));
+                }
+                runtime.pg_clear_attribute_stats(
+                    ctx,
+                    typed_args[0].value.clone(),
+                    typed_args[1].value.clone(),
+                    typed_args[2].value.clone(),
+                    typed_args[3].value.clone(),
+                )
+            }
+            _ => unreachable!(),
+        };
     }
     if matches!(func, BuiltinScalarFunction::PgColumnCompression)
         && let [Expr::Var(var)] = args
