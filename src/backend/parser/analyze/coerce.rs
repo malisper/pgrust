@@ -490,7 +490,6 @@ pub(super) fn coerce_unknown_string_literal_type(
             SqlTypeKind::Name => return SqlType::new(SqlTypeKind::Name),
             SqlTypeKind::Inet => return SqlType::new(SqlTypeKind::Inet),
             SqlTypeKind::Cidr => return SqlType::new(SqlTypeKind::Cidr),
-            SqlTypeKind::Interval => return SqlType::new(SqlTypeKind::Interval),
             SqlTypeKind::MacAddr => return SqlType::new(SqlTypeKind::MacAddr),
             SqlTypeKind::MacAddr8 => return SqlType::new(SqlTypeKind::MacAddr8),
             SqlTypeKind::OidVector => return SqlType::new(SqlTypeKind::OidVector),

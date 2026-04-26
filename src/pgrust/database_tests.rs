@@ -8756,7 +8756,7 @@ fn create_index_and_alter_table_set_are_noops() {
                     Value::Text("b".into()),
                 ],
                 vec![
-                    Value::Text("char".into()),
+                    Value::Text("bpchar".into()),
                     Value::Text("text".into()),
                     Value::Text("i".into()),
                     Value::Text("f".into()),
@@ -8836,7 +8836,7 @@ fn create_index_and_alter_table_set_are_noops() {
                         Value::Text("numeric".into()),
                     ],
                     vec![
-                        Value::Text("char".into()),
+                        Value::Text("bpchar".into()),
                         Value::Text("text".into()),
                         Value::Text("text".into()),
                     ],
@@ -19050,7 +19050,7 @@ fn rejected_create_table_like_sequence_does_not_poison_catalog_after_sequence_dr
     );
     assert_eq!(
         query_rows(&db, 1, "select count(*) from pg_namespace"),
-        vec![vec![Value::Int64(3)]]
+        vec![vec![Value::Int64(4)]]
     );
 }
 

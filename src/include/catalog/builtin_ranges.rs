@@ -276,16 +276,7 @@ pub fn range_type_ref_for_sql_type(sql_type: SqlType) -> Option<RangeTypeRef> {
     if !matches!(sql_type.kind, SqlTypeKind::Range) || sql_type.range_subtype_oid == 0 {
         return None;
     }
-    let subtype = crate::include::catalog::builtin_type_rows()
-        .into_iter()
-        .find(|row| row.oid == sql_type.range_subtype_oid)
-        .map(|row| row.sql_type.with_identity(row.oid, row.typrelid))
-        .or_else(|| {
-            (sql_type.typrelid != 0).then_some(SqlType::named_composite(
-                sql_type.range_subtype_oid,
-                sql_type.typrelid,
-            ))
-        })?;
+    let subtype = range_subtype_ref_for_sql_type(sql_type)?;
     Some(RangeTypeRef {
         sql_type,
         subtype,
@@ -306,16 +297,7 @@ pub fn range_type_ref_for_multirange_sql_type(sql_type: SqlType) -> Option<Range
     if !matches!(sql_type.kind, SqlTypeKind::Multirange) || sql_type.multirange_range_oid == 0 {
         return None;
     }
-    let subtype = crate::include::catalog::builtin_type_rows()
-        .into_iter()
-        .find(|row| row.oid == sql_type.range_subtype_oid)
-        .map(|row| row.sql_type.with_identity(row.oid, row.typrelid))
-        .or_else(|| {
-            (sql_type.typrelid != 0).then_some(SqlType::named_composite(
-                sql_type.range_subtype_oid,
-                sql_type.typrelid,
-            ))
-        })?;
+    let subtype = range_subtype_ref_for_sql_type(sql_type)?;
     Some(RangeTypeRef {
         sql_type: SqlType::range(sql_type.multirange_range_oid, sql_type.range_subtype_oid)
             .with_identity(sql_type.multirange_range_oid, sql_type.typrelid)
