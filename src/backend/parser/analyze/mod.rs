@@ -2020,11 +2020,6 @@ fn builtin_named_type_alias(name: &str) -> Option<SqlType> {
             SqlType::new(SqlTypeKind::FdwHandler)
                 .with_identity(crate::include::catalog::TABLE_AM_HANDLER_TYPE_OID, 0),
         )
-    } else if name.eq_ignore_ascii_case("cstring") {
-        Some(
-            SqlType::new(SqlTypeKind::Text)
-                .with_identity(crate::include::catalog::CSTRING_TYPE_OID, 0),
-        )
     } else if name.eq_ignore_ascii_case("regtype") {
         Some(SqlType::new(SqlTypeKind::RegType))
     } else if name.eq_ignore_ascii_case("regproc") {

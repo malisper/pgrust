@@ -101,7 +101,7 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
                 amoppurpose: 's',
                 amopopr: operator_oid,
                 amopmethod: BTREE_AM_OID,
-                amopsortfamily: 0,
+                amopsortfamily: family,
             });
             oid = oid.saturating_add(1);
         }

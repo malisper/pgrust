@@ -2468,8 +2468,14 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
                 SqlTypeKind::MacAddr8,
             ))));
         }
-        "bpchar" | "pg_catalog.bpchar" | "character" | "pg_catalog.character" => {
+        "bpchar" | "pg_catalog.bpchar" => {
             return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Char)));
+        }
+        "character" | "pg_catalog.character" => {
+            return Ok(RawTypeName::Builtin(SqlType::with_char_len(
+                SqlTypeKind::Char,
+                1,
+            )));
         }
         "pg_node_tree" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::PgNodeTree))),
         "trigger" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Trigger))),

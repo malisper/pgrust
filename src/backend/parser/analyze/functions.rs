@@ -2115,6 +2115,8 @@ fn range_prefixed_proc_src(proc_src: &str) -> Option<&str> {
         "daterange_",
         "tsrange_",
         "tstzrange_",
+        "arrayrange_",
+        "varbitrange_",
     ]
     .into_iter()
     .find_map(|prefix| proc_src.strip_prefix(prefix))?;
@@ -3825,6 +3827,12 @@ fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) 
             return true;
         }
         if matches!(row.sql_type.kind, SqlTypeKind::Enum) {
+            return true;
+        }
+        if matches!(
+            row.sql_type.kind,
+            SqlTypeKind::Text | SqlTypeKind::Char | SqlTypeKind::Varchar
+        ) {
             return true;
         }
         if matches!(

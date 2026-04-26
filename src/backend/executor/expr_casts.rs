@@ -2737,7 +2737,12 @@ fn parse_input_type_name(
 }
 
 fn input_type_name_supported(parsed: SqlType) -> bool {
-    if !parsed.is_array && matches!(parsed.kind, SqlTypeKind::Text) {
+    if !parsed.is_array
+        && matches!(
+            parsed.kind,
+            SqlTypeKind::Text | SqlTypeKind::Char | SqlTypeKind::Varchar
+        )
+    {
         return true;
     }
     if !parsed.is_array && (parsed.is_range() || parsed.is_multirange()) {

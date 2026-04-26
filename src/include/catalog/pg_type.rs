@@ -463,28 +463,6 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             MONEY_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::Money)),
         ),
-        builtin_type_row(
-            "macaddr",
-            MACADDR_TYPE_OID,
-            SqlType::new(SqlTypeKind::Text).with_identity(MACADDR_TYPE_OID, 0),
-        ),
-        builtin_type_row(
-            "_macaddr",
-            MACADDR_ARRAY_TYPE_OID,
-            SqlType::array_of(SqlType::new(SqlTypeKind::Text).with_identity(MACADDR_TYPE_OID, 0))
-                .with_identity(MACADDR_ARRAY_TYPE_OID, 0),
-        ),
-        builtin_type_row(
-            "macaddr8",
-            MACADDR8_TYPE_OID,
-            SqlType::new(SqlTypeKind::Text).with_identity(MACADDR8_TYPE_OID, 0),
-        ),
-        builtin_type_row(
-            "_macaddr8",
-            MACADDR8_ARRAY_TYPE_OID,
-            SqlType::array_of(SqlType::new(SqlTypeKind::Text).with_identity(MACADDR8_TYPE_OID, 0))
-                .with_identity(MACADDR8_ARRAY_TYPE_OID, 0),
-        ),
         builtin_type_row("cidr", CIDR_TYPE_OID, SqlType::new(SqlTypeKind::Cidr)),
         builtin_type_row(
             "_cidr",

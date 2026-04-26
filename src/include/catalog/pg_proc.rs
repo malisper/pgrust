@@ -4199,6 +4199,13 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
         aggregate_row(2803, "count", INT8_TYPE_OID, &oid_argtypes(&[]), 0),
         aggregate_row(6293, "any_value", ANYOID, &oid_argtypes(&[ANYOID]), 1),
         aggregate_row(
+            6219,
+            "range_agg",
+            ANYMULTIRANGEOID,
+            &oid_argtypes(&[ANYRANGEOID]),
+            1,
+        ),
+        aggregate_row(
             6220,
             "sum",
             NUMERIC_TYPE_OID,
@@ -7054,6 +7061,8 @@ fn range_prefixed_proc_src(proc_src: &str) -> Option<&str> {
         "daterange_",
         "tsrange_",
         "tstzrange_",
+        "arrayrange_",
+        "varbitrange_",
     ]
     .into_iter()
     .find_map(|prefix| proc_src.strip_prefix(prefix))?;

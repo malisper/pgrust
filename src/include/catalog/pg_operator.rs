@@ -687,7 +687,7 @@ pub fn bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
             3241,
             JSONB_CMP_EQ_PROC_OID,
             true,
-            false,
+            true,
         ),
         operator_row(
             3241,
