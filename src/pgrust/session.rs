@@ -1747,6 +1747,7 @@ impl Session {
 
         ExecutorContext {
             pool: Arc::clone(&db.pool),
+            data_dir: Some(db.cluster.base_dir.clone()),
             txns: db.txns.clone(),
             txn_waiter: Some(db.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(db.clone())),

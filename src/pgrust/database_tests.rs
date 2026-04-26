@@ -186,6 +186,7 @@ fn analyze_executor_context(
 ) -> crate::backend::executor::ExecutorContext {
     crate::backend::executor::ExecutorContext {
         pool: Arc::clone(&db.pool),
+        data_dir: None,
         txns: db.txns.clone(),
         txn_waiter: Some(db.txn_waiter.clone()),
         lock_status_provider: Some(Arc::new(db.clone())),
@@ -10411,7 +10412,8 @@ fn create_index_and_alter_table_set_are_noops() {
             if name == "num_exp_add_idx"
                 && (expected == "table"
                     || expected == "table, view, or sequence"
-                    || expected == "table, view, materialized view, or sequence") => {}
+                    || expected == "table, view, materialized view, or sequence"
+                    || expected == "table, view, materialized view, sequence, or TOAST table") => {}
         other => panic!("expected missing-table or wrong-object-type error, got {other:?}"),
     }
 

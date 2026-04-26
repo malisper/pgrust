@@ -2692,6 +2692,27 @@ fn planner_keeps_function_scan_filter_semantic_until_setrefs() {
 }
 
 #[test]
+fn planner_estimates_constant_generate_series_rows() {
+    let planned = planned_stmt_for_sql(
+        "select * from generate_series(timestamp '2024-02-01', timestamp '2024-03-01', interval '7 day') g(s)",
+    );
+    match planned.plan_tree {
+        Plan::FunctionScan { plan_info, .. } => {
+            assert_eq!(plan_info.plan_rows.as_f64().round() as u64, 5);
+        }
+        other => panic!("expected function scan, got {other:?}"),
+    }
+
+    let planned = planned_stmt_for_sql("select * from generate_series(1.0, 25.0, 2.0) g(s)");
+    match planned.plan_tree {
+        Plan::FunctionScan { plan_info, .. } => {
+            assert_eq!(plan_info.plan_rows.as_f64().round() as u64, 13);
+        }
+        other => panic!("expected function scan, got {other:?}"),
+    }
+}
+
+#[test]
 fn planner_places_lock_rows_between_order_by_and_limit() {
     let mut catalog = Catalog::default();
     catalog

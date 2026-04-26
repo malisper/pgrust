@@ -284,9 +284,34 @@ pub(crate) fn render_index_scan_condition_with_key_names(
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     key_column_names: Option<&[String]>,
 ) -> Option<String> {
+    render_index_scan_condition_with_key_names_and_runtime_renderer(
+        keys,
+        desc,
+        index_meta,
+        key_column_names,
+        None,
+    )
+}
+
+pub(crate) fn render_index_scan_condition_with_key_names_and_runtime_renderer(
+    keys: &[IndexScanKey],
+    desc: &RelationDesc,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    key_column_names: Option<&[String]>,
+    runtime_renderer: Option<&dyn Fn(&Expr) -> String>,
+) -> Option<String> {
     let rendered = keys
         .iter()
-        .filter_map(|key| render_index_scan_key(key, desc, index_meta, 's', key_column_names))
+        .filter_map(|key| {
+            render_index_scan_key(
+                key,
+                desc,
+                index_meta,
+                's',
+                key_column_names,
+                runtime_renderer,
+            )
+        })
         .collect::<Vec<_>>();
     match rendered.len() {
         0 => None,
@@ -308,7 +333,7 @@ pub(crate) fn render_index_order_by(
 ) -> Option<String> {
     let rendered = keys
         .iter()
-        .filter_map(|key| render_index_scan_key(key, desc, index_meta, 'o', None))
+        .filter_map(|key| render_index_scan_key(key, desc, index_meta, 'o', None, None))
         .collect::<Vec<_>>();
     match rendered.len() {
         0 => None,
@@ -1903,6 +1928,7 @@ fn render_index_scan_key(
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     purpose: char,
     key_column_names: Option<&[String]>,
+    runtime_renderer: Option<&dyn Fn(&Expr) -> String>,
 ) -> Option<String> {
     let default_column_names;
     if purpose == 's'
@@ -1989,7 +2015,9 @@ fn render_index_scan_key(
             ),
             None => render_explain_literal(value),
         },
-        IndexScanKeyArgument::Runtime(expr) => render_explain_expr(expr, &[]),
+        IndexScanKeyArgument::Runtime(expr) => runtime_renderer
+            .map(|render| render(expr))
+            .unwrap_or_else(|| render_explain_expr(expr, &[])),
     };
     Some(format!("{left_sql} {operator_name} {value_sql}"))
 }

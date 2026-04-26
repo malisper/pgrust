@@ -12,6 +12,7 @@ pub enum SyntheticSystemViewKind {
     PgPolicies,
     PgRules,
     PgStats,
+    PgSettings,
     PgStatActivity,
     PgStatAllTables,
     PgStatUserTables,
@@ -103,6 +104,7 @@ const PG_INDEXES_ALIASES: &[&str] = &["pg_indexes", "pg_catalog.pg_indexes"];
 const PG_POLICIES_ALIASES: &[&str] = &["pg_policies", "pg_catalog.pg_policies"];
 const PG_RULES_ALIASES: &[&str] = &["pg_rules", "pg_catalog.pg_rules"];
 const PG_STATS_ALIASES: &[&str] = &["pg_stats", "pg_catalog.pg_stats"];
+const PG_SETTINGS_ALIASES: &[&str] = &["pg_settings", "pg_catalog.pg_settings"];
 const PG_STAT_ACTIVITY_ALIASES: &[&str] = &["pg_stat_activity", "pg_catalog.pg_stat_activity"];
 const PG_STAT_ALL_TABLES_ALIASES: &[&str] =
     &["pg_stat_all_tables", "pg_catalog.pg_stat_all_tables"];
@@ -284,6 +286,12 @@ const PG_STAT_ACTIVITY_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("usename"),
     SyntheticSystemViewColumn::text("state"),
     SyntheticSystemViewColumn::text("query"),
+    SyntheticSystemViewColumn::text("backend_type"),
+];
+
+const PG_SETTINGS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("name"),
+    SyntheticSystemViewColumn::text("setting"),
 ];
 
 const PG_LOCKS_COLUMNS: &[SyntheticSystemViewColumn] = &[
@@ -493,7 +501,7 @@ const INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_COLUMNS: &[SyntheticSystemViewColum
     SyntheticSystemViewColumn::text("dependent_column"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 22] = [
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 23] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgEnum,
         canonical_name: "pg_catalog.pg_enum",
@@ -555,6 +563,13 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 22] = [
         canonical_name: "pg_catalog.pg_stats",
         aliases: PG_STATS_ALIASES,
         columns: PG_STATS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgSettings,
+        canonical_name: "pg_catalog.pg_settings",
+        aliases: PG_SETTINGS_ALIASES,
+        columns: PG_SETTINGS_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {

@@ -1071,6 +1071,7 @@ impl Database {
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
+                    data_dir: None,
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
@@ -1335,6 +1336,7 @@ impl Database {
                     crate::backend::executor::DeferredForeignKeyTracker::default();
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
+                    data_dir: None,
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
@@ -1448,6 +1450,7 @@ impl Database {
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
+                    data_dir: None,
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
@@ -1679,6 +1682,7 @@ impl Database {
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
+                    data_dir: None,
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
@@ -1790,6 +1794,7 @@ impl Database {
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
+                    data_dir: None,
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
@@ -2196,6 +2201,7 @@ impl Database {
                 let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
+                    data_dir: None,
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
@@ -2412,6 +2418,7 @@ impl Database {
         let session_replication_role = self.session_replication_role(client_id);
         let ctx = ExecutorContext {
             pool: std::sync::Arc::clone(&self.pool),
+            data_dir: None,
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(std::sync::Arc::new(self.clone())),

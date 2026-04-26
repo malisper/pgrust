@@ -1083,6 +1083,7 @@ impl Database {
         let relations = [relation];
         let mut ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
+            data_dir: None,
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(self.clone())),
@@ -1966,6 +1967,7 @@ impl Database {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let mut ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
+            data_dir: None,
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(self.clone())),
@@ -2079,6 +2081,7 @@ impl Database {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let mut ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
+            data_dir: None,
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(self.clone())),
@@ -2628,6 +2631,7 @@ impl Database {
             let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
             let mut ctx = ExecutorContext {
                 pool: Arc::clone(&self.pool),
+                data_dir: None,
                 txns: self.txns.clone(),
                 txn_waiter: Some(self.txn_waiter.clone()),
                 lock_status_provider: Some(Arc::new(self.clone())),
