@@ -131,20 +131,20 @@ use crate::backend::utils::misc::guc::plpgsql_guc_default_value;
 use crate::backend::utils::time::datetime::current_postgres_timestamp_usecs;
 use crate::include::access::toast_compression::ToastCompressionId;
 use crate::include::catalog::{
-    BOX_SPGIST_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID, BYTEA_TYPE_OID, CONSTRAINT_CHECK,
-    CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
-    CONSTRAINT_UNIQUE, CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID,
-    INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID,
-    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
-    PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, POLY_SPGIST_OPCLASS_OID,
-    QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_SPGIST_OPCLASS_OID, bootstrap_pg_am_rows,
-    builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
+    BOX_SPGIST_OPCLASS_OID, BPCHAR_HASH_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID, BYTEA_TYPE_OID,
+    CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
+    CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, GIN_AM_OID,
+    GIST_AM_OID, HASH_AM_OID, INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID,
+    PG_DEPENDENCIES_TYPE_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID,
+    PG_NDISTINCT_TYPE_OID, PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID,
+    POLY_SPGIST_OPCLASS_OID, QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_SPGIST_OPCLASS_OID,
+    bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
-    BoolExpr, BoolExprType, FuncExpr, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr, OpExprKind,
-    SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, ScalarFunctionImpl, SubLinkType,
+    BoolExpr, BoolExprType, FuncExpr, HashFunctionKind, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr,
+    OpExprKind, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, ScalarFunctionImpl, SubLinkType,
     TABLE_OID_ATTR_NO, attrno_index, is_executor_special_varno,
 };
 use crate::pgrust::compact_string::CompactString;
@@ -4512,26 +4512,68 @@ fn cast_record_value_for_target(
     ))
 }
 
-fn eval_interval_hash_function(values: &[Value]) -> Result<Value, ExecError> {
-    let [value] = values else {
-        return Err(ExecError::DetailedError {
-            message: "malformed interval_hash call".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        });
+fn eval_hash_builtin_function(
+    kind: HashFunctionKind,
+    extended: bool,
+    values: &[Value],
+) -> Result<Value, ExecError> {
+    let opclass = if kind == HashFunctionKind::BpChar {
+        Some(BPCHAR_HASH_OPCLASS_OID)
+    } else {
+        None
     };
-    match value {
-        Value::Null => Ok(Value::Null),
-        Value::Interval(interval) => {
-            let span = interval.cmp_key() as i64;
-            Ok(Value::Int32((span ^ (span >> 32)) as i32))
+    if extended {
+        let [value, seed] = values else {
+            return Err(malformed_expr_error("hash_extended"));
+        };
+        if matches!(value, Value::Null) || matches!(seed, Value::Null) {
+            return Ok(Value::Null);
         }
-        other => Err(ExecError::TypeMismatch {
-            op: "interval_hash",
-            left: other.clone(),
-            right: Value::Interval(crate::include::nodes::datum::IntervalValue::zero()),
-        }),
+        let seed = match seed {
+            Value::Int16(seed) => i64::from(*seed),
+            Value::Int32(seed) => i64::from(*seed),
+            Value::Int64(seed) => *seed,
+            _ => {
+                return Err(ExecError::TypeMismatch {
+                    op: "hash_extended",
+                    left: value.clone(),
+                    right: seed.clone(),
+                });
+            }
+        };
+        let hash = crate::backend::access::hash::hash_value_extended(value, opclass, seed as u64)
+            .map_err(|message| hash_function_error(message, true))?
+            .unwrap_or(0);
+        return Ok(Value::Int64(hash as i64));
+    }
+
+    let [value] = values else {
+        return Err(malformed_expr_error("hash"));
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let hash = crate::backend::access::hash::hash_value_extended(value, opclass, 0)
+        .map_err(|message| hash_function_error(message, false))?
+        .unwrap_or(0);
+    Ok(Value::Int32(hash as u32 as i32))
+}
+
+fn hash_function_error(message: String, extended: bool) -> ExecError {
+    let message = if extended {
+        message.replacen(
+            "could not identify a hash function",
+            "could not identify an extended hash function",
+            1,
+        )
+    } else {
+        message
+    };
+    ExecError::DetailedError {
+        message,
+        detail: None,
+        hint: None,
+        sqlstate: "42883",
     }
 }
 
@@ -4861,7 +4903,13 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::JustifyHours => eval_justify_hours_function(&values),
         BuiltinScalarFunction::JustifyInterval => eval_justify_interval_function(&values),
         BuiltinScalarFunction::MakeInterval => eval_make_interval_function(&values),
-        BuiltinScalarFunction::IntervalHash => eval_interval_hash_function(&values),
+        BuiltinScalarFunction::IntervalHash => {
+            eval_hash_builtin_function(HashFunctionKind::Interval, false, &values)
+        }
+        BuiltinScalarFunction::HashValue(kind) => eval_hash_builtin_function(kind, false, &values),
+        BuiltinScalarFunction::HashValueExtended(kind) => {
+            eval_hash_builtin_function(kind, true, &values)
+        }
         BuiltinScalarFunction::XmlComment => eval_xml_comment_function(&values, None),
         BuiltinScalarFunction::XmlIsWellFormed => eval_xml_is_well_formed_function(
             &values,
@@ -6316,7 +6364,13 @@ fn eval_builtin_function(
             eval_make_timestamptz_function(&values, &ctx.datetime_config)
         }
         BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(&values),
-        BuiltinScalarFunction::IntervalHash => eval_interval_hash_function(&values),
+        BuiltinScalarFunction::IntervalHash => {
+            eval_hash_builtin_function(HashFunctionKind::Interval, false, &values)
+        }
+        BuiltinScalarFunction::HashValue(kind) => eval_hash_builtin_function(kind, false, &values),
+        BuiltinScalarFunction::HashValueExtended(kind) => {
+            eval_hash_builtin_function(kind, true, &values)
+        }
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
         BuiltinScalarFunction::UnicodeVersion => eval_unicode_version_function(&values),
         BuiltinScalarFunction::UnicodeAssigned => eval_unicode_assigned_function(&values),
@@ -7364,8 +7418,7 @@ fn uuid_v7_timestamp(value: &[u8; 16]) -> i64 {
 }
 
 fn uuid_hash(value: &[u8; 16]) -> u32 {
-    let hash = crate::backend::access::hash::support::hash_bytes_extended(value, 0);
-    (hash as u32) ^ ((hash >> 32) as u32)
+    crate::backend::access::hash::support::hash_bytes_extended(value, 0) as u32
 }
 
 fn uuid_hash_extended(value: &[u8; 16], seed: u64) -> u64 {

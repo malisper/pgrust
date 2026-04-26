@@ -11,8 +11,8 @@ use crate::include::catalog::{
     range_type_ref_for_sql_type,
 };
 use crate::include::nodes::primnodes::{
-    BuiltinWindowFunction, HypotheticalAggFunc, JsonRecordFunction, RegexTableFunction,
-    StringTableFunction,
+    BuiltinWindowFunction, HashFunctionKind, HypotheticalAggFunc, JsonRecordFunction,
+    RegexTableFunction, StringTableFunction,
 };
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -1285,6 +1285,8 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::MakeTimestampTz => matches!(args.len(), 6 | 7),
             BuiltinScalarFunction::ToTimestamp => args.len() == 1,
             BuiltinScalarFunction::IntervalHash => args.len() == 1,
+            BuiltinScalarFunction::HashValue(_) => args.len() == 1,
+            BuiltinScalarFunction::HashValueExtended(_) => args.len() == 2,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
             BuiltinScalarFunction::UnicodeVersion => args.is_empty(),
             BuiltinScalarFunction::UnicodeAssigned => args.len() == 1,
@@ -1903,6 +1905,12 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::IntervalHash => {
             return Some(SqlType::new(SqlTypeKind::Int4));
         }
+        BuiltinScalarFunction::HashValue(_) => {
+            return Some(SqlType::new(SqlTypeKind::Int4));
+        }
+        BuiltinScalarFunction::HashValueExtended(_) => {
+            return Some(SqlType::new(SqlTypeKind::Int8));
+        }
         BuiltinScalarFunction::TxidCurrent | BuiltinScalarFunction::TxidCurrentIfAssigned => {
             return Some(SqlType::new(SqlTypeKind::Int8));
         }
@@ -2173,18 +2181,70 @@ fn table_function_named_arg_signature(name: &str) -> Option<NamedArgSignature> {
 }
 
 fn builtin_scalar_function_for_proc_src(proc_src: &str) -> Option<BuiltinScalarFunction> {
-    legacy_scalar_function_entries()
-        .iter()
-        .find_map(|(name, func)| proc_src.eq_ignore_ascii_case(name).then_some(*func))
-        .or_else(|| {
-            range_prefixed_proc_src(proc_src).and_then(builtin_scalar_function_for_proc_src)
-        })
-        .or_else(|| {
-            proc_src
-                .rsplit_once('_')
-                .filter(|(_, suffix)| suffix.chars().all(|ch| ch.is_ascii_digit()))
-                .and_then(|(base, _)| builtin_scalar_function_for_proc_src(base))
-        })
+    hash_scalar_function_for_proc_src(proc_src).or_else(|| {
+        legacy_scalar_function_entries()
+            .iter()
+            .find_map(|(name, func)| proc_src.eq_ignore_ascii_case(name).then_some(*func))
+            .or_else(|| {
+                range_prefixed_proc_src(proc_src).and_then(builtin_scalar_function_for_proc_src)
+            })
+            .or_else(|| {
+                proc_src
+                    .rsplit_once('_')
+                    .filter(|(_, suffix)| suffix.chars().all(|ch| ch.is_ascii_digit()))
+                    .and_then(|(base, _)| builtin_scalar_function_for_proc_src(base))
+            })
+    })
+}
+
+fn hash_scalar_function_for_proc_src(proc_src: &str) -> Option<BuiltinScalarFunction> {
+    let normalized = proc_src.to_ascii_lowercase();
+    let (base, extended) = normalized
+        .strip_suffix("_extended")
+        .map(|base| (base, true))
+        .or_else(|| normalized.strip_suffix("extended").map(|base| (base, true)))
+        .unwrap_or((normalized.as_str(), false));
+    let kind = match base {
+        "hashbool" => HashFunctionKind::Bool,
+        "hashint2" => HashFunctionKind::Int2,
+        "hashint4" => HashFunctionKind::Int4,
+        "hashint8" => HashFunctionKind::Int8,
+        "hashoid" => HashFunctionKind::Oid,
+        "hashchar" => HashFunctionKind::InternalChar,
+        "hashname" => HashFunctionKind::Name,
+        "hashtext" => HashFunctionKind::Text,
+        "hashvarchar" => HashFunctionKind::Varchar,
+        "hashbpchar" => HashFunctionKind::BpChar,
+        "hashfloat4" => HashFunctionKind::Float4,
+        "hashfloat8" => HashFunctionKind::Float8,
+        "hash_numeric" => HashFunctionKind::Numeric,
+        "hashtimestamp" | "timestamp_hash" => HashFunctionKind::Timestamp,
+        "hashtimestamptz" | "timestamptz_hash" => HashFunctionKind::TimestampTz,
+        "hashdate" => HashFunctionKind::Date,
+        "hashtime" | "time_hash" => HashFunctionKind::Time,
+        "hashtimetz" | "timetz_hash" => HashFunctionKind::TimeTz,
+        "hashbytea" => HashFunctionKind::Bytea,
+        "hashoidvector" => HashFunctionKind::OidVector,
+        "hash_aclitem" => HashFunctionKind::AclItem,
+        "hashinet" => HashFunctionKind::Inet,
+        "hashmacaddr" => HashFunctionKind::MacAddr,
+        "hashmacaddr8" => HashFunctionKind::MacAddr8,
+        "hash_array" => HashFunctionKind::Array,
+        "interval_hash" => HashFunctionKind::Interval,
+        "uuid_hash" => HashFunctionKind::Uuid,
+        "pg_lsn_hash" => HashFunctionKind::PgLsn,
+        "hashenum" => HashFunctionKind::Enum,
+        "jsonb_hash" => HashFunctionKind::Jsonb,
+        "hash_range" => HashFunctionKind::Range,
+        "hash_multirange" => HashFunctionKind::Multirange,
+        "hash_record" => HashFunctionKind::Record,
+        _ => return None,
+    };
+    Some(if extended {
+        BuiltinScalarFunction::HashValueExtended(kind)
+    } else {
+        BuiltinScalarFunction::HashValue(kind)
+    })
 }
 
 fn range_prefixed_proc_src(proc_src: &str) -> Option<&str> {
@@ -3698,6 +3758,8 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::Xid8Cmp
             | BuiltinScalarFunction::UuidHash
             | BuiltinScalarFunction::UuidHashExtended
+            | BuiltinScalarFunction::HashValue(_)
+            | BuiltinScalarFunction::HashValueExtended(_)
             | BuiltinScalarFunction::GenRandomUuid
             | BuiltinScalarFunction::UuidV7
             | BuiltinScalarFunction::UuidExtractVersion

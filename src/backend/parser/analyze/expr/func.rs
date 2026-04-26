@@ -3244,6 +3244,8 @@ pub(super) fn bind_scalar_function_call(
         | BuiltinScalarFunction::HashMacAddrExtended
         | BuiltinScalarFunction::HashMacAddr8
         | BuiltinScalarFunction::HashMacAddr8Extended
+        | BuiltinScalarFunction::HashValue(_)
+        | BuiltinScalarFunction::HashValueExtended(_)
         | BuiltinScalarFunction::TxidSnapshotXmin
         | BuiltinScalarFunction::TxidSnapshotXmax
         | BuiltinScalarFunction::TxidVisibleInSnapshot

@@ -3,7 +3,7 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::*;
 use crate::include::nodes::primnodes::{
-    AggFunc, BuiltinScalarFunction, BuiltinWindowFunction, HypotheticalAggFunc,
+    AggFunc, BuiltinScalarFunction, BuiltinWindowFunction, HashFunctionKind, HypotheticalAggFunc,
 };
 use std::sync::OnceLock;
 
@@ -76,11 +76,11 @@ pub const INTERVAL_CMP_LT_PROC_OID: u32 = 1164;
 pub const INTERVAL_CMP_LE_PROC_OID: u32 = 1165;
 pub const INTERVAL_CMP_GE_PROC_OID: u32 = 1166;
 pub const INTERVAL_CMP_GT_PROC_OID: u32 = 1167;
-pub const JSONB_CONTAINS_PROC_OID: u32 = 4044;
-pub const JSONB_CONTAINED_PROC_OID: u32 = 4045;
-pub const JSONB_EXISTS_PROC_OID: u32 = 4046;
-pub const JSONB_EXISTS_ANY_PROC_OID: u32 = 4047;
-pub const JSONB_EXISTS_ALL_PROC_OID: u32 = 4048;
+pub const JSONB_CONTAINS_PROC_OID: u32 = 4046;
+pub const JSONB_EXISTS_PROC_OID: u32 = 4047;
+pub const JSONB_EXISTS_ANY_PROC_OID: u32 = 4048;
+pub const JSONB_EXISTS_ALL_PROC_OID: u32 = 4049;
+pub const JSONB_CONTAINED_PROC_OID: u32 = 4050;
 pub const GIN_COMPARE_JSONB_PROC_OID: u32 = 3480;
 pub const GIN_EXTRACT_JSONB_PROC_OID: u32 = 3482;
 pub const GIN_EXTRACT_JSONB_QUERY_PROC_OID: u32 = 3483;
@@ -143,31 +143,61 @@ pub const BRIN_MINMAX_OPCINFO_PROC_OID: u32 = 3383;
 pub const BRIN_MINMAX_ADD_VALUE_PROC_OID: u32 = 3384;
 pub const BRIN_MINMAX_CONSISTENT_PROC_OID: u32 = 3385;
 pub const BRIN_MINMAX_UNION_PROC_OID: u32 = 3386;
-pub const HASH_BOOL_PROC_OID: u32 = 76500;
-pub const HASH_INT2_PROC_OID: u32 = 76501;
-pub const HASH_INT4_PROC_OID: u32 = 76502;
-pub const HASH_INT8_PROC_OID: u32 = 76503;
-pub const HASH_OID_PROC_OID: u32 = 76504;
-pub const HASH_CHAR_PROC_OID: u32 = 76505;
-pub const HASH_NAME_PROC_OID: u32 = 76506;
-pub const HASH_TEXT_PROC_OID: u32 = 76507;
+pub const HASH_BOOL_PROC_OID: u32 = 6417;
+pub const HASH_BOOL_EXTENDED_PROC_OID: u32 = 6418;
+pub const HASH_INT2_PROC_OID: u32 = 449;
+pub const HASH_INT2_EXTENDED_PROC_OID: u32 = 441;
+pub const HASH_INT4_PROC_OID: u32 = 450;
+pub const HASH_INT4_EXTENDED_PROC_OID: u32 = 425;
+pub const HASH_INT8_PROC_OID: u32 = 949;
+pub const HASH_INT8_EXTENDED_PROC_OID: u32 = 442;
+pub const HASH_OID_PROC_OID: u32 = 453;
+pub const HASH_OID_EXTENDED_PROC_OID: u32 = 445;
+pub const HASH_CHAR_PROC_OID: u32 = 454;
+pub const HASH_CHAR_EXTENDED_PROC_OID: u32 = 446;
+pub const HASH_NAME_PROC_OID: u32 = 455;
+pub const HASH_NAME_EXTENDED_PROC_OID: u32 = 447;
+pub const HASH_TEXT_PROC_OID: u32 = 400;
+pub const HASH_TEXT_EXTENDED_PROC_OID: u32 = 448;
 pub const HASH_VARCHAR_PROC_OID: u32 = 76508;
-pub const HASH_BPCHAR_PROC_OID: u32 = 76509;
-pub const HASH_FLOAT4_PROC_OID: u32 = 76510;
-pub const HASH_FLOAT8_PROC_OID: u32 = 76511;
-pub const HASH_NUMERIC_PROC_OID: u32 = 76512;
-pub const HASH_TIMESTAMP_PROC_OID: u32 = 76513;
-pub const HASH_TIMESTAMPTZ_PROC_OID: u32 = 76514;
-pub const HASH_DATE_PROC_OID: u32 = 76515;
-pub const HASH_TIME_PROC_OID: u32 = 76516;
-pub const HASH_TIMETZ_PROC_OID: u32 = 76517;
-pub const HASH_BYTEA_PROC_OID: u32 = 76518;
-pub const HASH_MULTIRANGE_PROC_OID: u32 = 76519;
+pub const HASH_BPCHAR_PROC_OID: u32 = 1080;
+pub const HASH_BPCHAR_EXTENDED_PROC_OID: u32 = 972;
+pub const HASH_FLOAT4_PROC_OID: u32 = 451;
+pub const HASH_FLOAT4_EXTENDED_PROC_OID: u32 = 443;
+pub const HASH_FLOAT8_PROC_OID: u32 = 452;
+pub const HASH_FLOAT8_EXTENDED_PROC_OID: u32 = 444;
+pub const HASH_NUMERIC_PROC_OID: u32 = 432;
+pub const HASH_NUMERIC_EXTENDED_PROC_OID: u32 = 780;
+pub const HASH_TIMESTAMP_PROC_OID: u32 = 2039;
+pub const HASH_TIMESTAMP_EXTENDED_PROC_OID: u32 = 3411;
+pub const HASH_TIMESTAMPTZ_PROC_OID: u32 = 6425;
+pub const HASH_TIMESTAMPTZ_EXTENDED_PROC_OID: u32 = 6426;
+pub const HASH_DATE_PROC_OID: u32 = 6415;
+pub const HASH_DATE_EXTENDED_PROC_OID: u32 = 6416;
+pub const HASH_TIME_PROC_OID: u32 = 1688;
+pub const HASH_TIME_EXTENDED_PROC_OID: u32 = 3409;
+pub const HASH_TIMETZ_PROC_OID: u32 = 1696;
+pub const HASH_TIMETZ_EXTENDED_PROC_OID: u32 = 3410;
+pub const HASH_BYTEA_PROC_OID: u32 = 6413;
+pub const HASH_BYTEA_EXTENDED_PROC_OID: u32 = 6414;
+pub const HASH_OIDVECTOR_PROC_OID: u32 = 457;
+pub const HASH_OIDVECTOR_EXTENDED_PROC_OID: u32 = 776;
+pub const HASH_ACLITEM_PROC_OID: u32 = 329;
+pub const HASH_ACLITEM_EXTENDED_PROC_OID: u32 = 777;
+pub const HASH_INET_PROC_OID: u32 = 422;
+pub const HASH_INET_EXTENDED_PROC_OID: u32 = 779;
+pub const HASH_ARRAY_PROC_OID: u32 = 626;
+pub const HASH_ARRAY_EXTENDED_PROC_OID: u32 = 782;
+pub const HASH_MULTIRANGE_PROC_OID: u32 = 4278;
+pub const HASH_MULTIRANGE_EXTENDED_PROC_OID: u32 = 4279;
 pub const HASH_UUID_PROC_OID: u32 = 2963;
-pub const HASH_RANGE_PROC_OID: u32 = 76520;
-pub const HASH_JSONB_PROC_OID: u32 = 76521;
-pub const HASH_JSONB_EXTENDED_PROC_OID: u32 = 76522;
+pub const HASH_UUID_EXTENDED_PROC_OID: u32 = 3412;
+pub const HASH_RANGE_PROC_OID: u32 = 3902;
+pub const HASH_RANGE_EXTENDED_PROC_OID: u32 = 3417;
 pub const HASH_INTERVAL_PROC_OID: u32 = 1697;
+pub const HASH_INTERVAL_EXTENDED_PROC_OID: u32 = 3418;
+pub const HASH_PG_LSN_PROC_OID: u32 = 3252;
+pub const HASH_PG_LSN_EXTENDED_PROC_OID: u32 = 3413;
 pub const ENUM_EQ_PROC_OID: u32 = 3508;
 pub const ENUM_NE_PROC_OID: u32 = 3509;
 pub const ENUM_LT_PROC_OID: u32 = 3510;
@@ -177,6 +207,10 @@ pub const ENUM_GE_PROC_OID: u32 = 3513;
 pub const ENUM_CMP_PROC_OID: u32 = 3514;
 pub const HASH_ENUM_PROC_OID: u32 = 3515;
 pub const HASH_ENUM_EXTENDED_PROC_OID: u32 = 3414;
+pub const HASH_JSONB_PROC_OID: u32 = 4045;
+pub const HASH_JSONB_EXTENDED_PROC_OID: u32 = 3416;
+pub const HASH_RECORD_PROC_OID: u32 = 6192;
+pub const HASH_RECORD_EXTENDED_PROC_OID: u32 = 6193;
 pub const MACADDR_EQ_PROC_OID: u32 = 830;
 pub const MACADDR_LT_PROC_OID: u32 = 831;
 pub const MACADDR_LE_PROC_OID: u32 = 832;
@@ -7468,18 +7502,70 @@ fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalar
 }
 
 fn builtin_scalar_function_for_proc_src(proc_src: &str) -> Option<BuiltinScalarFunction> {
-    legacy_scalar_function_entries()
-        .iter()
-        .find_map(|(name, func)| proc_src.eq_ignore_ascii_case(name).then_some(*func))
-        .or_else(|| {
-            range_prefixed_proc_src(proc_src).and_then(builtin_scalar_function_for_proc_src)
-        })
-        .or_else(|| {
-            proc_src
-                .rsplit_once('_')
-                .filter(|(_, suffix)| suffix.chars().all(|ch| ch.is_ascii_digit()))
-                .and_then(|(base, _)| builtin_scalar_function_for_proc_src(base))
-        })
+    hash_scalar_function_for_proc_src(proc_src).or_else(|| {
+        legacy_scalar_function_entries()
+            .iter()
+            .find_map(|(name, func)| proc_src.eq_ignore_ascii_case(name).then_some(*func))
+            .or_else(|| {
+                range_prefixed_proc_src(proc_src).and_then(builtin_scalar_function_for_proc_src)
+            })
+            .or_else(|| {
+                proc_src
+                    .rsplit_once('_')
+                    .filter(|(_, suffix)| suffix.chars().all(|ch| ch.is_ascii_digit()))
+                    .and_then(|(base, _)| builtin_scalar_function_for_proc_src(base))
+            })
+    })
+}
+
+fn hash_scalar_function_for_proc_src(proc_src: &str) -> Option<BuiltinScalarFunction> {
+    let normalized = proc_src.to_ascii_lowercase();
+    let (base, extended) = normalized
+        .strip_suffix("_extended")
+        .map(|base| (base, true))
+        .or_else(|| normalized.strip_suffix("extended").map(|base| (base, true)))
+        .unwrap_or((normalized.as_str(), false));
+    let kind = match base {
+        "hashbool" => HashFunctionKind::Bool,
+        "hashint2" => HashFunctionKind::Int2,
+        "hashint4" => HashFunctionKind::Int4,
+        "hashint8" => HashFunctionKind::Int8,
+        "hashoid" => HashFunctionKind::Oid,
+        "hashchar" => HashFunctionKind::InternalChar,
+        "hashname" => HashFunctionKind::Name,
+        "hashtext" => HashFunctionKind::Text,
+        "hashvarchar" => HashFunctionKind::Varchar,
+        "hashbpchar" => HashFunctionKind::BpChar,
+        "hashfloat4" => HashFunctionKind::Float4,
+        "hashfloat8" => HashFunctionKind::Float8,
+        "hash_numeric" => HashFunctionKind::Numeric,
+        "hashtimestamp" | "timestamp_hash" => HashFunctionKind::Timestamp,
+        "hashtimestamptz" | "timestamptz_hash" => HashFunctionKind::TimestampTz,
+        "hashdate" => HashFunctionKind::Date,
+        "hashtime" | "time_hash" => HashFunctionKind::Time,
+        "hashtimetz" | "timetz_hash" => HashFunctionKind::TimeTz,
+        "hashbytea" => HashFunctionKind::Bytea,
+        "hashoidvector" => HashFunctionKind::OidVector,
+        "hash_aclitem" => HashFunctionKind::AclItem,
+        "hashinet" => HashFunctionKind::Inet,
+        "hashmacaddr" => HashFunctionKind::MacAddr,
+        "hashmacaddr8" => HashFunctionKind::MacAddr8,
+        "hash_array" => HashFunctionKind::Array,
+        "interval_hash" => HashFunctionKind::Interval,
+        "uuid_hash" => HashFunctionKind::Uuid,
+        "pg_lsn_hash" => HashFunctionKind::PgLsn,
+        "hashenum" => HashFunctionKind::Enum,
+        "jsonb_hash" => HashFunctionKind::Jsonb,
+        "hash_range" => HashFunctionKind::Range,
+        "hash_multirange" => HashFunctionKind::Multirange,
+        "hash_record" => HashFunctionKind::Record,
+        _ => return None,
+    };
+    Some(if extended {
+        BuiltinScalarFunction::HashValueExtended(kind)
+    } else {
+        BuiltinScalarFunction::HashValue(kind)
+    })
 }
 
 fn range_prefixed_proc_src(proc_src: &str) -> Option<&str> {
@@ -10928,7 +11014,7 @@ fn hash_equality_proc_rows() -> Vec<PgProcRow> {
 }
 
 fn hash_support_proc_rows() -> Vec<PgProcRow> {
-    [
+    let standard = [
         (HASH_BOOL_PROC_OID, "hashbool", BOOL_TYPE_OID),
         (HASH_INT2_PROC_OID, "hashint2", INT2_TYPE_OID),
         (HASH_INT4_PROC_OID, "hashint4", INT4_TYPE_OID),
@@ -10941,41 +11027,201 @@ fn hash_support_proc_rows() -> Vec<PgProcRow> {
         (HASH_BPCHAR_PROC_OID, "hashbpchar", BPCHAR_TYPE_OID),
         (HASH_FLOAT4_PROC_OID, "hashfloat4", FLOAT4_TYPE_OID),
         (HASH_FLOAT8_PROC_OID, "hashfloat8", FLOAT8_TYPE_OID),
+        (HASH_BYTEA_PROC_OID, "hashbytea", BYTEA_TYPE_OID),
+        (HASH_OIDVECTOR_PROC_OID, "hashoidvector", OIDVECTOR_TYPE_OID),
+        (HASH_ACLITEM_PROC_OID, "hash_aclitem", ACLITEM_TYPE_OID),
+        (HASH_INET_PROC_OID, "hashinet", INET_TYPE_OID),
         (HASH_NUMERIC_PROC_OID, "hash_numeric", NUMERIC_TYPE_OID),
-        (HASH_TIMESTAMP_PROC_OID, "hashtimestamp", TIMESTAMP_TYPE_OID),
+        (HASH_DATE_PROC_OID, "hashdate", DATE_TYPE_OID),
+        (HASH_TIME_PROC_OID, "time_hash", TIME_TYPE_OID),
+        (HASH_TIMETZ_PROC_OID, "timetz_hash", TIMETZ_TYPE_OID),
+        (HASH_INTERVAL_PROC_OID, "interval_hash", INTERVAL_TYPE_OID),
+        (
+            HASH_TIMESTAMP_PROC_OID,
+            "timestamp_hash",
+            TIMESTAMP_TYPE_OID,
+        ),
         (
             HASH_TIMESTAMPTZ_PROC_OID,
-            "hashtimestamptz",
+            "timestamptz_hash",
             TIMESTAMPTZ_TYPE_OID,
         ),
-        (HASH_DATE_PROC_OID, "hashdate", DATE_TYPE_OID),
-        (HASH_TIME_PROC_OID, "hashtime", TIME_TYPE_OID),
-        (HASH_TIMETZ_PROC_OID, "hashtimetz", TIMETZ_TYPE_OID),
-        (HASH_BYTEA_PROC_OID, "hashbytea", BYTEA_TYPE_OID),
+        (HASH_PG_LSN_PROC_OID, "pg_lsn_hash", PG_LSN_TYPE_OID),
+        (HASH_JSONB_PROC_OID, "jsonb_hash", JSONB_TYPE_OID),
+        (HASH_ARRAY_PROC_OID, "hash_array", ANYARRAYOID),
+        (HASH_RECORD_PROC_OID, "hash_record", RECORD_TYPE_OID),
+        (HASH_RANGE_PROC_OID, "hash_range", ANYRANGEOID),
         (
             HASH_MULTIRANGE_PROC_OID,
             "hash_multirange",
             ANYMULTIRANGEOID,
         ),
-        (HASH_JSONB_PROC_OID, "jsonb_hash", JSONB_TYPE_OID),
-        (HASH_INTERVAL_PROC_OID, "interval_hash", INTERVAL_TYPE_OID),
-    ]
-    .into_iter()
-    .map(|(oid, proname, type_oid)| {
-        proc_row(
-            oid,
-            proname,
+    ];
+    let extended = [
+        (
+            HASH_BOOL_EXTENDED_PROC_OID,
+            "hashboolextended",
+            BOOL_TYPE_OID,
+        ),
+        (
+            HASH_INT2_EXTENDED_PROC_OID,
+            "hashint2extended",
+            INT2_TYPE_OID,
+        ),
+        (
+            HASH_INT4_EXTENDED_PROC_OID,
+            "hashint4extended",
             INT4_TYPE_OID,
-            &oid_argtypes(&[type_oid]),
-            proname,
-            1,
-            false,
-            true,
-            'f',
-            'i',
-        )
-    })
-    .collect()
+        ),
+        (
+            HASH_INT8_EXTENDED_PROC_OID,
+            "hashint8extended",
+            INT8_TYPE_OID,
+        ),
+        (HASH_OID_EXTENDED_PROC_OID, "hashoidextended", OID_TYPE_OID),
+        (
+            HASH_CHAR_EXTENDED_PROC_OID,
+            "hashcharextended",
+            INTERNAL_CHAR_TYPE_OID,
+        ),
+        (
+            HASH_NAME_EXTENDED_PROC_OID,
+            "hashnameextended",
+            NAME_TYPE_OID,
+        ),
+        (
+            HASH_TEXT_EXTENDED_PROC_OID,
+            "hashtextextended",
+            TEXT_TYPE_OID,
+        ),
+        (
+            HASH_BPCHAR_EXTENDED_PROC_OID,
+            "hashbpcharextended",
+            BPCHAR_TYPE_OID,
+        ),
+        (
+            HASH_FLOAT4_EXTENDED_PROC_OID,
+            "hashfloat4extended",
+            FLOAT4_TYPE_OID,
+        ),
+        (
+            HASH_FLOAT8_EXTENDED_PROC_OID,
+            "hashfloat8extended",
+            FLOAT8_TYPE_OID,
+        ),
+        (
+            HASH_BYTEA_EXTENDED_PROC_OID,
+            "hashbyteaextended",
+            BYTEA_TYPE_OID,
+        ),
+        (
+            HASH_OIDVECTOR_EXTENDED_PROC_OID,
+            "hashoidvectorextended",
+            OIDVECTOR_TYPE_OID,
+        ),
+        (
+            HASH_ACLITEM_EXTENDED_PROC_OID,
+            "hash_aclitem_extended",
+            ACLITEM_TYPE_OID,
+        ),
+        (
+            HASH_INET_EXTENDED_PROC_OID,
+            "hashinetextended",
+            INET_TYPE_OID,
+        ),
+        (
+            HASH_NUMERIC_EXTENDED_PROC_OID,
+            "hash_numeric_extended",
+            NUMERIC_TYPE_OID,
+        ),
+        (
+            HASH_DATE_EXTENDED_PROC_OID,
+            "hashdateextended",
+            DATE_TYPE_OID,
+        ),
+        (
+            HASH_TIME_EXTENDED_PROC_OID,
+            "time_hash_extended",
+            TIME_TYPE_OID,
+        ),
+        (
+            HASH_TIMETZ_EXTENDED_PROC_OID,
+            "timetz_hash_extended",
+            TIMETZ_TYPE_OID,
+        ),
+        (
+            HASH_INTERVAL_EXTENDED_PROC_OID,
+            "interval_hash_extended",
+            INTERVAL_TYPE_OID,
+        ),
+        (
+            HASH_TIMESTAMP_EXTENDED_PROC_OID,
+            "timestamp_hash_extended",
+            TIMESTAMP_TYPE_OID,
+        ),
+        (
+            HASH_TIMESTAMPTZ_EXTENDED_PROC_OID,
+            "timestamptz_hash_extended",
+            TIMESTAMPTZ_TYPE_OID,
+        ),
+        (
+            HASH_PG_LSN_EXTENDED_PROC_OID,
+            "pg_lsn_hash_extended",
+            PG_LSN_TYPE_OID,
+        ),
+        (
+            HASH_ARRAY_EXTENDED_PROC_OID,
+            "hash_array_extended",
+            ANYARRAYOID,
+        ),
+        (
+            HASH_RECORD_EXTENDED_PROC_OID,
+            "hash_record_extended",
+            RECORD_TYPE_OID,
+        ),
+        (
+            HASH_RANGE_EXTENDED_PROC_OID,
+            "hash_range_extended",
+            ANYRANGEOID,
+        ),
+        (
+            HASH_MULTIRANGE_EXTENDED_PROC_OID,
+            "hash_multirange_extended",
+            ANYMULTIRANGEOID,
+        ),
+    ];
+
+    standard
+        .into_iter()
+        .map(|(oid, proname, type_oid)| {
+            proc_row(
+                oid,
+                proname,
+                INT4_TYPE_OID,
+                &oid_argtypes(&[type_oid]),
+                proname,
+                1,
+                false,
+                true,
+                'f',
+                'i',
+            )
+        })
+        .chain(extended.into_iter().map(|(oid, proname, type_oid)| {
+            proc_row(
+                oid,
+                proname,
+                INT8_TYPE_OID,
+                &oid_argtypes(&[type_oid, INT8_TYPE_OID]),
+                proname,
+                2,
+                false,
+                true,
+                'f',
+                'i',
+            )
+        }))
+        .collect()
 }
 
 fn hash_extended_proc_rows() -> Vec<PgProcRow> {

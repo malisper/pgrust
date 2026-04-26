@@ -48,7 +48,7 @@ use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT,
     USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE, USECS_PER_SEC,
 };
-use crate::include::nodes::datum::ArrayDimension;
+use crate::include::nodes::datum::{ArrayDimension, BitString};
 use crate::pgrust::compact_string::CompactString;
 use num_bigint::BigInt;
 use num_integer::Integer;
@@ -61,6 +61,33 @@ pub(crate) struct InputErrorInfo {
     pub(crate) detail: Option<String>,
     pub(crate) hint: Option<String>,
     pub(crate) sqlstate: &'static str,
+}
+
+fn cast_integer_to_bit_string(
+    value: u64,
+    source_width: i32,
+    negative: bool,
+    target_type: SqlType,
+) -> BitString {
+    let target_len = match target_type.kind {
+        SqlTypeKind::Bit => target_type.bit_len().unwrap_or(1),
+        SqlTypeKind::VarBit => target_type.bit_len().unwrap_or(source_width),
+        _ => unreachable!("integer bit cast target checked by caller"),
+    }
+    .max(0);
+    let mut bytes = vec![0u8; BitString::byte_len(target_len)];
+    for bit_idx in 0..target_len as usize {
+        let right_index = target_len as usize - 1 - bit_idx;
+        let bit_set = if right_index < source_width as usize {
+            ((value >> right_index) & 1) != 0
+        } else {
+            negative
+        };
+        if bit_set {
+            bytes[bit_idx / 8] |= 1 << (7 - (bit_idx % 8));
+        }
+    }
+    BitString::new(target_len, bytes)
 }
 
 fn unsupported_anyarray_input() -> ExecError {
@@ -3579,6 +3606,15 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Ok(Value::Money(i64::from(v) * 100)),
             SqlType {
+                kind: SqlTypeKind::Bit | SqlTypeKind::VarBit,
+                ..
+            } => Ok(Value::Bit(cast_integer_to_bit_string(
+                v as u16 as u64,
+                16,
+                v < 0,
+                ty,
+            ))),
+            SqlType {
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Cstring
@@ -3600,8 +3636,6 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::Internal
                     | SqlTypeKind::InternalChar
-                    | SqlTypeKind::Bit
-                    | SqlTypeKind::VarBit
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
@@ -3724,6 +3758,15 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Ok(Value::Money(i64::from(v) * 100)),
             SqlType {
+                kind: SqlTypeKind::Bit | SqlTypeKind::VarBit,
+                ..
+            } => Ok(Value::Bit(cast_integer_to_bit_string(
+                v as u32 as u64,
+                32,
+                v < 0,
+                ty,
+            ))),
+            SqlType {
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Cstring
@@ -3745,8 +3788,6 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::Internal
                     | SqlTypeKind::InternalChar
-                    | SqlTypeKind::Bit
-                    | SqlTypeKind::VarBit
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
@@ -4523,6 +4564,15 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     sqlstate: "22003",
                 }),
             SqlType {
+                kind: SqlTypeKind::Bit | SqlTypeKind::VarBit,
+                ..
+            } => Ok(Value::Bit(cast_integer_to_bit_string(
+                v as u64,
+                64,
+                v < 0,
+                ty,
+            ))),
+            SqlType {
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Cstring
@@ -4544,8 +4594,6 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::Internal
                     | SqlTypeKind::InternalChar
-                    | SqlTypeKind::Bit
-                    | SqlTypeKind::VarBit
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json

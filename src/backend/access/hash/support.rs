@@ -1,5 +1,9 @@
 use crate::include::catalog::BPCHAR_HASH_OPCLASS_OID;
-use crate::include::nodes::datum::{MultirangeValue, RangeBound, RangeValue, Value};
+use crate::include::nodes::datum::{
+    ArrayValue, InetValue, MultirangeValue, RangeBound, RangeValue, RecordValue, Value,
+};
+use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
+use std::net::IpAddr;
 
 pub const HASH_PARTITION_SEED: u64 = 0x7A5B_2236_7996_DCFD;
 const HASH_INITIAL_VALUE: u32 = 0x9e37_79b9 + 3_923_095;
@@ -45,6 +49,9 @@ fn hash_final(mut a: u32, mut b: u32, mut c: u32) -> (u32, u32, u32) {
 }
 
 pub(crate) fn hash_bytes_extended(bytes: &[u8], seed: u64) -> u64 {
+    // :HACK: pgrust preserves PostgreSQL SQL hash semantics, but this shared
+    // digest wrapper is not a full port of PostgreSQL's per-type C hash
+    // functions, so exact result bits and hash placement may differ.
     let mut a = HASH_INITIAL_VALUE.wrapping_add(bytes.len() as u32);
     let mut b = a;
     let mut c = a;
@@ -157,18 +164,37 @@ pub(crate) fn hash_value_extended(
             bytes.extend_from_slice(&value.offset_seconds.to_le_bytes());
             hash_bytes_extended(&bytes, seed)
         }
+        Value::Interval(value) => {
+            let mut bytes = Vec::with_capacity(16);
+            bytes.extend_from_slice(&value.time_micros.to_le_bytes());
+            bytes.extend_from_slice(&value.days.to_le_bytes());
+            bytes.extend_from_slice(&value.months.to_le_bytes());
+            hash_bytes_extended(&bytes, seed)
+        }
         Value::Float64(value) if *value == 0.0 => seed,
         Value::Float64(value) if value.is_nan() => {
             hash_bytes_extended(&f64::NAN.to_le_bytes(), seed)
         }
         Value::Float64(value) => hash_bytes_extended(&value.to_le_bytes(), seed),
-        Value::Numeric(value) => hash_bytes_extended(value.render().as_bytes(), seed),
+        Value::Numeric(value) => {
+            hash_bytes_extended(value.normalize_display_scale().render().as_bytes(), seed)
+        }
         Value::Bytea(value) => hash_bytes_extended(value, seed),
         Value::Uuid(value) => hash_bytes_extended(value, seed),
+        Value::Inet(value) | Value::Cidr(value) => hash_inet_value(value, seed),
+        Value::PgLsn(value) => hash_bytes_extended(&value.to_le_bytes(), seed),
+        Value::Jsonb(value) => hash_bytes_extended(value, seed),
+        Value::Array(values) => {
+            let array = ArrayValue::from_nested_values(values.clone(), vec![1])?;
+            hash_array_value(&array, seed)?
+        }
+        Value::PgArray(value) => hash_array_value(value, seed)?,
+        Value::Record(value) => hash_record_value(value, seed)?,
         Value::Range(value) => hash_range_value(value, seed)?,
         Value::Multirange(value) => hash_multirange_value(value, seed)?,
         Value::MacAddr(value) => hash_bytes_extended(value, seed),
         Value::MacAddr8(value) => hash_bytes_extended(value, seed),
+        Value::Bit(_) => return Err(non_hashable_type_error(value.sql_type_hint())),
         value if value.as_text().is_some() => {
             let mut text = value.as_text().unwrap();
             if opclass == Some(BPCHAR_HASH_OPCLASS_OID) {
@@ -176,9 +202,81 @@ pub(crate) fn hash_value_extended(
             }
             hash_bytes_extended(text.as_bytes(), seed)
         }
-        other => return Err(format!("unsupported hash key value {other:?}")),
+        other => return Err(non_hashable_type_error(other.sql_type_hint())),
     };
     Ok(Some(hash))
+}
+
+fn hash_inet_value(value: &InetValue, seed: u64) -> u64 {
+    let mut bytes = Vec::with_capacity(18);
+    match value.addr {
+        IpAddr::V4(addr) => {
+            bytes.push(4);
+            bytes.push(value.bits);
+            bytes.extend_from_slice(&addr.octets());
+        }
+        IpAddr::V6(addr) => {
+            bytes.push(6);
+            bytes.push(value.bits);
+            bytes.extend_from_slice(&addr.octets());
+        }
+    }
+    hash_bytes_extended(&bytes, seed)
+}
+
+fn hash_array_value(value: &ArrayValue, seed: u64) -> Result<u64, String> {
+    let mut hash = hash_uint32_extended(value.ndim() as u32, seed);
+    for dimension in &value.dimensions {
+        hash = hash_combine64(hash, hash_uint32_extended(dimension.length as u32, seed));
+        hash = hash_combine64(
+            hash,
+            hash_uint32_extended(dimension.lower_bound as u32, seed),
+        );
+    }
+    for element in &value.elements {
+        hash = hash_combine64(hash, hash_element_value(element, seed)?);
+    }
+    Ok(hash)
+}
+
+fn hash_record_value(value: &RecordValue, seed: u64) -> Result<u64, String> {
+    let mut hash = hash_uint32_extended(value.fields.len() as u32, seed);
+    for (field, field_value) in value.iter() {
+        let field_hash = hash_value_extended(field_value, None, seed)
+            .map_err(|_| non_hashable_type_error(Some(field.sql_type)))?
+            .unwrap_or_else(|| hash_null_sentinel(seed));
+        hash = hash_combine64(hash, field_hash);
+    }
+    Ok(hash)
+}
+
+fn hash_element_value(value: &Value, seed: u64) -> Result<u64, String> {
+    Ok(hash_value_extended(value, None, seed)?.unwrap_or_else(|| hash_null_sentinel(seed)))
+}
+
+fn hash_null_sentinel(seed: u64) -> u64 {
+    hash_uint32_extended(0xFFFF_FFFF, seed)
+}
+
+fn non_hashable_type_error(ty: Option<SqlType>) -> String {
+    let type_name = ty
+        .map(non_hashable_type_name)
+        .unwrap_or_else(|| "unknown".to_string());
+    format!("could not identify a hash function for type {type_name}")
+}
+
+fn non_hashable_type_name(ty: SqlType) -> String {
+    match ty.element_type().kind {
+        SqlTypeKind::Bit | SqlTypeKind::VarBit => "bit varying".to_string(),
+        SqlTypeKind::Point => "point".to_string(),
+        SqlTypeKind::Lseg => "lseg".to_string(),
+        SqlTypeKind::Path => "path".to_string(),
+        SqlTypeKind::Line => "line".to_string(),
+        SqlTypeKind::Box => "box".to_string(),
+        SqlTypeKind::Polygon => "polygon".to_string(),
+        SqlTypeKind::Circle => "circle".to_string(),
+        other => format!("{other:?}").to_ascii_lowercase(),
+    }
 }
 
 fn hash_multirange_value(value: &MultirangeValue, seed: u64) -> Result<u64, String> {
@@ -222,11 +320,7 @@ fn hash_range_bound(bound: Option<&RangeBound>, seed: u64) -> Result<u64, String
 }
 
 pub(crate) fn hash_index_value(value: &Value, opclass: Option<u32>) -> Result<Option<u32>, String> {
-    Ok(hash_value_extended(value, opclass, 0)?.map(|hash| {
-        let low = hash as u32;
-        let high = (hash >> 32) as u32;
-        low ^ high
-    }))
+    Ok(hash_value_extended(value, opclass, 0)?.map(|hash| hash as u32))
 }
 
 pub(crate) fn hash_values_combined(values: &[Value], opclasses: &[u32]) -> Result<u64, String> {
