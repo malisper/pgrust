@@ -224,7 +224,10 @@ fn analyze_executor_context(
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
         catalog: visible_catalog,
-        compiled_functions: HashMap::new(),
+        plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
+            crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
+        )),
+        pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: HashMap::new(),
         cte_producers: HashMap::new(),
         recursive_worktables: HashMap::new(),
@@ -30308,6 +30311,206 @@ fn create_or_replace_function_updates_existing_body() {
         query_rows(&db, 1, "select inc(4)"),
         vec![vec![Value::Int32(6)]]
     );
+}
+
+#[test]
+fn plpgsql_function_cache_reuses_scalar_across_statements() {
+    let dir = temp_dir("plpgsql_cache_scalar");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
+        )
+        .unwrap();
+    assert_eq!(session.plpgsql_function_cache_len(), 0);
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(2)"),
+        vec![vec![Value::Int32(3)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+}
+
+#[test]
+fn plpgsql_function_cache_recompiles_create_or_replace_body() {
+    let dir = temp_dir("plpgsql_cache_replace");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+
+    session
+        .execute(
+            &db,
+            "create or replace function inc(x int4) returns int4 language plpgsql as $$ begin return x + 2; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(3)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+}
+
+#[test]
+fn plpgsql_function_cache_does_not_reuse_dropped_function_body() {
+    let dir = temp_dir("plpgsql_cache_drop_recreate");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(2)]]
+    );
+    session.execute(&db, "drop function inc(int4)").unwrap();
+    session
+        .execute(
+            &db,
+            "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 9; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(10)]]
+    );
+}
+
+#[test]
+fn plpgsql_function_cache_keeps_polymorphic_signatures_separate() {
+    let dir = temp_dir("plpgsql_cache_polymorphic");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function echo_any(x anyelement) returns anyelement language plpgsql as $$ begin return x; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select echo_any(7::int4)"),
+        vec![vec![Value::Int32(7)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select echo_any('txt'::text)"),
+        vec![vec![Value::Text("txt".into())]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 2);
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select echo_any(8::int4)"),
+        vec![vec![Value::Int32(8)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 2);
+}
+
+#[test]
+fn plpgsql_function_cache_reuses_trigger_function_across_statements() {
+    let dir = temp_dir("plpgsql_cache_trigger");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4, note text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function row_notice() returns trigger language plpgsql as $$
+             begin
+               raise notice '%:%', TG_OP, NEW.id;
+               return NEW;
+             end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create trigger items_notice before insert on items for each row execute function row_notice()",
+        )
+        .unwrap();
+
+    clear_notices();
+    session
+        .execute(&db, "insert into items values (1, 'a')")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["INSERT:1".to_string()]);
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+    clear_notices();
+    session
+        .execute(&db, "insert into items values (2, 'b')")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["INSERT:2".to_string()]);
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+}
+
+#[test]
+fn plpgsql_function_cache_uses_current_transition_table_rows() {
+    let dir = temp_dir("plpgsql_cache_transition_table");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4, note text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function insert_transition_notice() returns trigger language plpgsql as $$
+             declare c int4; s int4;
+             begin
+               select count(*), sum(id) into c, s from new_rows;
+               raise notice 'insert:%:%', c, s;
+               return null;
+             end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create trigger items_insert_ref after insert on items referencing new table as new_rows for each statement execute function insert_transition_notice()",
+        )
+        .unwrap();
+
+    clear_notices();
+    session
+        .execute(&db, "insert into items values (1, 'a'), (2, 'b')")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["insert:2:3".to_string()]);
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+
+    clear_notices();
+    session
+        .execute(
+            &db,
+            "insert into items values (10, 'x'), (20, 'y'), (30, 'z')",
+        )
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["insert:3:60".to_string()]);
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
 }
 
 #[test]

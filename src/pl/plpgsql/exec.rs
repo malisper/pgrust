@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::backend::access::heap::heapam::HeapError;
@@ -22,13 +24,16 @@ use crate::backend::utils::record::{
 };
 use crate::include::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
-    ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, TEXT_TYPE_OID,
+    ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, PgProcRow,
+    TEXT_TYPE_OID,
 };
 use crate::include::nodes::datum::{RecordDescriptor, RecordValue};
+use crate::include::nodes::execnodes::{MaterializedCteTable, MaterializedRow};
 use crate::include::nodes::primnodes::{QueryColumn, expr_sql_type_hint};
 use crate::pgrust::session::ByteaOutputFormat;
 
 use super::ast::{ExceptionCondition, RaiseLevel};
+use super::cache::{PlpgsqlFunctionCacheKey, RelationShape, TransitionTableShape};
 use super::compile::{
     CompiledBlock, CompiledExceptionHandler, CompiledExpr, CompiledForQuerySource,
     CompiledForQueryTarget, CompiledFunction, CompiledSelectIntoTarget, CompiledStmt,
@@ -323,65 +328,7 @@ pub fn execute_user_defined_trigger_function(
     call: &TriggerCallContext,
     ctx: &mut ExecutorContext,
 ) -> Result<TriggerFunctionResult, ExecError> {
-    let catalog = ctx.catalog.as_ref().ok_or_else(|| {
-        function_runtime_error(
-            "user-defined functions require executor catalog context",
-            None,
-            "0A000",
-        )
-    })?;
-    let row = catalog.proc_row_by_oid(proc_oid).ok_or_else(|| {
-        function_runtime_error(&format!("unknown function oid {proc_oid}"), None, "42883")
-    })?;
-    if row.prokind != 'f' {
-        return Err(function_runtime_error(
-            "only functions are executable through the PL/pgSQL runtime",
-            Some(format!("prokind = {}", row.prokind)),
-            "0A000",
-        ));
-    }
-    let language = catalog.language_row_by_oid(row.prolang).ok_or_else(|| {
-        function_runtime_error(
-            &format!("unknown language oid {}", row.prolang),
-            None,
-            "42883",
-        )
-    })?;
-    if !language.lanname.eq_ignore_ascii_case("plpgsql") {
-        return Err(function_runtime_error(
-            "only LANGUAGE plpgsql functions are supported",
-            Some(format!("function language is {}", language.lanname)),
-            "0A000",
-        ));
-    }
-    let return_type = catalog.type_by_oid(row.prorettype).ok_or_else(|| {
-        function_runtime_error(
-            &format!("unknown return type oid {}", row.prorettype),
-            None,
-            "42883",
-        )
-    })?;
-    if return_type.sql_type.kind != SqlTypeKind::Trigger {
-        return Err(function_runtime_error(
-            "trigger runtime called for a non-trigger function",
-            Some(format!("return type is {:?}", return_type.sql_type.kind)),
-            "0A000",
-        ));
-    }
-    if row.pronargs != 0 {
-        return Err(function_runtime_error(
-            "trigger functions must not accept SQL arguments",
-            Some(format!("pronargs = {}", row.pronargs)),
-            "0A000",
-        ));
-    }
-    let compiled = compile_trigger_function_from_proc(
-        &row,
-        &call.relation_desc,
-        &call.transition_tables,
-        catalog,
-    )
-    .map_err(ExecError::Parse)?;
+    let compiled = compiled_trigger_function_for_proc(proc_oid, call, ctx)?;
     let FunctionReturnContract::Trigger { bindings } = &compiled.return_contract else {
         return Err(function_runtime_error(
             "trigger function compiled with a non-trigger return contract",
@@ -399,8 +346,18 @@ pub fn execute_user_defined_trigger_function(
     };
     state.values[compiled.found_slot] = Value::Bool(false);
     seed_trigger_state(bindings, call, &mut state);
-    let _ = exec_function_block(&compiled.body, &compiled, None, &mut state, ctx)
-        .map_err(|err| with_plpgsql_context_if_missing(err, &compiled, "statement"))?;
+    let saved_pinned_cte_tables = ctx.pinned_cte_tables.clone();
+    let saved_cte_tables = ctx.cte_tables.clone();
+    let saved_cte_producers = ctx.cte_producers.clone();
+    let result = match install_trigger_transition_ctes(&compiled, call, ctx) {
+        Ok(()) => exec_function_block(&compiled.body, &compiled, None, &mut state, ctx)
+            .map_err(|err| with_plpgsql_context_if_missing(err, &compiled, "statement")),
+        Err(err) => Err(err),
+    };
+    ctx.pinned_cte_tables = saved_pinned_cte_tables;
+    ctx.cte_tables = saved_cte_tables;
+    ctx.cte_producers = saved_cte_producers;
+    let _ = result?;
     state.trigger_return.ok_or_else(|| {
         function_runtime_error(
             "control reached end of trigger procedure without RETURN",
@@ -416,81 +373,37 @@ fn compiled_function_for_proc(
     actual_arg_types: &[Option<SqlType>],
     ctx: &mut ExecutorContext,
 ) -> Result<Arc<CompiledFunction>, ExecError> {
-    if let Some(compiled) =
-        compile_polymorphic_function(proc_oid, resolved_result_type, actual_arg_types, ctx)?
-    {
+    let catalog = executor_catalog(ctx, "user-defined functions")?;
+    let Some(row) = catalog.proc_row_by_oid(proc_oid) else {
+        ctx.plpgsql_function_cache.write().remove_proc(proc_oid);
+        return Err(function_runtime_error(
+            &format!("unknown function oid {proc_oid}"),
+            None,
+            "42883",
+        ));
+    };
+    validate_plpgsql_function_row(&row, catalog, "function")?;
+    let key = routine_cache_key(&row, resolved_result_type, actual_arg_types);
+    if let Some(compiled) = ctx.plpgsql_function_cache.read().get_valid(&key, &row) {
         return Ok(compiled);
     }
-    if let Some(compiled) = ctx.compiled_functions.get(&proc_oid) {
-        return Ok(Arc::clone(compiled));
-    }
-
-    let compiled = {
-        let catalog = ctx.catalog.as_ref().ok_or_else(|| {
-            function_runtime_error(
-                "user-defined functions require executor catalog context",
-                None,
-                "0A000",
-            )
-        })?;
-        let row = catalog.proc_row_by_oid(proc_oid).ok_or_else(|| {
-            function_runtime_error(&format!("unknown function oid {proc_oid}"), None, "42883")
-        })?;
-        if row.prokind != 'f' {
-            return Err(function_runtime_error(
-                "only functions are executable through the PL/pgSQL runtime",
-                Some(format!("prokind = {}", row.prokind)),
-                "0A000",
-            ));
-        }
-        let language = catalog.language_row_by_oid(row.prolang).ok_or_else(|| {
-            function_runtime_error(
-                &format!("unknown language oid {}", row.prolang),
-                None,
-                "42883",
-            )
-        })?;
-        if !language.lanname.eq_ignore_ascii_case("plpgsql") {
-            return Err(function_runtime_error(
-                "only LANGUAGE plpgsql functions are supported",
-                Some(format!("function language is {}", language.lanname)),
-                "0A000",
-            ));
-        }
-        Arc::new(compile_function_from_proc(&row, catalog).map_err(ExecError::Parse)?)
-    };
-
-    ctx.compiled_functions
-        .insert(proc_oid, Arc::clone(&compiled));
+    let compile_row =
+        concrete_polymorphic_proc_row(&row, resolved_result_type, actual_arg_types, catalog)?
+            .unwrap_or_else(|| row.clone());
+    let compiled =
+        Arc::new(compile_function_from_proc(&compile_row, catalog).map_err(ExecError::Parse)?);
+    ctx.plpgsql_function_cache
+        .write()
+        .insert(key, row, Arc::clone(&compiled));
     Ok(compiled)
 }
 
-fn compile_polymorphic_function(
-    proc_oid: u32,
+fn concrete_polymorphic_proc_row(
+    row: &PgProcRow,
     resolved_result_type: Option<SqlType>,
     actual_arg_types: &[Option<SqlType>],
-    ctx: &mut ExecutorContext,
-) -> Result<Option<Arc<CompiledFunction>>, ExecError> {
-    let catalog = ctx.catalog.as_ref().ok_or_else(|| {
-        function_runtime_error(
-            "user-defined functions require executor catalog context",
-            None,
-            "0A000",
-        )
-    })?;
-    let row = catalog.proc_row_by_oid(proc_oid).ok_or_else(|| {
-        function_runtime_error(&format!("unknown function oid {proc_oid}"), None, "42883")
-    })?;
-    let language = catalog.language_row_by_oid(row.prolang).ok_or_else(|| {
-        function_runtime_error(
-            &format!("unknown language oid {}", row.prolang),
-            None,
-            "42883",
-        )
-    })?;
-    if !language.lanname.eq_ignore_ascii_case("plpgsql") {
-        return Ok(None);
-    }
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<PgProcRow>, ExecError> {
     let mut concrete_row = row.clone();
     let mut changed = false;
     if is_polymorphic_type_oid(row.prorettype)
@@ -529,9 +442,7 @@ fn compile_polymorphic_function(
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(" ");
-    Ok(Some(Arc::new(
-        compile_function_from_proc(&concrete_row, catalog).map_err(ExecError::Parse)?,
-    )))
+    Ok(Some(concrete_row))
 }
 
 fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
@@ -569,48 +480,248 @@ fn compiled_procedure_for_proc(
     proc_oid: u32,
     ctx: &mut ExecutorContext,
 ) -> Result<Arc<CompiledFunction>, ExecError> {
-    if let Some(compiled) = ctx.compiled_functions.get(&proc_oid) {
-        return Ok(Arc::clone(compiled));
+    let catalog = executor_catalog(ctx, "user-defined procedures")?;
+    let Some(row) = catalog.proc_row_by_oid(proc_oid) else {
+        ctx.plpgsql_function_cache.write().remove_proc(proc_oid);
+        return Err(function_runtime_error(
+            &format!("unknown procedure oid {proc_oid}"),
+            None,
+            "42883",
+        ));
+    };
+    validate_plpgsql_procedure_row(&row, catalog)?;
+    let key = routine_cache_key(&row, None, &[]);
+    if let Some(compiled) = ctx.plpgsql_function_cache.read().get_valid(&key, &row) {
+        return Ok(compiled);
+    }
+    let compiled = Arc::new(compile_function_from_proc(&row, catalog).map_err(ExecError::Parse)?);
+    ctx.plpgsql_function_cache
+        .write()
+        .insert(key, row, Arc::clone(&compiled));
+    Ok(compiled)
+}
+
+fn compiled_trigger_function_for_proc(
+    proc_oid: u32,
+    call: &TriggerCallContext,
+    ctx: &mut ExecutorContext,
+) -> Result<Arc<CompiledFunction>, ExecError> {
+    let catalog = executor_catalog(ctx, "user-defined functions")?;
+    let Some(row) = catalog.proc_row_by_oid(proc_oid) else {
+        ctx.plpgsql_function_cache.write().remove_proc(proc_oid);
+        return Err(function_runtime_error(
+            &format!("unknown function oid {proc_oid}"),
+            None,
+            "42883",
+        ));
+    };
+    validate_plpgsql_function_row(&row, catalog, "function")?;
+    let return_type = catalog.type_by_oid(row.prorettype).ok_or_else(|| {
+        function_runtime_error(
+            &format!("unknown return type oid {}", row.prorettype),
+            None,
+            "42883",
+        )
+    })?;
+    if return_type.sql_type.kind != SqlTypeKind::Trigger {
+        return Err(function_runtime_error(
+            "trigger runtime called for a non-trigger function",
+            Some(format!("return type is {:?}", return_type.sql_type.kind)),
+            "0A000",
+        ));
+    }
+    if row.pronargs != 0 {
+        return Err(function_runtime_error(
+            "trigger functions must not accept SQL arguments",
+            Some(format!("pronargs = {}", row.pronargs)),
+            "0A000",
+        ));
     }
 
-    let compiled = {
-        let catalog = ctx.catalog.as_ref().ok_or_else(|| {
-            function_runtime_error(
-                "user-defined procedures require executor catalog context",
-                None,
-                "0A000",
-            )
-        })?;
-        let row = catalog.proc_row_by_oid(proc_oid).ok_or_else(|| {
-            function_runtime_error(&format!("unknown procedure oid {proc_oid}"), None, "42883")
-        })?;
-        if row.prokind != 'p' {
-            return Err(function_runtime_error(
-                "only procedures are executable through CALL",
-                Some(format!("prokind = {}", row.prokind)),
-                "0A000",
-            ));
-        }
-        let language = catalog.language_row_by_oid(row.prolang).ok_or_else(|| {
-            function_runtime_error(
-                &format!("unknown language oid {}", row.prolang),
-                None,
-                "42883",
-            )
-        })?;
-        if !language.lanname.eq_ignore_ascii_case("plpgsql") {
-            return Err(function_runtime_error(
-                "only LANGUAGE plpgsql procedures are supported",
-                Some(format!("procedure language is {}", language.lanname)),
-                "0A000",
-            ));
-        }
-        Arc::new(compile_function_from_proc(&row, catalog).map_err(ExecError::Parse)?)
-    };
-
-    ctx.compiled_functions
-        .insert(proc_oid, Arc::clone(&compiled));
+    let key = trigger_cache_key(proc_oid, call);
+    if let Some(compiled) = ctx.plpgsql_function_cache.read().get_valid(&key, &row) {
+        return Ok(compiled);
+    }
+    let compiled = Arc::new(
+        compile_trigger_function_from_proc(
+            &row,
+            &call.relation_desc,
+            &call.transition_tables,
+            catalog,
+        )
+        .map_err(ExecError::Parse)?,
+    );
+    ctx.plpgsql_function_cache
+        .write()
+        .insert(key, row, Arc::clone(&compiled));
     Ok(compiled)
+}
+
+fn executor_catalog<'a>(
+    ctx: &'a ExecutorContext,
+    object_kind: &str,
+) -> Result<&'a crate::backend::utils::cache::visible_catalog::VisibleCatalog, ExecError> {
+    ctx.catalog.as_ref().ok_or_else(|| {
+        function_runtime_error(
+            &format!("{object_kind} require executor catalog context"),
+            None,
+            "0A000",
+        )
+    })
+}
+
+fn validate_plpgsql_function_row(
+    row: &PgProcRow,
+    catalog: &dyn CatalogLookup,
+    object_kind: &str,
+) -> Result<(), ExecError> {
+    if row.prokind != 'f' {
+        return Err(function_runtime_error(
+            "only functions are executable through the PL/pgSQL runtime",
+            Some(format!("prokind = {}", row.prokind)),
+            "0A000",
+        ));
+    }
+    validate_plpgsql_language(row, catalog, object_kind)
+}
+
+fn validate_plpgsql_procedure_row(
+    row: &PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    if row.prokind != 'p' {
+        return Err(function_runtime_error(
+            "only procedures are executable through CALL",
+            Some(format!("prokind = {}", row.prokind)),
+            "0A000",
+        ));
+    }
+    validate_plpgsql_language(row, catalog, "procedure")
+}
+
+fn validate_plpgsql_language(
+    row: &PgProcRow,
+    catalog: &dyn CatalogLookup,
+    object_kind: &str,
+) -> Result<(), ExecError> {
+    let language = catalog.language_row_by_oid(row.prolang).ok_or_else(|| {
+        function_runtime_error(
+            &format!("unknown language oid {}", row.prolang),
+            None,
+            "42883",
+        )
+    })?;
+    if !language.lanname.eq_ignore_ascii_case("plpgsql") {
+        return Err(function_runtime_error(
+            &format!("only LANGUAGE plpgsql {object_kind}s are supported"),
+            Some(format!("{object_kind} language is {}", language.lanname)),
+            "0A000",
+        ));
+    }
+    Ok(())
+}
+
+fn routine_cache_key(
+    row: &PgProcRow,
+    resolved_result_type: Option<SqlType>,
+    actual_arg_types: &[Option<SqlType>],
+) -> PlpgsqlFunctionCacheKey {
+    if row_uses_polymorphic_types(row) {
+        PlpgsqlFunctionCacheKey::Routine {
+            proc_oid: row.oid,
+            resolved_result_type,
+            actual_arg_types: actual_arg_types.to_vec(),
+        }
+    } else {
+        PlpgsqlFunctionCacheKey::Routine {
+            proc_oid: row.oid,
+            resolved_result_type: None,
+            actual_arg_types: Vec::new(),
+        }
+    }
+}
+
+fn row_uses_polymorphic_types(row: &PgProcRow) -> bool {
+    is_polymorphic_type_oid(row.prorettype)
+        || parse_proc_argtype_oids(&row.proargtypes)
+            .unwrap_or_default()
+            .into_iter()
+            .any(is_polymorphic_type_oid)
+        || row
+            .proallargtypes
+            .as_ref()
+            .is_some_and(|types| types.iter().copied().any(is_polymorphic_type_oid))
+}
+
+fn trigger_cache_key(proc_oid: u32, call: &TriggerCallContext) -> PlpgsqlFunctionCacheKey {
+    PlpgsqlFunctionCacheKey::Trigger {
+        proc_oid,
+        relation_shape: RelationShape::from_desc(&call.relation_desc),
+        transition_tables: call
+            .transition_tables
+            .iter()
+            .map(|table| TransitionTableShape {
+                name: table.name.clone(),
+                relation_shape: RelationShape::from_desc(&table.desc),
+            })
+            .collect(),
+    }
+}
+
+fn install_trigger_transition_ctes(
+    compiled: &CompiledFunction,
+    call: &TriggerCallContext,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for compiled_cte in &compiled.trigger_transition_ctes {
+        let table = call
+            .transition_tables
+            .iter()
+            .find(|table| table.name == compiled_cte.name)
+            .ok_or_else(|| {
+                function_runtime_error(
+                    &format!(
+                        "missing transition table \"{}\" for cached trigger function",
+                        compiled_cte.name
+                    ),
+                    None,
+                    "XX000",
+                )
+            })?;
+        ctx.pinned_cte_tables.insert(
+            compiled_cte.cte_id,
+            Rc::new(RefCell::new(MaterializedCteTable {
+                rows: materialized_transition_table_rows(table),
+                eof: true,
+            })),
+        );
+        ctx.cte_producers.remove(&compiled_cte.cte_id);
+    }
+    Ok(())
+}
+
+fn materialized_transition_table_rows(
+    table: &super::compile::TriggerTransitionTable,
+) -> Vec<MaterializedRow> {
+    let visible_indexes = table
+        .desc
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| (!column.dropped).then_some(index))
+        .collect::<Vec<_>>();
+    table
+        .rows
+        .iter()
+        .map(|row| {
+            let mut values = visible_indexes
+                .iter()
+                .map(|index| row.get(*index).cloned().unwrap_or(Value::Null))
+                .collect::<Vec<_>>();
+            Value::materialize_all(&mut values);
+            MaterializedRow::new(TupleSlot::virtual_row(values), Vec::new())
+        })
+        .collect()
 }
 
 fn execute_compiled_function(

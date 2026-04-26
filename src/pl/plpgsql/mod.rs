@@ -1,4 +1,5 @@
 mod ast;
+mod cache;
 mod compile;
 mod exec;
 mod gram;
@@ -9,6 +10,7 @@ use crate::backend::executor::{ExecError, ExecutorContext, StatementResult};
 use crate::backend::parser::{Catalog, CatalogLookup, DoStatement, ParseError};
 
 pub use ast::*;
+pub use cache::PlpgsqlFunctionCache;
 pub use compile::{CompiledFunction, TriggerTransitionTable};
 pub use exec::{
     PlpgsqlNotice, TriggerCallContext, TriggerFunctionResult, TriggerOperation, clear_notices,

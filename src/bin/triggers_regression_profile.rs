@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use pgrust::pgrust::database::{Database, Session};
+use pgrust::pl::plpgsql::take_notices;
 
 struct Args {
     base_dir: PathBuf,
@@ -64,9 +65,11 @@ fn main() -> Result<(), String> {
         }
     }
 
+    let _ = take_notices();
     let started = Instant::now();
     for _ in 0..args.iterations {
         session.execute(&db, sql).map_err(|e| format!("{e:?}"))?;
+        let _ = take_notices();
     }
     let elapsed = started.elapsed();
 
