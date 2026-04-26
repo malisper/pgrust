@@ -1318,7 +1318,7 @@ fn try_parse_set_transaction_statement(sql: &str) -> Result<Option<Statement>, P
     // level and stores the setting only as compatibility metadata.
     Ok(Some(Statement::Set(SetStatement {
         name: "transaction_isolation".into(),
-        value: level.to_ascii_lowercase(),
+        value: Some(level.to_ascii_lowercase()),
         is_local: true,
     })))
 }
@@ -9930,15 +9930,19 @@ fn build_set(pair: Pair<'_, Rule>) -> Result<SetStatement, ParseError> {
                         }
                         Rule::kw_xml if name.is_none() => name = Some("xmloption".to_string()),
                         Rule::kw_document if value.is_none() => {
-                            value = Some("DOCUMENT".to_string())
+                            value = Some(Some("DOCUMENT".to_string()))
                         }
-                        Rule::kw_content if value.is_none() => value = Some("CONTENT".to_string()),
-                        Rule::set_value_list => value = Some(build_set_value_list(clause_part)),
+                        Rule::kw_content if value.is_none() => {
+                            value = Some(Some("CONTENT".to_string()))
+                        }
+                        Rule::set_value_list => {
+                            value = Some(build_set_value_list_value(clause_part))
+                        }
                         _ => {}
                     }
                 }
             }
-            Rule::set_value_list => value = Some(build_set_value_list(part)),
+            Rule::set_value_list => value = Some(build_set_value_list_value(part)),
             _ => {}
         }
     }
@@ -10495,12 +10499,27 @@ fn build_role_membership_option(pair: Pair<'_, Rule>) -> Result<RoleOption, Pars
     )
 }
 
-fn build_set_value_list(pair: Pair<'_, Rule>) -> String {
-    pair.into_inner()
+fn build_set_value_list_value(pair: Pair<'_, Rule>) -> Option<String> {
+    let atoms = pair
+        .into_inner()
         .filter(|part| part.as_rule() == Rule::set_value_atom)
-        .map(build_simple_set_value_atom)
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect::<Vec<_>>();
+    if atoms.len() == 1
+        && atoms[0]
+            .clone()
+            .into_inner()
+            .next()
+            .is_some_and(|part| part.as_rule() == Rule::kw_default)
+    {
+        return None;
+    }
+    Some(
+        atoms
+            .into_iter()
+            .map(build_simple_set_value_atom)
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
 }
 
 fn build_simple_set_value_atom(pair: Pair<'_, Rule>) -> String {

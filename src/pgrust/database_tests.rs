@@ -21686,6 +21686,23 @@ fn stats_gucs_show_postgres_like_defaults_and_runtime_values() {
 }
 
 #[test]
+fn set_guc_to_default_resets_runtime_value() {
+    let base = temp_dir("set_guc_to_default_resets_runtime_value");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set enable_bitmapscan to off")
+        .unwrap();
+    assert!(!session.planner_config().enable_bitmapscan);
+
+    session
+        .execute(&db, "set enable_bitmapscan to default")
+        .unwrap();
+    assert!(session.planner_config().enable_bitmapscan);
+}
+
+#[test]
 fn plpgsql_gucs_show_set_current_setting_and_drive_asserts() {
     let base = temp_dir("plpgsql_gucs");
     let db = Database::open(&base, 16).unwrap();

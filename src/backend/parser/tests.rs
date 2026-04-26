@@ -1910,7 +1910,30 @@ fn parse_set_statement() {
         stmt,
         Statement::Set(SetStatement {
             name: "extra_float_digits".into(),
-            value: "0".into(),
+            value: Some("0".into()),
+            is_local: false,
+        })
+    );
+}
+
+#[test]
+fn parse_set_statement_to_default() {
+    let stmt = parse_statement("set enable_bitmapscan to default").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Set(SetStatement {
+            name: "enable_bitmapscan".into(),
+            value: None,
+            is_local: false,
+        })
+    );
+
+    let stmt = parse_statement("set application_name to 'default'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Set(SetStatement {
+            name: "application_name".into(),
+            value: Some("default".into()),
             is_local: false,
         })
     );
@@ -1945,7 +1968,7 @@ fn parse_set_xml_option_statement() {
         stmt,
         Statement::Set(SetStatement {
             name: "xmloption".into(),
-            value: "DOCUMENT".into(),
+            value: Some("DOCUMENT".into()),
             is_local: false,
         })
     );
@@ -4507,7 +4530,7 @@ fn parse_set_transaction_isolation_level_serializable() {
         parse_statement("set transaction isolation level serializable").unwrap(),
         Statement::Set(SetStatement {
             name: "transaction_isolation".into(),
-            value: "serializable".into(),
+            value: Some("serializable".into()),
             is_local: true,
         })
     );
@@ -5038,7 +5061,7 @@ fn parse_set_local_statement() {
         stmt,
         Statement::Set(SetStatement {
             name: "client_min_messages".into(),
-            value: "warning".into(),
+            value: Some("warning".into()),
             is_local: true,
         })
     );
@@ -5051,7 +5074,7 @@ fn parse_set_local_time_zone_statement() {
         stmt,
         Statement::Set(SetStatement {
             name: "timezone".into(),
-            value: "10.5".into(),
+            value: Some("10.5".into()),
             is_local: true,
         })
     );
@@ -5064,7 +5087,7 @@ fn parse_set_time_zone_negative_offset_statement() {
         stmt,
         Statement::Set(SetStatement {
             name: "timezone".into(),
-            value: "-8".into(),
+            value: Some("-8".into()),
             is_local: false,
         })
     );
@@ -5077,7 +5100,7 @@ fn parse_set_statement_with_escape_string() {
         stmt,
         Statement::Set(SetStatement {
             name: "application_name".into(),
-            value: "line\nbreak".into(),
+            value: Some("line\nbreak".into()),
             is_local: false,
         })
     );

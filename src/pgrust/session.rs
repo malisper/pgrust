@@ -6310,19 +6310,12 @@ impl Session {
         {
             txn.local_guc_snapshot = Some((self.gucs.clone(), self.datetime_config.clone()));
         }
-        self.apply_guc_value(&stmt.name, &stmt.value)?;
-        if name == "row_security" {
-            db.install_row_security_enabled(self.client_id, self.row_security_enabled());
-            db.plan_cache.invalidate_all();
-        } else if name == "session_replication_role" {
-            db.install_session_replication_role(self.client_id, self.session_replication_role());
-            db.plan_cache.invalidate_all();
-        } else if matches!(
-            name.as_str(),
-            "enable_partitionwise_join" | "enable_seqscan"
-        ) {
-            db.plan_cache.invalidate_all();
+        if let Some(value) = &stmt.value {
+            self.apply_guc_value(&stmt.name, value)?;
+        } else {
+            self.reset_guc(&name);
         }
+        self.after_guc_change(db, &name);
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -6343,39 +6336,8 @@ impl Session {
                     normalized,
                 )));
             }
-            match normalized.as_str() {
-                "datestyle" => self.guc_reset_datestyle(),
-                "intervalstyle" => self.guc_reset_intervalstyle(),
-                "timezone" => self.guc_reset_timezone(),
-                "max_stack_depth" => self.guc_reset_max_stack_depth(),
-                "xmlbinary" => self.datetime_config.xml.binary = Default::default(),
-                "xmloption" => self.datetime_config.xml.option = Default::default(),
-                "stats_fetch_consistency" => self
-                    .stats_state
-                    .write()
-                    .set_fetch_consistency(StatsFetchConsistency::Cache),
-                "track_functions" => self
-                    .stats_state
-                    .write()
-                    .set_track_functions(TrackFunctionsSetting::None),
-                _ => {}
-            }
-            self.gucs.remove(&normalized);
-            if normalized == "row_security" {
-                db.install_row_security_enabled(self.client_id, self.row_security_enabled());
-                db.plan_cache.invalidate_all();
-            } else if normalized == "session_replication_role" {
-                db.install_session_replication_role(
-                    self.client_id,
-                    self.session_replication_role(),
-                );
-                db.plan_cache.invalidate_all();
-            } else if matches!(
-                normalized.as_str(),
-                "enable_partitionwise_join" | "enable_seqscan"
-            ) {
-                db.plan_cache.invalidate_all();
-            }
+            self.reset_guc(&normalized);
+            self.after_guc_change(db, &normalized);
         } else {
             self.gucs.clear();
             self.guc_reset_datestyle();
@@ -6391,6 +6353,46 @@ impl Session {
             db.plan_cache.invalidate_all();
         }
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn reset_guc(&mut self, normalized: &str) {
+        match normalized {
+            "datestyle" => self.guc_reset_datestyle(),
+            "intervalstyle" => self.guc_reset_intervalstyle(),
+            "timezone" => self.guc_reset_timezone(),
+            "max_stack_depth" => self.guc_reset_max_stack_depth(),
+            "xmlbinary" => self.datetime_config.xml.binary = Default::default(),
+            "xmloption" => self.datetime_config.xml.option = Default::default(),
+            "stats_fetch_consistency" => self
+                .stats_state
+                .write()
+                .set_fetch_consistency(StatsFetchConsistency::Cache),
+            "track_functions" => self
+                .stats_state
+                .write()
+                .set_track_functions(TrackFunctionsSetting::None),
+            _ => {}
+        }
+        self.gucs.remove(normalized);
+    }
+
+    fn after_guc_change(&self, db: &Database, normalized: &str) {
+        if normalized == "row_security" {
+            db.install_row_security_enabled(self.client_id, self.row_security_enabled());
+            db.plan_cache.invalidate_all();
+        } else if normalized == "session_replication_role" {
+            db.install_session_replication_role(self.client_id, self.session_replication_role());
+            db.plan_cache.invalidate_all();
+        } else if matches!(
+            normalized,
+            "enable_partitionwise_join"
+                | "enable_seqscan"
+                | "enable_indexscan"
+                | "enable_indexonlyscan"
+                | "enable_bitmapscan"
+        ) {
+            db.plan_cache.invalidate_all();
+        }
     }
 
     fn apply_show(
