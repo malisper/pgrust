@@ -1276,6 +1276,7 @@ pub(super) fn validate_scalar_function_arity(
                 args.len() == 2
             }
             BuiltinScalarFunction::CashWords => args.len() == 1,
+            BuiltinScalarFunction::UnsupportedXmlFeature => true,
             BuiltinScalarFunction::XmlComment
             | BuiltinScalarFunction::XmlIsWellFormed
             | BuiltinScalarFunction::XmlIsWellFormedDocument
@@ -2454,6 +2455,44 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("cashlarger", BuiltinScalarFunction::CashLarger),
         ("cashsmaller", BuiltinScalarFunction::CashSmaller),
         ("cash_words", BuiltinScalarFunction::CashWords),
+        ("table_to_xml", BuiltinScalarFunction::UnsupportedXmlFeature),
+        (
+            "table_to_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "table_to_xml_and_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        ("query_to_xml", BuiltinScalarFunction::UnsupportedXmlFeature),
+        (
+            "query_to_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "query_to_xml_and_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "cursor_to_xml",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "cursor_to_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "schema_to_xml",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "schema_to_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "schema_to_xml_and_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
         (
             "pg_get_constraintdef",
             BuiltinScalarFunction::PgGetConstraintDef,

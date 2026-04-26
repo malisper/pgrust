@@ -104,7 +104,10 @@ use super::expr_string::{
     eval_upper_function,
 };
 use super::expr_txid::eval_txid_builtin_function;
-use super::expr_xml::{eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function};
+use super::expr_xml::{
+    eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function,
+    unsupported_xml_feature_error,
+};
 use super::node_types::*;
 use super::pg_regex::{
     eval_regex_match_operator, eval_regexp_count, eval_regexp_instr, eval_regexp_like,
@@ -4886,6 +4889,7 @@ fn eval_plpgsql_builtin_function(
                 right: Value::Null,
             }),
         },
+        BuiltinScalarFunction::UnsupportedXmlFeature => Err(unsupported_xml_feature_error()),
         BuiltinScalarFunction::Int4Pl
         | BuiltinScalarFunction::Int8Inc
         | BuiltinScalarFunction::Int8IncAny
@@ -7026,6 +7030,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::BoolNe => eval_boolne(&values),
         BuiltinScalarFunction::BoolAndStateFunc => eval_booland_statefunc(&values),
         BuiltinScalarFunction::BoolOrStateFunc => eval_boolor_statefunc(&values),
+        BuiltinScalarFunction::UnsupportedXmlFeature => Err(unsupported_xml_feature_error()),
         BuiltinScalarFunction::XmlComment => eval_xml_comment_function(&values, Some(ctx)),
         BuiltinScalarFunction::XmlIsWellFormed => {
             eval_xml_is_well_formed_function(&values, ctx.datetime_config.xml.option, Some(ctx))

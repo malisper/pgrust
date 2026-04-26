@@ -449,6 +449,120 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             'v',
         ),
+        xml_mapping_proc_row(
+            2923,
+            "table_to_xml",
+            &[
+                REGCLASS_TYPE_OID,
+                BOOL_TYPE_OID,
+                BOOL_TYPE_OID,
+                TEXT_TYPE_OID,
+            ],
+            &["tbl", "nulls", "tableforest", "targetns"],
+            's',
+            'r',
+        ),
+        xml_mapping_proc_row(
+            2924,
+            "query_to_xml",
+            &[TEXT_TYPE_OID, BOOL_TYPE_OID, BOOL_TYPE_OID, TEXT_TYPE_OID],
+            &["query", "nulls", "tableforest", "targetns"],
+            'v',
+            'u',
+        ),
+        xml_mapping_proc_row(
+            2925,
+            "cursor_to_xml",
+            &[
+                REFCURSOR_TYPE_OID,
+                INT4_TYPE_OID,
+                BOOL_TYPE_OID,
+                BOOL_TYPE_OID,
+                TEXT_TYPE_OID,
+            ],
+            &["cursor", "count", "nulls", "tableforest", "targetns"],
+            'v',
+            'u',
+        ),
+        xml_mapping_proc_row(
+            2926,
+            "table_to_xmlschema",
+            &[
+                REGCLASS_TYPE_OID,
+                BOOL_TYPE_OID,
+                BOOL_TYPE_OID,
+                TEXT_TYPE_OID,
+            ],
+            &["tbl", "nulls", "tableforest", "targetns"],
+            's',
+            'r',
+        ),
+        xml_mapping_proc_row(
+            2927,
+            "query_to_xmlschema",
+            &[TEXT_TYPE_OID, BOOL_TYPE_OID, BOOL_TYPE_OID, TEXT_TYPE_OID],
+            &["query", "nulls", "tableforest", "targetns"],
+            'v',
+            'u',
+        ),
+        xml_mapping_proc_row(
+            2928,
+            "cursor_to_xmlschema",
+            &[
+                REFCURSOR_TYPE_OID,
+                BOOL_TYPE_OID,
+                BOOL_TYPE_OID,
+                TEXT_TYPE_OID,
+            ],
+            &["cursor", "nulls", "tableforest", "targetns"],
+            'v',
+            'u',
+        ),
+        xml_mapping_proc_row(
+            2929,
+            "table_to_xml_and_xmlschema",
+            &[
+                REGCLASS_TYPE_OID,
+                BOOL_TYPE_OID,
+                BOOL_TYPE_OID,
+                TEXT_TYPE_OID,
+            ],
+            &["tbl", "nulls", "tableforest", "targetns"],
+            's',
+            'r',
+        ),
+        xml_mapping_proc_row(
+            2930,
+            "query_to_xml_and_xmlschema",
+            &[TEXT_TYPE_OID, BOOL_TYPE_OID, BOOL_TYPE_OID, TEXT_TYPE_OID],
+            &["query", "nulls", "tableforest", "targetns"],
+            'v',
+            'u',
+        ),
+        xml_mapping_proc_row(
+            2933,
+            "schema_to_xml",
+            &[NAME_TYPE_OID, BOOL_TYPE_OID, BOOL_TYPE_OID, TEXT_TYPE_OID],
+            &["schema", "nulls", "tableforest", "targetns"],
+            's',
+            'r',
+        ),
+        xml_mapping_proc_row(
+            2934,
+            "schema_to_xmlschema",
+            &[NAME_TYPE_OID, BOOL_TYPE_OID, BOOL_TYPE_OID, TEXT_TYPE_OID],
+            &["schema", "nulls", "tableforest", "targetns"],
+            's',
+            'r',
+        ),
+        xml_mapping_proc_row(
+            2935,
+            "schema_to_xml_and_xmlschema",
+            &[NAME_TYPE_OID, BOOL_TYPE_OID, BOOL_TYPE_OID, TEXT_TYPE_OID],
+            &["schema", "nulls", "tableforest", "targetns"],
+            's',
+            'r',
+        ),
         proc_row(
             1599,
             "setseed",
@@ -8696,6 +8810,44 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("cashlarger", BuiltinScalarFunction::CashLarger),
         ("cashsmaller", BuiltinScalarFunction::CashSmaller),
         ("cash_words", BuiltinScalarFunction::CashWords),
+        ("table_to_xml", BuiltinScalarFunction::UnsupportedXmlFeature),
+        (
+            "table_to_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "table_to_xml_and_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        ("query_to_xml", BuiltinScalarFunction::UnsupportedXmlFeature),
+        (
+            "query_to_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "query_to_xml_and_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "cursor_to_xml",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "cursor_to_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "schema_to_xml",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "schema_to_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "schema_to_xml_and_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
         (
             "pg_get_constraintdef",
             BuiltinScalarFunction::PgGetConstraintDef,
@@ -14727,6 +14879,32 @@ fn cast_proc_row(oid: u32, proname: &str, prorettype: u32, arg_oids: &[u32]) -> 
 
 fn comparison_proc_row(oid: u32, proname: &str, arg_oids: &[u32]) -> PgProcRow {
     comparison_proc_row_with_src(oid, proname, arg_oids, proname)
+}
+
+fn xml_mapping_proc_row(
+    oid: u32,
+    proname: &str,
+    arg_oids: &[u32],
+    arg_names: &[&str],
+    provolatile: char,
+    proparallel: char,
+) -> PgProcRow {
+    let mut row = proc_row_with_parallel(
+        oid,
+        proname,
+        XML_TYPE_OID,
+        &oid_argtypes(arg_oids),
+        proname,
+        arg_oids.len() as i16,
+        false,
+        true,
+        'f',
+        provolatile,
+        proparallel,
+    );
+    row.procost = 100.0;
+    row.proargnames = Some(arg_names.iter().map(|name| (*name).into()).collect());
+    row
 }
 
 fn comparison_proc_row_with_src(

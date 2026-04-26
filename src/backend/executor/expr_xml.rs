@@ -26,6 +26,18 @@ fn xml_input_error(
     }
 }
 
+pub(crate) fn unsupported_xml_feature_error() -> ExecError {
+    ExecError::XmlInput {
+        raw_input: String::new(),
+        message: "unsupported XML feature".into(),
+        detail: Some(
+            "This functionality requires the server to be built with libxml support.".into(),
+        ),
+        context: None,
+        sqlstate: "0A000",
+    }
+}
+
 fn is_xml_whitespace(bytes: &[u8]) -> bool {
     bytes
         .iter()
@@ -1179,7 +1191,12 @@ pub(crate) fn eval_xml_expr(
 ) -> Result<Value, ExecError> {
     match xml.op {
         XmlExprOp::Element => eval_xml_element(xml, slot, ctx),
-        XmlExprOp::Forest => eval_xml_forest(xml, slot, ctx),
+        XmlExprOp::Forest => {
+            // :HACK: PostgreSQL's no-libxml build rejects XMLFOREST through
+            // NO_XML_SUPPORT(). Keep pgrust aligned with that regression
+            // profile until XML construction is gated by a real libxml mode.
+            Err(unsupported_xml_feature_error())
+        }
         XmlExprOp::Parse => eval_xml_parse(xml, slot, ctx),
         XmlExprOp::Pi => eval_xml_pi(xml, slot, ctx),
         XmlExprOp::Root => eval_xml_root(xml, slot, ctx),
