@@ -2442,7 +2442,6 @@ pub enum GrantObjectPrivilege {
     UsageOnSchema,
     UsageOnType,
     ExecuteOnFunction,
-    UsageOnType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

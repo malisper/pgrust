@@ -4188,22 +4188,6 @@ fn build_revoke_table_all_privileges(sql: &str) -> Result<RevokeObjectStatement,
     })
 }
 
-fn build_revoke_type_usage(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
-    let prefix = "revoke usage on type ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "from")?;
-    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
-    Ok(RevokeObjectStatement {
-        privilege: GrantObjectPrivilege::UsageOnType,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        cascade,
-    })
-}
-
 fn build_grant_role_membership(sql: &str) -> Result<GrantRoleMembershipStatement, ParseError> {
     let prefix = "grant ";
     let rest = sql
