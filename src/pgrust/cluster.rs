@@ -29,10 +29,10 @@ use crate::include::catalog::relkind_has_storage;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::autovacuum::{AutovacuumConfig, AutovacuumRuntime};
 use crate::pgrust::database::{
-    AsyncNotifyRuntime, ConversionEntry, Database, DatabaseCreateGrant, DatabaseError,
-    DatabaseOpenOptions, DatabaseStatsStore, DomainEntry, EnumTypeEntry, LargeObjectRuntime,
-    RangeTypeEntry, SequenceRuntime, SessionStatsState, StatisticsObjectEntry, TempBackendId,
-    TempNamespace,
+    AsyncNotifyRuntime, BaseTypeEntry, ConversionEntry, Database, DatabaseCreateGrant,
+    DatabaseError, DatabaseOpenOptions, DatabaseStatsStore, DomainEntry, EnumTypeEntry,
+    LargeObjectRuntime, RangeTypeEntry, SequenceRuntime, SessionStatsState, StatisticsObjectEntry,
+    TempBackendId, TempNamespace,
 };
 use crate::{BufferPool, ClientId};
 
@@ -106,6 +106,7 @@ pub(crate) struct OpenDatabaseState {
     pub domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
     pub enum_types: Arc<RwLock<BTreeMap<String, EnumTypeEntry>>>,
     pub range_types: Arc<RwLock<BTreeMap<String, RangeTypeEntry>>>,
+    pub base_types: Arc<RwLock<BTreeMap<u32, BaseTypeEntry>>>,
     pub conversions: Arc<RwLock<BTreeMap<String, ConversionEntry>>>,
     pub statistics_objects: Arc<RwLock<BTreeMap<String, StatisticsObjectEntry>>>,
     pub sequences: Arc<SequenceRuntime>,
@@ -136,6 +137,7 @@ impl OpenDatabaseState {
             domains: Arc::new(RwLock::new(BTreeMap::new())),
             enum_types: Arc::new(RwLock::new(BTreeMap::new())),
             range_types: Arc::new(RwLock::new(BTreeMap::new())),
+            base_types: Arc::new(RwLock::new(BTreeMap::new())),
             conversions: Arc::new(RwLock::new(BTreeMap::new())),
             statistics_objects: Arc::new(RwLock::new(BTreeMap::new())),
             sequences,
@@ -378,6 +380,7 @@ impl Cluster {
                 domains: Arc::new(RwLock::new(BTreeMap::new())),
                 enum_types: Arc::new(RwLock::new(BTreeMap::new())),
                 range_types: Arc::new(RwLock::new(BTreeMap::new())),
+                base_types: Arc::new(RwLock::new(BTreeMap::new())),
                 conversions: Arc::new(RwLock::new(BTreeMap::new())),
                 statistics_objects: Arc::new(RwLock::new(BTreeMap::new())),
                 sequences: Arc::new(SequenceRuntime::new_ephemeral()),
@@ -477,6 +480,7 @@ impl Cluster {
             domains: Arc::clone(&state.domains),
             enum_types: Arc::clone(&state.enum_types),
             range_types: Arc::clone(&state.range_types),
+            base_types: Arc::clone(&state.base_types),
             conversions: Arc::clone(&state.conversions),
             statistics_objects: Arc::clone(&state.statistics_objects),
             sequences: Arc::clone(&state.sequences),

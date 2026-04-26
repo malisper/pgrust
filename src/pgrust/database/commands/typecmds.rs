@@ -6,14 +6,18 @@ use crate::backend::executor::{ColumnDesc, RelationDesc, StatementResult};
 use crate::backend::parser::{
     AlterEnumValuePosition, AlterTypeAddEnumValueStatement, AlterTypeOwnerStatement,
     AlterTypeRenameEnumValueStatement, AlterTypeRenameTypeStatement, AlterTypeStatement,
-    CatalogLookup, CreateCompositeTypeStatement, CreateEnumTypeStatement, CreateRangeTypeStatement,
-    CreateTypeStatement, DropTypeStatement, ParseError, parse_type_name, resolve_raw_type_name,
+    CatalogLookup, CreateBaseTypeOption, CreateBaseTypeStatement, CreateCompositeTypeStatement,
+    CreateEnumTypeStatement, CreateRangeTypeStatement, CreateShellTypeStatement,
+    CreateTypeStatement, DropTypeStatement, ParseError, SqlTypeKind, parse_type_name,
+    resolve_raw_type_name,
 };
-use crate::backend::utils::misc::notices::push_notice;
+use crate::backend::utils::misc::notices::{push_notice, push_warning};
+use crate::include::access::htup::{AttributeAlign, AttributeStorage};
+use crate::include::catalog::{CSTRING_TYPE_OID, PgProcRow};
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, is_system_column_name, map_catalog_error, reject_type_with_dependents,
 };
-use crate::pgrust::database::{EnumLabelEntry, EnumTypeEntry, RangeTypeEntry};
+use crate::pgrust::database::{BaseTypeEntry, EnumLabelEntry, EnumTypeEntry, RangeTypeEntry};
 
 enum ResolvedDropTypeTarget {
     Composite {
@@ -29,6 +33,10 @@ enum ResolvedDropTypeTarget {
     Range {
         type_oid: u32,
         normalized_name: String,
+        display_name: String,
+    },
+    Shell {
+        type_oid: u32,
         display_name: String,
     },
     Other,
@@ -67,6 +75,22 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         match create_stmt {
+            CreateTypeStatement::Shell(stmt) => self.execute_create_shell_type_stmt(
+                client_id,
+                stmt,
+                xid,
+                cid,
+                configured_search_path,
+                catalog_effects,
+            ),
+            CreateTypeStatement::Base(stmt) => self.execute_create_base_type_stmt(
+                client_id,
+                stmt,
+                xid,
+                cid,
+                configured_search_path,
+                catalog_effects,
+            ),
             CreateTypeStatement::Composite(stmt) => {
                 let interrupts = self.interrupt_state(client_id);
                 let (type_name, namespace_oid) = self.normalize_create_type_name_with_search_path(
@@ -283,6 +307,42 @@ impl Database {
                         expected: "type",
                     }));
                 }
+                Some(ResolvedDropTypeTarget::Shell {
+                    type_oid,
+                    display_name,
+                }) => {
+                    reject_type_with_dependents(
+                        self,
+                        client_id,
+                        Some((xid, cid)),
+                        type_oid,
+                        &display_name,
+                    )?;
+                    let ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid,
+                        client_id,
+                        waiter: Some(self.txn_waiter.clone()),
+                        interrupts: Arc::clone(&interrupts),
+                    };
+                    match self
+                        .catalog
+                        .write()
+                        .drop_shell_type_by_oid_mvcc(type_oid, &ctx)
+                    {
+                        Ok(effect) => {
+                            catalog_effects.push(effect);
+                            dropped += 1;
+                        }
+                        Err(CatalogError::UnknownType(_)) if drop_stmt.if_exists => {}
+                        Err(CatalogError::UnknownType(_)) => {
+                            return Err(type_does_not_exist_error(type_name));
+                        }
+                        Err(err) => return Err(map_catalog_error(err)),
+                    }
+                }
                 Some(ResolvedDropTypeTarget::Enum {
                     type_oid,
                     normalized_name,
@@ -494,6 +554,12 @@ impl Database {
             }
             return Ok(None);
         };
+        if matches!(type_row.sql_type.kind, SqlTypeKind::Shell) {
+            return Ok(Some(ResolvedDropTypeTarget::Shell {
+                type_oid: type_row.oid,
+                display_name: format_name(type_row.typnamespace, &type_row.typname),
+            }));
+        }
         let Some(class_row) = catcache.class_by_oid(type_row.typrelid) else {
             return Ok(Some(ResolvedDropTypeTarget::Other));
         };
@@ -537,7 +603,386 @@ fn lower_create_composite_type_desc(
     Ok(RelationDesc { columns })
 }
 
+struct ResolvedBaseTypeSpec {
+    typlen: i16,
+    typalign: AttributeAlign,
+    typstorage: AttributeStorage,
+    typelem: u32,
+    support_proc_oids: Vec<u32>,
+    default: Option<String>,
+}
+
+fn resolve_base_type_spec(
+    stmt: &CreateBaseTypeStatement,
+    type_oid: u32,
+    catalog: &dyn CatalogLookup,
+) -> Result<ResolvedBaseTypeSpec, ExecError> {
+    let mut typlen = -1;
+    let mut typalign = AttributeAlign::Int;
+    let mut typstorage = AttributeStorage::Extended;
+    let mut typelem = 0;
+    let mut input_name = None;
+    let mut output_name = None;
+    let mut default = None;
+
+    for option in &stmt.options {
+        let option_name = option.name.as_str();
+        let normalized = option_name.to_ascii_lowercase();
+        if option_name != normalized {
+            push_warning(format!("type attribute \"{option_name}\" not recognized"));
+            continue;
+        }
+        match normalized.as_str() {
+            "internallength" => {
+                let value = base_type_option_value(option)?;
+                typlen = parse_base_type_internal_length(value)?;
+            }
+            "input" => input_name = Some(base_type_option_value(option)?.to_string()),
+            "output" => output_name = Some(base_type_option_value(option)?.to_string()),
+            "alignment" => {
+                typalign = parse_base_type_alignment(base_type_option_value(option)?)?;
+            }
+            "storage" => {
+                typstorage = parse_base_type_storage(base_type_option_value(option)?)?;
+            }
+            "element" => {
+                let raw_type =
+                    parse_type_name(base_type_option_value(option)?).map_err(ExecError::Parse)?;
+                let sql_type =
+                    resolve_raw_type_name(&raw_type, catalog).map_err(ExecError::Parse)?;
+                typelem = catalog.type_oid_for_sql_type(sql_type).ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnsupportedType(format!("{raw_type:?}")))
+                })?;
+            }
+            "default" => default = Some(base_type_option_value(option)?.to_string()),
+            "passedbyvalue" => {}
+            "category" | "preferred" | "receive" | "send" | "typmod_in" | "typmod_out"
+            | "analyze" | "subscript" => {
+                let _ = option.value.as_deref();
+            }
+            _ => push_warning(format!("type attribute \"{option_name}\" not recognized")),
+        }
+    }
+
+    let input_proc = resolve_base_type_input_proc(
+        catalog,
+        input_name
+            .as_deref()
+            .ok_or_else(base_type_input_missing_error)?,
+        type_oid,
+        &stmt.type_name,
+    )?;
+    let output_proc = resolve_base_type_output_proc(
+        catalog,
+        output_name
+            .as_deref()
+            .ok_or_else(base_type_output_missing_error)?,
+        type_oid,
+        &stmt.type_name,
+    )?;
+    if typlen >= 0 {
+        typstorage = AttributeStorage::Plain;
+    }
+
+    Ok(ResolvedBaseTypeSpec {
+        typlen,
+        typalign,
+        typstorage,
+        typelem,
+        support_proc_oids: vec![input_proc.oid, output_proc.oid],
+        default,
+    })
+}
+
+fn base_type_option_value(option: &CreateBaseTypeOption) -> Result<&str, ExecError> {
+    option.value.as_deref().ok_or_else(|| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "base type option value",
+            actual: option.name.clone(),
+        })
+    })
+}
+
+fn parse_base_type_internal_length(value: &str) -> Result<i16, ExecError> {
+    if value.eq_ignore_ascii_case("variable") {
+        return Ok(-1);
+    }
+    value.parse::<i16>().map_err(|_| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "base type internal length",
+            actual: value.to_string(),
+        })
+    })
+}
+
+fn parse_base_type_alignment(value: &str) -> Result<AttributeAlign, ExecError> {
+    match value.to_ascii_lowercase().as_str() {
+        "char" | "char1" => Ok(AttributeAlign::Char),
+        "int2" | "short" => Ok(AttributeAlign::Short),
+        "int4" | "integer" => Ok(AttributeAlign::Int),
+        "double" => Ok(AttributeAlign::Double),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "char, int2, int4, integer, or double",
+            actual: value.to_string(),
+        })),
+    }
+}
+
+fn parse_base_type_storage(value: &str) -> Result<AttributeStorage, ExecError> {
+    match value.to_ascii_lowercase().as_str() {
+        "plain" => Ok(AttributeStorage::Plain),
+        "external" => Ok(AttributeStorage::External),
+        "extended" => Ok(AttributeStorage::Extended),
+        "main" => Ok(AttributeStorage::Main),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "plain, external, extended, or main",
+            actual: value.to_string(),
+        })),
+    }
+}
+
+fn resolve_base_type_input_proc(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    type_oid: u32,
+    type_name: &str,
+) -> Result<PgProcRow, ExecError> {
+    let proc_name = base_type_proc_object_name(name);
+    let matches = catalog
+        .proc_rows_by_name(&proc_name)
+        .into_iter()
+        .filter(|row| {
+            row.prorettype == type_oid
+                && parse_proc_arg_oids(&row.proargtypes).first().copied() == Some(CSTRING_TYPE_OID)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [row] => Ok(row.clone()),
+        _ => Err(ExecError::DetailedError {
+            message: format!("type input function {proc_name} must return type {type_name}"),
+            detail: None,
+            hint: None,
+            sqlstate: "42P13",
+        }),
+    }
+}
+
+fn resolve_base_type_output_proc(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    type_oid: u32,
+    type_name: &str,
+) -> Result<PgProcRow, ExecError> {
+    let proc_name = base_type_proc_object_name(name);
+    let matches = catalog
+        .proc_rows_by_name(&proc_name)
+        .into_iter()
+        .filter(|row| {
+            row.prorettype == CSTRING_TYPE_OID
+                && parse_proc_arg_oids(&row.proargtypes) == [type_oid]
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [row] => Ok(row.clone()),
+        _ => Err(ExecError::DetailedError {
+            message: format!("type output function {proc_name} must accept type {type_name}"),
+            detail: None,
+            hint: None,
+            sqlstate: "42P13",
+        }),
+    }
+}
+
+fn parse_proc_arg_oids(argtypes: &str) -> Vec<u32> {
+    argtypes
+        .split_whitespace()
+        .filter_map(|part| part.parse::<u32>().ok())
+        .collect()
+}
+
+fn base_type_proc_object_name(name: &str) -> String {
+    name.trim()
+        .rsplit_once('.')
+        .map(|(_, object)| object)
+        .unwrap_or_else(|| name.trim())
+        .trim_matches('"')
+        .to_ascii_lowercase()
+}
+
+fn base_type_input_missing_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "type input function must be specified".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "42P13",
+    }
+}
+
+fn base_type_output_missing_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "type output function must be specified".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "42P13",
+    }
+}
+
 impl Database {
+    pub(crate) fn create_shell_type_for_name_in_transaction(
+        &self,
+        client_id: ClientId,
+        raw_type_name: &str,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(u32, String), ExecError> {
+        let (schema_name, type_name) = split_qualified_type_name(raw_type_name);
+        let (normalized_name, namespace_oid) = self
+            .normalize_create_type_name_with_search_path(
+                client_id,
+                Some((xid, cid)),
+                schema_name,
+                type_name,
+                configured_search_path,
+            )
+            .map_err(ExecError::Parse)?;
+        let object_name = type_object_name(&normalized_name);
+        let display_name = qualified_type_display_name(schema_name, type_name);
+        let search_path = self.effective_search_path(client_id, configured_search_path);
+        let base_type_rows = self
+            .backend_catcache(client_id, Some((xid, cid)))
+            .map_err(|err| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "catalog lookup",
+                    actual: format!("{err:?}"),
+                })
+            })?
+            .type_rows();
+        let enum_type_rows = self.enum_type_rows_for_search_path(&search_path);
+        let range_type_rows = self.range_type_rows_for_search_path(&search_path);
+        if type_name_exists_in_rows(&base_type_rows, namespace_oid, &object_name)
+            || type_name_exists_in_rows(&enum_type_rows, namespace_oid, &object_name)
+            || type_name_exists_in_rows(&range_type_rows, namespace_oid, &object_name)
+        {
+            return Err(type_already_exists_error(&display_name));
+        }
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        match self.catalog.write().create_shell_type_mvcc(
+            normalized_name,
+            namespace_oid,
+            self.auth_state(client_id).current_user_oid(),
+            &ctx,
+        ) {
+            Ok((type_oid, effect)) => {
+                catalog_effects.push(effect);
+                self.plan_cache.invalidate_all();
+                Ok((type_oid, object_name))
+            }
+            Err(CatalogError::TableAlreadyExists(_)) => {
+                Err(type_already_exists_error(&display_name))
+            }
+            Err(err) => Err(map_catalog_error(err)),
+        }
+    }
+
+    fn execute_create_shell_type_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &CreateShellTypeStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let type_name = match &stmt.schema_name {
+            Some(schema_name) => format!("{schema_name}.{}", stmt.type_name),
+            None => stmt.type_name.clone(),
+        };
+        self.create_shell_type_for_name_in_transaction(
+            client_id,
+            &type_name,
+            xid,
+            cid,
+            configured_search_path,
+            catalog_effects,
+        )?;
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn execute_create_base_type_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &CreateBaseTypeStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let lookup_name = match &stmt.schema_name {
+            Some(schema_name) => format!("{schema_name}.{}", stmt.type_name),
+            None => stmt.type_name.clone(),
+        };
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let shell_row = catalog.type_by_name(&lookup_name).ok_or_else(|| {
+            ExecError::DetailedError {
+                message: format!("type \"{}\" does not exist", base_type_display_name(stmt)),
+                detail: None,
+                hint: Some(
+                    "Create the type as a shell type, then create its I/O functions, then do a full CREATE TYPE."
+                        .into(),
+                ),
+                sqlstate: "42704",
+            }
+        })?;
+        if !matches!(shell_row.sql_type.kind, SqlTypeKind::Shell) {
+            return Err(type_already_exists_error(&base_type_display_name(stmt)));
+        }
+
+        let spec = resolve_base_type_spec(stmt, shell_row.oid, &catalog)?;
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let (array_oid, effect) = self
+            .catalog
+            .write()
+            .complete_shell_base_type_mvcc(
+                shell_row.oid,
+                spec.typlen,
+                spec.typalign,
+                spec.typstorage,
+                spec.typelem,
+                &spec.support_proc_oids,
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
+        self.base_types.write().insert(
+            shell_row.oid,
+            BaseTypeEntry {
+                oid: shell_row.oid,
+                array_oid,
+                default: spec.default,
+            },
+        );
+        catalog_effects.push(effect);
+        self.plan_cache.invalidate_all();
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     fn execute_create_enum_type_stmt(
         &self,
         client_id: ClientId,
@@ -1082,6 +1527,13 @@ fn enum_type_display_name(stmt: &CreateEnumTypeStatement) -> String {
     }
 }
 
+fn base_type_display_name(stmt: &CreateBaseTypeStatement) -> String {
+    match &stmt.schema_name {
+        Some(schema_name) => format!("{schema_name}.{}", stmt.type_name),
+        None => stmt.type_name.clone(),
+    }
+}
+
 fn validate_enum_label_len(label: &str) -> Result<(), ExecError> {
     if label.len() > 63 {
         return Err(ExecError::DetailedError {
@@ -1134,6 +1586,28 @@ fn range_type_display_name(stmt: &CreateRangeTypeStatement) -> String {
         Some(schema_name) => format!("{schema_name}.{}", stmt.type_name),
         None => stmt.type_name.clone(),
     }
+}
+
+fn split_qualified_type_name(type_name: &str) -> (Option<&str>, &str) {
+    match type_name.split_once('.') {
+        Some((schema_name, object_name)) => (Some(schema_name), object_name),
+        None => (None, type_name),
+    }
+}
+
+fn qualified_type_display_name(schema_name: Option<&str>, type_name: &str) -> String {
+    match schema_name {
+        Some(schema_name) => format!("{schema_name}.{type_name}"),
+        None => type_name.to_string(),
+    }
+}
+
+fn type_object_name(normalized_name: &str) -> String {
+    normalized_name
+        .rsplit('.')
+        .next()
+        .unwrap_or(normalized_name)
+        .to_string()
 }
 
 fn default_multirange_type_name(range_type_name: &str) -> String {

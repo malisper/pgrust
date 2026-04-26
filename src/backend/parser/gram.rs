@@ -2388,6 +2388,9 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "pg_node_tree" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::PgNodeTree))),
         "trigger" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Trigger))),
         "void" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Void))),
+        "cstring" | "pg_catalog.cstring" => {
+            return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Cstring)));
+        }
         "fdw_handler" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::FdwHandler))),
         "regrole" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegRole))),
         "regproc" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegProc))),
@@ -6836,14 +6839,24 @@ fn build_create_type_statement(sql: &str) -> Result<CreateTypeStatement, ParseEr
     let ((schema_name, type_name), rest) = parse_qualified_sql_name(rest)?;
     let rest = rest.trim_start();
     if rest.is_empty() {
-        return Err(ParseError::FeatureNotSupported(
-            "shell types are not supported in CREATE TYPE".into(),
-        ));
+        return Ok(CreateTypeStatement::Shell(CreateShellTypeStatement {
+            schema_name,
+            type_name,
+        }));
     }
     if rest.starts_with('(') {
-        return Err(ParseError::FeatureNotSupported(
-            "base type definitions are not supported in CREATE TYPE".into(),
-        ));
+        let (option_list, rest) = take_parenthesized_segment(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: rest.trim().into(),
+            });
+        }
+        return Ok(CreateTypeStatement::Base(CreateBaseTypeStatement {
+            schema_name,
+            type_name,
+            options: parse_create_base_type_options(&option_list)?,
+        }));
     }
     if !keyword_at_start(rest, "as") {
         return Err(ParseError::FeatureNotSupported(
@@ -7461,6 +7474,32 @@ fn parse_create_type_attributes(input: &str) -> Result<Vec<CompositeTypeAttribut
         .into_iter()
         .filter(|item| !item.trim().is_empty())
         .map(|item| parse_create_type_attribute(&item))
+        .collect()
+}
+
+fn parse_create_base_type_options(input: &str) -> Result<Vec<CreateBaseTypeOption>, ParseError> {
+    let items = split_top_level_items(input, ',')?;
+    if items.len() == 1 && items[0].trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    items
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .map(|item| {
+            let trimmed = item.trim();
+            let (name_sql, value) = match split_top_level_once(trimmed, '=')? {
+                Some((name, value)) => (name.trim(), Some(value.trim().to_string())),
+                None => (trimmed, None),
+            };
+            let (name, rest) = parse_sql_identifier(name_sql)?;
+            if !rest.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "base type option name",
+                    actual: name_sql.into(),
+                });
+            }
+            Ok(CreateBaseTypeOption { name, value })
+        })
         .collect()
 }
 
@@ -8180,6 +8219,37 @@ fn split_top_level_items(input: &str, separator: char) -> Result<Vec<String>, Pa
     }
     items.push(input[start..].trim().to_string());
     Ok(items)
+}
+
+fn split_top_level_once(input: &str, separator: char) -> Result<Option<(&str, &str)>, ParseError> {
+    let mut depth = 0usize;
+    let bytes = input.as_bytes();
+    let sep = separator as u8;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = parse_delimited_token_end(bytes, i, b'\'');
+                continue;
+            }
+            b'"' => {
+                i = parse_delimited_token_end(bytes, i, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            byte if byte == sep && depth == 0 => return Ok(Some((&input[..i], &input[i + 1..]))),
+            _ => {}
+        }
+        i += 1;
+    }
+    Ok(None)
 }
 
 fn find_next_top_level_keyword(input: &str, keywords: &[&str]) -> Option<usize> {
@@ -13480,8 +13550,10 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Enum => "enum",
         SqlTypeKind::Record => "record",
         SqlTypeKind::Composite => "record",
+        SqlTypeKind::Shell => "shell",
         SqlTypeKind::Trigger => "trigger",
         SqlTypeKind::Void => "void",
+        SqlTypeKind::Cstring => "cstring",
         SqlTypeKind::FdwHandler => "fdw_handler",
         SqlTypeKind::Int2 => "int2",
         SqlTypeKind::Int2Vector => "int2vector",

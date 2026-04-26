@@ -544,6 +544,7 @@ pub enum ExecError {
         column: String,
         ty: ScalarType,
         attlen: i16,
+        actual_len: Option<usize>,
     },
     InvalidStorageValue {
         column: String,
