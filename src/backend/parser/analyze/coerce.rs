@@ -479,109 +479,116 @@ fn is_string_literal_expr(expr: &SqlExpr) -> bool {
     )
 }
 
+pub(super) fn unknown_string_literal_peer_type(peer_type: SqlType) -> Option<SqlType> {
+    if peer_type.is_array {
+        return Some(peer_type);
+    }
+    if is_numeric_family(peer_type) {
+        return Some(peer_type.element_type());
+    }
+    if matches!(peer_type.element_type().kind, SqlTypeKind::Money) {
+        return Some(SqlType::new(SqlTypeKind::Money));
+    }
+    if is_bit_string_type(peer_type) {
+        return Some(SqlType::new(SqlTypeKind::VarBit));
+    }
+    match peer_type.element_type().kind {
+        SqlTypeKind::Date => return Some(SqlType::new(SqlTypeKind::Date)),
+        SqlTypeKind::Time => return Some(SqlType::new(SqlTypeKind::Time)),
+        SqlTypeKind::TimeTz => return Some(SqlType::new(SqlTypeKind::TimeTz)),
+        SqlTypeKind::Timestamp => return Some(SqlType::new(SqlTypeKind::Timestamp)),
+        SqlTypeKind::TimestampTz => return Some(SqlType::new(SqlTypeKind::TimestampTz)),
+        SqlTypeKind::Interval => return Some(SqlType::new(SqlTypeKind::Interval)),
+        SqlTypeKind::Jsonb => return Some(SqlType::new(SqlTypeKind::Jsonb)),
+        SqlTypeKind::Bytea => return Some(SqlType::new(SqlTypeKind::Bytea)),
+        SqlTypeKind::Uuid => return Some(SqlType::new(SqlTypeKind::Uuid)),
+        SqlTypeKind::Enum if peer_type.type_oid != 0 => return Some(peer_type),
+        SqlTypeKind::InternalChar => return Some(SqlType::new(SqlTypeKind::InternalChar)),
+        SqlTypeKind::Name => return Some(SqlType::new(SqlTypeKind::Name)),
+        SqlTypeKind::Inet => return Some(SqlType::new(SqlTypeKind::Inet)),
+        SqlTypeKind::Cidr => return Some(SqlType::new(SqlTypeKind::Cidr)),
+        SqlTypeKind::MacAddr => return Some(SqlType::new(SqlTypeKind::MacAddr)),
+        SqlTypeKind::MacAddr8 => return Some(SqlType::new(SqlTypeKind::MacAddr8)),
+        SqlTypeKind::TsQuery => return Some(SqlType::new(SqlTypeKind::TsQuery)),
+        SqlTypeKind::TsVector => return Some(SqlType::new(SqlTypeKind::TsVector)),
+        SqlTypeKind::Tid => return Some(SqlType::new(SqlTypeKind::Tid)),
+        SqlTypeKind::Int2Vector => return Some(SqlType::new(SqlTypeKind::Int2Vector)),
+        SqlTypeKind::OidVector => return Some(SqlType::new(SqlTypeKind::OidVector)),
+        SqlTypeKind::Void => return Some(SqlType::new(SqlTypeKind::Void)),
+        SqlTypeKind::Shell => return Some(SqlType::new(SqlTypeKind::Shell)),
+        SqlTypeKind::Cstring => return Some(SqlType::new(SqlTypeKind::Cstring)),
+        SqlTypeKind::FdwHandler => return Some(SqlType::new(SqlTypeKind::FdwHandler)),
+        SqlTypeKind::RegClass => return Some(SqlType::new(SqlTypeKind::RegClass)),
+        SqlTypeKind::RegType => return Some(SqlType::new(SqlTypeKind::RegType)),
+        SqlTypeKind::RegRole => return Some(SqlType::new(SqlTypeKind::RegRole)),
+        SqlTypeKind::RegNamespace => return Some(SqlType::new(SqlTypeKind::RegNamespace)),
+        SqlTypeKind::RegOperator => return Some(SqlType::new(SqlTypeKind::RegOperator)),
+        SqlTypeKind::RegProcedure => return Some(SqlType::new(SqlTypeKind::RegProcedure)),
+        SqlTypeKind::RegConfig => return Some(SqlType::new(SqlTypeKind::RegConfig)),
+        SqlTypeKind::RegDictionary => return Some(SqlType::new(SqlTypeKind::RegDictionary)),
+        SqlTypeKind::PgLsn => return Some(SqlType::new(SqlTypeKind::PgLsn)),
+        _ => {}
+    }
+    if peer_type.is_array {
+        match peer_type.kind {
+            SqlTypeKind::TsQuery => {
+                return Some(SqlType::array_of(SqlType::new(SqlTypeKind::TsQuery)));
+            }
+            SqlTypeKind::TsVector => {
+                return Some(SqlType::array_of(SqlType::new(SqlTypeKind::TsVector)));
+            }
+            SqlTypeKind::Void => return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Void))),
+            SqlTypeKind::Shell => return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Shell))),
+            SqlTypeKind::Cstring => {
+                return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Cstring)));
+            }
+            SqlTypeKind::FdwHandler => {
+                return Some(SqlType::array_of(SqlType::new(SqlTypeKind::FdwHandler)));
+            }
+            SqlTypeKind::RegClass => {
+                return Some(SqlType::array_of(SqlType::new(SqlTypeKind::RegClass)));
+            }
+            SqlTypeKind::RegType => {
+                return Some(SqlType::array_of(SqlType::new(SqlTypeKind::RegType)));
+            }
+            SqlTypeKind::RegRole => {
+                return Some(SqlType::array_of(SqlType::new(SqlTypeKind::RegRole)));
+            }
+            SqlTypeKind::RegNamespace => {
+                return Some(SqlType::array_of(SqlType::new(SqlTypeKind::RegNamespace)));
+            }
+            SqlTypeKind::RegOperator => {
+                return Some(SqlType::array_of(SqlType::new(SqlTypeKind::RegOperator)));
+            }
+            SqlTypeKind::RegProcedure => {
+                return Some(SqlType::array_of(SqlType::new(SqlTypeKind::RegProcedure)));
+            }
+            SqlTypeKind::RegConfig => {
+                return Some(SqlType::array_of(SqlType::new(SqlTypeKind::RegConfig)));
+            }
+            SqlTypeKind::RegDictionary => {
+                return Some(SqlType::array_of(SqlType::new(SqlTypeKind::RegDictionary)));
+            }
+            _ => {}
+        }
+    }
+    if is_geometry_type(peer_type) {
+        return Some(peer_type.element_type());
+    }
+    if peer_type.is_range() {
+        return Some(peer_type.element_type());
+    }
+    None
+}
+
 pub(super) fn coerce_unknown_string_literal_type(
     expr: &SqlExpr,
     expr_type: SqlType,
     peer_type: SqlType,
 ) -> SqlType {
     if is_string_literal_expr(expr) {
-        if peer_type.is_array {
-            return peer_type;
-        }
-        if is_numeric_family(peer_type) {
-            return peer_type.element_type();
-        }
-        if matches!(peer_type.element_type().kind, SqlTypeKind::Money) {
-            return SqlType::new(SqlTypeKind::Money);
-        }
-        if is_bit_string_type(peer_type) {
-            return SqlType::new(SqlTypeKind::VarBit);
-        }
-        match peer_type.element_type().kind {
-            SqlTypeKind::Date => return SqlType::new(SqlTypeKind::Date),
-            SqlTypeKind::Time => return SqlType::new(SqlTypeKind::Time),
-            SqlTypeKind::TimeTz => return SqlType::new(SqlTypeKind::TimeTz),
-            SqlTypeKind::Timestamp => return SqlType::new(SqlTypeKind::Timestamp),
-            SqlTypeKind::TimestampTz => return SqlType::new(SqlTypeKind::TimestampTz),
-            SqlTypeKind::Interval => return SqlType::new(SqlTypeKind::Interval),
-            SqlTypeKind::Jsonb => return SqlType::new(SqlTypeKind::Jsonb),
-            SqlTypeKind::Bytea => return SqlType::new(SqlTypeKind::Bytea),
-            SqlTypeKind::Uuid => return SqlType::new(SqlTypeKind::Uuid),
-            SqlTypeKind::Enum if peer_type.type_oid != 0 => return peer_type,
-            SqlTypeKind::InternalChar => return SqlType::new(SqlTypeKind::InternalChar),
-            SqlTypeKind::Name => return SqlType::new(SqlTypeKind::Name),
-            SqlTypeKind::Inet => return SqlType::new(SqlTypeKind::Inet),
-            SqlTypeKind::Cidr => return SqlType::new(SqlTypeKind::Cidr),
-            SqlTypeKind::MacAddr => return SqlType::new(SqlTypeKind::MacAddr),
-            SqlTypeKind::MacAddr8 => return SqlType::new(SqlTypeKind::MacAddr8),
-            SqlTypeKind::OidVector => return SqlType::new(SqlTypeKind::OidVector),
-            SqlTypeKind::Int2Vector => return SqlType::new(SqlTypeKind::Int2Vector),
-            SqlTypeKind::TsQuery => return SqlType::new(SqlTypeKind::TsQuery),
-            SqlTypeKind::TsVector => return SqlType::new(SqlTypeKind::TsVector),
-            SqlTypeKind::Tid => return SqlType::new(SqlTypeKind::Tid),
-            SqlTypeKind::Void => return SqlType::new(SqlTypeKind::Void),
-            SqlTypeKind::Shell => return SqlType::new(SqlTypeKind::Shell),
-            SqlTypeKind::Cstring => return SqlType::new(SqlTypeKind::Cstring),
-            SqlTypeKind::FdwHandler => return SqlType::new(SqlTypeKind::FdwHandler),
-            SqlTypeKind::RegClass => return SqlType::new(SqlTypeKind::RegClass),
-            SqlTypeKind::RegType => return SqlType::new(SqlTypeKind::RegType),
-            SqlTypeKind::RegRole => return SqlType::new(SqlTypeKind::RegRole),
-            SqlTypeKind::RegNamespace => return SqlType::new(SqlTypeKind::RegNamespace),
-            SqlTypeKind::RegOperator => return SqlType::new(SqlTypeKind::RegOperator),
-            SqlTypeKind::RegProcedure => return SqlType::new(SqlTypeKind::RegProcedure),
-            SqlTypeKind::RegConfig => return SqlType::new(SqlTypeKind::RegConfig),
-            SqlTypeKind::RegDictionary => return SqlType::new(SqlTypeKind::RegDictionary),
-            SqlTypeKind::PgLsn => return SqlType::new(SqlTypeKind::PgLsn),
-            _ => {}
-        }
-        if peer_type.is_array {
-            match peer_type.kind {
-                SqlTypeKind::TsQuery => {
-                    return SqlType::array_of(SqlType::new(SqlTypeKind::TsQuery));
-                }
-                SqlTypeKind::TsVector => {
-                    return SqlType::array_of(SqlType::new(SqlTypeKind::TsVector));
-                }
-                SqlTypeKind::Void => return SqlType::array_of(SqlType::new(SqlTypeKind::Void)),
-                SqlTypeKind::Shell => return SqlType::array_of(SqlType::new(SqlTypeKind::Shell)),
-                SqlTypeKind::Cstring => {
-                    return SqlType::array_of(SqlType::new(SqlTypeKind::Cstring));
-                }
-                SqlTypeKind::FdwHandler => {
-                    return SqlType::array_of(SqlType::new(SqlTypeKind::FdwHandler));
-                }
-                SqlTypeKind::RegClass => {
-                    return SqlType::array_of(SqlType::new(SqlTypeKind::RegClass));
-                }
-                SqlTypeKind::RegType => {
-                    return SqlType::array_of(SqlType::new(SqlTypeKind::RegType));
-                }
-                SqlTypeKind::RegRole => {
-                    return SqlType::array_of(SqlType::new(SqlTypeKind::RegRole));
-                }
-                SqlTypeKind::RegNamespace => {
-                    return SqlType::array_of(SqlType::new(SqlTypeKind::RegNamespace));
-                }
-                SqlTypeKind::RegOperator => {
-                    return SqlType::array_of(SqlType::new(SqlTypeKind::RegOperator));
-                }
-                SqlTypeKind::RegProcedure => {
-                    return SqlType::array_of(SqlType::new(SqlTypeKind::RegProcedure));
-                }
-                SqlTypeKind::RegConfig => {
-                    return SqlType::array_of(SqlType::new(SqlTypeKind::RegConfig));
-                }
-                SqlTypeKind::RegDictionary => {
-                    return SqlType::array_of(SqlType::new(SqlTypeKind::RegDictionary));
-                }
-                _ => {}
-            }
-        }
-        if is_geometry_type(peer_type) {
-            return peer_type.element_type();
-        }
-        if peer_type.is_range() {
-            return peer_type.element_type();
+        if let Some(coerced) = unknown_string_literal_peer_type(peer_type) {
+            return coerced;
         }
     }
     expr_type

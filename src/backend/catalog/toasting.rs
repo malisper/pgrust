@@ -255,6 +255,7 @@ pub fn new_relation_create_toast_table(
             indnullsnotdistinct: false,
             indisexclusion: false,
             indimmediate: true,
+            btree_options: None,
             brin_options: None,
             gin_options: None,
             hash_options: None,

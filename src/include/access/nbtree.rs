@@ -23,6 +23,7 @@ pub const BTREE_VERSION: u32 = 4;
 pub const BTREE_MIN_VERSION: u32 = 2;
 pub const BTREE_NOVAC_VERSION: u32 = 3;
 pub const BTREE_DEFAULT_FILLFACTOR: u16 = 90;
+pub const BTREE_DEFAULT_DEDUPLICATE_ITEMS: bool = true;
 pub const BTREE_NONLEAF_FILLFACTOR: u16 = 70;
 pub const BTREE_SINGLEVAL_FILLFACTOR: u16 = 96;
 pub const P_NONE: u32 = 0;
@@ -35,6 +36,21 @@ pub const BT_LESS_EQUAL_STRATEGY_NUMBER: u16 = 2;
 pub const BT_EQUAL_STRATEGY_NUMBER: u16 = 3;
 pub const BT_GREATER_EQUAL_STRATEGY_NUMBER: u16 = 4;
 pub const BT_GREATER_STRATEGY_NUMBER: u16 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BtreeOptions {
+    pub fillfactor: u16,
+    pub deduplicate_items: bool,
+}
+
+impl Default for BtreeOptions {
+    fn default() -> Self {
+        Self {
+            fillfactor: BTREE_DEFAULT_FILLFACTOR,
+            deduplicate_items: BTREE_DEFAULT_DEDUPLICATE_ITEMS,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BtPageType {

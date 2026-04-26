@@ -224,15 +224,27 @@ impl Database {
                 let visible_type_rows = self
                     .lazy_catalog_lookup(client_id, Some((xid, *cid)), None)
                     .type_rows();
-                let (dropped, effect) = self
+                let drop_result = self
                     .catalog
                     .write()
                     .drop_relation_by_oid_mvcc_with_extra_type_rows(
                         relation_oid,
                         &ctx,
                         &visible_type_rows,
-                    )
-                    .map_err(map_catalog_error)?;
+                    );
+                let (dropped, effect) = match drop_result {
+                    Ok(result) => result,
+                    Err(crate::backend::catalog::CatalogError::UnknownTable(_)) => {
+                        // :HACK: Failed concurrent temp-index commands can leave a
+                        // temp pg_class row without enough companion rows to build
+                        // a relcache entry. PostgreSQL drops these backend-local
+                        // leftovers on namespace reuse; skip the broken row here so
+                        // the fresh temp namespace can still be used.
+                        dropped_relation_oids.insert(relation_oid);
+                        continue;
+                    }
+                    Err(err) => return Err(map_catalog_error(err)),
+                };
                 dropped_relation_oids.extend(dropped.into_iter().map(|entry| entry.relation_oid));
                 catalog_effects.push(effect);
                 *cid = (*cid).saturating_add(1);

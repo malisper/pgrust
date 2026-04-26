@@ -435,6 +435,7 @@ pub enum Path {
         relispopulated: bool,
         toast: Option<ToastRelationRef>,
         desc: RelationDesc,
+        disabled: bool,
     },
     IndexOnlyScan {
         plan_info: PlanEstimate,

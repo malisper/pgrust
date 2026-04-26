@@ -702,9 +702,22 @@ fn collect_relation_access_paths(
         }
     }
     if paths.is_empty() {
+        if !config.enable_seqscan && relkind == 'r' {
+            for path in &mut seq_paths {
+                mark_seqscan_disabled(path);
+            }
+        }
         paths = seq_paths;
     }
     paths
+}
+
+fn mark_seqscan_disabled(path: &mut Path) {
+    match path {
+        Path::SeqScan { disabled, .. } => *disabled = true,
+        Path::Filter { input, .. } | Path::OrderBy { input, .. } => mark_seqscan_disabled(input),
+        _ => {}
+    }
 }
 
 fn collect_relation_ordered_index_paths(

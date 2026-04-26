@@ -173,6 +173,7 @@ fn main() -> Result<(), ExecError> {
                 relation_oid: 0,
                 relkind: 'r',
                 relispopulated: true,
+                disabled: false,
                 toast: None,
                 desc: desc(),
             }),

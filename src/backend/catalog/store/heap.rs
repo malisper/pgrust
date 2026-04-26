@@ -35,6 +35,7 @@ use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, s
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::backend::utils::cache::syscache::{SysCacheId, SysCacheTuple};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
+use crate::include::access::nbtree::BtreeOptions;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
     BootstrapCatalogKind, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
@@ -553,6 +554,7 @@ impl CatalogStore {
             indnullsnotdistinct: false,
             indisexclusion: false,
             indimmediate: true,
+            btree_options: None,
             brin_options: None,
             gin_options: None,
             hash_options: None,
@@ -3450,6 +3452,7 @@ impl CatalogStore {
             indnullsnotdistinct: false,
             indisexclusion: false,
             indimmediate: true,
+            btree_options: None,
             brin_options: None,
             gin_options: None,
             hash_options: None,
@@ -7052,6 +7055,54 @@ fn build_relation_entry(
     Ok(entry)
 }
 
+fn btree_reloptions(options: Option<BtreeOptions>) -> Option<Vec<String>> {
+    options.map(|options| {
+        vec![
+            format!("fillfactor={}", options.fillfactor),
+            format!(
+                "deduplicate_items={}",
+                if options.deduplicate_items {
+                    "on"
+                } else {
+                    "off"
+                }
+            ),
+        ]
+    })
+}
+
+fn explicit_btree_opclass_oid(opclass_name: &str, type_oid: u32) -> Option<u32> {
+    let opclass_name = opclass_name
+        .rsplit_once('.')
+        .map(|(_, name)| name)
+        .unwrap_or(opclass_name);
+    crate::include::catalog::bootstrap_pg_opclass_rows()
+        .into_iter()
+        .find(|row| {
+            row.opcmethod == crate::include::catalog::BTREE_AM_OID
+                && row.opcname.eq_ignore_ascii_case(opclass_name)
+                && btree_opclass_accepts_type(row.opcintype, type_oid)
+        })
+        .map(|row| row.oid)
+}
+
+fn btree_opclass_accepts_type(opcintype: u32, type_oid: u32) -> bool {
+    use crate::include::catalog::{
+        ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, BPCHAR_TYPE_OID,
+        TEXT_TYPE_OID, VARCHAR_TYPE_OID,
+    };
+
+    opcintype == type_oid
+        || matches!(
+            opcintype,
+            ANYOID | ANYARRAYOID | ANYENUMOID | ANYRANGEOID | ANYMULTIRANGEOID
+        )
+        || (matches!(
+            opcintype,
+            TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID
+        ) && matches!(type_oid, TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID))
+}
+
 fn build_index_entry(
     type_lookup: &impl PgTypeLookup,
     index_name: String,
@@ -7210,8 +7261,8 @@ fn build_index_entry_with_relkind(
         namespace_oid: table.namespace_oid,
         owner_oid: table.owner_oid,
         relacl: None,
-        reloptions: None,
         of_type_oid: 0,
+        reloptions: btree_reloptions(resolved_options.btree_options),
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,
@@ -7257,6 +7308,7 @@ fn build_index_entry_with_relkind(
                 .map(str::trim)
                 .filter(|pred| !pred.is_empty())
                 .map(str::to_string),
+            btree_options: resolved_options.btree_options,
             brin_options: resolved_options.brin_options.clone(),
             gin_options: resolved_options.gin_options.clone(),
             hash_options: resolved_options.hash_options,
@@ -7358,6 +7410,7 @@ fn build_toast_catalog_changes(
             indnullsnotdistinct: false,
             indisexclusion: false,
             indimmediate: true,
+            btree_options: None,
             brin_options: None,
             gin_options: None,
             hash_options: None,
@@ -7405,7 +7458,10 @@ fn default_index_build_options_for_relation(
             .find(|column| column.name.eq_ignore_ascii_case(&column_name.name))
             .ok_or_else(|| CatalogError::UnknownColumn(column_name.name.clone()))?;
         let type_oid = resolved_sql_type_oid(type_lookup, table, column.sql_type)?;
-        let opclass_oid = if matches!(
+        let opclass_oid = if let Some(opclass_name) = column_name.opclass.as_deref() {
+            explicit_btree_opclass_oid(opclass_name, type_oid)
+                .ok_or_else(|| CatalogError::UnknownType("index operator class".into()))?
+        } else if matches!(
             column.sql_type.element_type().kind,
             crate::backend::parser::SqlTypeKind::Enum
         ) {
@@ -7433,6 +7489,7 @@ fn default_index_build_options_for_relation(
         indnullsnotdistinct: false,
         indisexclusion: false,
         indimmediate: true,
+        btree_options: None,
         brin_options: None,
         gin_options: None,
         hash_options: None,
@@ -9010,6 +9067,7 @@ fn catalog_entry_from_relation_row(
             indoption: index.indoption.clone(),
             indexprs: index.indexprs.clone(),
             indpred: index.indpred.clone(),
+            btree_options: index.btree_options,
             brin_options: index.brin_options.clone(),
             gin_options: index.gin_options.clone(),
             hash_options: index.hash_options,
@@ -9390,6 +9448,7 @@ fn catalog_entry_from_visible_relation(
             indoption: index.indoption.clone(),
             indexprs: index.indexprs.clone(),
             indpred: index.indpred.clone(),
+            btree_options: index.btree_options,
             brin_options: index.brin_options.clone(),
             gin_options: index.gin_options.clone(),
             hash_options: index.hash_options,
@@ -9447,6 +9506,7 @@ fn catalog_entry_from_relation(relation: &RelCacheEntry) -> CatalogEntry {
             indoption: index.indoption.clone(),
             indexprs: index.indexprs.clone(),
             indpred: index.indpred.clone(),
+            btree_options: index.btree_options,
             brin_options: index.brin_options.clone(),
             gin_options: index.gin_options.clone(),
             hash_options: index.hash_options,

@@ -95,6 +95,7 @@ pub(super) fn estimate_seqscan_candidate(
         order_items,
         None,
         catalog,
+        false,
     )
 }
 

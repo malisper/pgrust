@@ -531,6 +531,34 @@ fn push_nonverbose_plan_details(
             }
             true
         }
+        Plan::BitmapIndexScan {
+            keys,
+            desc,
+            index_meta,
+            index_quals,
+            ..
+        } => {
+            if let Some(detail) = render_index_scan_condition_with_key_names_and_runtime_renderer(
+                keys,
+                desc,
+                index_meta,
+                None,
+                Some(&|expr| render_verbose_expr(expr, &[], ctx)),
+            ) {
+                lines.push(format!("{prefix}Index Cond: ({detail})"));
+            } else if let Some(qual) = index_quals.iter().cloned().reduce(Expr::and) {
+                let column_names = desc
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect::<Vec<_>>();
+                lines.push(format!(
+                    "{prefix}Index Cond: {}",
+                    render_explain_expr(&qual, &column_names)
+                ));
+            }
+            true
+        }
         _ => false,
     }
 }

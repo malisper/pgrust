@@ -41,6 +41,13 @@ fn comparison_operator_for_quantified_array(op: SubqueryComparisonOp) -> Option<
     }
 }
 
+fn quantified_array_literal_prefers_left_type(element: &SqlExpr) -> bool {
+    matches!(
+        element,
+        SqlExpr::Const(_) | SqlExpr::IntegerLiteral(_) | SqlExpr::NumericLiteral(_)
+    )
+}
+
 fn infer_quantified_array_literal_type(
     elements: &[SqlExpr],
     left_type: SqlType,
@@ -86,6 +93,10 @@ fn infer_quantified_array_literal_type(
                     right_type: sql_type_name(element_type),
                 });
             }
+        }
+        if common == Some(left_element_type) && quantified_array_literal_prefers_left_type(element)
+        {
+            continue;
         }
         common = Some(match common {
             None => element_type,

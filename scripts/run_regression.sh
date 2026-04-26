@@ -434,6 +434,9 @@ direct_test_dependencies() {
         create_index_spgist|index_including|index_including_gist)
             echo "create_index"
             ;;
+        btree_index)
+            echo "create_index"
+            ;;
         stats_ext)
             echo "create_misc create_aggregate"
             ;;
@@ -817,6 +820,12 @@ run_psql_file() {
     wait "$child_pid"
 }
 
+reset_dependency_session_state() {
+    local output_file="$1"
+
+    psql "${PG_ARGS[@]}" -q -c "RESET ROLE; SET search_path = public;" >> "$output_file" 2>&1
+}
+
 # Build pgrust_server
 if [[ "$SKIP_BUILD" == false ]]; then
     echo "Building pgrust_server ($SERVER_PROFILE)..."
@@ -1010,6 +1019,11 @@ run_base_dependency_setup() {
     mkdir -p "$(dirname "$output_file")"
     echo "Running base dependency setup for $base_name: $dependency_name"
     if run_psql_file "$TIMEOUT" "$PREPARED_SQL_FILE" "$output_file" psql "${PG_ARGS[@]}" -a -q; then
+        if ! reset_dependency_session_state "$output_file"; then
+            echo "ERROR: failed to reset dependency session state for $base_name: $dependency_name" >&2
+            echo "See: $output_file" >&2
+            return 1
+        fi
         return 0
     fi
 
@@ -1481,6 +1495,17 @@ run_one_regression_test() {
         return 0
     fi
 
+    if [[ -n "$SINGLE_TEST" && "$ISOLATED_PARALLEL" != true ]]; then
+        if ! run_regression_dependency_setups "$test_name"; then
+            {
+                echo "ERROR: dependency setup failed for $test_name"
+                echo "test: $test_name"
+            } > "$output_file"
+            write_test_status "$status_file" "error" "$test_name" 0 0 0 0
+            return 1
+        fi
+    fi
+
     if [[ "$test_name" == "select_distinct" ]] && ! run_select_distinct_index_setup; then
         {
             echo "ERROR: select_distinct index dependency setup failed"
@@ -1582,6 +1607,11 @@ run_regression_dependency_setup() {
     mkdir -p "$(dirname "$output_file")"
     echo "Running dependency setup for $dependent_name: $dependency_name"
     if run_psql_file "$TIMEOUT" "$PREPARED_SQL_FILE" "$output_file" psql "${PG_ARGS[@]}" -a -q; then
+        if ! reset_dependency_session_state "$output_file"; then
+            echo "ERROR: failed to reset dependency session state for $dependent_name: $dependency_name" >&2
+            echo "See: $output_file" >&2
+            return 1
+        fi
         return 0
     fi
 
@@ -1598,17 +1628,27 @@ run_regression_dependency_setups() {
     local dependent_name="$1"
     local dep=""
     local -a dependencies=()
+    local -a pending_dependencies=()
 
     while IFS= read -r dep; do
         [[ -n "$dep" ]] && dependencies+=("$dep")
     done < <(collect_test_dependencies "$dependent_name")
 
-    if [[ ${#dependencies[@]} -eq 0 ]]; then
+    for dep in "${dependencies[@]}"; do
+        if [[ "$dep" == "create_index" ]] \
+            && [[ "$NEEDS_CREATE_INDEX_BASE" == true ]] \
+            && test_uses_create_index_base "$dependent_name"; then
+            continue
+        fi
+        pending_dependencies+=("$dep")
+    done
+
+    if [[ ${#pending_dependencies[@]} -eq 0 ]]; then
         return 0
     fi
 
-    echo "Dependency setup for $dependent_name: ${dependencies[*]}"
-    for dep in "${dependencies[@]}"; do
+    echo "Dependency setup for $dependent_name: ${pending_dependencies[*]}"
+    for dep in "${pending_dependencies[@]}"; do
         if ! run_regression_dependency_setup "$dep" "$dependent_name"; then
             if [[ "$IGNORE_DEPS" == "true" ]]; then
                 echo "WARNING: dependency setup failed but continuing due to --ignore-deps" >&2
