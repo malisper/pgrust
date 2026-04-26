@@ -629,6 +629,9 @@ impl Database {
             Statement::CreateDatabase(ref create_stmt) => {
                 self.execute_create_database_stmt(client_id, create_stmt)
             }
+            Statement::AlterDatabase(ref alter_stmt) => {
+                self.execute_alter_database_stmt(client_id, alter_stmt)
+            }
             Statement::AlterRole(ref alter_stmt) => {
                 self.execute_alter_role_stmt(client_id, alter_stmt)
             }

@@ -1795,6 +1795,72 @@ fn eval_pg_get_acl(values: &[Value], ctx: &ExecutorContext) -> Result<Value, Exe
     }
 }
 
+fn eval_make_acl_item(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _, _, _]
+        | [_, Value::Null, _, _]
+        | [_, _, Value::Null, _]
+        | [_, _, _, Value::Null] => Ok(Value::Null),
+        [grantee, grantor, privileges, grant_option] => {
+            let grantee = oid_arg_to_u32(grantee, "makeaclitem")?;
+            let grantor = oid_arg_to_u32(grantor, "makeaclitem")?;
+            let Some(privileges) = privileges.as_text() else {
+                return Err(ExecError::TypeMismatch {
+                    op: "makeaclitem",
+                    left: privileges.clone(),
+                    right: Value::Text("".into()),
+                });
+            };
+            let Value::Bool(grant_option) = grant_option else {
+                return Err(ExecError::TypeMismatch {
+                    op: "makeaclitem",
+                    left: grant_option.clone(),
+                    right: Value::Bool(false),
+                });
+            };
+            let mut privilege_bits = acl_privilege_abbrev(privileges);
+            if *grant_option {
+                privilege_bits = privilege_bits
+                    .chars()
+                    .flat_map(|ch| [ch, '*'])
+                    .collect::<String>();
+            }
+            Ok(Value::Text(
+                format!("{grantee}={privilege_bits}/{grantor}").into(),
+            ))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "makeaclitem(grantee, grantor, privileges, grant_option)",
+            actual: format!("MakeAclItem({} args)", values.len()),
+        })),
+    }
+}
+
+fn acl_privilege_abbrev(privileges: &str) -> String {
+    privileges
+        .split(|ch: char| ch == ',' || ch.is_ascii_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let lower = part.to_ascii_lowercase();
+            match lower.as_str() {
+                "select" => "r",
+                "insert" => "a",
+                "update" => "w",
+                "delete" => "d",
+                "truncate" => "D",
+                "references" => "x",
+                "trigger" => "t",
+                "execute" => "X",
+                "usage" => "U",
+                "create" => "C",
+                "connect" => "c",
+                "temporary" | "temp" => "T",
+                _ => part,
+            }
+        })
+        .collect()
+}
+
 fn eval_obj_description(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
     match values {
         [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
@@ -5602,6 +5668,7 @@ fn eval_builtin_function(
         }
         BuiltinScalarFunction::PgGetUserById => eval_pg_get_userbyid(&values, ctx),
         BuiltinScalarFunction::PgGetAcl => eval_pg_get_acl(&values, ctx),
+        BuiltinScalarFunction::MakeAclItem => eval_make_acl_item(&values),
         BuiltinScalarFunction::PgGetStatisticsObjDef => eval_pg_get_statisticsobjdef(&values, ctx),
         BuiltinScalarFunction::PgGetStatisticsObjDefColumns => {
             eval_pg_get_statisticsobjdef_columns(&values, ctx)

@@ -3459,6 +3459,51 @@ fn parse_create_database_statement() {
         stmt,
         Statement::CreateDatabase(CreateDatabaseStatement {
             database_name: "analytics".into(),
+            options: CreateDatabaseOptions::default(),
+        })
+    );
+}
+
+#[test]
+fn parse_create_database_options() {
+    let stmt = parse_statement(
+        "create database analytics encoding utf8 lc_collate \"C\" lc_ctype \"C\" template template0",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateDatabase(CreateDatabaseStatement {
+            database_name: "analytics".into(),
+            options: CreateDatabaseOptions {
+                encoding: Some("utf8".into()),
+                lc_collate: Some("C".into()),
+                lc_ctype: Some("C".into()),
+                template: Some("template0".into()),
+                ..CreateDatabaseOptions::default()
+            },
+        })
+    );
+}
+
+#[test]
+fn parse_alter_database_statement() {
+    let stmt = parse_statement("alter database analytics rename to warehouse").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterDatabase(AlterDatabaseStatement {
+            database_name: "analytics".into(),
+            action: AlterDatabaseAction::Rename {
+                new_name: "warehouse".into(),
+            },
+        })
+    );
+
+    let stmt = parse_statement("alter database warehouse connection_limit 123").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterDatabase(AlterDatabaseStatement {
+            database_name: "warehouse".into(),
+            action: AlterDatabaseAction::ConnectionLimit { limit: 123 },
         })
     );
 }

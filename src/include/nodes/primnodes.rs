@@ -549,6 +549,7 @@ pub enum BuiltinScalarFunction {
     SetVal,
     PgGetSerialSequence,
     PgGetAcl,
+    MakeAclItem,
     TxidCurrent,
     TxidCurrentIfAssigned,
     TxidVisibleInSnapshot,

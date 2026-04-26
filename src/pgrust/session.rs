@@ -2194,6 +2194,19 @@ impl Session {
                     db.execute_create_database_stmt(self.client_id, create_stmt)
                 }
             }
+            Statement::AlterDatabase(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    db.execute_alter_database_stmt(self.client_id, alter_stmt)
+                }
+            }
             Statement::CreateSchema(ref create_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -5210,6 +5223,17 @@ impl Session {
             Statement::CreateDatabase(_) => Err(ExecError::Parse(
                 ParseError::ActiveSqlTransaction("CREATE DATABASE"),
             )),
+            Statement::AlterDatabase(ref alter_stmt) => {
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_database_stmt_in_transaction(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    false,
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::AlterRole(ref alter_stmt) => {
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_role_stmt_in_transaction(

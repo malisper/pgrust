@@ -3955,6 +3955,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             's',
         ),
+        proc_row(
+            1365,
+            "makeaclitem",
+            ACLITEM_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID, BOOL_TYPE_OID]),
+            "makeaclitem",
+            4,
+            false,
+            false,
+            'f',
+            's',
+        ),
         variadic_proc_row(
             3951,
             "json_extract_path",
@@ -7430,6 +7442,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgGetSerialSequence,
         ),
         ("pg_get_acl", BuiltinScalarFunction::PgGetAcl),
+        ("makeaclitem", BuiltinScalarFunction::MakeAclItem),
         ("txid_current", BuiltinScalarFunction::TxidCurrent),
         (
             "txid_current_if_assigned",

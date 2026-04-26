@@ -1296,6 +1296,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
             BuiltinScalarFunction::PgGetAcl => args.len() == 3,
+            BuiltinScalarFunction::MakeAclItem => args.len() == 4,
             BuiltinScalarFunction::PgGetUserById => args.len() == 1,
             BuiltinScalarFunction::ObjDescription => args.len() == 2,
             BuiltinScalarFunction::PgDescribeObject => args.len() == 3,
@@ -2864,6 +2865,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("regrole_to_text", BuiltinScalarFunction::RegRoleToText),
         ("regroleout", BuiltinScalarFunction::RegRoleToText),
         ("pg_get_acl", BuiltinScalarFunction::PgGetAcl),
+        ("makeaclitem", BuiltinScalarFunction::MakeAclItem),
         ("pg_get_userbyid", BuiltinScalarFunction::PgGetUserById),
         (
             "pg_indexam_has_property",
@@ -3574,6 +3576,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::PgGetSerialSequence
             | BuiltinScalarFunction::PgGetAcl
+            | BuiltinScalarFunction::MakeAclItem
             | BuiltinScalarFunction::PgGetUserById
             | BuiltinScalarFunction::ObjDescription
             | BuiltinScalarFunction::PgDescribeObject

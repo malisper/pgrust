@@ -727,13 +727,17 @@ impl Database {
             .iter()
             .map(|role| role.oid)
             .collect::<BTreeSet<_>>();
-        let owned_objects = owned_objects_for_roles(
-            self,
-            client_id,
-            Some((xid, cid)),
-            &old_role_oids.into_iter().collect::<Vec<_>>(),
-        )?;
-        if owned_objects.is_empty() {
+        let old_role_oid_list = old_role_oids.iter().copied().collect::<Vec<_>>();
+        let owned_objects =
+            owned_objects_for_roles(self, client_id, Some((xid, cid)), &old_role_oid_list)?;
+        let database_rows = self
+            .txn_backend_catcache(client_id, xid, cid)
+            .map_err(map_role_catalog_error)?
+            .database_rows()
+            .into_iter()
+            .filter(|row| old_role_oids.contains(&row.datdba))
+            .collect::<Vec<_>>();
+        if owned_objects.is_empty() && database_rows.is_empty() {
             return Ok(StatementResult::AffectedRows(0));
         }
 
@@ -783,6 +787,29 @@ impl Database {
                     .alter_relation_owner_mvcc(object.oid, new_role.oid, &ctx)
                     .map_err(map_role_catalog_error)?,
             };
+            catalog_effects.push(effect);
+        }
+        for (offset, database) in database_rows.into_iter().enumerate() {
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: cid.saturating_add(owned_objects.len() as u32 + offset as u32),
+                client_id,
+                waiter: None,
+                interrupts: interrupts.clone(),
+            };
+            let effect = self
+                .shared_catalog
+                .write()
+                .replace_database_row_mvcc(
+                    crate::include::catalog::PgDatabaseRow {
+                        datdba: new_role.oid,
+                        ..database
+                    },
+                    &ctx,
+                )
+                .map_err(map_role_catalog_error)?;
             catalog_effects.push(effect);
         }
 
