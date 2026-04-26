@@ -1396,6 +1396,7 @@ pub(crate) fn enforce_temporal_constraints_for_write(
                     constraint,
                     values,
                     &existing,
+                    &ctx.datetime_config,
                 ));
             }
         }
@@ -1553,6 +1554,16 @@ fn eval_exclusion_operator(proc_oid: u32, left: &Value, right: &Value) -> Result
     {
         return result;
     }
+    if let Some(func) = crate::include::catalog::builtin_scalar_function_for_proc_oid(proc_oid)
+        && let Some(result) = crate::backend::executor::expr_range::eval_range_function(
+            func,
+            &[left.clone(), right.clone()],
+            None,
+            false,
+        )
+    {
+        return result;
+    }
     Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
         "exclusion operator function oid {proc_oid}"
     ))))
@@ -1613,7 +1624,7 @@ pub(crate) fn validate_temporal_constraint_existing_rows(
     desc: &RelationDesc,
     constraint: &BoundTemporalConstraint,
     rows: &[(ItemPointerData, Vec<Value>)],
-    _ctx: &mut ExecutorContext,
+    ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     for (left_pos, (_, left_values)) in rows.iter().enumerate() {
         validate_temporal_period_value(relation_name, desc, constraint, left_values)?;
@@ -1633,10 +1644,11 @@ pub(crate) fn validate_temporal_constraint_existing_rows(
                         constraint.constraint_name
                     ),
                     detail: Some(
-                        crate::backend::executor::value_io::format_exclusion_create_key_detail(
+                        crate::backend::executor::value_io::format_exclusion_create_key_detail_with_config(
                             &constraint_columns(desc, constraint),
                             &left_key,
                             &right_key,
+                            &ctx.datetime_config,
                         ),
                     ),
                     hint: None,
@@ -1744,6 +1756,7 @@ fn temporal_exclusion_violation(
     constraint: &BoundTemporalConstraint,
     proposed: &[Value],
     existing: &[Value],
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
 ) -> ExecError {
     ExecError::DetailedError {
         message: format!(
@@ -1754,10 +1767,11 @@ fn temporal_exclusion_violation(
             let proposed_key = constraint_key_values(constraint, proposed);
             let existing_key = constraint_key_values(constraint, existing);
             Some(
-                crate::backend::executor::value_io::format_exclusion_key_detail(
+                crate::backend::executor::value_io::format_exclusion_key_detail_with_config(
                     &constraint_columns(desc, constraint),
                     &proposed_key,
                     &existing_key,
+                    datetime_config,
                 ),
             )
         },

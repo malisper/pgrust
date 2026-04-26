@@ -516,6 +516,10 @@ impl CatalogLookup for VisibleCatalog {
         rows
     }
 
+    fn domain_check_by_type_oid(&self, oid: u32) -> Option<String> {
+        self.domain_checks.get(&oid).map(|(name, _)| name.clone())
+    }
+
     fn range_rows(&self) -> Vec<PgRangeRow> {
         builtin_range_rows()
     }

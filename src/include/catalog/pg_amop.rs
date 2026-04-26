@@ -770,6 +770,17 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         });
         oid = oid.saturating_add(1);
     }
+    rows.push(PgAmopRow {
+        oid,
+        amopfamily: HASH_RANGE_FAMILY_OID,
+        amoplefttype: ANYRANGEOID,
+        amoprighttype: ANYRANGEOID,
+        amopstrategy: 1,
+        amoppurpose: 's',
+        amopopr: 0,
+        amopmethod: HASH_AM_OID,
+        amopsortfamily: 0,
+    });
     rows
 }
 

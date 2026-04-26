@@ -20,10 +20,10 @@ use crate::backend::access::transam::xlog::{
     XLOG_BTREE_NEWROOT, XLOG_BTREE_SPLIT_L, XLOG_BTREE_SPLIT_R, XLOG_FPI,
 };
 use crate::backend::catalog::CatalogError;
-use crate::backend::executor::render_datetime_value_text;
 use crate::backend::executor::value_io::{
     decode_value, encode_anyarray_bytes, encode_array_bytes, format_vector_array_storage_text,
 };
+use crate::backend::executor::{encode_range_bytes, render_datetime_value_text};
 use crate::backend::storage::fsm::get_free_index_page;
 use crate::backend::storage::page::bufpage::{MAX_HEAP_TUPLE_SIZE, max_align, page_header};
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
@@ -187,11 +187,13 @@ fn encode_index_value(
         | Value::Line(_)
         | Value::Box(_)
         | Value::Polygon(_)
-        | Value::Circle(_)
-        | Value::Range(_) => Err(CatalogError::Io(format!(
+        | Value::Circle(_) => Err(CatalogError::Io(format!(
             "unsupported index key type {:?}",
             sql_type.kind
         ))),
+        Value::Range(range) => {
+            encode_range_bytes(range).map_err(|err| CatalogError::Io(format!("{err:?}")))
+        }
         Value::Multirange(v) => crate::backend::executor::encode_multirange_bytes(v)
             .map_err(|err| CatalogError::Io(format!("{err:?}"))),
         Value::Array(_) | Value::PgArray(_)

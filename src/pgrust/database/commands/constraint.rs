@@ -7,8 +7,8 @@ use crate::backend::parser::{
     BoundTemporalConstraint, ForeignKeyConstraintAction,
 };
 use crate::include::catalog::{
-    CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
-    CONSTRAINT_UNIQUE, PG_CATALOG_NAMESPACE_OID, PgConstraintRow,
+    CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
+    CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, PG_CATALOG_NAMESPACE_OID, PgConstraintRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::TupleSlot;
@@ -1266,7 +1266,9 @@ impl Database {
                         &table_entry,
                         &index_entry,
                         constraint_name,
-                        if action.primary {
+                        if action.exclusion {
+                            CONSTRAINT_EXCLUSION
+                        } else if action.primary {
                             CONSTRAINT_PRIMARY
                         } else if action.exclusion {
                             crate::include::catalog::CONSTRAINT_EXCLUSION

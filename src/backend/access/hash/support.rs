@@ -164,6 +164,7 @@ pub(crate) fn hash_value_extended(
         Value::Numeric(value) => hash_bytes_extended(value.render().as_bytes(), seed),
         Value::Bytea(value) => hash_bytes_extended(value, seed),
         Value::Uuid(value) => hash_bytes_extended(value, seed),
+        Value::Range(value) => hash_range_value(value, seed)?,
         Value::Multirange(value) => hash_multirange_value(value, seed)?,
         Value::MacAddr(value) => hash_bytes_extended(value, seed),
         Value::MacAddr8(value) => hash_bytes_extended(value, seed),

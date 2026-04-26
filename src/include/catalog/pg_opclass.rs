@@ -106,6 +106,7 @@ pub const BYTEA_HASH_OPCLASS_OID: u32 = 76218;
 pub const UUID_HASH_OPCLASS_OID: u32 = 76219;
 pub const ENUM_HASH_OPCLASS_OID: u32 = 76220;
 pub const MULTIRANGE_HASH_OPCLASS_OID: u32 = 76221;
+pub const RANGE_HASH_OPCLASS_OID: u32 = 76222;
 pub const MACADDR_HASH_OPCLASS_OID: u32 = 76232;
 pub const MACADDR8_HASH_OPCLASS_OID: u32 = 76233;
 pub const INTERVAL_HASH_OPCLASS_OID: u32 = 76234;
@@ -330,6 +331,17 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             MACADDR8_TYPE_OID,
         ),
         PgOpclassRow {
+            oid: RANGE_BTREE_OPCLASS_OID,
+            opcmethod: BTREE_AM_OID,
+            opcname: "range_ops".into(),
+            opcnamespace: PG_CATALOG_NAMESPACE_OID,
+            opcowner: BOOTSTRAP_SUPERUSER_OID,
+            opcfamily: BTREE_RANGE_FAMILY_OID,
+            opcintype: ANYRANGEOID,
+            opcdefault: true,
+            opckeytype: 0,
+        },
+        PgOpclassRow {
             oid: MULTIRANGE_BTREE_OPCLASS_OID,
             opcmethod: BTREE_AM_OID,
             opcname: "multirange_ops".into(),
@@ -357,12 +369,6 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             "jsonb_ops",
             BTREE_JSONB_FAMILY_OID,
             JSONB_TYPE_OID,
-        ),
-        row(
-            RANGE_BTREE_OPCLASS_OID,
-            "range_ops",
-            BTREE_RANGE_FAMILY_OID,
-            ANYRANGEOID,
         ),
         row(
             RECORD_BTREE_OPCLASS_OID,
@@ -815,6 +821,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             UUID_TYPE_OID,
         ),
         hash_row(
+            RANGE_HASH_OPCLASS_OID,
+            "range_ops",
+            HASH_RANGE_FAMILY_OID,
+            ANYRANGEOID,
+        ),
+        hash_row(
             INTERVAL_HASH_OPCLASS_OID,
             "interval_ops",
             HASH_INTERVAL_FAMILY_OID,
@@ -968,6 +980,8 @@ pub fn default_btree_opclass_oid(type_oid: u32) -> Option<u32> {
         INET_TYPE_OID => INET_BTREE_OPCLASS_OID,
         BIT_TYPE_OID => BIT_BTREE_OPCLASS_OID,
         VARBIT_TYPE_OID => VARBIT_BTREE_OPCLASS_OID,
+        INT4RANGE_TYPE_OID | INT8RANGE_TYPE_OID | NUMRANGE_TYPE_OID | DATERANGE_TYPE_OID
+        | TSRANGE_TYPE_OID | TSTZRANGE_TYPE_OID => RANGE_BTREE_OPCLASS_OID,
         MACADDR_TYPE_OID => MACADDR_BTREE_OPCLASS_OID,
         MACADDR8_TYPE_OID => MACADDR8_BTREE_OPCLASS_OID,
         INT4MULTIRANGE_TYPE_OID
@@ -1002,6 +1016,8 @@ pub fn default_hash_opclass_oid(type_oid: u32) -> Option<u32> {
         TIMETZ_TYPE_OID => TIMETZ_HASH_OPCLASS_OID,
         BYTEA_TYPE_OID => BYTEA_HASH_OPCLASS_OID,
         UUID_TYPE_OID => UUID_HASH_OPCLASS_OID,
+        INT4RANGE_TYPE_OID | INT8RANGE_TYPE_OID | NUMRANGE_TYPE_OID | DATERANGE_TYPE_OID
+        | TSRANGE_TYPE_OID | TSTZRANGE_TYPE_OID => RANGE_HASH_OPCLASS_OID,
         INT4MULTIRANGE_TYPE_OID
         | NUMMULTIRANGE_TYPE_OID
         | TSMULTIRANGE_TYPE_OID

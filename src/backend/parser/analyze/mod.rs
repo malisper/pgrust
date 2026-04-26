@@ -831,6 +831,10 @@ pub trait CatalogLookup {
         None
     }
 
+    fn domain_check_by_type_oid(&self, _domain_oid: u32) -> Option<String> {
+        None
+    }
+
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
         if let Some(range_type) = range_type_ref_for_sql_type(sql_type) {
             if sql_type.is_array {
@@ -1250,6 +1254,10 @@ impl CatalogLookup for IndexExpressionCatalogLookup<'_> {
 
     fn domain_check_name(&self, domain_oid: u32) -> Option<String> {
         self.inner.domain_check_name(domain_oid)
+    }
+
+    fn domain_check_by_type_oid(&self, domain_oid: u32) -> Option<String> {
+        self.inner.domain_check_by_type_oid(domain_oid)
     }
 
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {

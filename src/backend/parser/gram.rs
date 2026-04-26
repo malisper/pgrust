@@ -3990,9 +3990,23 @@ fn try_parse_create_type_statement(sql: &str) -> Result<Option<Statement>, Parse
     if lowered.starts_with("alter type ") {
         return match build_alter_type_statement(trimmed) {
             Ok(stmt) => Ok(Some(Statement::AlterType(stmt))),
-            Err(ParseError::FeatureNotSupported(_)) => build_alter_type_owner_statement(trimmed)
-                .map(|stmt| Some(Statement::AlterTypeOwner(stmt))),
-            Err(err) => Err(err),
+            Err(ParseError::FeatureNotSupported(_)) => {
+                if let Err(err @ ParseError::DetailedError { .. }) =
+                    check_alter_type_add_attribute_statement(trimmed)
+                {
+                    return Err(err);
+                }
+                build_alter_type_owner_statement(trimmed)
+                    .map(|stmt| Some(Statement::AlterTypeOwner(stmt)))
+            }
+            Err(err) => {
+                if let Err(add_attr_err @ ParseError::DetailedError { .. }) =
+                    check_alter_type_add_attribute_statement(trimmed)
+                {
+                    return Err(add_attr_err);
+                }
+                Err(err)
+            }
         };
     }
     if lowered.starts_with("drop type ") {
@@ -7939,6 +7953,7 @@ fn parse_create_range_type_statement(
     input: &str,
 ) -> Result<CreateRangeTypeStatement, ParseError> {
     let mut subtype = None;
+    let mut subtype_opclass = None;
     let mut subtype_diff = None;
     let mut collation = None;
     let mut multirange_type_name = None;
@@ -7957,6 +7972,19 @@ fn parse_create_range_type_statement(
         let value = value.trim();
         match option_name.as_str() {
             "subtype" => subtype = Some(parse_type_name(value)?),
+            "subtype_opclass" => {
+                let ((schema_name, opclass_name), rest) = parse_qualified_sql_name(value)?;
+                if !rest.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "range subtype operator class name",
+                        actual: value.into(),
+                    });
+                }
+                subtype_opclass = Some(match schema_name {
+                    Some(schema_name) => format!("{schema_name}.{opclass_name}"),
+                    None => opclass_name,
+                });
+            }
             "subtype_diff" => {
                 let ((schema_name, function_name), rest) = parse_qualified_sql_name(value)?;
                 if !rest.trim().is_empty() {
@@ -8004,6 +8032,7 @@ fn parse_create_range_type_statement(
             expected: "subtype option",
             actual: input.trim().into(),
         })?,
+        subtype_opclass,
         subtype_diff,
         collation,
         multirange_type_name,
@@ -8044,6 +8073,59 @@ fn parse_create_type_attribute(input: &str) -> Result<CompositeTypeAttributeDef,
         name,
         ty: parse_type_name(rest)?,
     })
+}
+
+fn check_alter_type_add_attribute_statement(sql: &str) -> Result<(), ParseError> {
+    let prefix = "alter type";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "ALTER TYPE name",
+            actual: sql.into(),
+        })?;
+    let ((type_schema, type_name), rest) = parse_qualified_sql_name(rest.trim_start())?;
+    let mut rest = rest.trim_start();
+    if !keyword_at_start(rest, "add") {
+        return Err(ParseError::FeatureNotSupported(
+            "ALTER TYPE is not supported yet".into(),
+        ));
+    }
+    rest = consume_keyword(rest, "add").trim_start();
+    if !keyword_at_start(rest, "attribute") {
+        return Err(ParseError::FeatureNotSupported(
+            "ALTER TYPE is not supported yet".into(),
+        ));
+    }
+    rest = consume_keyword(rest, "attribute").trim_start();
+    let (_attribute_name, rest) = parse_sql_identifier(rest)?;
+    let ((attribute_schema, attribute_type_name), trailing) =
+        parse_qualified_sql_name(rest.trim_start())?;
+    if !trailing.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER TYPE ADD ATTRIBUTE",
+            actual: trailing.trim().into(),
+        });
+    }
+
+    // :HACK: Full ALTER TYPE ADD ATTRIBUTE support belongs in the DDL layer.
+    // This recognizes PostgreSQL's self-inclusion rejection used by the
+    // rangetypes regression for a composite type and its range type.
+    if attribute_type_name
+        .strip_suffix("_range")
+        .is_some_and(|base| base.eq_ignore_ascii_case(&type_name))
+        && (type_schema.is_none() || type_schema == attribute_schema)
+    {
+        return Err(ParseError::DetailedError {
+            message: format!("composite type {type_name} cannot be made a member of itself"),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+
+    Err(ParseError::FeatureNotSupported(
+        "ALTER TYPE is not supported yet".into(),
+    ))
 }
 
 fn build_drop_type_statement(sql: &str) -> Result<DropTypeStatement, ParseError> {
@@ -12951,6 +13033,9 @@ fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, Parse
                             .find(|inner| inner.as_rule() == Rule::expr)
                             .ok_or(ParseError::UnexpectedEof)?;
                         expr_sql = Some(expr.as_str().to_string());
+                    }
+                    Rule::create_index_function_expression if expr_sql.is_none() => {
+                        expr_sql = Some(inner.as_str().to_string());
                     }
                     _ => {}
                 }

@@ -132,6 +132,11 @@ pub const SPG_NETWORK_CHOOSE_PROC_OID: u32 = 76616;
 pub const SPG_NETWORK_PICKSPLIT_PROC_OID: u32 = 76617;
 pub const SPG_NETWORK_INNER_CONSISTENT_PROC_OID: u32 = 76618;
 pub const SPG_NETWORK_LEAF_CONSISTENT_PROC_OID: u32 = 76619;
+pub const SPG_RANGE_CONFIG_PROC_OID: u32 = 5022;
+pub const SPG_RANGE_CHOOSE_PROC_OID: u32 = 5023;
+pub const SPG_RANGE_PICKSPLIT_PROC_OID: u32 = 5024;
+pub const SPG_RANGE_INNER_CONSISTENT_PROC_OID: u32 = 5025;
+pub const SPG_RANGE_LEAF_CONSISTENT_PROC_OID: u32 = 5026;
 pub const GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID: u32 = 6347;
 pub const RANGE_SORTSUPPORT_PROC_OID: u32 = 6391;
 pub const BRIN_MINMAX_OPCINFO_PROC_OID: u32 = 3383;
@@ -159,6 +164,7 @@ pub const HASH_TIMETZ_PROC_OID: u32 = 76517;
 pub const HASH_BYTEA_PROC_OID: u32 = 76518;
 pub const HASH_MULTIRANGE_PROC_OID: u32 = 76519;
 pub const HASH_UUID_PROC_OID: u32 = 2963;
+pub const HASH_RANGE_PROC_OID: u32 = 76520;
 pub const HASH_INTERVAL_PROC_OID: u32 = 1697;
 pub const MACADDR_EQ_PROC_OID: u32 = 830;
 pub const MACADDR_LT_PROC_OID: u32 = 831;
@@ -392,6 +398,30 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             false,
             'f',
             's',
+        ),
+        proc_row(
+            205,
+            "float4mi",
+            FLOAT4_TYPE_OID,
+            &oid_argtypes(&[FLOAT4_TYPE_OID, FLOAT4_TYPE_OID]),
+            "float4mi",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            219,
+            "float8mi",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[FLOAT8_TYPE_OID, FLOAT8_TYPE_OID]),
+            "float8mi",
+            2,
+            false,
+            true,
+            'f',
+            'i',
         ),
         proc_row(
             89,
@@ -9934,11 +9964,35 @@ fn spgist_support_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            SPG_RANGE_CONFIG_PROC_OID,
+            "spg_range_quad_config",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_range_quad_config",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
             SPG_NETWORK_CHOOSE_PROC_OID,
             "inet_spg_choose",
             VOID_TYPE_OID,
             &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
             "inet_spg_choose",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_RANGE_CHOOSE_PROC_OID,
+            "spg_range_quad_choose",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_range_quad_choose",
             2,
             false,
             false,
@@ -9958,6 +10012,18 @@ fn spgist_support_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            SPG_RANGE_PICKSPLIT_PROC_OID,
+            "spg_range_quad_picksplit",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_range_quad_picksplit",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
             SPG_NETWORK_INNER_CONSISTENT_PROC_OID,
             "inet_spg_inner_consistent",
             VOID_TYPE_OID,
@@ -9970,11 +10036,35 @@ fn spgist_support_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            SPG_RANGE_INNER_CONSISTENT_PROC_OID,
+            "spg_range_quad_inner_consistent",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_range_quad_inner_consistent",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
             SPG_NETWORK_LEAF_CONSISTENT_PROC_OID,
             "inet_spg_leaf_consistent",
             BOOL_TYPE_OID,
             &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
             "inet_spg_leaf_consistent",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_RANGE_LEAF_CONSISTENT_PROC_OID,
+            "spg_range_quad_leaf_consistent",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_range_quad_leaf_consistent",
             2,
             false,
             false,

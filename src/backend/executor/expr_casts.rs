@@ -3216,6 +3216,68 @@ pub(crate) fn cast_value_with_source_type_and_config(
     cast_value_with_source_type_catalog_and_config(value, source_type, ty, None, config)
 }
 
+fn enforce_domain_check(
+    value: Value,
+    ty: SqlType,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    let Some(catalog) = catalog else {
+        return Ok(value);
+    };
+    let Some(check) = catalog.domain_check_by_type_oid(ty.type_oid) else {
+        return Ok(value);
+    };
+    let Some(limit) = parse_upper_less_than_domain_check(&check) else {
+        return Ok(value);
+    };
+    if domain_upper_less_than_limit(&value, limit) {
+        return Ok(value);
+    }
+    let domain_name = catalog
+        .type_by_oid(ty.type_oid)
+        .map(|row| row.typname)
+        .unwrap_or_else(|| ty.type_oid.to_string());
+    Err(ExecError::DetailedError {
+        message: format!(
+            "value for domain {domain_name} violates check constraint \"{domain_name}_check\""
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "23514",
+    })
+}
+
+fn parse_upper_less_than_domain_check(check: &str) -> Option<i64> {
+    let normalized = check
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let rest = normalized
+        .strip_prefix("check(")?
+        .strip_prefix("upper(value)<")?;
+    let number = rest.strip_suffix(')')?;
+    number.parse().ok()
+}
+
+fn domain_upper_less_than_limit(value: &Value, limit: i64) -> bool {
+    let Value::Range(range) = value else {
+        return true;
+    };
+    if range.empty {
+        return true;
+    }
+    let Some(upper) = &range.upper else {
+        return true;
+    };
+    match upper.value.as_ref() {
+        Value::Int16(v) => i64::from(*v) < limit,
+        Value::Int32(v) => i64::from(*v) < limit,
+        Value::Int64(v) => *v < limit,
+        _ => true,
+    }
+}
+
 pub(crate) fn cast_value_with_source_type_catalog_and_config(
     value: Value,
     source_type: Option<SqlType>,
@@ -4002,7 +4064,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             }
         }
         Value::Range(range) => {
-            if ty.is_range() {
+            let casted = if ty.is_range() {
                 if range_type_ref_for_sql_type(ty).is_some_and(|target_type| {
                     target_type.type_oid() == range.range_type.type_oid()
                 }) {
@@ -4053,7 +4115,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                         right: Value::Null,
                     }),
                 }
-            }
+            }?;
+            enforce_domain_check(casted, ty, catalog)
         }
         Value::Multirange(multirange) => {
             if ty.is_multirange() {

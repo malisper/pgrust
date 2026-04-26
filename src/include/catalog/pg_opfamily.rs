@@ -90,6 +90,7 @@ pub const HASH_TIMESTAMP_FAMILY_OID: u32 = 2040;
 pub const HASH_BOOL_FAMILY_OID: u32 = 2222;
 pub const HASH_BYTEA_FAMILY_OID: u32 = 2223;
 pub const HASH_UUID_FAMILY_OID: u32 = 2969;
+pub const HASH_RANGE_FAMILY_OID: u32 = 2224;
 pub const HASH_MULTIRANGE_FAMILY_OID: u32 = 4225;
 pub const HASH_MACADDR_FAMILY_OID: u32 = 76230;
 pub const HASH_MACADDR8_FAMILY_OID: u32 = 76231;
@@ -417,6 +418,7 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
         hash_row(HASH_BOOL_FAMILY_OID, "bool_ops"),
         hash_row(HASH_BYTEA_FAMILY_OID, "bytea_ops"),
         hash_row(HASH_UUID_FAMILY_OID, "uuid_ops"),
+        hash_row(HASH_RANGE_FAMILY_OID, "range_ops"),
         hash_row(HASH_MULTIRANGE_FAMILY_OID, "multirange_ops"),
         hash_row(HASH_MACADDR_FAMILY_OID, "macaddr_ops"),
         hash_row(HASH_MACADDR8_FAMILY_OID, "macaddr8_ops"),

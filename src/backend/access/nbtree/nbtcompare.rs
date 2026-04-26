@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 
+use crate::backend::executor::expr_range::compare_range_values;
 use crate::backend::executor::{
     compare_multirange_values, compare_network_values, compare_order_values,
 };
@@ -41,6 +42,7 @@ pub fn compare_bt_values(left: &Value, right: &Value) -> Ordering {
                 .expect("btree array comparisons use implicit default collation")
         }
         (Value::InternalChar(a), Value::InternalChar(b)) => a.cmp(b),
+        (Value::Range(a), Value::Range(b)) => compare_range_values(a, b),
         (Value::Interval(a), Value::Interval(b)) => a.cmp_key().cmp(&b.cmp_key()),
         (Value::Multirange(a), Value::Multirange(b)) => compare_multirange_values(a, b),
         (Value::Inet(a) | Value::Cidr(a), Value::Inet(b) | Value::Cidr(b)) => {
@@ -90,6 +92,8 @@ pub fn compare_bt_keyspace(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::executor::expr_range::parse_range_text;
+    use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
 
     #[test]
@@ -136,5 +140,16 @@ mod tests {
             compare_bt_values(&with_null, &without_null),
             Ordering::Greater
         );
+    }
+
+    #[test]
+    fn bt_range_comparison_uses_range_ordering() {
+        let range_type = SqlType::new(SqlTypeKind::Int4Range);
+        let empty = parse_range_text("empty", range_type).unwrap();
+        let non_empty = parse_range_text("[1,5)", range_type).unwrap();
+
+        assert_eq!(compare_bt_values(&empty, &empty), Ordering::Equal);
+        assert_eq!(compare_bt_values(&empty, &non_empty), Ordering::Less);
+        assert_eq!(compare_bt_values(&non_empty, &empty), Ordering::Greater);
     }
 }

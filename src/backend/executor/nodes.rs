@@ -27,7 +27,7 @@ use crate::backend::storage::page::bufpage::{
 };
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, DateTimeConfig};
-use crate::backend::utils::time::date::format_date_text;
+use crate::backend::utils::time::date::{format_date_text, parse_date_text};
 use crate::backend::utils::time::instant::Instant;
 use crate::backend::utils::time::timestamp::{
     format_timestamp_text, format_timestamptz_text, parse_timestamp_text, parse_timestamptz_text,
@@ -36,8 +36,10 @@ use crate::include::access::scankey::ScanKeyData;
 use crate::include::access::visibilitymap::visibilitymap_get_status;
 use crate::include::access::visibilitymapdefs::VISIBILITYMAP_ALL_VISIBLE;
 use crate::include::catalog::{
-    BTREE_AM_OID, GIST_AM_OID, HASH_AM_OID, PG_LARGEOBJECT_METADATA_RELATION_OID, SPGIST_AM_OID,
+    BTREE_AM_OID, DATE_TYPE_OID, GIST_AM_OID, HASH_AM_OID, PG_LARGEOBJECT_METADATA_RELATION_OID,
+    SPGIST_AM_OID, TEXT_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
 };
+use crate::include::nodes::datetime::{DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimestampTzADT};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, CteScanState,
@@ -1743,14 +1745,21 @@ fn render_index_scan_key(
     key_column_names: Option<&[String]>,
 ) -> Option<String> {
     let index_attno = usize::try_from(key.attribute_number.checked_sub(1)?).ok()?;
-    let heap_attno = usize::try_from(*index_meta.indkey.get(index_attno)?)
-        .ok()?
-        .checked_sub(1)?;
-    let column = desc.columns.get(heap_attno)?;
-    let column_name = key_column_names
-        .and_then(|names| names.get(heap_attno))
-        .cloned()
-        .unwrap_or_else(|| column.name.clone());
+    let index_key_attno = *index_meta.indkey.get(index_attno)?;
+    let (column_name, column_type) = if index_key_attno == 0 {
+        (
+            expression_index_key_sql(index_meta, index_attno)?,
+            SqlType::new(SqlTypeKind::Text),
+        )
+    } else {
+        let heap_attno = usize::try_from(index_key_attno).ok()?.checked_sub(1)?;
+        let column = desc.columns.get(heap_attno)?;
+        let column_name = key_column_names
+            .and_then(|names| names.get(heap_attno))
+            .cloned()
+            .unwrap_or_else(|| column.name.clone());
+        (column_name, column.sql_type)
+    };
     if purpose == 's' && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Null)) {
         match key.strategy {
             0 => return Some(format!("{column_name} IS NULL")),
@@ -1758,10 +1767,10 @@ fn render_index_scan_key(
             _ => {}
         }
     }
-    let display_type = index_key_argument_display_type(&key.argument, column.sql_type);
+    let display_type = index_key_argument_display_type(&key.argument, column_type);
     let right_type_oid = display_type.map(crate::backend::utils::cache::catcache::sql_type_oid);
     let left_sql = if matches!(display_type.map(|ty| ty.kind), Some(SqlTypeKind::Char))
-        && column.sql_type.kind == SqlTypeKind::Char
+        && column_type.kind == SqlTypeKind::Char
     {
         format!("({column_name})::bpchar")
     } else {
@@ -1863,7 +1872,9 @@ fn fallback_index_scan_operator(am_oid: u32, strategy: u16) -> Option<String> {
                 3 => ">>",
                 4 => ">>=",
                 5 => "&&",
-                6 => "=",
+                6 => "-|-",
+                7 => "@>",
+                8 => "<@",
                 _ => return None,
             }
             .into(),
@@ -1887,6 +1898,75 @@ fn index_key_argument_display_type(
             crate::include::nodes::primnodes::expr_sql_type_hint(expr)
         }
     }
+}
+
+fn expression_index_key_sql(
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    index_attno: usize,
+) -> Option<String> {
+    let expr_pos = index_meta
+        .indkey
+        .iter()
+        .take(index_attno)
+        .filter(|attno| **attno == 0)
+        .count();
+    let expr_sqls = serde_json::from_str::<Vec<String>>(index_meta.indexprs.as_deref()?).ok()?;
+    expr_sqls
+        .get(expr_pos)
+        .map(|expr_sql| format_expression_index_sql(expr_sql))
+}
+
+fn format_expression_index_sql(expr_sql: &str) -> String {
+    let trimmed = expr_sql.trim();
+    let Some(open_paren) = trimmed.find('(') else {
+        return trimmed.to_string();
+    };
+    if !trimmed.ends_with(')') {
+        return trimmed.to_string();
+    }
+    let name = trimmed[..open_paren].trim();
+    if name.is_empty() {
+        return trimmed.to_string();
+    }
+    let args = &trimmed[open_paren + 1..trimmed.len().saturating_sub(1)];
+    let args = split_expression_index_args(args)
+        .into_iter()
+        .map(format_expression_index_arg)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({args})")
+}
+
+fn split_expression_index_args(args: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (idx, ch) in args.char_indices() {
+        match ch {
+            '(' => depth = depth.saturating_add(1),
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(args[start..idx].trim());
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    out.push(args[start..].trim());
+    out
+}
+
+fn format_expression_index_arg(arg: &str) -> String {
+    let trimmed = arg.trim();
+    if let Some((left, right)) = trimmed.split_once('+') {
+        return format!("({} + {})", left.trim(), right.trim());
+    }
+    if let Some((left, right)) = trimmed.split_once('-')
+        && !left.trim().is_empty()
+    {
+        return format!("({} - {})", left.trim(), right.trim());
+    }
+    trimmed.to_string()
 }
 
 impl BitmapIndexScanState {
@@ -2263,6 +2343,11 @@ pub(crate) fn render_explain_expr_with_qualifier(
     qualifier: Option<&str>,
     column_names: &[String],
 ) -> String {
+    if let Some(rendered) =
+        render_range_support_expr(expr, qualifier, column_names).map(|out| out.render_full())
+    {
+        return rendered;
+    }
     if matches!(
         expr,
         Expr::Func(func)
@@ -2454,6 +2539,7 @@ fn render_explain_expr_inner_with_qualifier(
         }
         Expr::CurrentCatalog => "CURRENT_CATALOG".into(),
         Expr::CurrentSchema => "CURRENT_SCHEMA".into(),
+        Expr::CurrentDate => "CURRENT_DATE".into(),
         Expr::CurrentUser => "CURRENT_USER".into(),
         Expr::CurrentRole => "CURRENT_ROLE".into(),
         Expr::SessionUser => "SESSION_USER".into(),
@@ -2482,6 +2568,11 @@ fn render_explain_func_expr(
     ) && func.args.len() == 1
     {
         return render_explain_expr_inner_with_qualifier(&func.args[0], qualifier, column_names);
+    }
+    if let Some(rendered) =
+        render_range_support_func_expr(func, qualifier, column_names).map(|out| out.render_inner())
+    {
+        return rendered;
     }
     let render_as_named_call = matches!(
         (&func.implementation, func.funcname.as_deref()),
@@ -2544,6 +2635,498 @@ fn render_explain_scalar_array_op(
         render_explain_infix_operand(&saop.left, qualifier, column_names),
         render_explain_expr_inner_with_qualifier(&saop.right, qualifier, column_names)
     )
+}
+
+pub(crate) fn render_verbose_range_support_expr(
+    expr: &Expr,
+    column_names: &[String],
+) -> Option<String> {
+    render_range_support_expr(expr, None, column_names).map(|out| out.render_verbose())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RangeSupportSubtype {
+    Date,
+    TimestampTz,
+    Text,
+}
+
+#[derive(Clone)]
+enum RangeSupportBoundValue {
+    Date(DateADT),
+    TimestampTz(TimestampTzADT),
+    Text(String),
+}
+
+#[derive(Clone)]
+struct RangeSupportBound {
+    value: RangeSupportBoundValue,
+    inclusive: bool,
+}
+
+struct RangeSupportBounds {
+    subtype: RangeSupportSubtype,
+    empty: bool,
+    lower: Option<RangeSupportBound>,
+    upper: Option<RangeSupportBound>,
+}
+
+enum RangeSupportOutput {
+    Bool(&'static str),
+    Comparison(String),
+    And(String, String),
+    ElementContainedByRangeLiteral { elem: String, range_literal: String },
+}
+
+impl RangeSupportOutput {
+    fn render_inner(self) -> String {
+        match self {
+            Self::Bool(value) => value.into(),
+            Self::Comparison(comparison) => comparison,
+            Self::And(lower, upper) => format!("({lower}) AND ({upper})"),
+            Self::ElementContainedByRangeLiteral {
+                elem,
+                range_literal,
+            } => {
+                format!("{elem} <@ {range_literal}")
+            }
+        }
+    }
+
+    fn render_full(self) -> String {
+        match self {
+            Self::Bool(value) => format!("({value})"),
+            Self::Comparison(comparison) => format!("({comparison})"),
+            Self::And(lower, upper) => format!("(({lower}) AND ({upper}))"),
+            Self::ElementContainedByRangeLiteral {
+                elem,
+                range_literal,
+            } => {
+                format!("({elem} <@ {range_literal})")
+            }
+        }
+    }
+
+    fn render_verbose(self) -> String {
+        match self {
+            Self::Bool(value) => value.into(),
+            Self::Comparison(comparison) => format!("({comparison})"),
+            Self::And(lower, upper) => format!("(({lower}) AND ({upper}))"),
+            Self::ElementContainedByRangeLiteral {
+                elem,
+                range_literal,
+            } => {
+                format!("({elem} <@ {range_literal})")
+            }
+        }
+    }
+}
+
+fn render_range_support_expr(
+    expr: &Expr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> Option<RangeSupportOutput> {
+    let Expr::Func(func) = expr else {
+        return None;
+    };
+    render_range_support_func_expr(func, qualifier, column_names)
+}
+
+fn render_range_support_func_expr(
+    func: &FuncExpr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> Option<RangeSupportOutput> {
+    let (elem, range) = match (func.implementation, func.args.as_slice()) {
+        (ScalarFunctionImpl::Builtin(BuiltinScalarFunction::RangeContainedBy), [elem, range]) => {
+            (elem, range)
+        }
+        (ScalarFunctionImpl::Builtin(BuiltinScalarFunction::RangeContains), [range, elem]) => {
+            (elem, range)
+        }
+        _ => return None,
+    };
+    let bounds = range_support_bounds(range)?;
+    if bounds.empty {
+        return Some(RangeSupportOutput::Bool("false"));
+    }
+    let elem_expr = elem;
+    let elem = render_range_support_elem(elem_expr, qualifier, column_names);
+    if bounds.lower.is_none() && bounds.upper.is_none() {
+        return Some(RangeSupportOutput::Bool("true"));
+    }
+
+    if bounds.subtype == RangeSupportSubtype::TimestampTz
+        && range_support_elem_is_clock_timestamp(strip_range_support_casts(elem_expr))
+        && bounds.lower.is_some()
+        && bounds.upper.is_some()
+        && let Some(range_literal) = render_tstzrange_support_literal(&bounds)
+    {
+        return Some(RangeSupportOutput::ElementContainedByRangeLiteral {
+            elem,
+            range_literal,
+        });
+    }
+
+    let mut comparisons = Vec::with_capacity(2);
+    if let Some(lower) = &bounds.lower {
+        comparisons.push(render_range_bound_comparison(
+            &elem,
+            RangeSupportBoundSide::Lower,
+            lower,
+            bounds.subtype,
+        )?);
+    }
+    if let Some(upper) = &bounds.upper {
+        comparisons.push(render_range_bound_comparison(
+            &elem,
+            RangeSupportBoundSide::Upper,
+            upper,
+            bounds.subtype,
+        )?);
+    }
+    match comparisons.as_slice() {
+        [] => Some(RangeSupportOutput::Bool("true")),
+        [comparison] => Some(RangeSupportOutput::Comparison(comparison.clone())),
+        [lower, upper] => Some(RangeSupportOutput::And(lower.clone(), upper.clone())),
+        _ => None,
+    }
+}
+
+fn range_support_bounds(expr: &Expr) -> Option<RangeSupportBounds> {
+    match strip_range_support_casts(expr) {
+        Expr::Const(Value::Range(range)) => {
+            let subtype = range_support_subtype_for_sql_type(range.range_type.subtype)?;
+            Some(RangeSupportBounds {
+                subtype,
+                empty: range.empty,
+                lower: match range.lower.as_ref() {
+                    Some(bound) => Some(range_support_bound_from_range_bound(bound, subtype)?),
+                    None => None,
+                },
+                upper: match range.upper.as_ref() {
+                    Some(bound) => Some(range_support_bound_from_range_bound(bound, subtype)?),
+                    None => None,
+                },
+            })
+        }
+        Expr::Func(func)
+            if matches!(
+                func.implementation,
+                ScalarFunctionImpl::Builtin(BuiltinScalarFunction::RangeConstructor)
+            ) =>
+        {
+            let subtype = func
+                .funcresulttype
+                .and_then(range_support_subtype_for_sql_type)
+                .or_else(|| range_support_subtype_from_constructor_args(&func.args))?;
+            let lower_arg = func.args.first()?;
+            let upper_arg = func.args.get(1)?;
+            let (lower_inclusive, upper_inclusive) =
+                range_constructor_inclusivity(func.args.get(2));
+            Some(RangeSupportBounds {
+                subtype,
+                empty: false,
+                lower: range_support_bound_from_expr(lower_arg, subtype, lower_inclusive)?,
+                upper: range_support_bound_from_expr(upper_arg, subtype, upper_inclusive)?,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn range_support_bound_from_range_bound(
+    bound: &crate::include::nodes::datum::RangeBound,
+    subtype: RangeSupportSubtype,
+) -> Option<RangeSupportBound> {
+    Some(RangeSupportBound {
+        value: range_support_bound_value_from_value(&bound.value, subtype)?,
+        inclusive: bound.inclusive,
+    })
+}
+
+fn range_support_subtype_for_sql_type(sql_type: SqlType) -> Option<RangeSupportSubtype> {
+    match sql_type.kind {
+        SqlTypeKind::Date | SqlTypeKind::DateRange => Some(RangeSupportSubtype::Date),
+        SqlTypeKind::TimestampTz | SqlTypeKind::TimestampTzRange => {
+            Some(RangeSupportSubtype::TimestampTz)
+        }
+        SqlTypeKind::Text => Some(RangeSupportSubtype::Text),
+        SqlTypeKind::Range => match sql_type.range_subtype_oid {
+            DATE_TYPE_OID => Some(RangeSupportSubtype::Date),
+            TIMESTAMPTZ_TYPE_OID => Some(RangeSupportSubtype::TimestampTz),
+            TEXT_TYPE_OID => Some(RangeSupportSubtype::Text),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn range_support_subtype_from_constructor_args(args: &[Expr]) -> Option<RangeSupportSubtype> {
+    if args.iter().any(|arg| {
+        matches!(
+            strip_range_support_casts(arg),
+            Expr::Const(Value::TimestampTz(_))
+        )
+    }) {
+        return Some(RangeSupportSubtype::TimestampTz);
+    }
+    if args
+        .iter()
+        .any(|arg| matches!(strip_range_support_casts(arg), Expr::Const(Value::Date(_))))
+    {
+        return Some(RangeSupportSubtype::Date);
+    }
+    if args.iter().any(|arg| {
+        matches!(
+            strip_range_support_casts(arg),
+            Expr::Const(Value::Text(_) | Value::TextRef(_, _))
+        )
+    }) {
+        return Some(RangeSupportSubtype::Text);
+    }
+    None
+}
+
+fn range_support_bound_from_expr(
+    expr: &Expr,
+    subtype: RangeSupportSubtype,
+    inclusive: bool,
+) -> Option<Option<RangeSupportBound>> {
+    match strip_range_support_casts(expr) {
+        Expr::Const(Value::Null) => Some(None),
+        Expr::Const(value) => Some(Some(RangeSupportBound {
+            value: range_support_bound_value_from_value(value, subtype)?,
+            inclusive,
+        })),
+        _ => None,
+    }
+}
+
+fn range_support_bound_value_from_value(
+    value: &Value,
+    subtype: RangeSupportSubtype,
+) -> Option<RangeSupportBoundValue> {
+    match subtype {
+        RangeSupportSubtype::Date => match value {
+            Value::Date(value) => Some(RangeSupportBoundValue::Date(*value)),
+            Value::Text(_) | Value::TextRef(_, _) => {
+                let config = postgres_explain_datetime_config();
+                parse_date_text(value.as_text()?, &config)
+                    .ok()
+                    .map(RangeSupportBoundValue::Date)
+            }
+            _ => None,
+        },
+        RangeSupportSubtype::TimestampTz => match value {
+            Value::TimestampTz(value) => Some(RangeSupportBoundValue::TimestampTz(*value)),
+            Value::Text(_) | Value::TextRef(_, _) => {
+                let config = postgres_explain_datetime_config();
+                parse_timestamptz_text(value.as_text()?, &config)
+                    .ok()
+                    .map(RangeSupportBoundValue::TimestampTz)
+            }
+            _ => None,
+        },
+        RangeSupportSubtype::Text => match value {
+            Value::Text(_) | Value::TextRef(_, _) => {
+                Some(RangeSupportBoundValue::Text(value.as_text()?.to_string()))
+            }
+            _ => None,
+        },
+    }
+}
+
+fn range_constructor_inclusivity(flags: Option<&Expr>) -> (bool, bool) {
+    let Some(flags) = flags else {
+        return (true, false);
+    };
+    let Some(text) = range_support_const_text(flags) else {
+        return (true, false);
+    };
+    let mut chars = text.chars();
+    let lower = matches!(chars.next(), Some('['));
+    let upper = matches!(chars.next_back(), Some(']'));
+    (lower, upper)
+}
+
+fn range_support_const_text(expr: &Expr) -> Option<&str> {
+    match strip_range_support_casts(expr) {
+        Expr::Const(value) => value.as_text(),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RangeSupportBoundSide {
+    Lower,
+    Upper,
+}
+
+fn render_range_bound_comparison(
+    elem: &str,
+    side: RangeSupportBoundSide,
+    bound: &RangeSupportBound,
+    subtype: RangeSupportSubtype,
+) -> Option<String> {
+    let (op, value) = match (side, subtype) {
+        (RangeSupportBoundSide::Lower, RangeSupportSubtype::Text) => {
+            let op = if bound.inclusive { "~>=~" } else { "~>~" };
+            (op, render_text_support_literal(bound)?)
+        }
+        (RangeSupportBoundSide::Upper, RangeSupportSubtype::Text) => {
+            let op = if bound.inclusive { "~<=~" } else { "~<~" };
+            (op, render_text_support_literal(bound)?)
+        }
+        (RangeSupportBoundSide::Lower, _) => {
+            let op = if bound.inclusive { ">=" } else { ">" };
+            (
+                op,
+                render_range_support_bound_literal(bound, subtype, false)?,
+            )
+        }
+        (RangeSupportBoundSide::Upper, RangeSupportSubtype::Date)
+            if bound.inclusive && range_support_bound_is_finite(bound) =>
+        {
+            (
+                "<",
+                render_range_support_bound_literal(bound, subtype, true)?,
+            )
+        }
+        (RangeSupportBoundSide::Upper, _) => {
+            let op = if bound.inclusive { "<=" } else { "<" };
+            (
+                op,
+                render_range_support_bound_literal(bound, subtype, false)?,
+            )
+        }
+    };
+    Some(format!("{elem} {op} {value}"))
+}
+
+fn range_support_bound_is_finite(bound: &RangeSupportBound) -> bool {
+    match &bound.value {
+        RangeSupportBoundValue::Date(value) => {
+            value.0 != DATEVAL_NOBEGIN && value.0 != DATEVAL_NOEND
+        }
+        RangeSupportBoundValue::TimestampTz(value) => value.is_finite(),
+        RangeSupportBoundValue::Text(_) => true,
+    }
+}
+
+fn render_range_support_bound_literal(
+    bound: &RangeSupportBound,
+    subtype: RangeSupportSubtype,
+    increment_date: bool,
+) -> Option<String> {
+    let config = postgres_explain_datetime_config();
+    match (&bound.value, subtype) {
+        (RangeSupportBoundValue::Date(value), RangeSupportSubtype::Date) => {
+            let value = if increment_date {
+                DateADT(value.0 + 1)
+            } else {
+                *value
+            };
+            Some(format!("'{}'::date", format_date_text(value, &config)))
+        }
+        (RangeSupportBoundValue::TimestampTz(value), RangeSupportSubtype::TimestampTz) => {
+            Some(format!(
+                "'{}'::timestamp with time zone",
+                format_timestamptz_text(*value, &config)
+            ))
+        }
+        (RangeSupportBoundValue::Text(_), RangeSupportSubtype::Text) => {
+            render_text_support_literal(bound)
+        }
+        _ => None,
+    }
+}
+
+fn render_text_support_literal(bound: &RangeSupportBound) -> Option<String> {
+    let RangeSupportBoundValue::Text(value) = &bound.value else {
+        return None;
+    };
+    Some(format!("'{}'::text", value.replace('\'', "''")))
+}
+
+fn render_tstzrange_support_literal(bounds: &RangeSupportBounds) -> Option<String> {
+    if bounds.subtype != RangeSupportSubtype::TimestampTz {
+        return None;
+    }
+    let lower = bounds.lower.as_ref()?;
+    let upper = bounds.upper.as_ref()?;
+    let config = postgres_explain_datetime_config();
+    let lower_value = match &lower.value {
+        RangeSupportBoundValue::TimestampTz(value) => format_timestamptz_text(*value, &config),
+        _ => return None,
+    };
+    let upper_value = match &upper.value {
+        RangeSupportBoundValue::TimestampTz(value) => format_timestamptz_text(*value, &config),
+        _ => return None,
+    };
+    let lower_bracket = if lower.inclusive { '[' } else { '(' };
+    let upper_bracket = if upper.inclusive { ']' } else { ')' };
+    Some(format!(
+        "'{lower_bracket}\"{}\",\"{}\"{upper_bracket}'::tstzrange",
+        lower_value.replace('"', "\\\""),
+        upper_value.replace('"', "\\\"")
+    ))
+}
+
+fn render_range_support_elem(
+    expr: &Expr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    let expr = strip_range_support_casts(expr);
+    match expr {
+        Expr::CurrentDate => "CURRENT_DATE".into(),
+        Expr::Func(func)
+            if matches!(
+                func.implementation,
+                ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Now)
+            ) =>
+        {
+            "now()".into()
+        }
+        Expr::Func(func)
+            if matches!(
+                func.implementation,
+                ScalarFunctionImpl::Builtin(BuiltinScalarFunction::ClockTimestamp)
+            ) =>
+        {
+            "clock_timestamp()".into()
+        }
+        _ => render_explain_expr_inner_with_qualifier(expr, qualifier, column_names),
+    }
+}
+
+fn range_support_elem_is_clock_timestamp(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Func(func)
+            if matches!(
+                func.implementation,
+                ScalarFunctionImpl::Builtin(BuiltinScalarFunction::ClockTimestamp)
+            )
+    )
+}
+
+fn strip_range_support_casts(mut expr: &Expr) -> &Expr {
+    while let Expr::Cast(inner, _) = expr {
+        expr = inner;
+    }
+    expr
+}
+
+fn postgres_explain_datetime_config() -> DateTimeConfig {
+    DateTimeConfig {
+        date_style_format: DateStyleFormat::Postgres,
+        date_order: DateOrder::Mdy,
+        time_zone: "America/Los_Angeles".into(),
+        ..DateTimeConfig::default()
+    }
 }
 
 fn render_explain_timezone_function(
@@ -3067,6 +3650,16 @@ fn render_explain_literal(value: &Value) -> String {
                 crate::backend::executor::value_io::render_uuid_text(uuid)
             )
         }
+        Value::Range(_) => {
+            let rendered = crate::backend::executor::expr_range::render_range_text(value)
+                .unwrap_or_else(|| format!("{value:?}"));
+            format!("'{rendered}'")
+        }
+        Value::Multirange(_) => {
+            let rendered = crate::backend::executor::expr_multirange::render_multirange_text(value)
+                .unwrap_or_else(|| format!("{value:?}"));
+            format!("'{rendered}'")
+        }
         Value::Date(date) => {
             format!("'{}'", format_date_text(*date, &DateTimeConfig::default()))
         }
@@ -3183,6 +3776,21 @@ fn render_explain_sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::Circle => "circle".into(),
         SqlTypeKind::Point => "point".into(),
         SqlTypeKind::Uuid => "uuid".into(),
+        SqlTypeKind::Range => match element.type_oid {
+            crate::include::catalog::INT4RANGE_TYPE_OID => "int4range".into(),
+            crate::include::catalog::INT8RANGE_TYPE_OID => "int8range".into(),
+            crate::include::catalog::NUMRANGE_TYPE_OID => "numrange".into(),
+            crate::include::catalog::DATERANGE_TYPE_OID => "daterange".into(),
+            crate::include::catalog::TSRANGE_TYPE_OID => "tsrange".into(),
+            crate::include::catalog::TSTZRANGE_TYPE_OID => "tstzrange".into(),
+            _ => "text".into(),
+        },
+        SqlTypeKind::Int4Range => "int4range".into(),
+        SqlTypeKind::Int8Range => "int8range".into(),
+        SqlTypeKind::NumericRange => "numrange".into(),
+        SqlTypeKind::DateRange => "daterange".into(),
+        SqlTypeKind::TimestampRange => "tsrange".into(),
+        SqlTypeKind::TimestampTzRange => "tstzrange".into(),
         _ => "text".into(),
     };
     if ty.is_array {

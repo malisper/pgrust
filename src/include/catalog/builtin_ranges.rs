@@ -308,7 +308,7 @@ pub fn range_type_ref_for_multirange_sql_type(sql_type: SqlType) -> Option<Range
         })?;
     Some(RangeTypeRef {
         sql_type: SqlType::range(sql_type.multirange_range_oid, sql_type.range_subtype_oid)
-            .with_identity(sql_type.multirange_range_oid, 0)
+            .with_identity(sql_type.multirange_range_oid, sql_type.typrelid)
             .with_range_metadata(
                 sql_type.range_subtype_oid,
                 sql_type.type_oid,
@@ -322,6 +322,28 @@ pub fn range_type_ref_for_multirange_sql_type(sql_type: SqlType) -> Option<Range
             RangeCanonicalization::Continuous
         },
     })
+}
+
+fn range_subtype_ref_for_sql_type(sql_type: SqlType) -> Option<SqlType> {
+    if let Some(row) = crate::include::catalog::builtin_type_rows()
+        .into_iter()
+        .find(|row| row.oid == sql_type.range_subtype_oid)
+    {
+        return Some(row.sql_type.with_identity(row.oid, row.typrelid));
+    }
+    if sql_type.range_subtype_oid == 0 {
+        return None;
+    }
+    if sql_type.typrelid != 0 {
+        return Some(SqlType::named_composite(
+            sql_type.range_subtype_oid,
+            sql_type.typrelid,
+        ));
+    }
+    // :HACK: Dynamic enum/domain subtypes are currently text-backed in pgrust's
+    // catalog layer. Preserve their OID so subtype checks still distinguish them
+    // from plain text while the runtime representation remains text.
+    Some(SqlType::new(SqlTypeKind::Text).with_identity(sql_type.range_subtype_oid, 0))
 }
 
 pub fn multirange_type_ref_for_sql_type(sql_type: SqlType) -> Option<MultirangeTypeRef> {

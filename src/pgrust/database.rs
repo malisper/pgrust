@@ -1,6 +1,7 @@
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -302,7 +303,7 @@ pub(crate) struct EnumTypeEntry {
     pub comment: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RangeTypeEntry {
     pub oid: u32,
     pub array_oid: u32,
@@ -315,10 +316,62 @@ pub(crate) struct RangeTypeEntry {
     pub public_usage: bool,
     pub owner_usage: bool,
     pub subtype: SqlType,
+    #[serde(default)]
+    pub subtype_dependency_oid: Option<u32>,
+    // :HACK: Stored for catalog compatibility; range comparison still uses the subtype's
+    // default ordering until opclass-specific range support is wired through execution.
+    pub subtype_opclass: Option<String>,
     pub subtype_diff: Option<String>,
     pub collation: Option<String>,
     pub typacl: Option<Vec<String>>,
     pub comment: Option<String>,
+}
+
+pub(crate) fn load_range_type_entries(
+    base_dir: &Path,
+    database_oid: u32,
+) -> Result<BTreeMap<String, RangeTypeEntry>, DatabaseError> {
+    let path = range_types_file_path(base_dir, database_oid);
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| DatabaseError::Catalog(CatalogError::Io(err.to_string())))?;
+    serde_json::from_str(&text).map_err(|_| {
+        DatabaseError::Catalog(CatalogError::Corrupt("invalid range type metadata file"))
+    })
+}
+
+pub(crate) fn save_range_type_entries(
+    base_dir: &Path,
+    database_oid: u32,
+    range_types: &BTreeMap<String, RangeTypeEntry>,
+) -> Result<(), ExecError> {
+    let path = range_types_file_path(base_dir, database_oid);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(range_type_metadata_io_error)?;
+    }
+    let text = serde_json::to_string_pretty(range_types).map_err(|err| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "range type metadata serialization",
+            actual: err.to_string(),
+        })
+    })?;
+    std::fs::write(path, text).map_err(range_type_metadata_io_error)
+}
+
+fn range_types_file_path(base_dir: &Path, database_oid: u32) -> PathBuf {
+    base_dir
+        .join("base")
+        .join(database_oid.to_string())
+        .join("pg_pgrust_range_types.json")
+}
+
+fn range_type_metadata_io_error(error: std::io::Error) -> ExecError {
+    ExecError::Parse(ParseError::UnexpectedToken {
+        expected: "range type metadata persistence",
+        actual: error.to_string(),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -882,6 +935,15 @@ impl Database {
             .map(|check| check.name.clone())
     }
 
+    pub(crate) fn domain_check_by_type_oid(&self, domain_oid: u32) -> Option<String> {
+        self.domains
+            .read()
+            .values()
+            .find(|domain| domain.oid == domain_oid)?
+            .check
+            .clone()
+    }
+
     pub(crate) fn domain_checks_for_catalog(&self) -> BTreeMap<u32, (String, Vec<u32>)> {
         self.domains
             .read()
@@ -1087,6 +1149,26 @@ impl Database {
             (schema_rank, row.typname.clone())
         });
         rows
+    }
+
+    pub(crate) fn dynamic_type_rows_for_search_path(
+        &self,
+        search_path: &[String],
+    ) -> Vec<PgTypeRow> {
+        let mut rows = self.domain_type_rows_for_search_path(search_path);
+        rows.extend(self.enum_type_rows_for_search_path(search_path));
+        rows.extend(self.range_type_rows_for_search_path(search_path));
+        rows
+    }
+
+    pub(crate) fn refresh_catalog_store_dynamic_type_rows(
+        &self,
+        client_id: ClientId,
+        configured_search_path: Option<&[String]>,
+    ) {
+        let search_path = self.effective_search_path(client_id, configured_search_path);
+        let rows = self.dynamic_type_rows_for_search_path(&search_path);
+        self.catalog.write().set_extra_type_rows(rows);
     }
 
     pub(crate) fn range_rows(&self) -> Vec<PgRangeRow> {

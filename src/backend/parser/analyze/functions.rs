@@ -173,10 +173,24 @@ pub(super) fn resolve_function_call(
     }
 
     best.map(|(resolved, _, _, _)| resolved)
-        .ok_or_else(|| ParseError::UnexpectedToken {
-            expected: "supported function",
-            actual: name.to_string(),
-        })
+        .ok_or_else(|| undefined_function_error(name, actual_types))
+}
+
+fn undefined_function_error(name: &str, actual_types: &[SqlType]) -> ParseError {
+    let signature = actual_types
+        .iter()
+        .map(|ty| sql_type_name(*ty))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ParseError::DetailedError {
+        message: format!("function {name}({signature}) does not exist"),
+        detail: None,
+        hint: Some(
+            "No function matches the given name and argument types. You might need to add explicit type casts."
+                .into(),
+        ),
+        sqlstate: "42883",
+    }
 }
 
 fn polymorphic_candidate_is_consistent(
@@ -371,6 +385,9 @@ fn match_proc_signature(
             cost += arg_cost;
             declared_arg_types.push(target_type);
         }
+        if !polymorphic_signature_matches(&row.proargtypes, &declared_arg_types) {
+            return None;
+        }
         return Some(CandidateMatch {
             declared_arg_types,
             cost,
@@ -404,6 +421,9 @@ fn match_proc_signature(
             match_explicit_variadic_arg(catalog, *actual_types.last()?, row.provariadic)?;
         cost += arg_cost;
         declared_arg_types.push(target_type);
+        if !polymorphic_signature_matches(&row.proargtypes, &declared_arg_types) {
+            return None;
+        }
         return Some(CandidateMatch {
             declared_arg_types,
             cost,
@@ -418,6 +438,10 @@ fn match_proc_signature(
             match_variadic_element_type(catalog, *actual_type, row.provariadic)?;
         cost += arg_cost;
         declared_arg_types.push(target_type);
+    }
+
+    if !polymorphic_signature_matches(&row.proargtypes, &declared_arg_types) {
+        return None;
     }
 
     Some(CandidateMatch {
@@ -438,6 +462,123 @@ fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
         .collect()
 }
 
+fn polymorphic_signature_matches(proargtypes: &str, actual_types: &[SqlType]) -> bool {
+    let Some(declared_oids) = parse_proc_argtype_oids(proargtypes) else {
+        return false;
+    };
+    let mut exact_subtype = None;
+    let mut compatible_range_anchor = None;
+    let mut compatible_other_subtypes = Vec::new();
+
+    for (declared_oid, actual_type) in declared_oids.into_iter().zip(actual_types.iter().copied()) {
+        match declared_oid {
+            ANYOID | ANYELEMENTOID => {
+                if !merge_exact_polymorphic_subtype(&mut exact_subtype, actual_type) {
+                    return false;
+                }
+            }
+            ANYARRAYOID if actual_type.is_array => {
+                if !merge_exact_polymorphic_subtype(&mut exact_subtype, actual_type.element_type())
+                {
+                    return false;
+                }
+            }
+            ANYRANGEOID => {
+                let Some(range_type) = range_type_ref_for_sql_type(actual_type) else {
+                    return false;
+                };
+                if !merge_exact_polymorphic_subtype(&mut exact_subtype, range_type.subtype) {
+                    return false;
+                }
+            }
+            ANYMULTIRANGEOID => {
+                let Some(multirange_type) = multirange_type_ref_for_sql_type(actual_type) else {
+                    return false;
+                };
+                if !merge_exact_polymorphic_subtype(
+                    &mut exact_subtype,
+                    multirange_type.range_type.subtype,
+                ) {
+                    return false;
+                }
+            }
+            ANYCOMPATIBLEOID => compatible_other_subtypes.push(actual_type),
+            ANYCOMPATIBLEARRAYOID if actual_type.is_array => {
+                compatible_other_subtypes.push(actual_type.element_type());
+            }
+            ANYCOMPATIBLERANGEOID => {
+                let Some(range_type) = range_type_ref_for_sql_type(actual_type) else {
+                    return false;
+                };
+                if !merge_exact_polymorphic_subtype(
+                    &mut compatible_range_anchor,
+                    range_type.subtype,
+                ) {
+                    return false;
+                }
+            }
+            ANYCOMPATIBLEMULTIRANGEOID => {
+                let Some(multirange_type) = multirange_type_ref_for_sql_type(actual_type) else {
+                    return false;
+                };
+                if !merge_exact_polymorphic_subtype(
+                    &mut compatible_range_anchor,
+                    multirange_type.range_type.subtype,
+                ) {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(anchor) = compatible_range_anchor {
+        compatible_other_subtypes
+            .into_iter()
+            .all(|actual| can_coerce_to_polymorphic_range_anchor(actual, anchor))
+    } else {
+        true
+    }
+}
+
+fn merge_exact_polymorphic_subtype(current: &mut Option<SqlType>, inferred: SqlType) -> bool {
+    match *current {
+        None => {
+            *current = Some(inferred);
+            true
+        }
+        Some(existing) => polymorphic_types_match(existing, inferred),
+    }
+}
+
+fn can_coerce_to_polymorphic_range_anchor(actual: SqlType, target: SqlType) -> bool {
+    if polymorphic_types_match(actual, target) {
+        return true;
+    }
+    if actual.is_array || target.is_array {
+        return false;
+    }
+    if is_text_like_type(actual) && is_text_like_type(target) {
+        return true;
+    }
+    matches!(
+        (actual.kind, target.kind),
+        (SqlTypeKind::Int2, SqlTypeKind::Int4)
+            | (SqlTypeKind::Int2, SqlTypeKind::Int8)
+            | (SqlTypeKind::Int2, SqlTypeKind::Numeric)
+            | (SqlTypeKind::Int2, SqlTypeKind::Float4)
+            | (SqlTypeKind::Int2, SqlTypeKind::Float8)
+            | (SqlTypeKind::Int4, SqlTypeKind::Int8)
+            | (SqlTypeKind::Int4, SqlTypeKind::Numeric)
+            | (SqlTypeKind::Int4, SqlTypeKind::Float4)
+            | (SqlTypeKind::Int4, SqlTypeKind::Float8)
+            | (SqlTypeKind::Int8, SqlTypeKind::Numeric)
+            | (SqlTypeKind::Int8, SqlTypeKind::Float4)
+            | (SqlTypeKind::Int8, SqlTypeKind::Float8)
+            | (SqlTypeKind::Float4, SqlTypeKind::Float8)
+    )
+}
+
 fn match_proc_arg_type(
     catalog: &dyn CatalogLookup,
     actual_type: SqlType,
@@ -446,7 +587,7 @@ fn match_proc_arg_type(
     if declared_oid == ANYOID || declared_oid == ANYELEMENTOID {
         return Some((2, actual_type));
     }
-    if declared_oid == ANYARRAYOID {
+    if matches!(declared_oid, ANYARRAYOID | ANYCOMPATIBLEARRAYOID) {
         return (actual_type.is_array || actual_type.kind == SqlTypeKind::AnyArray)
             .then_some((2, actual_type));
     }
@@ -934,6 +1075,13 @@ fn canonical_polymorphic_type(mut ty: SqlType) -> SqlType {
         ty.type_oid = 0;
     }
     ty
+}
+
+fn polymorphic_types_match(left: SqlType, right: SqlType) -> bool {
+    left.kind == right.kind
+        && left.is_array == right.is_array
+        && (left.type_oid == 0 || right.type_oid == 0 || left.type_oid == right.type_oid)
+        && (left.typrelid == 0 || right.typrelid == 0 || left.typrelid == right.typrelid)
 }
 
 fn match_variadic_element_type(
@@ -3961,8 +4109,8 @@ mod tests {
 
         assert!(matches!(
             error,
-            ParseError::UnexpectedToken { expected, actual }
-                if expected == "supported function" && actual == "unnest"
+            ParseError::DetailedError { message, sqlstate, .. }
+                if message == "function unnest(anyarray) does not exist" && sqlstate == "42883"
         ));
     }
 

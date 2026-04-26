@@ -109,11 +109,11 @@ pub(super) fn catalog_entry_from_bound_index_relation(
             indclass: index.index_meta.indclass.clone(),
             indcollation: index.index_meta.indcollation.clone(),
             indoption: index.index_meta.indoption.clone(),
-            indexprs: None,
-            indpred: None,
-            brin_options: None,
-            gin_options: None,
-            hash_options: None,
+            indexprs: index.index_meta.indexprs.clone(),
+            indpred: index.index_meta.indpred.clone(),
+            brin_options: index.index_meta.brin_options.clone(),
+            gin_options: index.index_meta.gin_options.clone(),
+            hash_options: index.index_meta.hash_options,
         }),
     }
 }
@@ -174,6 +174,22 @@ fn catalog_type_oid(
                 })
                 .map(|row| row.oid)
         })
+}
+
+fn expression_index_default_name(expr_sql: &str) -> String {
+    let trimmed = expr_sql.trim();
+    let Some(open_paren) = trimmed.find('(') else {
+        return "expr".into();
+    };
+    let name = trimmed[..open_paren].trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch == '_' || ch == '.' || ch.is_ascii_alphanumeric())
+    {
+        return "expr".into();
+    }
+    name.rsplit('.').next().unwrap_or(name).to_ascii_lowercase()
 }
 
 impl Database {
@@ -430,10 +446,10 @@ impl Database {
         let column_part = columns
             .iter()
             .map(|column| {
-                if column.expr_sql.is_some() {
-                    "expr"
+                if let Some(expr_sql) = column.expr_sql.as_deref() {
+                    expression_index_default_name(expr_sql)
                 } else {
-                    column.name.as_str()
+                    column.name.clone()
                 }
             })
             .collect::<Vec<_>>()
@@ -504,8 +520,16 @@ impl Database {
                     })?
                     .sql_type
             };
-            let type_oid = range_type_ref_for_sql_type(sql_type)
-                .map(|range_type| range_type.type_oid())
+            let type_oid = ((sql_type.is_range() || sql_type.is_multirange())
+                && sql_type.type_oid != 0)
+                .then_some(sql_type.type_oid)
+                .or_else(|| {
+                    range_type_ref_for_sql_type(sql_type).map(|range_type| range_type.type_oid())
+                })
+                .or_else(|| {
+                    multirange_type_ref_for_sql_type(sql_type)
+                        .map(|multirange_type| multirange_type.type_oid())
+                })
                 .or_else(|| {
                     (matches!(
                         sql_type.element_type().kind,
@@ -1486,7 +1510,12 @@ impl Database {
             });
         }
         if access_method_oid == SPGIST_AM_OID
-            && key_columns.iter().any(|column| column.expr_sql.is_some())
+            && key_columns.iter().any(|column| {
+                column.expr_sql.is_some()
+                    && !column
+                        .expr_type
+                        .is_some_and(crate::backend::parser::SqlType::is_range)
+            })
         {
             return Err(ExecError::DetailedError {
                 message: "access method \"spgist\" does not support expression indexes".into(),

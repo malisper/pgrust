@@ -313,22 +313,48 @@ pub fn bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         oid = oid.saturating_add(1);
     }
     for (procnum, proc_oid) in [
-        (1_i16, RANGE_GIST_CONSISTENT_PROC_OID),
-        (2, RANGE_GIST_UNION_PROC_OID),
-        (5, RANGE_GIST_PENALTY_PROC_OID),
-        (6, RANGE_GIST_PICKSPLIT_PROC_OID),
-        (7, RANGE_GIST_SAME_PROC_OID),
-        (11, RANGE_SORTSUPPORT_PROC_OID),
+        (1_i16, SPG_RANGE_CONFIG_PROC_OID),
+        (2, SPG_RANGE_CHOOSE_PROC_OID),
+        (3, SPG_RANGE_PICKSPLIT_PROC_OID),
+        (4, SPG_RANGE_INNER_CONSISTENT_PROC_OID),
+        (5, SPG_RANGE_LEAF_CONSISTENT_PROC_OID),
     ] {
         rows.push(PgAmprocRow {
             oid,
-            amprocfamily: GIST_RANGE_FAMILY_OID,
+            amprocfamily: SPGIST_RANGE_FAMILY_OID,
             amproclefttype: ANYRANGEOID,
             amprocrighttype: ANYRANGEOID,
             amprocnum: procnum,
             amproc: proc_oid,
         });
         oid = oid.saturating_add(1);
+    }
+    for range_type_oid in [
+        INT4RANGE_TYPE_OID,
+        INT8RANGE_TYPE_OID,
+        NUMRANGE_TYPE_OID,
+        DATERANGE_TYPE_OID,
+        TSRANGE_TYPE_OID,
+        TSTZRANGE_TYPE_OID,
+    ] {
+        for (procnum, proc_oid) in [
+            (1_i16, RANGE_GIST_CONSISTENT_PROC_OID),
+            (2, RANGE_GIST_UNION_PROC_OID),
+            (5, RANGE_GIST_PENALTY_PROC_OID),
+            (6, RANGE_GIST_PICKSPLIT_PROC_OID),
+            (7, RANGE_GIST_SAME_PROC_OID),
+            (11, RANGE_SORTSUPPORT_PROC_OID),
+        ] {
+            rows.push(PgAmprocRow {
+                oid,
+                amprocfamily: GIST_RANGE_FAMILY_OID,
+                amproclefttype: range_type_oid,
+                amprocrighttype: range_type_oid,
+                amprocnum: procnum,
+                amproc: proc_oid,
+            });
+            oid = oid.saturating_add(1);
+        }
     }
     rows.push(PgAmprocRow {
         oid,
@@ -515,6 +541,7 @@ pub fn bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         ),
         (HASH_BYTEA_FAMILY_OID, BYTEA_TYPE_OID, HASH_BYTEA_PROC_OID),
         (HASH_UUID_FAMILY_OID, UUID_TYPE_OID, HASH_UUID_PROC_OID),
+        (HASH_RANGE_FAMILY_OID, ANYRANGEOID, HASH_RANGE_PROC_OID),
         (
             HASH_MULTIRANGE_FAMILY_OID,
             ANYMULTIRANGEOID,
