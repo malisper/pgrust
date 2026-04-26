@@ -2503,6 +2503,82 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 n_keys,
             )?),
         )),
+        SqlExpr::Overlaps(l, r) => {
+            let SqlExpr::Row(left_items) = l.as_ref() else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "row expression",
+                    actual: format!("{l:?}"),
+                });
+            };
+            let SqlExpr::Row(right_items) = r.as_ref() else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "row expression",
+                    actual: format!("{r:?}"),
+                });
+            };
+            let ([left_start, left_end_or_interval], [right_start, right_end_or_interval]) =
+                (left_items.as_slice(), right_items.as_slice())
+            else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "two-element OVERLAPS rows",
+                    actual: format!("{} and {} elements", left_items.len(), right_items.len()),
+                });
+            };
+            let left_end_type = grouped_infer_sql_expr_type(
+                left_end_or_interval,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            );
+            let right_end_type = grouped_infer_sql_expr_type(
+                right_end_or_interval,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            );
+            let left_end =
+                if !left_end_type.is_array && matches!(left_end_type.kind, SqlTypeKind::Interval) {
+                    SqlExpr::Add(
+                        Box::new(left_start.clone()),
+                        Box::new(left_end_or_interval.clone()),
+                    )
+                } else {
+                    left_end_or_interval.clone()
+                };
+            let right_end = if !right_end_type.is_array
+                && matches!(right_end_type.kind, SqlTypeKind::Interval)
+            {
+                SqlExpr::Add(
+                    Box::new(right_start.clone()),
+                    Box::new(right_end_or_interval.clone()),
+                )
+            } else {
+                right_end_or_interval.clone()
+            };
+            let lowered = SqlExpr::And(
+                Box::new(SqlExpr::Lt(
+                    Box::new(left_start.clone()),
+                    Box::new(right_end),
+                )),
+                Box::new(SqlExpr::Lt(
+                    Box::new(right_start.clone()),
+                    Box::new(left_end),
+                )),
+            );
+            bind_agg_output_expr(
+                &lowered,
+                group_by_exprs,
+                group_key_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )
+        }
         SqlExpr::ArrayLiteral(elements) => bind_grouped_array_literal(
             elements,
             group_by_exprs,

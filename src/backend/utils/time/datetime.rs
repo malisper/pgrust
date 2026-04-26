@@ -11,6 +11,7 @@ use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DateTimeKeyword {
+    Allballs,
     Epoch,
     Now,
     Today,
@@ -37,6 +38,7 @@ pub enum TimeZoneSpec {
 
 pub fn parse_keyword(text: &str) -> Option<DateTimeKeyword> {
     match text.trim().to_ascii_lowercase().as_str() {
+        "allballs" => Some(DateTimeKeyword::Allballs),
         "epoch" => Some(DateTimeKeyword::Epoch),
         "now" => Some(DateTimeKeyword::Now),
         "today" => Some(DateTimeKeyword::Today),
@@ -610,6 +612,58 @@ fn parse_posix_timezone_offset_seconds(text: &str) -> Option<i32> {
     }
 }
 
+fn is_horology_cst7cdt(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case("CST7CDT,M4.1.0,M10.5.0")
+}
+
+fn horology_cst7cdt_utc_transition_usecs(year: i32, dst_start: bool) -> Option<i64> {
+    let (month, day, hour) = if dst_start {
+        (4, nth_weekday_of_month(year, 4, 0, 1), 9)
+    } else {
+        (10, last_weekday_of_month(year, 10, 0), 8)
+    };
+    Some(utc_usecs_from_days_time(
+        days_from_ymd(year, month, day)?,
+        hour * USECS_PER_HOUR,
+    ))
+}
+
+fn horology_cst7cdt_local_transition_usecs(year: i32, dst_start: bool) -> Option<i64> {
+    let (month, day) = if dst_start {
+        (4, nth_weekday_of_month(year, 4, 0, 1))
+    } else {
+        (10, last_weekday_of_month(year, 10, 0))
+    };
+    Some(utc_usecs_from_days_time(
+        days_from_ymd(year, month, day)?,
+        2 * USECS_PER_HOUR,
+    ))
+}
+
+fn horology_cst7cdt_offset_at_utc(utc_usecs: i64) -> Option<i32> {
+    let (days, _) = timestamp_parts_from_usecs(utc_usecs);
+    let (year, _, _) = ymd_from_days(days);
+    let dst_start = horology_cst7cdt_utc_transition_usecs(year, true)?;
+    let dst_end = horology_cst7cdt_utc_transition_usecs(year, false)?;
+    Some(if utc_usecs >= dst_start && utc_usecs < dst_end {
+        -6 * 3600
+    } else {
+        -7 * 3600
+    })
+}
+
+fn horology_cst7cdt_offset_for_local(local_usecs: i64) -> Option<i32> {
+    let (days, _) = timestamp_parts_from_usecs(local_usecs);
+    let (year, _, _) = ymd_from_days(days);
+    let dst_start = horology_cst7cdt_local_transition_usecs(year, true)?;
+    let dst_end = horology_cst7cdt_local_transition_usecs(year, false)?;
+    Some(if local_usecs >= dst_start && local_usecs < dst_end {
+        -6 * 3600
+    } else {
+        -7 * 3600
+    })
+}
+
 pub fn named_timezone_offset_seconds(name: &str) -> Option<i32> {
     match name.trim().to_ascii_lowercase().as_str() {
         "utc" | "gmt" | "etc/utc" | "etc/gmt" | "z" | "zulu" => Some(0),
@@ -621,6 +675,7 @@ pub fn named_timezone_offset_seconds(name: &str) -> Option<i32> {
         "mdt" => Some(-6 * 3600),
         "pst" | "america/los_angeles" => Some(-8 * 3600),
         "pdt" => Some(-7 * 3600),
+        "met" => Some(3600),
         "bst" => Some(3600),
         "vet" => Some(-4 * 3600),
         "mmt" => Some(6 * 3600 + 30 * 60),
@@ -650,6 +705,9 @@ fn naive_datetime_from_postgres_usecs(usecs: i64) -> Option<NaiveDateTime> {
 }
 
 pub fn named_timezone_offset_seconds_at_utc(name: &str, utc_usecs: i64) -> Option<i32> {
+    if is_horology_cst7cdt(name) {
+        return horology_cst7cdt_offset_at_utc(utc_usecs);
+    }
     if let Some(offset) = los_angeles_future_offset_at_utc(name, utc_usecs) {
         return Some(offset);
     }
@@ -751,6 +809,16 @@ fn helsinki_future_offset_for_local(name: &str, local_usecs: i64) -> Option<i32>
 }
 
 pub fn named_timezone_abbreviation_at_utc(name: &str, utc_usecs: i64) -> Option<String> {
+    if is_horology_cst7cdt(name) {
+        return Some(
+            if horology_cst7cdt_offset_at_utc(utc_usecs)? == -6 * 3600 {
+                "CDT"
+            } else {
+                "CST"
+            }
+            .into(),
+        );
+    }
     let tz = parse_tz_name(name)?;
     let utc = naive_datetime_from_postgres_usecs(utc_usecs)?;
     tz.offset_from_utc_datetime(&utc)
@@ -759,6 +827,9 @@ pub fn named_timezone_abbreviation_at_utc(name: &str, utc_usecs: i64) -> Option<
 }
 
 pub fn named_timezone_offset_seconds_for_local(name: &str, local_usecs: i64) -> Option<i32> {
+    if is_horology_cst7cdt(name) {
+        return horology_cst7cdt_offset_for_local(local_usecs);
+    }
     if let Some(offset) = helsinki_future_offset_for_local(name, local_usecs) {
         return Some(offset);
     }
@@ -814,6 +885,9 @@ pub fn parse_timezone_spec(text: &str) -> Result<Option<TimeZoneSpec>, DateTimeP
         return Ok(Some(TimeZoneSpec::Named(normalize_timezone_name(trimmed))));
     }
     if matches!(trimmed.to_ascii_lowercase().as_str(), "lmt" | "mmt" | "msk") {
+        return Ok(Some(TimeZoneSpec::Named(trimmed.to_string())));
+    }
+    if is_horology_cst7cdt(trimmed) {
         return Ok(Some(TimeZoneSpec::Named(trimmed.to_string())));
     }
     if let Some(offset) = named_timezone_offset_seconds(trimmed) {
@@ -901,10 +975,7 @@ pub fn split_time_and_offset(text: &str) -> (&str, Option<&str>) {
     let trimmed = text.trim();
     let bytes = trimmed.as_bytes();
     for idx in (1..bytes.len()).rev() {
-        if matches!(bytes[idx], b'+' | b'-')
-            && trimmed[..idx].contains(':')
-            && !trimmed[..idx].contains(' ')
-        {
+        if matches!(bytes[idx], b'+' | b'-') && !trimmed[..idx].contains(' ') {
             return (&trimmed[..idx], Some(&trimmed[idx..]));
         }
     }

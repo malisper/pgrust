@@ -859,6 +859,7 @@ fn validate_publication_filter_expr(expr: &SqlExpr) -> Result<(), ExecError> {
         | Or(left, right)
         | IsDistinctFrom(left, right)
         | IsNotDistinctFrom(left, right)
+        | Overlaps(left, right)
         | ArrayOverlap(left, right)
         | ArrayContains(left, right)
         | ArrayContained(left, right)

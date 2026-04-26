@@ -651,6 +651,7 @@ pub enum BuiltinScalarFunction {
     MakeTime,
     MakeTimestamp,
     MakeTimestampTz,
+    TimestampTzConstructor,
     ToTimestamp,
     IntervalHash,
     HashValue(HashFunctionKind),

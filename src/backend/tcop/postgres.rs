@@ -5762,6 +5762,7 @@ fn raw_expr_contains_pg_notify(expr: &crate::backend::parser::SqlExpr) -> bool {
         | crate::backend::parser::SqlExpr::Or(left, right)
         | crate::backend::parser::SqlExpr::IsDistinctFrom(left, right)
         | crate::backend::parser::SqlExpr::IsNotDistinctFrom(left, right)
+        | crate::backend::parser::SqlExpr::Overlaps(left, right)
         | crate::backend::parser::SqlExpr::ArrayOverlap(left, right)
         | crate::backend::parser::SqlExpr::ArrayContains(left, right)
         | crate::backend::parser::SqlExpr::ArrayContained(left, right)

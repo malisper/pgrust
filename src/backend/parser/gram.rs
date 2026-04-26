@@ -11375,8 +11375,10 @@ fn build_set_guc_name(pair: Pair<'_, Rule>) -> String {
 fn build_show(pair: Pair<'_, Rule>) -> Result<ShowStatement, ParseError> {
     let mut name = None;
     for part in pair.into_inner() {
-        if part.as_rule() == Rule::identifier {
-            name = Some(build_identifier(part));
+        match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::time_zone_guc_name => name = Some("timezone".to_string()),
+            _ => {}
         }
     }
     let name = name.ok_or(ParseError::UnexpectedEof)?;
@@ -11624,8 +11626,10 @@ fn build_reset_role(_pair: Pair<'_, Rule>) -> Result<ResetRoleStatement, ParseEr
 fn build_reset(pair: Pair<'_, Rule>) -> Result<ResetStatement, ParseError> {
     let mut name = None;
     for part in pair.into_inner() {
-        if part.as_rule() == Rule::identifier {
-            name = Some(build_identifier(part));
+        match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::time_zone_guc_name => name = Some("timezone".to_string()),
+            _ => {}
         }
     }
     Ok(ResetStatement { name })
@@ -17836,25 +17840,72 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 }
                 Rule::between_suffix => {
                     let mut negated = false;
+                    let mut symmetric = false;
                     let mut bounds = Vec::new();
                     for part in next.into_inner() {
                         match part.as_rule() {
                             Rule::kw_not => negated = true,
+                            Rule::kw_symmetric => symmetric = true,
                             Rule::concat_expr => bounds.push(build_expr(part)?),
                             _ => {}
                         }
                     }
                     let low = bounds.first().cloned().ok_or(ParseError::UnexpectedEof)?;
                     let high = bounds.get(1).cloned().ok_or(ParseError::UnexpectedEof)?;
-                    let between = SqlExpr::And(
-                        Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(low))),
-                        Box::new(SqlExpr::LtEq(Box::new(left), Box::new(high))),
-                    );
-                    Ok(if negated {
-                        SqlExpr::Not(Box::new(between))
+                    let between = if symmetric && negated {
+                        SqlExpr::And(
+                            Box::new(SqlExpr::Or(
+                                Box::new(SqlExpr::Lt(
+                                    Box::new(left.clone()),
+                                    Box::new(low.clone()),
+                                )),
+                                Box::new(SqlExpr::Gt(
+                                    Box::new(left.clone()),
+                                    Box::new(high.clone()),
+                                )),
+                            )),
+                            Box::new(SqlExpr::Or(
+                                Box::new(SqlExpr::Lt(Box::new(left.clone()), Box::new(high))),
+                                Box::new(SqlExpr::Gt(Box::new(left), Box::new(low))),
+                            )),
+                        )
+                    } else if symmetric {
+                        SqlExpr::Or(
+                            Box::new(SqlExpr::And(
+                                Box::new(SqlExpr::GtEq(
+                                    Box::new(left.clone()),
+                                    Box::new(low.clone()),
+                                )),
+                                Box::new(SqlExpr::LtEq(
+                                    Box::new(left.clone()),
+                                    Box::new(high.clone()),
+                                )),
+                            )),
+                            Box::new(SqlExpr::And(
+                                Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(high))),
+                                Box::new(SqlExpr::LtEq(Box::new(left), Box::new(low))),
+                            )),
+                        )
+                    } else if negated {
+                        SqlExpr::Or(
+                            Box::new(SqlExpr::Lt(Box::new(left.clone()), Box::new(low))),
+                            Box::new(SqlExpr::Gt(Box::new(left), Box::new(high))),
+                        )
                     } else {
-                        between
-                    })
+                        SqlExpr::And(
+                            Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(low))),
+                            Box::new(SqlExpr::LtEq(Box::new(left), Box::new(high))),
+                        )
+                    };
+                    Ok(between)
+                }
+                Rule::overlaps_suffix => {
+                    let right = next
+                        .into_inner()
+                        .find(|part| part.as_rule() == Rule::implicit_row_expr)
+                        .ok_or(ParseError::UnexpectedEof)
+                        .and_then(build_expr)?;
+                    Ok(SqlExpr::Overlaps(Box::new(left), Box::new(right)))
                 }
                 Rule::in_expr_list_suffix => {
                     let mut negated = false;

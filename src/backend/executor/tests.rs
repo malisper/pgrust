@@ -2787,6 +2787,38 @@ fn insert_sql_inserts_row() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn insert_select_coerces_timestamp_to_timestamptz_target() {
+    let db = Database::open(temp_dir("insert_select_timestamp_tz"), 16).unwrap();
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "set timezone to 'America/Los_Angeles'")
+        .unwrap();
+    session
+        .execute(&db, "create table src_ts (d1 timestamp without time zone)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into src_ts values (timestamp '1970-01-01 00:00:00')",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table dst_tstz (d1 timestamp with time zone)")
+        .unwrap();
+    session
+        .execute(&db, "insert into dst_tstz select d1 from src_ts")
+        .unwrap();
+
+    assert_query_rows(
+        session.execute(&db, "select d1 from dst_tstz").unwrap(),
+        vec![vec![Value::TimestampTz(TimestampTzADT(
+            -946_684_800_000_000 + 8 * crate::include::nodes::datetime::USECS_PER_HOUR,
+        ))]],
+    );
+}
+
 #[test]
 fn analyze_sql_validates_existing_targets() {
     let base = temp_dir("analyze_sql");
@@ -6700,6 +6732,139 @@ fn select_interval_literals_comparison_and_arithmetic() {
             }),
             Value::Bool(false),
         ]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select interval '01:00' between '00:00' and '23:00'",
+        )
+        .unwrap(),
+        vec![vec![Value::Bool(true)]],
+    );
+}
+
+#[test]
+fn date_time_arithmetic_matches_postgres_operator_results() {
+    let base = temp_dir("date_time_arithmetic");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let day = i64::from(crate::backend::utils::time::datetime::days_from_ymd(2001, 1, 2).unwrap())
+        * crate::include::nodes::datetime::USECS_PER_DAY;
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select date '2001-01-02' + time '03:04', time '03:04' + date '2001-01-02', date '2001-01-02' - time '03:04'",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Timestamp(TimestampADT(day + 11_040_000_000)),
+            Value::Timestamp(TimestampADT(day + 11_040_000_000)),
+            Value::Timestamp(TimestampADT(day - 11_040_000_000)),
+        ]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select date '2001-01-02' + timetz '03:04+02', timetz '03:04+02' + date '2001-01-02'",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::TimestampTz(TimestampTzADT(day + 3_840_000_000)),
+            Value::TimestampTz(TimestampTzADT(day + 3_840_000_000)),
+        ]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select timestamptz(date '2001-01-02', time '03:04'), timestamptz(date '2001-01-02', timetz '03:04+02')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::TimestampTz(TimestampTzADT(day + 11_040_000_000)),
+            Value::TimestampTz(TimestampTzADT(day + 3_840_000_000)),
+        ]],
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select date '2001-01-02' - timetz '03:04+02'",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "operator does not exist: date - time with time zone"
+    );
+}
+
+#[test]
+fn mixed_date_timestamp_comparisons_execute_with_common_types() {
+    let base = temp_dir("mixed_date_timestamp_comparisons");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select date '2001-01-02' < timestamp '2001-01-03', timestamp '2001-01-02' >= date '2001-01-02', date '2001-01-02' <= timestamptz '2001-01-03 00:00+00'",
+        )
+        .unwrap(),
+        vec![vec![Value::Bool(true), Value::Bool(true), Value::Bool(true)]],
+    );
+}
+
+#[test]
+fn mixed_date_timestamp_comparisons_do_not_cast_out_of_range_dates() {
+    let base = temp_dir("mixed_date_timestamp_out_of_range_comparisons");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '2202020-10-05'::date > '2020-10-05'::timestamp,
+                    '2020-10-05'::timestamp > '2202020-10-05'::date,
+                    '2202020-10-05'::date > '2020-10-05'::timestamptz,
+                    '4714-11-24 BC'::date < '2020-10-05'::timestamptz",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(true),
+        ]],
+    );
+}
+
+#[test]
+fn overlaps_expression_lowers_for_horology_datetime_cases() {
+    let base = temp_dir("overlaps_horology_datetime");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select (timestamp '2000-11-27', timestamp '2000-11-28') overlaps (timestamp '2000-11-27 12:00', timestamp '2000-11-30'), (timestamp '2000-11-27', interval '12 hours') overlaps (timestamp '2000-11-27 12:00', interval '12 hours'), (time '00:00', interval '1 hour') overlaps (time '01:30', interval '1 hour')",
+        )
+        .unwrap(),
+        vec![vec![Value::Bool(true), Value::Bool(false), Value::Bool(false)]],
     );
 }
 

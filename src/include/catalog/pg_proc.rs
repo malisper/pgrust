@@ -5773,6 +5773,54 @@ fn pg_proc_alias_pair_rows() -> Vec<PgProcRow> {
             's',
         ),
         proc_row(
+            1176,
+            "timestamptz",
+            TIMESTAMPTZ_TYPE_OID,
+            &oid_argtypes(&[DATE_TYPE_OID, TIME_TYPE_OID]),
+            "see system_functions.sql",
+            2,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            1359,
+            "timestamptz",
+            TIMESTAMPTZ_TYPE_OID,
+            &oid_argtypes(&[DATE_TYPE_OID, TIMETZ_TYPE_OID]),
+            "datetimetz_timestamptz",
+            2,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            1158,
+            "to_timestamp",
+            TIMESTAMPTZ_TYPE_OID,
+            &oid_argtypes(&[FLOAT8_TYPE_OID]),
+            "float8_timestamptz",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1778,
+            "to_timestamp",
+            TIMESTAMPTZ_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID]),
+            "to_timestamp",
+            2,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
             2041,
             "overlaps",
             BOOL_TYPE_OID,
@@ -7607,6 +7655,11 @@ pub fn proc_oid_for_builtin_window_function(func: BuiltinWindowFunction) -> Opti
 }
 
 fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
+    if row.proname.eq_ignore_ascii_case("timestamptz")
+        && matches!(row.proargtypes.trim(), "1082 1083" | "1082 1266")
+    {
+        return Some(BuiltinScalarFunction::TimestampTzConstructor);
+    }
     builtin_scalar_function_for_proc_src(&row.prosrc)
         .or_else(|| builtin_scalar_function_for_proc_src(&row.proname))
 }

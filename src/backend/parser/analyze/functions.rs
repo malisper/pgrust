@@ -363,6 +363,11 @@ fn normalize_builtin_function_name(name: &str) -> &str {
 }
 
 fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
+    if row.proname.eq_ignore_ascii_case("timestamptz")
+        && matches!(row.proargtypes.trim(), "1082 1083" | "1082 1266")
+    {
+        return Some(BuiltinScalarFunction::TimestampTzConstructor);
+    }
     builtin_scalar_function_for_proc_src(&row.prosrc)
         .or_else(|| builtin_scalar_function_for_proc_src(&row.proname))
 }
@@ -1308,7 +1313,8 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::MakeDate | BuiltinScalarFunction::MakeTime => args.len() == 3,
             BuiltinScalarFunction::MakeTimestamp => args.len() == 6,
             BuiltinScalarFunction::MakeTimestampTz => matches!(args.len(), 6 | 7),
-            BuiltinScalarFunction::ToTimestamp => args.len() == 1,
+            BuiltinScalarFunction::TimestampTzConstructor => args.len() == 2,
+            BuiltinScalarFunction::ToTimestamp => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::IntervalHash => args.len() == 1,
             BuiltinScalarFunction::HashValue(_) => args.len() == 1,
             BuiltinScalarFunction::HashValueExtended(_) => args.len() == 2,
@@ -3972,6 +3978,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ToChar
             | BuiltinScalarFunction::ToDate
             | BuiltinScalarFunction::ToNumber
+            | BuiltinScalarFunction::TimestampTzConstructor
             | BuiltinScalarFunction::ToTimestamp
             | BuiltinScalarFunction::Age
             | BuiltinScalarFunction::RegexpMatch

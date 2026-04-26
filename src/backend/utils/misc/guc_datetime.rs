@@ -97,15 +97,18 @@ pub fn parse_datestyle_with_fallback(
             "postgres" | "postgresql" => format = Some(DateStyleFormat::Postgres),
             "german" => format = Some(DateStyleFormat::German),
             "mdy" | "us" | "noneuro" => order = Some(DateOrder::Mdy),
-            "dmy" | "euro" => order = Some(DateOrder::Dmy),
+            "dmy" | "euro" | "european" => order = Some(DateOrder::Dmy),
             "ymd" => order = Some(DateOrder::Ymd),
             _ => return None,
         }
     }
-    Some((
-        format.unwrap_or(fallback_format),
-        order.unwrap_or(fallback_order),
-    ))
+    let format = format.unwrap_or(fallback_format);
+    let order = order.unwrap_or(if matches!(format, DateStyleFormat::German) {
+        DateOrder::Dmy
+    } else {
+        fallback_order
+    });
+    Some((format, order))
 }
 
 pub fn format_datestyle(config: &DateTimeConfig) -> String {
@@ -194,6 +197,30 @@ mod tests {
         assert_eq!(parse_timezone("+9.75"), Some("-09:45".into()));
         assert_eq!(parse_timezone("+02:00"), Some("-02".into()));
         assert_eq!(parse_timezone("04:30"), Some("-04:30".into()));
+    }
+
+    #[test]
+    fn german_datestyle_defaults_to_dmy_order() {
+        assert_eq!(
+            parse_datestyle("German"),
+            Some((DateStyleFormat::German, DateOrder::Dmy))
+        );
+        assert_eq!(
+            parse_datestyle_with_fallback("German, MDY", DateStyleFormat::Iso, DateOrder::Mdy),
+            Some((DateStyleFormat::German, DateOrder::Mdy))
+        );
+    }
+
+    #[test]
+    fn european_datestyle_is_dmy_alias() {
+        assert_eq!(
+            parse_datestyle("European, Postgres"),
+            Some((DateStyleFormat::Postgres, DateOrder::Dmy))
+        );
+        assert_eq!(
+            parse_datestyle("European, ISO"),
+            Some((DateStyleFormat::Iso, DateOrder::Dmy))
+        );
     }
 }
 use crate::backend::utils::misc::guc_xml::XmlConfig;
