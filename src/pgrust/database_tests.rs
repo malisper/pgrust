@@ -8120,6 +8120,36 @@ fn create_hash_index_catalog_and_equality_scan() {
 }
 
 #[test]
+fn hash_index_build_sizes_initial_buckets_for_low_fillfactor() {
+    let base = temp_dir("hash_index_low_fillfactor_build");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into items select g, 'name-' || g from generate_series(1, 10000) g",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index items_name_hash on items using hash (name text_ops) with (fillfactor = 10)",
+    )
+    .unwrap();
+
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select id from items where name = 'name-4242'",
+        "items_name_hash",
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id from items where name = 'name-4242'"),
+        vec![vec![Value::Int32(4242)]]
+    );
+}
+
+#[test]
 fn hash_expression_partial_index_matches_equality_quals() {
     let base = temp_dir("hash_expression_partial_index");
     let db = Database::open(&base, 16).unwrap();

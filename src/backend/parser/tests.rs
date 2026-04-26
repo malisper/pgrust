@@ -652,6 +652,7 @@ fn row_security_test_catalog(base: Catalog, current_user_oid: u32) -> RowSecurit
         rolbypassrls: false,
         rolconnlimit: -1,
         rolpassword: None,
+        rolvaliduntil: None,
     });
     authid_rows.sort_by_key(|row| row.oid);
     RowSecurityTestCatalog {
@@ -3854,11 +3855,34 @@ fn parse_alter_role_option_statement() {
             ]),
         })
     );
+
+    let stmt = parse_statement("alter role regress_tenant with inherit login").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterRole(AlterRoleStatement {
+            role_name: "regress_tenant".into(),
+            action: AlterRoleAction::Options(vec![
+                RoleOption::Inherit(true),
+                RoleOption::Login(true),
+            ]),
+        })
+    );
 }
 
 #[test]
 fn parse_alter_user_password_statement() {
     let stmt = parse_statement("alter user regress_priv_user2 password 'verysecret'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterRole(AlterRoleStatement {
+            role_name: "regress_priv_user2".into(),
+            action: AlterRoleAction::Options(vec![RoleOption::Password(
+                Some("verysecret".into(),)
+            )]),
+        })
+    );
+
+    let stmt = parse_statement("alter user regress_priv_user2 with password 'verysecret'").unwrap();
     assert_eq!(
         stmt,
         Statement::AlterRole(AlterRoleStatement {

@@ -18,6 +18,7 @@ use crate::include::catalog::{
     PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
     bootstrap_composite_type_rows, builtin_type_rows,
 };
+use crate::include::nodes::datetime::TimestampTzADT;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, RecordValue, Value};
 
 pub(crate) fn catalog_row_values_for_kind(
@@ -557,6 +558,11 @@ pub(crate) fn pg_authid_row_from_values(values: Vec<Value>) -> Result<PgAuthIdRo
         rolbypassrls: expect_bool(&values[8])?,
         rolconnlimit: expect_int32(&values[9])?,
         rolpassword: values.get(10).map(nullable_text).transpose()?.flatten(),
+        rolvaliduntil: values
+            .get(11)
+            .map(nullable_timestamptz)
+            .transpose()?
+            .flatten(),
     })
 }
 
@@ -1316,6 +1322,7 @@ fn pg_authid_row_values(row: PgAuthIdRow) -> Vec<Value> {
         Value::Int32(row.rolconnlimit),
         row.rolpassword
             .map_or(Value::Null, |value| Value::Text(value.into())),
+        nullable_timestamptz_value(row.rolvaliduntil),
     ]
 }
 
@@ -2110,6 +2117,14 @@ fn nullable_text(value: &Value) -> Result<Option<String>, CatalogError> {
     }
 }
 
+fn nullable_timestamptz(value: &Value) -> Result<Option<TimestampTzADT>, CatalogError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::TimestampTz(timestamp) => Ok(Some(*timestamp)),
+        _ => Err(CatalogError::Corrupt("expected nullable timestamptz value")),
+    }
+}
+
 fn nullable_pg_statistic_array(value: &Value) -> Result<Option<Vec<PgStatisticRow>>, CatalogError> {
     let Some(array) = expect_nullable_array(value)? else {
         return Ok(None);
@@ -2218,6 +2233,10 @@ fn nullable_text_value(value: Option<String>) -> Value {
     value
         .map(|text| Value::Text(text.into()))
         .unwrap_or(Value::Null)
+}
+
+fn nullable_timestamptz_value(value: Option<TimestampTzADT>) -> Value {
+    value.map(Value::TimestampTz).unwrap_or(Value::Null)
 }
 
 fn expect_char(value: &Value, label: &'static str) -> Result<char, CatalogError> {

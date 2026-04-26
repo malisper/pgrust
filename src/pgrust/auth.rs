@@ -269,6 +269,7 @@ mod tests {
             rolbypassrls: false,
             rolconnlimit: -1,
             rolpassword: None,
+            rolvaliduntil: None,
         }
     }
 
