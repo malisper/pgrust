@@ -39,12 +39,13 @@ After creating or updating the benchmark, give the user:
 Use this command shape by default:
 
 ```bash
-cargo build --release --bin <bench_bin>
+TARGET_DIR="$(scripts/cargo_isolated.sh --print-target-dir)"
+scripts/cargo_isolated.sh build --release --bin <bench_bin>
 
 sudo rm -f /tmp/pgrust_dtrace.out && \
 sudo dtrace -x ustackframes=100 \
   -n 'profile-997 /execname == "<bench_bin>"/ { @[ustack()] = count(); }' \
-  -c "./target/release/<bench_bin> <bench args>" \
+  -c "$TARGET_DIR/release/<bench_bin> <bench args>" \
   -o /tmp/pgrust_dtrace.out && \
 bench/analyze_profile.sh /tmp/pgrust_dtrace.out
 ```
@@ -52,6 +53,8 @@ bench/analyze_profile.sh /tmp/pgrust_dtrace.out
 Notes:
 - Use `execname == "<bench_bin>"` for `dtrace -c` benchmarks.
 - Keep the benchmark command self-contained so `dtrace` can launch it directly.
+- Use `scripts/cargo_isolated.sh` for Cargo commands. It keeps build artifacts
+  in the bounded `/tmp` target pool instead of archiveable context directories.
 - Default output file is `/tmp/pgrust_dtrace.out` unless the user asks otherwise.
 
 ## Implementation rules
@@ -69,10 +72,10 @@ Notes:
 ## Validation
 
 For a new benchmark binary:
-- run `cargo check --bin <bench_bin>`
+- run `scripts/cargo_isolated.sh check --bin <bench_bin>`
 
 If the user wants a full profile flow, also provide:
-- `cargo build --release --bin <bench_bin>`
+- `scripts/cargo_isolated.sh build --release --bin <bench_bin>`
 
 ## Reporting
 

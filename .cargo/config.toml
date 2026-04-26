@@ -1,6 +1,7 @@
 [build]
 # Share dependency artifacts across local worktrees by default.
 target-dir = "/tmp/pgrust-target"
+rustc-wrapper = "scripts/rustc_sccache_wrapper.sh"
 
 [target.aarch64-apple-darwin]
 linker = "scripts/macos-rust-lld-linker.sh"
