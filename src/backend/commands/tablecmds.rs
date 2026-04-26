@@ -3455,6 +3455,7 @@ fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
         | Plan::Hash { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
         | Plan::Projection { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
