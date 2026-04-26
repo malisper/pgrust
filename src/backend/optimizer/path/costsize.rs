@@ -43,6 +43,7 @@ use super::super::{
     relids_subset,
 };
 use super::gistcost::estimate_gist_scan_cost;
+use super::regex_prefix::{RegexFixedPrefix, regex_fixed_prefix, regex_prefix_upper_bound};
 
 fn is_gist_like_am(am_oid: u32) -> bool {
     am_oid == GIST_AM_OID || am_oid == SPGIST_AM_OID
@@ -3987,6 +3988,9 @@ fn qual_strategy(
                     .then(|| gist_builtin_strategy(proc_oid, argument))
                     .flatten()
             }),
+        super::super::IndexStrategyLookup::RegexPrefix { exact } => {
+            (index.index_meta.am_oid == BTREE_AM_OID && exact).then_some(3)
+        }
     }
 }
 
@@ -4027,7 +4031,8 @@ fn build_btree_index_keys(
                 if used[idx] || qual.column != Some(column) {
                     return None;
                 }
-                network_btree_range_keys_for_qual(qual, (index_pos + 1) as i16)
+                regex_btree_range_keys_for_qual(qual, (index_pos + 1) as i16)
+                    .or_else(|| network_btree_range_keys_for_qual(qual, (index_pos + 1) as i16))
                     .map(|keys| (idx, keys))
             })
         {
@@ -4113,6 +4118,24 @@ fn network_btree_range_keys_for_qual(
             upper_strategy,
             Value::Inet(network_btree_upper_bound(value)),
         ),
+    ])
+}
+
+fn regex_btree_range_keys_for_qual(
+    qual: &IndexableQual,
+    attribute_number: i16,
+) -> Option<Vec<IndexScanKey>> {
+    let super::super::IndexStrategyLookup::RegexPrefix { exact: false } = qual.lookup else {
+        return None;
+    };
+    let prefix = match qual.argument.as_const()? {
+        Value::Text(prefix) => prefix.as_str(),
+        _ => return None,
+    };
+    let upper = regex_prefix_upper_bound(prefix)?;
+    Some(vec![
+        IndexScanKey::const_value(attribute_number, 4, Value::Text(prefix.to_string().into())),
+        IndexScanKey::const_value(attribute_number, 1, Value::Text(upper.into())),
     ])
 }
 
@@ -4230,6 +4253,24 @@ fn indexable_qual_with_argument(
         Expr::Op(op) if op.args.len() == 2 => {
             let left = strip_casts(&op.args[0]);
             let right = &op.args[1];
+            if matches!(op.op, OpExprKind::RegexMatch)
+                && let Some(prefix) = regex_fixed_prefix_argument(right)
+                && let Some(index_expr) = regex_prefix_index_expr(left, &prefix)
+            {
+                return Some(IndexableQual {
+                    column: expr_column_index(left),
+                    key_expr: strip_casts(left).clone(),
+                    lookup: super::super::IndexStrategyLookup::RegexPrefix {
+                        exact: prefix.exact,
+                    },
+                    argument: IndexScanKeyArgument::Const(Value::Text(prefix.prefix.into())),
+                    index_expr,
+                    recheck_expr: None,
+                    expr: expr.clone(),
+                    residual_expr: Some(expr.clone()),
+                    is_not_null: false,
+                });
+            }
             if let Some(argument) = argument_for(right) {
                 return mk(
                     left,
@@ -4315,6 +4356,36 @@ fn indexable_qual_with_argument(
         ),
         _ => None,
     }
+}
+
+fn regex_fixed_prefix_argument(expr: &Expr) -> Option<RegexFixedPrefix> {
+    let value = const_argument(expr)?;
+    let pattern = match value {
+        Value::Text(pattern) => pattern.to_string(),
+        _ => return None,
+    };
+    let prefix = regex_fixed_prefix(&pattern)?;
+    if prefix.prefix.is_empty() {
+        return None;
+    }
+    if !prefix.exact && regex_prefix_upper_bound(&prefix.prefix).is_none() {
+        return None;
+    }
+    Some(prefix)
+}
+
+fn regex_prefix_index_expr(key_expr: &Expr, prefix: &RegexFixedPrefix) -> Option<Expr> {
+    let lower = Expr::Const(Value::Text(prefix.prefix.clone().into()));
+    if prefix.exact {
+        return Some(Expr::op_auto(OpExprKind::Eq, vec![key_expr.clone(), lower]));
+    }
+    let upper = Expr::Const(Value::Text(
+        regex_prefix_upper_bound(&prefix.prefix)?.into(),
+    ));
+    Some(Expr::and(
+        Expr::op_auto(OpExprKind::GtEq, vec![key_expr.clone(), lower]),
+        Expr::op_auto(OpExprKind::Lt, vec![key_expr.clone(), upper]),
+    ))
 }
 
 fn text_starts_with_index_expr(func: &FuncExpr) -> Expr {

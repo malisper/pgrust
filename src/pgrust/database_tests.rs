@@ -16320,6 +16320,59 @@ fn explain_bootstrap_seqscan_shows_relation_name_and_filter() {
 }
 
 #[test]
+fn explain_bootstrap_anchored_regex_uses_proname_index_range() {
+    let base = temp_dir("explain_bootstrap_regex_index_range");
+    let db = Database::open(&base, 16).unwrap();
+
+    let lines = explain_lines(&db, 1, "select * from pg_proc where proname ~ '^abc'");
+    assert!(
+        lines.iter().any(|line| {
+            line.starts_with("Index Scan using pg_proc_proname_args_nsp_index on pg_proc  (cost=")
+        }),
+        "expected anchored regex to use pg_proc proname index, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line
+                == "  Index Cond: ((proname >= 'abc'::text) AND (proname < 'abd'::text))"),
+        "expected regex prefix range index condition, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "  Filter: (proname ~ '^abc'::text)"),
+        "expected original regex filter to remain, got {lines:?}"
+    );
+}
+
+#[test]
+fn explain_bootstrap_exact_regex_uses_proname_index_equality() {
+    let base = temp_dir("explain_bootstrap_regex_index_exact");
+    let db = Database::open(&base, 16).unwrap();
+
+    let lines = explain_lines(&db, 1, "select * from pg_proc where proname ~ '^abc$'");
+    assert!(
+        lines.iter().any(|line| {
+            line.starts_with("Index Scan using pg_proc_proname_args_nsp_index on pg_proc  (cost=")
+        }),
+        "expected exact regex to use pg_proc proname index, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "  Index Cond: (proname = 'abc'::text)"),
+        "expected regex exact index condition, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "  Filter: (proname ~ '^abc$'::text)"),
+        "expected original regex filter to remain, got {lines:?}"
+    );
+}
+
+#[test]
 fn explain_heap_seqscan_shows_relation_name() {
     let base = temp_dir("explain_heap_seqscan_relation_name");
     let db = Database::open(&base, 16).unwrap();
