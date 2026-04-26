@@ -24,6 +24,10 @@ pub fn is_binary_coercible_type(from: SqlType, to: SqlType) -> bool {
         return true;
     }
 
+    if text_typmod_coercion_is_required(from, to) {
+        return false;
+    }
+
     if matches!(
         from.kind,
         SqlTypeKind::AnyRange | SqlTypeKind::AnyCompatibleRange
@@ -50,6 +54,13 @@ pub fn is_binary_coercible_type(from: SqlType, to: SqlType) -> bool {
     bootstrap_pg_cast_rows()
         .into_iter()
         .any(|row| row.castsource == from_oid && row.casttarget == to_oid && row.castmethod == 'b')
+}
+
+fn text_typmod_coercion_is_required(from: SqlType, to: SqlType) -> bool {
+    !from.is_array
+        && !to.is_array
+        && to.typmod >= SqlType::VARHDRSZ
+        && matches!(to.kind, SqlTypeKind::Char | SqlTypeKind::Varchar)
 }
 
 fn lower_special_cast(expr: &Expr, from: SqlType, to: SqlType) -> Option<Expr> {
@@ -780,4 +791,25 @@ pub(super) fn bind_numeric_literal(value: &str) -> Result<Value, ParseError> {
         .parse::<f64>()
         .map(|_| Value::Numeric(value.into()))
         .map_err(|_| ParseError::InvalidNumeric(value.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_coercible_preserves_character_typmod_coercion() {
+        assert!(!is_binary_coercible_type(
+            SqlType::new(SqlTypeKind::Text),
+            SqlType::with_char_len(SqlTypeKind::Char, 10),
+        ));
+        assert!(!is_binary_coercible_type(
+            SqlType::new(SqlTypeKind::Text),
+            SqlType::with_char_len(SqlTypeKind::Varchar, 10),
+        ));
+        assert!(is_binary_coercible_type(
+            SqlType::new(SqlTypeKind::Text),
+            SqlType::new(SqlTypeKind::Char),
+        ));
+    }
 }
