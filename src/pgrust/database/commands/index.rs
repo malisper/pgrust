@@ -49,6 +49,15 @@ fn map_unique_index_build_violation(
     }
 }
 
+fn invalid_fillfactor_error(value: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("value {value} out of bounds for option \"fillfactor\""),
+        detail: Some("Valid values are between \"10\" and \"100\".".into()),
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
 pub(super) fn catalog_entry_from_bound_relation(
     relation: &crate::backend::parser::BoundRelation,
 ) -> crate::backend::catalog::CatalogEntry {
@@ -343,17 +352,12 @@ impl Database {
         let mut resolved = HashOptions::default();
         for option in options {
             if option.name.eq_ignore_ascii_case("fillfactor") {
-                let fillfactor = option.value.parse::<u16>().map_err(|_| {
-                    ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "integer fillfactor between 10 and 100",
-                        actual: option.value.clone(),
-                    })
-                })?;
+                let fillfactor = option
+                    .value
+                    .parse::<u16>()
+                    .map_err(|_| invalid_fillfactor_error(&option.value))?;
                 if !(10..=100).contains(&fillfactor) {
-                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "integer fillfactor between 10 and 100",
-                        actual: option.value.clone(),
-                    }));
+                    return Err(invalid_fillfactor_error(&option.value));
                 }
                 resolved.fillfactor = fillfactor;
                 continue;
@@ -959,47 +963,6 @@ impl Database {
             .as_ref()
             .and_then(|meta| meta.indpred.as_deref())
             .is_some_and(|predicate| !predicate.trim().is_empty());
-        if has_expression_keys
-            && access_method_oid != GIST_AM_OID
-            && access_method_oid != SPGIST_AM_OID
-        {
-            self.build_expression_index_rows_in_transaction(
-                client_id,
-                relation,
-                &index_entry,
-                index_name,
-                visible_catalog,
-                xid,
-                cid,
-                access_method_oid,
-                access_method_handler,
-                maintenance_work_mem_kb,
-            )?;
-            let mut catalog_guard = self.catalog.write();
-            let readiness_ctx = CatalogWriteContext {
-                pool: self.pool.clone(),
-                txns: self.txns.clone(),
-                xid,
-                cid: cid.saturating_add(1),
-                client_id,
-                waiter: None,
-                interrupts,
-            };
-            let ready_effect = catalog_guard
-                .set_index_entry_ready_valid_mvcc(&index_entry, true, true, &readiness_ctx)
-                .map_err(|err| match err {
-                    CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
-                    _ => ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "index catalog readiness update",
-                        actual: "index readiness update failed".into(),
-                    }),
-                })?;
-            drop(catalog_guard);
-            self.apply_catalog_mutation_effect_immediate(&ready_effect)?;
-            catalog_effects.push(ready_effect);
-            return Ok(index_entry);
-        }
-
         let snapshot = self
             .txns
             .read()
@@ -1317,6 +1280,7 @@ impl Database {
                         index_meta: index_meta.clone(),
                         default_toast_compression: ctx.default_toast_compression,
                         heap_tid,
+                        old_heap_tid: None,
                         values: key_values,
                         unique_check: if index_meta.indisunique {
                             IndexUniqueCheck::Yes
@@ -1742,7 +1706,7 @@ impl Database {
         reinitialize_index_relation(index, &mut ctx, xid)?;
         let rows = collect_matching_rows_heap(heap.rel, &heap.desc, heap.toast, None, &mut ctx)?;
         for (tid, values) in rows {
-            insert_index_entry_for_row(heap.rel, &heap.desc, index, &values, tid, &mut ctx)?;
+            insert_index_entry_for_row(heap.rel, &heap.desc, index, &values, tid, None, &mut ctx)?;
         }
         Ok(())
     }

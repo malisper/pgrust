@@ -2,7 +2,10 @@ use super::agg_output::{
     bind_agg_output_expr, current_grouped_agg_visible_ctes, grouped_infer_common_scalar_expr_type,
     grouped_infer_sql_expr_type,
 };
-use super::functions::{resolve_scalar_function, validate_scalar_function_arity};
+use super::expr::catalog_backed_explicit_cast_allowed;
+use super::functions::{
+    resolve_function_cast_type, resolve_scalar_function, validate_scalar_function_arity,
+};
 use super::infer::infer_array_literal_type_with_ctes;
 use super::*;
 use crate::include::nodes::primnodes::{SubLink, SubLinkType};
@@ -300,6 +303,41 @@ pub(super) fn bind_grouped_func_call(
             agg_list,
             n_keys,
         );
+    }
+    if !func_variadic
+        && !name.eq_ignore_ascii_case("pg_lsn")
+        && let Some(target_type) = resolve_function_cast_type(catalog, name)
+        && args.len() == 1
+        && args.iter().all(|arg| arg.name.is_none())
+    {
+        let source_type = grouped_infer_sql_expr_type(
+            &args[0].value,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+        );
+        let bound_arg = bind_agg_output_expr(
+            &args[0].value,
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        )?;
+        if catalog_backed_explicit_cast_allowed(source_type, target_type, catalog) {
+            return Ok(Expr::Cast(
+                Box::new(bound_arg),
+                if source_type == target_type {
+                    source_type
+                } else {
+                    target_type
+                },
+            ));
+        }
     }
     let func = resolve_scalar_function(name).ok_or_else(|| ParseError::UnexpectedToken {
         expected: "supported builtin function",

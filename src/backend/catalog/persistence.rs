@@ -348,6 +348,7 @@ fn catalog_row_identity_matches(
 ) -> bool {
     match kind {
         BootstrapCatalogKind::PgClass
+        | BootstrapCatalogKind::PgNamespace
         | BootstrapCatalogKind::PgType
         | BootstrapCatalogKind::PgAttrdef
         | BootstrapCatalogKind::PgTrigger

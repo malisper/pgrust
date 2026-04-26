@@ -144,6 +144,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_sequence_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_alter_table_identity_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_copy_statement(&sql, options)? {
         return Ok(stmt);
     }
@@ -856,6 +859,10 @@ fn try_parse_aggregate_statement(sql: &str) -> Result<Option<Statement>, ParseEr
     if lowered.starts_with("drop aggregate ") {
         return build_drop_aggregate_statement(trimmed)
             .map(|stmt| Some(Statement::DropAggregate(stmt)));
+    }
+    if lowered.starts_with("alter aggregate ") {
+        return build_alter_aggregate_rename_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterAggregateRename(stmt)));
     }
     if lowered.starts_with("comment on aggregate ") {
         return build_comment_on_aggregate_statement(trimmed)
@@ -2916,13 +2923,27 @@ where
     // Keep executor/runtime checks tied to the GUC, but give parser-only work a
     // floor until those recursive builders are flattened.
     let max_stack_depth_kb = max_stack_depth_kb.max(PARSER_STACK_DEPTH_FLOOR_KB);
-    std::thread::Builder::new()
+    let (result, notices) = std::thread::Builder::new()
         .name("pgrust-parser".into())
         .stack_size(PARSER_THREAD_STACK_BYTES)
-        .spawn(move || StackDepthGuard::enter(max_stack_depth_kb).run(f))
+        .spawn(move || {
+            let result = StackDepthGuard::enter(max_stack_depth_kb).run(f);
+            let notices = crate::backend::utils::misc::notices::take_notices();
+            (result, notices)
+        })
         .expect("spawn parser thread")
         .join()
-        .expect("parser thread panicked")
+        .expect("parser thread panicked");
+    for notice in notices {
+        crate::backend::utils::misc::notices::push_backend_notice(
+            notice.severity,
+            notice.sqlstate,
+            notice.message,
+            notice.detail,
+            notice.position,
+        );
+    }
+    result
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -3641,6 +3662,10 @@ fn try_parse_index_statement(sql: &str) -> Result<Option<Statement>, ParseError>
     if lowered.contains(" set statistics ") {
         return build_alter_index_alter_column_statistics_statement(trimmed)
             .map(|stmt| Some(Statement::AlterIndexAlterColumnStatistics(stmt)));
+    }
+    if lowered.contains(" set ") {
+        return build_alter_index_set_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterIndexSet(stmt)));
     }
     Ok(None)
 }
@@ -5115,6 +5140,268 @@ fn try_parse_sequence_statement(sql: &str) -> Result<Option<Statement>, ParseErr
     build_alter_sequence_statement(trimmed).map(|stmt| Some(Statement::AlterSequence(stmt)))
 }
 
+fn try_parse_alter_table_identity_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("alter table ") {
+        return Ok(None);
+    }
+    if ![
+        " identity",
+        " generated",
+        " restart",
+        " increment",
+        " minvalue",
+        " maxvalue",
+        " cache",
+        " cycle",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
+    {
+        return Ok(None);
+    }
+
+    let mut rest = consume_keyword(trimmed, "alter").trim_start();
+    rest = consume_keyword(rest, "table").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        let after_not = consume_keyword(after_if, "not").trim_start();
+        rest = consume_keyword(after_not, "exists").trim_start();
+        if_exists = true;
+    }
+    let mut only = false;
+    if keyword_at_start(rest, "only") {
+        rest = consume_keyword(rest, "only").trim_start();
+        only = true;
+    }
+    let (table_parts, mut rest) = parse_qualified_identifier_parts(rest)?;
+    let table_name = table_parts.join(".");
+    rest = rest.trim_start();
+    if let Some(after_star) = rest.strip_prefix('*') {
+        rest = after_star.trim_start();
+    }
+    if !keyword_at_start(rest, "alter") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "alter").trim_start();
+    if keyword_at_start(rest, "column") {
+        rest = consume_keyword(rest, "column").trim_start();
+    }
+    let (column_name, rest) = parse_unqualified_identifier(rest, "ALTER TABLE column name")?;
+    let rest = rest.trim_start();
+    let Some(action) = parse_alter_column_identity_action(rest)? else {
+        return Ok(None);
+    };
+    Ok(Some(Statement::AlterTableAlterColumnIdentity(
+        AlterTableAlterColumnIdentityStatement {
+            if_exists,
+            only,
+            table_name,
+            column_name,
+            action,
+        },
+    )))
+}
+
+fn parse_alter_column_identity_action(
+    input: &str,
+) -> Result<Option<AlterColumnIdentityAction>, ParseError> {
+    let rest = input.trim_start();
+    if keyword_at_start(rest, "add") {
+        let mut rest = consume_keyword(rest, "add").trim_start();
+        rest = consume_keyword(rest, "generated").trim_start();
+        let (kind, next) = parse_identity_generation_kind(rest)?;
+        rest = consume_keyword(next.trim_start(), "as").trim_start();
+        rest = consume_keyword(rest, "identity").trim_start();
+        let (options, rest) = parse_optional_parenthesized_sequence_options(rest)?;
+        ensure_identity_action_consumed(rest)?;
+        return Ok(Some(AlterColumnIdentityAction::Add(ColumnIdentityDef {
+            kind,
+            options,
+        })));
+    }
+    if keyword_at_start(rest, "drop") {
+        let mut rest = consume_keyword(rest, "drop").trim_start();
+        rest = consume_keyword(rest, "identity").trim_start();
+        let mut missing_ok = false;
+        if keyword_at_start(rest, "if") {
+            let after_if = consume_keyword(rest, "if").trim_start();
+            rest = consume_keyword(after_if, "exists").trim_start();
+            missing_ok = true;
+        }
+        ensure_identity_action_consumed(rest)?;
+        return Ok(Some(AlterColumnIdentityAction::Drop { missing_ok }));
+    }
+    if keyword_at_start(rest, "set") {
+        let after_set = consume_keyword(rest, "set").trim_start();
+        if keyword_at_start(after_set, "generated") {
+            let after_generated = consume_keyword(after_set, "generated").trim_start();
+            let (kind, rest) = parse_identity_generation_kind(after_generated)?;
+            let (options, rest) = parse_identity_sequence_option_patch(rest)?;
+            ensure_identity_action_consumed(rest)?;
+            return Ok(Some(AlterColumnIdentityAction::Set {
+                generation: Some(kind),
+                options,
+            }));
+        }
+    }
+    if starts_identity_sequence_option_patch(rest) {
+        let (options, rest) = parse_identity_sequence_option_patch(rest)?;
+        ensure_identity_action_consumed(rest)?;
+        return Ok(Some(AlterColumnIdentityAction::Set {
+            generation: None,
+            options,
+        }));
+    }
+    Ok(None)
+}
+
+fn starts_identity_sequence_option_patch(input: &str) -> bool {
+    let trimmed = input.trim_start();
+    if keyword_at_start(trimmed, "restart") {
+        return true;
+    }
+    if !keyword_at_start(trimmed, "set") {
+        return false;
+    }
+    let after_set = consume_keyword(trimmed, "set").trim_start();
+    keyword_at_start(after_set, "increment")
+        || keyword_at_start(after_set, "minvalue")
+        || keyword_at_start(after_set, "no minvalue")
+        || keyword_at_start(after_set, "maxvalue")
+        || keyword_at_start(after_set, "no maxvalue")
+        || keyword_at_start(after_set, "start")
+        || keyword_at_start(after_set, "restart")
+        || keyword_at_start(after_set, "cache")
+        || keyword_at_start(after_set, "cycle")
+        || keyword_at_start(after_set, "no cycle")
+}
+
+fn parse_identity_generation_kind(input: &str) -> Result<(ColumnIdentityKind, &str), ParseError> {
+    let input = input.trim_start();
+    if keyword_at_start(input, "always") {
+        return Ok((
+            ColumnIdentityKind::Always,
+            consume_keyword(input, "always").trim_start(),
+        ));
+    }
+    if keyword_at_start(input, "by") {
+        let after_by = consume_keyword(input, "by").trim_start();
+        if keyword_at_start(after_by, "default") {
+            return Ok((
+                ColumnIdentityKind::ByDefault,
+                consume_keyword(after_by, "default").trim_start(),
+            ));
+        }
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "ALWAYS or BY DEFAULT",
+        actual: input.into(),
+    })
+}
+
+fn parse_optional_parenthesized_sequence_options(
+    input: &str,
+) -> Result<(SequenceOptionsSpec, &str), ParseError> {
+    let input = input.trim_start();
+    let Some(after_open) = input.strip_prefix('(') else {
+        return Ok((SequenceOptionsSpec::default(), input));
+    };
+    let Some(close_index) = after_open.find(')') else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "closing ')' for identity sequence options",
+            actual: input.into(),
+        });
+    };
+    let inner = &after_open[..close_index];
+    let rest = &after_open[close_index + 1..];
+    let (options, option_rest) = parse_sequence_option_spec(inner)?;
+    if !option_rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "identity sequence options",
+            actual: option_rest.trim().into(),
+        });
+    }
+    if options.owned_by.is_some() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "identity sequence options without OWNED BY",
+            actual: inner.into(),
+        });
+    }
+    Ok((options, rest))
+}
+
+fn parse_identity_sequence_option_patch(
+    input: &str,
+) -> Result<(SequenceOptionsPatchSpec, &str), ParseError> {
+    let mut rest = input;
+    let mut options = SequenceOptionsPatchSpec::default();
+    loop {
+        let trimmed = rest.trim_start();
+        if trimmed.is_empty() {
+            return Ok((options, trimmed));
+        }
+        let option_input = if keyword_at_start(trimmed, "set") {
+            consume_keyword(trimmed, "set").trim_start()
+        } else {
+            trimmed
+        };
+        let (patch, remainder) = parse_sequence_option_patch(option_input)?;
+        if remainder == option_input {
+            return Ok((options, trimmed));
+        }
+        merge_sequence_option_patch(&mut options, patch)?;
+        rest = remainder;
+    }
+}
+
+fn merge_sequence_option_patch(
+    target: &mut SequenceOptionsPatchSpec,
+    patch: SequenceOptionsPatchSpec,
+) -> Result<(), ParseError> {
+    if patch.increment.is_some() {
+        target.increment = patch.increment;
+    }
+    if patch.minvalue.is_some() {
+        target.minvalue = patch.minvalue;
+    }
+    if patch.maxvalue.is_some() {
+        target.maxvalue = patch.maxvalue;
+    }
+    if patch.start.is_some() {
+        target.start = patch.start;
+    }
+    if patch.restart.is_some() {
+        target.restart = patch.restart;
+    }
+    if patch.cache.is_some() {
+        target.cache = patch.cache;
+    }
+    if patch.cycle.is_some() {
+        target.cycle = patch.cycle;
+    }
+    if patch.owned_by.is_some() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "identity sequence options without OWNED BY",
+            actual: "OWNED BY".into(),
+        });
+    }
+    Ok(())
+}
+
+fn ensure_identity_action_consumed(rest: &str) -> Result<(), ParseError> {
+    if rest.trim().is_empty() {
+        Ok(())
+    } else {
+        Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER TABLE identity action",
+            actual: rest.trim().into(),
+        })
+    }
+}
+
 fn parse_schema_qualified_name(
     input: &str,
 ) -> Result<((Option<String>, String), &str), ParseError> {
@@ -5532,6 +5819,74 @@ fn build_alter_index_attach_partition_statement(
         parent_index_name,
         child_index_name,
     })
+}
+
+fn build_alter_index_set_statement(sql: &str) -> Result<AlterIndexSetStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "index").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(after_if, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF EXISTS",
+                actual: sql.into(),
+            });
+        }
+        if_exists = true;
+        rest = consume_keyword(after_if, "exists").trim_start();
+    }
+    let (parts, rest_after_index) = parse_qualified_identifier_parts(rest)?;
+    let index_name = parts.join(".");
+    let mut rest = rest_after_index.trim_start();
+    if !keyword_at_start(rest, "set") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER INDEX SET",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "set").trim_start();
+    let (options_sql, tail) = take_parenthesized_segment(rest)?;
+    if !tail.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER INDEX SET statement",
+            actual: tail.trim().into(),
+        });
+    }
+    let options = parse_reloption_assignments(&options_sql)?;
+    Ok(AlterIndexSetStatement {
+        if_exists,
+        index_name,
+        options,
+    })
+}
+
+fn parse_reloption_assignments(input: &str) -> Result<Vec<RelOption>, ParseError> {
+    split_comma_separated_sql(input)?
+        .into_iter()
+        .map(|part| {
+            let (name_sql, value_sql) =
+                part.split_once('=')
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "reloption assignment",
+                        actual: part.trim().into(),
+                    })?;
+            let (name, tail) = parse_sql_identifier(name_sql)?;
+            if !tail.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "reloption name",
+                    actual: tail.trim().into(),
+                });
+            }
+            let value_sql = value_sql.trim();
+            let value = scan_string_literal_token_len(value_sql)
+                .filter(|len| value_sql[*len..].trim().is_empty())
+                .map(|len| decode_string_literal(&value_sql[..len]))
+                .transpose()?
+                .unwrap_or_else(|| value_sql.to_string());
+            Ok(RelOption { name, value })
+        })
+        .collect()
 }
 
 fn build_alter_view_rename_statement(sql: &str) -> Result<AlterTableRenameStatement, ParseError> {
@@ -6625,6 +6980,7 @@ struct ParsedCreateAggregateOptions {
     mtransspace: i32,
     mfinalfunc_extra: bool,
     mfinalfunc_modify: char,
+    hypothetical: bool,
 }
 
 fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatement, ParseError> {
@@ -6660,6 +7016,14 @@ fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatemen
     }
 
     let parsed_options = parse_create_aggregate_options(&options_sql)?;
+    if signature.is_none() && parsed_options.basetype.is_none() && parsed_options.stype.is_some() {
+        return Err(ParseError::DetailedError {
+            message: "aggregate input type must be specified".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
     let signature = match signature {
         Some(signature) => {
             if parsed_options.basetype.is_some() {
@@ -6673,32 +7037,29 @@ fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatemen
         None => parsed_options
             .basetype
             .clone()
-            .ok_or_else(|| ParseError::DetailedError {
-                message: "aggregate input type must be specified".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "42601",
-            })?,
+            .unwrap_or(AggregateSignatureKind::Star),
     };
 
     let missing_actual = aggregate_name.clone();
+    let stype = parsed_options
+        .stype
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "STYPE or STYPE1 option",
+            actual: "aggregate stype must be specified".into(),
+        })?;
+    let sfunc_name = parsed_options
+        .sfunc_name
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "SFUNC or SFUNC1 option",
+            actual: missing_actual.clone(),
+        })?;
     Ok(CreateAggregateStatement {
         schema_name,
         aggregate_name,
         replace_existing,
         signature,
-        sfunc_name: parsed_options
-            .sfunc_name
-            .ok_or_else(|| ParseError::UnexpectedToken {
-                expected: "SFUNC or SFUNC1 option",
-                actual: missing_actual.clone(),
-            })?,
-        stype: parsed_options
-            .stype
-            .ok_or_else(|| ParseError::UnexpectedToken {
-                expected: "STYPE or STYPE1 option",
-                actual: missing_actual.clone(),
-            })?,
+        sfunc_name,
+        stype,
         finalfunc_name: parsed_options.finalfunc_name,
         initcond: parsed_options.initcond,
         parallel: parsed_options.parallel,
@@ -6716,6 +7077,7 @@ fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatemen
         mtransspace: parsed_options.mtransspace,
         mfinalfunc_extra: parsed_options.mfinalfunc_extra,
         mfinalfunc_modify: parsed_options.mfinalfunc_modify,
+        hypothetical: parsed_options.hypothetical,
     })
 }
 
@@ -6762,6 +7124,49 @@ fn build_drop_aggregate_statement(sql: &str) -> Result<DropAggregateStatement, P
         aggregate_name,
         signature: parse_aggregate_signature_kind(&signature_sql)?,
         cascade,
+    })
+}
+
+fn build_alter_aggregate_rename_statement(
+    sql: &str,
+) -> Result<AlterAggregateRenameStatement, ParseError> {
+    let prefix = "alter aggregate";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER AGGREGATE name(signature) RENAME TO new_name",
+            actual: sql.into(),
+        });
+    };
+    let rest = rest.trim_start();
+    let ((schema_name, aggregate_name), rest_after_name) = parse_schema_qualified_name(rest)?;
+    let (signature_sql, rest) = take_parenthesized_segment(rest_after_name.trim_start())?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "rename") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "RENAME TO",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "rename").trim_start();
+    if !keyword_at_start(rest, "to") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "TO",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "to").trim_start();
+    let (new_name, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER AGGREGATE RENAME statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(AlterAggregateRenameStatement {
+        schema_name,
+        aggregate_name,
+        signature: parse_aggregate_signature_kind(&signature_sql)?,
+        new_name,
     })
 }
 
@@ -6995,6 +7400,7 @@ fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOp
     for item in split_top_level_items(input, ',')? {
         let Some(eq_idx) = item.find('=') else {
             if item.trim().eq_ignore_ascii_case("hypothetical") {
+                parsed.hypothetical = true;
                 continue;
             }
             return Err(ParseError::UnexpectedToken {
@@ -7002,7 +7408,17 @@ fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOp
                 actual: item,
             });
         };
-        let key = item[..eq_idx].trim().to_ascii_lowercase();
+        let raw_key = item[..eq_idx].trim();
+        if raw_key.starts_with('"') {
+            let attr = parse_sql_identifier(raw_key)
+                .map(|(ident, _)| ident)
+                .unwrap_or_else(|_| raw_key.trim_matches('"').to_string());
+            crate::backend::utils::misc::notices::push_warning(format!(
+                "aggregate attribute \"{attr}\" not recognized"
+            ));
+            continue;
+        }
+        let key = raw_key.to_ascii_lowercase();
         let value = item[eq_idx + 1..].trim();
         match key.as_str() {
             "sfunc" | "sfunc1" => parsed.sfunc_name = Some(parse_aggregate_proc_name(value)?),
@@ -7025,7 +7441,7 @@ fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOp
             "msspace" => parsed.mtransspace = parse_aggregate_i32(value)?,
             "mfinalfunc_extra" => parsed.mfinalfunc_extra = parse_aggregate_bool(value)?,
             "mfinalfunc_modify" => parsed.mfinalfunc_modify = parse_aggregate_final_modify(value)?,
-            "sortop" | "hypothetical" => {
+            "sortop" => {
                 return Err(ParseError::FeatureNotSupported(format!(
                     "{key} aggregate option is not supported"
                 )));
@@ -7051,19 +7467,38 @@ fn parse_aggregate_signature_kind(input: &str) -> Result<AggregateSignatureKind,
             actual: "()".into(),
         });
     }
-    if keyword_boundary(trimmed, "order by").is_some() {
-        return Err(ParseError::FeatureNotSupported(
-            "ordered-set aggregate signatures are not supported".into(),
-        ));
-    }
-    let args = split_top_level_items(trimmed, ',')?
-        .into_iter()
-        .map(|item| parse_aggregate_signature_arg(&item))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(AggregateSignatureKind::Args(args))
+    let (arg_sql, order_by_sql) =
+        if let Some(order_by_idx) = find_next_top_level_keyword(trimmed, &["order by"]) {
+            (
+                trimmed[..order_by_idx].trim(),
+                Some(consume_keyword(&trimmed[order_by_idx..], "order by").trim()),
+            )
+        } else {
+            (trimmed, None)
+        };
+    let args = if arg_sql.is_empty() {
+        Vec::new()
+    } else {
+        split_top_level_items(arg_sql, ',')?
+            .into_iter()
+            .map(|item| parse_aggregate_signature_arg(&item))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let order_by = if let Some(order_by_sql) = order_by_sql {
+        split_top_level_items(order_by_sql, ',')?
+            .into_iter()
+            .map(|item| parse_aggregate_signature_arg(&item))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    Ok(AggregateSignatureKind::Args(AggregateSignature {
+        args,
+        order_by,
+    }))
 }
 
-fn parse_aggregate_signature_arg(input: &str) -> Result<AggregateArgType, ParseError> {
+fn parse_aggregate_signature_arg(input: &str) -> Result<AggregateSignatureArg, ParseError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(ParseError::UnexpectedToken {
@@ -7071,22 +7506,102 @@ fn parse_aggregate_signature_arg(input: &str) -> Result<AggregateArgType, ParseE
             actual: input.into(),
         });
     }
-    if keyword_at_start(trimmed, "variadic") {
-        return Err(ParseError::FeatureNotSupported(
-            "VARIADIC aggregate signatures are not supported".into(),
-        ));
+    let variadic = keyword_at_start(trimmed, "variadic");
+    let type_or_named = if variadic {
+        consume_keyword(trimmed, "variadic").trim_start()
+    } else {
+        trimmed
+    };
+    let named_candidate = parse_sql_identifier(type_or_named)
+        .ok()
+        .and_then(|(name, rest)| {
+            let rest = rest.trim();
+            (!rest.is_empty()
+                && !aggregate_type_phrase_starts_with_identifier(type_or_named)
+                && parse_aggregate_arg_type(rest).is_ok())
+            .then_some((name, rest))
+        });
+    let (name, type_sql) = if let Some((name, rest)) = named_candidate {
+        (Some(name), rest)
+    } else if let Ok(arg_type) = parse_aggregate_arg_type(type_or_named)
+        && aggregate_arg_type_consumes_all(type_or_named, &arg_type)
+    {
+        (None, type_or_named)
+    } else if let Ok((name, rest)) = parse_sql_identifier(type_or_named)
+        && !rest.trim().is_empty()
+    {
+        (Some(name), rest.trim())
+    } else {
+        (None, type_or_named)
+    };
+    Ok(AggregateSignatureArg {
+        name,
+        arg_type: parse_aggregate_arg_type(type_sql)?,
+        variadic,
+    })
+}
+
+fn aggregate_type_phrase_starts_with_identifier(input: &str) -> bool {
+    let lower = input.trim_start().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "double precision"
+            | "character varying"
+            | "bit varying"
+            | "time with time zone"
+            | "time without time zone"
+            | "timestamp with time zone"
+            | "timestamp without time zone"
+    ) || lower.starts_with("time(")
+        || lower.starts_with("time ")
+        || lower.starts_with("timestamp(")
+        || lower.starts_with("timestamp ")
+        || lower.starts_with("character(")
+        || lower.starts_with("character ")
+        || lower.starts_with("interval ")
+        || lower.starts_with("interval(")
+}
+
+fn aggregate_arg_type_consumes_all(input: &str, arg_type: &AggregateArgType) -> bool {
+    match arg_type {
+        AggregateArgType::AnyPseudo => parse_sql_identifier(input)
+            .is_ok_and(|(ident, rest)| ident.eq_ignore_ascii_case("any") && rest.trim().is_empty()),
+        AggregateArgType::Type(_) => parse_type_name(input).is_ok(),
     }
+}
+
+fn parse_aggregate_arg_type(input: &str) -> Result<AggregateArgType, ParseError> {
+    let trimmed = input.trim();
     if let Ok((ident, rest)) = parse_sql_identifier(trimmed)
         && rest.trim().is_empty()
         && ident.eq_ignore_ascii_case("any")
     {
         return Ok(AggregateArgType::AnyPseudo);
     }
-    parse_type_name(trimmed)
-        .map(AggregateArgType::Type)
-        .map_err(|_| {
-            ParseError::FeatureNotSupported("named aggregate parameters are not supported".into())
-        })
+    parse_type_name(trimmed).map(AggregateArgType::Type)
+}
+
+fn parse_aggregate_signature_type_only_arg(
+    input: &str,
+) -> Result<AggregateSignatureArg, ParseError> {
+    let arg = parse_aggregate_signature_arg(input)?;
+    if arg.name.is_some() {
+        return Err(ParseError::FeatureNotSupported(
+            "named aggregate parameters are not supported in BASETYPE".into(),
+        ));
+    }
+    Ok(arg)
+}
+
+fn parse_aggregate_signature_type_only(input: &str) -> Result<AggregateSignatureKind, ParseError> {
+    let args = split_top_level_items(input, ',')?
+        .into_iter()
+        .map(|item| parse_aggregate_signature_type_only_arg(&item))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AggregateSignatureKind::Args(AggregateSignature {
+        args,
+        order_by: Vec::new(),
+    }))
 }
 
 fn parse_legacy_aggregate_basetype(input: &str) -> Result<AggregateSignatureKind, ParseError> {
@@ -7105,9 +7620,7 @@ fn parse_legacy_aggregate_basetype(input: &str) -> Result<AggregateSignatureKind
     {
         return Ok(AggregateSignatureKind::Star);
     }
-    Ok(AggregateSignatureKind::Args(vec![
-        parse_aggregate_signature_arg(trimmed)?,
-    ]))
+    parse_aggregate_signature_type_only(trimmed)
 }
 
 fn parse_aggregate_proc_name(input: &str) -> Result<String, ParseError> {
@@ -7189,7 +7702,7 @@ fn parse_aggregate_parallel(input: &str) -> Result<FunctionParallel, ParseError>
         "unsafe" => Ok(FunctionParallel::Unsafe),
         _ => Err(ParseError::UnexpectedToken {
             expected: "SAFE, RESTRICTED, or UNSAFE",
-            actual: value,
+            actual: "parameter \"parallel\" must be SAFE, RESTRICTED, or UNSAFE".into(),
         }),
     }
 }
@@ -9552,13 +10065,9 @@ fn parse_create_function_arg_with_base(
         });
     }
     let lowered = trimmed.to_ascii_lowercase();
-    if lowered.contains(" default ")
-        || lowered.contains(":=")
-        || lowered.starts_with("variadic ")
-        || lowered.contains(" variadic ")
-    {
+    if lowered.contains(" default ") || lowered.contains(":=") {
         return Err(ParseError::FeatureNotSupported(
-            "default arguments and VARIADIC are not supported in CREATE FUNCTION".into(),
+            "default arguments are not supported in CREATE FUNCTION".into(),
         ));
     }
 
@@ -9571,7 +10080,12 @@ fn parse_create_function_arg_with_base(
     } else {
         (FunctionArgMode::In, trimmed)
     };
-    let rest = rest.trim_start();
+    let mut variadic = false;
+    let mut rest = rest.trim_start();
+    if keyword_at_start(rest, "variadic") {
+        variadic = true;
+        rest = consume_keyword(rest, "variadic").trim_start();
+    }
     if !rest.chars().any(char::is_whitespace)
         && let Ok(ty) = parse_type_name(rest)
     {
@@ -9582,13 +10096,18 @@ fn parse_create_function_arg_with_base(
             ty,
             type_position,
             default_expr: None,
-            variadic: false,
+            variadic,
         });
     }
     let (name, type_sql) = match parse_sql_identifier(rest) {
         Ok((name, rest)) if !rest.trim().is_empty() => (Some(name), rest.trim_start()),
         _ => (None, rest),
     };
+    let mut type_sql = type_sql;
+    if keyword_at_start(type_sql, "variadic") {
+        variadic = true;
+        type_sql = consume_keyword(type_sql, "variadic").trim_start();
+    }
     if type_sql.trim().is_empty() {
         return Err(ParseError::UnexpectedToken {
             expected: "argument type name",
@@ -9603,7 +10122,7 @@ fn parse_create_function_arg_with_base(
         ty,
         type_position,
         default_expr: None,
-        variadic: false,
+        variadic,
     })
 }
 
@@ -12514,7 +13033,7 @@ fn build_simple_select_statement(
                         Rule::having_clause => having = Some(build_having_clause(inner)?),
                         Rule::window_clause => window_clauses = build_window_clause(inner)?,
                         Rule::order_by_clause => order_by = build_order_by_clause(inner)?,
-                        Rule::limit_clause => limit = Some(build_limit_clause(inner)?),
+                        Rule::limit_clause => limit = build_limit_clause(inner)?,
                         Rule::offset_clause => offset = Some(build_offset_clause(inner)?),
                         Rule::locking_clause => locking_clause = Some(build_locking_clause(inner)?),
                         _ => {}
@@ -12528,7 +13047,7 @@ fn build_simple_select_statement(
             Rule::having_clause => having = Some(build_having_clause(part)?),
             Rule::window_clause => window_clauses = build_window_clause(part)?,
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
-            Rule::limit_clause => limit = Some(build_limit_clause(part)?),
+            Rule::limit_clause => limit = build_limit_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
             Rule::locking_clause => locking_clause = Some(build_locking_clause(part)?),
             _ => {}
@@ -12630,7 +13149,10 @@ fn build_set_operation_term(pair: Pair<'_, Rule>) -> Result<SelectStatement, Par
                 .find(|part| {
                     matches!(
                         part.as_rule(),
-                        Rule::select_stmt | Rule::values_stmt | Rule::table_stmt
+                        Rule::select_stmt
+                            | Rule::values_stmt
+                            | Rule::table_stmt
+                            | Rule::parenthesized_set_operation_term
                     )
                 })
                 .ok_or(ParseError::UnexpectedEof)?;
@@ -12683,7 +13205,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
             }
             Rule::window_clause => window_clauses = build_window_clause(part)?,
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
-            Rule::limit_clause => limit = Some(build_limit_clause(part)?),
+            Rule::limit_clause => limit = build_limit_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
             Rule::locking_clause => locking_clause = Some(build_locking_clause(part)?),
             _ => {}
@@ -12799,7 +13321,7 @@ fn build_values_statement(pair: Pair<'_, Rule>) -> Result<ValuesStatement, Parse
             }
             Rule::values_row => rows.push(build_values_row(part)?),
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
-            Rule::limit_clause => limit = Some(build_limit_clause(part)?),
+            Rule::limit_clause => limit = build_limit_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
             _ => {}
         }
@@ -12952,7 +13474,15 @@ fn build_order_by_clause(pair: Pair<'_, Rule>) -> Result<Vec<OrderByItem>, Parse
 }
 
 fn build_locking_clause(pair: Pair<'_, Rule>) -> Result<SelectLockingClause, ParseError> {
-    match pair.as_str().trim().to_ascii_lowercase().as_str() {
+    let raw = pair.as_str().trim().to_ascii_lowercase();
+    let strength = raw
+        .split_once(" of ")
+        .map(|(strength, _)| strength)
+        .unwrap_or(&raw);
+    // :HACK: Parse FOR UPDATE/SHARE OF relation lists so view definitions and
+    // regression inputs bind, but keep using the existing all-relation row-mark
+    // model until SelectLockingClause carries the relation-name list.
+    match strength {
         "for no key update" => Ok(SelectLockingClause::ForNoKeyUpdate),
         "for update" => Ok(SelectLockingClause::ForUpdate),
         "for key share" => Ok(SelectLockingClause::ForKeyShare),
@@ -13007,8 +13537,15 @@ fn order_by_using_operator_direction(operator: &str) -> Option<bool> {
     }
 }
 
-fn build_limit_clause(pair: Pair<'_, Rule>) -> Result<usize, ParseError> {
-    build_usize_clause(pair, "LIMIT")
+fn build_limit_clause(pair: Pair<'_, Rule>) -> Result<Option<usize>, ParseError> {
+    if pair
+        .clone()
+        .into_inner()
+        .any(|part| part.as_rule() == Rule::kw_null)
+    {
+        return Ok(None);
+    }
+    build_usize_clause(pair, "LIMIT").map(Some)
 }
 
 fn build_offset_clause(pair: Pair<'_, Rule>) -> Result<usize, ParseError> {
@@ -13347,6 +13884,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
     let mut table_name = None;
     let mut table_alias = None;
     let mut columns = None;
+    let mut overriding = None;
     let mut source = None;
     let mut on_conflict = None;
     let mut returning = Vec::new();
@@ -13370,6 +13908,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
                 table_alias = Some(build_identifier(alias));
             }
             Rule::assignment_target_list => columns = Some(build_assignment_target_list(part)?),
+            Rule::insert_overriding_clause => overriding = Some(build_insert_overriding(part)?),
             Rule::insert_values_source => {
                 source = Some(InsertSource::Values(
                     part.into_inner()
@@ -13391,9 +13930,24 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         table_alias,
         columns,
+        overriding,
         source: source.ok_or(ParseError::UnexpectedEof)?,
         on_conflict,
         returning,
+    })
+}
+
+fn build_insert_overriding(pair: Pair<'_, Rule>) -> Result<OverridingKind, ParseError> {
+    let raw = pair.as_str().to_ascii_lowercase();
+    if raw.contains(" system ") {
+        return Ok(OverridingKind::System);
+    }
+    if raw.contains(" user ") {
+        return Ok(OverridingKind::User);
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "OVERRIDING SYSTEM VALUE or OVERRIDING USER VALUE",
+        actual: raw,
     })
 }
 
@@ -16366,8 +16920,8 @@ fn set_column_generated(
 }
 
 fn set_column_identity(
-    target: &mut Option<ColumnIdentityKind>,
-    value: ColumnIdentityKind,
+    target: &mut Option<ColumnIdentityDef>,
+    value: ColumnIdentityDef,
     column_name: &str,
 ) -> Result<(), ParseError> {
     if target.is_some() {
@@ -16380,20 +16934,50 @@ fn set_column_identity(
     Ok(())
 }
 
-fn build_column_identity(pair: Pair<'_, Rule>) -> Result<ColumnIdentityKind, ParseError> {
-    let when = pair
-        .into_inner()
-        .find(|part| part.as_rule() == Rule::generated_when)
-        .map(|part| part.as_str().trim().to_ascii_lowercase())
-        .ok_or(ParseError::UnexpectedEof)?;
-    match when.as_str() {
+fn build_column_identity(pair: Pair<'_, Rule>) -> Result<ColumnIdentityDef, ParseError> {
+    let mut when = None;
+    let mut options = SequenceOptionsSpec::default();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::generated_when => when = Some(part.as_str().trim().to_ascii_lowercase()),
+            Rule::column_identity_options => {
+                let raw = part.as_str().trim();
+                let Some(inner) = raw
+                    .strip_prefix('(')
+                    .and_then(|value| value.strip_suffix(')'))
+                else {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "identity sequence options",
+                        actual: raw.into(),
+                    });
+                };
+                let (parsed, rest) = parse_sequence_option_spec(inner)?;
+                if !rest.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "identity sequence options",
+                        actual: rest.trim().into(),
+                    });
+                }
+                if parsed.owned_by.is_some() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "identity sequence options without OWNED BY",
+                        actual: raw.into(),
+                    });
+                }
+                options = parsed;
+            }
+            _ => {}
+        }
+    }
+    let kind = match when.as_deref().ok_or(ParseError::UnexpectedEof)? {
         "always" => Ok(ColumnIdentityKind::Always),
         "by default" => Ok(ColumnIdentityKind::ByDefault),
         other => Err(ParseError::UnexpectedToken {
             expected: "GENERATED ALWAYS or GENERATED BY DEFAULT",
             actual: other.into(),
         }),
-    }
+    }?;
+    Ok(ColumnIdentityDef { kind, options })
 }
 
 fn build_column_compression(

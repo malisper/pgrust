@@ -161,6 +161,17 @@ fn bind_single_column_sublink(
     })))
 }
 
+fn ensure_row_subquery_width(width: usize, expected: usize) -> Result<(), ParseError> {
+    if width == expected {
+        Ok(())
+    } else {
+        Err(ParseError::UnexpectedToken {
+            expected: "row subquery with matching column count",
+            actual: format!("subquery returned {width} columns"),
+        })
+    }
+}
+
 pub(super) fn bind_scalar_subquery_expr(
     select: &SelectStatement,
     scope: &BoundScope,
@@ -219,6 +230,41 @@ pub(super) fn bind_exists_subquery_expr(
     })))
 }
 
+pub(super) fn bind_row_compare_subquery_expr(
+    row: &SqlExpr,
+    op: SubqueryComparisonOp,
+    subquery: &SelectStatement,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let SqlExpr::Row(items) = row else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "row expression",
+            actual: format!("{row:?}"),
+        });
+    };
+    let child_visible_agg_scope = child_visible_aggregate_scope();
+    let subquery = bind_subquery_query(
+        subquery,
+        scope,
+        catalog,
+        outer_scopes,
+        child_visible_agg_scope.as_ref(),
+        ctes,
+    )?;
+    ensure_row_subquery_width(subquery.columns().len(), items.len())?;
+    let left =
+        bind_expr_with_outer_and_ctes(row, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    Ok(Expr::SubLink(Box::new(SubLink {
+        sublink_type: SubLinkType::RowCompareSubLink(op),
+        testexpr: Some(Box::new(left)),
+        subselect: Box::new(subquery),
+    })))
+}
+
 pub(super) fn bind_in_subquery_expr(
     expr: &SqlExpr,
     subquery: &SelectStatement,
@@ -239,9 +285,8 @@ pub(super) fn bind_in_subquery_expr(
         ctes,
     )?;
     let subquery_width = subquery.columns().len();
-    let testexpr = if subquery_width == 1 {
-        bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?
-    } else {
+    let testexpr = if let SqlExpr::Row(items) = expr {
+        ensure_row_subquery_width(subquery_width, items.len())?;
         bind_row_valued_in_testexpr(
             expr,
             &mut subquery,
@@ -251,6 +296,9 @@ pub(super) fn bind_in_subquery_expr(
             grouped_outer,
             ctes,
         )?
+    } else {
+        ensure_single_column_subquery(subquery_width)?;
+        bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?
     };
     let any_expr = Expr::SubLink(Box::new(SubLink {
         sublink_type: SubLinkType::AnySubLink(SubqueryComparisonOp::Eq),
@@ -352,7 +400,15 @@ pub(super) fn bind_quantified_subquery_expr(
         child_visible_agg_scope.as_ref(),
         ctes,
     )?;
-    ensure_single_column_subquery(subquery.columns().len())?;
+    let row_width = match left {
+        SqlExpr::Row(items) => Some(items.len()),
+        _ => None,
+    };
+    if let Some(width) = row_width {
+        ensure_row_subquery_width(subquery.columns().len(), width)?;
+    } else {
+        ensure_single_column_subquery(subquery.columns().len())?;
+    }
     let left = Box::new(bind_expr_with_outer_and_ctes(
         left,
         scope,

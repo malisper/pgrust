@@ -1070,8 +1070,8 @@ pub(super) fn validate_alter_table_add_column(
     if let Some(generated) = &column.generated {
         desc.default_expr = Some(generated.expr_sql.clone());
         desc.generated = Some(generated.kind);
-    } else if let Some(identity) = column.identity {
-        desc.identity = Some(identity);
+    } else if let Some(identity) = &column.identity {
+        desc.identity = Some(identity.kind);
     } else if serial_kind.is_none() {
         desc.default_expr = column.default_expr.clone();
         if let Some(sql) = desc.default_expr.as_deref() {
@@ -1088,20 +1088,27 @@ pub(super) fn validate_alter_table_add_column(
     let constraint_actions =
         normalize_alter_table_add_column_constraints(table_name, column, existing_constraints)
             .map_err(ExecError::Parse)?;
-    let owned_sequence_kind = if let Some(serial_kind) = serial_kind {
-        Some(serial_kind)
-    } else if column.identity.is_some() {
-        Some(serial_kind_for_identity_sql_type(sql_type).map_err(ExecError::Parse)?)
+    let owned_sequence = if let Some(serial_kind) = serial_kind {
+        Some((
+            serial_kind,
+            crate::backend::parser::SequenceOptionsSpec::default(),
+        ))
+    } else if let Some(identity) = &column.identity {
+        Some((
+            serial_kind_for_identity_sql_type(sql_type).map_err(ExecError::Parse)?,
+            identity.options.clone(),
+        ))
     } else {
         None
     };
     Ok(AlterTableAddColumnPlan {
         column: desc,
-        owned_sequence: owned_sequence_kind.map(|serial_kind| OwnedSequenceSpec {
+        owned_sequence: owned_sequence.map(|(serial_kind, options)| OwnedSequenceSpec {
             column_index: relation_desc.columns.len(),
             column_name: column.name.clone(),
             serial_kind,
             sql_type,
+            options,
         }),
         not_null_action: constraint_actions.not_null,
         check_actions: constraint_actions.checks,
@@ -1426,6 +1433,17 @@ pub(super) fn validate_alter_table_alter_column_default(
     if current_column.generated.is_some() {
         return Err(ExecError::DetailedError {
             message: format!("column \"{}\" is a generated column", current_column.name),
+            detail: None,
+            hint: None,
+            sqlstate: "428C9",
+        });
+    }
+    if current_column.identity.is_some() {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "column \"{}\" of relation is an identity column",
+                current_column.name
+            ),
             detail: None,
             hint: None,
             sqlstate: "428C9",

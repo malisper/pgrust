@@ -147,7 +147,7 @@ fn rebuild_relation_indexes_for_alter_column_type(
     {
         reinitialize_index_relation(index, ctx, xid)?;
         for (tid, values) in rewritten_rows {
-            insert_index_entry_for_row(relation.rel, new_desc, index, values, *tid, ctx)?;
+            insert_index_entry_for_row(relation.rel, new_desc, index, values, *tid, None, ctx)?;
         }
     }
     Ok(())

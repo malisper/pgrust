@@ -1,12 +1,16 @@
 use super::super::*;
 use super::privilege::{acl_grants_privilege, effective_acl_grantee_names, type_owner_default_acl};
 use crate::backend::commands::partition::validate_new_partition_bound;
+use crate::backend::parser::analyze::{
+    ResolvedFunctionCall, is_binary_coercible_type, resolve_function_call,
+};
 use crate::backend::parser::{
-    AggregateArgType, AggregateSignatureKind, CreateAggregateStatement, CreateFunctionArg,
+    AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
+    AlterAggregateRenameStatement, CreateAggregateStatement, CreateFunctionArg,
     CreateFunctionReturnSpec, CreateFunctionStatement, CreateProcedureStatement, FunctionArgMode,
     FunctionParallel, FunctionVolatility, OwnedSequenceSpec, PartitionBoundSpec, RawTypeName,
-    RelOption, SequenceOptionsSpec, SqlType, SqlTypeKind, Statement, parse_statement,
-    pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
+    RelOption, SqlType, SqlTypeKind, Statement, parse_statement, pg_partitioned_table_row,
+    resolve_raw_type_name, serialize_partition_bound,
 };
 use crate::backend::utils::misc::notices::{
     push_backend_notice, push_notice, push_notice_with_detail,
@@ -450,19 +454,204 @@ pub(super) fn aggregate_signature_arg_oids(
 ) -> Result<Vec<u32>, ParseError> {
     match signature {
         AggregateSignatureKind::Star => Ok(Vec::new()),
-        AggregateSignatureKind::Args(args) => args
+        AggregateSignatureKind::Args(signature) => signature
+            .args
             .iter()
-            .map(|arg| match arg {
-                AggregateArgType::AnyPseudo => Ok(ANYOID),
-                AggregateArgType::Type(raw_type) => {
-                    let sql_type = resolve_raw_type_name(raw_type, catalog)?;
-                    catalog
-                        .type_oid_for_sql_type(sql_type)
-                        .ok_or_else(|| ParseError::UnsupportedType(format!("{sql_type:?}")))
-                }
-            })
+            .chain(signature.order_by.iter())
+            .map(|arg| aggregate_signature_arg_oid(catalog, arg))
             .collect(),
     }
+}
+
+pub(super) fn format_aggregate_signature(
+    aggregate_name: &str,
+    signature: &AggregateSignatureKind,
+    catalog: &dyn CatalogLookup,
+) -> Result<String, ExecError> {
+    Ok(match signature {
+        AggregateSignatureKind::Star => format!("{aggregate_name}(*)"),
+        AggregateSignatureKind::Args(signature) => {
+            let args = signature
+                .args
+                .iter()
+                .map(|arg| format_aggregate_signature_arg(arg, catalog))
+                .collect::<Result<Vec<_>, _>>()?;
+            let order_by = signature
+                .order_by
+                .iter()
+                .map(|arg| format_aggregate_signature_arg(arg, catalog))
+                .collect::<Result<Vec<_>, _>>()?;
+            if order_by.is_empty() {
+                format!("{aggregate_name}({})", args.join(", "))
+            } else if args.is_empty() {
+                format!("{aggregate_name}(ORDER BY {})", order_by.join(", "))
+            } else {
+                format!(
+                    "{aggregate_name}({} ORDER BY {})",
+                    args.join(", "),
+                    order_by.join(", ")
+                )
+            }
+        }
+    })
+}
+
+fn format_aggregate_signature_arg(
+    arg: &AggregateSignatureArg,
+    catalog: &dyn CatalogLookup,
+) -> Result<String, ExecError> {
+    let type_name = match &arg.arg_type {
+        AggregateArgType::AnyPseudo => "\"any\"".to_string(),
+        AggregateArgType::Type(raw_type) => {
+            let sql_type = resolve_raw_type_name(raw_type, catalog).map_err(ExecError::Parse)?;
+            format_sql_type_name(sql_type)
+        }
+    };
+    Ok(if arg.variadic {
+        format!("VARIADIC {type_name}")
+    } else {
+        type_name
+    })
+}
+
+fn aggregate_signature_arg_oid(
+    catalog: &dyn CatalogLookup,
+    arg: &AggregateSignatureArg,
+) -> Result<u32, ParseError> {
+    match &arg.arg_type {
+        AggregateArgType::AnyPseudo => Ok(ANYOID),
+        AggregateArgType::Type(raw_type) => {
+            let sql_type = resolve_raw_type_name(raw_type, catalog)?;
+            catalog
+                .type_oid_for_sql_type(sql_type)
+                .ok_or_else(|| ParseError::UnsupportedType(format!("{sql_type:?}")))
+        }
+    }
+}
+
+fn aggregate_transition_input_oids(
+    catalog: &dyn CatalogLookup,
+    signature: &AggregateSignatureKind,
+) -> Result<Vec<u32>, ParseError> {
+    match signature {
+        AggregateSignatureKind::Star => Ok(Vec::new()),
+        AggregateSignatureKind::Args(signature) if signature.order_by.is_empty() => signature
+            .args
+            .iter()
+            .map(|arg| aggregate_signature_arg_oid(catalog, arg))
+            .collect(),
+        AggregateSignatureKind::Args(signature) => signature
+            .order_by
+            .iter()
+            .map(|arg| aggregate_signature_arg_oid(catalog, arg))
+            .collect(),
+    }
+}
+
+fn aggregate_direct_arg_count(signature: &AggregateSignatureKind) -> i16 {
+    match signature {
+        AggregateSignatureKind::Star => 0,
+        AggregateSignatureKind::Args(signature) if signature.order_by.is_empty() => 0,
+        AggregateSignatureKind::Args(signature) => signature.args.len() as i16,
+    }
+}
+
+fn aggregate_kind(create_stmt: &CreateAggregateStatement) -> char {
+    if create_stmt.hypothetical {
+        'h'
+    } else if matches!(
+        &create_stmt.signature,
+        AggregateSignatureKind::Args(AggregateSignature { order_by, .. }) if !order_by.is_empty()
+    ) {
+        'o'
+    } else {
+        'n'
+    }
+}
+
+fn routine_kind_detail(name: &str, prokind: char, aggkind: Option<char>) -> String {
+    let kind = match (prokind, aggkind) {
+        ('a', Some('o')) => "an ordered-set aggregate function",
+        ('a', Some('h')) => "a hypothetical-set aggregate function",
+        ('a', _) => "an ordinary aggregate function",
+        ('p', _) => "a procedure",
+        _ => "a function",
+    };
+    format!("\"{name}\" is {kind}.")
+}
+
+fn cannot_change_routine_kind_error(name: &str, prokind: char, aggkind: Option<char>) -> ExecError {
+    ExecError::DetailedError {
+        message: "cannot change routine kind".into(),
+        detail: Some(routine_kind_detail(name, prokind, aggkind)),
+        hint: None,
+        sqlstate: "42809",
+    }
+}
+
+fn aggregate_arg_modes(signature: &AggregateSignatureKind) -> Option<Vec<u8>> {
+    let AggregateSignatureKind::Args(signature) = signature else {
+        return None;
+    };
+    let modes = signature
+        .args
+        .iter()
+        .chain(signature.order_by.iter())
+        .map(|arg| if arg.variadic { b'v' } else { b'i' })
+        .collect::<Vec<_>>();
+    modes.iter().any(|mode| *mode == b'v').then_some(modes)
+}
+
+fn aggregate_arg_names(signature: &AggregateSignatureKind) -> Option<Vec<String>> {
+    let AggregateSignatureKind::Args(signature) = signature else {
+        return None;
+    };
+    let names = signature
+        .args
+        .iter()
+        .chain(signature.order_by.iter())
+        .map(|arg| arg.name.clone().unwrap_or_default())
+        .collect::<Vec<_>>();
+    names.iter().any(|name| !name.is_empty()).then_some(names)
+}
+
+fn aggregate_provariadic(
+    catalog: &dyn CatalogLookup,
+    signature: &AggregateSignatureKind,
+) -> Result<u32, ParseError> {
+    let AggregateSignatureKind::Args(signature) = signature else {
+        return Ok(0);
+    };
+    signature
+        .args
+        .iter()
+        .chain(signature.order_by.iter())
+        .find(|arg| arg.variadic)
+        .map(|arg| {
+            aggregate_signature_arg_oid(catalog, arg)
+                .map(|type_oid| variadic_element_type_oid(catalog, type_oid))
+        })
+        .transpose()
+        .map(|oid| oid.unwrap_or(0))
+}
+
+fn variadic_element_type_oid(catalog: &dyn CatalogLookup, type_oid: u32) -> u32 {
+    catalog
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typarray == type_oid)
+        .map(|row| row.oid)
+        .or_else(|| {
+            catalog.type_by_oid(type_oid).map(|row| {
+                if row.sql_type.is_array {
+                    row.sql_type.type_oid
+                } else {
+                    row.typelem
+                }
+            })
+        })
+        .filter(|element_oid| *element_oid != 0)
+        .unwrap_or(type_oid)
 }
 
 fn raw_named_shell_type_name(raw: &RawTypeName) -> Option<&str> {
@@ -565,6 +754,224 @@ fn resolve_exact_proc_row(
     }
 }
 
+#[derive(Debug, Clone)]
+struct AggregateSupportProc {
+    row: PgProcRow,
+    result_type: SqlType,
+    declared_arg_types: Vec<SqlType>,
+}
+
+fn lookup_aggregate_support_proc_row(
+    catalog: &dyn CatalogLookup,
+    proc_name: &str,
+    arg_oids: &[u32],
+    explicit_variadic: bool,
+) -> Result<AggregateSupportProc, ExecError> {
+    let actual_types = arg_oids
+        .iter()
+        .map(|oid| {
+            catalog
+                .type_by_oid(*oid)
+                .map(|row| row.sql_type)
+                .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(format!("oid {oid}"))))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let support = match resolve_function_call(catalog, proc_name, &actual_types, explicit_variadic)
+    {
+        Ok(resolved) => aggregate_support_from_resolved(catalog, proc_name, resolved)?,
+        Err(
+            err @ ParseError::DetailedError {
+                sqlstate: "42883", ..
+            },
+        ) => {
+            if let Some(retry_types) = aggregate_runtime_coercion_retry_types(&actual_types)
+                && let Ok(resolved) =
+                    resolve_function_call(catalog, proc_name, &retry_types, explicit_variadic)
+            {
+                aggregate_support_from_resolved(catalog, proc_name, resolved)?
+            } else if let Some(support) =
+                lookup_exact_aggregate_support_proc(catalog, proc_name, arg_oids)?
+            {
+                support
+            } else {
+                return Err(match err {
+                    ParseError::DetailedError {
+                        message, sqlstate, ..
+                    } => ExecError::DetailedError {
+                        message,
+                        detail: None,
+                        hint: None,
+                        sqlstate,
+                    },
+                    err => ExecError::Parse(err),
+                });
+            }
+        }
+        Err(err) => {
+            return Err(match err {
+                ParseError::DetailedError {
+                    message, sqlstate, ..
+                } if sqlstate == "42883" => ExecError::DetailedError {
+                    message,
+                    detail: None,
+                    hint: None,
+                    sqlstate,
+                },
+                err => ExecError::Parse(err),
+            });
+        }
+    };
+    if support.row.prokind != 'f' {
+        return Err(ExecError::DetailedError {
+            message: format!("function {proc_name} does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
+        });
+    }
+    if support.row.proretset {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "function {} returns a set",
+                aggregate_support_signature(proc_name, &support.declared_arg_types)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+    for (actual_type, declared_type) in actual_types
+        .iter()
+        .copied()
+        .zip(support.declared_arg_types.iter().copied())
+    {
+        if !is_binary_coercible_type(actual_type, declared_type) {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "function {} requires run-time type coercion",
+                    aggregate_support_signature(proc_name, &support.declared_arg_types)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+    }
+    Ok(support)
+}
+
+fn aggregate_support_from_resolved(
+    catalog: &dyn CatalogLookup,
+    proc_name: &str,
+    resolved: ResolvedFunctionCall,
+) -> Result<AggregateSupportProc, ExecError> {
+    let row =
+        catalog
+            .proc_row_by_oid(resolved.proc_oid)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("function {proc_name} does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "42883",
+            })?;
+    Ok(AggregateSupportProc {
+        row,
+        result_type: resolved.result_type,
+        declared_arg_types: resolved.declared_arg_types,
+    })
+}
+
+fn aggregate_runtime_coercion_retry_types(actual_types: &[SqlType]) -> Option<Vec<SqlType>> {
+    let first = actual_types.first().copied()?;
+    if actual_types.len() < 2
+        || first.kind == SqlTypeKind::Internal
+        || actual_types.iter().copied().all(|ty| ty == first)
+    {
+        return None;
+    }
+    Some(vec![first; actual_types.len()])
+}
+
+fn lookup_exact_aggregate_support_proc(
+    catalog: &dyn CatalogLookup,
+    proc_name: &str,
+    arg_oids: &[u32],
+) -> Result<Option<AggregateSupportProc>, ExecError> {
+    let (schema_name, base_name) = split_proc_name(proc_name);
+    let mut rows = catalog
+        .proc_rows_by_name(base_name)
+        .into_iter()
+        .filter(|row| {
+            schema_name
+                .map(|schema_name| {
+                    catalog
+                        .namespace_row_by_oid(row.pronamespace)
+                        .is_some_and(|namespace| {
+                            namespace.nspname.eq_ignore_ascii_case(schema_name)
+                        })
+                })
+                .unwrap_or(true)
+        })
+        .filter(|row| {
+            parse_proc_argtype_oids(&row.proargtypes).is_some_and(|oids| oids == arg_oids)
+        })
+        .collect::<Vec<_>>();
+    match rows.len() {
+        0 => Ok(None),
+        1 => {
+            let row = rows.remove(0);
+            let declared_arg_types = sql_types_for_oids(catalog, arg_oids)?;
+            let result_type = catalog
+                .type_by_oid(row.prorettype)
+                .map(|row| row.sql_type)
+                .or_else(|| {
+                    (row.prorettype == RECORD_TYPE_OID).then_some(SqlType::new(SqlTypeKind::Record))
+                })
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnsupportedType(format!(
+                        "oid {}",
+                        row.prorettype
+                    )))
+                })?;
+            Ok(Some(AggregateSupportProc {
+                row,
+                result_type,
+                declared_arg_types,
+            }))
+        }
+        _ => Err(ExecError::DetailedError {
+            message: format!("function name {proc_name} is ambiguous"),
+            detail: None,
+            hint: None,
+            sqlstate: "42725",
+        }),
+    }
+}
+
+fn sql_types_for_oids(
+    catalog: &dyn CatalogLookup,
+    arg_oids: &[u32],
+) -> Result<Vec<SqlType>, ExecError> {
+    arg_oids
+        .iter()
+        .map(|oid| {
+            catalog
+                .type_by_oid(*oid)
+                .map(|row| row.sql_type)
+                .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(format!("oid {oid}"))))
+        })
+        .collect()
+}
+
+fn aggregate_support_signature(proc_name: &str, arg_types: &[SqlType]) -> String {
+    let args = arg_types
+        .iter()
+        .map(|ty| format_sql_type_name(*ty))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{proc_name}({args})")
+}
+
 fn exact_proc_signature(catalog: &dyn CatalogLookup, proc_name: &str, arg_oids: &[u32]) -> String {
     let args = arg_oids
         .iter()
@@ -572,6 +979,22 @@ fn exact_proc_signature(catalog: &dyn CatalogLookup, proc_name: &str, arg_oids: 
         .collect::<Vec<_>>()
         .join(", ");
     format!("{proc_name}({args})")
+}
+
+fn support_result_type_oid(
+    catalog: &dyn CatalogLookup,
+    support: &AggregateSupportProc,
+) -> Result<u32, ExecError> {
+    catalog
+        .type_oid_for_sql_type(support.result_type)
+        .or_else(|| (support.result_type.kind == SqlTypeKind::Record).then_some(RECORD_TYPE_OID))
+        .or_else(|| (support.row.prorettype != 0).then_some(support.row.prorettype))
+        .ok_or_else(|| {
+            ExecError::Parse(ParseError::UnsupportedType(format!(
+                "{:?}",
+                support.result_type
+            )))
+        })
 }
 
 fn proc_signature_type_name(catalog: &dyn CatalogLookup, oid: u32) -> String {
@@ -1265,7 +1688,7 @@ impl Database {
         }
 
         let options = resolve_sequence_options_spec(
-            &SequenceOptionsSpec::default(),
+            &column.options,
             sequence_type_oid_for_serial_kind(column.serial_kind),
         )
         .map_err(ExecError::Parse)?;
@@ -1771,22 +2194,7 @@ impl Database {
                 callable_arg_oids.push(type_oid);
                 callable_arg_defaults.push(arg.default_expr.clone());
                 if arg.variadic {
-                    provariadic = catalog
-                        .type_rows()
-                        .into_iter()
-                        .find(|row| row.typarray == type_oid)
-                        .map(|row| row.oid)
-                        .or_else(|| {
-                            catalog.type_by_oid(type_oid).map(|row| {
-                                if row.sql_type.is_array {
-                                    row.sql_type.type_oid
-                                } else {
-                                    row.typelem
-                                }
-                            })
-                        })
-                        .filter(|element_oid| *element_oid != 0)
-                        .unwrap_or(type_oid);
+                    provariadic = variadic_element_type_oid(&catalog, type_oid);
                 }
             }
             if matches!(arg.mode, FunctionArgMode::Out | FunctionArgMode::InOut) {
@@ -1797,7 +2205,11 @@ impl Database {
                 });
             }
             all_arg_oids.push(type_oid);
-            all_arg_modes.push(proc_arg_mode(arg.mode));
+            all_arg_modes.push(if arg.variadic {
+                b'v'
+            } else {
+                proc_arg_mode(arg.mode)
+            });
             all_arg_names.push(arg.name.clone().unwrap_or_default());
         }
 
@@ -1943,6 +2355,10 @@ impl Database {
                     prorettype = RECORD_TYPE_OID;
                 }
             }
+        }
+        if provariadic != 0 && proargmodes.is_none() {
+            proallargtypes = Some(all_arg_oids.clone());
+            proargmodes = Some(all_arg_modes.clone());
         }
 
         validate_polymorphic_range_output_types(
@@ -2110,73 +2526,120 @@ impl Database {
             configured_search_path,
         )?;
         let arg_oids = aggregate_signature_arg_oids(&catalog, &create_stmt.signature)?;
+        let transition_input_oids =
+            aggregate_transition_input_oids(&catalog, &create_stmt.signature)?;
+        let provariadic = aggregate_provariadic(&catalog, &create_stmt.signature)?;
+        let explicit_variadic = provariadic != 0;
         let stype =
             resolve_raw_type_name(&create_stmt.stype, &catalog).map_err(ExecError::Parse)?;
         let stype_oid = catalog
             .type_oid_for_sql_type(stype)
             .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(format!("{stype:?}"))))?;
-        let mut trans_arg_oids = Vec::with_capacity(arg_oids.len() + 1);
+        if create_stmt.serialfunc_name.is_some() != create_stmt.deserialfunc_name.is_some() {
+            return Err(ExecError::DetailedError {
+                message:
+                    "must specify both or neither of serialization and deserialization functions"
+                        .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
+        }
+        let mut trans_arg_oids = Vec::with_capacity(transition_input_oids.len() + 1);
         trans_arg_oids.push(stype_oid);
-        trans_arg_oids.extend(arg_oids.iter().copied());
-        let transfn_row = resolve_exact_proc_row(
-            self,
-            client_id,
-            txn_ctx,
+        trans_arg_oids.extend(transition_input_oids.iter().copied());
+        let transfn_row = lookup_aggregate_support_proc_row(
             &catalog,
             &create_stmt.sfunc_name,
             &trans_arg_oids,
-            'f',
+            explicit_variadic,
         )?;
+        if support_result_type_oid(&catalog, &transfn_row)? != stype_oid {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "return type of transition function {} is not {}",
+                    create_stmt.sfunc_name,
+                    format_sql_type_name(stype)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
+        }
+        let mut final_arg_oids = vec![stype_oid];
+        if create_stmt.finalfunc_extra {
+            final_arg_oids.extend(arg_oids.iter().copied());
+        }
         let finalfn_row = create_stmt
             .finalfunc_name
             .as_deref()
-            .map(|name| {
-                resolve_exact_proc_row(self, client_id, txn_ctx, &catalog, name, &[stype_oid], 'f')
-            })
+            .map(|name| lookup_aggregate_support_proc_row(&catalog, name, &final_arg_oids, false))
             .transpose()?;
-        if create_stmt.serialfunc_name.is_some() != create_stmt.deserialfunc_name.is_some() {
-            return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "both SERIALFUNC and DESERIALFUNC",
-                actual: aggregate_name.clone(),
-            }));
-        }
         let combinefn_row = create_stmt
             .combinefunc_name
             .as_deref()
             .map(|name| {
-                resolve_exact_proc_row(
-                    self,
-                    client_id,
-                    txn_ctx,
-                    &catalog,
-                    name,
-                    &[stype_oid, stype_oid],
-                    'f',
-                )
+                lookup_aggregate_support_proc_row(&catalog, name, &[stype_oid, stype_oid], false)
             })
             .transpose()?;
+        if let Some(combinefn_row) = combinefn_row.as_ref()
+            && support_result_type_oid(&catalog, combinefn_row)? != stype_oid
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "return type of combine function {} is not {}",
+                    create_stmt.combinefunc_name.as_deref().unwrap_or_default(),
+                    format_sql_type_name(stype)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
+        }
         let serialfn_row = create_stmt
             .serialfunc_name
             .as_deref()
-            .map(|name| {
-                resolve_exact_proc_row(self, client_id, txn_ctx, &catalog, name, &[stype_oid], 'f')
-            })
+            .map(|name| lookup_aggregate_support_proc_row(&catalog, name, &[stype_oid], false))
             .transpose()?;
+        if let Some(serialfn_row) = serialfn_row.as_ref()
+            && support_result_type_oid(&catalog, serialfn_row)? != BYTEA_TYPE_OID
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "return type of serialization function {} is not bytea",
+                    create_stmt.serialfunc_name.as_deref().unwrap_or_default()
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
+        }
         let deserialfn_row = create_stmt
             .deserialfunc_name
             .as_deref()
             .map(|name| {
-                resolve_exact_proc_row(
-                    self,
-                    client_id,
-                    txn_ctx,
+                lookup_aggregate_support_proc_row(
                     &catalog,
                     name,
                     &[BYTEA_TYPE_OID, INTERNAL_TYPE_OID],
-                    'f',
+                    false,
                 )
             })
             .transpose()?;
+        if let Some(deserialfn_row) = deserialfn_row.as_ref()
+            && support_result_type_oid(&catalog, deserialfn_row)? != stype_oid
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "return type of deserialization function {} is not {}",
+                    create_stmt.deserialfunc_name.as_deref().unwrap_or_default(),
+                    format_sql_type_name(stype)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
+        }
         let mstype_oid = create_stmt
             .mstype
             .as_ref()
@@ -2195,41 +2658,76 @@ impl Database {
             .as_deref()
             .map(|name| {
                 let mstype_oid = mstype_oid.unwrap_or(stype_oid);
-                let mut args = Vec::with_capacity(arg_oids.len() + 1);
+                let mut args = Vec::with_capacity(transition_input_oids.len() + 1);
                 args.push(mstype_oid);
-                args.extend(arg_oids.iter().copied());
-                resolve_exact_proc_row(self, client_id, txn_ctx, &catalog, name, &args, 'f')
+                args.extend(transition_input_oids.iter().copied());
+                lookup_aggregate_support_proc_row(&catalog, name, &args, explicit_variadic)
             })
             .transpose()?;
+        if let Some(msfunc_row) = msfunc_row.as_ref()
+            && support_result_type_oid(&catalog, msfunc_row)? != mstype_oid.unwrap_or(stype_oid)
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "return type of forward transition function {} is not {}",
+                    create_stmt.msfunc_name.as_deref().unwrap_or_default(),
+                    format_sql_type_name(stype)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
+        }
         let minvfunc_row = create_stmt
             .minvfunc_name
             .as_deref()
             .map(|name| {
                 let mstype_oid = mstype_oid.unwrap_or(stype_oid);
-                let mut args = Vec::with_capacity(arg_oids.len() + 1);
+                let mut args = Vec::with_capacity(transition_input_oids.len() + 1);
                 args.push(mstype_oid);
-                args.extend(arg_oids.iter().copied());
-                resolve_exact_proc_row(self, client_id, txn_ctx, &catalog, name, &args, 'f')
+                args.extend(transition_input_oids.iter().copied());
+                lookup_aggregate_support_proc_row(&catalog, name, &args, explicit_variadic)
             })
             .transpose()?;
+        if let Some(minvfunc_row) = minvfunc_row.as_ref()
+            && support_result_type_oid(&catalog, minvfunc_row)? != mstype_oid.unwrap_or(stype_oid)
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "return type of inverse transition function {} is not {}",
+                    create_stmt.minvfunc_name.as_deref().unwrap_or_default(),
+                    format_sql_type_name(stype)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
+        }
+        if let (Some(msfunc_row), Some(minvfunc_row)) = (&msfunc_row, &minvfunc_row)
+            && msfunc_row.row.proisstrict != minvfunc_row.row.proisstrict
+        {
+            return Err(ExecError::DetailedError {
+                message:
+                    "strictness of aggregate's forward and inverse transition functions must match"
+                        .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
+        }
+        let mut mfinal_arg_oids = vec![mstype_oid.unwrap_or(stype_oid)];
+        if create_stmt.mfinalfunc_extra {
+            mfinal_arg_oids.extend(arg_oids.iter().copied());
+        }
         let mfinalfn_row = create_stmt
             .mfinalfunc_name
             .as_deref()
-            .map(|name| {
-                resolve_exact_proc_row(
-                    self,
-                    client_id,
-                    txn_ctx,
-                    &catalog,
-                    name,
-                    &[mstype_oid.unwrap_or(stype_oid)],
-                    'f',
-                )
-            })
+            .map(|name| lookup_aggregate_support_proc_row(&catalog, name, &mfinal_arg_oids, false))
             .transpose()?;
         let result_type_oid = finalfn_row
             .as_ref()
-            .map(|row| row.prorettype)
+            .map(|support| support_result_type_oid(&catalog, support))
+            .transpose()?
             .unwrap_or(stype_oid);
         let proargtypes = arg_oids
             .iter()
@@ -2245,7 +2743,14 @@ impl Database {
                         .is_some_and(|row_arg_oids| row_arg_oids == arg_oids)
                     && row.prokind != 'a'
             });
-        if conflicting_non_aggregate.is_some() {
+        if let Some(conflicting_non_aggregate) = conflicting_non_aggregate {
+            if create_stmt.replace_existing {
+                return Err(cannot_change_routine_kind_error(
+                    &aggregate_name,
+                    conflicting_non_aggregate.prokind,
+                    None,
+                ));
+            }
             return Err(ExecError::Parse(ParseError::WrongObjectType {
                 name: aggregate_name.clone(),
                 expected: "aggregate",
@@ -2259,6 +2764,33 @@ impl Database {
                 actual: format!("aggregate {aggregate_name}({proargtypes}) already exists"),
             }));
         }
+        if let Some((old_proc_row, old_aggregate_row)) = existing.first()
+            && create_stmt.replace_existing
+        {
+            let new_aggkind = aggregate_kind(create_stmt);
+            if old_aggregate_row.aggkind != new_aggkind {
+                return Err(cannot_change_routine_kind_error(
+                    &aggregate_name,
+                    old_proc_row.prokind,
+                    Some(old_aggregate_row.aggkind),
+                ));
+            }
+            if old_proc_row.prorettype != result_type_oid {
+                return Err(ExecError::DetailedError {
+                    message: "cannot change return type of existing function".into(),
+                    detail: None,
+                    hint: Some(format!(
+                        "Use DROP AGGREGATE {} first.",
+                        format_aggregate_signature(
+                            &aggregate_name,
+                            &create_stmt.signature,
+                            &catalog,
+                        )?
+                    )),
+                    sqlstate: "42P13",
+                });
+            }
+        }
 
         let proc_row = PgProcRow {
             oid: 0,
@@ -2269,7 +2801,7 @@ impl Database {
             prolang: PG_LANGUAGE_INTERNAL_OID,
             procost: 1.0,
             prorows: 0.0,
-            provariadic: 0,
+            provariadic,
             prosupport: 0,
             prokind: 'a',
             prosecdef: false,
@@ -2282,9 +2814,12 @@ impl Database {
             pronargdefaults: 0,
             prorettype: result_type_oid,
             proargtypes,
-            proallargtypes: None,
-            proargmodes: None,
-            proargnames: None,
+            proallargtypes: (!matches!(create_stmt.signature, AggregateSignatureKind::Star)
+                && (aggregate_arg_modes(&create_stmt.signature).is_some()
+                    || aggregate_arg_names(&create_stmt.signature).is_some()))
+            .then_some(arg_oids.clone()),
+            proargmodes: aggregate_arg_modes(&create_stmt.signature),
+            proargnames: aggregate_arg_names(&create_stmt.signature),
             proargdefaults: None,
             prosrc: aggregate_name.clone(),
             probin: None,
@@ -2292,16 +2827,37 @@ impl Database {
         };
         let aggregate_row = PgAggregateRow {
             aggfnoid: 0,
-            aggkind: 'n',
-            aggnumdirectargs: 0,
-            aggtransfn: transfn_row.oid,
-            aggfinalfn: finalfn_row.as_ref().map(|row| row.oid).unwrap_or(0),
-            aggcombinefn: combinefn_row.as_ref().map(|row| row.oid).unwrap_or(0),
-            aggserialfn: serialfn_row.as_ref().map(|row| row.oid).unwrap_or(0),
-            aggdeserialfn: deserialfn_row.as_ref().map(|row| row.oid).unwrap_or(0),
-            aggmtransfn: msfunc_row.as_ref().map(|row| row.oid).unwrap_or(0),
-            aggminvtransfn: minvfunc_row.as_ref().map(|row| row.oid).unwrap_or(0),
-            aggmfinalfn: mfinalfn_row.as_ref().map(|row| row.oid).unwrap_or(0),
+            aggkind: aggregate_kind(create_stmt),
+            aggnumdirectargs: aggregate_direct_arg_count(&create_stmt.signature),
+            aggtransfn: transfn_row.row.oid,
+            aggfinalfn: finalfn_row
+                .as_ref()
+                .map(|support| support.row.oid)
+                .unwrap_or(0),
+            aggcombinefn: combinefn_row
+                .as_ref()
+                .map(|support| support.row.oid)
+                .unwrap_or(0),
+            aggserialfn: serialfn_row
+                .as_ref()
+                .map(|support| support.row.oid)
+                .unwrap_or(0),
+            aggdeserialfn: deserialfn_row
+                .as_ref()
+                .map(|support| support.row.oid)
+                .unwrap_or(0),
+            aggmtransfn: msfunc_row
+                .as_ref()
+                .map(|support| support.row.oid)
+                .unwrap_or(0),
+            aggminvtransfn: minvfunc_row
+                .as_ref()
+                .map(|support| support.row.oid)
+                .unwrap_or(0),
+            aggmfinalfn: mfinalfn_row
+                .as_ref()
+                .map(|support| support.row.oid)
+                .unwrap_or(0),
             aggfinalextra: create_stmt.finalfunc_extra,
             aggmfinalextra: create_stmt.mfinalfunc_extra,
             aggfinalmodify: create_stmt.finalfunc_modify,
@@ -2342,6 +2898,119 @@ impl Database {
             };
             effect
         };
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_alter_aggregate_rename_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        rename_stmt: &AlterAggregateRenameStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_alter_aggregate_rename_stmt_in_transaction_with_search_path(
+            client_id,
+            rename_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_alter_aggregate_rename_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        rename_stmt: &AlterAggregateRenameStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let txn_ctx = Some((xid, cid));
+        let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+        let arg_oids = aggregate_signature_arg_oids(&catalog, &rename_stmt.signature)?;
+        let schema_oid = match &rename_stmt.schema_name {
+            Some(schema_name) => Some(
+                self.visible_namespace_oid_by_name(client_id, txn_ctx, schema_name)
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("schema \"{schema_name}\" does not exist"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "3F000",
+                    })?,
+            ),
+            None => None,
+        };
+        let matches = resolve_aggregate_proc_rows(
+            &catalog,
+            &rename_stmt.aggregate_name,
+            schema_oid,
+            &arg_oids,
+        );
+        let (proc_row, aggregate_row) = match matches.as_slice() {
+            [(proc_row, aggregate_row)] => (proc_row.clone(), aggregate_row.clone()),
+            [] => {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "aggregate {} does not exist",
+                        format_aggregate_signature(
+                            &rename_stmt.aggregate_name,
+                            &rename_stmt.signature,
+                            &catalog
+                        )?
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42883",
+                });
+            }
+            _ => {
+                return Err(ExecError::DetailedError {
+                    message: format!("aggregate name {} is ambiguous", rename_stmt.aggregate_name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42725",
+                });
+            }
+        };
+        if !resolve_aggregate_proc_rows(&catalog, &rename_stmt.new_name, schema_oid, &arg_oids)
+            .is_empty()
+        {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "unused aggregate name",
+                actual: format!("aggregate {} already exists", rename_stmt.new_name),
+            }));
+        }
+        let mut new_proc_row = proc_row.clone();
+        new_proc_row.proname = rename_stmt.new_name.clone();
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let (_oid, effect) = self
+            .catalog
+            .write()
+            .replace_aggregate_mvcc(
+                &proc_row,
+                &aggregate_row,
+                new_proc_row,
+                aggregate_row.clone(),
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))

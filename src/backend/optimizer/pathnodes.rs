@@ -1063,6 +1063,7 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
         Expr::SubLink(sublink) => match sublink.sublink_type {
             SubLinkType::ExistsSubLink
             | SubLinkType::AnySubLink(_)
+            | SubLinkType::RowCompareSubLink(_)
             | SubLinkType::AllSubLink(_) => SqlType::new(SqlTypeKind::Bool),
             SubLinkType::ArraySubLink => SqlType::array_of(
                 sublink
@@ -1082,6 +1083,7 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
         Expr::SubPlan(subplan) => match subplan.sublink_type {
             SubLinkType::ExistsSubLink
             | SubLinkType::AnySubLink(_)
+            | SubLinkType::RowCompareSubLink(_)
             | SubLinkType::AllSubLink(_) => SqlType::new(SqlTypeKind::Bool),
             SubLinkType::ArraySubLink => SqlType::array_of(
                 subplan

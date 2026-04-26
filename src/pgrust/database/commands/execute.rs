@@ -541,6 +541,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableAlterColumnIdentity(ref alter_stmt) => self
+                .execute_alter_table_alter_column_identity_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableAddConstraint(ref alter_stmt) => self
                 .execute_alter_table_add_constraint_stmt_with_search_path(
                     client_id,
@@ -634,7 +640,8 @@ impl Database {
             Statement::Show(_)
             | Statement::Set(_)
             | Statement::Reset(_)
-            | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+            | Statement::AlterTableSet(_)
+            | Statement::AlterIndexSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CreateRole(ref create_stmt) => {
                 self.execute_create_role_stmt(client_id, create_stmt, None)
             }
@@ -725,6 +732,12 @@ impl Database {
                 .execute_create_aggregate_stmt_with_search_path(
                     client_id,
                     create_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterAggregateRename(ref rename_stmt) => self
+                .execute_alter_aggregate_rename_stmt_with_search_path(
+                    client_id,
+                    rename_stmt,
                     configured_search_path,
                 ),
             Statement::CreateCast(ref create_stmt) => self

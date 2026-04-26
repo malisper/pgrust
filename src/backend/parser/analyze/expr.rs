@@ -42,7 +42,8 @@ use self::ops::{
 };
 use self::subquery::{
     bind_array_subquery_expr, bind_exists_subquery_expr, bind_in_subquery_expr,
-    bind_quantified_array_expr, bind_quantified_subquery_expr, bind_scalar_subquery_expr,
+    bind_quantified_array_expr, bind_quantified_subquery_expr, bind_row_compare_subquery_expr,
+    bind_scalar_subquery_expr,
 };
 pub(crate) use self::targets::{BoundSelectTargets, bind_select_targets};
 use self::targets::{bind_set_returning_expr_from_parts, root_call_returns_set};
@@ -2261,6 +2262,19 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     grouped_outer,
                     ctes,
                 )?
+            } else if let (SqlExpr::Row(_), SqlExpr::ScalarSubquery(subquery)) =
+                (left.as_ref(), right.as_ref())
+            {
+                bind_row_compare_subquery_expr(
+                    left,
+                    SubqueryComparisonOp::Eq,
+                    subquery,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
             } else if let Some(result) = bind_maybe_multirange_comparison(
                 "=",
                 left,
@@ -2317,6 +2331,19 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     OpExprKind::NotEq,
                     left_items,
                     right_items,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else if let (SqlExpr::Row(_), SqlExpr::ScalarSubquery(subquery)) =
+                (left.as_ref(), right.as_ref())
+            {
+                bind_row_compare_subquery_expr(
+                    left,
+                    SubqueryComparisonOp::NotEq,
+                    subquery,
                     scope,
                     catalog,
                     outer_scopes,
@@ -4406,7 +4433,7 @@ fn fallback_explicit_cast_expr(
     }
 }
 
-fn catalog_backed_explicit_cast_allowed(
+pub(super) fn catalog_backed_explicit_cast_allowed(
     source_type: SqlType,
     target_type: SqlType,
     catalog: &dyn CatalogLookup,

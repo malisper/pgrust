@@ -2012,6 +2012,18 @@ impl Database {
         if relation.desc.columns[column_index].storage.nullable {
             return Ok(StatementResult::AffectedRows(0));
         }
+        if relation.desc.columns[column_index].identity.is_some() {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "column \"{}\" of relation \"{}\" is an identity column",
+                    relation.desc.columns[column_index].name, alter_stmt.table_name
+                )
+                .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "55000",
+            });
+        }
         let attnum = (column_index + 1) as i16;
         let existing_constraints = catalog.constraint_rows_for_relation(relation.relation_oid);
         if let Some(primary) = primary_constraint_for_attnum(&existing_constraints, attnum) {
