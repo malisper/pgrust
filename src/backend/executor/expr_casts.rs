@@ -2114,6 +2114,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Cstring
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
@@ -2182,7 +2183,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Err(unsupported_anyarray_input()),
             SqlType {
-                kind: SqlTypeKind::Record | SqlTypeKind::Composite,
+                kind: SqlTypeKind::Record | SqlTypeKind::Composite | SqlTypeKind::Shell,
                 ..
             } => Err(unsupported_record_input()),
             SqlType {
@@ -2258,6 +2259,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Cstring
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
@@ -2326,7 +2328,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Err(unsupported_anyarray_input()),
             SqlType {
-                kind: SqlTypeKind::Record | SqlTypeKind::Composite,
+                kind: SqlTypeKind::Record | SqlTypeKind::Composite | SqlTypeKind::Shell,
                 ..
             } => Err(unsupported_record_input()),
             SqlType {
@@ -2359,6 +2361,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Cstring
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
@@ -2450,7 +2453,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Err(unsupported_anyarray_input()),
             SqlType {
-                kind: SqlTypeKind::Record | SqlTypeKind::Composite,
+                kind: SqlTypeKind::Record | SqlTypeKind::Composite | SqlTypeKind::Shell,
                 ..
             } => Err(unsupported_record_input()),
             SqlType {
@@ -2691,6 +2694,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             } else {
                 match ty.kind {
                     SqlTypeKind::Text
+                    | SqlTypeKind::Cstring
                     | SqlTypeKind::Name
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
@@ -2717,6 +2721,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             } else {
                 match ty.kind {
                     SqlTypeKind::Text
+                    | SqlTypeKind::Cstring
                     | SqlTypeKind::Name
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
@@ -3005,6 +3010,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Cstring
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
@@ -3073,7 +3079,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Err(unsupported_anyarray_input()),
             SqlType {
-                kind: SqlTypeKind::Record | SqlTypeKind::Composite,
+                kind: SqlTypeKind::Record | SqlTypeKind::Composite | SqlTypeKind::Shell,
                 ..
             } => Err(unsupported_record_input()),
             SqlType {
@@ -3122,6 +3128,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Cstring
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
@@ -3225,7 +3232,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Err(unsupported_anyarray_input()),
             SqlType {
-                kind: SqlTypeKind::Record | SqlTypeKind::Composite,
+                kind: SqlTypeKind::Record | SqlTypeKind::Composite | SqlTypeKind::Shell,
                 ..
             } => Err(unsupported_record_input()),
             SqlType {
@@ -3511,6 +3518,11 @@ pub(crate) fn cast_text_value_with_config(
         | SqlTypeKind::AnyCompatibleMultirange
         | SqlTypeKind::AnyEnum => Ok(Value::Text(CompactString::new(text))),
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
+        SqlTypeKind::Shell => Err(ExecError::TypeMismatch {
+            op: "::shell",
+            left: Value::Text(CompactString::new(text)),
+            right: Value::Null,
+        }),
         SqlTypeKind::Trigger => Err(unsupported_trigger_input()),
         SqlTypeKind::Internal => Err(ExecError::TypeMismatch {
             op: "::internal",
@@ -3523,6 +3535,7 @@ pub(crate) fn cast_text_value_with_config(
             right: Value::Null,
         }),
         SqlTypeKind::Text
+        | SqlTypeKind::Cstring
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
         | SqlTypeKind::PgNodeTree => Ok(Value::Text(CompactString::new(text))),
@@ -3672,6 +3685,11 @@ pub(super) fn cast_numeric_value(
         | SqlTypeKind::AnyCompatibleMultirange
         | SqlTypeKind::AnyEnum => Ok(Value::Text(CompactString::from_owned(value.render()))),
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
+        SqlTypeKind::Shell => Err(ExecError::TypeMismatch {
+            op: "::shell",
+            left: Value::Numeric(value.clone()),
+            right: Value::Null,
+        }),
         SqlTypeKind::Trigger => Err(unsupported_trigger_input()),
         SqlTypeKind::Internal => Err(ExecError::TypeMismatch {
             op: "::internal",
@@ -3692,6 +3710,7 @@ pub(super) fn cast_numeric_value(
         SqlTypeKind::Money => money_parse_text(&value.render()).map(Value::Money),
         SqlTypeKind::Text
         | SqlTypeKind::Enum
+        | SqlTypeKind::Cstring
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
         | SqlTypeKind::Point
