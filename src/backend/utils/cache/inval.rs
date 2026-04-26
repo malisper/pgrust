@@ -56,6 +56,7 @@ pub fn apply_backend_cache_invalidation(
         return;
     }
 
+    state.syscache.invalidate(invalidation);
     state.catcache = None;
     state.relcache = None;
     state.cache_ctx = None;

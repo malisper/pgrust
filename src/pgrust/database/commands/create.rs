@@ -1,5 +1,5 @@
 use super::super::*;
-use super::privilege::{acl_grants_privilege, effective_acl_grantee_names, type_owner_default_acl};
+use super::privilege::{acl_grants_privilege, type_owner_default_acl};
 use crate::backend::commands::partition::validate_new_partition_bound;
 use crate::backend::parser::analyze::{
     ResolvedFunctionCall, is_binary_coercible_type, resolve_function_call,
@@ -12,6 +12,9 @@ use crate::backend::parser::{
     RelOption, SqlType, SqlTypeKind, Statement, parse_statement, pg_partitioned_table_row,
     resolve_raw_type_name, serialize_partition_bound,
 };
+use crate::backend::utils::cache::syscache::{
+    SysCacheId, SysCacheTuple, search_sys_cache_list1_db, search_sys_cache1_db,
+};
 use crate::backend::utils::misc::notices::{
     push_backend_notice, push_notice, push_notice_with_detail,
 };
@@ -19,8 +22,9 @@ use crate::include::catalog::{
     ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
     BOOTSTRAP_SUPERUSER_OID, BYTEA_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
     PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID,
-    PgAggregateRow, PgProcRow, RECORD_TYPE_OID, VOID_TYPE_OID,
+    PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgProcRow, RECORD_TYPE_OID, VOID_TYPE_OID,
 };
+use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::include::nodes::primnodes::{QueryColumn, RelationDesc};
 use crate::pgrust::database::ddl::format_sql_type_name;
@@ -33,6 +37,11 @@ use crate::pgrust::database::{
 pub(super) struct CreatedOwnedSequence {
     pub(super) column_index: usize,
     pub(super) sequence_oid: u32,
+}
+
+struct EffectiveTypeAclGrantees {
+    names: std::collections::BTreeSet<String>,
+    is_superuser: bool,
 }
 
 fn validate_sql_procedure_body(
@@ -3102,7 +3111,7 @@ impl Database {
             )?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let lowered = lower_create_table_with_catalog(create_stmt, &catalog, persistence)?;
-        self.ensure_create_table_type_usage(client_id, &lowered.relation_desc)?;
+        self.ensure_create_table_type_usage(client_id, Some((xid, cid)), &lowered.relation_desc)?;
         if create_stmt.if_not_exists
             && relation_exists_in_namespace(&catalog, &table_name, namespace_oid)
         {
@@ -3510,36 +3519,48 @@ impl Database {
     fn ensure_create_table_type_usage(
         &self,
         client_id: ClientId,
+        txn_ctx: Option<(TransactionId, CommandId)>,
         desc: &RelationDesc,
     ) -> Result<(), ExecError> {
-        let auth = self.auth_state(client_id);
-        let auth_catalog = self
-            .auth_catalog(client_id, None)
-            .map_err(map_catalog_error)?;
-        let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
-        let range_types = self.range_types.read();
-        for column in &desc.columns {
-            let ty = column.sql_type.element_type();
-            let Some(entry) = range_types
-                .values()
-                .find(|entry| ty.type_oid == entry.oid || ty.type_oid == entry.multirange_oid)
-            else {
-                continue;
-            };
-            let owner_name = auth_catalog
-                .role_by_oid(entry.owner_oid)
-                .map(|entry| entry.rolname.clone())
+        let used_range_types = {
+            let range_types = self.range_types.read();
+            desc.columns
+                .iter()
+                .filter_map(|column| {
+                    let ty = column.sql_type.element_type();
+                    range_types
+                        .values()
+                        .find(|entry| {
+                            ty.type_oid == entry.oid || ty.type_oid == entry.multirange_oid
+                        })
+                        .map(|entry| {
+                            let type_name = if ty.type_oid == entry.multirange_oid {
+                                entry.multirange_name.clone()
+                            } else {
+                                entry.name.clone()
+                            };
+                            (entry.clone(), type_name)
+                        })
+                })
+                .collect::<Vec<_>>()
+        };
+        if used_range_types.is_empty() {
+            return Ok(());
+        }
+
+        let effective_grantees = self.effective_type_acl_grantees(client_id, txn_ctx)?;
+        for (entry, type_name) in used_range_types {
+            let owner_name = self
+                .syscache_role_by_oid(client_id, txn_ctx, entry.owner_oid)?
+                .map(|role| role.rolname)
                 .unwrap_or_else(|| entry.owner_oid.to_string());
             let acl = entry
                 .typacl
                 .clone()
                 .unwrap_or_else(|| type_owner_default_acl(&owner_name));
-            if !acl_grants_privilege(&acl, &effective_names, 'U') {
-                let type_name = if ty.type_oid == entry.multirange_oid {
-                    &entry.multirange_name
-                } else {
-                    &entry.name
-                };
+            if !effective_grantees.is_superuser
+                && !acl_grants_privilege(&acl, &effective_grantees.names, 'U')
+            {
                 return Err(ExecError::DetailedError {
                     message: format!("permission denied for type {type_name}"),
                     detail: None,
@@ -3549,6 +3570,87 @@ impl Database {
             }
         }
         Ok(())
+    }
+
+    fn effective_type_acl_grantees(
+        &self,
+        client_id: ClientId,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+    ) -> Result<EffectiveTypeAclGrantees, ExecError> {
+        let auth = self.auth_state(client_id);
+        let mut names = std::collections::BTreeSet::from([String::new()]);
+        let mut pending = std::collections::VecDeque::from([auth.current_user_oid()]);
+        let mut visited = std::collections::BTreeSet::new();
+
+        while let Some(member_oid) = pending.pop_front() {
+            if !visited.insert(member_oid) {
+                continue;
+            }
+            if let Some(role) = self.syscache_role_by_oid(client_id, txn_ctx, member_oid)? {
+                if member_oid == auth.current_user_oid() && role.rolsuper {
+                    return Ok(EffectiveTypeAclGrantees {
+                        names,
+                        is_superuser: true,
+                    });
+                }
+                names.insert(role.rolname);
+            }
+            for membership in
+                self.syscache_auth_memberships_for_member(client_id, txn_ctx, member_oid)?
+            {
+                if membership.inherit_option {
+                    pending.push_back(membership.roleid);
+                }
+            }
+        }
+
+        Ok(EffectiveTypeAclGrantees {
+            names,
+            is_superuser: false,
+        })
+    }
+
+    fn syscache_role_by_oid(
+        &self,
+        client_id: ClientId,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+        role_oid: u32,
+    ) -> Result<Option<PgAuthIdRow>, ExecError> {
+        Ok(search_sys_cache1_db(
+            self,
+            client_id,
+            txn_ctx,
+            SysCacheId::AuthIdOid,
+            Value::Int64(i64::from(role_oid)),
+        )
+        .map_err(map_catalog_error)?
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::AuthId(row) => Some(row),
+            _ => None,
+        }))
+    }
+
+    fn syscache_auth_memberships_for_member(
+        &self,
+        client_id: ClientId,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+        member_oid: u32,
+    ) -> Result<Vec<PgAuthMembersRow>, ExecError> {
+        Ok(search_sys_cache_list1_db(
+            self,
+            client_id,
+            txn_ctx,
+            SysCacheId::AuthMembersMemberRole,
+            Value::Int64(i64::from(member_oid)),
+        )
+        .map_err(map_catalog_error)?
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::AuthMembers(row) => Some(row),
+            _ => None,
+        })
+        .collect())
     }
 
     pub(crate) fn execute_create_view_stmt_in_transaction_with_search_path(
