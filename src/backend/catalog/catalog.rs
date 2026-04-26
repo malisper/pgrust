@@ -122,6 +122,8 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Void
         | SqlTypeKind::Trigger
         | SqlTypeKind::FdwHandler
+        | SqlTypeKind::Shell
+        | SqlTypeKind::Cstring
         | SqlTypeKind::AnyElement
         | SqlTypeKind::AnyEnum
         | SqlTypeKind::AnyRange
@@ -242,6 +244,8 @@ pub(crate) fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Void => ScalarType::Text,
         SqlTypeKind::Trigger => ScalarType::Text,
         SqlTypeKind::FdwHandler => ScalarType::Text,
+        SqlTypeKind::Shell => ScalarType::Text,
+        SqlTypeKind::Cstring => ScalarType::Text,
         SqlTypeKind::Int2 => ScalarType::Int16,
         SqlTypeKind::Int2Vector => ScalarType::Text,
         SqlTypeKind::Int4 => ScalarType::Int32,

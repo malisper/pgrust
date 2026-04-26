@@ -14,7 +14,8 @@ use crate::include::nodes::parsenodes::{
     AlterColumnExpressionAction, AlterTableTriggerMode, AlterTableTriggerStateStatement,
     AlterTableTriggerTarget, AlterTriggerRenameStatement, ColumnConstraint, ColumnGeneratedKind,
     CommentOnAggregateStatement, CommentOnFunctionStatement, CommentOnOperatorStatement,
-    CompositeTypeAttributeDef, CreateAggregateStatement, CreateCompositeTypeStatement,
+    CompositeTypeAttributeDef, CreateAggregateStatement, CreateBaseTypeOption,
+    CreateBaseTypeStatement, CreateCompositeTypeStatement, CreateShellTypeStatement,
     CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement, DropTriggerStatement,
     DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef,
     InsertSource, InsertStatement, JoinTreeNode, PartitionStrategy, PublicationObjectSpec,
@@ -5436,6 +5437,10 @@ fn parse_standalone_type_names() {
         SqlType::new(SqlTypeKind::Char)
     );
     assert_eq!(
+        parse_type_name("cstring").unwrap(),
+        SqlType::new(SqlTypeKind::Cstring)
+    );
+    assert_eq!(
         parse_type_name("char").unwrap(),
         SqlType::with_char_len(SqlTypeKind::Char, 1)
     );
@@ -10520,17 +10525,54 @@ fn parse_create_and_drop_type_statements() {
 }
 
 #[test]
-fn parse_create_type_supports_enum_and_rejects_other_unsupported_forms() {
-    assert!(matches!(
-        parse_statement("create type myint"),
-        Err(ParseError::FeatureNotSupported(feature))
-            if feature == "shell types are not supported in CREATE TYPE"
-    ));
-    assert!(matches!(
-        parse_statement("create type myint (input = myintin, output = myintout, like = int4)"),
-        Err(ParseError::FeatureNotSupported(feature))
-            if feature == "base type definitions are not supported in CREATE TYPE"
-    ));
+fn parse_create_type_supports_base_enum_and_range_forms() {
+    let Statement::CreateType(CreateTypeStatement::Shell(CreateShellTypeStatement {
+        schema_name,
+        type_name,
+    })) = parse_statement("create type myint").unwrap()
+    else {
+        panic!("expected shell create type");
+    };
+    assert_eq!(schema_name, None);
+    assert_eq!(type_name, "myint");
+    let Statement::CreateType(CreateTypeStatement::Base(CreateBaseTypeStatement {
+        schema_name,
+        type_name,
+        options,
+    })) = parse_statement(
+        "create type myint (input = myintin, output = myintout, internallength = 4, passedbyvalue, default = 42)",
+    )
+    .unwrap()
+    else {
+        panic!("expected base create type");
+    };
+    assert_eq!(schema_name, None);
+    assert_eq!(type_name, "myint");
+    assert_eq!(
+        options,
+        vec![
+            CreateBaseTypeOption {
+                name: "input".into(),
+                value: Some("myintin".into()),
+            },
+            CreateBaseTypeOption {
+                name: "output".into(),
+                value: Some("myintout".into()),
+            },
+            CreateBaseTypeOption {
+                name: "internallength".into(),
+                value: Some("4".into()),
+            },
+            CreateBaseTypeOption {
+                name: "passedbyvalue".into(),
+                value: None,
+            },
+            CreateBaseTypeOption {
+                name: "default".into(),
+                value: Some("42".into()),
+            },
+        ]
+    );
     match parse_statement("create type mood as enum ('sad', 'ok')").unwrap() {
         Statement::CreateType(CreateTypeStatement::Enum(stmt)) => {
             assert_eq!(stmt.schema_name, None);
