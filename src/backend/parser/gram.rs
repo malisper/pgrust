@@ -9622,6 +9622,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_role_stmt => Ok(Statement::AlterRole(build_alter_role(inner)?)),
         Rule::alter_group_stmt => build_alter_group(inner),
         Rule::create_database_stmt => Ok(Statement::CreateDatabase(build_create_database(inner)?)),
+        Rule::alter_database_stmt => Ok(Statement::AlterDatabase(build_alter_database(inner)?)),
         Rule::create_index_stmt => Ok(Statement::CreateIndex(build_create_index(inner)?)),
         Rule::alter_table_add_column_stmt => Ok(Statement::AlterTableAddColumn(
             build_alter_table_add_column(inner)?,
@@ -10339,24 +10340,272 @@ fn build_alter_role_rename(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
 
 fn build_create_database(pair: Pair<'_, Rule>) -> Result<CreateDatabaseStatement, ParseError> {
     let mut database_name = None;
-    let mut has_options = false;
+    let mut options = CreateDatabaseOptions::default();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::identifier if database_name.is_none() => {
                 database_name = Some(build_identifier(part))
             }
-            Rule::create_database_options => has_options = true,
+            Rule::create_database_options => build_create_database_options(part, &mut options)?,
             _ => {}
         }
     }
-    if has_options {
-        return Err(ParseError::FeatureNotSupported(
-            "CREATE DATABASE options".into(),
-        ));
-    }
     Ok(CreateDatabaseStatement {
         database_name: database_name.ok_or(ParseError::UnexpectedEof)?,
+        options,
     })
+}
+
+fn build_create_database_options(
+    pair: Pair<'_, Rule>,
+    options: &mut CreateDatabaseOptions,
+) -> Result<(), ParseError> {
+    for option in pair.into_inner() {
+        build_create_database_option(option, options)?;
+    }
+    Ok(())
+}
+
+fn build_create_database_option(
+    pair: Pair<'_, Rule>,
+    options: &mut CreateDatabaseOptions,
+) -> Result<(), ParseError> {
+    let option = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match option.as_rule() {
+        Rule::create_database_connection_limit_option => {
+            let value = option
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::signed_integer)
+                .ok_or(ParseError::UnexpectedEof)?;
+            set_create_database_option(
+                &mut options.connection_limit,
+                parse_i32(value)?,
+                "CONNECTION LIMIT",
+            )
+        }
+        Rule::create_database_simple_option => {
+            let mut inner = option.into_inner();
+            let name = inner
+                .next()
+                .map(build_identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            let value = inner.next().ok_or(ParseError::UnexpectedEof)?;
+            let option_name = name.to_ascii_lowercase();
+            match option_name.as_str() {
+                "template" => set_create_database_option(
+                    &mut options.template,
+                    build_create_database_option_value(value)?,
+                    "TEMPLATE",
+                ),
+                "encoding" => set_create_database_option(
+                    &mut options.encoding,
+                    build_create_database_option_value(value)?,
+                    "ENCODING",
+                ),
+                "lc_collate" => set_create_database_option(
+                    &mut options.lc_collate,
+                    build_create_database_option_value(value)?,
+                    "LC_COLLATE",
+                ),
+                "lc_ctype" => set_create_database_option(
+                    &mut options.lc_ctype,
+                    build_create_database_option_value(value)?,
+                    "LC_CTYPE",
+                ),
+                "owner" => set_create_database_option(
+                    &mut options.owner,
+                    build_create_database_option_value(value)?,
+                    "OWNER",
+                ),
+                "tablespace" => set_create_database_option(
+                    &mut options.tablespace,
+                    build_create_database_option_value(value)?,
+                    "TABLESPACE",
+                ),
+                "connection_limit" => set_create_database_option(
+                    &mut options.connection_limit,
+                    parse_create_database_i32_value(value, "CONNECTION_LIMIT")?,
+                    "CONNECTION_LIMIT",
+                ),
+                "allow_connections" => set_create_database_option(
+                    &mut options.allow_connections,
+                    parse_create_database_bool_value(value, "ALLOW_CONNECTIONS")?,
+                    "ALLOW_CONNECTIONS",
+                ),
+                "is_template" => set_create_database_option(
+                    &mut options.is_template,
+                    parse_create_database_bool_value(value, "IS_TEMPLATE")?,
+                    "IS_TEMPLATE",
+                ),
+                _ => Err(ParseError::UnexpectedToken {
+                    expected: "recognized CREATE DATABASE option",
+                    actual: name,
+                }),
+            }
+        }
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "CREATE DATABASE option",
+            actual: option.as_str().into(),
+        }),
+    }
+}
+
+fn set_create_database_option<T>(
+    slot: &mut Option<T>,
+    value: T,
+    name: &'static str,
+) -> Result<(), ParseError> {
+    if slot.is_some() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CREATE DATABASE option specified once",
+            actual: name.into(),
+        });
+    }
+    *slot = Some(value);
+    Ok(())
+}
+
+fn build_create_database_option_value(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    let inner = pair.clone().into_inner().next().unwrap_or(pair);
+    match inner.as_rule() {
+        Rule::identifier => Ok(build_identifier(inner)),
+        Rule::quoted_string_literal
+        | Rule::string_literal
+        | Rule::unicode_string_literal
+        | Rule::escape_string_literal
+        | Rule::dollar_string_literal => decode_string_literal_pair(inner),
+        Rule::kw_true => Ok("true".into()),
+        Rule::kw_false => Ok("false".into()),
+        Rule::kw_on_value => Ok("on".into()),
+        Rule::kw_off => Ok("off".into()),
+        Rule::kw_default => Ok("default".into()),
+        Rule::signed_integer | Rule::integer => Ok(inner.as_str().into()),
+        _ => Ok(inner.as_str().into()),
+    }
+}
+
+fn parse_create_database_i32_value(
+    pair: Pair<'_, Rule>,
+    name: &'static str,
+) -> Result<i32, ParseError> {
+    let inner = pair.clone().into_inner().next().unwrap_or(pair);
+    match inner.as_rule() {
+        Rule::signed_integer | Rule::integer => parse_i32(inner),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "integer CREATE DATABASE option value",
+            actual: name.into(),
+        }),
+    }
+}
+
+fn parse_create_database_bool_value(
+    pair: Pair<'_, Rule>,
+    name: &'static str,
+) -> Result<bool, ParseError> {
+    let value = build_create_database_option_value(pair)?.to_ascii_lowercase();
+    match value.as_str() {
+        "true" | "on" | "1" => Ok(true),
+        "false" | "off" | "0" => Ok(false),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "boolean CREATE DATABASE option value",
+            actual: name.into(),
+        }),
+    }
+}
+
+fn build_alter_database(pair: Pair<'_, Rule>) -> Result<AlterDatabaseStatement, ParseError> {
+    let mut database_name = None;
+    let mut action = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if database_name.is_none() => {
+                database_name = Some(build_identifier(part));
+            }
+            Rule::alter_database_action => {
+                let inner = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+                action = Some(build_alter_database_action(inner)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(AlterDatabaseStatement {
+        database_name: database_name.ok_or(ParseError::UnexpectedEof)?,
+        action: action.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_database_action(pair: Pair<'_, Rule>) -> Result<AlterDatabaseAction, ParseError> {
+    match pair.as_rule() {
+        Rule::alter_database_rename_action => {
+            let new_name = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(AlterDatabaseAction::Rename { new_name })
+        }
+        Rule::alter_database_set_tablespace_action => {
+            let identifiers = pair
+                .into_inner()
+                .filter(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier)
+                .collect::<Vec<_>>();
+            match identifiers.as_slice() {
+                [keyword, tablespace_name] if keyword.eq_ignore_ascii_case("tablespace") => {
+                    Ok(AlterDatabaseAction::SetTablespace {
+                        tablespace_name: tablespace_name.clone(),
+                    })
+                }
+                _ => Err(ParseError::UnexpectedToken {
+                    expected: "ALTER DATABASE SET TABLESPACE",
+                    actual: identifiers.join(" "),
+                }),
+            }
+        }
+        Rule::alter_database_reset_tablespace_action => {
+            let keyword = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            if !keyword.eq_ignore_ascii_case("tablespace") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "ALTER DATABASE RESET TABLESPACE",
+                    actual: keyword,
+                });
+            }
+            Ok(AlterDatabaseAction::ResetTablespace)
+        }
+        Rule::alter_database_connection_limit_action => {
+            let mut inner = pair.into_inner();
+            let keyword = inner
+                .next()
+                .map(build_identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            if !keyword.eq_ignore_ascii_case("connection_limit") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "ALTER DATABASE CONNECTION_LIMIT",
+                    actual: keyword,
+                });
+            }
+            let limit = inner.next().ok_or(ParseError::UnexpectedEof)?;
+            Ok(AlterDatabaseAction::ConnectionLimit {
+                limit: parse_i32(limit)?,
+            })
+        }
+        Rule::alter_database_owner_action => {
+            let new_owner = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(AlterDatabaseAction::OwnerTo { new_owner })
+        }
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "ALTER DATABASE action",
+            actual: pair.as_str().into(),
+        }),
+    }
 }
 
 fn build_role_option(pair: Pair<'_, Rule>) -> Result<RoleOption, ParseError> {

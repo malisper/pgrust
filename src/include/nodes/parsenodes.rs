@@ -295,6 +295,7 @@ pub enum Statement {
     AlterType(AlterTypeStatement),
     AlterTypeOwner(AlterTypeOwnerStatement),
     CreateDatabase(CreateDatabaseStatement),
+    AlterDatabase(AlterDatabaseStatement),
     CreateSchema(CreateSchemaStatement),
     CreateTablespace(CreateTablespaceStatement),
     CreateTable(CreateTableStatement),
@@ -1580,6 +1581,35 @@ pub enum RawPartitionRangeDatum {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateDatabaseStatement {
     pub database_name: String,
+    pub options: CreateDatabaseOptions,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CreateDatabaseOptions {
+    pub template: Option<String>,
+    pub encoding: Option<String>,
+    pub lc_collate: Option<String>,
+    pub lc_ctype: Option<String>,
+    pub owner: Option<String>,
+    pub tablespace: Option<String>,
+    pub connection_limit: Option<i32>,
+    pub allow_connections: Option<bool>,
+    pub is_template: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterDatabaseStatement {
+    pub database_name: String,
+    pub action: AlterDatabaseAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterDatabaseAction {
+    Rename { new_name: String },
+    SetTablespace { tablespace_name: String },
+    ResetTablespace,
+    ConnectionLimit { limit: i32 },
+    OwnerTo { new_owner: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

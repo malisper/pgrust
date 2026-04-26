@@ -565,6 +565,7 @@ fn run_statement(
         | Statement::DropForeignDataWrapper(_)
         | Statement::CreateRole(_)
         | Statement::CreateDatabase(_)
+        | Statement::AlterDatabase(_)
         | Statement::AlterRole(_)
         | Statement::DropRole(_)
         | Statement::DropDatabase(_)

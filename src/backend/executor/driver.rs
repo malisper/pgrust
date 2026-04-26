@@ -401,6 +401,10 @@ fn execute_statement_with_source(
             expected: "CREATE DATABASE handled by database/session layer",
             actual: "CREATE DATABASE".into(),
         })),
+        Statement::AlterDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER DATABASE handled by database/session layer",
+            actual: "ALTER DATABASE".into(),
+        })),
         Statement::CreateSchema(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE SCHEMA handled by database/session layer",
             actual: "CREATE SCHEMA".into(),
@@ -699,6 +703,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::CreateDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE DATABASE".into(),
+        })),
+        Statement::AlterDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER DATABASE".into(),
         })),
         Statement::CreateSchema(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
