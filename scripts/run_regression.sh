@@ -1479,7 +1479,9 @@ run_one_regression_test() {
     query_expected_file="$expected_file"
 
     candidates=("$expected_file")
-    if [[ "$expected_file" == "$EXPECTED_DIR/${test_name}.out" ]]; then
+    # pgrust always reports UTF8 today; keep unicode failures diffed against
+    # the UTF8 expected output instead of the short non-UTF8 skip alternate.
+    if [[ "$expected_file" == "$EXPECTED_DIR/${test_name}.out" && "$test_name" != "unicode" ]]; then
         shopt -s nullglob
         for candidate in "$EXPECTED_DIR/${test_name}_"[0-9]*.out; do
             candidates+=("$candidate")

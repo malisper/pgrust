@@ -13857,6 +13857,44 @@ fn parse_unicode_string_and_identifier_literals() {
 }
 
 #[test]
+fn parse_unicode_normalization_syntax_lowers_to_function_calls() {
+    let stmt = parse_statement(
+        "select normalize(U&'\\0061\\0308', nfd) as n, U&'\\00E4' is not nfkc normalized as ok",
+    )
+    .unwrap();
+    let Statement::Select(stmt) = stmt else {
+        panic!("expected select statement");
+    };
+
+    match &stmt.targets[0].expr {
+        SqlExpr::FuncCall { name, args, .. } => {
+            assert_eq!(name, "normalize");
+            assert_eq!(args.args().len(), 2);
+            assert_eq!(
+                args.args()[1].value,
+                SqlExpr::Const(Value::Text("NFD".into()))
+            );
+        }
+        other => panic!("expected normalize call, got {other:?}"),
+    }
+
+    match &stmt.targets[1].expr {
+        SqlExpr::Not(inner) => match inner.as_ref() {
+            SqlExpr::FuncCall { name, args, .. } => {
+                assert_eq!(name, "is_normalized");
+                assert_eq!(args.args().len(), 2);
+                assert_eq!(
+                    args.args()[1].value,
+                    SqlExpr::Const(Value::Text("NFKC".into()))
+                );
+            }
+            other => panic!("expected is_normalized call, got {other:?}"),
+        },
+        other => panic!("expected negated normalization predicate, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_unicode_uescape_string_and_identifier_literals() {
     let stmt = parse_statement(
         "select U&'d!0061t\\+000061' UESCAPE '!' as U&\"d*0061t\\+000061\" UESCAPE '*'",

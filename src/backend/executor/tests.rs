@@ -19209,6 +19209,56 @@ fn getdatabaseencoding_and_jsonpath_unicode_work() {
 }
 
 #[test]
+fn unicode_normalization_functions_work() {
+    let base = temp_dir("unicode_normalization");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select unicode_version() is not null,
+                unicode_assigned(U&'abc'),
+                unicode_assigned(U&'abc\\+10FFFF'),
+                normalize(U&'\\0061\\0308\\24D1c') = U&'\\00E4\\24D1c' collate \"C\",
+                normalize(U&'\\0061\\0308\\24D1c', NFKC) = U&'\\00E4bc' collate \"C\",
+                U&'\\00E4\\24D1c' is normalized,
+                U&'\\0061\\0308bc' is nfd normalized",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(false),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select \"normalize\"('abc', 'def')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "invalid normalization form: def" && sqlstate == "22023"
+    ));
+}
+
+#[test]
 fn concat_text_array_and_jsonb_work() {
     let base = temp_dir("concat_ops");
     let txns = TransactionManager::new_durable(&base).unwrap();

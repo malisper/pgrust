@@ -15916,6 +15916,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             };
 
             match next.as_rule() {
+                Rule::is_normalized_suffix => build_is_normalized_predicate(left, next),
                 Rule::null_predicate_suffix => build_null_predicate(left, next),
                 Rule::is_document_suffix => {
                     let negated = next.into_inner().any(|part| part.as_rule() == Rule::kw_not);
@@ -16405,6 +16406,26 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 vec![
                     SqlFunctionArg::positional(field.ok_or(ParseError::UnexpectedEof)?),
                     SqlFunctionArg::positional(value.ok_or(ParseError::UnexpectedEof)?),
+                ],
+            ))
+        }
+        Rule::normalize_expr => {
+            let mut value = None;
+            let mut form = None;
+            for part in pair.into_inner() {
+                match part.as_rule() {
+                    Rule::expr => value = Some(build_expr(part)?),
+                    Rule::unicode_normal_form => form = Some(unicode_normal_form_literal(part)),
+                    _ => {}
+                }
+            }
+            Ok(simple_func_call(
+                "normalize",
+                vec![
+                    SqlFunctionArg::positional(value.ok_or(ParseError::UnexpectedEof)?),
+                    SqlFunctionArg::positional(SqlExpr::Const(Value::Text(
+                        form.unwrap_or("NFC").into(),
+                    ))),
                 ],
             ))
         }
@@ -17148,6 +17169,43 @@ fn build_null_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, 
     } else {
         SqlExpr::IsDistinctFrom(Box::new(left), Box::new(right))
     })
+}
+
+fn build_is_normalized_predicate(
+    left: SqlExpr,
+    pair: Pair<'_, Rule>,
+) -> Result<SqlExpr, ParseError> {
+    let mut negated = false;
+    let mut form = "NFC";
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::kw_not => negated = true,
+            Rule::unicode_normal_form => form = unicode_normal_form_literal(part),
+            _ => {}
+        }
+    }
+    let expr = simple_func_call(
+        "is_normalized",
+        vec![
+            SqlFunctionArg::positional(left),
+            SqlFunctionArg::positional(SqlExpr::Const(Value::Text(form.into()))),
+        ],
+    );
+    Ok(if negated {
+        SqlExpr::Not(Box::new(expr))
+    } else {
+        expr
+    })
+}
+
+fn unicode_normal_form_literal(pair: Pair<'_, Rule>) -> &'static str {
+    match pair.as_str().to_ascii_uppercase().as_str() {
+        "NFC" => "NFC",
+        "NFD" => "NFD",
+        "NFKC" => "NFKC",
+        "NFKD" => "NFKD",
+        _ => "NFC",
+    }
 }
 
 fn build_like_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
