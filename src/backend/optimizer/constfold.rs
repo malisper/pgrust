@@ -734,23 +734,16 @@ fn cast_is_const_fold_safe(value: &Value, target: SqlType) -> bool {
     let Some(source) = value.sql_type_hint() else {
         return true;
     };
-    let source = source.element_type().kind;
-    let target = target.element_type().kind;
-    if matches!(
-        (source, target),
-        (
-            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Varchar | SqlTypeKind::Char,
-            SqlTypeKind::Date
-                | SqlTypeKind::Time
-                | SqlTypeKind::TimeTz
-                | SqlTypeKind::Timestamp
-                | SqlTypeKind::TimestampTz
+    if matches!(target.element_type().kind, SqlTypeKind::Interval)
+        && matches!(
+            source.element_type().kind,
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
         )
-    ) {
+    {
         return false;
     }
     !matches!(
-        (source, target),
+        (source.kind, target.kind),
         (SqlTypeKind::TimestampTz | SqlTypeKind::TimeTz, _)
             | (_, SqlTypeKind::TimestampTz | SqlTypeKind::TimeTz)
     )

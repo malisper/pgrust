@@ -5,8 +5,8 @@ use super::exec_expr::parse_numeric_text;
 use super::expr_bit::{coerce_bit_string, render_bit_text};
 use super::expr_casts::{
     cast_numeric_value, cast_text_value_with_config, cast_value, cast_value_with_config,
-    parse_text_array_literal_with_options, render_internal_char_text, render_interval_text,
-    render_pg_lsn_text,
+    parse_text_array_literal_with_options, render_internal_char_text,
+    render_interval_text_with_config, render_pg_lsn_text,
 };
 use super::expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 use super::expr_geometry::{
@@ -157,7 +157,9 @@ pub(crate) fn format_record_text_with_options(
                                 _ => v.to_string(),
                             },
                             Value::Numeric(v) => v.render(),
-                            Value::Interval(v) => render_interval_text(*v),
+                            Value::Interval(v) => {
+                                render_interval_text_with_config(*v, &float_format.datetime_config)
+                            }
                             Value::Bytea(v) => {
                                 let mut rendered = String::from("\\\\x");
                                 for byte in v {
@@ -290,7 +292,7 @@ fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> 
         Value::Bool(true) => "t".to_string(),
         Value::Bool(false) => "f".to_string(),
         Value::Numeric(v) => v.render(),
-        Value::Interval(v) => render_interval_text(*v),
+        Value::Interval(v) => render_interval_text_with_config(*v, datetime_config),
         Value::Text(text) => text.to_string(),
         Value::TextRef(_, _) => value.as_text().unwrap_or_default().to_string(),
         Value::Json(text) => text.to_string(),
@@ -2607,10 +2609,7 @@ mod tests {
         ])
         .with_element_type_oid(crate::include::catalog::INTERVAL_TYPE_OID);
 
-        assert_eq!(
-            format_array_value_text(&array),
-            "{\"@ 0\",\"@ 1 hour 42 mins 20 secs\"}"
-        );
+        assert_eq!(format_array_value_text(&array), "{00:00:00,01:42:20}");
     }
 
     #[test]

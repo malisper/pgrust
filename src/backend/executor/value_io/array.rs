@@ -1,5 +1,7 @@
 use super::*;
-use crate::backend::executor::expr_casts::{parse_interval_text_value, render_interval_text};
+use crate::backend::executor::expr_casts::{
+    parse_interval_text_value, render_interval_text_with_config,
+};
 use crate::backend::storage::page::bufpage::max_align;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::AttributeAlign;
@@ -1331,14 +1333,14 @@ fn format_array_values_nested(
             Value::Null => out.push_str("NULL"),
             Value::Text(text) if array.element_type_oid == Some(INTERVAL_TYPE_OID) => {
                 let rendered = parse_interval_text_value(text)
-                    .map(render_interval_text)
+                    .map(|value| render_interval_text_with_config(value, datetime_config))
                     .unwrap_or_else(|_| text.to_string());
                 push_array_text_element(&mut out, &rendered);
             }
             Value::TextRef(_, _) if array.element_type_oid == Some(INTERVAL_TYPE_OID) => {
                 let text = item.as_text().unwrap_or_default();
                 let rendered = parse_interval_text_value(text)
-                    .map(render_interval_text)
+                    .map(|value| render_interval_text_with_config(value, datetime_config))
                     .unwrap_or_else(|_| text.to_string());
                 push_array_text_element(&mut out, &rendered);
             }
@@ -1349,7 +1351,10 @@ fn format_array_values_nested(
             Value::Money(v) => out.push_str(&crate::backend::executor::money_format_text(*v)),
             Value::Float64(v) => out.push_str(&v.to_string()),
             Value::Numeric(v) => out.push_str(&v.render()),
-            Value::Interval(v) => push_array_text_element(&mut out, &render_interval_text(*v)),
+            Value::Interval(v) => push_array_text_element(
+                &mut out,
+                &render_interval_text_with_config(*v, datetime_config),
+            ),
             Value::Date(_)
             | Value::Time(_)
             | Value::TimeTz(_)

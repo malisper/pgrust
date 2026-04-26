@@ -131,9 +131,13 @@ fn values_output_columns() -> Vec<QueryColumn> {
 }
 
 fn values_path(slot_id: usize, startup_cost: f64, total_cost: f64) -> Path {
+    values_path_with_rows(slot_id, startup_cost, total_cost, 10.0)
+}
+
+fn values_path_with_rows(slot_id: usize, startup_cost: f64, total_cost: f64, rows: f64) -> Path {
     let output_columns = values_output_columns();
     Path::Values {
-        plan_info: PlanEstimate::new(startup_cost, total_cost, 10.0, 2),
+        plan_info: PlanEstimate::new(startup_cost, total_cost, rows, 2),
         pathtarget: PathTarget::new(vec![var(slot_id, 1), var(slot_id, 2)]),
         slot_id,
         rows: vec![vec![
@@ -142,6 +146,53 @@ fn values_path(slot_id: usize, startup_cost: f64, total_cost: f64) -> Path {
         ]],
         output_columns,
     }
+}
+
+fn seqscan_path_with_rows(slot_id: usize, startup_cost: f64, total_cost: f64, rows: f64) -> Path {
+    let output_columns = values_output_columns();
+    let rel_number = slot_id as u32;
+    Path::SeqScan {
+        plan_info: PlanEstimate::new(startup_cost, total_cost, rows, 2),
+        pathtarget: PathTarget::new(vec![var(slot_id, 1), var(slot_id, 2)]),
+        source_id: slot_id,
+        rel: crate::RelFileLocator {
+            spc_oid: 0,
+            db_oid: 0,
+            rel_number,
+        },
+        relation_name: format!("t{slot_id}"),
+        relation_oid: rel_number,
+        relkind: 'r',
+        relispopulated: true,
+        toast: None,
+        desc: RelationDesc {
+            columns: output_columns
+                .into_iter()
+                .map(|column| column_desc(column.name, column.sql_type, true))
+                .collect(),
+        },
+    }
+}
+
+fn ordered_path_with_rows(
+    slot_id: usize,
+    startup_cost: f64,
+    total_cost: f64,
+    rows: f64,
+    key_attno: usize,
+) -> Path {
+    order_by_path(
+        startup_cost,
+        total_cost,
+        values_path_with_rows(slot_id, startup_cost, total_cost, rows),
+        vec![OrderByEntry {
+            expr: var(slot_id, key_attno),
+            ressortgroupref: 0,
+            descending: false,
+            nulls_first: None,
+            collation_oid: None,
+        }],
+    )
 }
 
 fn projection_path(
@@ -178,8 +229,9 @@ fn order_by_path(
     items: Vec<OrderByEntry>,
 ) -> Path {
     let pathtarget = input.semantic_output_target();
+    let rows = input.plan_info().plan_rows.as_f64();
     Path::OrderBy {
-        plan_info: PlanEstimate::new(startup_cost, total_cost, 10.0, input.columns().len()),
+        plan_info: PlanEstimate::new(startup_cost, total_cost, rows, input.columns().len()),
         pathtarget,
         input: Box::new(input),
         items,
@@ -246,18 +298,14 @@ fn join_pathtarget(left: &Path, right: &Path) -> PathTarget {
 }
 
 fn ordered_path(slot_id: usize, startup_cost: f64, total_cost: f64, key_attno: usize) -> Path {
-    order_by_path(
-        startup_cost,
-        total_cost,
-        values_path(slot_id, startup_cost, total_cost),
-        vec![OrderByEntry {
-            expr: var(slot_id, key_attno),
-            ressortgroupref: 0,
-            descending: false,
-            nulls_first: None,
-            collation_oid: None,
-        }],
-    )
+    ordered_path_with_rows(slot_id, startup_cost, total_cost, 10.0, key_attno)
+}
+
+fn assert_float_near(actual: f64, expected: f64) {
+    assert!(
+        (actual - expected).abs() < 1e-9,
+        "expected {expected}, got {actual}"
+    );
 }
 
 #[test]
@@ -3394,6 +3442,137 @@ fn swapped_join_candidate_keeps_logical_pathtarget_order() {
         swapped.output_vars(),
         vec![var(2, 1), var(2, 2), var(1, 1), var(1, 2)]
     );
+}
+
+#[test]
+fn nested_loop_cost_prefers_materializing_smaller_inner_side() {
+    let paths = super::build_join_paths(
+        seqscan_path_with_rows(1, 0.0, 1.04, 2.0),
+        seqscan_path_with_rows(2, 0.0, 1.03, 3.0),
+        &[1],
+        &[2],
+        JoinType::Cross,
+        vec![],
+    );
+
+    let default = paths
+        .iter()
+        .find(|path| match path {
+            Path::NestedLoopJoin { left, .. } => left.output_vars().first() == Some(&var(1, 1)),
+            _ => false,
+        })
+        .expect("default nested loop");
+    let swapped = paths
+        .iter()
+        .find(|path| match path {
+            Path::NestedLoopJoin { left, .. } => left.output_vars().first() == Some(&var(2, 1)),
+            _ => false,
+        })
+        .expect("swapped nested loop");
+
+    assert!(
+        swapped.plan_info().total_cost.as_f64() < default.plan_info().total_cost.as_f64(),
+        "expected materialized smaller inner to be cheaper: default={:?}, swapped={:?}",
+        default.plan_info(),
+        swapped.plan_info()
+    );
+
+    let best = paths
+        .iter()
+        .min_by(|left, right| {
+            left.plan_info()
+                .total_cost
+                .as_f64()
+                .partial_cmp(&right.plan_info().total_cost.as_f64())
+                .unwrap()
+        })
+        .expect("best path");
+    match best {
+        Path::NestedLoopJoin { left, .. } => {
+            assert_eq!(left.output_vars().first(), Some(&var(2, 1)));
+        }
+        other => panic!("expected nested loop best path, got {other:?}"),
+    }
+}
+
+#[test]
+fn hash_join_cost_accounts_for_build_probe_qual_and_output_cpu() {
+    let eq_clause = restrict(eq(var(1, 1), var(2, 1)));
+    let residual_clause = restrict(gt(var(1, 2), var(2, 2)));
+    let paths = super::build_join_paths(
+        values_path_with_rows(1, 2.0, 12.0, 1_000.0),
+        values_path_with_rows(2, 3.0, 23.0, 2_000.0),
+        &[1],
+        &[2],
+        JoinType::Inner,
+        vec![eq_clause.clone(), residual_clause.clone()],
+    );
+    let hash = paths
+        .iter()
+        .find(|path| {
+            matches!(
+                path,
+                Path::HashJoin { left, .. } if left.output_vars().first() == Some(&var(1, 1))
+            )
+        })
+        .expect("hash join path");
+
+    let left_rows = 1_000.0;
+    let right_rows = 2_000.0;
+    let hash_candidate_rows = left_rows * right_rows * super::DEFAULT_EQ_SEL;
+    let rows = left_rows * right_rows * super::DEFAULT_EQ_SEL * super::DEFAULT_INEQ_SEL;
+    let build_cpu = right_rows * (super::CPU_OPERATOR_COST + super::CPU_TUPLE_COST);
+    let probe_cpu = left_rows * super::CPU_OPERATOR_COST;
+    let hash_qual_cpu =
+        hash_candidate_rows * super::predicate_cost(&eq_clause.clause) * super::CPU_OPERATOR_COST;
+    let residual_cpu = rows
+        * (super::CPU_TUPLE_COST
+            + super::predicate_cost(&residual_clause.clause) * super::CPU_OPERATOR_COST);
+    let output_cpu = rows * super::CPU_TUPLE_COST;
+    let startup = 2.0 + 23.0 + build_cpu;
+    let total = startup + (12.0 - 2.0) + probe_cpu + hash_qual_cpu + residual_cpu + output_cpu;
+
+    assert_float_near(hash.plan_info().startup_cost.as_f64(), startup);
+    assert_float_near(hash.plan_info().total_cost.as_f64(), total);
+}
+
+#[test]
+fn merge_join_cost_accounts_for_key_qual_and_output_cpu() {
+    let eq_clause = restrict(eq(var(1, 1), var(2, 1)));
+    let residual_clause = restrict(gt(var(1, 2), var(2, 2)));
+    let paths = super::build_join_paths(
+        ordered_path_with_rows(1, 2.0, 12.0, 1_000.0, 1),
+        ordered_path_with_rows(2, 3.0, 23.0, 2_000.0, 1),
+        &[1],
+        &[2],
+        JoinType::Inner,
+        vec![eq_clause.clone(), residual_clause.clone()],
+    );
+    let merge = paths
+        .iter()
+        .find(|path| {
+            matches!(
+                path,
+                Path::MergeJoin { left, .. } if left.output_vars().first() == Some(&var(1, 1))
+            )
+        })
+        .expect("merge join path");
+
+    let left_rows = 1_000.0;
+    let right_rows = 2_000.0;
+    let merge_candidate_rows = left_rows * right_rows * super::DEFAULT_EQ_SEL;
+    let rows = left_rows * right_rows * super::DEFAULT_EQ_SEL * super::DEFAULT_INEQ_SEL;
+    let key_compare_cpu = (left_rows + right_rows) * super::CPU_OPERATOR_COST;
+    let merge_qual_cpu =
+        merge_candidate_rows * super::predicate_cost(&eq_clause.clause) * super::CPU_OPERATOR_COST;
+    let residual_cpu = rows
+        * (super::CPU_TUPLE_COST
+            + super::predicate_cost(&residual_clause.clause) * super::CPU_OPERATOR_COST);
+    let output_cpu = rows * super::CPU_TUPLE_COST;
+    let total = 12.0 + 23.0 + key_compare_cpu + merge_qual_cpu + residual_cpu + output_cpu;
+
+    assert_float_near(merge.plan_info().startup_cost.as_f64(), 2.0 + 3.0);
+    assert_float_near(merge.plan_info().total_cost.as_f64(), total);
 }
 
 #[test]

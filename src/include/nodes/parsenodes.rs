@@ -3131,6 +3131,16 @@ pub struct SqlType {
 impl SqlType {
     pub const NO_TYPEMOD: i32 = -1;
     pub const VARHDRSZ: i32 = 4;
+    pub const INTERVAL_FULL_RANGE: i32 = 0x7fff;
+    pub const INTERVAL_FULL_PRECISION: i32 = 0xffff;
+    pub const INTERVAL_RANGE_MASK: i32 = 0x7fff;
+    pub const INTERVAL_PRECISION_MASK: i32 = 0xffff;
+    pub const INTERVAL_MASK_MONTH: i32 = 1 << 1;
+    pub const INTERVAL_MASK_YEAR: i32 = 1 << 2;
+    pub const INTERVAL_MASK_DAY: i32 = 1 << 3;
+    pub const INTERVAL_MASK_HOUR: i32 = 1 << 10;
+    pub const INTERVAL_MASK_MINUTE: i32 = 1 << 11;
+    pub const INTERVAL_MASK_SECOND: i32 = 1 << 12;
 
     pub const fn new(kind: SqlTypeKind) -> Self {
         Self {
@@ -3192,6 +3202,34 @@ impl SqlType {
         Self {
             kind,
             typmod: precision,
+            is_array: false,
+            type_oid: 0,
+            typrelid: 0,
+            range_subtype_oid: 0,
+            range_multitype_oid: 0,
+            range_discrete: false,
+            multirange_range_oid: 0,
+        }
+    }
+
+    pub const fn with_interval_typmod(precision: Option<i32>, range: Option<i32>) -> Self {
+        let typmod = match range {
+            Some(range) => {
+                let precision = match precision {
+                    Some(precision) => precision,
+                    None => Self::INTERVAL_FULL_PRECISION,
+                };
+                ((range & Self::INTERVAL_RANGE_MASK) << 16)
+                    | (precision & Self::INTERVAL_PRECISION_MASK)
+            }
+            None => match precision {
+                Some(precision) => precision,
+                None => Self::NO_TYPEMOD,
+            },
+        };
+        Self {
+            kind: SqlTypeKind::Interval,
+            typmod,
             is_array: false,
             type_oid: 0,
             typrelid: 0,
@@ -3341,6 +3379,35 @@ impl SqlType {
                 Some(self.typmod)
             }
             _ => None,
+        }
+    }
+
+    pub const fn interval_precision(self) -> Option<i32> {
+        if !matches!(self.kind, SqlTypeKind::Interval) || self.typmod < 0 {
+            return None;
+        }
+        if self.typmod <= crate::include::nodes::datetime::MAX_TIME_PRECISION {
+            return Some(self.typmod);
+        }
+        let precision = self.typmod & Self::INTERVAL_PRECISION_MASK;
+        if precision == Self::INTERVAL_FULL_PRECISION {
+            None
+        } else {
+            Some(precision)
+        }
+    }
+
+    pub const fn interval_range(self) -> Option<i32> {
+        if !matches!(self.kind, SqlTypeKind::Interval)
+            || self.typmod <= crate::include::nodes::datetime::MAX_TIME_PRECISION
+        {
+            return None;
+        }
+        let range = (self.typmod >> 16) & Self::INTERVAL_RANGE_MASK;
+        if range == 0 || range == Self::INTERVAL_FULL_RANGE {
+            None
+        } else {
+            Some(range)
         }
     }
 }

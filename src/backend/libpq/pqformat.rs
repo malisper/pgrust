@@ -7,7 +7,7 @@ use crate::backend::executor::value_io::builtin_type_oid_for_sql_type;
 use crate::backend::executor::{
     ArrayValue, ExecError, QueryColumn, Value, geometry_input_error_message,
     render_datetime_value_text_with_config, render_geometry_text, render_internal_char_text,
-    render_interval_text, render_macaddr_text, render_macaddr8_text,
+    render_interval_text_with_config, render_macaddr_text, render_macaddr8_text,
     render_multirange_text_with_config, render_pg_lsn_text, render_range_text_with_config,
 };
 use crate::backend::parser::{SqlType, SqlTypeKind};
@@ -1136,7 +1136,7 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(text.as_bytes());
             }
             Value::Interval(v) => {
-                let text = render_interval_text(*v);
+                let text = render_interval_text_with_config(*v, &float_format.datetime_config);
                 buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
                 buf.extend_from_slice(text.as_bytes());
             }
@@ -2691,8 +2691,8 @@ mod tests {
         .unwrap();
 
         assert!(
-            out.windows("{\"@ 0\",\"@ 1 hour 42 mins 20 secs\"}".len())
-                .any(|window| window == b"{\"@ 0\",\"@ 1 hour 42 mins 20 secs\"}")
+            out.windows("{00:00:00,01:42:20}".len())
+                .any(|window| window == b"{00:00:00,01:42:20}")
         );
     }
 

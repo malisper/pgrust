@@ -773,6 +773,10 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                             ..
                         }) => SqlType::new(SqlTypeKind::Timestamp),
                         Some(SqlType {
+                            kind: SqlTypeKind::Time,
+                            ..
+                        }) => SqlType::new(SqlTypeKind::TimeTz),
+                        Some(SqlType {
                             kind: SqlTypeKind::TimeTz,
                             ..
                         }) => SqlType::new(SqlTypeKind::TimeTz),
@@ -782,7 +786,6 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 }
                 Some(BuiltinScalarFunction::DatePart) => SqlType::new(SqlTypeKind::Float8),
                 Some(BuiltinScalarFunction::Extract) => SqlType::new(SqlTypeKind::Numeric),
-                Some(BuiltinScalarFunction::TimeZone) => SqlType::new(SqlTypeKind::TimeTz),
                 Some(BuiltinScalarFunction::DateTrunc) => match args.args().get(1).map(|arg| {
                     infer_sql_expr_type_with_ctes(
                         &arg.value,
@@ -801,6 +804,10 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                         kind: SqlTypeKind::Timestamp,
                         ..
                     }) => SqlType::new(SqlTypeKind::Timestamp),
+                    Some(SqlType {
+                        kind: SqlTypeKind::Interval,
+                        ..
+                    }) => SqlType::new(SqlTypeKind::Interval),
                     Some(SqlType {
                         kind: SqlTypeKind::TimestampTz,
                         ..
@@ -828,6 +835,11 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::ToTimestamp) => {
                     SqlType::new(SqlTypeKind::TimestampTz)
                 }
+                Some(
+                    BuiltinScalarFunction::JustifyDays
+                    | BuiltinScalarFunction::JustifyHours
+                    | BuiltinScalarFunction::JustifyInterval,
+                ) => SqlType::new(SqlTypeKind::Interval),
                 Some(BuiltinScalarFunction::IsFinite) => SqlType::new(SqlTypeKind::Bool),
                 Some(
                     BuiltinScalarFunction::MacAddrEq
@@ -868,6 +880,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     | BuiltinScalarFunction::MacAddr8Trunc
                     | BuiltinScalarFunction::MacAddr8Set7Bit,
                 ) => SqlType::new(SqlTypeKind::MacAddr8),
+                Some(BuiltinScalarFunction::MakeInterval) => SqlType::new(SqlTypeKind::Interval),
                 Some(BuiltinScalarFunction::MakeDate) => SqlType::new(SqlTypeKind::Date),
                 Some(BuiltinScalarFunction::MakeTime) => SqlType::new(SqlTypeKind::Time),
                 Some(BuiltinScalarFunction::MakeTimestamp) => SqlType::new(SqlTypeKind::Timestamp),
@@ -875,6 +888,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     SqlType::new(SqlTypeKind::TimestampTz)
                 }
                 Some(BuiltinScalarFunction::Age) => SqlType::new(SqlTypeKind::Interval),
+                Some(BuiltinScalarFunction::IntervalHash) => SqlType::new(SqlTypeKind::Int4),
                 Some(BuiltinScalarFunction::ToJson)
                 | Some(BuiltinScalarFunction::ArrayToJson)
                 | Some(BuiltinScalarFunction::JsonBuildArray)
