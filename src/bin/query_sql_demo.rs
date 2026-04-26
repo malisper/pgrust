@@ -223,7 +223,10 @@ fn main() -> Result<(), ExecError> {
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
         catalog: relcache.materialize_visible_catalog(),
-        compiled_functions: std::collections::HashMap::new(),
+        plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
+            pgrust::pl::plpgsql::PlpgsqlFunctionCache::default(),
+        )),
+        pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),

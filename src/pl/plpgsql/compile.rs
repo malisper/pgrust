@@ -44,6 +44,7 @@ pub struct CompiledFunction {
     pub(crate) found_slot: usize,
     pub(crate) sqlerrm_slot: usize,
     pub(crate) local_ctes: Vec<BoundCte>,
+    pub(crate) trigger_transition_ctes: Vec<CompiledTriggerTransitionCte>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +59,12 @@ pub struct TriggerTransitionTable {
     pub name: String,
     pub desc: RelationDesc,
     pub rows: Vec<Vec<crate::backend::executor::Value>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledTriggerTransitionCte {
+    pub(crate) name: String,
+    pub(crate) cte_id: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -582,6 +589,7 @@ pub(crate) fn compile_do_function(
         found_slot,
         sqlerrm_slot,
         local_ctes: Vec::new(),
+        trigger_transition_ctes: Vec::new(),
     })
 }
 
@@ -693,6 +701,7 @@ pub(crate) fn compile_function_from_proc(
         found_slot,
         sqlerrm_slot,
         local_ctes: Vec::new(),
+        trigger_transition_ctes: Vec::new(),
     })
 }
 
@@ -704,14 +713,20 @@ pub(crate) fn compile_trigger_function_from_proc(
 ) -> Result<CompiledFunction, ParseError> {
     let block = parse_block(&row.prosrc)?;
     let mut env = CompileEnv::default();
+    let mut trigger_transition_ctes = Vec::new();
     env.local_ctes = transition_tables
         .iter()
         .map(|table| {
-            crate::backend::parser::bound_cte_from_materialized_rows(
+            let cte = crate::backend::parser::bound_cte_from_materialized_rows(
                 table.name.clone(),
                 &table.desc,
-                &table.rows,
-            )
+                &[],
+            );
+            trigger_transition_ctes.push(CompiledTriggerTransitionCte {
+                name: table.name.clone(),
+                cte_id: cte.cte_id,
+            });
+            cte
         })
         .collect();
     let bindings = seed_trigger_env(&mut env, relation_desc);
@@ -728,6 +743,7 @@ pub(crate) fn compile_trigger_function_from_proc(
         found_slot,
         sqlerrm_slot,
         local_ctes: env.local_ctes.clone(),
+        trigger_transition_ctes,
     })
 }
 

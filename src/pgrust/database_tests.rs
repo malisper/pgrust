@@ -225,7 +225,10 @@ fn analyze_executor_context(
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
         catalog: visible_catalog,
-        compiled_functions: HashMap::new(),
+        plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
+            crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
+        )),
+        pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: HashMap::new(),
         cte_producers: HashMap::new(),
         recursive_worktables: HashMap::new(),
@@ -11199,6 +11202,192 @@ fn statement_trigger_return_value_is_ignored() {
     assert_eq!(
         query_rows(&db, 1, "select id from items"),
         vec![vec![Value::Int32(1)]]
+    );
+}
+
+#[test]
+fn foreign_key_actions_respect_disabled_internal_triggers() {
+    let dir = temp_dir("fk_actions_disabled_internal_triggers");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 references parents(id) on delete cascade)",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1), (2)")
+        .unwrap();
+    db.execute(1, "insert into children values (1), (2)")
+        .unwrap();
+
+    db.execute(1, "alter table parents disable trigger user")
+        .unwrap();
+    db.execute(1, "delete from parents where id = 2").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id from children order by id"),
+        vec![vec![Value::Int32(1)]]
+    );
+
+    db.execute(1, "alter table parents disable trigger all")
+        .unwrap();
+    db.execute(1, "delete from parents where id = 1").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id from children order by id"),
+        vec![vec![Value::Int32(1)]]
+    );
+}
+
+#[test]
+fn foreign_key_checks_respect_disabled_internal_triggers() {
+    let dir = temp_dir("fk_checks_disabled_internal_triggers");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(1, "create table children (id int4 references parents(id))")
+        .unwrap();
+
+    db.execute(1, "alter table children disable trigger all")
+        .unwrap();
+    db.execute(1, "insert into children values (99)").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id from children"),
+        vec![vec![Value::Int32(99)]]
+    );
+
+    db.execute(1, "alter table children enable trigger all")
+        .unwrap();
+    match db.execute(1, "insert into children values (100)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. })
+            if constraint == "children_id_fkey" => {}
+        other => panic!("expected foreign key violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn partition_trigger_state_propagates_to_clones_unless_only() {
+    let dir = temp_dir("partition_trigger_state_propagates");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parent_part (id int4) partition by range (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table child_part partition of parent_part for values from (0) to (10)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function part_trig_fn() returns trigger language plpgsql as $$ begin return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger part_trig after insert on parent_part for each row execute function part_trig_fn()",
+    )
+    .unwrap();
+
+    db.execute(1, "alter table parent_part disable trigger part_trig")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, t.tgenabled::text \
+             from pg_trigger t join pg_class c on c.oid = t.tgrelid \
+             where t.tgname = 'part_trig' order by c.relname"
+        ),
+        vec![
+            vec![Value::Text("child_part".into()), Value::Text("D".into())],
+            vec![Value::Text("parent_part".into()), Value::Text("D".into())],
+        ]
+    );
+
+    db.execute(
+        1,
+        "alter table only parent_part enable always trigger part_trig",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, t.tgenabled::text \
+             from pg_trigger t join pg_class c on c.oid = t.tgrelid \
+             where t.tgname = 'part_trig' order by c.relname"
+        ),
+        vec![
+            vec![Value::Text("child_part".into()), Value::Text("D".into())],
+            vec![Value::Text("parent_part".into()), Value::Text("A".into())],
+        ]
+    );
+}
+
+#[test]
+fn trigger_relid_regclass_assignment_uses_relation_name() {
+    let dir = temp_dir("trigger_relid_regclass_assignment");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(1, "create table trigger_items (id int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function relid_notice() returns trigger language plpgsql as $$ \
+         declare relid text; \
+         begin \
+           relid := TG_RELID::regclass; \
+           raise notice 'relid %', relid; \
+           return new; \
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger relid_notice before insert on trigger_items for each row execute function relid_notice()",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "insert into trigger_items values (1)")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![String::from("relid trigger_items")]
+    );
+}
+
+#[test]
+fn partition_ancestors_supports_with_ordinality() {
+    let dir = temp_dir("partition_ancestors_with_ordinality");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parent_part (id int4) partition by range (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table child_part partition of parent_part for values from (0) to (10)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relid::regclass::text, ordinality \
+             from pg_partition_ancestors('child_part') with ordinality as a(relid, ordinality)"
+        ),
+        vec![
+            vec![Value::Text("child_part".into()), Value::Int64(1)],
+            vec![Value::Text("parent_part".into()), Value::Int64(2)],
+        ]
     );
 }
 
@@ -30514,6 +30703,206 @@ fn create_or_replace_function_updates_existing_body() {
         query_rows(&db, 1, "select inc(4)"),
         vec![vec![Value::Int32(6)]]
     );
+}
+
+#[test]
+fn plpgsql_function_cache_reuses_scalar_across_statements() {
+    let dir = temp_dir("plpgsql_cache_scalar");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
+        )
+        .unwrap();
+    assert_eq!(session.plpgsql_function_cache_len(), 0);
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(2)"),
+        vec![vec![Value::Int32(3)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+}
+
+#[test]
+fn plpgsql_function_cache_recompiles_create_or_replace_body() {
+    let dir = temp_dir("plpgsql_cache_replace");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+
+    session
+        .execute(
+            &db,
+            "create or replace function inc(x int4) returns int4 language plpgsql as $$ begin return x + 2; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(3)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+}
+
+#[test]
+fn plpgsql_function_cache_does_not_reuse_dropped_function_body() {
+    let dir = temp_dir("plpgsql_cache_drop_recreate");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(2)]]
+    );
+    session.execute(&db, "drop function inc(int4)").unwrap();
+    session
+        .execute(
+            &db,
+            "create function inc(x int4) returns int4 language plpgsql as $$ begin return x + 9; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select inc(1)"),
+        vec![vec![Value::Int32(10)]]
+    );
+}
+
+#[test]
+fn plpgsql_function_cache_keeps_polymorphic_signatures_separate() {
+    let dir = temp_dir("plpgsql_cache_polymorphic");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function echo_any(x anyelement) returns anyelement language plpgsql as $$ begin return x; end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select echo_any(7::int4)"),
+        vec![vec![Value::Int32(7)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select echo_any('txt'::text)"),
+        vec![vec![Value::Text("txt".into())]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 2);
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select echo_any(8::int4)"),
+        vec![vec![Value::Int32(8)]]
+    );
+    assert_eq!(session.plpgsql_function_cache_len(), 2);
+}
+
+#[test]
+fn plpgsql_function_cache_reuses_trigger_function_across_statements() {
+    let dir = temp_dir("plpgsql_cache_trigger");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4, note text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function row_notice() returns trigger language plpgsql as $$
+             begin
+               raise notice '%:%', TG_OP, NEW.id;
+               return NEW;
+             end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create trigger items_notice before insert on items for each row execute function row_notice()",
+        )
+        .unwrap();
+
+    clear_notices();
+    session
+        .execute(&db, "insert into items values (1, 'a')")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["INSERT:1".to_string()]);
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+    clear_notices();
+    session
+        .execute(&db, "insert into items values (2, 'b')")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["INSERT:2".to_string()]);
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+}
+
+#[test]
+fn plpgsql_function_cache_uses_current_transition_table_rows() {
+    let dir = temp_dir("plpgsql_cache_transition_table");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4, note text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function insert_transition_notice() returns trigger language plpgsql as $$
+             declare c int4; s int4;
+             begin
+               select count(*), sum(id) into c, s from new_rows;
+               raise notice 'insert:%:%', c, s;
+               return null;
+             end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create trigger items_insert_ref after insert on items referencing new table as new_rows for each statement execute function insert_transition_notice()",
+        )
+        .unwrap();
+
+    clear_notices();
+    session
+        .execute(&db, "insert into items values (1, 'a'), (2, 'b')")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["insert:2:3".to_string()]);
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
+
+    clear_notices();
+    session
+        .execute(
+            &db,
+            "insert into items values (10, 'x'), (20, 'y'), (30, 'z')",
+        )
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["insert:3:60".to_string()]);
+    assert_eq!(session.plpgsql_function_cache_len(), 1);
 }
 
 #[test]

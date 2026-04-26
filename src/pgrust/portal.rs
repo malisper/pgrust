@@ -231,7 +231,7 @@ impl Portal {
 
     pub fn fetch_forward(&mut self, limit: PortalFetchLimit) -> Result<PortalRunResult, ExecError> {
         self.status = PortalStatus::Active;
-        let result = match &mut self.execution {
+        let mut result = match &mut self.execution {
             PortalExecution::Streaming(guard) => fetch_streaming_forward(guard, limit),
             PortalExecution::Materialized {
                 columns,
@@ -260,6 +260,13 @@ impl Portal {
             Ok(result) if result.completed => self.status = PortalStatus::Done,
             Ok(_) => self.status = PortalStatus::Ready,
             Err(_) => self.status = PortalStatus::Failed,
+        }
+        if let Ok(result) = &mut result
+            && result.completed
+            && !self.command_tag.is_empty()
+            && self.command_tag != "SELECT"
+        {
+            result.command_tag = Some(self.command_tag.clone());
         }
         result
     }

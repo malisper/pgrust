@@ -4889,6 +4889,20 @@ fn parse_create_instead_of_trigger_statement() {
 }
 
 #[test]
+fn parse_create_trigger_statement_for_statement_without_each() {
+    let stmt = parse_statement(
+        "create trigger audit_stmt after insert on public.people for statement execute function public.audit_people()",
+    )
+    .unwrap();
+    match stmt {
+        Statement::CreateTrigger(CreateTriggerStatement { level, .. }) => {
+            assert_eq!(level, TriggerLevel::Statement);
+        }
+        other => panic!("expected create trigger, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_alter_table_disable_trigger_user() {
     let stmt = parse_statement("alter table only public.people disable trigger user").unwrap();
     assert_eq!(

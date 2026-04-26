@@ -7928,7 +7928,9 @@ fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, P
         }
         if keyword_at_start(rest, "for") {
             let mut next = consume_keyword(rest, "for").trim_start();
-            next = consume_keyword(next, "each").trim_start();
+            if keyword_at_start(next, "each") {
+                next = consume_keyword(next, "each").trim_start();
+            }
             if keyword_at_start(next, "row") {
                 level = TriggerLevel::Row;
                 rest = consume_keyword(next, "row");

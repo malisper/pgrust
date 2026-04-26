@@ -162,7 +162,7 @@ use crate::pgrust::database::{
     AsyncNotifyRuntime, DatabaseStatsStore, LargeObjectRuntime, PendingNotification,
     SequenceRuntime, SessionStatsState, TransactionWaiter,
 };
-use crate::pl::plpgsql::CompiledFunction;
+use crate::pl::plpgsql::PlpgsqlFunctionCache;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -175,6 +175,7 @@ use expr_ops::parse_numeric_text;
 pub(crate) use foreign_keys::{
     enforce_inbound_foreign_key_reference, enforce_inbound_foreign_keys_on_delete,
     enforce_inbound_foreign_keys_on_update, enforce_outbound_foreign_keys,
+    foreign_key_action_trigger_enabled_on_delete, foreign_key_action_trigger_enabled_on_update,
 };
 pub(crate) use permissions::relation_values_visible_for_error_detail;
 
@@ -422,7 +423,8 @@ pub struct ExecutorContext {
     pub pending_catalog_effects: Vec<CatalogMutationEffect>,
     pub pending_table_locks: Vec<RelFileLocator>,
     pub catalog: Option<VisibleCatalog>,
-    pub compiled_functions: HashMap<u32, Arc<CompiledFunction>>,
+    pub plpgsql_function_cache: Arc<parking_lot::RwLock<PlpgsqlFunctionCache>>,
+    pub pinned_cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,
     pub cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,
     pub cte_producers: HashMap<usize, Rc<RefCell<PlanState>>>,
     pub recursive_worktables: HashMap<usize, Rc<RefCell<RecursiveWorkTable>>>,
