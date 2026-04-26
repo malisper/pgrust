@@ -851,15 +851,17 @@ pub(crate) fn insert_index_key_values(
                 .unwrap_or_default()
                 .min(insert_ctx.index_desc.columns.len())
                 .min(insert_ctx.values.len());
-            ExecError::UniqueViolation {
-                constraint,
-                detail: Some(
-                    crate::backend::executor::value_io::format_unique_key_detail(
-                        &insert_ctx.index_desc.columns[..key_count],
-                        &insert_ctx.values[..key_count],
-                    ),
-                ),
-            }
+            let detail = crate::backend::executor::relation_values_visible_for_error_detail(
+                insert_ctx.index_meta.indrelid,
+                ctx,
+            )
+            .then(|| {
+                crate::backend::executor::value_io::format_unique_key_detail(
+                    &insert_ctx.index_desc.columns[..key_count],
+                    &insert_ctx.values[..key_count],
+                )
+            });
+            ExecError::UniqueViolation { constraint, detail }
         }
         other => map_index_insert_error(other),
     })?;

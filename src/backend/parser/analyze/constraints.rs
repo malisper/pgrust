@@ -139,6 +139,7 @@ pub struct BoundExclusionConstraint {
 pub struct BoundReferencedByForeignKey {
     pub constraint_oid: u32,
     pub constraint_name: String,
+    pub referenced_relation_oid: u32,
     pub child_relation_name: String,
     pub child_relation_oid: u32,
     pub child_rel: crate::backend::storage::smgr::RelFileLocator,
@@ -2149,7 +2150,7 @@ fn bind_outbound_foreign_key_constraint(
 }
 
 fn bind_inbound_foreign_key_constraint(
-    _relation_oid: u32,
+    relation_oid: u32,
     desc: &RelationDesc,
     row: PgConstraintRow,
     catalog: &dyn super::CatalogLookup,
@@ -2170,6 +2171,7 @@ fn bind_inbound_foreign_key_constraint(
     Ok(BoundReferencedByForeignKey {
         constraint_oid: row.oid,
         constraint_name: row.conname,
+        referenced_relation_oid: relation_oid,
         child_relation_name: relation_display_name(catalog, child_relation.relation_oid, "<child>"),
         child_relation_oid: child_relation.relation_oid,
         child_rel: child_relation.rel,

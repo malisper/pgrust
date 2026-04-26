@@ -27,6 +27,7 @@ use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
 use crate::backend::parser::{CatalogLookup, SelectStatement, Statement};
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
 use crate::backend::rewrite::format_view_definition;
+use crate::backend::utils::cache::syscache::backend_catcache;
 use crate::backend::utils::misc::guc_datetime::{DateTimeConfig, format_datestyle};
 use crate::backend::utils::misc::notices::{
     clear_notices as clear_backend_notices, take_notices as take_backend_notices,
@@ -3074,7 +3075,12 @@ fn execute_psql_describe_query(
     {
         return psql_relation_obj_description_query(db, session, sql);
     }
-    if lower.contains("from pg_catalog.pg_policy pol") && lower.contains("pol.polroles") {
+    if is_psql_permissions_query(&lower) {
+        return Some(psql_describe_permissions_query(db, session, &lower));
+    }
+    if lower.contains("from pg_catalog.pg_policy pol")
+        && (lower.contains("pol.polroles") || lower.contains("polroles"))
+    {
         return Some((vec![QueryColumn::text("Policies")], Vec::new()));
     }
     if lower.contains("pg_catalog.pg_statistic_ext")
@@ -3108,6 +3114,176 @@ fn execute_psql_describe_query(
         ));
     }
     None
+}
+
+fn is_psql_permissions_query(lower: &str) -> bool {
+    lower.starts_with("select n.nspname")
+        && lower.contains("c.relname")
+        && lower.contains("case c.relkind")
+        && lower.contains("c.relacl")
+        && lower.contains("from pg_catalog.pg_class c")
+        && lower.contains("from pg_catalog.pg_policy pol")
+        && lower.contains(" as \"policies\"")
+}
+
+fn psql_describe_permissions_query(
+    db: &Database,
+    session: &Session,
+    lower_sql: &str,
+) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
+    let columns = vec![
+        QueryColumn::text("Schema"),
+        QueryColumn::text("Name"),
+        QueryColumn::text("Type"),
+        QueryColumn::text("Access privileges"),
+        QueryColumn::text("Column privileges"),
+        QueryColumn::text("Policies"),
+    ];
+    let Ok(catcache) = backend_catcache(db, session.client_id, session.catalog_txn_ctx()) else {
+        return (columns, Vec::new());
+    };
+
+    let namespace_names = catcache
+        .namespace_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<HashMap<_, _>>();
+    let role_names = catcache
+        .authid_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.rolname))
+        .collect::<HashMap<_, _>>();
+    let attribute_rows = catcache.attribute_rows();
+    let policy_rows = catcache.policy_rows();
+    let hide_system_schemas = lower_sql.contains("n.nspname <> 'pg_catalog'")
+        || lower_sql.contains("n.nspname <> 'information_schema'");
+
+    let mut rows = catcache
+        .class_rows()
+        .into_iter()
+        .filter(|class| matches!(class.relkind, 'r' | 'v' | 'm' | 'S' | 'f' | 'p'))
+        .filter_map(|class| {
+            let schema_name = namespace_names.get(&class.relnamespace)?.clone();
+            if hide_system_schemas
+                && matches!(schema_name.as_str(), "pg_catalog" | "information_schema")
+            {
+                return None;
+            }
+            Some((
+                schema_name.clone(),
+                class.relname.clone(),
+                vec![
+                    Value::Text(schema_name.into()),
+                    Value::Text(class.relname.clone().into()),
+                    Value::Text(psql_permissions_relkind_name(class.relkind).into()),
+                    format_acl_column_value(class.relacl),
+                    format_column_privileges_value(&attribute_rows, class.oid),
+                    format_policy_column_value(&policy_rows, &role_names, class.oid),
+                ],
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    (columns, rows.into_iter().map(|(_, _, row)| row).collect())
+}
+
+fn psql_permissions_relkind_name(relkind: char) -> &'static str {
+    match relkind {
+        'r' => "table",
+        'v' => "view",
+        'm' => "materialized view",
+        'S' => "sequence",
+        'f' => "foreign table",
+        'p' => "partitioned table",
+        _ => "",
+    }
+}
+
+fn format_acl_column_value(acl: Option<Vec<String>>) -> Value {
+    match acl {
+        Some(items) if items.is_empty() => Value::Text("(none)".into()),
+        Some(items) => Value::Text(items.join("\n").into()),
+        None => Value::Null,
+    }
+}
+
+fn format_column_privileges_value(
+    attributes: &[crate::include::catalog::PgAttributeRow],
+    relation_oid: u32,
+) -> Value {
+    let parts = attributes
+        .iter()
+        .filter(|attribute| attribute.attrelid == relation_oid && !attribute.attisdropped)
+        .filter_map(|attribute| {
+            let acl = attribute.attacl.as_ref()?;
+            Some(format!("{}:\n  {}", attribute.attname, acl.join("\n  ")))
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        Value::Null
+    } else {
+        Value::Text(parts.join("\n").into())
+    }
+}
+
+fn format_policy_column_value(
+    policies: &[crate::include::catalog::PgPolicyRow],
+    role_names: &HashMap<u32, String>,
+    relation_oid: u32,
+) -> Value {
+    let mut relation_policies = policies
+        .iter()
+        .filter(|policy| policy.polrelid == relation_oid)
+        .collect::<Vec<_>>();
+    relation_policies.sort_by_key(|policy| policy.oid);
+
+    let parts = relation_policies
+        .into_iter()
+        .map(|policy| {
+            let mut text = policy.polname.clone();
+            if !policy.polpermissive {
+                text.push_str(" (RESTRICTIVE)");
+            }
+            if policy.polcmd != crate::include::catalog::PolicyCommand::All {
+                text.push_str(&format!(" ({})", policy.polcmd.as_char()));
+            }
+            text.push(':');
+            if let Some(qual) = &policy.polqual {
+                text.push_str("\n  (u): ");
+                text.push_str(qual);
+            }
+            if let Some(with_check) = &policy.polwithcheck {
+                text.push_str("\n  (c): ");
+                text.push_str(with_check);
+            }
+            if policy.polroles.as_slice() != [0] {
+                let mut names = policy
+                    .polroles
+                    .iter()
+                    .map(|oid| {
+                        if *oid == 0 {
+                            "public".to_string()
+                        } else {
+                            role_names
+                                .get(oid)
+                                .cloned()
+                                .unwrap_or_else(|| oid.to_string())
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                names.sort();
+                text.push_str("\n  to: ");
+                text.push_str(&names.join(", "));
+            }
+            text
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        Value::Null
+    } else {
+        Value::Text(parts.join("\n").into())
+    }
 }
 
 fn psql_describe_types_query(
@@ -8144,6 +8320,75 @@ mod tests {
                 Value::Text("widgets".into()),
             ]]
         );
+    }
+
+    #[test]
+    fn psql_permissions_query_handles_unqualified_polroles() {
+        let db = Database::open(temp_dir("describe_permissions_policies"), 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create role app_role nologin")
+            .unwrap();
+        session
+            .execute(&db, "create table widgets (id int4 not null)")
+            .unwrap();
+        session
+            .execute(&db, "grant all on widgets to public")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create policy p1 on widgets as restrictive to app_role using (id > 0)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create policy p2 on widgets as restrictive to app_role using (id > 1)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create policy p1a on widgets as restrictive to app_role using (id > 2)",
+            )
+            .unwrap();
+
+        let sql = "SELECT n.nspname as \"Schema\",
+  c.relname as \"Name\",
+  CASE c.relkind WHEN 'r' THEN 'table' END as \"Type\",
+  CASE WHEN pg_catalog.array_length(c.relacl, 1) = 0 THEN '(none)' ELSE pg_catalog.array_to_string(c.relacl, E'\\n') END AS \"Access privileges\",
+  pg_catalog.array_to_string(ARRAY(SELECT attname || E':\\n  ' || pg_catalog.array_to_string(attacl, E'\\n  ') FROM pg_catalog.pg_attribute a WHERE attrelid = c.oid AND NOT attisdropped AND attacl IS NOT NULL), E'\\n') AS \"Column privileges\",
+  pg_catalog.array_to_string(ARRAY(SELECT polname || CASE WHEN NOT polpermissive THEN E' (RESTRICTIVE)' ELSE '' END || CASE WHEN polcmd != '*' THEN E' (' || polcmd::pg_catalog.text || E'):' ELSE E':' END || CASE WHEN polqual IS NOT NULL THEN E'\\n  (u): ' || pg_catalog.pg_get_expr(polqual, polrelid) ELSE E'' END || CASE WHEN polroles <> '{0}' THEN E'\\n  to: ' || pg_catalog.array_to_string(ARRAY(SELECT rolname FROM pg_catalog.pg_roles WHERE oid = ANY (polroles) ORDER BY 1), E', ') ELSE E'' END FROM pg_catalog.pg_policy pol WHERE polrelid = c.oid), E'\\n') AS \"Policies\"
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r','v','m','S','f','p')
+      AND n.nspname <> 'pg_catalog'
+      AND n.nspname <> 'information_schema'
+ORDER BY 1, 2;";
+        let (columns, rows) = execute_psql_describe_query(&db, &session, sql).unwrap();
+        assert_eq!(columns.len(), 6);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Value::Text("public".into()));
+        assert_eq!(rows[0][1], Value::Text("widgets".into()));
+        assert_eq!(rows[0][2], Value::Text("table".into()));
+        match &rows[0][3] {
+            Value::Text(acl) => assert!(acl.contains("=arwdDxtm/")),
+            other => panic!("expected relation ACL text, got {other:?}"),
+        }
+        assert_eq!(rows[0][4], Value::Null);
+        match &rows[0][5] {
+            Value::Text(policies) => {
+                assert!(policies.contains("p1 (RESTRICTIVE):"));
+                assert!(policies.contains("(u): id > 0"));
+                assert!(policies.contains("to: app_role"));
+                assert!(
+                    policies.find("p2 (RESTRICTIVE):").unwrap()
+                        < policies.find("p1a (RESTRICTIVE):").unwrap()
+                );
+            }
+            other => panic!("expected policies text, got {other:?}"),
+        }
     }
 
     #[test]

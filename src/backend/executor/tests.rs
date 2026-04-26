@@ -4254,6 +4254,73 @@ fn explain_expr_parenthesizes_boolean_clause_args() {
 }
 
 #[test]
+fn explain_expr_matches_postgres_filter_formatting() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::{OpExprKind, ScalarFunctionImpl};
+
+    let int4 = SqlType::new(SqlTypeKind::Int4);
+    let text = SqlType::new(SqlTypeKind::Text);
+    let bool_ty = SqlType::new(SqlTypeKind::Bool);
+    let a = Expr::Var(Var {
+        varno: 1,
+        varattno: user_attrno(0),
+        varlevelsup: 0,
+        vartype: int4,
+    });
+    let b = Expr::Var(Var {
+        varno: 1,
+        varattno: user_attrno(1),
+        varlevelsup: 0,
+        vartype: text,
+    });
+    let modulo = Expr::binary_op(
+        OpExprKind::Mod,
+        int4,
+        a.clone(),
+        Expr::Const(Value::Int32(2)),
+    );
+    let equality = Expr::binary_op(
+        OpExprKind::Eq,
+        bool_ty,
+        modulo,
+        Expr::Const(Value::Int32(0)),
+    );
+
+    assert_eq!(
+        render_explain_expr(&equality, &["a".into(), "b".into()]),
+        "((a % 2) = 0)"
+    );
+
+    let mut leak = Expr::func_with_impl(
+        16506,
+        Some(bool_ty),
+        false,
+        ScalarFunctionImpl::UserDefined { proc_oid: 16506 },
+        vec![b.clone()],
+    );
+    if let Expr::Func(func) = &mut leak {
+        func.funcname = Some("f_leak".into());
+    }
+    assert_eq!(
+        render_explain_expr(&leak, &["a".into(), "b".into()]),
+        "f_leak(b)"
+    );
+
+    let like = Expr::Like {
+        expr: Box::new(b),
+        pattern: Box::new(Expr::Const(Value::Text("%2f%".into()))),
+        escape: None,
+        case_insensitive: false,
+        negated: false,
+        collation_oid: Some(100),
+    };
+    assert_eq!(
+        render_explain_expr(&like, &["a".into(), "b".into()]),
+        "(b ~~ '%2f%'::text)"
+    );
+}
+
+#[test]
 fn explain_expr_renders_scalar_array_op_with_typed_array_literal() {
     use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
     use crate::include::nodes::datum::NumericValue;

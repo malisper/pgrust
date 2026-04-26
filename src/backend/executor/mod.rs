@@ -38,6 +38,7 @@ mod node_hash;
 mod node_hashjoin;
 mod node_mergejoin;
 mod nodes;
+mod permissions;
 mod pg_regex;
 mod sqlfunc;
 mod srf;
@@ -174,6 +175,7 @@ pub(crate) use foreign_keys::{
     enforce_inbound_foreign_key_reference, enforce_inbound_foreign_keys_on_delete,
     enforce_inbound_foreign_keys_on_update, enforce_outbound_foreign_keys,
 };
+pub(crate) use permissions::relation_values_visible_for_error_detail;
 
 #[derive(Debug, Clone, Default)]
 pub struct ExprEvalBindings {
