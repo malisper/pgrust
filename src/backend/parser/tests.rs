@@ -3662,6 +3662,19 @@ fn parse_alter_table_drop_column_statement() {
             only: false,
             table_name: "items".into(),
             column_name: "note".into(),
+            cascade: false,
+        })
+    );
+
+    let stmt = parse_statement("alter table items drop column note cascade").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableDropColumn(AlterTableDropColumnStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            column_name: "note".into(),
+            cascade: true,
         })
     );
 }

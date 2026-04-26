@@ -140,8 +140,8 @@ pub fn lower_create_table(
                     return Err(ParseError::UnexpectedToken {
                         expected: "generated column without DEFAULT",
                         actual: format!(
-                            "both default and generation expression specified for column \"{}\"",
-                            column.name
+                            "both default and generation expression specified for column \"{}\" of table \"{}\"",
+                            column.name, stmt.table_name
                         ),
                     });
                 }
@@ -150,12 +150,17 @@ pub fn lower_create_table(
                         || column.default_expr.is_some()
                         || serial_kind.is_some())
                 {
+                    let actual = if column.generated.is_some() {
+                        format!(
+                            "both identity and generation expression specified for column \"{}\" of table \"{}\"",
+                            column.name, stmt.table_name
+                        )
+                    } else {
+                        format!("conflicting identity definition for column \"{}\"", column.name)
+                    };
                     return Err(ParseError::UnexpectedToken {
                         expected: "identity column without DEFAULT, generated expression, or serial type",
-                        actual: format!(
-                            "conflicting identity definition for column \"{}\"",
-                            column.name
-                        ),
+                        actual,
                     });
                 }
                 if serial_kind.is_some() && column.generated.is_some() {
