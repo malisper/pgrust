@@ -4,8 +4,8 @@ use crate::backend::executor::cast_value;
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
     BTREE_AM_OID, GIST_AM_OID, GIST_MULTIRANGE_FAMILY_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID,
-    SPGIST_AM_OID, bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
-    proc_oid_for_builtin_scalar_function,
+    SPGIST_AM_OID, SPGIST_TEXT_FAMILY_OID, bootstrap_pg_operator_rows,
+    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
 };
 use crate::include::nodes::primnodes::{BuiltinScalarFunction, OpExprKind, expr_sql_type_hint};
 
@@ -86,6 +86,12 @@ fn const_argument(expr: &Expr) -> Option<Value> {
 fn simple_index_column(index: &BoundIndexRelation, index_pos: usize) -> Option<usize> {
     let attnum = *index.index_meta.indkey.get(index_pos)?;
     (attnum > 0).then_some((attnum - 1) as usize)
+}
+
+fn index_key_count(index: &BoundIndexRelation) -> usize {
+    usize::try_from(index.index_meta.indnkeyatts)
+        .unwrap_or_default()
+        .min(index.index_meta.indkey.len())
 }
 
 fn index_expression_position(index: &BoundIndexRelation, index_pos: usize) -> Option<usize> {
@@ -184,6 +190,24 @@ fn btree_builtin_strategy(kind: OpExprKind) -> Option<u16> {
     })
 }
 
+fn spgist_text_builtin_strategy(
+    index: &BoundIndexRelation,
+    index_pos: usize,
+    kind: OpExprKind,
+) -> Option<u16> {
+    if index.index_meta.opfamily_oids.get(index_pos).copied()? != SPGIST_TEXT_FAMILY_OID {
+        return None;
+    }
+    Some(match kind {
+        OpExprKind::Lt => 11,
+        OpExprKind::LtEq => 12,
+        OpExprKind::Eq => 3,
+        OpExprKind::GtEq => 14,
+        OpExprKind::Gt => 15,
+        _ => return None,
+    })
+}
+
 fn commuted_function_proc_oid(funcid: u32) -> Option<u32> {
     let builtin = builtin_scalar_function_for_proc_oid(funcid)?;
     let commuted = commuted_builtin_function(builtin)?;
@@ -249,19 +273,41 @@ fn qual_strategy(
     qual: &IndexableQual,
 ) -> Option<u16> {
     match qual.lookup {
-        IndexStrategyLookup::Operator { oid, kind } => index
-            .index_meta
-            .amop_strategy_for_operator(&index.desc, index_pos, oid, value_type_oid(&qual.argument))
-            .or_else(|| {
-                (index.index_meta.am_oid == BTREE_AM_OID)
-                    .then(|| btree_builtin_strategy(kind))
-                    .flatten()
-                    .or_else(|| {
-                        (index.index_meta.am_oid == HASH_AM_OID && kind == OpExprKind::Eq)
-                            .then_some(1)
-                    })
-                    .or_else(|| gist_operator_builtin_strategy(index, index_pos, kind))
-            }),
+        IndexStrategyLookup::Operator { oid, kind } => {
+            if index.index_meta.am_oid == SPGIST_AM_OID
+                && oid == 0
+                && matches!(qual.argument, Value::Null)
+            {
+                return match kind {
+                    OpExprKind::Eq => Some(0),
+                    OpExprKind::Lt => Some(1),
+                    _ => None,
+                };
+            }
+            index
+                .index_meta
+                .amop_strategy_for_operator(
+                    &index.desc,
+                    index_pos,
+                    oid,
+                    value_type_oid(&qual.argument),
+                )
+                .or_else(|| {
+                    (index.index_meta.am_oid == BTREE_AM_OID)
+                        .then(|| btree_builtin_strategy(kind))
+                        .flatten()
+                        .or_else(|| {
+                            (index.index_meta.am_oid == SPGIST_AM_OID)
+                                .then(|| spgist_text_builtin_strategy(index, index_pos, kind))
+                                .flatten()
+                        })
+                        .or_else(|| {
+                            (index.index_meta.am_oid == HASH_AM_OID && kind == OpExprKind::Eq)
+                                .then_some(1)
+                        })
+                        .or_else(|| gist_operator_builtin_strategy(index, index_pos, kind))
+                })
+        }
         IndexStrategyLookup::Proc(proc_oid) => index
             .index_meta
             .amop_strategy_for_proc(
@@ -286,7 +332,7 @@ fn build_btree_scan_keys(
     let mut keys = Vec::new();
     let mut equality_prefix = 0usize;
 
-    for index_pos in 0..index.index_meta.indkey.len() {
+    for index_pos in 0..index_key_count(index) {
         let Some(column) = simple_index_column(index, index_pos) else {
             break;
         };
@@ -337,13 +383,12 @@ fn build_gist_scan_keys(
     parsed_quals
         .iter()
         .filter_map(|qual| {
-            let (index_pos, strategy) =
-                (0..index.index_meta.indkey.len()).find_map(|index_pos| {
-                    (index_key_matches_qual(index, index_pos, qual))
-                        .then(|| qual_strategy(index, index_pos, qual))
-                        .flatten()
-                        .map(|strategy| (index_pos, strategy))
-                })?;
+            let (index_pos, strategy) = (0..index_key_count(index)).find_map(|index_pos| {
+                (index_key_matches_qual(index, index_pos, qual))
+                    .then(|| qual_strategy(index, index_pos, qual))
+                    .flatten()
+                    .map(|strategy| (index_pos, strategy))
+            })?;
             Some(crate::include::access::scankey::ScanKeyData {
                 attribute_number: (index_pos + 1) as i16,
                 strategy,
@@ -357,7 +402,7 @@ fn build_hash_scan_keys(
     index: &BoundIndexRelation,
     parsed_quals: &[IndexableQual],
 ) -> Vec<crate::include::access::scankey::ScanKeyData> {
-    if index.index_meta.indkey.len() != 1 {
+    if index_key_count(index) != 1 {
         return Vec::new();
     }
     parsed_quals
@@ -470,10 +515,14 @@ fn index_order_match(
     let mut direction = None;
     let mut matched = 0usize;
     for (idx, item) in items.iter().enumerate() {
+        let index_pos = equality_prefix + idx;
+        if index_pos >= index_key_count(index) {
+            break;
+        }
         let Some(column) = simple_column_index(&item.expr) else {
             break;
         };
-        let Some(index_column) = simple_index_column(index, equality_prefix + idx) else {
+        let Some(index_column) = simple_index_column(index, index_pos) else {
             break;
         };
         if index_column != column {
@@ -568,6 +617,22 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
             }
             None
         }
+        Expr::IsNotNull(inner) => mk(
+            strip_casts(inner),
+            IndexStrategyLookup::Operator {
+                oid: 0,
+                kind: OpExprKind::Lt,
+            },
+            Value::Null,
+        ),
+        Expr::IsNull(inner) => mk(
+            strip_casts(inner),
+            IndexStrategyLookup::Operator {
+                oid: 0,
+                kind: OpExprKind::Eq,
+            },
+            Value::Null,
+        ),
         _ => None,
     }
 }

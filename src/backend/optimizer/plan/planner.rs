@@ -25,7 +25,7 @@ use super::super::util::{
     pathkeys_to_order_items, projection_is_identity, required_query_pathkeys_for_path,
     required_query_pathkeys_for_rel,
 };
-use super::super::{expand_join_rte_vars, optimize_path, pull_up_sublinks};
+use super::super::{expand_join_rte_vars, optimize_path_with_config, pull_up_sublinks};
 
 pub(super) fn make_pathtarget_projection_rel(
     root: &PlannerInfo,
@@ -47,7 +47,7 @@ pub(super) fn make_pathtarget_projection_rel(
             rel.add_path(path);
             continue;
         }
-        rel.add_path(optimize_path(
+        rel.add_path(optimize_path_with_config(
             Path::Projection {
                 plan_info: PlanEstimate::default(),
                 pathtarget: PathTarget::from_target_list(&targets),
@@ -56,6 +56,7 @@ pub(super) fn make_pathtarget_projection_rel(
                 targets: targets.clone(),
             },
             catalog,
+            root.config,
         ));
     }
     bestpath::set_cheapest(&mut rel);
@@ -110,8 +111,9 @@ fn aggregate_path(
     output_columns: Vec<crate::include::nodes::primnodes::QueryColumn>,
     reltarget: PathTarget,
     catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
 ) -> Path {
-    optimize_path(
+    optimize_path_with_config(
         Path::Aggregate {
             plan_info: PlanEstimate::default(),
             pathtarget: reltarget,
@@ -126,6 +128,7 @@ fn aggregate_path(
             output_columns,
         },
         catalog,
+        config,
     )
 }
 
@@ -199,6 +202,7 @@ fn make_aggregate_rel(
                 output_columns,
                 root.grouped_target.clone(),
                 catalog,
+                root.config,
             ));
             continue;
         }
@@ -217,6 +221,7 @@ fn make_aggregate_rel(
                 output_columns,
                 root.grouped_target.clone(),
                 catalog,
+                root.config,
             ));
         } else {
             let path_satisfies_group_order =
@@ -233,6 +238,7 @@ fn make_aggregate_rel(
                 output_columns.clone(),
                 root.grouped_target.clone(),
                 catalog,
+                root.config,
             ));
             if path_satisfies_group_order {
                 rel.add_path(aggregate_path(
@@ -247,6 +253,7 @@ fn make_aggregate_rel(
                     output_columns,
                     root.grouped_target.clone(),
                     catalog,
+                    root.config,
                 ));
             }
         }
@@ -257,7 +264,7 @@ fn make_aggregate_rel(
 }
 
 fn make_filter_rel(
-    _root: &PlannerInfo,
+    root: &PlannerInfo,
     input_rel: RelOptInfo,
     predicate: Expr,
     catalog: &dyn CatalogLookup,
@@ -268,7 +275,7 @@ fn make_filter_rel(
         input_rel.reltarget.clone(),
     );
     for path in input_rel.pathlist {
-        rel.add_path(optimize_path(
+        rel.add_path(optimize_path_with_config(
             Path::Filter {
                 plan_info: PlanEstimate::default(),
                 pathtarget: path.semantic_output_target(),
@@ -276,6 +283,7 @@ fn make_filter_rel(
                 predicate: predicate.clone(),
             },
             catalog,
+            root.config,
         ));
     }
     bestpath::set_cheapest(&mut rel);
@@ -475,7 +483,7 @@ fn make_window_rel(
         .chain(ordered_input_paths.into_iter())
     {
         let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
-            optimize_path(
+            optimize_path_with_config(
                 Path::OrderBy {
                     plan_info: PlanEstimate::default(),
                     pathtarget: path.semantic_output_target(),
@@ -484,11 +492,12 @@ fn make_window_rel(
                     input: Box::new(path),
                 },
                 catalog,
+                root.config,
             )
         } else {
             path
         };
-        rel.add_path(optimize_path(
+        rel.add_path(optimize_path_with_config(
             Path::WindowAgg {
                 plan_info: PlanEstimate::default(),
                 pathtarget: rel.reltarget.clone(),
@@ -498,6 +507,7 @@ fn make_window_rel(
                 clause: clause.clone(),
             },
             catalog,
+            root.config,
         ));
     }
     bestpath::set_cheapest(&mut rel);
@@ -524,7 +534,7 @@ fn make_project_set_rel(
     let slot_id = next_synthetic_slot_id();
     let mut rel = RelOptInfo::new(input_rel.relids.clone(), RelOptKind::UpperRel, reltarget);
     for path in input_rel.pathlist {
-        rel.add_path(optimize_path(
+        rel.add_path(optimize_path_with_config(
             Path::ProjectSet {
                 plan_info: PlanEstimate::default(),
                 pathtarget: rel.reltarget.clone(),
@@ -533,6 +543,7 @@ fn make_project_set_rel(
                 targets: targets.to_vec(),
             },
             catalog,
+            root.config,
         ));
     }
     bestpath::set_cheapest(&mut rel);
@@ -974,7 +985,7 @@ fn make_ordered_rel(
         let required_pathkeys = required_query_pathkeys_for_path(root, path);
         if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
             let display_items = sort_key_display_items(root, &root.query_pathkeys);
-            rel.add_path(optimize_path(
+            rel.add_path(optimize_path_with_config(
                 Path::OrderBy {
                     plan_info: PlanEstimate::default(),
                     pathtarget: path.semantic_output_target(),
@@ -983,6 +994,7 @@ fn make_ordered_rel(
                     input: Box::new(path.clone()),
                 },
                 catalog,
+                root.config,
             ));
         } else if rel.pathlist.is_empty() {
             rel.add_path(path.clone());
@@ -1028,7 +1040,7 @@ fn make_distinct_rel(
     for path in input_rel.pathlist {
         let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
             let display_items = sort_key_display_items(root, &required_pathkeys);
-            optimize_path(
+            optimize_path_with_config(
                 Path::OrderBy {
                     plan_info: PlanEstimate::default(),
                     pathtarget: path.semantic_output_target(),
@@ -1037,17 +1049,19 @@ fn make_distinct_rel(
                     input: Box::new(path),
                 },
                 catalog,
+                root.config,
             )
         } else {
             path
         };
-        rel.add_path(optimize_path(
+        rel.add_path(optimize_path_with_config(
             Path::Unique {
                 plan_info: PlanEstimate::default(),
                 pathtarget: path.semantic_output_target(),
                 input: Box::new(path),
             },
             catalog,
+            root.config,
         ));
     }
     bestpath::set_cheapest(&mut rel);
@@ -1056,7 +1070,7 @@ fn make_distinct_rel(
 }
 
 fn make_limit_rel(
-    _root: &PlannerInfo,
+    root: &PlannerInfo,
     input_rel: RelOptInfo,
     limit: Option<usize>,
     offset: usize,
@@ -1068,7 +1082,7 @@ fn make_limit_rel(
         input_rel.reltarget.clone(),
     );
     for path in input_rel.pathlist {
-        rel.add_path(optimize_path(
+        rel.add_path(optimize_path_with_config(
             Path::Limit {
                 plan_info: PlanEstimate::default(),
                 pathtarget: path.semantic_output_target(),
@@ -1077,6 +1091,7 @@ fn make_limit_rel(
                 offset,
             },
             catalog,
+            root.config,
         ));
     }
     bestpath::set_cheapest(&mut rel);
@@ -1084,6 +1099,7 @@ fn make_limit_rel(
 }
 
 fn make_lock_rows_rel(
+    root: &PlannerInfo,
     input_rel: RelOptInfo,
     row_marks: &[crate::include::nodes::parsenodes::QueryRowMark],
     catalog: &dyn CatalogLookup,
@@ -1094,7 +1110,7 @@ fn make_lock_rows_rel(
         input_rel.reltarget.clone(),
     );
     for path in input_rel.pathlist {
-        rel.add_path(optimize_path(
+        rel.add_path(optimize_path_with_config(
             Path::LockRows {
                 plan_info: PlanEstimate::default(),
                 pathtarget: path.semantic_output_target(),
@@ -1102,6 +1118,7 @@ fn make_lock_rows_rel(
                 row_marks: row_marks.to_vec(),
             },
             catalog,
+            root.config,
         ));
     }
     bestpath::set_cheapest(&mut rel);
@@ -1286,7 +1303,7 @@ fn make_projection_rel(
             rel.add_path(path);
             continue;
         }
-        rel.add_path(optimize_path(
+        rel.add_path(optimize_path_with_config(
             Path::Projection {
                 plan_info: PlanEstimate::default(),
                 pathtarget: PathTarget::from_target_list(&targets),
@@ -1295,6 +1312,7 @@ fn make_projection_rel(
                 targets,
             },
             catalog,
+            root.config,
         ));
     }
     bestpath::set_cheapest(&mut rel);
@@ -1375,7 +1393,7 @@ pub(super) fn grouping_planner(
     }
 
     if !root.parse.row_marks.is_empty() {
-        current_rel = make_lock_rows_rel(current_rel, &root.parse.row_marks, catalog);
+        current_rel = make_lock_rows_rel(root, current_rel, &root.parse.row_marks, catalog);
     }
 
     if root.parse.limit_count.is_some() || root.parse.limit_offset != 0 {

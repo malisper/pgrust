@@ -295,6 +295,10 @@ fn execute_statement_with_source(
             expected: "COMMENT ON FUNCTION handled by database/session layer",
             actual: "COMMENT ON FUNCTION".into(),
         })),
+        Statement::CommentOnOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COMMENT ON OPERATOR handled by database/session layer",
+            actual: "COMMENT ON OPERATOR".into(),
+        })),
         Statement::CommentOnConstraint(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON CONSTRAINT handled by database/session layer",
             actual: "COMMENT ON CONSTRAINT".into(),
@@ -342,6 +346,10 @@ fn execute_statement_with_source(
         | Statement::ReassignOwned(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "role management".into(),
         ))),
+        Statement::ReindexIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "REINDEX handled by database/session layer",
+            actual: "REINDEX".into(),
+        })),
         Statement::CreateIndex(stmt) => execute_create_index(stmt, catalog, ctx),
         Statement::Call(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "CALL execution".into(),
@@ -606,6 +614,10 @@ pub fn execute_readonly_statement_with_config(
             expected: "read-only statement",
             actual: "COMMENT ON FUNCTION".into(),
         })),
+        Statement::CommentOnOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "COMMENT ON OPERATOR".into(),
+        })),
         Statement::CommentOnConstraint(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "COMMENT ON CONSTRAINT".into(),
@@ -633,6 +645,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::CreateIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE INDEX".into(),
+        })),
+        Statement::ReindexIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "REINDEX".into(),
         })),
         Statement::Call(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "CALL execution".into(),

@@ -13,11 +13,25 @@ use std::collections::{BTreeSet, VecDeque};
 
 const TABLE_ALL_PRIVILEGE_CHARS: &str = "arwdDxtm";
 const TABLE_SELECT_PRIVILEGE_CHARS: &str = "r";
+const SCHEMA_ALL_PRIVILEGE_CHARS: &str = "UC";
+const SCHEMA_USAGE_PRIVILEGE_CHARS: &str = "U";
+const TYPE_USAGE_PRIVILEGE_CHARS: &str = "U";
+const FUNCTION_EXECUTE_PRIVILEGE_CHARS: &str = "X";
 
 fn table_privilege_chars(privilege: GrantObjectPrivilege) -> Option<&'static str> {
     match privilege {
         GrantObjectPrivilege::AllPrivilegesOnTable => Some(TABLE_ALL_PRIVILEGE_CHARS),
         GrantObjectPrivilege::SelectOnTable => Some(TABLE_SELECT_PRIVILEGE_CHARS),
+        _ => None,
+    }
+}
+
+fn object_privilege_chars(privilege: GrantObjectPrivilege) -> Option<&'static str> {
+    match privilege {
+        GrantObjectPrivilege::AllPrivilegesOnSchema => Some(SCHEMA_ALL_PRIVILEGE_CHARS),
+        GrantObjectPrivilege::UsageOnSchema => Some(SCHEMA_USAGE_PRIVILEGE_CHARS),
+        GrantObjectPrivilege::UsageOnType => Some(TYPE_USAGE_PRIVILEGE_CHARS),
+        GrantObjectPrivilege::ExecuteOnFunction => Some(FUNCTION_EXECUTE_PRIVILEGE_CHARS),
         _ => None,
     }
 }
@@ -107,6 +121,106 @@ fn collapse_relation_acl_defaults(
         [only] if only == &default_owner => None,
         _ => Some(acl),
     }
+}
+
+pub(crate) fn effective_acl_grantee_names(
+    auth: &crate::pgrust::auth::AuthState,
+    catalog: &crate::pgrust::auth::AuthCatalog,
+) -> BTreeSet<String> {
+    let mut names = BTreeSet::from([String::new()]);
+    for role in catalog.roles() {
+        if auth.has_effective_membership(role.oid, catalog) {
+            names.insert(role.rolname.clone());
+        }
+    }
+    names
+}
+
+pub(crate) fn acl_grants_privilege(
+    acl: &[String],
+    effective_names: &BTreeSet<String>,
+    privilege: char,
+) -> bool {
+    acl.iter().any(|item| {
+        parse_acl_item(item)
+            .map(|(grantee, privileges, _)| {
+                effective_names.contains(&grantee) && privileges.contains(privilege)
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn schema_owner_default_acl(owner_name: &str) -> Vec<String> {
+    vec![format!(
+        "{owner_name}={SCHEMA_ALL_PRIVILEGE_CHARS}/{owner_name}"
+    )]
+}
+
+pub(crate) fn type_owner_default_acl(owner_name: &str) -> Vec<String> {
+    vec![
+        format!("{owner_name}={TYPE_USAGE_PRIVILEGE_CHARS}/{owner_name}"),
+        format!("={TYPE_USAGE_PRIVILEGE_CHARS}/{owner_name}"),
+    ]
+}
+
+fn function_owner_default_acl(owner_name: &str) -> Vec<String> {
+    vec![
+        format!("{owner_name}={FUNCTION_EXECUTE_PRIVILEGE_CHARS}/{owner_name}"),
+        format!("={FUNCTION_EXECUTE_PRIVILEGE_CHARS}/{owner_name}"),
+    ]
+}
+
+fn collapse_acl_defaults(acl: Vec<String>, defaults: &[String]) -> Option<Vec<String>> {
+    if acl == defaults { None } else { Some(acl) }
+}
+
+fn grant_acl_entry(
+    acl: &mut Vec<String>,
+    grantee: &str,
+    grantor: &str,
+    privilege_chars: &str,
+    allowed: &str,
+) {
+    if let Some(existing) = acl.iter_mut().find(|item| {
+        parse_acl_item(item)
+            .map(|(item_grantee, _, item_grantor)| {
+                item_grantee == grantee && item_grantor == grantor
+            })
+            .unwrap_or(false)
+    }) {
+        let (_, existing_privileges, _) = parse_acl_item(existing).expect("validated above");
+        let merged = canonicalize_acl_privileges(
+            &format!("{existing_privileges}{privilege_chars}"),
+            allowed,
+        );
+        *existing = format!("{grantee}={merged}/{grantor}");
+        return;
+    }
+    acl.push(format!(
+        "{grantee}={}/{grantor}",
+        canonicalize_acl_privileges(privilege_chars, allowed)
+    ));
+}
+
+fn revoke_acl_entry(acl: &mut Vec<String>, grantee: &str, privilege_chars: &str, allowed: &str) {
+    acl.retain_mut(|item| {
+        let Some((item_grantee, existing_privileges, grantor)) = parse_acl_item(item) else {
+            return true;
+        };
+        if item_grantee != grantee {
+            return true;
+        }
+        let remaining: String = existing_privileges
+            .chars()
+            .filter(|ch| !privilege_chars.contains(*ch))
+            .collect();
+        let remaining = canonicalize_acl_privileges(&remaining, allowed);
+        if remaining.is_empty() {
+            return false;
+        }
+        *item = format!("{grantee}={remaining}/{grantor}");
+        true
+    });
 }
 fn single_object_name<'a>(
     object_names: &'a [String],
@@ -220,6 +334,61 @@ fn ensure_function_signature_exists(
     }
 }
 
+fn lookup_function_row_by_signature(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    configured_search_path: Option<&[String]>,
+    signature: &str,
+) -> Result<crate::include::catalog::PgProcRow, ExecError> {
+    let catalog = db.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+    let (proc_name, arg_names) =
+        parse_granted_function_signature(signature).map_err(ExecError::Parse)?;
+    let (schema_name, base_name) = proc_name
+        .rsplit_once('.')
+        .map(|(schema, name)| (Some(schema.trim().to_ascii_lowercase()), name.trim()))
+        .unwrap_or((None, proc_name));
+    let desired_arg_oids = arg_names
+        .into_iter()
+        .map(|arg| {
+            let raw_type = parse_type_name(arg)?;
+            let sql_type = resolve_raw_type_name(&raw_type, &catalog)?;
+            catalog
+                .type_oid_for_sql_type(sql_type)
+                .ok_or_else(|| ParseError::UnsupportedType(arg.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ExecError::Parse)?;
+    let schema_oid = match schema_name {
+        Some(ref schema_name) => Some(
+            db.visible_namespace_oid_by_name(client_id, txn_ctx, schema_name)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("schema \"{schema_name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "3F000",
+                })?,
+        ),
+        None => None,
+    };
+    let normalized_name = base_name.trim_matches('"').to_ascii_lowercase();
+    catalog
+        .proc_rows_by_name(&normalized_name)
+        .into_iter()
+        .find(|row| {
+            parse_proc_argtype_oids(&row.proargtypes) == Some(desired_arg_oids.clone())
+                && schema_oid
+                    .map(|schema_oid| row.pronamespace == schema_oid)
+                    .unwrap_or(true)
+        })
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("function {signature} does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
+        })
+}
+
 impl Database {
     pub(crate) fn execute_grant_object_stmt_with_search_path(
         &self,
@@ -238,35 +407,24 @@ impl Database {
                     configured_search_path,
                 )
             }
-            GrantObjectPrivilege::AllPrivilegesOnSchema => {
-                let catcache = self
-                    .backend_catcache(client_id, None)
-                    .map_err(map_catalog_error)?;
-                for object_name in &stmt.object_names {
-                    catcache.namespace_by_name(object_name).ok_or_else(|| {
-                        ExecError::DetailedError {
-                            message: format!("schema \"{}\" does not exist", object_name),
-                            detail: None,
-                            hint: None,
-                            sqlstate: "3F000",
-                        }
-                    })?;
-                }
-                Ok(StatementResult::AffectedRows(0))
-            }
-            GrantObjectPrivilege::ExecuteOnFunction => {
-                let object_name =
-                    single_object_name(&stmt.object_names, "single function signature")?;
-                ensure_function_signature_exists(
-                    self,
+            GrantObjectPrivilege::AllPrivilegesOnSchema | GrantObjectPrivilege::UsageOnSchema => {
+                self.execute_grant_schema_acl_stmt_with_search_path(
                     client_id,
-                    None,
+                    stmt,
                     configured_search_path,
-                    object_name,
-                )?;
-                Ok(StatementResult::AffectedRows(0))
+                )
             }
-            GrantObjectPrivilege::UsageOnType => Ok(StatementResult::AffectedRows(0)),
+            GrantObjectPrivilege::UsageOnType => self.execute_grant_type_acl_stmt_with_search_path(
+                client_id,
+                stmt,
+                configured_search_path,
+            ),
+            GrantObjectPrivilege::ExecuteOnFunction => self
+                .execute_grant_function_acl_stmt_with_search_path(
+                    client_id,
+                    stmt,
+                    configured_search_path,
+                ),
         }
     }
 
@@ -293,35 +451,30 @@ impl Database {
                     catalog_effects,
                 )
             }
-            GrantObjectPrivilege::AllPrivilegesOnSchema => {
-                let catcache = self
-                    .backend_catcache(client_id, Some((xid, cid)))
-                    .map_err(map_catalog_error)?;
-                for object_name in &stmt.object_names {
-                    catcache.namespace_by_name(object_name).ok_or_else(|| {
-                        ExecError::DetailedError {
-                            message: format!("schema \"{}\" does not exist", object_name),
-                            detail: None,
-                            hint: None,
-                            sqlstate: "3F000",
-                        }
-                    })?;
-                }
-                Ok(StatementResult::AffectedRows(0))
-            }
-            GrantObjectPrivilege::ExecuteOnFunction => {
-                let object_name =
-                    single_object_name(&stmt.object_names, "single function signature")?;
-                ensure_function_signature_exists(
-                    self,
+            GrantObjectPrivilege::AllPrivilegesOnSchema | GrantObjectPrivilege::UsageOnSchema => {
+                self.execute_schema_acl_stmt_in_transaction_with_search_path(
                     client_id,
-                    Some((xid, cid)),
+                    stmt.privilege.clone(),
+                    &stmt.object_names,
+                    &stmt.grantee_names,
+                    xid,
+                    cid,
                     configured_search_path,
-                    object_name,
-                )?;
-                Ok(StatementResult::AffectedRows(0))
+                    catalog_effects,
+                    false,
+                )
             }
-            GrantObjectPrivilege::UsageOnType => Ok(StatementResult::AffectedRows(0)),
+            GrantObjectPrivilege::UsageOnType => self.execute_grant_type_acl_stmt_with_search_path(
+                client_id,
+                stmt,
+                configured_search_path,
+            ),
+            GrantObjectPrivilege::ExecuteOnFunction => self
+                .execute_grant_function_acl_stmt_with_search_path(
+                    client_id,
+                    stmt,
+                    configured_search_path,
+                ),
         }
     }
 
@@ -342,37 +495,25 @@ impl Database {
                     configured_search_path,
                 )
             }
-            GrantObjectPrivilege::AllPrivilegesOnSchema => {
-                let catcache = self
-                    .backend_catcache(client_id, None)
-                    .map_err(map_catalog_error)?;
-                for object_name in &stmt.object_names {
-                    catcache.namespace_by_name(object_name).ok_or_else(|| {
-                        ExecError::DetailedError {
-                            message: format!("schema \"{}\" does not exist", object_name),
-                            detail: None,
-                            hint: None,
-                            sqlstate: "3F000",
-                        }
-                    })?;
-                }
-                Ok(StatementResult::AffectedRows(0))
-            }
-            GrantObjectPrivilege::ExecuteOnFunction => {
-                let object_name =
-                    single_object_name(&stmt.object_names, "single function signature")?;
-                ensure_function_signature_exists(
-                    self,
+            GrantObjectPrivilege::AllPrivilegesOnSchema | GrantObjectPrivilege::UsageOnSchema => {
+                self.execute_revoke_schema_acl_stmt_with_search_path(
                     client_id,
-                    None,
+                    stmt,
                     configured_search_path,
-                    object_name,
-                )?;
-                Ok(StatementResult::AffectedRows(0))
+                )
             }
-            GrantObjectPrivilege::UsageOnType => {
-                self.execute_revoke_type_usage_stmt(client_id, stmt, configured_search_path)
-            }
+            GrantObjectPrivilege::UsageOnType => self
+                .execute_revoke_type_acl_stmt_with_search_path(
+                    client_id,
+                    stmt,
+                    configured_search_path,
+                ),
+            GrantObjectPrivilege::ExecuteOnFunction => self
+                .execute_revoke_function_acl_stmt_with_search_path(
+                    client_id,
+                    stmt,
+                    configured_search_path,
+                ),
         }
     }
 
@@ -643,6 +784,529 @@ impl Database {
         catalog_effects.push(effect);
         let _ = stmt.cascade;
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn execute_grant_schema_acl_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &GrantObjectStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_schema_acl_stmt_in_transaction_with_search_path(
+            client_id,
+            stmt.privilege.clone(),
+            &stmt.object_names,
+            &stmt.grantee_names,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+            false,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    fn execute_revoke_schema_acl_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &RevokeObjectStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_schema_acl_stmt_in_transaction_with_search_path(
+            client_id,
+            stmt.privilege.clone(),
+            &stmt.object_names,
+            &stmt.grantee_names,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+            true,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    fn execute_schema_acl_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        privilege: GrantObjectPrivilege,
+        object_names: &[String],
+        grantee_names: &[String],
+        xid: TransactionId,
+        cid: CommandId,
+        _configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        revoke: bool,
+    ) -> Result<StatementResult, ExecError> {
+        let privilege_chars = object_privilege_chars(privilege.clone())
+            .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
+        let auth = self.auth_state(client_id);
+        let auth_catalog = self
+            .auth_catalog(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
+        let grantor_name = auth_catalog
+            .role_by_oid(auth.current_user_oid())
+            .map(|row| row.rolname.clone())
+            .ok_or_else(|| ExecError::DetailedError {
+                message: "current user does not exist".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        let catcache = self
+            .backend_catcache(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        for object_name in object_names {
+            let namespace = catcache
+                .namespace_by_name(object_name)
+                .cloned()
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("schema \"{}\" does not exist", object_name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "3F000",
+                })?;
+            if !auth_catalog
+                .role_by_oid(auth.current_user_oid())
+                .is_some_and(|row| row.rolsuper)
+                && !auth.has_effective_membership(namespace.nspowner, &auth_catalog)
+            {
+                return Err(ExecError::DetailedError {
+                    message: format!("must be owner of schema {object_name}"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42501",
+                });
+            }
+            let owner_name = auth_catalog
+                .role_by_oid(namespace.nspowner)
+                .map(|row| row.rolname.clone())
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("owner for schema \"{object_name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+            let mut acl = namespace
+                .nspacl
+                .clone()
+                .unwrap_or_else(|| schema_owner_default_acl(&owner_name));
+            for grantee_name in grantee_names {
+                let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
+                    String::new()
+                } else {
+                    auth_catalog
+                        .role_by_name(grantee_name)
+                        .map(|row| row.rolname.clone())
+                        .ok_or_else(|| {
+                            ExecError::Parse(role_management_error(format!(
+                                "role \"{}\" does not exist",
+                                grantee_name
+                            )))
+                        })?
+                };
+                if revoke {
+                    revoke_acl_entry(
+                        &mut acl,
+                        &grantee_acl_name,
+                        privilege_chars,
+                        SCHEMA_ALL_PRIVILEGE_CHARS,
+                    );
+                } else {
+                    grant_acl_entry(
+                        &mut acl,
+                        &grantee_acl_name,
+                        &grantor_name,
+                        privilege_chars,
+                        SCHEMA_ALL_PRIVILEGE_CHARS,
+                    );
+                }
+            }
+            let new_acl = collapse_acl_defaults(acl, &schema_owner_default_acl(&owner_name));
+            let effect = self
+                .catalog
+                .write()
+                .alter_namespace_acl_mvcc(namespace.oid, new_acl, &ctx)
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+        }
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn execute_grant_type_acl_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &GrantObjectStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        self.execute_type_acl_stmt_with_search_path(
+            client_id,
+            stmt.privilege.clone(),
+            &stmt.object_names,
+            &stmt.grantee_names,
+            configured_search_path,
+            false,
+        )
+    }
+
+    fn execute_revoke_type_acl_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &RevokeObjectStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        self.execute_type_acl_stmt_with_search_path(
+            client_id,
+            stmt.privilege.clone(),
+            &stmt.object_names,
+            &stmt.grantee_names,
+            configured_search_path,
+            true,
+        )
+    }
+
+    fn execute_type_acl_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        privilege: GrantObjectPrivilege,
+        object_names: &[String],
+        grantee_names: &[String],
+        configured_search_path: Option<&[String]>,
+        revoke: bool,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let privilege_chars = object_privilege_chars(privilege.clone())
+            .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
+        let auth = self.auth_state(client_id);
+        let auth_catalog = self
+            .auth_catalog(client_id, Some((xid, 0)))
+            .map_err(map_catalog_error)?;
+        let grantor_name = auth_catalog
+            .role_by_oid(auth.current_user_oid())
+            .map(|row| row.rolname.clone())
+            .ok_or_else(|| ExecError::DetailedError {
+                message: "current user does not exist".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, 0)), configured_search_path);
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: 0,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        for object_name in object_names {
+            let raw_type = parse_type_name(object_name).map_err(ExecError::Parse)?;
+            let sql_type = resolve_raw_type_name(&raw_type, &catalog).map_err(ExecError::Parse)?;
+            let type_oid = catalog.type_oid_for_sql_type(sql_type).ok_or_else(|| {
+                ExecError::DetailedError {
+                    message: format!("type \"{}\" does not exist", object_name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                }
+            })?;
+            if let Some(entry) = self.range_types.read().values().find(|entry| {
+                entry.multirange_oid == type_oid || entry.multirange_array_oid == type_oid
+            }) {
+                return Err(cannot_set_multirange_privileges_error(&entry.name));
+            }
+            let row = catalog
+                .type_by_oid(type_oid)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("type \"{}\" does not exist", object_name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                })?;
+            if !auth_catalog
+                .role_by_oid(auth.current_user_oid())
+                .is_some_and(|entry| entry.rolsuper)
+                && !auth.has_effective_membership(row.typowner, &auth_catalog)
+            {
+                return Err(ExecError::DetailedError {
+                    message: format!("must be owner of type {object_name}"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42501",
+                });
+            }
+            let owner_name = auth_catalog
+                .role_by_oid(row.typowner)
+                .map(|entry| entry.rolname.clone())
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("owner for type \"{object_name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+            let mut acl = row
+                .typacl
+                .clone()
+                .unwrap_or_else(|| type_owner_default_acl(&owner_name));
+            for grantee_name in grantee_names {
+                let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
+                    String::new()
+                } else {
+                    auth_catalog
+                        .role_by_name(grantee_name)
+                        .map(|entry| entry.rolname.clone())
+                        .ok_or_else(|| {
+                            ExecError::Parse(role_management_error(format!(
+                                "role \"{}\" does not exist",
+                                grantee_name
+                            )))
+                        })?
+                };
+                if revoke {
+                    revoke_acl_entry(
+                        &mut acl,
+                        &grantee_acl_name,
+                        privilege_chars,
+                        TYPE_USAGE_PRIVILEGE_CHARS,
+                    );
+                } else {
+                    grant_acl_entry(
+                        &mut acl,
+                        &grantee_acl_name,
+                        &grantor_name,
+                        privilege_chars,
+                        TYPE_USAGE_PRIVILEGE_CHARS,
+                    );
+                }
+            }
+            let new_acl = collapse_acl_defaults(acl, &type_owner_default_acl(&owner_name));
+            let mut updated_dynamic = false;
+            if let Some(domain) = self
+                .domains
+                .write()
+                .values_mut()
+                .find(|entry| entry.oid == type_oid)
+            {
+                domain.typacl = new_acl.clone();
+                updated_dynamic = true;
+            }
+            if !updated_dynamic {
+                let mut enum_types = self.enum_types.write();
+                if let Some(entry) = enum_types
+                    .values_mut()
+                    .find(|entry| entry.oid == type_oid || entry.array_oid == type_oid)
+                {
+                    entry.typacl = new_acl.clone();
+                    updated_dynamic = true;
+                }
+            }
+            if !updated_dynamic {
+                let mut range_types = self.range_types.write();
+                if let Some(entry) = range_types.values_mut().find(|entry| {
+                    entry.oid == type_oid
+                        || entry.array_oid == type_oid
+                        || entry.multirange_oid == type_oid
+                        || entry.multirange_array_oid == type_oid
+                }) {
+                    entry.typacl = new_acl.clone();
+                    updated_dynamic = true;
+                }
+            }
+            if updated_dynamic {
+                self.plan_cache.invalidate_all();
+            } else {
+                let effect = self
+                    .catalog
+                    .write()
+                    .alter_type_acl_mvcc(type_oid, new_acl, &ctx)
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+            }
+        }
+        let result = self.finish_txn(
+            client_id,
+            xid,
+            Ok(StatementResult::AffectedRows(0)),
+            &catalog_effects,
+            &[],
+            &[],
+        );
+        guard.disarm();
+        result
+    }
+
+    fn execute_grant_function_acl_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &GrantObjectStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        self.execute_function_acl_stmt_with_search_path(
+            client_id,
+            stmt.privilege.clone(),
+            &stmt.object_names,
+            &stmt.grantee_names,
+            configured_search_path,
+            false,
+        )
+    }
+
+    fn execute_revoke_function_acl_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &RevokeObjectStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        self.execute_function_acl_stmt_with_search_path(
+            client_id,
+            stmt.privilege.clone(),
+            &stmt.object_names,
+            &stmt.grantee_names,
+            configured_search_path,
+            true,
+        )
+    }
+
+    fn execute_function_acl_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        privilege: GrantObjectPrivilege,
+        object_names: &[String],
+        grantee_names: &[String],
+        configured_search_path: Option<&[String]>,
+        revoke: bool,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let privilege_chars = object_privilege_chars(privilege.clone())
+            .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
+        let auth = self.auth_state(client_id);
+        let auth_catalog = self
+            .auth_catalog(client_id, Some((xid, 0)))
+            .map_err(map_catalog_error)?;
+        let grantor_name = auth_catalog
+            .role_by_oid(auth.current_user_oid())
+            .map(|row| row.rolname.clone())
+            .ok_or_else(|| ExecError::DetailedError {
+                message: "current user does not exist".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: 0,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        for object_name in object_names {
+            let row = lookup_function_row_by_signature(
+                self,
+                client_id,
+                Some((xid, 0)),
+                configured_search_path,
+                object_name,
+            )?;
+            if !auth_catalog
+                .role_by_oid(auth.current_user_oid())
+                .is_some_and(|entry| entry.rolsuper)
+                && !auth.has_effective_membership(row.proowner, &auth_catalog)
+            {
+                return Err(ExecError::DetailedError {
+                    message: format!("must be owner of function {object_name}"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42501",
+                });
+            }
+            let owner_name = auth_catalog
+                .role_by_oid(row.proowner)
+                .map(|entry| entry.rolname.clone())
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("owner for function \"{object_name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+            let mut acl = row
+                .proacl
+                .clone()
+                .unwrap_or_else(|| function_owner_default_acl(&owner_name));
+            for grantee_name in grantee_names {
+                let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
+                    String::new()
+                } else {
+                    auth_catalog
+                        .role_by_name(grantee_name)
+                        .map(|entry| entry.rolname.clone())
+                        .ok_or_else(|| {
+                            ExecError::Parse(role_management_error(format!(
+                                "role \"{}\" does not exist",
+                                grantee_name
+                            )))
+                        })?
+                };
+                if revoke {
+                    revoke_acl_entry(
+                        &mut acl,
+                        &grantee_acl_name,
+                        privilege_chars,
+                        FUNCTION_EXECUTE_PRIVILEGE_CHARS,
+                    );
+                } else {
+                    grant_acl_entry(
+                        &mut acl,
+                        &grantee_acl_name,
+                        &grantor_name,
+                        privilege_chars,
+                        FUNCTION_EXECUTE_PRIVILEGE_CHARS,
+                    );
+                }
+            }
+            let new_acl = collapse_acl_defaults(acl, &function_owner_default_acl(&owner_name));
+            let effect = self
+                .catalog
+                .write()
+                .alter_proc_acl_mvcc(row.oid, new_acl, &ctx)
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+        }
+        let result = self.finish_txn(
+            client_id,
+            xid,
+            Ok(StatementResult::AffectedRows(0)),
+            &catalog_effects,
+            &[],
+            &[],
+        );
+        guard.disarm();
+        result
     }
 
     pub(crate) fn execute_grant_role_membership_stmt(

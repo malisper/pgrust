@@ -1338,6 +1338,21 @@ impl Session {
                 .get("enable_seqscan")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
+            enable_indexscan: self
+                .gucs
+                .get("enable_indexscan")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            enable_indexonlyscan: self
+                .gucs
+                .get("enable_indexonlyscan")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            enable_bitmapscan: self
+                .gucs
+                .get("enable_bitmapscan")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
         }
     }
 
@@ -2348,6 +2363,24 @@ impl Session {
                     self.maintenance_work_mem_kb()?,
                 )
             }
+            Statement::ReindexIndex(ref reindex_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_reindex_index_stmt_with_search_path(
+                        self.client_id,
+                        reindex_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::AlterTableOwner(ref alter_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -3329,6 +3362,24 @@ impl Session {
                     )
                 }
             }
+            Statement::CommentOnOperator(ref comment_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_comment_on_operator_stmt_with_search_path(
+                        self.client_id,
+                        comment_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::CommentOnRole(ref comment_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -4232,6 +4283,22 @@ impl Session {
                     search_path.as_deref(),
                     maintenance_work_mem_kb,
                     catalog_effects,
+                )
+            }
+            Statement::ReindexIndex(ref reindex_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                if let Some(index) = catalog.lookup_any_relation(&reindex_stmt.index_name) {
+                    self.lock_table_if_needed(db, index.rel, TableLockMode::AccessExclusive)?;
+                }
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_reindex_index_stmt_in_transaction_with_search_path(
+                    client_id,
+                    reindex_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
                 )
             }
             Statement::CreateStatistics(ref create_stmt) => {
@@ -5425,6 +5492,18 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::CommentOnOperator(ref comment_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_comment_on_operator_stmt_in_transaction_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::CommentOnConstraint(ref comment_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relation = catalog
@@ -5949,6 +6028,7 @@ impl Session {
             }
             Statement::CreateTableAs(ref create_stmt) => {
                 let search_path = self.configured_search_path();
+                let planner_config = self.planner_config();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_create_table_as_stmt_in_transaction_with_search_path(
                     client_id,
@@ -5956,6 +6036,7 @@ impl Session {
                     xid,
                     cid,
                     search_path.as_deref(),
+                    planner_config,
                     &mut txn.catalog_effects,
                     &mut txn.temp_effects,
                 )
@@ -6519,7 +6600,12 @@ impl Session {
                     .write()
                     .set_track_functions(track_functions);
             }
-            "row_security" | "enable_partitionwise_join" | "enable_seqscan" => {
+            "row_security"
+            | "enable_partitionwise_join"
+            | "enable_seqscan"
+            | "enable_indexscan"
+            | "enable_indexonlyscan"
+            | "enable_bitmapscan" => {
                 parse_bool_guc(value).ok_or_else(|| {
                     ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
                 })?;

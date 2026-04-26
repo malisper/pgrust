@@ -1043,6 +1043,7 @@ impl Database {
                 namespace_oid,
                 labels,
                 creating_xid: Some(xid),
+                typacl: None,
                 comment: None,
             },
         );
@@ -1384,6 +1385,7 @@ impl Database {
                 subtype,
                 subtype_diff: stmt.subtype_diff.clone(),
                 collation: stmt.collation.clone(),
+                typacl: None,
                 comment: None,
             },
         );

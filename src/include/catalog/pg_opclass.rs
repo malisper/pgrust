@@ -58,6 +58,8 @@ pub const POLY_SPGIST_OPCLASS_OID: u32 = 76014;
 pub const INET_GIST_OPCLASS_OID: u32 = 76016;
 pub const INET_SPGIST_OPCLASS_OID: u32 = 76017;
 pub const MULTIRANGE_GIST_OPCLASS_OID: u32 = 76018;
+pub const QUAD_POINT_SPGIST_OPCLASS_OID: u32 = 76019;
+pub const KD_POINT_SPGIST_OPCLASS_OID: u32 = 76020;
 pub const JSONB_GIN_OPCLASS_OID: u32 = 10064;
 pub const BYTEA_BRIN_MINMAX_OPCLASS_OID: u32 = 76120;
 pub const CHAR_BRIN_MINMAX_OPCLASS_OID: u32 = 76121;
@@ -439,16 +441,33 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             ANYMULTIRANGEOID,
         ),
         spgist_row(
+            QUAD_POINT_SPGIST_OPCLASS_OID,
+            "quad_point_ops",
+            SPGIST_QUAD_POINT_FAMILY_OID,
+            POINT_TYPE_OID,
+        ),
+        PgOpclassRow {
+            oid: KD_POINT_SPGIST_OPCLASS_OID,
+            opcmethod: SPGIST_AM_OID,
+            opcname: "kd_point_ops".into(),
+            opcnamespace: PG_CATALOG_NAMESPACE_OID,
+            opcowner: BOOTSTRAP_SUPERUSER_OID,
+            opcfamily: SPGIST_KD_POINT_FAMILY_OID,
+            opcintype: POINT_TYPE_OID,
+            opcdefault: false,
+            opckeytype: 0,
+        },
+        spgist_row(
+            TEXT_SPGIST_OPCLASS_OID,
+            "text_ops",
+            SPGIST_TEXT_FAMILY_OID,
+            TEXT_TYPE_OID,
+        ),
+        spgist_row(
             BOX_SPGIST_OPCLASS_OID,
             "box_ops",
             SPGIST_BOX_FAMILY_OID,
             BOX_TYPE_OID,
-        ),
-        spgist_row(
-            POINT_SPGIST_OPCLASS_OID,
-            "quad_point_ops",
-            SPGIST_QUAD_POINT_FAMILY_OID,
-            POINT_TYPE_OID,
         ),
         spgist_row(
             INET_SPGIST_OPCLASS_OID,
@@ -461,12 +480,6 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             "range_ops",
             SPGIST_RANGE_FAMILY_OID,
             ANYRANGEOID,
-        ),
-        spgist_row(
-            TEXT_SPGIST_OPCLASS_OID,
-            "text_ops",
-            SPGIST_TEXT_FAMILY_OID,
-            TEXT_TYPE_OID,
         ),
         PgOpclassRow {
             oid: POLY_SPGIST_OPCLASS_OID,

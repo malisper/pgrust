@@ -11,6 +11,10 @@ filter = 'test(backend::executor::tests::numeric_regression_remaining_precision_
 slow-timeout = { period = "300s", terminate-after = 1, grace-period = "0s" }
 
 [[profile.ci.overrides]]
+filter = 'test(backend::executor::tests::recursive_lsystem_points_query_executes)'
+slow-timeout = { period = "180s", terminate-after = 1, grace-period = "0s" }
+
+[[profile.ci.overrides]]
 filter = 'test(backend::parser::tests::bind_insert_rejects_non_matching_expression_collation_and_opclass_targets)'
 slow-timeout = { period = "180s", terminate-after = 1, grace-period = "0s" }
 

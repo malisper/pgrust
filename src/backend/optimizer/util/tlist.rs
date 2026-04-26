@@ -6,7 +6,7 @@ use crate::include::nodes::primnodes::{
 };
 
 use super::super::expand_join_rte_vars;
-use super::super::optimize_path;
+use super::super::optimize_path_with_config;
 use super::super::pathnodes::{
     expr_sql_type, layout_candidate_for_expr, lower_agg_output_expr, lower_expr_to_path_output,
 };
@@ -102,7 +102,7 @@ pub(super) fn project_to_slot_layout_internal(
         .collect::<Vec<_>>();
     let rewritten_targets = annotate_targets_for_input(root, &input, &rewritten_targets);
 
-    optimize_path(
+    optimize_path_with_config(
         Path::Projection {
             plan_info: PlanEstimate::default(),
             pathtarget: PathTarget::from_target_list(&rewritten_targets),
@@ -111,6 +111,7 @@ pub(super) fn project_to_slot_layout_internal(
             targets: rewritten_targets,
         },
         catalog,
+        root.map(|root| root.config).unwrap_or_default(),
     )
 }
 

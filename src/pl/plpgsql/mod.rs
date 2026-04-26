@@ -160,6 +160,33 @@ mod tests {
     }
 
     #[test]
+    fn execute_do_raise_info_queues_info_notice() {
+        run_plpgsql_test("execute_do_raise_info_queues_info_notice", || {
+            let stmt = DoStatement {
+                language: None,
+                code: r#"
+                    declare r boolean;
+                    begin
+                        execute $e$ select 2 !=-- comment
+                          1 $e$ into r;
+                        raise info 'r = %', r;
+                    end
+                "#
+                .into(),
+            };
+
+            assert_eq!(execute_do(&stmt).unwrap(), StatementResult::AffectedRows(0));
+            assert_eq!(
+                take_notices(),
+                vec![PlpgsqlNotice {
+                    level: RaiseLevel::Info,
+                    message: "r = t".into(),
+                }]
+            );
+        });
+    }
+
+    #[test]
     fn execute_do_raise_exception_surfaces_message() {
         run_plpgsql_test("execute_do_raise_exception_surfaces_message", || {
             let stmt = DoStatement {

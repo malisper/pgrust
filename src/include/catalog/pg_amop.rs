@@ -258,6 +258,43 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         });
         oid = oid.saturating_add(1);
     }
+    for family in [SPGIST_QUAD_POINT_FAMILY_OID, SPGIST_KD_POINT_FAMILY_OID] {
+        for (strategy, name, righttype) in [
+            (11_i16, "|>>", POINT_TYPE_OID),
+            (30, ">^", POINT_TYPE_OID),
+            (1, "<<", POINT_TYPE_OID),
+            (5, ">>", POINT_TYPE_OID),
+            (10, "<<|", POINT_TYPE_OID),
+            (29, "<^", POINT_TYPE_OID),
+            (6, "~=", POINT_TYPE_OID),
+            (8, "<@", BOX_TYPE_OID),
+        ] {
+            rows.push(PgAmopRow {
+                oid,
+                amopfamily: family,
+                amoplefttype: POINT_TYPE_OID,
+                amoprighttype: righttype,
+                amopstrategy: strategy,
+                amoppurpose: 's',
+                amopopr: operator_oid(&operators, name, POINT_TYPE_OID, righttype),
+                amopmethod: SPGIST_AM_OID,
+                amopsortfamily: 0,
+            });
+            oid = oid.saturating_add(1);
+        }
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: family,
+            amoplefttype: POINT_TYPE_OID,
+            amoprighttype: POINT_TYPE_OID,
+            amopstrategy: 15,
+            amoppurpose: 'o',
+            amopopr: operator_oid(&operators, "<->", POINT_TYPE_OID, POINT_TYPE_OID),
+            amopmethod: SPGIST_AM_OID,
+            amopsortfamily: BTREE_FLOAT_FAMILY_OID,
+        });
+        oid = oid.saturating_add(1);
+    }
     for (strategy, name, righttype) in [
         (1_i16, "<<", BOX_TYPE_OID),
         (2, "&<", BOX_TYPE_OID),
@@ -482,20 +519,6 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
             amopstrategy: strategy,
             amoppurpose: 's',
             amopopr: operator_oid(&operators, name, ANYRANGEOID, righttype),
-            amopmethod: SPGIST_AM_OID,
-            amopsortfamily: 0,
-        });
-        oid = oid.saturating_add(1);
-    }
-    for (strategy, name) in [(29_i16, "<^"), (30, ">^")] {
-        rows.push(PgAmopRow {
-            oid,
-            amopfamily: SPGIST_QUAD_POINT_FAMILY_OID,
-            amoplefttype: POINT_TYPE_OID,
-            amoprighttype: POINT_TYPE_OID,
-            amopstrategy: strategy,
-            amoppurpose: 's',
-            amopopr: operator_oid(&operators, name, POINT_TYPE_OID, POINT_TYPE_OID),
             amopmethod: SPGIST_AM_OID,
             amopsortfamily: 0,
         });

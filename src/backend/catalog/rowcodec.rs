@@ -370,6 +370,7 @@ pub(crate) fn namespace_row_from_values(
         oid: expect_oid(&values[0])?,
         nspname: expect_text(&values[1])?,
         nspowner: expect_oid(&values[2])?,
+        nspacl: nullable_text_array(&values[3])?,
     })
 }
 
@@ -670,6 +671,7 @@ pub(crate) fn pg_operator_row_from_values(
 pub(crate) fn pg_proc_row_from_values(values: Vec<Value>) -> Result<PgProcRow, CatalogError> {
     let has_added_proc_columns = values.len() > 24;
     let prosrc_index = if has_added_proc_columns { 24 } else { 23 };
+    let proacl_index = if has_added_proc_columns { 27 } else { 24 };
     Ok(PgProcRow {
         oid: expect_oid(&values[0])?,
         proname: expect_text(&values[1])?,
@@ -708,6 +710,11 @@ pub(crate) fn pg_proc_row_from_values(values: Vec<Value>) -> Result<PgProcRow, C
         prosqlbody: values
             .get(prosrc_index + 2)
             .map(nullable_text)
+            .transpose()?
+            .flatten(),
+        proacl: values
+            .get(proacl_index)
+            .map(nullable_text_array)
             .transpose()?
             .flatten(),
     })
@@ -1048,6 +1055,7 @@ pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, C
         typinput,
         typoutput,
         typmodout,
+        typacl: nullable_text_array(&values[13])?,
         sql_type: decode_builtin_sql_type(oid).unwrap_or_else(|| {
             if typrelid != 0 {
                 SqlType::named_composite(oid, typrelid)
@@ -1169,6 +1177,7 @@ fn namespace_row_values(row: PgNamespaceRow) -> Vec<Value> {
         Value::Int32(row.oid as i32),
         Value::Text(row.nspname.into()),
         Value::Int32(row.nspowner as i32),
+        nullable_array_value(row.nspacl.map(text_array_value)),
     ]
 }
 
@@ -1444,6 +1453,7 @@ fn pg_proc_row_values(row: PgProcRow) -> Vec<Value> {
         Value::Text(row.prosrc.into()),
         nullable_text_value(row.probin),
         nullable_text_value(row.prosqlbody),
+        nullable_array_value(row.proacl.map(text_array_value)),
     ]
 }
 
@@ -1622,6 +1632,7 @@ fn pg_type_row_values(row: PgTypeRow) -> Vec<Value> {
         Value::Int32(row.typinput as i32),
         Value::Int32(row.typoutput as i32),
         Value::Int32(row.typmodout as i32),
+        nullable_array_value(row.typacl.map(text_array_value)),
     ]
 }
 

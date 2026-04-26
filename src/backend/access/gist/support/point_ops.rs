@@ -171,7 +171,9 @@ pub(crate) fn picksplit(values: &[Value]) -> Result<GistColumnPickSplit, Catalog
         }
         let left_penalty = point_distance(&left_center, points[index]);
         let right_penalty = point_distance(&right_center, points[index]);
-        if left_penalty <= right_penalty {
+        if left_penalty < right_penalty
+            || (left_penalty == right_penalty && left.len() <= right.len())
+        {
             left.push(index);
             left_center = union(
                 &left
@@ -220,5 +222,27 @@ pub(crate) fn same(left: &Value, right: &Value) -> Result<bool, CatalogError> {
         (Value::Null, Value::Null) => Ok(true),
         (Value::Null, _) | (_, Value::Null) => Ok(false),
         _ => Ok(point_same(expect_point(left)?, expect_point(right)?)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::include::nodes::datum::{GeoPoint, Value};
+
+    use super::picksplit;
+
+    fn point(x: f64, y: f64) -> Value {
+        Value::Point(GeoPoint { x, y })
+    }
+
+    #[test]
+    fn picksplit_balances_identical_points() {
+        let values = vec![point(0.0, 0.0); 32];
+
+        let split = picksplit(&values).unwrap();
+
+        assert!(!split.left.is_empty());
+        assert!(!split.right.is_empty());
+        assert!(split.left.len().abs_diff(split.right.len()) <= 1);
     }
 }

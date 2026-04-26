@@ -7,10 +7,7 @@ use crate::backend::access::index::buildkeys::{
 use crate::backend::access::transam::xlog::{XLOG_GIST_PAGE_INIT, XLOG_GIST_PAGE_UPDATE};
 use crate::backend::catalog::CatalogError;
 use crate::backend::storage::page::bufpage::{PageError, page_header};
-use crate::include::access::amapi::{
-    IndexBuildContext, IndexBuildEmptyContext, IndexBuildResult, IndexInsertContext,
-    IndexUniqueCheck,
-};
+use crate::include::access::amapi::{IndexBuildContext, IndexBuildEmptyContext, IndexBuildResult};
 use crate::include::access::gist::{
     F_LEAF, GIST_INVALID_BLOCKNO, GistPageError, gist_page_replace_items,
 };
@@ -19,7 +16,8 @@ use crate::include::access::itup::IndexTupleData;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::RelationDesc;
 
-use super::insert::gistinsert;
+use super::build_buffers::GistBuildBuffers;
+use super::insert::{GistTupleEntry, insert_build_entries};
 use super::page::{GistLoggedPage, ensure_empty_gist, write_buffered_page, write_logged_pages};
 use super::state::GistState;
 use super::support::sortsupport;
@@ -27,8 +25,6 @@ use super::tuple::{make_downlink_tuple, make_leaf_tuple, tuple_storage_size};
 
 const GIST_DEFAULT_FILLFACTOR: usize = 90;
 const GIST_BUFFERING_MIN_WORK_MEM_KB: usize = 64;
-const GIST_BUFFERING_FLUSH_TUPLES: usize = 4096;
-const GIST_BUFFERING_SWITCH_CHECK_STEP: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GistBuildMode {
@@ -38,11 +34,11 @@ enum GistBuildMode {
 }
 
 #[derive(Debug, Clone)]
-struct GistBuildTuple {
-    heap_tid: ItemPointerData,
-    key_values: Vec<Value>,
-    leaf_tuple: IndexTupleData,
-    approx_size: usize,
+pub(super) struct GistBuildTuple {
+    pub(super) heap_tid: ItemPointerData,
+    pub(super) key_values: Vec<Value>,
+    pub(super) leaf_tuple: IndexTupleData,
+    pub(super) approx_size: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -88,7 +84,7 @@ pub(crate) fn gistbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, Cat
     match select_build_mode(&state, ctx.maintenance_work_mem_kb) {
         GistBuildMode::Sorted => gistbuild_sorted(ctx, &state),
         GistBuildMode::Buffering => gistbuild_buffered(ctx, &state),
-        GistBuildMode::RepeatedInsert => gistbuild_repeated(ctx),
+        GistBuildMode::RepeatedInsert => gistbuild_repeated(ctx, &state),
     }
 }
 
@@ -114,9 +110,12 @@ fn has_all_sortsupport(state: &GistState) -> bool {
             .all(|column| column.sortsupport_proc.and_then(sortsupport).is_some())
 }
 
-fn gistbuild_repeated(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
+fn gistbuild_repeated(
+    ctx: &IndexBuildContext,
+    state: &GistState,
+) -> Result<IndexBuildResult, CatalogError> {
     scan_visible_heap(ctx, |tid, key_values| {
-        gistinsert_build_tuple(ctx, tid, key_values)
+        gistinsert_build_tuple(ctx, state, tid, key_values)
     })
 }
 
@@ -124,32 +123,37 @@ fn gistbuild_buffered(
     ctx: &IndexBuildContext,
     state: &GistState,
 ) -> Result<IndexBuildResult, CatalogError> {
-    // :HACK: This is a real memory-bounded buffered build, but not PostgreSQL's
-    // gistbuildbuffers.c node-buffering algorithm yet. Deferred parity work is
-    // to switch from a single spool + flush loop to per-node buffering with
-    // spill/revisit behavior during descent.
-    let spool_limit_bytes = ctx
-        .maintenance_work_mem_kb
-        .saturating_mul(1024)
-        .max(GIST_BUFFERING_MIN_WORK_MEM_KB * 1024);
-    let mut spool = Vec::new();
-    let mut spool_bytes = 0usize;
-    scan_visible_heap(ctx, |tid, key_values| {
-        let build_tuple = make_build_tuple(&ctx.index_desc, tid, key_values)?;
-        spool_bytes = spool_bytes.saturating_add(build_tuple.approx_size);
-        spool.push(build_tuple);
-        if spool.len() >= GIST_BUFFERING_SWITCH_CHECK_STEP
-            && (spool.len() >= GIST_BUFFERING_FLUSH_TUPLES || spool_bytes >= spool_limit_bytes)
-        {
-            flush_buffered_tuples(ctx, state, &mut spool)?;
-            spool_bytes = 0;
-        }
-        Ok(())
-    })
-    .and_then(|result| {
-        flush_buffered_tuples(ctx, state, &mut spool)?;
-        Ok(result)
-    })
+    let mut buffers = GistBuildBuffers::new(ctx.maintenance_work_mem_kb);
+    let result = scan_visible_heap(ctx, |tid, key_values| {
+        buffers.insert(
+            ctx,
+            state,
+            make_build_tuple(&ctx.index_desc, tid, key_values)?,
+        )
+    })?;
+    buffers.flush_all(ctx, state)?;
+    Ok(result)
+}
+
+fn gistinsert_build_tuple(
+    ctx: &IndexBuildContext,
+    state: &GistState,
+    heap_tid: ItemPointerData,
+    values: Vec<Value>,
+) -> Result<(), CatalogError> {
+    let build_tuple = make_build_tuple(&ctx.index_desc, heap_tid, values)?;
+    insert_build_entries(
+        &ctx.pool,
+        ctx.client_id,
+        ctx.snapshot.current_xid,
+        ctx.index_relation,
+        &ctx.index_desc,
+        state,
+        vec![GistTupleEntry {
+            tuple: build_tuple.leaf_tuple,
+            values: build_tuple.key_values,
+        }],
+    )
 }
 
 fn gistbuild_sorted(
@@ -214,32 +218,6 @@ fn scan_visible_heap(
     Ok(result)
 }
 
-fn gistinsert_build_tuple(
-    ctx: &IndexBuildContext,
-    heap_tid: ItemPointerData,
-    values: Vec<Value>,
-) -> Result<(), CatalogError> {
-    gistinsert(&IndexInsertContext {
-        pool: ctx.pool.clone(),
-        txns: ctx.txns.clone(),
-        txn_waiter: None,
-        client_id: ctx.client_id,
-        interrupts: ctx.interrupts.clone(),
-        snapshot: ctx.snapshot.clone(),
-        heap_relation: ctx.heap_relation,
-        heap_desc: ctx.heap_desc.clone(),
-        index_relation: ctx.index_relation,
-        index_name: ctx.index_name.clone(),
-        index_desc: ctx.index_desc.clone(),
-        index_meta: ctx.index_meta.clone(),
-        default_toast_compression: ctx.default_toast_compression,
-        heap_tid,
-        values,
-        unique_check: IndexUniqueCheck::No,
-    })?;
-    Ok(())
-}
-
 fn make_build_tuple(
     desc: &RelationDesc,
     heap_tid: ItemPointerData,
@@ -254,27 +232,8 @@ fn make_build_tuple(
     })
 }
 
-fn flush_buffered_tuples(
-    ctx: &IndexBuildContext,
-    state: &GistState,
-    spool: &mut Vec<GistBuildTuple>,
-) -> Result<(), CatalogError> {
-    if spool.is_empty() {
-        return Ok(());
-    }
-    sort_build_tuples_partial(state, spool);
-    for tuple in spool.drain(..) {
-        gistinsert_build_tuple(ctx, tuple.heap_tid, tuple.key_values)?;
-    }
-    Ok(())
-}
-
 fn sort_build_tuples(state: &GistState, tuples: &mut [GistBuildTuple]) {
     tuples.sort_by(|left, right| compare_build_tuples(state, left, right, true));
-}
-
-fn sort_build_tuples_partial(state: &GistState, tuples: &mut [GistBuildTuple]) {
-    tuples.sort_by(|left, right| compare_build_tuples(state, left, right, false));
 }
 
 fn compare_build_tuples(

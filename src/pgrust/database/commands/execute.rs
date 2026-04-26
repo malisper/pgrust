@@ -377,6 +377,12 @@ impl Database {
                     configured_search_path,
                     65_536,
                 ),
+            Statement::ReindexIndex(ref reindex_stmt) => self
+                .execute_reindex_index_stmt_with_search_path(
+                    client_id,
+                    reindex_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateStatistics(ref create_stmt) => self
                 .execute_create_statistics_stmt_with_search_path(
                     client_id,
@@ -831,6 +837,12 @@ impl Database {
                 ),
             Statement::CommentOnFunction(ref comment_stmt) => self
                 .execute_comment_on_function_stmt_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    configured_search_path,
+                ),
+            Statement::CommentOnOperator(ref comment_stmt) => self
+                .execute_comment_on_operator_stmt_with_search_path(
                     client_id,
                     comment_stmt,
                     configured_search_path,
@@ -1467,6 +1479,7 @@ impl Database {
                     None,
                     0,
                     configured_search_path,
+                    planner_config,
                 ),
             Statement::RefreshMaterializedView(ref refresh_stmt) => self
                 .execute_refresh_materialized_view_stmt_with_search_path(

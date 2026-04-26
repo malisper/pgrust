@@ -1572,6 +1572,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         })
     }
 
+    fn index_row_by_oid(&self, index_oid: u32) -> Option<PgIndexRow> {
+        index_row_by_indexrelid(self.db, self.client_id, self.txn_ctx, index_oid)
+    }
+
     fn operator_by_name_left_right(
         &self,
         name: &str,
@@ -1602,6 +1606,12 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             SysCacheTuple::Operator(row) => Some(row),
             _ => None,
         })
+    }
+
+    fn operator_rows(&self) -> Vec<PgOperatorRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .map(|cache| cache.operator_rows())
+            .unwrap_or_default()
     }
 
     fn current_user_oid(&self) -> u32 {

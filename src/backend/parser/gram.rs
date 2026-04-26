@@ -100,6 +100,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_comment_on_function_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_comment_on_operator_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_operator_class_statement(&sql)? {
         return Ok(stmt);
     }
@@ -157,6 +160,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_index_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_reindex_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_view_statement(&sql)? {
         return Ok(stmt);
     }
@@ -173,9 +179,46 @@ fn parse_statement_with_options_inner(
     }
     match SqlParser::parse(Rule::statement, &sql) {
         Ok(mut pairs) => build_statement(pairs.next().ok_or(ParseError::UnexpectedEof)?),
-        Err(err) => try_parse_unsupported_statement(&sql)
-            .ok_or_else(|| map_pest_error("statement", &sql, err)),
+        Err(err) => {
+            if is_select_with_trailing_operator(&sql) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "statement",
+                    actual: "syntax error at or near \";\"".into(),
+                });
+            }
+            try_parse_unsupported_statement(&sql)
+                .ok_or_else(|| map_pest_error("statement", &sql, err))
+        }
     }
+}
+
+fn is_select_with_trailing_operator(sql: &str) -> bool {
+    let trimmed = sql.trim().trim_end_matches(';').trim_end();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("select ") && !lowered.starts_with("with ") {
+        return false;
+    }
+    let Some(last) = trimmed.chars().next_back() else {
+        return false;
+    };
+    matches!(
+        last,
+        '!' | '#'
+            | '%'
+            | '&'
+            | '*'
+            | '+'
+            | '-'
+            | '/'
+            | '<'
+            | '='
+            | '>'
+            | '?'
+            | '@'
+            | '^'
+            | '|'
+            | '~'
+    )
 }
 
 fn try_parse_alter_table_add_unnamed_constraint_statement(
@@ -192,6 +235,7 @@ fn try_parse_alter_table_add_unnamed_constraint_statement(
         (" add unique", " add ".len()),
         (" add check", " add ".len()),
         (" add not null", " add ".len()),
+        (" add exclude", " add ".len()),
         (" add foreign key", " add ".len()),
     ]
     .into_iter()
@@ -217,6 +261,7 @@ fn try_parse_alter_table_add_unnamed_constraint_statement(
         | TableConstraint::Check { attributes, .. }
         | TableConstraint::PrimaryKey { attributes, .. }
         | TableConstraint::Unique { attributes, .. }
+        | TableConstraint::Exclusion { attributes, .. }
         | TableConstraint::ForeignKey { attributes, .. }
             if attributes.name.as_deref() == Some("__pgrust_internal_unnamed_constraint__") =>
         {
@@ -3218,6 +3263,40 @@ fn try_parse_index_statement(sql: &str) -> Result<Option<Statement>, ParseError>
     Ok(None)
 }
 
+fn try_parse_reindex_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("reindex ") {
+        return Ok(None);
+    }
+
+    let mut rest = consume_keyword(trimmed, "reindex").trim_start();
+    let concurrently = if keyword_at_start(rest, "concurrently") {
+        rest = consume_keyword(rest, "concurrently").trim_start();
+        true
+    } else {
+        false
+    };
+    if !keyword_at_start(rest, "index") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "REINDEX INDEX",
+            actual: rest.to_string(),
+        });
+    }
+    rest = consume_keyword(rest, "index").trim_start();
+    let (parts, tail) = parse_qualified_identifier_parts(rest)?;
+    if !tail.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of REINDEX INDEX statement",
+            actual: tail.trim().to_string(),
+        });
+    }
+    Ok(Some(Statement::ReindexIndex(ReindexIndexStatement {
+        concurrently,
+        index_name: parts.join("."),
+    })))
+}
+
 fn try_parse_view_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -3853,6 +3932,17 @@ fn try_parse_comment_on_function_statement(sql: &str) -> Result<Option<Statement
     )))
 }
 
+fn try_parse_comment_on_operator_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("comment on operator ") {
+        return Ok(None);
+    }
+    Ok(Some(Statement::CommentOnOperator(
+        build_comment_on_operator_statement(trimmed)?,
+    )))
+}
+
 fn try_parse_create_operator_class_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -3931,6 +4021,12 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("grant all on schema ") {
         return Ok(Statement::GrantObject(build_grant_schema_all(sql)?));
     }
+    if lowered.starts_with("grant usage on schema ") {
+        return Ok(Statement::GrantObject(build_grant_schema_usage(sql)?));
+    }
+    if lowered.starts_with("grant usage on type ") {
+        return Ok(Statement::GrantObject(build_grant_type_usage(sql)?));
+    }
     if lowered.starts_with("grant execute on function ") {
         return Ok(Statement::GrantObject(build_grant_function_execute(sql)?));
     }
@@ -3955,8 +4051,14 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("revoke create on database ") {
         return Ok(Statement::RevokeObject(build_revoke_database_create(sql)?));
     }
+    if lowered.starts_with("revoke usage on schema ") {
+        return Ok(Statement::RevokeObject(build_revoke_schema_usage(sql)?));
+    }
     if lowered.starts_with("revoke usage on type ") {
         return Ok(Statement::RevokeObject(build_revoke_type_usage(sql)?));
+    }
+    if lowered.starts_with("revoke execute on function ") {
+        return Ok(Statement::RevokeObject(build_revoke_function_execute(sql)?));
     }
     if lowered.starts_with("revoke all privileges on ") {
         return Ok(Statement::RevokeObject(build_revoke_table_all_privileges(
@@ -4084,6 +4186,38 @@ fn build_grant_schema_all(sql: &str) -> Result<GrantObjectStatement, ParseError>
     })
 }
 
+fn build_grant_schema_usage(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let prefix = "grant usage on schema ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_names, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege: GrantObjectPrivilege::UsageOnSchema,
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
+fn build_grant_type_usage(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let prefix = "grant usage on type ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_names, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege: GrantObjectPrivilege::UsageOnType,
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
 fn build_grant_function_execute(sql: &str) -> Result<GrantObjectStatement, ParseError> {
     let prefix = "grant execute on function ";
     let rest = sql
@@ -4116,17 +4250,17 @@ fn build_revoke_database_create(sql: &str) -> Result<RevokeObjectStatement, Pars
     })
 }
 
-fn build_revoke_table_all_privileges(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
-    let prefix = "revoke all privileges on ";
+fn build_revoke_schema_usage(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let prefix = "revoke usage on schema ";
     let rest = sql
         .get(prefix.len()..)
         .ok_or(ParseError::UnexpectedEof)?
         .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "from")?;
+    let (object_names, rest) = split_once_keyword(rest, "from")?;
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
-        privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
-        object_names: vec![normalize_simple_identifier(object_name)?],
+        privilege: GrantObjectPrivilege::UsageOnSchema,
+        object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade,
     })
@@ -4138,10 +4272,42 @@ fn build_revoke_type_usage(sql: &str) -> Result<RevokeObjectStatement, ParseErro
         .get(prefix.len()..)
         .ok_or(ParseError::UnexpectedEof)?
         .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "from")?;
+    let (object_names, rest) = split_once_keyword(rest, "from")?;
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnType,
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        cascade,
+    })
+}
+
+fn build_revoke_function_execute(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let prefix = "revoke execute on function ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege: GrantObjectPrivilege::ExecuteOnFunction,
+        object_names: vec![object_name.trim().to_ascii_lowercase()],
+        grantee_names,
+        cascade,
+    })
+}
+
+fn build_revoke_table_all_privileges(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let prefix = "revoke all privileges on ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
         object_names: vec![normalize_simple_identifier(object_name)?],
         grantee_names,
         cascade,
@@ -5841,6 +6007,50 @@ fn build_comment_on_function_statement(
     })
 }
 
+fn build_comment_on_operator_statement(
+    sql: &str,
+) -> Result<CommentOnOperatorStatement, ParseError> {
+    let Some(rest) = sql.get("comment on operator".len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "COMMENT ON OPERATOR name(leftarg, rightarg) IS ...",
+            actual: sql.into(),
+        });
+    };
+    let rest = rest.trim_start();
+    let ((schema_name, operator_name), rest_after_name) = parse_operator_name(rest)?;
+    let ((left_arg, right_arg), rest) = parse_operator_argtypes(rest_after_name.trim_start())?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "is") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "IS",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "is").trim_start();
+    let (comment, rest) = if keyword_at_start(rest, "null") {
+        (None, consume_keyword(rest, "null"))
+    } else {
+        let len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+            expected: "quoted string or NULL",
+            actual: rest.into(),
+        })?;
+        (Some(decode_string_literal(&rest[..len])?), &rest[len..])
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of COMMENT ON OPERATOR",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CommentOnOperatorStatement {
+        schema_name,
+        operator_name,
+        left_arg,
+        right_arg,
+        comment,
+    })
+}
+
 fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOptions, ParseError> {
     let mut parsed = ParsedCreateAggregateOptions {
         finalfunc_modify: 'r',
@@ -7046,6 +7256,7 @@ fn build_create_operator_statement(sql: &str) -> Result<CreateOperatorStatement,
     let mut join = None;
     let mut hashes = false;
     let mut merges = false;
+    let mut unrecognized_attributes = Vec::new();
 
     for item in split_top_level_items(&definition_sql, ',')? {
         let trimmed = item.trim();
@@ -7060,15 +7271,11 @@ fn build_create_operator_statement(sql: &str) -> Result<CreateOperatorStatement,
                     actual: trimmed.into(),
                 });
             }
-            match option_name.to_ascii_lowercase().as_str() {
+            match option_name.as_str() {
                 "hashes" => hashes = true,
                 "merges" => merges = true,
-                other => {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "recognized CREATE OPERATOR option",
-                        actual: other.into(),
-                    });
-                }
+                "sort1" | "sort2" | "ltcmp" | "gtcmp" => {}
+                _ => unrecognized_attributes.push(option_name),
             }
             continue;
         };
@@ -7081,7 +7288,7 @@ fn build_create_operator_statement(sql: &str) -> Result<CreateOperatorStatement,
             });
         }
         let value = trimmed[eq_idx + 1..].trim();
-        match option_name.to_ascii_lowercase().as_str() {
+        match option_name.as_str() {
             "procedure" | "function" => {
                 let (target, rest) = parse_qualified_name_ref(value, "procedure name")?;
                 if !rest.trim().is_empty() {
@@ -7134,12 +7341,8 @@ fn build_create_operator_statement(sql: &str) -> Result<CreateOperatorStatement,
             }
             "hashes" => hashes = parse_operator_bool_value(value)?,
             "merges" => merges = parse_operator_bool_value(value)?,
-            other => {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "recognized CREATE OPERATOR option",
-                    actual: other.into(),
-                });
-            }
+            "sort1" | "sort2" | "ltcmp" | "gtcmp" => {}
+            _ => unrecognized_attributes.push(option_name),
         }
     }
 
@@ -7148,16 +7351,14 @@ fn build_create_operator_statement(sql: &str) -> Result<CreateOperatorStatement,
         operator_name,
         left_arg,
         right_arg,
-        procedure: procedure.ok_or_else(|| ParseError::UnexpectedToken {
-            expected: "PROCEDURE option",
-            actual: sql.into(),
-        })?,
+        procedure,
         commutator,
         negator,
         restrict,
         join,
         hashes,
         merges,
+        unrecognized_attributes,
     })
 }
 
@@ -7448,6 +7649,12 @@ fn parse_operator_token(input: &str) -> Result<(String, &str), ParseError> {
         return Err(ParseError::UnexpectedToken {
             expected: "operator name",
             actual: input.into(),
+        });
+    }
+    if &input[..token_len] == "=>" {
+        return Err(ParseError::UnexpectedToken {
+            expected: "operator name",
+            actual: "syntax error at or near \"=>\"".into(),
         });
     }
     Ok((input[..token_len].to_string(), &input[token_len..]))
@@ -12098,6 +12305,7 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
                 Rule::primary_key_table_constraint
                 | Rule::unique_table_constraint
+                | Rule::exclusion_table_constraint
                 | Rule::check_table_constraint
                 | Rule::not_null_table_constraint
                 | Rule::foreign_key_table_constraint => {
@@ -12141,6 +12349,19 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 attributes,
                 columns,
                 without_overlaps,
+            })
+        }
+        Rule::exclusion_table_constraint => {
+            let body = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::exclusion_table_constraint_body)
+                .ok_or(ParseError::UnexpectedEof)?;
+            let (using_method, elements, include_columns) = build_exclusion_constraint_body(body)?;
+            Ok(TableConstraint::Exclusion {
+                attributes,
+                using_method,
+                elements,
+                include_columns,
             })
         }
         Rule::check_table_constraint => {
@@ -12203,6 +12424,52 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
             actual: pair.as_str().to_string(),
         }),
     }
+}
+
+fn build_exclusion_constraint_body(
+    pair: Pair<'_, Rule>,
+) -> Result<(String, Vec<ExclusionElement>, Vec<String>), ParseError> {
+    let mut using_method = None;
+    let mut elements = Vec::new();
+    let mut include_columns = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if using_method.is_none() => {
+                using_method = Some(build_identifier(part));
+            }
+            Rule::exclusion_element => {
+                let mut column = None;
+                let mut operator = None;
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::identifier => column = Some(build_identifier(inner)),
+                        Rule::operator_token => operator = Some(inner.as_str().to_string()),
+                        _ => {}
+                    }
+                }
+                elements.push(ExclusionElement {
+                    column: column.ok_or(ParseError::UnexpectedEof)?,
+                    operator: operator.ok_or(ParseError::UnexpectedEof)?,
+                });
+            }
+            Rule::create_index_include_clause => {
+                include_columns.extend(
+                    part.into_inner()
+                        .filter(|inner| inner.as_rule() == Rule::ident_list)
+                        .flat_map(|inner| inner.into_inner().map(build_identifier)),
+                );
+            }
+            _ => {}
+        }
+    }
+    if elements.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok((
+        using_method.ok_or(ParseError::UnexpectedEof)?,
+        elements,
+        include_columns,
+    ))
 }
 
 fn build_key_column_list(
@@ -12342,6 +12609,7 @@ fn set_table_constraint_name(constraint: &mut TableConstraint, name: String) {
         | TableConstraint::Check { attributes, .. }
         | TableConstraint::PrimaryKey { attributes, .. }
         | TableConstraint::Unique { attributes, .. }
+        | TableConstraint::Exclusion { attributes, .. }
         | TableConstraint::ForeignKey { attributes, .. } => attributes.name = Some(name),
     }
 }
@@ -15460,57 +15728,63 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
         )?))),
         Rule::negated_expr => {
-            let raw = pair.as_str().trim_start();
-            let expr = build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)?;
-            if raw.starts_with("@-@") {
+            let mut inner = pair.into_inner();
+            let op = inner.next().ok_or(ParseError::UnexpectedEof)?.as_str();
+            let expr = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+            if op == "@-@" {
                 Ok(SqlExpr::GeometryUnaryOp {
                     op: GeometryUnaryOp::Length,
                     expr: Box::new(expr),
                 })
-            } else if raw.starts_with('#') {
+            } else if op == "#" {
                 Ok(SqlExpr::GeometryUnaryOp {
                     op: GeometryUnaryOp::Npoints,
                     expr: Box::new(expr),
                 })
-            } else if raw.starts_with("@@") {
+            } else if op == "@@" {
                 Ok(SqlExpr::GeometryUnaryOp {
                     op: GeometryUnaryOp::Center,
                     expr: Box::new(expr),
                 })
-            } else if raw.starts_with("?|") {
+            } else if op == "?|" {
                 Ok(SqlExpr::GeometryUnaryOp {
                     op: GeometryUnaryOp::IsVertical,
                     expr: Box::new(expr),
                 })
-            } else if raw.starts_with("?-") {
+            } else if op == "?-" {
                 Ok(SqlExpr::GeometryUnaryOp {
                     op: GeometryUnaryOp::IsHorizontal,
                     expr: Box::new(expr),
                 })
-            } else if raw.starts_with("||/") {
+            } else if op == "||/" {
                 Ok(simple_func_call(
                     "cbrt",
                     vec![SqlFunctionArg::positional(expr)],
                 ))
-            } else if raw.starts_with("!!") {
+            } else if op == "!!" {
                 Ok(SqlExpr::PrefixOperator {
                     op: "!!".into(),
                     expr: Box::new(expr),
                 })
-            } else if raw.starts_with("|/") {
+            } else if op == "|/" {
                 Ok(simple_func_call(
                     "sqrt",
                     vec![SqlFunctionArg::positional(expr)],
                 ))
-            } else if raw.starts_with('@') {
+            } else if op == "@" {
                 Ok(simple_func_call(
                     "abs",
                     vec![SqlFunctionArg::positional(expr)],
                 ))
-            } else if raw.starts_with('~') {
+            } else if op == "~" {
                 Ok(SqlExpr::BitNot(Box::new(expr)))
-            } else {
+            } else if op == "-" {
                 Ok(SqlExpr::Negate(Box::new(expr)))
+            } else {
+                Ok(SqlExpr::PrefixOperator {
+                    op: op.into(),
+                    expr: Box::new(expr),
+                })
             }
         }
         Rule::not_expr => {
@@ -15773,6 +16047,31 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         }
                         "&&" => SqlExpr::BinaryOperator {
                             op: "&&".into(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "~<~" => SqlExpr::BinaryOperator {
+                            op: "~<~".into(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "~<=~" => SqlExpr::BinaryOperator {
+                            op: "~<=~".into(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "~>=~" => SqlExpr::BinaryOperator {
+                            op: "~>=~".into(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "~>~" => SqlExpr::BinaryOperator {
+                            op: "~>~".into(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "^@" => SqlExpr::BinaryOperator {
+                            op: "^@".into(),
                             left: Box::new(left),
                             right: Box::new(right),
                         },
@@ -18043,10 +18342,10 @@ mod tests {
                 operator_name: "===".to_string(),
                 left_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
                 right_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
-                procedure: QualifiedNameRef {
+                procedure: Some(QualifiedNameRef {
                     schema_name: None,
                     name: "regoperator_test_fn".to_string(),
-                },
+                }),
                 commutator: None,
                 negator: None,
                 restrict: Some(QualifiedNameRef {
@@ -18059,7 +18358,11 @@ mod tests {
                 }),
                 hashes: true,
                 merges: true,
+                unrecognized_attributes: Vec::new(),
             })
+        );
+        assert!(
+            parse_statement("create operator => (rightarg = int8, procedure = factorial)").is_err()
         );
     }
 

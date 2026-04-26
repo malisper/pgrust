@@ -513,6 +513,7 @@ pub enum BuiltinScalarFunction {
     ToOct,
     ToHex,
     Reverse,
+    TextStartsWith,
     GetBit,
     SetBit,
     GetByte,

@@ -227,6 +227,57 @@ pub fn bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         });
         oid = oid.saturating_add(1);
     }
+    for (family, procs) in [
+        (
+            SPGIST_QUAD_POINT_FAMILY_OID,
+            [
+                (1_i16, SPG_QUAD_CONFIG_PROC_OID),
+                (2, SPG_QUAD_CHOOSE_PROC_OID),
+                (3, SPG_QUAD_PICKSPLIT_PROC_OID),
+                (4, SPG_QUAD_INNER_CONSISTENT_PROC_OID),
+                (5, SPG_QUAD_LEAF_CONSISTENT_PROC_OID),
+            ],
+        ),
+        (
+            SPGIST_KD_POINT_FAMILY_OID,
+            [
+                (1_i16, SPG_KD_CONFIG_PROC_OID),
+                (2, SPG_KD_CHOOSE_PROC_OID),
+                (3, SPG_KD_PICKSPLIT_PROC_OID),
+                (4, SPG_KD_INNER_CONSISTENT_PROC_OID),
+                (5, SPG_QUAD_LEAF_CONSISTENT_PROC_OID),
+            ],
+        ),
+    ] {
+        for (procnum, proc_oid) in procs {
+            rows.push(PgAmprocRow {
+                oid,
+                amprocfamily: family,
+                amproclefttype: POINT_TYPE_OID,
+                amprocrighttype: POINT_TYPE_OID,
+                amprocnum: procnum,
+                amproc: proc_oid,
+            });
+            oid = oid.saturating_add(1);
+        }
+    }
+    for (procnum, proc_oid) in [
+        (1_i16, SPG_TEXT_CONFIG_PROC_OID),
+        (2, SPG_TEXT_CHOOSE_PROC_OID),
+        (3, SPG_TEXT_PICKSPLIT_PROC_OID),
+        (4, SPG_TEXT_INNER_CONSISTENT_PROC_OID),
+        (5, SPG_TEXT_LEAF_CONSISTENT_PROC_OID),
+    ] {
+        rows.push(PgAmprocRow {
+            oid,
+            amprocfamily: SPGIST_TEXT_FAMILY_OID,
+            amproclefttype: TEXT_TYPE_OID,
+            amprocrighttype: TEXT_TYPE_OID,
+            amprocnum: procnum,
+            amproc: proc_oid,
+        });
+        oid = oid.saturating_add(1);
+    }
     for (procnum, proc_oid) in [
         (1_i16, SPG_BOX_QUAD_CONFIG_PROC_OID),
         (2, SPG_BOX_QUAD_CHOOSE_PROC_OID),

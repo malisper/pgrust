@@ -247,8 +247,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
             actual, ..
         }) if actual.starts_with("syntax error at or near \"") => {
-            return extract_syntax_error_token(actual)
-                .and_then(|token| sql.rfind(token).map(|index| index + 1));
+            return extract_syntax_error_token(actual).and_then(|token| {
+                sql.rfind(token)
+                    .map(|index| index + 1)
+                    .or_else(|| (token == ";").then_some(sql.len() + 1))
+            });
         }
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. })
             if message == "duplicate trigger events specified at or near \"ON\"" =>
@@ -3407,6 +3410,8 @@ fn psql_describe_constraints_query(
         Some(crate::include::catalog::CONSTRAINT_PRIMARY)
     } else if lower.contains("contype = 'u'") {
         Some(crate::include::catalog::CONSTRAINT_UNIQUE)
+    } else if lower.contains("contype = 'x'") {
+        Some(crate::include::catalog::CONSTRAINT_EXCLUSION)
     } else if lower.contains("contype = 'n'") {
         Some(crate::include::catalog::CONSTRAINT_NOTNULL)
     } else {
@@ -3540,6 +3545,16 @@ fn constraint_def_for_row(
                 row,
             )
         }
+        crate::include::catalog::CONSTRAINT_EXCLUSION => {
+            let relation = relation.cloned().or_else(|| {
+                db.describe_relation_by_oid(
+                    session.client_id,
+                    session.catalog_txn_ctx(),
+                    row.conrelid,
+                )
+            })?;
+            exclusion_constraint_def(db, session, &relation, row)
+        }
         crate::include::catalog::CONSTRAINT_FOREIGN => {
             let relation = relation.cloned().or_else(|| {
                 db.describe_relation_by_oid(
@@ -3590,6 +3605,64 @@ fn index_backed_constraint_def(
         "UNIQUE"
     };
     Some(format!("{prefix} ({})", columns.join(", ")))
+}
+
+fn exclusion_constraint_def(
+    db: &Database,
+    session: &Session,
+    relation: &crate::backend::utils::cache::relcache::RelCacheEntry,
+    row: &crate::include::catalog::PgConstraintRow,
+) -> Option<String> {
+    let index = db
+        .describe_relation_by_oid(session.client_id, session.catalog_txn_ctx(), row.conindid)?
+        .index?;
+    let all_columns = index
+        .indkey
+        .iter()
+        .map(|attnum| {
+            (*attnum > 0)
+                .then(|| {
+                    relation
+                        .desc
+                        .columns
+                        .get((*attnum as usize).saturating_sub(1))
+                })
+                .flatten()
+                .map(|column| column.name.clone())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let operator_oids = row.conexclop.as_ref()?;
+    let catalog = session.catalog_lookup(db);
+    let operators = operator_oids
+        .iter()
+        .map(|operator_oid| {
+            catalog
+                .operator_by_oid(*operator_oid)
+                .map(|row| row.oprname)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let key_count = operators.len();
+    let key_columns = all_columns
+        .iter()
+        .take(key_count)
+        .zip(operators.iter())
+        .map(|(column, operator)| format!("{column} WITH {operator}"))
+        .collect::<Vec<_>>();
+    let include_columns = all_columns
+        .iter()
+        .skip(key_count)
+        .cloned()
+        .collect::<Vec<_>>();
+    let amname = db
+        .access_method_name_for_relation(session.client_id, session.catalog_txn_ctx(), row.conindid)
+        .unwrap_or_else(|| "gist".to_string());
+    let mut def = format!("EXCLUDE USING {amname} ({})", key_columns.join(", "));
+    if !include_columns.is_empty() {
+        def.push_str(" INCLUDE (");
+        def.push_str(&include_columns.join(", "));
+        def.push(')');
+    }
+    Some(def)
 }
 
 fn foreign_key_constraint_def(
@@ -4018,9 +4091,20 @@ pub(crate) fn format_psql_indexdef(
         .filter(|relation| relation.relkind == 'I')
         .map(|_| " ONLY")
         .unwrap_or("");
-    let column_names = psql_index_display_columns(db, session, &index.desc, &index.index_meta)
+    let all_column_names = psql_index_display_columns(db, session, &index.desc, &index.index_meta)
         .into_iter()
         .map(|column| column.definition)
+        .collect::<Vec<_>>();
+    let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or_default();
+    let key_column_names = all_column_names
+        .iter()
+        .take(key_count)
+        .cloned()
+        .collect::<Vec<_>>();
+    let include_column_names = all_column_names
+        .iter()
+        .skip(key_count)
+        .cloned()
         .collect::<Vec<_>>();
     let unique = if index.index_meta.indisunique {
         "UNIQUE "
@@ -4032,8 +4116,13 @@ pub(crate) fn format_psql_indexdef(
         index.name,
         table_name,
         amname,
-        column_names.join(", ")
+        key_column_names.join(", ")
     );
+    if !include_column_names.is_empty() {
+        definition.push_str(" INCLUDE (");
+        definition.push_str(&include_column_names.join(", "));
+        definition.push(')');
+    }
     if let Some(predicate) = index
         .index_meta
         .indpred

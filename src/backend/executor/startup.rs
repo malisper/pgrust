@@ -216,9 +216,12 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         Plan::BitmapHeapScan {
             bitmapqual,
             recheck_qual,
+            filter_qual,
             ..
         } => {
-            plan_uses_outer_columns(bitmapqual) || recheck_qual.iter().any(expr_uses_outer_columns)
+            plan_uses_outer_columns(bitmapqual)
+                || recheck_qual.iter().any(expr_uses_outer_columns)
+                || filter_qual.iter().any(expr_uses_outer_columns)
         }
         Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
             children.iter().any(plan_uses_outer_columns)
@@ -558,6 +561,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             rel,
             relation_oid: _,
             index_rel,
+            index_name,
             am_oid,
             desc,
             index_desc,
@@ -567,8 +571,10 @@ pub fn executor_start(plan: Plan) -> PlanState {
         } => Box::new(BitmapIndexScanState {
             rel,
             index_rel,
+            index_name,
             am_oid,
             column_names: desc.columns.iter().map(|c| c.name.clone()).collect(),
+            heap_desc: Rc::new(desc),
             index_desc: Rc::new(index_desc),
             index_meta,
             keys,
@@ -588,6 +594,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             desc,
             bitmapqual,
             recheck_qual,
+            filter_qual,
         } => {
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
             let desc = Rc::new(desc);
@@ -607,6 +614,14 @@ pub fn executor_start(plan: Plan) -> PlanState {
             let compiled_recheck = recheck_qual
                 .as_ref()
                 .map(|qual| expr::compile_predicate_with_decoder(qual, &decoder));
+            let filter_qual = (!filter_qual.is_empty()).then(|| {
+                let mut quals = filter_qual;
+                let first = quals.remove(0);
+                quals.into_iter().fold(first, Expr::and)
+            });
+            let compiled_filter = filter_qual
+                .as_ref()
+                .map(|qual| expr::compile_predicate_with_decoder(qual, &decoder));
             Box::new(BitmapHeapScanState {
                 rel,
                 relation_name,
@@ -622,6 +637,8 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 current_page_pin: None,
                 recheck_qual,
                 compiled_recheck,
+                filter_qual,
+                compiled_filter,
                 slot,
                 source_id,
                 relation_oid,
@@ -1318,6 +1335,7 @@ fn build_bitmap_index_state(plan: Plan) -> Box<BitmapIndexScanState> {
             rel,
             relation_oid: _,
             index_rel,
+            index_name,
             am_oid,
             desc,
             index_desc,
@@ -1327,8 +1345,10 @@ fn build_bitmap_index_state(plan: Plan) -> Box<BitmapIndexScanState> {
         } => Box::new(BitmapIndexScanState {
             rel,
             index_rel,
+            index_name,
             am_oid,
             column_names: desc.columns.iter().map(|c| c.name.clone()).collect(),
+            heap_desc: Rc::new(desc),
             index_desc: Rc::new(index_desc),
             index_meta,
             keys,

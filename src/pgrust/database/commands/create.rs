@@ -1,4 +1,5 @@
 use super::super::*;
+use super::privilege::{acl_grants_privilege, effective_acl_grantee_names, type_owner_default_acl};
 use crate::backend::commands::partition::validate_new_partition_bound;
 use crate::backend::parser::{
     AggregateArgType, AggregateSignatureKind, CreateAggregateStatement, CreateFunctionReturnSpec,
@@ -693,26 +694,44 @@ impl Database {
                     .cloned()
                     .map(crate::backend::parser::IndexColumnDef::from)
                     .collect::<Vec<_>>();
-                let (access_method_oid, access_method_handler, build_options) =
-                    if action.without_overlaps.is_some() {
-                        self.resolve_temporal_index_build_options(
-                            client_id,
-                            Some((xid, action_cid)),
-                            relation,
-                            &index_columns,
-                        )?
-                    } else {
-                        self.resolve_simple_index_build_options(
-                            client_id,
-                            Some((xid, action_cid)),
-                            "btree",
-                            relation,
-                            &index_columns,
-                            &[],
-                        )?
-                    };
+                let mut storage_columns = index_columns.clone();
+                storage_columns.extend(
+                    action
+                        .include_columns
+                        .iter()
+                        .cloned()
+                        .map(crate::backend::parser::IndexColumnDef::from),
+                );
+                let (access_method_oid, access_method_handler, build_options) = if action.exclusion
+                {
+                    self.resolve_simple_index_build_options(
+                        client_id,
+                        Some((xid, action_cid)),
+                        action.access_method.as_deref().unwrap_or("gist"),
+                        relation,
+                        &index_columns,
+                        &[],
+                    )?
+                } else if action.without_overlaps.is_some() {
+                    self.resolve_temporal_index_build_options(
+                        client_id,
+                        Some((xid, action_cid)),
+                        relation,
+                        &index_columns,
+                    )?
+                } else {
+                    self.resolve_simple_index_build_options(
+                        client_id,
+                        Some((xid, action_cid)),
+                        "btree",
+                        relation,
+                        &index_columns,
+                        &[],
+                    )?
+                };
                 let build_options = crate::backend::catalog::CatalogIndexBuildOptions {
                     indimmediate: !action.deferrable,
+                    indisexclusion: action.exclusion || build_options.indisexclusion,
                     ..build_options
                 };
                 let index_entry = self.build_simple_index_in_transaction(
@@ -720,9 +739,9 @@ impl Database {
                     relation,
                     &index_name,
                     catalog.materialize_visible_catalog(),
-                    &index_columns,
+                    &storage_columns,
                     None,
-                    true,
+                    !action.exclusion,
                     action.primary,
                     action.nulls_not_distinct,
                     xid,
@@ -758,7 +777,14 @@ impl Database {
                 } else {
                     Vec::new()
                 };
-                let conexclop = if action.without_overlaps.is_some() {
+                let conexclop = if action.exclusion {
+                    Some(self.exclusion_constraint_operator_oids_for_desc(
+                        &relation.desc,
+                        &action.columns,
+                        &action.exclusion_operators,
+                        &catalog,
+                    )?)
+                } else if action.without_overlaps.is_some() {
                     Some(self.temporal_constraint_operator_oids_for_relation(
                         relation.relation_oid,
                         &action.columns,
@@ -778,6 +804,8 @@ impl Database {
                         constraint_name,
                         if action.primary {
                             crate::include::catalog::CONSTRAINT_PRIMARY
+                        } else if action.exclusion {
+                            crate::include::catalog::CONSTRAINT_EXCLUSION
                         } else {
                             crate::include::catalog::CONSTRAINT_UNIQUE
                         },
@@ -1377,6 +1405,7 @@ impl Database {
                 check: create_stmt.check.clone(),
                 not_null: create_stmt.not_null,
                 enum_check,
+                typacl: None,
                 comment: None,
             },
         );
@@ -1787,6 +1816,7 @@ impl Database {
             proname: function_name.clone(),
             pronamespace: namespace_oid,
             proowner: BOOTSTRAP_SUPERUSER_OID,
+            proacl: None,
             prolang: language_row.oid,
             procost: create_stmt
                 .cost
@@ -2056,6 +2086,7 @@ impl Database {
             proname: aggregate_name.clone(),
             pronamespace: namespace_oid,
             proowner: BOOTSTRAP_SUPERUSER_OID,
+            proacl: None,
             prolang: PG_LANGUAGE_INTERNAL_OID,
             procost: 1.0,
             prorows: 0.0,
@@ -2618,7 +2649,11 @@ impl Database {
         client_id: ClientId,
         desc: &RelationDesc,
     ) -> Result<(), ExecError> {
-        let current_user_oid = self.auth_state(client_id).current_user_oid();
+        let auth = self.auth_state(client_id);
+        let auth_catalog = self
+            .auth_catalog(client_id, None)
+            .map_err(map_catalog_error)?;
+        let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
         let range_types = self.range_types.read();
         for column in &desc.columns {
             let ty = column.sql_type.element_type();
@@ -2628,12 +2663,15 @@ impl Database {
             else {
                 continue;
             };
-            let allowed = if current_user_oid == entry.owner_oid {
-                entry.owner_usage
-            } else {
-                entry.public_usage
-            };
-            if !allowed {
+            let owner_name = auth_catalog
+                .role_by_oid(entry.owner_oid)
+                .map(|entry| entry.rolname.clone())
+                .unwrap_or_else(|| entry.owner_oid.to_string());
+            let acl = entry
+                .typacl
+                .clone()
+                .unwrap_or_else(|| type_owner_default_acl(&owner_name));
+            if !acl_grants_privilege(&acl, &effective_names, 'U') {
                 let type_name = if ty.type_oid == entry.multirange_oid {
                     &entry.multirange_name
                 } else {
@@ -2843,6 +2881,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        planner_config: crate::include::nodes::pathnodes::PlannerConfig,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
@@ -2867,7 +2906,11 @@ impl Database {
                 configured_search_path,
             )?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let planned_stmt = crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)?;
+        let planned_stmt = crate::backend::parser::pg_plan_query_with_config(
+            &create_stmt.query,
+            &catalog,
+            planner_config,
+        )?;
         let mut rels = std::collections::BTreeSet::new();
         collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
 
@@ -2917,10 +2960,11 @@ impl Database {
             deferred_foreign_keys: None,
             trigger_depth: 0,
         };
-        let query_result = execute_readonly_statement(
+        let query_result = crate::backend::executor::execute_readonly_statement_with_config(
             Statement::Select(create_stmt.query.clone()),
             &catalog,
             &mut ctx,
+            planner_config,
         );
         let StatementResult::Query {
             columns,
@@ -3038,6 +3082,8 @@ impl Database {
             return Ok(StatementResult::AffectedRows(0));
         }
 
+        let insert_catalog =
+            self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
         let mut insert_ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
@@ -3076,7 +3122,7 @@ impl Database {
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
-            catalog: catalog.materialize_visible_catalog(),
+            catalog: insert_catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
@@ -3109,6 +3155,7 @@ impl Database {
         xid: Option<TransactionId>,
         cid: u32,
         configured_search_path: Option<&[String]>,
+        planner_config: crate::include::nodes::pathnodes::PlannerConfig,
     ) -> Result<StatementResult, ExecError> {
         if let Some(xid) = xid {
             let mut catalog_effects = Vec::new();
@@ -3119,6 +3166,7 @@ impl Database {
                 xid,
                 cid,
                 configured_search_path,
+                planner_config,
                 &mut catalog_effects,
                 &mut temp_effects,
             );
@@ -3133,6 +3181,7 @@ impl Database {
             xid,
             cid,
             configured_search_path,
+            planner_config,
             &mut catalog_effects,
             &mut temp_effects,
         );

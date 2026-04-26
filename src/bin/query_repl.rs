@@ -500,6 +500,7 @@ fn run_statement(
         | Statement::CommentOnPublication(_)
         | Statement::CommentOnAggregate(_)
         | Statement::CommentOnFunction(_)
+        | Statement::CommentOnOperator(_)
         | Statement::CreateTrigger(_)
         | Statement::DropTrigger(_)
         | Statement::AlterTableTriggerState(_)
@@ -521,6 +522,7 @@ fn run_statement(
         | Statement::AlterTableAlterColumnStatistics(_)
         | Statement::AlterIndexAlterColumnStatistics(_)
         | Statement::AlterIndexAttachPartition(_)
+        | Statement::ReindexIndex(_)
         | Statement::AlterTableAlterColumnStorage(_)
         | Statement::AlterTableAlterColumnDefault(_)
         | Statement::AlterTableAlterColumnExpression(_)
@@ -1020,6 +1022,10 @@ fn run_statement(
         Statement::DropIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP INDEX through Database/session path",
             actual: "DROP INDEX".into(),
+        })),
+        Statement::ReindexIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "REINDEX through Database/session path",
+            actual: "REINDEX".into(),
         })),
         Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP VIEW through Database/session path",

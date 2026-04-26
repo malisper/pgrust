@@ -108,6 +108,20 @@ pub const GIST_NETWORK_UNION_PROC_OID: u32 = 76611;
 pub const GIST_NETWORK_PENALTY_PROC_OID: u32 = 76612;
 pub const GIST_NETWORK_PICKSPLIT_PROC_OID: u32 = 76613;
 pub const GIST_NETWORK_SAME_PROC_OID: u32 = 76614;
+pub const SPG_QUAD_CONFIG_PROC_OID: u32 = 4018;
+pub const SPG_QUAD_CHOOSE_PROC_OID: u32 = 4019;
+pub const SPG_QUAD_PICKSPLIT_PROC_OID: u32 = 4020;
+pub const SPG_QUAD_INNER_CONSISTENT_PROC_OID: u32 = 4021;
+pub const SPG_QUAD_LEAF_CONSISTENT_PROC_OID: u32 = 4022;
+pub const SPG_KD_CONFIG_PROC_OID: u32 = 4023;
+pub const SPG_KD_CHOOSE_PROC_OID: u32 = 4024;
+pub const SPG_KD_PICKSPLIT_PROC_OID: u32 = 4025;
+pub const SPG_KD_INNER_CONSISTENT_PROC_OID: u32 = 4026;
+pub const SPG_TEXT_CONFIG_PROC_OID: u32 = 4027;
+pub const SPG_TEXT_CHOOSE_PROC_OID: u32 = 4028;
+pub const SPG_TEXT_PICKSPLIT_PROC_OID: u32 = 4029;
+pub const SPG_TEXT_INNER_CONSISTENT_PROC_OID: u32 = 4030;
+pub const SPG_TEXT_LEAF_CONSISTENT_PROC_OID: u32 = 4031;
 pub const SPG_BOX_QUAD_CONFIG_PROC_OID: u32 = 5012;
 pub const SPG_BOX_QUAD_CHOOSE_PROC_OID: u32 = 5013;
 pub const SPG_BOX_QUAD_PICKSPLIT_PROC_OID: u32 = 5014;
@@ -246,6 +260,7 @@ pub struct PgProcRow {
     pub proname: String,
     pub pronamespace: u32,
     pub proowner: u32,
+    pub proacl: Option<Vec<String>>,
     pub prolang: u32,
     pub procost: f64,
     pub prorows: f64,
@@ -327,6 +342,11 @@ pub fn pg_proc_desc() -> RelationDesc {
             column_desc("prosrc", SqlType::new(SqlTypeKind::Text), false),
             column_desc("probin", SqlType::new(SqlTypeKind::Text), true),
             column_desc("prosqlbody", SqlType::new(SqlTypeKind::PgNodeTree), true),
+            column_desc(
+                "proacl",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                true,
+            ),
         ],
     }
 }
@@ -3255,6 +3275,18 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             TEXT_TYPE_OID,
             &oid_argtypes(&[INT8_TYPE_OID]),
             "to_hex64",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1376,
+            "factorial",
+            NUMERIC_TYPE_OID,
+            &oid_argtypes(&[INT8_TYPE_OID]),
+            "numeric_fac",
             1,
             false,
             true,
@@ -7811,6 +7843,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("convert_from", BuiltinScalarFunction::ConvertFrom),
         ("md5", BuiltinScalarFunction::Md5),
         ("reverse", BuiltinScalarFunction::Reverse),
+        ("starts_with", BuiltinScalarFunction::TextStartsWith),
         ("encode", BuiltinScalarFunction::Encode),
         ("decode", BuiltinScalarFunction::Decode),
         ("sha224", BuiltinScalarFunction::Sha224),
@@ -9660,6 +9693,174 @@ fn gist_support_proc_rows() -> Vec<PgProcRow> {
 
 fn spgist_support_proc_rows() -> Vec<PgProcRow> {
     vec![
+        proc_row(
+            SPG_QUAD_CONFIG_PROC_OID,
+            "spg_quad_config",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_quad_config",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_QUAD_CHOOSE_PROC_OID,
+            "spg_quad_choose",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_quad_choose",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_QUAD_PICKSPLIT_PROC_OID,
+            "spg_quad_picksplit",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_quad_picksplit",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_QUAD_INNER_CONSISTENT_PROC_OID,
+            "spg_quad_inner_consistent",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_quad_inner_consistent",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_QUAD_LEAF_CONSISTENT_PROC_OID,
+            "spg_quad_leaf_consistent",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_quad_leaf_consistent",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_KD_CONFIG_PROC_OID,
+            "spg_kd_config",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_kd_config",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_KD_CHOOSE_PROC_OID,
+            "spg_kd_choose",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_kd_choose",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_KD_PICKSPLIT_PROC_OID,
+            "spg_kd_picksplit",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_kd_picksplit",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_KD_INNER_CONSISTENT_PROC_OID,
+            "spg_kd_inner_consistent",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_kd_inner_consistent",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_TEXT_CONFIG_PROC_OID,
+            "spg_text_config",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_text_config",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_TEXT_CHOOSE_PROC_OID,
+            "spg_text_choose",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_text_choose",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_TEXT_PICKSPLIT_PROC_OID,
+            "spg_text_picksplit",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_text_picksplit",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_TEXT_INNER_CONSISTENT_PROC_OID,
+            "spg_text_inner_consistent",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_text_inner_consistent",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_TEXT_LEAF_CONSISTENT_PROC_OID,
+            "spg_text_leaf_consistent",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_text_leaf_consistent",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
         proc_row(
             SPG_BOX_QUAD_CONFIG_PROC_OID,
             "spg_box_quad_config",
@@ -12225,6 +12426,7 @@ fn proc_row_with_parallel(
         proname: proname.into(),
         pronamespace: PG_CATALOG_NAMESPACE_OID,
         proowner: BOOTSTRAP_SUPERUSER_OID,
+        proacl: None,
         prolang: PG_LANGUAGE_INTERNAL_OID,
         procost: 1.0,
         prorows: if proretset { 1000.0 } else { 0.0 },
@@ -12536,6 +12738,7 @@ mod tests {
                 "prosrc",
                 "probin",
                 "prosqlbody",
+                "proacl",
             ]
         );
     }
@@ -12773,6 +12976,22 @@ mod tests {
         assert_eq!(
             builtin_scalar_function_for_proc_oid(row.oid),
             Some(BuiltinScalarFunction::PgBackendPid)
+        );
+    }
+
+    #[test]
+    fn bootstrap_rows_include_factorial_int8() {
+        let row = bootstrap_pg_proc_rows()
+            .into_iter()
+            .find(|row| {
+                row.proname == "factorial" && row.proargtypes == oid_argtypes(&[INT8_TYPE_OID])
+            })
+            .expect("factorial(int8) row");
+        assert_eq!(row.oid, 1376);
+        assert_eq!(row.prorettype, NUMERIC_TYPE_OID);
+        assert_eq!(
+            builtin_scalar_function_for_proc_oid(row.oid),
+            Some(BuiltinScalarFunction::Factorial)
         );
     }
 

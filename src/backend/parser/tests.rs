@@ -13,16 +13,17 @@ use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec,
     AlterColumnExpressionAction, AlterTableTriggerMode, AlterTableTriggerStateStatement,
     AlterTableTriggerTarget, AlterTriggerRenameStatement, ColumnConstraint, ColumnGeneratedKind,
-    CommentOnAggregateStatement, CommentOnFunctionStatement, CommentOnViewStatement,
-    CompositeTypeAttributeDef, CreateAggregateStatement, CreateBaseTypeOption,
-    CreateBaseTypeStatement, CreateCompositeTypeStatement, CreateShellTypeStatement,
-    CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement, DropTriggerStatement,
-    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef,
-    InsertSource, InsertStatement, JoinTreeNode, PartitionStrategy, PublicationObjectSpec,
-    PublicationOption, PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec,
-    RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
-    SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec,
-    TriggerLevel, TriggerReferencingSpec, TriggerTiming, ViewCheckOption,
+    CommentOnAggregateStatement, CommentOnFunctionStatement, CommentOnOperatorStatement,
+    CommentOnViewStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
+    CreateBaseTypeOption, CreateBaseTypeStatement, CreateCompositeTypeStatement,
+    CreateShellTypeStatement, CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement,
+    DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType,
+    GrantObjectPrivilege, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
+    PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
+    RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
+    RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint,
+    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerReferencingSpec, TriggerTiming,
+    ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -562,6 +563,25 @@ fn catalog() -> Catalog {
     catalog
 }
 
+fn catalog_with_operator_dispatch_table() -> Catalog {
+    let mut catalog = catalog();
+    catalog.insert(
+        "ops",
+        test_catalog_entry(
+            15003,
+            RelationDesc {
+                columns: vec![
+                    column_desc("left_box", SqlType::new(SqlTypeKind::Box), false),
+                    column_desc("right_box", SqlType::new(SqlTypeKind::Box), false),
+                    column_desc("left_range", SqlType::new(SqlTypeKind::Int4Range), false),
+                    column_desc("right_range", SqlType::new(SqlTypeKind::Int4Range), false),
+                ],
+            },
+        ),
+    );
+    catalog
+}
+
 fn catalog_with_pets() -> Catalog {
     let mut catalog = catalog();
     catalog.insert("pets", pets_entry());
@@ -753,9 +773,9 @@ fn catalog_with_people_id_index() -> Catalog {
                 indislive: true,
                 indimmediate: true,
                 indkey: vec![1],
-                indclass: vec![],
-                indcollation: vec![],
-                indoption: vec![],
+                indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
+                indcollation: vec![0],
+                indoption: vec![0],
                 indexprs: None,
                 indpred: None,
                 brin_options: None,
@@ -2123,6 +2143,37 @@ fn parse_comment_on_function_null_statement() {
             schema_name: None,
             function_name: "noop".into(),
             arg_types: Vec::new(),
+            comment: None,
+        })
+    );
+}
+
+#[test]
+fn parse_comment_on_operator_statement() {
+    let stmt =
+        parse_statement("comment on operator public.@#@ (none, int8) is 'prefix op'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnOperator(CommentOnOperatorStatement {
+            schema_name: Some("public".into()),
+            operator_name: "@#@".into(),
+            left_arg: None,
+            right_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int8))),
+            comment: Some("prefix op".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_comment_on_operator_null_statement() {
+    let stmt = parse_statement("comment on operator ## (path, path) is null").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnOperator(CommentOnOperatorStatement {
+            schema_name: None,
+            operator_name: "##".into(),
+            left_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Path))),
+            right_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Path))),
             comment: None,
         })
     );
@@ -3817,6 +3868,34 @@ fn parse_grant_all_on_multiple_schemas_statement() {
 }
 
 #[test]
+fn parse_grant_usage_on_schema_statement() {
+    let stmt = parse_statement("grant usage on schema public to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnSchema,
+            object_names: vec!["public".into()],
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_usage_on_type_statement() {
+    let stmt = parse_statement("grant usage on type custom_t to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnType,
+            object_names: vec!["custom_t".into()],
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
 fn parse_grant_select_on_table_statement() {
     let stmt = parse_statement("grant select on uaccount to public").unwrap();
     assert_eq!(
@@ -3878,6 +3957,48 @@ fn parse_revoke_all_privileges_on_table_from_public_statement() {
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
             object_names: vec!["tenant_table".into()],
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_usage_on_schema_statement() {
+    let stmt = parse_statement("revoke usage on schema public from public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnSchema,
+            object_names: vec!["public".into()],
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_usage_on_type_statement() {
+    let stmt = parse_statement("revoke usage on type custom_t from public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnType,
+            object_names: vec!["custom_t".into()],
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_execute_on_function_statement() {
+    let stmt = parse_statement("revoke execute on function f_leak(text) from public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::ExecuteOnFunction,
+            object_names: vec!["f_leak(text)".into()],
             grantee_names: vec!["public".into()],
             cascade: false,
         })
@@ -5992,6 +6113,45 @@ fn parse_prefix_float_operator_sugar() {
 }
 
 #[test]
+fn parse_custom_prefix_operator_uses_full_token() {
+    let stmt = parse_select("select @#@ 24, !=- 10").unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::PrefixOperator { op, .. } if op == "@#@"
+    ));
+    assert!(matches!(
+        &stmt.targets[1].expr,
+        SqlExpr::PrefixOperator { op, .. } if op == "!=-"
+    ));
+}
+
+#[test]
+fn parse_postgres_operator_edge_cases() {
+    match parse_statement("create operator => (rightarg = int8, procedure = factorial)") {
+        Err(ParseError::UnexpectedToken { actual, .. }) => {
+            assert_eq!(actual, "syntax error at or near \"=>\"");
+        }
+        other => panic!("expected => syntax error, got {other:?}"),
+    }
+
+    match parse_statement("select 10 !=-;") {
+        Err(ParseError::UnexpectedToken { actual, .. }) => {
+            assert_eq!(actual, "syntax error at or near \";\"");
+        }
+        other => panic!("expected postfix operator syntax error, got {other:?}"),
+    }
+
+    for sql in [
+        "select true<>-1 between 1 and 1",
+        "select false<>1 between 1 and 1",
+        "select false<=-1 between 1 and 1",
+        "select false>=-1 between 1 and 1",
+    ] {
+        parse_select(sql).unwrap_or_else(|err| panic!("{sql}: {err:?}"));
+    }
+}
+
+#[test]
 fn parse_power_operator_and_in_list() {
     let stmt = parse_select("select x ^ '2.0', x in (0, 1, 2) from metrics").unwrap();
     assert!(matches!(
@@ -6873,9 +7033,10 @@ fn build_plan_binds_pg_trigger_depth_as_builtin() {
 
 #[test]
 fn build_plan_dispatches_geometry_and_range_position_operators_independently() {
+    let catalog = catalog_with_operator_dispatch_table();
     let geometry_plan = build_plan(
-        &parse_select("select '(0,0),(1,1)'::box &< '(2,2),(3,3)'::box").unwrap(),
-        &catalog(),
+        &parse_select("select left_box &< right_box from ops").unwrap(),
+        &catalog,
     )
     .unwrap();
     let Plan::Projection {
@@ -6895,8 +7056,8 @@ fn build_plan_dispatches_geometry_and_range_position_operators_independently() {
     ));
 
     let overlap_plan = build_plan(
-        &parse_select("select '(0,0),(1,1)'::box && '(2,2),(3,3)'::box").unwrap(),
-        &catalog(),
+        &parse_select("select left_box && right_box from ops").unwrap(),
+        &catalog,
     )
     .unwrap();
     let Plan::Projection {
@@ -6916,8 +7077,8 @@ fn build_plan_dispatches_geometry_and_range_position_operators_independently() {
     ));
 
     let range_plan = build_plan(
-        &parse_select("select int4range(1, 4) &< int4range(2, 10)").unwrap(),
-        &catalog(),
+        &parse_select("select left_range &< right_range from ops").unwrap(),
+        &catalog,
     )
     .unwrap();
     let Plan::Projection {
@@ -10727,6 +10888,7 @@ fn lower_create_table_resolves_named_domain_types() {
             typname: "dom_int".into(),
             typnamespace: PUBLIC_NAMESPACE_OID,
             typowner: BOOTSTRAP_SUPERUSER_OID,
+            typacl: None,
             typlen: 4,
             typalign: AttributeAlign::Int,
             typstorage: AttributeStorage::Plain,

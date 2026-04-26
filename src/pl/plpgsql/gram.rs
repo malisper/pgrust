@@ -1343,6 +1343,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_raise_info_level() {
+        let block = parse_block(
+            r#"
+            begin
+                raise info 'r = %', true;
+            end
+            "#,
+        )
+        .unwrap();
+
+        let Stmt::Raise {
+            level,
+            message,
+            params,
+        } = &block.statements[0]
+        else {
+            panic!("expected RAISE statement");
+        };
+        assert!(matches!(level, RaiseLevel::Info));
+        assert_eq!(message, "r = %");
+        assert_eq!(params, &vec!["true".to_string()]);
+    }
+
+    #[test]
     fn parse_while_stmt() {
         let block = parse_block(
             "

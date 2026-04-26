@@ -367,6 +367,7 @@ pub enum Statement {
     CommentOnStatistics(CommentOnStatisticsStatement),
     CommentOnAggregate(CommentOnAggregateStatement),
     CommentOnFunction(CommentOnFunctionStatement),
+    CommentOnOperator(CommentOnOperatorStatement),
     CreateDomain(CreateDomainStatement),
     CreateConversion(CreateConversionStatement),
     CreatePublication(CreatePublicationStatement),
@@ -388,6 +389,7 @@ pub enum Statement {
     DropTable(DropTableStatement),
     DropTrigger(DropTriggerStatement),
     DropIndex(DropIndexStatement),
+    ReindexIndex(ReindexIndexStatement),
     DropDomain(DropDomainStatement),
     DropForeignDataWrapper(DropForeignDataWrapperStatement),
     DropView(DropViewStatement),
@@ -1770,13 +1772,14 @@ pub struct CreateOperatorStatement {
     pub operator_name: String,
     pub left_arg: Option<RawTypeName>,
     pub right_arg: Option<RawTypeName>,
-    pub procedure: QualifiedNameRef,
+    pub procedure: Option<QualifiedNameRef>,
     pub commutator: Option<String>,
     pub negator: Option<String>,
     pub restrict: Option<QualifiedNameRef>,
     pub join: Option<QualifiedNameRef>,
     pub hashes: bool,
     pub merges: bool,
+    pub unrecognized_attributes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2496,13 +2499,23 @@ pub struct CommentOnFunctionStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnOperatorStatement {
+    pub schema_name: Option<String>,
+    pub operator_name: String,
+    pub left_arg: Option<RawTypeName>,
+    pub right_arg: Option<RawTypeName>,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrantObjectPrivilege {
     CreateOnDatabase,
     AllPrivilegesOnTable,
     SelectOnTable,
     AllPrivilegesOnSchema,
-    ExecuteOnFunction,
+    UsageOnSchema,
     UsageOnType,
+    ExecuteOnFunction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2629,6 +2642,12 @@ pub struct DropIndexStatement {
     pub concurrently: bool,
     pub if_exists: bool,
     pub index_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReindexIndexStatement {
+    pub concurrently: bool,
+    pub index_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2975,6 +2994,12 @@ pub enum TableConstraint {
         columns: Vec<String>,
         without_overlaps: Option<String>,
     },
+    Exclusion {
+        attributes: ConstraintAttributes,
+        using_method: String,
+        elements: Vec<ExclusionElement>,
+        include_columns: Vec<String>,
+    },
     ForeignKey {
         attributes: ConstraintAttributes,
         columns: Vec<String>,
@@ -2987,6 +3012,12 @@ pub enum TableConstraint {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExclusionElement {
+    pub column: String,
+    pub operator: String,
+}
+
 impl TableConstraint {
     pub fn attributes(&self) -> &ConstraintAttributes {
         match self {
@@ -2994,6 +3025,7 @@ impl TableConstraint {
             | Self::Check { attributes, .. }
             | Self::PrimaryKey { attributes, .. }
             | Self::Unique { attributes, .. }
+            | Self::Exclusion { attributes, .. }
             | Self::ForeignKey { attributes, .. } => attributes,
         }
     }

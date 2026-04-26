@@ -93,9 +93,10 @@ use super::expr_string::{
     eval_reverse_function, eval_right_function, eval_rpad_function, eval_set_bit_bytes,
     eval_set_byte, eval_sha224_function, eval_sha256_function, eval_sha384_function,
     eval_sha512_function, eval_split_part_function, eval_strpos_function, eval_text_overlay,
-    eval_text_substring, eval_to_bin_function, eval_to_char_float4_function, eval_to_char_function,
-    eval_to_hex_function, eval_to_number_function, eval_to_oct_function, eval_translate_function,
-    eval_trim_function, eval_unistr_function,
+    eval_text_starts_with_function, eval_text_substring, eval_to_bin_function,
+    eval_to_char_float4_function, eval_to_char_function, eval_to_hex_function,
+    eval_to_number_function, eval_to_oct_function, eval_translate_function, eval_trim_function,
+    eval_unistr_function,
 };
 use super::expr_txid::eval_txid_builtin_function;
 use super::expr_xml::{eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function};
@@ -129,12 +130,13 @@ use crate::backend::utils::time::datetime::current_postgres_timestamp_usecs;
 use crate::include::access::toast_compression::ToastCompressionId;
 use crate::include::catalog::{
     BOX_SPGIST_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID, BYTEA_TYPE_OID, CONSTRAINT_CHECK,
-    CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE,
-    CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID,
-    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID,
-    PG_DEPENDENCIES_TYPE_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID,
-    PG_NDISTINCT_TYPE_OID, PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID,
-    POLY_SPGIST_OPCLASS_OID, SPGIST_AM_OID, bootstrap_pg_am_rows,
+    CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
+    CONSTRAINT_UNIQUE, CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID,
+    INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID,
+    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
+    PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, POLY_SPGIST_OPCLASS_OID,
+    QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_SPGIST_OPCLASS_OID, bootstrap_pg_am_rows,
     builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
@@ -374,7 +376,7 @@ enum IndexPropertyKind {
 enum IndexReturnability {
     Never,
     Always,
-    SpgistBox,
+    SpgistCanReturnData,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -511,7 +513,7 @@ fn index_am_profile(am_oid: u32) -> Option<IndexAmPropertyProfile> {
             amcaninclude: true,
             amindexscan: true,
             ambitmapscan: true,
-            returnability: IndexReturnability::SpgistBox,
+            returnability: IndexReturnability::SpgistCanReturnData,
         }),
         _ => crate::backend::access::index::amapi::index_am_handler(am_oid).map(|routine| {
             IndexAmPropertyProfile {
@@ -688,10 +690,17 @@ fn eval_pg_index_column_has_property(
                 Some(IndexPropertyKind::Returnable) => Value::Bool(match profile.returnability {
                     IndexReturnability::Never => false,
                     IndexReturnability::Always => true,
-                    IndexReturnability::SpgistBox => {
+                    IndexReturnability::SpgistCanReturnData => {
                         matches!(
                             index_meta.indclass.get(column_index).copied(),
-                            Some(BOX_SPGIST_OPCLASS_OID | POLY_SPGIST_OPCLASS_OID)
+                            Some(
+                                BOX_SPGIST_OPCLASS_OID
+                                    | POLY_SPGIST_OPCLASS_OID
+                                    | INET_SPGIST_OPCLASS_OID
+                                    | QUAD_POINT_SPGIST_OPCLASS_OID
+                                    | KD_POINT_SPGIST_OPCLASS_OID
+                                    | TEXT_SPGIST_OPCLASS_OID
+                            )
                         )
                     }
                 }),
@@ -2139,6 +2148,7 @@ fn format_constraintdef_for_catalog(
         CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE => {
             format_index_backed_constraintdef_for_catalog(catalog, row)
         }
+        CONSTRAINT_EXCLUSION => format_exclusion_constraintdef_for_catalog(catalog, row),
         CONSTRAINT_FOREIGN => format_foreign_key_constraintdef_for_catalog(catalog, row),
         _ => None,
     }
@@ -2165,6 +2175,53 @@ fn format_index_backed_constraintdef_for_catalog(
         "UNIQUE"
     };
     let mut def = format!("{prefix} ({})", columns.join(", "));
+    append_constraint_deferrability(&mut def, row);
+    Some(def)
+}
+
+fn format_exclusion_constraintdef_for_catalog(
+    catalog: &dyn CatalogLookup,
+    row: &crate::include::catalog::PgConstraintRow,
+) -> Option<String> {
+    let relation = catalog.lookup_relation_by_oid(row.conrelid)?;
+    let index = catalog
+        .index_relations_for_heap(row.conrelid)
+        .into_iter()
+        .find(|index| index.relation_oid == row.conindid)?;
+    let all_columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)?;
+    let operators = row
+        .conexclop
+        .as_ref()?
+        .iter()
+        .map(|operator_oid| {
+            catalog
+                .operator_by_oid(*operator_oid)
+                .map(|row| row.oprname)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let key_count = operators.len();
+    let key_columns = all_columns
+        .iter()
+        .take(key_count)
+        .zip(operators.iter())
+        .map(|(column, operator)| format!("{column} WITH {operator}"))
+        .collect::<Vec<_>>();
+    let include_columns = all_columns
+        .iter()
+        .skip(key_count)
+        .cloned()
+        .collect::<Vec<_>>();
+    let amname = bootstrap_pg_am_rows()
+        .into_iter()
+        .find(|row| row.oid == index.index_meta.am_oid)
+        .map(|row| row.amname)
+        .unwrap_or_else(|| "gist".into());
+    let mut def = format!("EXCLUDE USING {amname} ({})", key_columns.join(", "));
+    if !include_columns.is_empty() {
+        def.push_str(" INCLUDE (");
+        def.push_str(&include_columns.join(", "));
+        def.push(')');
+    }
     append_constraint_deferrability(&mut def, row);
     Some(def)
 }
@@ -2212,14 +2269,15 @@ fn append_constraint_deferrability(
 }
 
 fn eval_pg_get_indexdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
-    let (index_oid, column_no) = match values {
+    let (index_oid, column_no, qualify_table_name) = match values {
         [Value::Null] | [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => {
             return Ok(Value::Null);
         }
-        [index_oid] => (oid_arg_to_u32(index_oid, "pg_get_indexdef")?, 0),
+        [index_oid] => (oid_arg_to_u32(index_oid, "pg_get_indexdef")?, 0, true),
         [index_oid, column_no, _pretty] => (
             oid_arg_to_u32(index_oid, "pg_get_indexdef")?,
             int32_arg(column_no, "pg_get_indexdef")?,
+            false,
         ),
         _ => {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -2240,7 +2298,7 @@ fn eval_pg_get_indexdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value
             .unwrap_or(Value::Null));
     }
     Ok(Value::Text(
-        format_indexdef_for_catalog(catalog, &relation, &index).into(),
+        format_indexdef_for_catalog(catalog, &relation, &index, qualify_table_name).into(),
     ))
 }
 
@@ -2251,6 +2309,14 @@ fn index_relation_for_oid(
     crate::backend::parser::BoundRelation,
     crate::backend::parser::BoundIndexRelation,
 )> {
+    if let Some(index_row) = catalog.index_row_by_oid(index_oid) {
+        let relation = catalog.lookup_relation_by_oid(index_row.indrelid)?;
+        let index = catalog
+            .index_relations_for_heap(index_row.indrelid)
+            .into_iter()
+            .find(|index| index.relation_oid == index_oid)?;
+        return Some((relation, index));
+    }
     catalog
         .constraint_rows_for_index(index_oid)
         .into_iter()
@@ -2269,17 +2335,27 @@ fn format_indexdef_for_catalog(
     catalog: &dyn CatalogLookup,
     relation: &crate::backend::parser::BoundRelation,
     index: &crate::backend::parser::BoundIndexRelation,
+    qualify_table_name: bool,
 ) -> String {
     let table_name = catalog
         .class_row_by_oid(relation.relation_oid)
-        .map(|class| class.relname)
+        .map(|class| {
+            if qualify_table_name {
+                catalog
+                    .namespace_row_by_oid(class.relnamespace)
+                    .map(|namespace| format!("{}.{}", namespace.nspname, class.relname))
+                    .unwrap_or(class.relname)
+            } else {
+                class.relname
+            }
+        })
         .unwrap_or_else(|| relation.relation_oid.to_string());
     let amname = bootstrap_pg_am_rows()
         .into_iter()
         .find(|row| row.oid == index.index_meta.am_oid)
         .map(|row| row.amname)
         .unwrap_or_else(|| "btree".into());
-    let columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)
+    let all_columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)
         .unwrap_or_else(|| {
             index
                 .desc
@@ -2288,6 +2364,17 @@ fn format_indexdef_for_catalog(
                 .map(|column| column.name.clone())
                 .collect()
         });
+    let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or_default();
+    let key_columns = all_columns
+        .iter()
+        .take(key_count)
+        .cloned()
+        .collect::<Vec<_>>();
+    let include_columns = all_columns
+        .iter()
+        .skip(key_count)
+        .cloned()
+        .collect::<Vec<_>>();
     let unique = if index.index_meta.indisunique {
         "UNIQUE "
     } else {
@@ -2298,8 +2385,13 @@ fn format_indexdef_for_catalog(
         index.name,
         table_name,
         amname,
-        columns.join(", ")
+        key_columns.join(", ")
     );
+    if !include_columns.is_empty() {
+        definition.push_str(" INCLUDE (");
+        definition.push_str(&include_columns.join(", "));
+        definition.push(')');
+    }
     if let Some(predicate) = index
         .index_meta
         .indpred
@@ -4410,6 +4502,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
         BuiltinScalarFunction::Md5 => eval_md5_function(&values),
         BuiltinScalarFunction::Reverse => eval_reverse_function(&values),
+        BuiltinScalarFunction::TextStartsWith => eval_text_starts_with_function(&values),
         BuiltinScalarFunction::Encode => eval_encode_function(&values),
         BuiltinScalarFunction::Decode => eval_decode_function(&values),
         BuiltinScalarFunction::Sha224 => eval_sha224_function(&values),
@@ -5974,6 +6067,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::RPad => eval_rpad_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
+        BuiltinScalarFunction::TextStartsWith => eval_text_starts_with_function(&values),
         BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
         BuiltinScalarFunction::Initcap => eval_initcap_function(&values),
         BuiltinScalarFunction::BTrim => eval_trim_function("btrim", &values),

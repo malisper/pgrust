@@ -108,10 +108,6 @@ impl<'a> SpgistBulkBuilder<'a> {
         heap_tid: ItemPointerData,
         values: Vec<Value>,
     ) -> Result<bool, CatalogError> {
-        if values.iter().any(|value| matches!(value, Value::Null)) {
-            return Ok(false);
-        }
-
         let tuple = make_leaf_tuple(&self.ctx.index_desc, &values, heap_tid)?;
         match spgist_page_append_tuple(&mut self.current_page, &tuple) {
             Ok(_) => {

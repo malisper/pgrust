@@ -234,6 +234,7 @@ impl CatCache {
                     oid: entry.namespace_oid,
                     nspname: namespace.to_string(),
                     nspowner: entry.owner_oid,
+                    nspacl: None,
                 };
                 cache.namespaces_by_name.insert(
                     namespace_row.nspname.to_ascii_lowercase(),
@@ -382,7 +383,7 @@ impl CatCache {
                     indexrelid: entry.relation_oid,
                     indrelid: index_meta.indrelid,
                     indnatts: index_meta.indkey.len() as i16,
-                    indnkeyatts: index_meta.indkey.len() as i16,
+                    indnkeyatts: index_meta.indclass.len() as i16,
                     indisunique: index_meta.indisunique,
                     indnullsnotdistinct: index_meta.indnullsnotdistinct,
                     indisprimary: index_meta.indisprimary,
