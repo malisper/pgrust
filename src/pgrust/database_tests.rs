@@ -7550,7 +7550,7 @@ fn view_relfilenode_is_zero_and_drop_table_rejects_view_name() {
 }
 
 #[test]
-fn dependent_views_block_alter_and_drop() {
+fn dependent_views_allow_add_column_but_block_drop() {
     let dir = temp_dir("dependent_views_block_ddl");
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
@@ -7562,11 +7562,9 @@ fn dependent_views_block_alter_and_drop() {
         .execute(&db, "create view base_view as select id from base_items")
         .unwrap();
 
-    match session.execute(&db, "alter table base_items add column note text") {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
-            if actual.contains("view depends on it: base_view") => {}
-        other => panic!("expected dependent-view alter-table error, got {other:?}"),
-    }
+    session
+        .execute(&db, "alter table base_items add column note text")
+        .unwrap();
 
     match session.execute(&db, "drop table base_items") {
         Err(ExecError::DetailedError {

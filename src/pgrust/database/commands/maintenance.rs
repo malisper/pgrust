@@ -1743,13 +1743,6 @@ impl Database {
             return Ok(StatementResult::AffectedRows(0));
         };
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
-        if relation.relpersistence != 't' {
-            reject_inheritance_tree_ddl(
-                &catalog,
-                relation.relation_oid,
-                "ALTER TABLE ADD COLUMN on inheritance tree members is not supported yet",
-            )?;
-        }
         let _ = dependent_view_rewrites_for_relation(
             self,
             client_id,
