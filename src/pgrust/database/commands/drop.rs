@@ -16,6 +16,7 @@ use crate::include::nodes::parsenodes::{
     DropAggregateStatement, DropFunctionStatement, DropIndexStatement, DropProcedureStatement,
     DropSchemaStatement,
 };
+use crate::pgrust::auth::AuthCatalog;
 use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pgrust::database::save_range_type_entries;
 use std::collections::{BTreeMap, BTreeSet};
@@ -352,8 +353,25 @@ fn drop_schema_visible_namespace_oids(
     client_id: ClientId,
     txn_ctx: CatalogTxnContext,
     configured_search_path: Option<&[String]>,
+    auth_catalog: &AuthCatalog,
 ) -> BTreeSet<u32> {
-    db.effective_search_path(client_id, configured_search_path)
+    let mut search_path = db.effective_search_path(client_id, configured_search_path);
+    let includes_user_schema = configured_search_path
+        .map(|path| {
+            path.iter()
+                .any(|schema| schema.trim().eq_ignore_ascii_case("$user"))
+        })
+        .unwrap_or(true);
+    if includes_user_schema
+        && let Some(current_role) =
+            auth_catalog.role_by_oid(db.auth_state(client_id).current_user_oid())
+    {
+        let current_schema = current_role.rolname.to_ascii_lowercase();
+        if !search_path.iter().any(|schema| schema == &current_schema) {
+            search_path.push(current_schema);
+        }
+    }
+    search_path
         .into_iter()
         .filter_map(|schema| db.visible_namespace_oid_by_name(client_id, txn_ctx, &schema))
         .collect()
@@ -2063,6 +2081,7 @@ impl Database {
                     client_id,
                     Some((xid, cid)),
                     configured_search_path,
+                    &auth_catalog,
                 );
 
                 let mut proc_rows = catcache
