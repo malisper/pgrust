@@ -627,6 +627,9 @@ fn match_proc_arg_type(
             .then_some((2, actual_type));
     }
     let declared_type = catalog.type_by_oid(declared_oid)?.sql_type;
+    if let Some(cost) = arg_type_match_cost(actual_type, declared_type) {
+        return Some((cost, declared_type));
+    }
     if is_text_like_type(actual_type) && catalog_text_input_cast_exists(catalog, declared_oid) {
         return Some((3, declared_type));
     }
@@ -637,7 +640,7 @@ fn match_proc_arg_type(
     {
         return Some((3, declared_type));
     }
-    arg_type_match_cost(actual_type, declared_type).map(|cost| (cost, declared_type))
+    None
 }
 
 fn resolve_proc_result_type(
@@ -2125,12 +2128,12 @@ fn range_prefixed_proc_src(proc_src: &str) -> Option<&str> {
         "range_constructor2",
         "range_constructor3",
         "range_isempty",
-        "range_lower",
-        "range_upper",
         "range_lower_inc",
         "range_upper_inc",
         "range_lower_inf",
         "range_upper_inf",
+        "range_lower",
+        "range_upper",
         "range_merge",
         "range_adjacent",
         "range_difference",
@@ -3151,12 +3154,20 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("range_lower_inf", BuiltinScalarFunction::RangeLowerInf),
         ("range_upper_inf", BuiltinScalarFunction::RangeUpperInf),
         ("range_contains", BuiltinScalarFunction::RangeContains),
+        ("range_contains_elem", BuiltinScalarFunction::RangeContains),
         (
             "range_contained_by",
             BuiltinScalarFunction::RangeContainedBy,
         ),
+        (
+            "elem_contained_by_range",
+            BuiltinScalarFunction::RangeContainedBy,
+        ),
+        ("range_overlaps", BuiltinScalarFunction::RangeOverlap),
         ("range_overlap", BuiltinScalarFunction::RangeOverlap),
+        ("range_before", BuiltinScalarFunction::RangeStrictLeft),
         ("range_strict_left", BuiltinScalarFunction::RangeStrictLeft),
+        ("range_after", BuiltinScalarFunction::RangeStrictRight),
         (
             "range_strict_right",
             BuiltinScalarFunction::RangeStrictRight,

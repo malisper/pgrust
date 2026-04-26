@@ -370,6 +370,7 @@ fn catalog_row_identity_matches(
                 && catalog_value_eq(left.get(6), right.get(6))
         }
         BootstrapCatalogKind::PgIndex => catalog_value_eq(left.first(), right.first()),
+        BootstrapCatalogKind::PgPartitionedTable => catalog_value_eq(left.first(), right.first()),
         BootstrapCatalogKind::PgStatistic => {
             catalog_value_eq(left.first(), right.first())
                 && catalog_value_eq(left.get(1), right.get(1))
