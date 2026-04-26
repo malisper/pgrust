@@ -1664,6 +1664,7 @@ pub struct MergeStatement {
     pub source: FromItem,
     pub join_condition: SqlExpr,
     pub when_clauses: Vec<MergeWhenClause>,
+    pub returning: Vec<SelectItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

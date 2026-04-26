@@ -69,7 +69,12 @@ use crate::include::nodes::datum::{
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::pathnodes::PlannerConfig;
+use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, expr_sql_type_hint};
+use crate::pgrust::auth::{AuthCatalog, AuthState};
+use crate::pgrust::database::commands::privilege::{
+    acl_grants_privilege, effective_acl_grantee_names,
+};
 
 fn finalize_bound_insert(
     mut stmt: BoundInsertStatement,
@@ -3464,6 +3469,154 @@ fn merge_condition_matches(
     ))
 }
 
+fn auth_state_from_executor(ctx: &ExecutorContext) -> AuthState {
+    let mut auth = AuthState::default();
+    auth.assume_authenticated_user(ctx.session_user_oid);
+    auth.set_session_authorization(ctx.session_user_oid);
+    if ctx.current_user_oid != ctx.session_user_oid {
+        auth.set_role(ctx.current_user_oid);
+    }
+    auth
+}
+
+fn relation_acl_allows(
+    ctx: &ExecutorContext,
+    relation_oid: u32,
+    privilege: char,
+) -> Result<bool, ExecError> {
+    let catalog = ctx
+        .catalog
+        .as_ref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "catalog is not available for privilege check".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    let class_row =
+        catalog
+            .class_row_by_oid(relation_oid)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("relation with OID {relation_oid} does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+    let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
+    let auth = auth_state_from_executor(ctx);
+    if auth.has_effective_membership(class_row.relowner, &auth_catalog)
+        || auth_catalog
+            .role_by_oid(ctx.current_user_oid)
+            .is_some_and(|role| role.rolsuper)
+    {
+        return Ok(true);
+    }
+    let Some(acl) = class_row.relacl else {
+        return Ok(false);
+    };
+    let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
+    Ok(acl_grants_privilege(&acl, &effective_names, privilege))
+}
+
+fn relation_permission_denied(ctx: &ExecutorContext, relation_oid: u32) -> ExecError {
+    let relation_name = ctx
+        .catalog
+        .as_ref()
+        .and_then(|catalog| catalog.class_row_by_oid(relation_oid))
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation_oid.to_string());
+    ExecError::DetailedError {
+        message: format!("permission denied for table {relation_name}"),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    }
+}
+
+fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
+    match plan {
+        Plan::SeqScan { relation_oid, .. }
+        | Plan::IndexOnlyScan { relation_oid, .. }
+        | Plan::IndexScan { relation_oid, .. }
+        | Plan::BitmapHeapScan { relation_oid, .. } => {
+            oids.insert(*relation_oid);
+        }
+        Plan::BitmapIndexScan { relation_oid, .. } => {
+            oids.insert(*relation_oid);
+        }
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
+            for child in children {
+                collect_plan_relation_oids(child, oids);
+            }
+        }
+        Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. } => collect_plan_relation_oids(input, oids),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            collect_plan_relation_oids(left, oids);
+            collect_plan_relation_oids(right, oids);
+        }
+        Plan::Result { .. }
+        | Plan::Values { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::CteScan { .. }
+        | Plan::WorkTableScan { .. } => {}
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            collect_plan_relation_oids(anchor, oids);
+            collect_plan_relation_oids(recursive, oids);
+        }
+        Plan::SetOp { children, .. } => {
+            for child in children {
+                collect_plan_relation_oids(child, oids);
+            }
+        }
+    }
+}
+
+fn check_merge_privileges(
+    stmt: &BoundMergeStatement,
+    input_plan: &PlannedStmt,
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    if !relation_acl_allows(ctx, stmt.relation_oid, 'r')? {
+        return Err(relation_permission_denied(ctx, stmt.relation_oid));
+    }
+    for clause in &stmt.when_clauses {
+        let privilege = match clause.action {
+            BoundMergeAction::DoNothing => None,
+            BoundMergeAction::Insert { .. } => Some('a'),
+            BoundMergeAction::Update { .. } => Some('w'),
+            BoundMergeAction::Delete => Some('d'),
+        };
+        if let Some(privilege) = privilege
+            && !relation_acl_allows(ctx, stmt.relation_oid, privilege)?
+        {
+            return Err(relation_permission_denied(ctx, stmt.relation_oid));
+        }
+    }
+    let mut source_oids = BTreeSet::new();
+    collect_plan_relation_oids(&input_plan.plan_tree, &mut source_oids);
+    source_oids.remove(&stmt.relation_oid);
+    for relation_oid in source_oids {
+        if !relation_acl_allows(ctx, relation_oid, 'r')? {
+            return Err(relation_permission_denied(ctx, relation_oid));
+        }
+    }
+    Ok(())
+}
+
 fn execute_merge_insert_action(
     stmt: &BoundMergeStatement,
     target_columns: &[BoundAssignmentTarget],
@@ -3704,6 +3857,7 @@ pub(crate) fn execute_merge(
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_merge(stmt, catalog);
+    check_merge_privileges(&stmt, &stmt.input_plan, ctx)?;
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.input_plan.subplans.clone());
     let result = (|| {
         let mut state = executor_start(stmt.input_plan.plan_tree.clone());
