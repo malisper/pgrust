@@ -1662,16 +1662,20 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
     }
 }
 
-fn datetime_parse_error_details(ty: &'static str, text: &str, err: DateTimeParseError) -> String {
+pub(crate) fn datetime_parse_error_details(
+    ty: &'static str,
+    text: &str,
+    err: DateTimeParseError,
+) -> String {
     match err {
         DateTimeParseError::Invalid => format!("invalid input syntax for type {ty}: \"{text}\""),
         DateTimeParseError::FieldOutOfRange => {
             format!("date/time field value out of range: \"{text}\"")
         }
-        DateTimeParseError::TimestampOutOfRange => format!("{ty} out of range: \"{text}\""),
         DateTimeParseError::TimeZoneDisplacementOutOfRange => {
             format!("time zone displacement out of range: \"{text}\"")
         }
+        DateTimeParseError::TimestampOutOfRange => format!("timestamp out of range: \"{text}\""),
         DateTimeParseError::UnknownTimeZone(zone) => {
             format!("time zone \"{zone}\" not recognized")
         }
@@ -2495,7 +2499,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             }),
         },
         Value::Time(v) => match ty.kind {
-            SqlTypeKind::Time => Ok(Value::Time(v)),
+            SqlTypeKind::Time => Ok(apply_time_precision(Value::Time(v), ty.time_precision())),
             SqlTypeKind::Text
             | SqlTypeKind::Name
             | SqlTypeKind::Char
@@ -2519,7 +2523,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             }),
         },
         Value::TimeTz(v) => match ty.kind {
-            SqlTypeKind::TimeTz => Ok(Value::TimeTz(v)),
+            SqlTypeKind::TimeTz => Ok(apply_time_precision(Value::TimeTz(v), ty.time_precision())),
             SqlTypeKind::Time => Ok(Value::Time(v.time)),
             SqlTypeKind::Text
             | SqlTypeKind::Name
@@ -2541,7 +2545,10 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             }),
         },
         Value::Timestamp(v) => match ty.kind {
-            SqlTypeKind::Timestamp => Ok(Value::Timestamp(v)),
+            SqlTypeKind::Timestamp => Ok(apply_time_precision(
+                Value::Timestamp(v),
+                ty.time_precision(),
+            )),
             SqlTypeKind::TimestampTz => Ok(Value::TimestampTz(timestamp_to_timestamptz(v, config))),
             SqlTypeKind::Date => Ok(Value::Date(timestamp_date_part(v))),
             SqlTypeKind::Time => timestamp_time_part(v).map(Value::Time).ok_or_else(|| {
@@ -2576,7 +2583,10 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             }),
         },
         Value::TimestampTz(v) => match ty.kind {
-            SqlTypeKind::TimestampTz => Ok(Value::TimestampTz(v)),
+            SqlTypeKind::TimestampTz => Ok(apply_time_precision(
+                Value::TimestampTz(v),
+                ty.time_precision(),
+            )),
             SqlTypeKind::Timestamp => Ok(Value::Timestamp(timestamptz_local_timestamp(v, config))),
             SqlTypeKind::Date => Ok(Value::Date(timestamp_date_part(
                 timestamptz_local_timestamp(v, config),

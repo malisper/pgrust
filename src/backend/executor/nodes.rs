@@ -26,9 +26,12 @@ use crate::backend::storage::page::bufpage::{
     ItemIdFlags, page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number,
 };
 use crate::backend::storage::smgr::ForkNumber;
-use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, DateTimeConfig};
 use crate::backend::utils::time::date::format_date_text;
 use crate::backend::utils::time::instant::Instant;
+use crate::backend::utils::time::timestamp::{
+    format_timestamp_text, format_timestamptz_text, parse_timestamp_text, parse_timestamptz_text,
+};
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::access::visibilitymap::visibilitymap_get_status;
 use crate::include::access::visibilitymapdefs::VISIBILITYMAP_ALL_VISIBLE;
@@ -2461,6 +2464,14 @@ fn render_explain_func_expr(
             );
         }
     }
+    if matches!(
+        func.implementation,
+        ScalarFunctionImpl::Builtin(
+            BuiltinScalarFunction::Timezone | BuiltinScalarFunction::TimeZone
+        )
+    ) {
+        return render_explain_timezone_function(func, qualifier, column_names);
+    }
     let name = match func.implementation {
         ScalarFunctionImpl::Builtin(builtin) => builtin_scalar_function_name(builtin),
         ScalarFunctionImpl::UserDefined { proc_oid } => func
@@ -2499,6 +2510,36 @@ fn render_explain_scalar_array_op(
     )
 }
 
+fn render_explain_timezone_function(
+    func: &FuncExpr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    match func.args.as_slice() {
+        [value] => format!(
+            "timezone({})",
+            render_explain_expr_inner_with_qualifier(value, qualifier, column_names)
+        ),
+        [zone, value] if is_local_timezone_marker(zone) => format!(
+            "({} AT LOCAL)",
+            render_explain_expr_inner_with_qualifier(value, qualifier, column_names)
+        ),
+        [zone, value] => format!(
+            "({} AT TIME ZONE {})",
+            render_explain_expr_inner_with_qualifier(value, qualifier, column_names),
+            render_explain_expr_inner_with_qualifier(zone, qualifier, column_names)
+        ),
+        _ => "timezone()".into(),
+    }
+}
+
+fn is_local_timezone_marker(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Const(value) if value.as_text() == Some("__pgrust_local_timezone__")
+    )
+}
+
 fn builtin_scalar_function_name(func: BuiltinScalarFunction) -> String {
     match func {
         BuiltinScalarFunction::Lower => "lower".into(),
@@ -2511,6 +2552,8 @@ fn builtin_scalar_function_name(func: BuiltinScalarFunction) -> String {
         BuiltinScalarFunction::ArrayToJson => "array_to_json".into(),
         BuiltinScalarFunction::ToJson => "to_json".into(),
         BuiltinScalarFunction::ToJsonb => "to_jsonb".into(),
+        BuiltinScalarFunction::DatePart => "date_part".into(),
+        BuiltinScalarFunction::Extract => "extract".into(),
         other => format!("{other:?}"),
     }
 }
@@ -2868,6 +2911,9 @@ fn render_explain_cast(
     qualifier: Option<&str>,
     column_names: &[String],
 ) -> String {
+    if let Some(rendered) = render_explain_datetime_cast_literal(expr, ty) {
+        return rendered;
+    }
     if let Expr::Const(value) = expr {
         return format!(
             "{}::{}",
@@ -2877,6 +2923,37 @@ fn render_explain_cast(
     }
     let inner = render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
     format!("({inner})::{}", render_explain_sql_type_name(ty))
+}
+
+fn render_explain_datetime_cast_literal(expr: &Expr, ty: SqlType) -> Option<String> {
+    let Expr::Const(value) = expr else {
+        return None;
+    };
+    let text = value.as_text()?;
+    let config = postgres_utc_datetime_config();
+    match ty.kind {
+        SqlTypeKind::Timestamp => parse_timestamp_text(text, &config).ok().map(|timestamp| {
+            format!(
+                "'{}'::timestamp without time zone",
+                format_timestamp_text(timestamp, &config).replace('\'', "''")
+            )
+        }),
+        SqlTypeKind::TimestampTz => parse_timestamptz_text(text, &config).ok().map(|timestamp| {
+            format!(
+                "'{}'::timestamp with time zone",
+                format_timestamptz_text(timestamp, &config).replace('\'', "''")
+            )
+        }),
+        _ => None,
+    }
+}
+
+fn postgres_utc_datetime_config() -> DateTimeConfig {
+    let mut config = DateTimeConfig::default();
+    config.date_style_format = DateStyleFormat::Postgres;
+    config.date_order = DateOrder::Mdy;
+    config.time_zone = "UTC".into();
+    config
 }
 
 fn render_explain_join_cast(
@@ -2958,7 +3035,6 @@ fn render_explain_array_literal(
             render_explain_sql_type_name(array_type)
         );
     }
-
     let elements = elements
         .iter()
         .map(|expr| render_explain_expr_inner_with_qualifier(expr, qualifier, column_names))
@@ -3013,6 +3089,10 @@ fn render_explain_sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::Inet => "inet".into(),
         SqlTypeKind::Cidr => "cidr".into(),
         SqlTypeKind::Date => "date".into(),
+        SqlTypeKind::Time => "time without time zone".into(),
+        SqlTypeKind::TimeTz => "time with time zone".into(),
+        SqlTypeKind::Timestamp => "timestamp without time zone".into(),
+        SqlTypeKind::TimestampTz => "timestamp with time zone".into(),
         SqlTypeKind::Char => element
             .char_len()
             .map(|len| format!("character({len})"))

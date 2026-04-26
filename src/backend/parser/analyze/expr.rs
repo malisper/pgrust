@@ -1981,6 +1981,64 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             )?;
             bind_explicit_collation(bound_inner, inner_type, collation, catalog)?
         }
+        SqlExpr::AtTimeZone { expr, zone } => {
+            let source_type = infer_sql_expr_type_with_ctes(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let zone_type = infer_sql_expr_type_with_ctes(
+                zone,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let source_is_timestamptz = matches!(source_type.kind, SqlTypeKind::TimestampTz)
+                || matches!(
+                    expr.as_ref(),
+                    SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+                );
+            let target_source_type = if source_is_timestamptz {
+                SqlType::new(SqlTypeKind::TimestampTz)
+            } else {
+                SqlType::new(SqlTypeKind::Timestamp)
+            };
+            let result_type = if source_is_timestamptz {
+                SqlType::new(SqlTypeKind::Timestamp)
+            } else {
+                SqlType::new(SqlTypeKind::TimestampTz)
+            };
+            let bound_expr = bind_expr_with_outer_and_ctes(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            let bound_zone = bind_expr_with_outer_and_ctes(
+                zone,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            Expr::builtin_func(
+                BuiltinScalarFunction::Timezone,
+                Some(result_type),
+                false,
+                vec![
+                    coerce_bound_expr(bound_zone, zone_type, SqlType::new(SqlTypeKind::Text)),
+                    coerce_bound_expr(bound_expr, source_type, target_source_type),
+                ],
+            )
+        }
         SqlExpr::Eq(left, right) => {
             if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
                 (left.as_ref(), right.as_ref())

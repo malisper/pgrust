@@ -1,5 +1,9 @@
 use crate::backend::parser::analyze::analyze_select_query_with_outer;
 use crate::backend::parser::{CatalogLookup, ParseError, SqlType, SqlTypeKind, Statement};
+use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, DateTimeConfig};
+use crate::backend::utils::time::timestamp::{
+    format_timestamp_text, format_timestamptz_text, parse_timestamp_text, parse_timestamptz_text,
+};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntryKind, SelectStatement, ViewCheckOption,
@@ -318,6 +322,9 @@ fn render_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> Strin
         Expr::Var(var) => var_name(var, query).unwrap_or_else(|| format!("var{}", var.varattno)),
         Expr::Const(value) => render_literal(value),
         Expr::Cast(inner, ty) => {
+            if let Some(rendered) = render_datetime_cast_literal(inner, *ty) {
+                return rendered;
+            }
             if matches!(**inner, Expr::Const(_) | Expr::Var(_)) {
                 format!(
                     "{}::{}",
@@ -376,6 +383,37 @@ fn render_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> Strin
     }
 }
 
+fn render_datetime_cast_literal(expr: &Expr, ty: SqlType) -> Option<String> {
+    let Expr::Const(value) = expr else {
+        return None;
+    };
+    let text = value.as_text()?;
+    let config = postgres_utc_datetime_config();
+    match ty.kind {
+        SqlTypeKind::Timestamp => parse_timestamp_text(text, &config).ok().map(|timestamp| {
+            format!(
+                "'{}'::timestamp without time zone",
+                format_timestamp_text(timestamp, &config).replace('\'', "''")
+            )
+        }),
+        SqlTypeKind::TimestampTz => parse_timestamptz_text(text, &config).ok().map(|timestamp| {
+            format!(
+                "'{}'::timestamp with time zone",
+                format_timestamptz_text(timestamp, &config).replace('\'', "''")
+            )
+        }),
+        _ => None,
+    }
+}
+
+fn postgres_utc_datetime_config() -> DateTimeConfig {
+    let mut config = DateTimeConfig::default();
+    config.date_style_format = DateStyleFormat::Postgres;
+    config.date_order = DateOrder::Mdy;
+    config.time_zone = "UTC".into();
+    config
+}
+
 fn render_wrapped_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> String {
     match expr {
         Expr::Op(_) | Expr::Bool(_) => format!("({})", render_expr(expr, query, catalog)),
@@ -386,7 +424,9 @@ fn render_wrapped_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) 
 fn render_function(func: &FuncExpr, query: &Query, catalog: &dyn CatalogLookup) -> String {
     if matches!(
         func.implementation,
-        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TimeZone)
+        ScalarFunctionImpl::Builtin(
+            BuiltinScalarFunction::Timezone | BuiltinScalarFunction::TimeZone
+        )
     ) {
         return render_timezone_function(func, query, catalog);
     }
@@ -411,13 +451,25 @@ fn render_function(func: &FuncExpr, query: &Query, catalog: &dyn CatalogLookup) 
 fn render_timezone_function(func: &FuncExpr, query: &Query, catalog: &dyn CatalogLookup) -> String {
     match func.args.as_slice() {
         [value] => format!("timezone({})", render_expr(value, query, catalog)),
-        [zone, value] => format!(
-            "({} AT TIME ZONE {})",
-            render_expr(value, query, catalog),
-            render_timezone_zone_arg(zone, query, catalog)
-        ),
+        [zone, value] if is_local_timezone_marker(zone) => {
+            format!("({} AT LOCAL)", render_expr(value, query, catalog))
+        }
+        [zone, value] => {
+            format!(
+                "({} AT TIME ZONE {})",
+                render_expr(value, query, catalog),
+                render_timezone_zone_arg(zone, query, catalog)
+            )
+        }
         _ => "timezone()".into(),
     }
+}
+
+fn is_local_timezone_marker(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Const(value) if value.as_text() == Some("__pgrust_local_timezone__")
+    )
 }
 
 fn render_timezone_zone_arg(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> String {
@@ -549,6 +601,10 @@ fn render_sql_type(ty: SqlType) -> String {
         SqlTypeKind::Text => "text",
         SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::Time => "time without time zone",
+        SqlTypeKind::TimeTz => "time with time zone",
+        SqlTypeKind::Timestamp => "timestamp without time zone",
+        SqlTypeKind::TimestampTz => "timestamp with time zone",
         SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::Interval => "interval",
         SqlTypeKind::Json => "json",
@@ -615,7 +671,10 @@ fn render_builtin_function_name(func: BuiltinScalarFunction) -> &'static str {
         BuiltinScalarFunction::PgGetExpr => "pg_get_expr",
         BuiltinScalarFunction::PgGetViewDef => "pg_get_viewdef",
         BuiltinScalarFunction::CurrentSetting => "current_setting",
+        BuiltinScalarFunction::Timezone => "timezone",
         BuiltinScalarFunction::TimeZone => "timezone",
+        BuiltinScalarFunction::DatePart => "date_part",
+        BuiltinScalarFunction::Extract => "extract",
         _ => "function",
     }
 }

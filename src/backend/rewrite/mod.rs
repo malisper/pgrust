@@ -485,6 +485,7 @@ fn rewrite_set_returning_call(
             start,
             stop,
             step,
+            timezone,
             output_columns,
             with_ordinality,
         } => SetReturningCall::GenerateSeries {
@@ -493,6 +494,16 @@ fn rewrite_set_returning_call(
             start: rewrite_semantic_expr(start, catalog, expanded_views, active_policy_relations)?,
             stop: rewrite_semantic_expr(stop, catalog, expanded_views, active_policy_relations)?,
             step: rewrite_semantic_expr(step, catalog, expanded_views, active_policy_relations)?,
+            timezone: timezone
+                .map(|timezone| {
+                    rewrite_semantic_expr(
+                        timezone,
+                        catalog,
+                        expanded_views,
+                        active_policy_relations,
+                    )
+                })
+                .transpose()?,
             output_columns,
             with_ordinality,
         },

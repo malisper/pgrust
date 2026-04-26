@@ -368,9 +368,9 @@ fn bind_select_list_srf_call(
         .unwrap_or(func_variadic);
     match name.to_ascii_lowercase().as_str() {
         "generate_series" => {
-            if args.len() < 2 || args.len() > 3 {
+            if args.len() < 2 || args.len() > 4 {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "generate_series(start, stop[, step])",
+                    expected: "generate_series(start, stop, step[, timezone])",
                     actual: format!("generate_series with {} arguments", args.len()),
                 });
             }
@@ -406,7 +406,7 @@ fn bind_select_list_srf_call(
                 grouped_outer,
                 ctes,
             );
-            let step_type = if args.len() == 3 {
+            let step_type = if args.len() >= 3 {
                 Some(infer_sql_expr_type_with_ctes(
                     &args[2],
                     scope,
@@ -418,8 +418,26 @@ fn bind_select_list_srf_call(
             } else {
                 None
             };
+            let timezone_type = if args.len() == 4 {
+                Some(infer_sql_expr_type_with_ctes(
+                    &args[3],
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                ))
+            } else {
+                None
+            };
             let common = resolve_generate_series_common_type(start_type, stop_type, step_type)?;
-            let step = if args.len() == 3 {
+            if timezone_type.is_some() && !matches!(common.kind, SqlTypeKind::TimestampTz) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "generate_series timestamptz arguments with timezone",
+                    actual: sql_type_name(common),
+                });
+            }
+            let step = if args.len() >= 3 {
                 let step_expr = bind_expr_with_outer_and_ctes(
                     &args[2],
                     scope,
@@ -447,12 +465,30 @@ fn bind_select_list_srf_call(
                     _ => Expr::Const(Value::Int32(1)),
                 }
             };
+            let timezone = if args.len() == 4 {
+                let timezone_expr = bind_expr_with_outer_and_ctes(
+                    &args[3],
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                Some(coerce_bound_expr(
+                    timezone_expr,
+                    timezone_type.expect("generate_series timezone type"),
+                    SqlType::new(SqlTypeKind::Text),
+                ))
+            } else {
+                None
+            };
             Ok(SetReturningCall::GenerateSeries {
                 func_oid: resolved_proc_oid,
                 func_variadic: resolved_func_variadic,
                 start: coerce_bound_expr(start, start_type, common),
                 stop: coerce_bound_expr(stop, stop_type, common),
                 step,
+                timezone,
                 output_columns: vec![QueryColumn {
                     name: "generate_series".into(),
                     sql_type: common,

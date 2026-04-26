@@ -167,6 +167,8 @@ pub fn lower_create_table(
                 if let Some(not_null) = not_null {
                     desc.not_null_constraint_name = Some(not_null.constraint_name.clone());
                     desc.not_null_constraint_validated = !not_null.not_valid;
+                    desc.not_null_constraint_is_local = not_null.is_local;
+                    desc.not_null_constraint_inhcount = not_null.inhcount;
                     desc.not_null_constraint_no_inherit = not_null.no_inherit;
                     desc.not_null_primary_key_owned = not_null.primary_key_owned;
                 }
@@ -248,7 +250,9 @@ fn expand_create_table_like_clauses(
     let mut post_create_actions = Vec::new();
     for element in &stmt.elements {
         match element {
-            CreateTableElement::Column(_) | CreateTableElement::Constraint(_) => {
+            CreateTableElement::Column(_)
+            | CreateTableElement::PartitionColumnOverride(_)
+            | CreateTableElement::Constraint(_) => {
                 expanded.elements.push(element.clone());
             }
             CreateTableElement::Like(like) => {

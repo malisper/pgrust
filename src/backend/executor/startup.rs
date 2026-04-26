@@ -159,11 +159,16 @@ fn recursive_union_distinct_hashable(sql_type: SqlType) -> bool {
 fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
     match call {
         SetReturningCall::GenerateSeries {
-            start, stop, step, ..
+            start,
+            stop,
+            step,
+            timezone,
+            ..
         } => {
             expr_uses_outer_columns(start)
                 || expr_uses_outer_columns(stop)
                 || expr_uses_outer_columns(step)
+                || timezone.as_ref().is_some_and(expr_uses_outer_columns)
         }
         SetReturningCall::PartitionTree { relid, .. }
         | SetReturningCall::PartitionAncestors { relid, .. } => expr_uses_outer_columns(relid),

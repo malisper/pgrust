@@ -4,8 +4,9 @@ use super::ExecError;
 use super::exec_expr::parse_numeric_text;
 use super::expr_bit::{coerce_bit_string, render_bit_text};
 use super::expr_casts::{
-    cast_numeric_value, cast_text_value, cast_value, parse_text_array_literal_with_options,
-    render_internal_char_text, render_interval_text, render_pg_lsn_text,
+    cast_numeric_value, cast_text_value_with_config, cast_value, cast_value_with_config,
+    parse_text_array_literal_with_options, render_internal_char_text, render_interval_text,
+    render_pg_lsn_text,
 };
 use super::expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 use super::expr_geometry::{
@@ -1428,14 +1429,30 @@ pub(crate) fn encode_tuple_values(
     desc: &RelationDesc,
     values: &[Value],
 ) -> Result<Vec<TupleValue>, ExecError> {
+    encode_tuple_values_with_config(desc, values, &DateTimeConfig::default())
+}
+
+pub(crate) fn encode_tuple_values_with_config(
+    desc: &RelationDesc,
+    values: &[Value],
+    datetime_config: &DateTimeConfig,
+) -> Result<Vec<TupleValue>, ExecError> {
     desc.columns
         .iter()
         .zip(values.iter())
-        .map(|(column, value)| encode_value(column, value))
+        .map(|(column, value)| encode_value_with_config(column, value, datetime_config))
         .collect::<Result<Vec<_>, _>>()
 }
 
 pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleValue, ExecError> {
+    encode_value_with_config(column, value, &DateTimeConfig::default())
+}
+
+pub(crate) fn encode_value_with_config(
+    column: &ColumnDesc,
+    value: &Value,
+    datetime_config: &DateTimeConfig,
+) -> Result<TupleValue, ExecError> {
     if matches!(value, Value::Null) {
         return if !column.storage.nullable {
             Err(ExecError::MissingRequiredColumn(column.name.clone()))
@@ -1444,7 +1461,7 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
         };
     }
 
-    let coerced = coerce_assignment_value(value, column.sql_type)?;
+    let coerced = coerce_assignment_value_with_config(value, column.sql_type, datetime_config)?;
     match (&column.ty, coerced) {
         (ScalarType::Int16, Value::Int16(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Int32, Value::Int32(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
@@ -1633,6 +1650,14 @@ fn text_value_for_storage(value: &Value) -> Result<String, ExecError> {
 }
 
 pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, ExecError> {
+    coerce_assignment_value_with_config(value, target, &DateTimeConfig::default())
+}
+
+pub(crate) fn coerce_assignment_value_with_config(
+    value: &Value,
+    target: SqlType,
+    datetime_config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
     if target.kind == SqlTypeKind::AnyArray {
         return match value {
             Value::Null => Ok(Value::Null),
@@ -1667,7 +1692,11 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
                     )?;
                     let mut coerced = Vec::with_capacity(array.elements.len());
                     for item in &array.elements {
-                        coerced.push(coerce_assignment_value(item, element_type)?);
+                        coerced.push(coerce_assignment_value_with_config(
+                            item,
+                            element_type,
+                            datetime_config,
+                        )?);
                     }
                     Ok(Value::PgArray(ArrayValue::from_dimensions(
                         array.dimensions,
@@ -1676,7 +1705,11 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
                 } else {
                     let mut coerced = Vec::with_capacity(items.len());
                     for item in items {
-                        coerced.push(coerce_assignment_value(item, element_type)?);
+                        coerced.push(coerce_assignment_value_with_config(
+                            item,
+                            element_type,
+                            datetime_config,
+                        )?);
                     }
                     Ok(Value::Array(coerced))
                 }
@@ -1685,7 +1718,11 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
                 let element_type = target.element_type();
                 let mut coerced = Vec::with_capacity(array.elements.len());
                 for item in &array.elements {
-                    coerced.push(coerce_assignment_value(item, element_type)?);
+                    coerced.push(coerce_assignment_value_with_config(
+                        item,
+                        element_type,
+                        datetime_config,
+                    )?);
                 }
                 Ok(Value::PgArray(ArrayValue::from_dimensions(
                     array.dimensions.clone(),
@@ -1710,34 +1747,50 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
 
     match value {
         Value::Null => Ok(Value::Null),
-        Value::Int16(v) => cast_text_value(&v.to_string(), target, false),
-        Value::Int32(v) => cast_text_value(&v.to_string(), target, false),
+        Value::Int16(v) => {
+            cast_text_value_with_config(&v.to_string(), target, false, datetime_config)
+        }
+        Value::Int32(v) => {
+            cast_text_value_with_config(&v.to_string(), target, false, datetime_config)
+        }
         Value::EnumOid(v) if matches!(target.kind, SqlTypeKind::Enum) => Ok(Value::EnumOid(*v)),
-        Value::EnumOid(v) => cast_text_value(&v.to_string(), target, false),
-        Value::Int64(v) => cast_text_value(&v.to_string(), target, false),
-        Value::PgLsn(v) => cast_text_value(
-            &crate::backend::executor::render_pg_lsn_text(*v),
-            target,
-            false,
-        ),
-        Value::Money(v) => cast_text_value(
+        Value::EnumOid(v) => {
+            cast_text_value_with_config(&v.to_string(), target, false, datetime_config)
+        }
+        Value::Int64(v) => {
+            cast_text_value_with_config(&v.to_string(), target, false, datetime_config)
+        }
+        Value::PgLsn(v) => {
+            cast_text_value_with_config(&render_pg_lsn_text(*v), target, false, datetime_config)
+        }
+        Value::Money(v) => cast_text_value_with_config(
             &crate::backend::executor::money_format_text(*v),
             target,
             false,
+            datetime_config,
         ),
-        Value::Date(v) => cast_value(Value::Date(*v), target),
-        Value::Time(v) => cast_value(Value::Time(*v), target),
-        Value::TimeTz(v) => cast_value(Value::TimeTz(*v), target),
-        Value::Timestamp(v) => cast_value(Value::Timestamp(*v), target),
-        Value::TimestampTz(v) => cast_value(Value::TimestampTz(*v), target),
-        Value::Interval(v) => cast_value(Value::Interval(*v), target),
+        Value::Date(v) => cast_value_with_config(Value::Date(*v), target, datetime_config),
+        Value::Time(v) => cast_value_with_config(Value::Time(*v), target, datetime_config),
+        Value::TimeTz(v) => cast_value_with_config(Value::TimeTz(*v), target, datetime_config),
+        Value::Timestamp(v) => {
+            cast_value_with_config(Value::Timestamp(*v), target, datetime_config)
+        }
+        Value::TimestampTz(v) => {
+            cast_value_with_config(Value::TimestampTz(*v), target, datetime_config)
+        }
+        Value::Interval(v) => cast_value_with_config(Value::Interval(*v), target, datetime_config),
         Value::Bit(bits) => match target.kind {
             SqlTypeKind::Bit | SqlTypeKind::VarBit => {
                 Ok(Value::Bit(coerce_bit_string(bits.clone(), target, false)?))
             }
-            _ => cast_value(Value::Bit(bits.clone()), target),
+            _ => cast_value_with_config(Value::Bit(bits.clone()), target, datetime_config),
         },
-        Value::Bool(v) => cast_text_value(if *v { "true" } else { "false" }, target, false),
+        Value::Bool(v) => cast_text_value_with_config(
+            if *v { "true" } else { "false" },
+            target,
+            false,
+            datetime_config,
+        ),
         Value::Float64(v) => match target.kind {
             SqlTypeKind::Float4
             | SqlTypeKind::Float8
@@ -1746,32 +1799,58 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
             | SqlTypeKind::Int4
             | SqlTypeKind::Int8
             | SqlTypeKind::Oid => cast_value(Value::Float64(*v), target),
-            _ => cast_text_value(&v.to_string(), target, false),
+            _ => cast_text_value_with_config(&v.to_string(), target, false, datetime_config),
         },
         Value::Numeric(numeric) => cast_numeric_value(numeric.clone(), target, false),
-        Value::JsonPath(text) => cast_text_value(text.as_str(), target, false),
-        Value::Json(text) => cast_text_value(text.as_str(), target, false),
-        Value::Xml(text) => cast_text_value(text.as_str(), target, false),
-        Value::Jsonb(bytes) => cast_text_value(&render_jsonb_bytes(bytes)?, target, false),
-        Value::Bytea(bytes) => cast_value(Value::Bytea(bytes.clone()), target),
-        Value::Uuid(value) => cast_value(Value::Uuid(*value), target),
-        Value::Inet(v) => cast_text_value(&v.render_inet(), target, false),
-        Value::Cidr(v) => cast_text_value(&v.render_cidr(), target, false),
-        Value::MacAddr(v) => cast_text_value(&render_macaddr_text(v), target, false),
-        Value::MacAddr8(v) => cast_text_value(&render_macaddr8_text(v), target, false),
-        Value::TsVector(vector) => cast_text_value(
+        Value::JsonPath(text) => {
+            cast_text_value_with_config(text.as_str(), target, false, datetime_config)
+        }
+        Value::Json(text) => {
+            cast_text_value_with_config(text.as_str(), target, false, datetime_config)
+        }
+        Value::Xml(text) => {
+            cast_text_value_with_config(text.as_str(), target, false, datetime_config)
+        }
+        Value::Jsonb(bytes) => {
+            cast_text_value_with_config(&render_jsonb_bytes(bytes)?, target, false, datetime_config)
+        }
+        Value::Bytea(bytes) => {
+            cast_value_with_config(Value::Bytea(bytes.clone()), target, datetime_config)
+        }
+        Value::Uuid(value) => cast_value_with_config(Value::Uuid(*value), target, datetime_config),
+        Value::Inet(v) => {
+            cast_text_value_with_config(&v.render_inet(), target, false, datetime_config)
+        }
+        Value::Cidr(v) => {
+            cast_text_value_with_config(&v.render_cidr(), target, false, datetime_config)
+        }
+        Value::MacAddr(v) => {
+            cast_text_value_with_config(&render_macaddr_text(v), target, false, datetime_config)
+        }
+        Value::MacAddr8(v) => {
+            cast_text_value_with_config(&render_macaddr8_text(v), target, false, datetime_config)
+        }
+        Value::TsVector(vector) => cast_text_value_with_config(
             &crate::backend::executor::render_tsvector_text(vector),
             target,
             false,
+            datetime_config,
         ),
-        Value::TsQuery(query) => cast_text_value(
+        Value::TsQuery(query) => cast_text_value_with_config(
             &crate::backend::executor::render_tsquery_text(query),
             target,
             false,
+            datetime_config,
         ),
-        Value::Text(text) => cast_text_value(text.as_str(), target, false),
-        Value::TextRef(_, _) => cast_text_value(value.as_text().unwrap(), target, false),
-        Value::InternalChar(byte) => cast_value(Value::InternalChar(*byte), target),
+        Value::Text(text) => {
+            cast_text_value_with_config(text.as_str(), target, false, datetime_config)
+        }
+        Value::TextRef(_, _) => {
+            cast_text_value_with_config(value.as_text().unwrap(), target, false, datetime_config)
+        }
+        Value::InternalChar(byte) => {
+            cast_value_with_config(Value::InternalChar(*byte), target, datetime_config)
+        }
         Value::Range(range) => Ok(Value::Range(range.clone())),
         Value::Multirange(multirange) => Ok(Value::Multirange(multirange.clone())),
         Value::Point(_)
@@ -1780,7 +1859,7 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
         | Value::Line(_)
         | Value::Box(_)
         | Value::Polygon(_)
-        | Value::Circle(_) => cast_value(value.clone(), target),
+        | Value::Circle(_) => cast_value_with_config(value.clone(), target, datetime_config),
         Value::Array(items) => Ok(Value::Array(items.clone())),
         Value::PgArray(array) => Ok(Value::PgArray(array.clone())),
         Value::Record(record) => Ok(Value::Record(record.clone())),

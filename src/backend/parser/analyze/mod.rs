@@ -2863,6 +2863,10 @@ impl<'a> RecursiveReferenceChecker<'a> {
             | SqlExpr::JsonGetText(left, right)
             | SqlExpr::JsonPath(left, right)
             | SqlExpr::JsonPathText(left, right)
+            | SqlExpr::AtTimeZone {
+                expr: left,
+                zone: right,
+            }
             | SqlExpr::GeometryBinaryOp { left, right, .. } => {
                 self.visit_expr(left, context)?;
                 self.visit_expr(right, context)
@@ -3156,6 +3160,10 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
         | SqlExpr::JsonGetText(left, right)
         | SqlExpr::JsonPath(left, right)
         | SqlExpr::JsonPathText(left, right)
+        | SqlExpr::AtTimeZone {
+            expr: left,
+            zone: right,
+        }
         | SqlExpr::GeometryBinaryOp { left, right, .. } => {
             sql_expr_references_table(left, table_name)
                 || sql_expr_references_table(right, table_name)

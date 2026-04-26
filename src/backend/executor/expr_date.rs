@@ -1,11 +1,16 @@
 use super::{ExecError, Value};
+use crate::backend::executor::expr_datetime::current_date_value_with_config;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::datetime::{DateTimeParseError, TimeZoneSpec};
 use crate::backend::utils::time::datetime::{
-    day_of_week_from_julian_day, day_of_year, days_from_ymd, days_in_month,
+    current_timezone_name, day_of_week_from_julian_day, day_of_year, days_from_ymd,
     iso_day_of_week_from_julian_day, iso_week_and_year, julian_day_from_postgres_date,
-    parse_timezone_spec, timestamp_parts_from_usecs, timezone_offset_seconds,
-    unix_days_from_postgres_date, ymd_from_days,
+    parse_offset_seconds, parse_timezone_spec, timestamp_parts_from_usecs, timezone_offset_seconds,
+    timezone_offset_seconds_at_utc, unix_days_from_postgres_date, ymd_from_days,
+};
+use crate::backend::utils::time::timestamp::{
+    is_valid_finite_timestamp_usecs, make_timestamptz_from_parts, timestamp_at_time_zone,
+    timestamptz_at_time_zone,
 };
 use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT,
@@ -13,6 +18,7 @@ use crate::include::nodes::datetime::{
     USECS_PER_SEC,
 };
 use crate::include::nodes::datum::{IntervalValue, NumericValue};
+use num_traits::ToPrimitive;
 
 fn extract_year_number(astronomical_year: i32) -> i32 {
     if astronomical_year > 0 {
@@ -80,35 +86,14 @@ fn unrecognized_time_part(field: &str, with_timezone: bool) -> ExecError {
     }
 }
 
-fn timestamp_type_name(with_timezone: bool) -> &'static str {
-    if with_timezone {
-        "timestamp with time zone"
-    } else {
-        "timestamp without time zone"
-    }
-}
-
-fn unsupported_timestamp_part(field: &str, with_timezone: bool) -> ExecError {
-    ExecError::DetailedError {
-        message: format!(
-            "unit \"{field}\" not supported for type {}",
-            timestamp_type_name(with_timezone)
-        ),
-        detail: None,
-        hint: None,
-        sqlstate: "0A000",
-    }
-}
-
-fn unrecognized_timestamp_part(field: &str, with_timezone: bool) -> ExecError {
-    ExecError::DetailedError {
-        message: format!(
-            "unit \"{field}\" not recognized for type {}",
-            timestamp_type_name(with_timezone)
-        ),
-        detail: None,
-        hint: None,
-        sqlstate: "22023",
+fn normalize_date_part_field(field: &str) -> &str {
+    match field {
+        "msec" => "milliseconds",
+        "usec" => "microseconds",
+        "seconds" => "second",
+        "timezone_hour" => "timezone_h",
+        "timezone_minute" => "timezone_m",
+        other => other,
     }
 }
 
@@ -173,16 +158,10 @@ fn timezone_target_offset_seconds(
                 DateTimeParseError::UnknownTimeZone(zone) => {
                     timezone_function_error(format!("time zone \"{zone}\" not recognized"), "22023")
                 }
-                DateTimeParseError::Invalid | DateTimeParseError::FieldOutOfRange => {
-                    timezone_function_error(
-                        format!("invalid input syntax for type time zone: \"{name}\""),
-                        "22007",
-                    )
-                }
-                DateTimeParseError::TimeZoneDisplacementOutOfRange => {
-                    timezone_function_error("time zone displacement out of range", "22008")
-                }
-                DateTimeParseError::TimestampOutOfRange => timezone_function_error(
+                DateTimeParseError::Invalid
+                | DateTimeParseError::FieldOutOfRange
+                | DateTimeParseError::TimeZoneDisplacementOutOfRange
+                | DateTimeParseError::TimestampOutOfRange => timezone_function_error(
                     format!("invalid input syntax for type time zone: \"{name}\""),
                     "22007",
                 ),
@@ -239,103 +218,6 @@ fn retime_timetz(timetz: TimeTzADT, target_offset_seconds: i32) -> TimeTzADT {
     }
 }
 
-fn normalize_datetime_part(field: &str) -> &str {
-    match field {
-        "msec" => "milliseconds",
-        "usec" => "microseconds",
-        "secs" => "seconds",
-        other => other,
-    }
-}
-
-fn eval_timestamp_part(
-    field: &str,
-    timestamp_usecs: i64,
-    with_timezone: bool,
-) -> Result<Value, ExecError> {
-    let field = normalize_datetime_part(field);
-    if !matches!(
-        field,
-        "microsecond"
-            | "microseconds"
-            | "millisecond"
-            | "milliseconds"
-            | "second"
-            | "seconds"
-            | "minute"
-            | "hour"
-            | "day"
-            | "month"
-            | "year"
-            | "quarter"
-            | "decade"
-            | "century"
-            | "millennium"
-            | "isoyear"
-            | "week"
-            | "dow"
-            | "isodow"
-            | "doy"
-            | "julian"
-            | "epoch"
-    ) {
-        if matches!(field, "timezone" | "timezone_m" | "timezone_h") {
-            return Err(unsupported_timestamp_part(field, with_timezone));
-        }
-        return Err(unrecognized_timestamp_part(field, with_timezone));
-    }
-
-    if timestamp_usecs == TIMESTAMP_NOEND || timestamp_usecs == TIMESTAMP_NOBEGIN {
-        return Ok(match field {
-            "day" | "month" | "quarter" | "week" | "dow" | "isodow" | "doy" | "microsecond"
-            | "microseconds" | "millisecond" | "milliseconds" | "second" | "seconds" | "minute"
-            | "hour" => Value::Null,
-            "year" | "decade" | "century" | "millennium" | "julian" | "isoyear" | "epoch" => {
-                Value::Float64(if timestamp_usecs == TIMESTAMP_NOEND {
-                    f64::INFINITY
-                } else {
-                    f64::NEG_INFINITY
-                })
-            }
-            _ => Value::Null,
-        });
-    }
-
-    let (days, time_usecs) = timestamp_parts_from_usecs(timestamp_usecs);
-    let (astronomical_year, month, day) = ymd_from_days(days);
-    let year = extract_year_number(astronomical_year);
-    let julian_day = julian_day_from_postgres_date(days);
-    let (iso_year_astronomical, iso_week) = iso_week_and_year(astronomical_year, month, day);
-    let iso_year = extract_year_number(iso_year_astronomical);
-    let second_in_minute = time_usecs.rem_euclid(USECS_PER_MINUTE);
-    let result = match field {
-        "microsecond" | "microseconds" => second_in_minute as f64,
-        "millisecond" | "milliseconds" => second_in_minute as f64 / 1_000.0,
-        "second" | "seconds" => second_in_minute as f64 / USECS_PER_SEC as f64,
-        "minute" => time_usecs.div_euclid(USECS_PER_MINUTE).rem_euclid(60) as f64,
-        "hour" => time_usecs.div_euclid(USECS_PER_HOUR) as f64,
-        "day" => day as f64,
-        "month" => month as f64,
-        "year" => year as f64,
-        "quarter" => ((month - 1) / 3 + 1) as f64,
-        "decade" => astronomical_year.div_euclid(10) as f64,
-        "century" => extract_century(year) as f64,
-        "millennium" => extract_millennium(year) as f64,
-        "isoyear" => iso_year as f64,
-        "week" => iso_week as f64,
-        "dow" => day_of_week_from_julian_day(julian_day) as f64,
-        "isodow" => iso_day_of_week_from_julian_day(julian_day) as f64,
-        "doy" => day_of_year(astronomical_year, month, day) as f64,
-        "julian" => julian_day as f64 + time_usecs as f64 / USECS_PER_DAY as f64,
-        "epoch" => {
-            unix_days_from_postgres_date(days) as f64 * 86_400.0
-                + time_usecs as f64 / USECS_PER_SEC as f64
-        }
-        _ => return Err(unrecognized_timestamp_part(field, with_timezone)),
-    };
-    Ok(Value::Float64(result))
-}
-
 fn invalid_make_date(year: i32, month: i32, day: i32) -> ExecError {
     ExecError::DetailedError {
         message: format!("date field value out of range: {year}-{month:02}-{day:02}"),
@@ -362,6 +244,13 @@ fn display_year_to_astronomical(display_year: i32) -> i32 {
 }
 
 pub(crate) fn eval_date_part_function(values: &[Value]) -> Result<Value, ExecError> {
+    eval_date_part_function_with_config(values, &DateTimeConfig::default())
+}
+
+pub(crate) fn eval_date_part_function_with_config(
+    values: &[Value],
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
     let [field_value, date_value] = values else {
         return Err(ExecError::DetailedError {
             message: "malformed date_part call".into(),
@@ -381,19 +270,16 @@ pub(crate) fn eval_date_part_function(values: &[Value]) -> Result<Value, ExecErr
             right: Value::Text("".into()),
         })?;
     let field = field.trim().to_ascii_lowercase();
+    let field = normalize_date_part_field(&field);
 
     match date_value {
-        Value::Time(time) => return eval_time_part(&field, *time, false),
-        Value::TimeTz(timetz) => return eval_timetz_part(&field, *timetz),
-        Value::Timestamp(timestamp) => return eval_timestamp_part(&field, timestamp.0, false),
+        Value::Time(time) => return eval_time_part(field, *time, false),
+        Value::TimeTz(timetz) => return eval_timetz_part(field, *timetz),
+        Value::Timestamp(timestamp) => {
+            return eval_timestamp_part(field, timestamp.0, None);
+        }
         Value::TimestampTz(timestamp) => {
-            let local = if timestamp.is_finite() {
-                timestamp.0
-                    + i64::from(timezone_offset_seconds(&DateTimeConfig::default())) * USECS_PER_SEC
-            } else {
-                timestamp.0
-            };
-            return eval_timestamp_part(&field, local, true);
+            return eval_timestamptz_part(field, *timestamp, config);
         }
         Value::Date(_) => {}
         other => {
@@ -410,7 +296,7 @@ pub(crate) fn eval_date_part_function(values: &[Value]) -> Result<Value, ExecErr
     let date = *date;
 
     if matches!(
-        field.as_str(),
+        field,
         "microseconds"
             | "milliseconds"
             | "second"
@@ -422,11 +308,11 @@ pub(crate) fn eval_date_part_function(values: &[Value]) -> Result<Value, ExecErr
             | "timezone_h"
             | "timezone_hour"
     ) {
-        return Err(unsupported_date_part(&field));
+        return Err(unsupported_date_part(field));
     }
 
     if !matches!(
-        field.as_str(),
+        field,
         "day"
             | "month"
             | "year"
@@ -442,11 +328,11 @@ pub(crate) fn eval_date_part_function(values: &[Value]) -> Result<Value, ExecErr
             | "julian"
             | "epoch"
     ) {
-        return Err(unrecognized_date_part(&field));
+        return Err(unrecognized_date_part(field));
     }
 
     if !date.is_finite() {
-        return Ok(match field.as_str() {
+        return Ok(match field {
             "day" | "month" | "quarter" | "week" | "dow" | "isodow" | "doy" => Value::Null,
             "year" | "decade" | "century" | "millennium" | "julian" | "isoyear" | "epoch" => {
                 Value::Float64(if date.0.is_positive() {
@@ -465,7 +351,7 @@ pub(crate) fn eval_date_part_function(values: &[Value]) -> Result<Value, ExecErr
     let (iso_year_astronomical, iso_week) = iso_week_and_year(astronomical_year, month, day);
     let iso_year = extract_year_number(iso_year_astronomical);
 
-    let result = match field.as_str() {
+    let result = match field {
         "day" => day as f64,
         "month" => month as f64,
         "year" => year as f64,
@@ -480,7 +366,156 @@ pub(crate) fn eval_date_part_function(values: &[Value]) -> Result<Value, ExecErr
         "doy" => day_of_year(astronomical_year, month, day) as f64,
         "julian" => julian_day as f64,
         "epoch" => unix_days_from_postgres_date(date.0) as f64 * 86_400.0,
-        _ => return Err(unrecognized_date_part(&field)),
+        _ => return Err(unrecognized_date_part(field)),
+    };
+    Ok(Value::Float64(result))
+}
+
+pub(crate) fn eval_extract_function_with_config(
+    values: &[Value],
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    let [field_value, _] = values else {
+        return Err(ExecError::DetailedError {
+            message: "malformed date_part call".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    if matches!(field_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let field = field_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "date_part",
+            left: field_value.clone(),
+            right: Value::Text("".into()),
+        })?
+        .trim()
+        .to_ascii_lowercase();
+    let field = normalize_date_part_field(&field);
+    match eval_date_part_function_with_config(values, config)? {
+        Value::Float64(value) => Ok(Value::Numeric(extract_numeric_value(
+            value,
+            extract_numeric_scale(field),
+        ))),
+        other => Ok(other),
+    }
+}
+
+fn extract_numeric_scale(field: &str) -> u32 {
+    match field {
+        "millisecond" | "milliseconds" => 3,
+        "second" | "epoch" => 6,
+        _ => 0,
+    }
+}
+
+fn extract_numeric_value(value: f64, scale: u32) -> NumericValue {
+    if value.is_infinite() {
+        return if value.is_sign_positive() {
+            NumericValue::PosInf
+        } else {
+            NumericValue::NegInf
+        };
+    }
+    if value.is_nan() {
+        return NumericValue::NaN;
+    }
+    let value = if value == 0.0 { 0.0 } else { value };
+    NumericValue::from(format!("{value:.precision$}", precision = scale as usize))
+}
+
+fn timestamp_infinity_part(field: &str, positive: bool) -> Value {
+    match field {
+        "day" | "month" | "quarter" | "week" | "dow" | "isodow" | "doy" | "timezone"
+        | "timezone_h" | "timezone_m" | "microsecond" | "microseconds" | "millisecond"
+        | "milliseconds" | "second" | "minute" | "hour" => Value::Null,
+        "year" | "decade" | "century" | "millennium" | "julian" | "isoyear" | "epoch" => {
+            Value::Float64(if positive {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            })
+        }
+        _ => Value::Null,
+    }
+}
+
+fn unsupported_timestamp_part(field: &str, with_timezone: bool) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "unit \"{field}\" not supported for type timestamp {} time zone",
+            if with_timezone { "with" } else { "without" }
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn unrecognized_timestamp_part(field: &str, with_timezone: bool) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "unit \"{field}\" not recognized for type timestamp {} time zone",
+            if with_timezone { "with" } else { "without" }
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
+fn eval_timestamp_part(
+    field: &str,
+    timestamp_usecs: i64,
+    offset_seconds: Option<i32>,
+) -> Result<Value, ExecError> {
+    if timestamp_usecs == TIMESTAMP_NOEND || timestamp_usecs == TIMESTAMP_NOBEGIN {
+        return Ok(timestamp_infinity_part(
+            field,
+            timestamp_usecs == TIMESTAMP_NOEND,
+        ));
+    }
+    let (days, time_usecs) = timestamp_parts_from_usecs(timestamp_usecs);
+    let (astronomical_year, month, day) = ymd_from_days(days);
+    let year = extract_year_number(astronomical_year);
+    let julian_day = julian_day_from_postgres_date(days);
+    let (iso_year_astronomical, iso_week) = iso_week_and_year(astronomical_year, month, day);
+    let iso_year = extract_year_number(iso_year_astronomical);
+    let second = time_usecs.rem_euclid(USECS_PER_MINUTE) as f64 / USECS_PER_SEC as f64;
+    let result = match field {
+        "microsecond" | "microseconds" => time_usecs.rem_euclid(USECS_PER_MINUTE) as f64,
+        "millisecond" | "milliseconds" => time_usecs.rem_euclid(USECS_PER_MINUTE) as f64 / 1_000.0,
+        "second" => second,
+        "minute" => time_usecs.div_euclid(USECS_PER_MINUTE).rem_euclid(60) as f64,
+        "hour" => time_usecs.div_euclid(USECS_PER_HOUR) as f64,
+        "day" => day as f64,
+        "month" => month as f64,
+        "year" => year as f64,
+        "quarter" => ((month - 1) / 3 + 1) as f64,
+        "decade" => astronomical_year.div_euclid(10) as f64,
+        "century" => extract_century(year) as f64,
+        "millennium" => extract_millennium(year) as f64,
+        "isoyear" => iso_year as f64,
+        "week" => iso_week as f64,
+        "dow" => day_of_week_from_julian_day(julian_day) as f64,
+        "isodow" => iso_day_of_week_from_julian_day(julian_day) as f64,
+        "doy" => day_of_year(astronomical_year, month, day) as f64,
+        "julian" => julian_day as f64 + time_usecs as f64 / USECS_PER_DAY as f64,
+        "epoch" => {
+            unix_days_from_postgres_date(days) as f64 * 86_400.0
+                + time_usecs as f64 / USECS_PER_SEC as f64
+        }
+        "timezone" | "timezone_h" | "timezone_m" if offset_seconds.is_none() => {
+            return Err(unsupported_timestamp_part(field, false));
+        }
+        "timezone" => f64::from(offset_seconds.unwrap_or_default()),
+        "timezone_h" => f64::from(offset_seconds.unwrap_or_default() / 3_600),
+        "timezone_m" => f64::from(offset_seconds.unwrap_or_default() / 60 % 60),
+        _ => return Err(unrecognized_timestamp_part(field, offset_seconds.is_some())),
     };
     Ok(Value::Float64(result))
 }
@@ -523,55 +558,26 @@ pub(crate) fn eval_timezone_function(
     Ok(Value::TimeTz(retime_timetz(timetz, target_offset_seconds)))
 }
 
-fn extract_numeric_display_scale(field: &str) -> usize {
-    match normalize_datetime_part(field) {
-        "millisecond" | "milliseconds" => 3,
-        "second" | "seconds" | "epoch" | "julian" => 6,
-        _ => 0,
+fn eval_timestamptz_part(
+    field: &str,
+    timestamp: TimestampTzADT,
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    if !timestamp.is_finite() {
+        return Ok(timestamp_infinity_part(
+            field,
+            timestamp.0 == TIMESTAMP_NOEND,
+        ));
     }
-}
-
-fn float_part_to_numeric(value: Value, field: &str) -> Value {
-    let Value::Float64(value) = value else {
-        return value;
-    };
-    let numeric = if value.is_nan() {
-        NumericValue::NaN
-    } else if value.is_infinite() {
-        if value.is_sign_negative() {
-            NumericValue::NegInf
-        } else {
-            NumericValue::PosInf
-        }
-    } else {
-        let scale = extract_numeric_display_scale(field);
-        NumericValue::from(format!("{value:.scale$}"))
-    };
-    Value::Numeric(numeric)
-}
-
-pub(crate) fn eval_extract_function(values: &[Value]) -> Result<Value, ExecError> {
-    let [field_value, _] = values else {
-        return Err(ExecError::DetailedError {
-            message: "malformed extract call".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        });
-    };
-    if matches!(field_value, Value::Null) {
-        return Ok(Value::Null);
+    let offset = timezone_offset_seconds_at_utc(config, timestamp.0);
+    let local = timestamp.0 + i64::from(offset) * USECS_PER_SEC;
+    if field == "epoch" {
+        return Ok(Value::Float64(
+            unix_days_from_postgres_date(0) as f64 * 86_400.0
+                + timestamp.0 as f64 / USECS_PER_SEC as f64,
+        ));
     }
-    let field = field_value
-        .as_text()
-        .ok_or_else(|| ExecError::TypeMismatch {
-            op: "extract",
-            left: field_value.clone(),
-            right: Value::Text("".into()),
-        })?
-        .trim()
-        .to_ascii_lowercase();
-    eval_date_part_function(values).map(|value| float_part_to_numeric(value, &field))
+    eval_timestamp_part(field, local, Some(offset))
 }
 
 pub(crate) fn eval_isfinite_function(values: &[Value]) -> Result<Value, ExecError> {
@@ -595,9 +601,46 @@ pub(crate) fn eval_isfinite_function(values: &[Value]) -> Result<Value, ExecErro
 }
 
 fn truncate_timestamp_local(field: &str, days: i32) -> Result<i32, ExecError> {
-    let (astronomical_year, month, _day) = ymd_from_days(days);
+    let (astronomical_year, month, _) = ymd_from_days(days);
     let display_year = extract_year_number(astronomical_year);
     let truncated_astronomical_year = match field {
+        "day" => return Ok(days),
+        "week" => {
+            let isodow =
+                iso_day_of_week_from_julian_day(julian_day_from_postgres_date(days)) as i32;
+            return Ok(days - (isodow - 1));
+        }
+        "month" => {
+            return days_from_ymd(astronomical_year, month, 1).ok_or_else(|| {
+                ExecError::DetailedError {
+                    message: format!("unit \"{field}\" not supported for type timestamp"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                }
+            });
+        }
+        "quarter" => {
+            let quarter_month = ((month - 1) / 3) * 3 + 1;
+            return days_from_ymd(astronomical_year, quarter_month, 1).ok_or_else(|| {
+                ExecError::DetailedError {
+                    message: format!("unit \"{field}\" not supported for type timestamp"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                }
+            });
+        }
+        "year" => {
+            return days_from_ymd(astronomical_year, 1, 1).ok_or_else(|| {
+                ExecError::DetailedError {
+                    message: format!("unit \"{field}\" not supported for type timestamp"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                }
+            });
+        }
         "millennium" => {
             display_year_to_astronomical(truncation_field_start_display_year(display_year, 1000))
         }
@@ -605,21 +648,6 @@ fn truncate_timestamp_local(field: &str, days: i32) -> Result<i32, ExecError> {
             display_year_to_astronomical(truncation_field_start_display_year(display_year, 100))
         }
         "decade" => astronomical_year.div_euclid(10) * 10,
-        "year" => astronomical_year,
-        "quarter" => {
-            return days_from_ymd(astronomical_year, ((month - 1) / 3) * 3 + 1, 1)
-                .ok_or_else(|| unsupported_timestamp_part(field, false));
-        }
-        "month" => {
-            return days_from_ymd(astronomical_year, month, 1)
-                .ok_or_else(|| unsupported_timestamp_part(field, false));
-        }
-        "week" => {
-            let julian = julian_day_from_postgres_date(days);
-            let isodow = iso_day_of_week_from_julian_day(julian) as i32;
-            return Ok(days - (isodow - 1));
-        }
-        "day" => return Ok(days),
         _ => {
             return Err(ExecError::DetailedError {
                 message: format!("unit \"{field}\" not supported for type timestamp"),
@@ -637,67 +665,117 @@ fn truncate_timestamp_local(field: &str, days: i32) -> Result<i32, ExecError> {
     })
 }
 
-fn timestamp_trunc_usecs(field: &str, timestamp_usecs: i64) -> Result<i64, ExecError> {
-    let field = normalize_datetime_part(field);
-    if !matches!(
+fn date_trunc_field_supported(field: &str) -> bool {
+    matches!(
         field,
-        "millennium"
-            | "century"
-            | "decade"
-            | "year"
-            | "quarter"
-            | "month"
-            | "week"
-            | "day"
-            | "hour"
-            | "minute"
-            | "second"
-            | "seconds"
+        "microsecond"
+            | "microseconds"
             | "millisecond"
             | "milliseconds"
-            | "microsecond"
-            | "microseconds"
-    ) {
-        if matches!(field, "timezone" | "timezone_m" | "timezone_h") {
-            return Err(unsupported_timestamp_part(field, false));
-        }
-        return Err(unrecognized_timestamp_part(field, false));
+            | "second"
+            | "minute"
+            | "hour"
+            | "day"
+            | "week"
+            | "month"
+            | "quarter"
+            | "year"
+            | "decade"
+            | "century"
+            | "millennium"
+    )
+}
+
+fn date_trunc_field_known(field: &str) -> bool {
+    date_trunc_field_supported(field)
+        || matches!(
+            field,
+            "timezone"
+                | "timezone_h"
+                | "timezone_m"
+                | "epoch"
+                | "julian"
+                | "dow"
+                | "isodow"
+                | "doy"
+                | "isoyear"
+        )
+}
+
+fn validate_date_trunc_field(field: &str, with_timezone: bool) -> Result<(), ExecError> {
+    if date_trunc_field_supported(field) {
+        Ok(())
+    } else if date_trunc_field_known(field) {
+        Err(unsupported_timestamp_part(field, with_timezone))
+    } else {
+        Err(unrecognized_timestamp_part(field, with_timezone))
     }
-    if timestamp_usecs == TIMESTAMP_NOEND || timestamp_usecs == TIMESTAMP_NOBEGIN {
-        return Ok(timestamp_usecs);
-    }
+}
+
+fn local_timestamp_usecs(days: i32, time_usecs: i64) -> Result<i64, ExecError> {
+    let usecs = i128::from(days) * i128::from(USECS_PER_DAY) + i128::from(time_usecs);
+    i64::try_from(usecs).map_err(|_| timestamp_out_of_range_error())
+}
+
+fn truncate_timestamp_usecs_local(
+    field: &str,
+    timestamp_usecs: i64,
+    with_timezone: bool,
+) -> Result<i64, ExecError> {
+    validate_date_trunc_field(field, with_timezone)?;
     let (days, time_usecs) = timestamp_parts_from_usecs(timestamp_usecs);
-    let truncated = match field {
-        "hour" => {
-            i64::from(days) * USECS_PER_DAY + time_usecs.div_euclid(USECS_PER_HOUR) * USECS_PER_HOUR
-        }
-        "minute" => {
-            i64::from(days) * USECS_PER_DAY
-                + time_usecs.div_euclid(USECS_PER_MINUTE) * USECS_PER_MINUTE
-        }
-        "second" | "seconds" => {
-            i64::from(days) * USECS_PER_DAY + time_usecs.div_euclid(USECS_PER_SEC) * USECS_PER_SEC
-        }
+    match field {
+        "microsecond" | "microseconds" => Ok(timestamp_usecs),
         "millisecond" | "milliseconds" => {
-            i64::from(days) * USECS_PER_DAY + time_usecs.div_euclid(1_000) * 1_000
+            local_timestamp_usecs(days, time_usecs.div_euclid(1_000) * 1_000)
         }
-        "microsecond" | "microseconds" => timestamp_usecs,
-        _ => i64::from(truncate_timestamp_local(field, days)?) * USECS_PER_DAY,
-    };
-    Ok(truncated)
+        "second" => {
+            local_timestamp_usecs(days, time_usecs.div_euclid(USECS_PER_SEC) * USECS_PER_SEC)
+        }
+        "minute" => local_timestamp_usecs(
+            days,
+            time_usecs.div_euclid(USECS_PER_MINUTE) * USECS_PER_MINUTE,
+        ),
+        "hour" => {
+            local_timestamp_usecs(days, time_usecs.div_euclid(USECS_PER_HOUR) * USECS_PER_HOUR)
+        }
+        _ => truncate_timestamp_local(field, days).and_then(|days| local_timestamp_usecs(days, 0)),
+    }
 }
 
 pub(crate) fn eval_date_trunc_function(
     values: &[Value],
     config: &DateTimeConfig,
 ) -> Result<Value, ExecError> {
-    let [field_value, date_value] = values else {
-        return Err(ExecError::DetailedError {
-            message: "malformed date_trunc call".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        });
+    let (field_value, date_value, zone_value) = match values {
+        [field_value, date_value] => (field_value, date_value, None),
+        [field_value, date_value, zone_value] => (field_value, date_value, Some(zone_value)),
+        _ => {
+            return Err(ExecError::DetailedError {
+                message: "malformed date_trunc call".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            });
+        }
+    };
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let mut zone_config;
+    let config = if let Some(zone_value) = zone_value {
+        let zone = zone_value
+            .as_text()
+            .ok_or_else(|| ExecError::TypeMismatch {
+                op: "date_trunc",
+                left: zone_value.clone(),
+                right: Value::Text("".into()),
+            })?;
+        zone_config = config.clone();
+        zone_config.time_zone = zone.to_string();
+        &zone_config
+    } else {
+        config
     };
     if matches!(field_value, Value::Null) || matches!(date_value, Value::Null) {
         return Ok(Value::Null);
@@ -710,6 +788,14 @@ pub(crate) fn eval_date_trunc_function(
             right: Value::Text("".into()),
         })?;
     let field = field.trim().to_ascii_lowercase();
+    let field = normalize_date_part_field(&field);
+    if field == "ago" {
+        return Err(unrecognized_timestamp_part(
+            field,
+            matches!(date_value, Value::TimestampTz(_)),
+        ));
+    }
+    validate_date_trunc_field(field, matches!(date_value, Value::TimestampTz(_)))?;
     match date_value {
         Value::Date(date) => {
             if !date.is_finite() {
@@ -731,18 +817,40 @@ pub(crate) fn eval_date_trunc_function(
                 i64::from(days) * USECS_PER_DAY - offset_seconds * USECS_PER_SEC,
             )))
         }
-        Value::Timestamp(timestamp) => timestamp_trunc_usecs(&field, timestamp.0)
-            .map(|value| Value::Timestamp(TimestampADT(value))),
+        Value::Timestamp(timestamp) => {
+            if !timestamp.is_finite() {
+                return Ok(Value::Timestamp(*timestamp));
+            }
+            Ok(Value::Timestamp(TimestampADT(
+                truncate_timestamp_usecs_local(field, timestamp.0, false)?,
+            )))
+        }
         Value::TimestampTz(timestamp) => {
             if !timestamp.is_finite() {
-                timestamp_trunc_usecs(&field, timestamp.0)?;
                 return Ok(Value::TimestampTz(*timestamp));
             }
-            let offset_seconds = i64::from(timezone_offset_seconds(config));
-            let local_usecs = timestamp.0 + offset_seconds * USECS_PER_SEC;
-            timestamp_trunc_usecs(&field, local_usecs).map(|value| {
-                Value::TimestampTz(TimestampTzADT(value - offset_seconds * USECS_PER_SEC))
-            })
+            let zone = current_timezone_name(config);
+            let local = timestamptz_at_time_zone(*timestamp, zone).map_err(|err| {
+                ExecError::InvalidStorageValue {
+                    column: "time zone".into(),
+                    details: super::expr_casts::datetime_parse_error_details(
+                        "time zone",
+                        zone,
+                        err,
+                    ),
+                }
+            })?;
+            let truncated = TimestampADT(truncate_timestamp_usecs_local(field, local.0, true)?);
+            timestamp_at_time_zone(truncated, zone)
+                .map(Value::TimestampTz)
+                .map_err(|err| ExecError::InvalidStorageValue {
+                    column: "time zone".into(),
+                    details: super::expr_casts::datetime_parse_error_details(
+                        "time zone",
+                        zone,
+                        err,
+                    ),
+                })
         }
         other => Err(ExecError::TypeMismatch {
             op: "date_trunc",
@@ -752,48 +860,60 @@ pub(crate) fn eval_date_trunc_function(
     }
 }
 
-fn interval_total_usecs(value: IntervalValue) -> Option<i64> {
-    if !value.is_finite() || value.months != 0 {
-        return None;
+fn interval_stride_usecs(interval: IntervalValue) -> Result<i64, ExecError> {
+    if interval.months != 0 {
+        return Err(ExecError::DetailedError {
+            message: "timestamps cannot be binned into intervals containing months or years".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
     }
-    i64::from(value.days)
-        .checked_mul(USECS_PER_DAY)
-        .and_then(|days| days.checked_add(value.time_micros))
-}
-
-fn interval_out_of_range() -> ExecError {
-    ExecError::DetailedError {
+    let stride =
+        i128::from(interval.days) * i128::from(USECS_PER_DAY) + i128::from(interval.time_micros);
+    if stride <= 0 {
+        return Err(ExecError::DetailedError {
+            message: "stride must be greater than zero".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22008",
+        });
+    }
+    i64::try_from(stride).map_err(|_| ExecError::DetailedError {
         message: "interval out of range".into(),
         detail: None,
         hint: None,
         sqlstate: "22008",
-    }
+    })
 }
 
-fn timestamp_out_of_range() -> ExecError {
-    ExecError::DetailedError {
-        message: "timestamp out of range".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "22008",
+fn timestamp_bin_usecs(stride: i64, source: i64, origin: i64) -> Result<i64, ExecError> {
+    let diff = source
+        .checked_sub(origin)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "interval out of range".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22008",
+        })?;
+    let modulo = diff % stride;
+    let delta = diff - modulo;
+    let mut result = origin
+        .checked_add(delta)
+        .ok_or_else(timestamp_out_of_range_error)?;
+    if modulo < 0 {
+        result = result
+            .checked_sub(stride)
+            .ok_or_else(timestamp_out_of_range_error)?;
+        if !is_valid_finite_timestamp_usecs(result) {
+            return Err(timestamp_out_of_range_error());
+        }
     }
-}
-
-fn validate_timestamp_usecs_range(value: i64) -> Result<i64, ExecError> {
-    let min = i64::from(days_from_ymd(-4713, 11, 24).expect("valid timestamp lower bound"))
-        * USECS_PER_DAY;
-    let max_exclusive =
-        i64::from(days_from_ymd(294277, 1, 1).expect("valid timestamp upper bound"))
-            * USECS_PER_DAY;
-    if value < min || value >= max_exclusive {
-        Err(timestamp_out_of_range())
-    } else {
-        Ok(value)
-    }
+    Ok(result)
 }
 
 pub(crate) fn eval_date_bin_function(values: &[Value]) -> Result<Value, ExecError> {
-    let [stride_value, source_value, origin_value] = values else {
+    let [stride, source, origin] = values else {
         return Err(ExecError::DetailedError {
             message: "malformed date_bin call".into(),
             detail: None,
@@ -804,57 +924,387 @@ pub(crate) fn eval_date_bin_function(values: &[Value]) -> Result<Value, ExecErro
     if values.iter().any(|value| matches!(value, Value::Null)) {
         return Ok(Value::Null);
     }
-    let Value::Interval(stride) = stride_value else {
+    let Value::Interval(interval) = stride else {
         return Err(ExecError::TypeMismatch {
             op: "date_bin",
-            left: stride_value.clone(),
+            left: stride.clone(),
             right: Value::Interval(IntervalValue::zero()),
         });
     };
-    if stride.months != 0 {
-        return Err(ExecError::DetailedError {
-            message: "timestamps cannot be binned into intervals containing months or years".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
+    let stride = interval_stride_usecs(*interval)?;
+    match (source, origin) {
+        (Value::Timestamp(source), Value::Timestamp(origin)) => Ok(Value::Timestamp(TimestampADT(
+            timestamp_bin_usecs(stride, source.0, origin.0)?,
+        ))),
+        (Value::TimestampTz(source), Value::TimestampTz(origin)) => Ok(Value::TimestampTz(
+            TimestampTzADT(timestamp_bin_usecs(stride, source.0, origin.0)?),
+        )),
+        _ => Err(ExecError::TypeMismatch {
+            op: "date_bin",
+            left: source.clone(),
+            right: origin.clone(),
+        }),
     }
-    let stride_usecs = interval_total_usecs(*stride).ok_or_else(interval_out_of_range)?;
-    if stride_usecs <= 0 {
+}
+
+fn interval_total_usecs(interval: IntervalValue) -> Result<i64, ExecError> {
+    if !interval.is_finite() {
         return Err(ExecError::DetailedError {
-            message: "stride must be greater than zero".into(),
+            message: "interval out of range".into(),
             detail: None,
             hint: None,
             sqlstate: "22008",
         });
     }
-    let (source, origin, timestamptz) = match (source_value, origin_value) {
-        (Value::Timestamp(source), Value::Timestamp(origin)) => (source.0, origin.0, false),
-        (Value::TimestampTz(source), Value::TimestampTz(origin)) => (source.0, origin.0, true),
+    let usecs = i128::from(interval.months) * 30 * i128::from(USECS_PER_DAY)
+        + i128::from(interval.days) * i128::from(USECS_PER_DAY)
+        + i128::from(interval.time_micros);
+    i64::try_from(usecs).map_err(|_| ExecError::DetailedError {
+        message: "interval out of range".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    })
+}
+
+pub(crate) fn eval_datetime_add_function(
+    values: &[Value],
+    subtract: bool,
+) -> Result<Value, ExecError> {
+    let (timestamp, interval, zone) = match values {
+        [timestamp, interval] => (timestamp, interval, None),
+        [timestamp, interval, zone] => (timestamp, interval, Some(zone)),
         _ => {
-            return Err(ExecError::TypeMismatch {
-                op: "date_bin",
-                left: source_value.clone(),
-                right: origin_value.clone(),
+            return Err(ExecError::DetailedError {
+                message: "malformed date_add call".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
             });
         }
     };
-    let diff = source
-        .checked_sub(origin)
-        .ok_or_else(interval_out_of_range)?;
-    let bins = diff.div_euclid(stride_usecs);
-    let offset = bins
-        .checked_mul(stride_usecs)
-        .ok_or_else(interval_out_of_range)?;
-    let result = origin
-        .checked_add(offset)
-        .ok_or_else(interval_out_of_range)?;
-    let result = validate_timestamp_usecs_range(result)?;
-    Ok(if timestamptz {
-        Value::TimestampTz(TimestampTzADT(result))
-    } else {
-        Value::Timestamp(TimestampADT(result))
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let (Value::TimestampTz(timestamp), Value::Interval(interval)) = (timestamp, interval) else {
+        return Err(ExecError::TypeMismatch {
+            op: if subtract {
+                "date_subtract"
+            } else {
+                "date_add"
+            },
+            left: timestamp.clone(),
+            right: interval.clone(),
+        });
+    };
+    if let Some(zone) = zone {
+        let zone = zone.as_text().ok_or_else(|| ExecError::TypeMismatch {
+            op: if subtract {
+                "date_subtract"
+            } else {
+                "date_add"
+            },
+            left: zone.clone(),
+            right: Value::Text("".into()),
+        })?;
+        let local = timestamptz_at_time_zone(*timestamp, zone).map_err(|err| {
+            ExecError::InvalidStorageValue {
+                column: "time zone".into(),
+                details: super::expr_casts::datetime_parse_error_details("time zone", zone, err),
+            }
+        })?;
+        let local = add_interval_to_local_timestamp(local, *interval, subtract)?;
+        return timestamp_at_time_zone(local, zone)
+            .map(Value::TimestampTz)
+            .map_err(|err| ExecError::InvalidStorageValue {
+                column: "time zone".into(),
+                details: super::expr_casts::datetime_parse_error_details("time zone", zone, err),
+            });
+    }
+    let delta = interval_total_usecs(*interval)?;
+    let delta = if subtract { -delta } else { delta };
+    timestamp
+        .0
+        .checked_add(delta)
+        .map(|value| Value::TimestampTz(TimestampTzADT(value)))
+        .ok_or_else(timestamp_out_of_range_error)
+}
+
+fn timestamp_out_of_range_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "timestamp out of range".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    }
+}
+
+fn interval_out_of_range_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "interval out of range".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    }
+}
+
+fn timestamp_tz_local_timestamp(
+    timestamp: TimestampTzADT,
+    config: &DateTimeConfig,
+) -> Result<TimestampADT, ExecError> {
+    let zone = current_timezone_name(config);
+    timestamptz_at_time_zone(timestamp, zone).map_err(|err| ExecError::InvalidStorageValue {
+        column: "time zone".into(),
+        details: super::expr_casts::datetime_parse_error_details("time zone", zone, err),
     })
+}
+
+fn current_date_timestamp_tz(config: &DateTimeConfig) -> Result<TimestampTzADT, ExecError> {
+    let Value::Date(date) = current_date_value_with_config(config) else {
+        unreachable!("current_date returns date")
+    };
+    let local_midnight = TimestampADT(i64::from(date.0) * USECS_PER_DAY);
+    let zone = current_timezone_name(config);
+    timestamp_at_time_zone(local_midnight, zone).map_err(|err| ExecError::InvalidStorageValue {
+        column: "time zone".into(),
+        details: super::expr_casts::datetime_parse_error_details("time zone", zone, err),
+    })
+}
+
+fn age_infinity_interval(left: i64, right: i64) -> Option<Result<IntervalValue, ExecError>> {
+    match (left, right) {
+        (TIMESTAMP_NOEND, TIMESTAMP_NOEND) | (TIMESTAMP_NOBEGIN, TIMESTAMP_NOBEGIN) => {
+            Some(Err(interval_out_of_range_error()))
+        }
+        (TIMESTAMP_NOEND, _) | (_, TIMESTAMP_NOBEGIN) => Some(Ok(IntervalValue::infinity())),
+        (TIMESTAMP_NOBEGIN, _) | (_, TIMESTAMP_NOEND) => Some(Ok(IntervalValue::neg_infinity())),
+        _ => None,
+    }
+}
+
+fn symbolic_age_interval(
+    left_local: i64,
+    right_local: i64,
+    left_less: bool,
+) -> Result<IntervalValue, ExecError> {
+    let (left_days, left_time) = timestamp_parts_from_usecs(left_local);
+    let (right_days, right_time) = timestamp_parts_from_usecs(right_local);
+    let (left_year, left_month, left_day) = ymd_from_days(left_days);
+    let (right_year, right_month, right_day) = ymd_from_days(right_days);
+
+    let mut time = left_time - right_time;
+    let mut days = i64::from(left_day) - i64::from(right_day);
+    let mut months = (i64::from(left_year) - i64::from(right_year)) * 12 + i64::from(left_month)
+        - i64::from(right_month);
+
+    if left_less {
+        time = -time;
+        days = -days;
+        months = -months;
+    }
+    while time < 0 {
+        time += USECS_PER_DAY;
+        days -= 1;
+    }
+    while days < 0 {
+        let (borrow_year, borrow_month) = if left_less {
+            (left_year, left_month)
+        } else {
+            (right_year, right_month)
+        };
+        days += i64::from(crate::backend::utils::time::datetime::days_in_month(
+            borrow_year,
+            borrow_month,
+        ));
+        months -= 1;
+    }
+    if left_less {
+        time = -time;
+        days = -days;
+        months = -months;
+    }
+
+    Ok(IntervalValue {
+        time_micros: time,
+        days: i32::try_from(days).map_err(|_| interval_out_of_range_error())?,
+        months: i32::try_from(months).map_err(|_| interval_out_of_range_error())?,
+    })
+}
+
+fn age_timestamp_interval(
+    left: TimestampADT,
+    right: TimestampADT,
+) -> Result<IntervalValue, ExecError> {
+    if let Some(result) = age_infinity_interval(left.0, right.0) {
+        return result;
+    }
+    symbolic_age_interval(left.0, right.0, left.0 < right.0)
+}
+
+fn age_timestamptz_interval(
+    left: TimestampTzADT,
+    right: TimestampTzADT,
+    config: &DateTimeConfig,
+) -> Result<IntervalValue, ExecError> {
+    if let Some(result) = age_infinity_interval(left.0, right.0) {
+        return result;
+    }
+    let left_local = timestamp_tz_local_timestamp(left, config)?;
+    let right_local = timestamp_tz_local_timestamp(right, config)?;
+    symbolic_age_interval(left_local.0, right_local.0, left.0 < right.0)
+}
+
+pub(crate) fn eval_age_function(
+    values: &[Value],
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let interval = match values {
+        [Value::Timestamp(timestamp)] => {
+            let Value::Date(today) = current_date_value_with_config(config) else {
+                unreachable!("current_date returns date")
+            };
+            age_timestamp_interval(TimestampADT(i64::from(today.0) * USECS_PER_DAY), *timestamp)?
+        }
+        [Value::TimestampTz(timestamp)] => {
+            if timestamp.0 == TIMESTAMP_NOEND {
+                IntervalValue::neg_infinity()
+            } else if timestamp.0 == TIMESTAMP_NOBEGIN {
+                IntervalValue::infinity()
+            } else {
+                age_timestamptz_interval(current_date_timestamp_tz(config)?, *timestamp, config)?
+            }
+        }
+        [Value::Timestamp(left), Value::Timestamp(right)] => age_timestamp_interval(*left, *right)?,
+        [Value::TimestampTz(left), Value::TimestampTz(right)] => {
+            age_timestamptz_interval(*left, *right, config)?
+        }
+        _ => {
+            return Err(ExecError::TypeMismatch {
+                op: "age",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            });
+        }
+    };
+    Ok(Value::Interval(interval))
+}
+
+pub(crate) fn add_interval_to_local_timestamp(
+    timestamp: TimestampADT,
+    interval: IntervalValue,
+    subtract: bool,
+) -> Result<TimestampADT, ExecError> {
+    if !interval.is_finite() {
+        return Err(ExecError::DetailedError {
+            message: "interval out of range".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22008",
+        });
+    }
+    let sign = if subtract { -1 } else { 1 };
+    let (days, time_usecs) = timestamp_parts_from_usecs(timestamp.0);
+    let (year, month, day) = ymd_from_days(days);
+    let total_month =
+        i64::from(year) * 12 + i64::from(month - 1) + i64::from(interval.months) * i64::from(sign);
+    let new_year =
+        i32::try_from(total_month.div_euclid(12)).map_err(|_| timestamp_out_of_range_error())?;
+    let new_month = total_month.rem_euclid(12) as u32 + 1;
+    let max_day = crate::backend::utils::time::datetime::days_in_month(new_year, new_month);
+    let new_day = day.min(max_day);
+    let mut days =
+        days_from_ymd(new_year, new_month, new_day).ok_or_else(timestamp_out_of_range_error)?;
+    days = days
+        .checked_add(interval.days.saturating_mul(sign))
+        .ok_or_else(timestamp_out_of_range_error)?;
+    let total_time = i128::from(time_usecs) + i128::from(interval.time_micros) * i128::from(sign);
+    let day_adjust = total_time.div_euclid(i128::from(USECS_PER_DAY));
+    let time = total_time.rem_euclid(i128::from(USECS_PER_DAY));
+    days = days
+        .checked_add(i32::try_from(day_adjust).map_err(|_| timestamp_out_of_range_error())?)
+        .ok_or_else(timestamp_out_of_range_error)?;
+    let usecs = i128::from(days) * i128::from(USECS_PER_DAY) + time;
+    i64::try_from(usecs)
+        .map(TimestampADT)
+        .map_err(|_| timestamp_out_of_range_error())
+}
+
+fn numeric_value_as_f64(value: &NumericValue) -> Option<f64> {
+    match value {
+        NumericValue::PosInf => Some(f64::INFINITY),
+        NumericValue::NegInf => Some(f64::NEG_INFINITY),
+        NumericValue::NaN => Some(f64::NAN),
+        NumericValue::Finite { coeff, scale, .. } => {
+            Some(coeff.to_f64()? / 10f64.powi(*scale as i32))
+        }
+    }
+}
+
+fn value_as_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Int16(v) => Some(f64::from(*v)),
+        Value::Int32(v) => Some(f64::from(*v)),
+        Value::Int64(v) => Some(*v as f64),
+        Value::Float64(v) => Some(*v),
+        Value::Numeric(v) => numeric_value_as_f64(v),
+        _ => None,
+    }
+}
+
+pub(crate) fn eval_to_timestamp_function(values: &[Value]) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::DetailedError {
+            message: "malformed to_timestamp call".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let seconds = value_as_f64(value).ok_or_else(|| ExecError::TypeMismatch {
+        op: "to_timestamp",
+        left: value.clone(),
+        right: Value::Float64(0.0),
+    })?;
+    if seconds.is_nan() {
+        return Err(ExecError::DetailedError {
+            message: "timestamp cannot be NaN".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22008",
+        });
+    }
+    if seconds == f64::INFINITY {
+        return Ok(Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOEND)));
+    }
+    if seconds == f64::NEG_INFINITY {
+        return Ok(Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOBEGIN)));
+    }
+    let unix_epoch_usecs =
+        i64::from(days_from_ymd(1970, 1, 1).expect("valid unix epoch")) * USECS_PER_DAY;
+    let usecs = (seconds * USECS_PER_SEC as f64).round();
+    if !(i64::MIN as f64..=i64::MAX as f64).contains(&usecs) {
+        return Err(ExecError::DetailedError {
+            message: "timestamp out of range".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22008",
+        });
+    }
+    unix_epoch_usecs
+        .checked_add(usecs as i64)
+        .map(|usecs| Value::TimestampTz(TimestampTzADT(usecs)))
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "timestamp out of range".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22008",
+        })
 }
 
 pub(crate) fn eval_make_date_function(values: &[Value]) -> Result<Value, ExecError> {
@@ -1017,41 +1467,118 @@ pub(crate) fn eval_make_timestamp_function(values: &[Value]) -> Result<Value, Ex
     )))
 }
 
-pub(crate) fn eval_age_function(values: &[Value]) -> Result<Value, ExecError> {
-    let (left, right) = match values {
-        [Value::Null] | [_, Value::Null] | [Value::Null, _] => return Ok(Value::Null),
-        [Value::Timestamp(ts)] => (
-            crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
-            ts.0,
+fn make_timestamptz_numeric_timezone_error(zone: &str) -> Option<ExecError> {
+    let trimmed = zone.trim();
+    if trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        return Some(ExecError::DetailedError {
+            message: format!("invalid input syntax for type numeric time zone: \"{trimmed}\""),
+            detail: None,
+            hint: Some("Numeric time zones must have \"-\" or \"+\" as first character.".into()),
+            sqlstate: "22007",
+        });
+    }
+    if matches!(trimmed.as_bytes().first(), Some(b'+') | Some(b'-'))
+        && let Some(offset) = parse_offset_seconds(trimmed)
+        && offset.abs() > 15 * 3600 + 59 * 60 + 59
+    {
+        return Some(ExecError::DetailedError {
+            message: format!("numeric time zone \"{trimmed}\" out of range"),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    None
+}
+
+pub(crate) fn eval_make_timestamptz_function(
+    values: &[Value],
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let (year, month, day, hour, minute, second, zone) = match values {
+        [
+            Value::Int32(year),
+            Value::Int32(month),
+            Value::Int32(day),
+            Value::Int32(hour),
+            Value::Int32(minute),
+            Value::Float64(second),
+        ] => (
+            *year,
+            *month,
+            *day,
+            *hour,
+            *minute,
+            *second,
+            current_timezone_name(config),
         ),
-        [Value::Timestamp(left), Value::Timestamp(right)] => (left.0, right.0),
+        [
+            Value::Int32(year),
+            Value::Int32(month),
+            Value::Int32(day),
+            Value::Int32(hour),
+            Value::Int32(minute),
+            Value::Float64(second),
+            zone_value,
+        ] => {
+            let zone = zone_value
+                .as_text()
+                .ok_or_else(|| ExecError::TypeMismatch {
+                    op: "make_timestamptz",
+                    left: zone_value.clone(),
+                    right: Value::Text("".into()),
+                })?;
+            (*year, *month, *day, *hour, *minute, *second, zone)
+        }
         _ => {
-            return Err(ExecError::TypeMismatch {
-                op: "age",
-                left: values.first().cloned().unwrap_or(Value::Null),
-                right: values.get(1).cloned().unwrap_or(Value::Null),
+            return Err(ExecError::DetailedError {
+                message: "malformed make_timestamptz call".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
             });
         }
     };
-    match (left, right) {
-        (TIMESTAMP_NOEND, TIMESTAMP_NOEND) | (TIMESTAMP_NOBEGIN, TIMESTAMP_NOBEGIN) => {
-            Err(interval_out_of_range())
-        }
-        (TIMESTAMP_NOEND, _) | (_, TIMESTAMP_NOBEGIN) => {
-            Ok(Value::Interval(IntervalValue::infinity()))
-        }
-        (TIMESTAMP_NOBEGIN, _) | (_, TIMESTAMP_NOEND) => {
-            Ok(Value::Interval(IntervalValue::neg_infinity()))
-        }
-        _ => {
-            let diff = left.checked_sub(right).ok_or_else(interval_out_of_range)?;
-            Ok(Value::Interval(IntervalValue {
-                time_micros: diff % USECS_PER_DAY,
-                days: i32::try_from(diff / USECS_PER_DAY).map_err(|_| interval_out_of_range())?,
-                months: 0,
-            }))
-        }
+    let month = u32::try_from(month).map_err(|_| ExecError::DetailedError {
+        message: "date field value out of range".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    })?;
+    let day = u32::try_from(day).map_err(|_| ExecError::DetailedError {
+        message: "date field value out of range".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    })?;
+    let hour = u32::try_from(hour).map_err(|_| ExecError::DetailedError {
+        message: "time field value out of range".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    })?;
+    let minute = u32::try_from(minute).map_err(|_| ExecError::DetailedError {
+        message: "time field value out of range".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    })?;
+    if let Some(err) = make_timestamptz_numeric_timezone_error(zone) {
+        return Err(err);
     }
+    make_timestamptz_from_parts(year, month, day, hour, minute, second, zone, config)
+        .map(Value::TimestampTz)
+        .map_err(|err| ExecError::InvalidStorageValue {
+            column: "timestamptz".into(),
+            details: super::expr_casts::datetime_parse_error_details(
+                "timestamp with time zone",
+                zone,
+                err,
+            ),
+        })
 }
 
 fn to_date_parse_error(input: &str) -> ExecError {
@@ -1286,6 +1813,53 @@ mod tests {
     }
 
     #[test]
+    fn date_trunc_timestamptz_uses_local_zone_rules() {
+        let config = DateTimeConfig {
+            time_zone: "America/Los_Angeles".into(),
+            ..DateTimeConfig::default()
+        };
+        let source = TimestampTzADT(
+            i64::from(days_from_ymd(2004, 2, 29).unwrap()) * USECS_PER_DAY
+                + (15 * 3600 + 44 * 60 + 17) * USECS_PER_SEC
+                + 8 * USECS_PER_HOUR,
+        );
+        assert_eq!(
+            eval_date_trunc_function(
+                &[Value::Text("week".into()), Value::TimestampTz(source)],
+                &config,
+            )
+            .unwrap(),
+            Value::TimestampTz(TimestampTzADT(
+                i64::from(days_from_ymd(2004, 2, 23).unwrap()) * USECS_PER_DAY + 8 * USECS_PER_HOUR,
+            ))
+        );
+    }
+
+    #[test]
+    fn date_trunc_rejects_unsupported_field_for_infinite_timestamptz() {
+        let err = eval_date_trunc_function(
+            &[
+                Value::Text("timezone".into()),
+                Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOEND)),
+            ],
+            &DateTimeConfig::default(),
+        )
+        .unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message, sqlstate, ..
+            } => {
+                assert_eq!(
+                    message,
+                    "unit \"timezone\" not supported for type timestamp with time zone"
+                );
+                assert_eq!(sqlstate, "0A000");
+            }
+            other => panic!("expected detailed error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn make_date_maps_negative_years_to_bc() {
         assert_eq!(
             eval_make_date_function(&[Value::Int32(-44), Value::Int32(3), Value::Int32(15)])
@@ -1401,6 +1975,39 @@ mod tests {
         assert_eq!(
             eval_date_part_function(&[Value::Text("epoch".into()), Value::TimeTz(timetz)]).unwrap(),
             Value::Float64((20 * 60 * 60 + 30 * 60) as f64)
+        );
+    }
+
+    #[test]
+    fn date_part_timestamptz_timezone_fields_use_pg_sign() {
+        let config = DateTimeConfig {
+            time_zone: "America/Los_Angeles".into(),
+            ..DateTimeConfig::default()
+        };
+        let timestamp = TimestampTzADT(
+            i64::from(days_from_ymd(1997, 2, 10).unwrap()) * USECS_PER_DAY + 8 * USECS_PER_HOUR,
+        );
+        assert_eq!(
+            eval_date_part_function_with_config(
+                &[
+                    Value::Text("timezone".into()),
+                    Value::TimestampTz(timestamp),
+                ],
+                &config,
+            )
+            .unwrap(),
+            Value::Float64(-28_800.0)
+        );
+        assert_eq!(
+            eval_date_part_function_with_config(
+                &[
+                    Value::Text("timezone_h".into()),
+                    Value::TimestampTz(timestamp),
+                ],
+                &config,
+            )
+            .unwrap(),
+            Value::Float64(-8.0)
         );
     }
 }
