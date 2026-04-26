@@ -4160,7 +4160,48 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                 "dtitle".into(),
             ],
         ),
-        "((dlevel <= (InitPlan 1).col1 AND f_leak(dtitle) AND pguser = CURRENT_USER))"
+        "((dlevel <= (InitPlan 1).col1) AND f_leak(dtitle) AND (pguser = CURRENT_USER))"
+    );
+}
+
+#[test]
+fn explain_expr_parenthesizes_boolean_clause_args() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::{BoolExprType, OpExprKind};
+
+    let int4 = SqlType::new(SqlTypeKind::Int4);
+    let bool_ty = SqlType::new(SqlTypeKind::Bool);
+    let expr = Expr::bool_expr(
+        BoolExprType::Or,
+        vec![
+            Expr::binary_op(
+                OpExprKind::Eq,
+                bool_ty,
+                Expr::Var(Var {
+                    varno: 1,
+                    varattno: user_attrno(0),
+                    varlevelsup: 0,
+                    vartype: int4,
+                }),
+                Expr::Const(Value::Int32(1)),
+            ),
+            Expr::binary_op(
+                OpExprKind::LtEq,
+                bool_ty,
+                Expr::Var(Var {
+                    varno: 1,
+                    varattno: user_attrno(0),
+                    varlevelsup: 0,
+                    vartype: int4,
+                }),
+                Expr::Const(Value::Int32(3)),
+            ),
+        ],
+    );
+
+    assert_eq!(
+        render_explain_expr(&expr, &["a".into()]),
+        "((a = 1) OR (a <= 3))"
     );
 }
 

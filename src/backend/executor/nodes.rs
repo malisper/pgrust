@@ -2506,7 +2506,7 @@ fn render_explain_expr_inner_with_qualifier(
                     .into_iter()
                     .map(|arg| render_explain_bool_arg(arg, qualifier, column_names))
                     .collect::<Vec<_>>();
-                format!("({})", rendered.join(" AND "))
+                rendered.join(" AND ")
             }
             crate::include::nodes::primnodes::BoolExprType::Or => {
                 let mut args = Vec::new();
@@ -2519,16 +2519,19 @@ fn render_explain_expr_inner_with_qualifier(
                     .into_iter()
                     .map(|arg| render_explain_bool_arg(arg, qualifier, column_names))
                     .collect::<Vec<_>>();
-                format!("({})", rendered.join(" OR "))
+                rendered.join(" OR ")
             }
             crate::include::nodes::primnodes::BoolExprType::Not => {
                 let Some(inner) = bool_expr.args.first() else {
                     return format!("{expr:?}");
                 };
-                format!(
-                    "NOT {}",
-                    render_explain_expr_inner_with_qualifier(inner, qualifier, column_names)
-                )
+                let rendered =
+                    render_explain_expr_inner_with_qualifier(inner, qualifier, column_names);
+                if explain_bool_arg_is_bare(inner) {
+                    format!("NOT {rendered}")
+                } else {
+                    format!("NOT ({rendered})")
+                }
             }
         },
         Expr::Coalesce(left, right) => format!(
@@ -3284,7 +3287,29 @@ fn render_explain_bool_arg(
     column_names: &[String],
 ) -> String {
     let rendered = render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
-    rendered
+    if explain_bool_arg_is_bare(expr) {
+        rendered
+    } else {
+        format!("({rendered})")
+    }
+}
+
+fn explain_bool_arg_is_bare(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Var(_)
+            | Expr::Param(_)
+            | Expr::Const(_)
+            | Expr::Func(_)
+            | Expr::SubPlan(_)
+            | Expr::CurrentCatalog
+            | Expr::CurrentSchema
+            | Expr::CurrentDate
+            | Expr::CurrentUser
+            | Expr::CurrentRole
+            | Expr::SessionUser
+            | Expr::Random
+    )
 }
 
 fn explain_detail_prefix(indent: usize) -> String {
@@ -3425,29 +3450,41 @@ pub(crate) fn render_explain_join_expr_inner(
         },
         Expr::Bool(bool_expr) => match bool_expr.boolop {
             crate::include::nodes::primnodes::BoolExprType::And => {
-                let rendered = bool_expr
-                    .args
-                    .iter()
-                    .map(|arg| render_explain_join_expr_inner(arg, outer_names, inner_names))
+                let mut args = Vec::new();
+                collect_bool_explain_args(
+                    expr,
+                    crate::include::nodes::primnodes::BoolExprType::And,
+                    &mut args,
+                );
+                let rendered = args
+                    .into_iter()
+                    .map(|arg| render_explain_join_bool_arg(arg, outer_names, inner_names))
                     .collect::<Vec<_>>();
-                format!("({})", rendered.join(" AND "))
+                rendered.join(" AND ")
             }
             crate::include::nodes::primnodes::BoolExprType::Or => {
-                let rendered = bool_expr
-                    .args
-                    .iter()
-                    .map(|arg| render_explain_join_expr_inner(arg, outer_names, inner_names))
+                let mut args = Vec::new();
+                collect_bool_explain_args(
+                    expr,
+                    crate::include::nodes::primnodes::BoolExprType::Or,
+                    &mut args,
+                );
+                let rendered = args
+                    .into_iter()
+                    .map(|arg| render_explain_join_bool_arg(arg, outer_names, inner_names))
                     .collect::<Vec<_>>();
-                format!("({})", rendered.join(" OR "))
+                rendered.join(" OR ")
             }
             crate::include::nodes::primnodes::BoolExprType::Not => {
                 let Some(inner) = bool_expr.args.first() else {
                     return format!("{expr:?}");
                 };
-                format!(
-                    "NOT {}",
-                    render_explain_join_expr_inner(inner, outer_names, inner_names)
-                )
+                let rendered = render_explain_join_expr_inner(inner, outer_names, inner_names);
+                if explain_bool_arg_is_bare(inner) {
+                    format!("NOT {rendered}")
+                } else {
+                    format!("NOT ({rendered})")
+                }
             }
         },
         Expr::Coalesce(left, right) => format!(
@@ -3475,6 +3512,19 @@ pub(crate) fn render_explain_join_expr_inner(
             render_explain_join_expr_inner(expr, outer_names, inner_names)
         }),
         other => format!("{other:?}"),
+    }
+}
+
+fn render_explain_join_bool_arg(
+    expr: &Expr,
+    outer_names: &[String],
+    inner_names: &[String],
+) -> String {
+    let rendered = render_explain_join_expr_inner(expr, outer_names, inner_names);
+    if explain_bool_arg_is_bare(expr) {
+        rendered
+    } else {
+        format!("({rendered})")
     }
 }
 
