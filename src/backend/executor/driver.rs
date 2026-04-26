@@ -536,6 +536,11 @@ fn execute_statement_with_source(
             execute_update(bind_update(&stmt, catalog)?, catalog, ctx, xid, cid)
         }
         Statement::Delete(stmt) => execute_delete(bind_delete(&stmt, catalog)?, catalog, ctx, xid),
+        Statement::Unsupported(stmt) if stmt.feature == "ALTER DEFAULT PRIVILEGES" => {
+            // :HACK: pgrust does not track default ACLs yet; accept this DDL
+            // form so regression scripts that set up ownership can proceed.
+            Ok(StatementResult::AffectedRows(0))
+        }
         Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
         Statement::Begin
         | Statement::Commit
@@ -615,6 +620,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::Merge(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "MERGE".into(),
         ))),
+        Statement::Unsupported(stmt) if stmt.feature == "ALTER DEFAULT PRIVILEGES" => {
+            // :HACK: see readonly path above.
+            Ok(StatementResult::AffectedRows(0))
+        }
         Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
         Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

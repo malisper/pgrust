@@ -181,7 +181,7 @@ fn parse_statement_with_options_inner(
         if matches!(
             stmt,
             Statement::Unsupported(UnsupportedStatement {
-                feature: "ROLE management",
+                feature: "ROLE management" | "ALTER DEFAULT PRIVILEGES",
                 ..
             })
         ) {
@@ -3616,6 +3616,8 @@ fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
         Some("SELECT form")
     } else if lowered.starts_with("delete from ") {
         Some("DELETE form")
+    } else if lowered.starts_with("alter default privileges ") {
+        Some("ALTER DEFAULT PRIVILEGES")
     } else if lowered.starts_with("prepare ") {
         Some("PREPARE")
     } else if lowered.starts_with("execute ") {
@@ -11789,6 +11791,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
     let mut analyze = false;
     let mut buffers = false;
     let mut costs = true;
+    let mut summary = true;
     let mut timing = true;
     let mut verbose = false;
     let mut statement = None;
@@ -11819,9 +11822,10 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
                     Some(Rule::kw_analyze) => analyze = bool_val,
                     Some(Rule::kw_buffers) => buffers = bool_val,
                     Some(Rule::kw_costs) => costs = bool_val,
+                    Some(Rule::kw_summary) => summary = bool_val,
                     Some(Rule::kw_timing) => timing = bool_val,
                     Some(Rule::kw_verbose) => verbose = bool_val,
-                    _ => {} // SUMMARY, FORMAT: parsed but ignored
+                    _ => {} // FORMAT is parsed but ignored
                 }
             }
             Rule::select_stmt => statement = Some(Statement::Select(build_select(part)?)),
@@ -11842,6 +11846,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
         analyze,
         buffers,
         costs,
+        summary,
         timing,
         verbose,
         statement: Box::new(statement.ok_or(ParseError::UnexpectedEof)?),
@@ -12204,7 +12209,7 @@ fn build_values_statement(pair: Pair<'_, Rule>) -> Result<ValuesStatement, Parse
     })
 }
 
-fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
+pub(crate) fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
     SelectStatement {
         with_recursive: stmt.with_recursive,
         with: stmt.with,
@@ -13100,6 +13105,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     let mut query_sql = None;
     let mut is_ctas = false;
     let mut if_not_exists = false;
+    let mut skip_data = false;
     for part in pair.into_inner() {
         let part = if part.as_rule() == Rule::create_table_tail {
             part.into_inner().next().ok_or(ParseError::UnexpectedEof)?
@@ -13139,6 +13145,13 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                             query_sql = Some(inner.as_str().trim().to_string());
                             query = Some(build_select(inner)?);
                         }
+                        Rule::values_stmt => {
+                            query_sql = Some(inner.as_str().trim().to_string());
+                            query = Some(wrap_values_as_select(build_values_statement(inner)?));
+                        }
+                        Rule::matview_data_clause => {
+                            skip_data = inner.as_str().to_ascii_lowercase().contains("no");
+                        }
                         _ => {}
                     }
                 }
@@ -13171,7 +13184,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             query_sql,
             if_not_exists,
             object_type: TableAsObjectType::Table,
-            skip_data: false,
+            skip_data,
         }))
     } else {
         Ok(Statement::CreateTable(CreateTableStatement {
@@ -13255,6 +13268,10 @@ fn build_create_materialized_view(
             Rule::select_stmt => {
                 query_sql = Some(part.as_str().trim().to_string());
                 query = Some(build_select(part)?);
+            }
+            Rule::values_stmt => {
+                query_sql = Some(part.as_str().trim().to_string());
+                query = Some(wrap_values_as_select(build_values_statement(part)?));
             }
             Rule::matview_data_clause => {
                 skip_data = part.as_str().to_ascii_lowercase().contains("no");

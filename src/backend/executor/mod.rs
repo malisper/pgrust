@@ -136,6 +136,7 @@ use crate::backend::access::transam::xact::{
 };
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::Catalog;
+use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::commands::tablecmds::*;
 use crate::backend::parser::{
     ParseError, Statement, bind_delete, bind_insert, bind_update, parse_statement, pg_plan_query,
@@ -155,8 +156,8 @@ use crate::backend::utils::misc::stack_depth;
 use crate::include::access::htup::TupleError;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::pgrust::database::{
-    AsyncNotifyRuntime, DatabaseStatsStore, LargeObjectRuntime, PendingNotification,
-    SequenceRuntime, SessionStatsState, TransactionWaiter,
+    AsyncNotifyRuntime, Database, DatabaseStatsStore, LargeObjectRuntime, PendingNotification,
+    SequenceRuntime, SessionStatsState, TempMutationEffect, TransactionWaiter,
 };
 use crate::pl::plpgsql::CompiledFunction;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
@@ -377,6 +378,9 @@ pub struct ExecutorContext {
     pub timed: bool,
     pub allow_side_effects: bool,
     pub pending_async_notifications: Vec<PendingNotification>,
+    pub catalog_effects: Vec<CatalogMutationEffect>,
+    pub temp_effects: Vec<TempMutationEffect>,
+    pub database: Option<Database>,
     pub catalog: Option<VisibleCatalog>,
     pub compiled_functions: HashMap<u32, Arc<CompiledFunction>>,
     pub cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,

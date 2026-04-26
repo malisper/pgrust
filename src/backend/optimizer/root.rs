@@ -158,6 +158,14 @@ fn validate_select_locking(query: &Query, strength: SelectLockingClause) -> Resu
             "FOR UPDATE/SHARE in a recursive query is not implemented".into(),
         ));
     }
+    if let Some(relname) = jointree_materialized_view_name(query.jointree.as_ref(), &query.rtable) {
+        return Err(ParseError::DetailedError {
+            message: format!("cannot lock rows in materialized view \"{relname}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
     if jointree_contains_values(query.jointree.as_ref(), &query.rtable) {
         return Err(ParseError::FeatureNotSupportedMessage(format!(
             "{} cannot be applied to VALUES",
@@ -165,6 +173,26 @@ fn validate_select_locking(query: &Query, strength: SelectLockingClause) -> Resu
         )));
     }
     Ok(())
+}
+
+fn jointree_materialized_view_name(
+    jointree: Option<&JoinTreeNode>,
+    rtable: &[RangeTblEntry],
+) -> Option<String> {
+    let jointree = jointree?;
+    match jointree {
+        JoinTreeNode::RangeTblRef(rtindex) => {
+            let rte = rtable.get(rtindex.saturating_sub(1))?;
+            match rte.kind {
+                RangeTblEntryKind::Relation { relkind: 'm', .. } => rte.alias.clone(),
+                _ => None,
+            }
+        }
+        JoinTreeNode::JoinExpr { left, right, .. } => {
+            jointree_materialized_view_name(Some(left), rtable)
+                .or_else(|| jointree_materialized_view_name(Some(right), rtable))
+        }
+    }
 }
 
 fn jointree_contains_values(jointree: Option<&JoinTreeNode>, rtable: &[RangeTblEntry]) -> bool {

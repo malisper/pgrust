@@ -5858,6 +5858,17 @@ fn parse_type_cast_expression() {
 }
 
 #[test]
+fn analyze_unknown_type_cast_outputs_text() {
+    let stmt = parse_select("select 'foo'::unknown as u").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+    assert_eq!(
+        query_column_names_and_types(&query),
+        vec![("u".into(), SqlType::new(SqlTypeKind::Text))]
+    );
+}
+
+#[test]
 fn parse_field_select_uses_field_name_as_default_output_name() {
     let stmt = parse_select("select (jsonb_each('{\"a\":1}'::jsonb)).key").unwrap();
     assert_eq!(stmt.targets[0].output_name, "key");
@@ -8283,6 +8294,9 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create temp table tempy(id) as select 1").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, column_names, persistence: TablePersistence::Temporary, .. }) if table_name == "tempy" && column_names == vec!["id"])
     );
     assert!(
+        matches!(parse_statement("create table value_table(a, b) as values (1, 2)").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, column_names, query_sql: Some(query_sql), .. }) if table_name == "value_table" && column_names == vec!["a", "b"] && query_sql == "values (1, 2)")
+    );
+    assert!(
         matches!(
             parse_statement("create materialized view if not exists mv_items(id, name) as select id, name from people with no data").unwrap(),
             Statement::CreateTableAs(CreateTableAsStatement {
@@ -8296,6 +8310,45 @@ fn parse_insert_update_delete() {
             }) if table_name == "mv_items"
                 && column_names == vec!["id", "name"]
                 && query_sql == "select id, name from people"
+        )
+    );
+    assert!(
+        matches!(
+            parse_statement("create materialized view mv_withdata(a) as select generate_series(1, 10) with data").unwrap(),
+            Statement::CreateTableAs(CreateTableAsStatement {
+                table_name,
+                column_names,
+                object_type: TableAsObjectType::MaterializedView,
+                skip_data: false,
+                query_sql: Some(query_sql),
+                ..
+            }) if table_name == "mv_withdata"
+                && column_names == vec!["a"]
+                && query_sql == "select generate_series(1, 10)"
+        )
+    );
+    assert!(
+        matches!(
+            parse_statement("create materialized view mvtest_error as select 1/0 as x with no data").unwrap(),
+            Statement::CreateTableAs(CreateTableAsStatement {
+                table_name,
+                object_type: TableAsObjectType::MaterializedView,
+                skip_data: true,
+                query_sql: Some(query_sql),
+                ..
+            }) if table_name == "mvtest_error" && query_sql == "select 1/0 as x"
+        )
+    );
+    assert!(
+        matches!(
+            parse_statement("explain (analyze, costs off) create materialized view mv_nodata(a) as select generate_series(1, 10) with no data").unwrap(),
+            Statement::Explain(explain)
+                if matches!(explain.statement.as_ref(), Statement::CreateTableAs(CreateTableAsStatement {
+                    table_name,
+                    object_type: TableAsObjectType::MaterializedView,
+                    skip_data: true,
+                    ..
+                }) if table_name == "mv_nodata")
         )
     );
     assert!(
@@ -12847,6 +12900,21 @@ fn build_plan_for_select_list_generate_series_uses_project_set() {
                 }
             ));
         }
+        other => panic!("expected project set plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn build_plan_for_aliased_select_list_generate_series_uses_alias() {
+    let stmt = parse_select("select generate_series(1, 3) as a").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    match plan {
+        Plan::ProjectSet { targets, .. } => match &targets[..] {
+            [crate::include::nodes::primnodes::ProjectSetTarget::Set { name, .. }] => {
+                assert_eq!(name, "a");
+            }
+            other => panic!("expected single project set target, got {other:?}"),
+        },
         other => panic!("expected project set plan, got {other:?}"),
     }
 }

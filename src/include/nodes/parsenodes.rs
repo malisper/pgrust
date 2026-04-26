@@ -1091,6 +1091,7 @@ pub struct ExplainStatement {
     pub analyze: bool,
     pub buffers: bool,
     pub costs: bool,
+    pub summary: bool,
     pub timing: bool,
     pub verbose: bool,
     pub statement: Box<Statement>,

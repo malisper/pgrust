@@ -9,8 +9,8 @@ use crate::backend::optimizer::finalize_expr_subqueries;
 use crate::backend::parser::analyze::scope_for_relation;
 use crate::backend::parser::{
     BoundCte, BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup,
-    FromItem, ParseError, SelectStatement, SlotScopeColumn, SqlExpr, SqlType, SqlTypeKind,
-    Statement, bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
+    CreateTableAsStatement, FromItem, ParseError, SelectStatement, SlotScopeColumn, SqlExpr,
+    SqlType, SqlTypeKind, Statement, bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
     bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_expr,
     parse_statement, parse_type_name, pg_plan_query_with_outer_scopes_and_ctes,
     pg_plan_values_query_with_outer_scopes_and_ctes, resolve_raw_type_name,
@@ -279,6 +279,9 @@ pub(crate) enum CompiledStmt {
     },
     ExecDelete {
         stmt: BoundDeleteStatement,
+    },
+    CreateTableAs {
+        stmt: CreateTableAsStatement,
     },
 }
 
@@ -1476,6 +1479,7 @@ fn compile_exec_sql_stmt(
         Statement::Delete(stmt) => Ok(CompiledStmt::ExecDelete {
             stmt: bind_delete_with_outer_scopes(&stmt, catalog, &[outer_scope])?,
         }),
+        Statement::CreateTableAs(stmt) => Ok(CompiledStmt::CreateTableAs { stmt }),
         other => Err(ParseError::UnexpectedToken {
             expected: "PL/pgSQL SQL statement",
             actual: format!("{other:?}"),

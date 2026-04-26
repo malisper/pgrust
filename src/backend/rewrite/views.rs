@@ -8,15 +8,31 @@ use crate::backend::utils::time::timestamp::{
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
-    JoinTreeNode, Query, RangeTblEntryKind, SelectStatement, ViewCheckOption,
+    JoinTreeNode, Query, RangeTblEntryKind, SelectStatement, SetOperationQuery, SetOperator,
+    ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{
     Aggref, BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, JoinType, OpExprKind,
-    RelationDesc, ScalarArrayOpExpr, ScalarFunctionImpl, SubLink, SubLinkType, TargetEntry, Var,
-    attrno_index,
+    RelationDesc, ScalarArrayOpExpr, ScalarFunctionImpl, SetReturningCall, SubLink, SubLinkType,
+    TargetEntry, Var, attrno_index,
 };
 
 const RETURN_RULE_NAME: &str = "_RETURN";
+
+#[derive(Clone, Copy)]
+struct RenderOptions {
+    qualify_vars: bool,
+    include_aliases: bool,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self {
+            qualify_vars: false,
+            include_aliases: true,
+        }
+    }
+}
 
 fn view_display_name(relation_oid: u32, alias: Option<&str>) -> String {
     alias
@@ -120,9 +136,7 @@ fn validate_view_shape(
     for (actual_column, stored_column) in
         actual_columns.into_iter().zip(relation_desc.columns.iter())
     {
-        if !actual_column.name.eq_ignore_ascii_case(&stored_column.name)
-            || actual_column.sql_type != stored_column.sql_type
-        {
+        if actual_column.sql_type != stored_column.sql_type {
             return Err(ParseError::UnexpectedToken {
                 expected: "view query columns matching stored view descriptor",
                 actual: format!("stale view definition for {display_name}"),
@@ -130,6 +144,21 @@ fn validate_view_shape(
         }
     }
     Ok(())
+}
+
+fn apply_relation_desc_target_names(query: &mut Query, relation_desc: &RelationDesc) {
+    let mut column_index = 0usize;
+    for target in query
+        .target_list
+        .iter_mut()
+        .filter(|target| !target.resjunk)
+    {
+        if let Some(column) = relation_desc.columns.get(column_index) {
+            target.name = column.name.clone();
+            target.sql_type = column.sql_type;
+        }
+        column_index += 1;
+    }
 }
 
 pub(crate) fn load_view_return_query(
@@ -142,10 +171,11 @@ pub(crate) fn load_view_return_query(
     let select = load_view_return_select(relation_oid, alias, catalog, expanded_views)?;
     let mut next_views = expanded_views.to_vec();
     next_views.push(relation_oid);
-    let (query, _) =
+    let (mut query, _) =
         analyze_select_query_with_outer(&select, catalog, &[], None, None, &[], &next_views)?;
     let display_name = view_display_name(relation_oid, alias);
     validate_view_shape(&query, relation_desc, &display_name)?;
+    apply_relation_desc_target_names(&mut query, relation_desc);
     Ok(query)
 }
 
@@ -165,11 +195,15 @@ pub(crate) fn load_view_return_select(
     // pgrust still stores SQL text and reparses it here until the catalog
     // format is upgraded to preserve analyzed query trees directly.
     let stmt = crate::backend::parser::parse_statement(&sql)?;
-    let Statement::Select(select) = stmt else {
-        return Err(ParseError::UnexpectedToken {
-            expected: "SELECT view definition",
-            actual: sql.to_string(),
-        });
+    let select = match stmt {
+        Statement::Select(select) => select,
+        Statement::Values(values) => crate::backend::parser::wrap_values_as_select(values),
+        _ => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "SELECT view definition",
+                actual: sql.to_string(),
+            });
+        }
     };
     Ok(select)
 }
@@ -185,11 +219,23 @@ pub(crate) fn rewrite_view_relation_query(
 }
 
 fn render_view_query(query: &Query, catalog: &dyn CatalogLookup) -> String {
+    render_view_query_with_options(query, catalog, RenderOptions::default())
+}
+
+fn render_view_query_with_options(
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    options: RenderOptions,
+) -> String {
+    if let Some(set_operation) = &query.set_operation {
+        return render_set_operation_query(set_operation, catalog);
+    }
+
     let targets = query
         .target_list
         .iter()
         .filter(|target| !target.resjunk)
-        .map(|target| render_target_entry(target, query, catalog))
+        .map(|target| render_target_entry(target, query, catalog, options))
         .collect::<Vec<_>>();
     let mut lines = if targets.len() > 1 {
         let mut lines = vec![format!(" SELECT {},", targets[0])];
@@ -205,13 +251,13 @@ fn render_view_query(query: &Query, catalog: &dyn CatalogLookup) -> String {
     if let Some(jointree) = &query.jointree {
         lines.push(format!(
             "   FROM {}",
-            render_from_node(query, jointree, catalog, 3)
+            render_from_node(query, jointree, catalog, 3, options)
         ));
     }
     if let Some(where_qual) = &query.where_qual {
         lines.push(format!(
             "  WHERE {}",
-            render_expr(where_qual, query, catalog)
+            render_expr(where_qual, query, catalog, options)
         ));
     }
     if !query.group_by.is_empty() {
@@ -220,7 +266,7 @@ fn render_view_query(query: &Query, catalog: &dyn CatalogLookup) -> String {
             query
                 .group_by
                 .iter()
-                .map(|expr| render_expr(expr, query, catalog))
+                .map(|expr| render_expr(expr, query, catalog, options))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -228,7 +274,7 @@ fn render_view_query(query: &Query, catalog: &dyn CatalogLookup) -> String {
     if let Some(having_qual) = &query.having_qual {
         lines.push(format!(
             "  HAVING {}",
-            render_expr(having_qual, query, catalog)
+            render_expr(having_qual, query, catalog, options)
         ));
     }
     if !query.sort_clause.is_empty() {
@@ -237,7 +283,7 @@ fn render_view_query(query: &Query, catalog: &dyn CatalogLookup) -> String {
             query
                 .sort_clause
                 .iter()
-                .map(|sort| render_expr(&sort.expr, query, catalog))
+                .map(|sort| render_expr(&sort.expr, query, catalog, options))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -245,14 +291,79 @@ fn render_view_query(query: &Query, catalog: &dyn CatalogLookup) -> String {
     lines.join("\n") + ";"
 }
 
-fn render_target_entry(target: &TargetEntry, query: &Query, catalog: &dyn CatalogLookup) -> String {
+fn render_set_operation_query(
+    set_operation: &SetOperationQuery,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let operator = match set_operation.op {
+        SetOperator::Union { all } => {
+            if all {
+                "UNION ALL"
+            } else {
+                "UNION"
+            }
+        }
+        SetOperator::Intersect { all } => {
+            if all {
+                "INTERSECT ALL"
+            } else {
+                "INTERSECT"
+            }
+        }
+        SetOperator::Except { all } => {
+            if all {
+                "EXCEPT ALL"
+            } else {
+                "EXCEPT"
+            }
+        }
+    };
+    set_operation
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            render_view_query_with_options(
+                input,
+                catalog,
+                RenderOptions {
+                    qualify_vars: true,
+                    include_aliases: index == 0,
+                },
+            )
+            .trim_end_matches(';')
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(&format!("\n{operator}\n"))
+        + ";"
+}
+
+fn render_target_entry(
+    target: &TargetEntry,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    options: RenderOptions,
+) -> String {
     let mut rendered = match &target.expr {
         Expr::Var(var) if join_using_var_needs_cast(var, target.sql_type, query) => format!(
             "({})::{}",
-            var_name(var, query).unwrap_or_else(|| format!("var{}", var.varattno)),
+            var_name(var, query, catalog, options)
+                .unwrap_or_else(|| format!("var{}", var.varattno)),
             render_sql_type(target.sql_type)
         ),
-        _ => render_expr(&target.expr, query, catalog),
+        Expr::Const(Value::Null) if target.sql_type.kind == SqlTypeKind::Text => {
+            "NULL::text".into()
+        }
+        Expr::Const(Value::Text(_) | Value::TextRef(_, _))
+            if target.sql_type.kind == SqlTypeKind::Text =>
+        {
+            format!(
+                "{}::text",
+                render_expr(&target.expr, query, catalog, options)
+            )
+        }
+        _ => render_expr(&target.expr, query, catalog, options),
     };
     if target.name.eq_ignore_ascii_case("dat_at_local")
         && let Some(inner) = rendered
@@ -261,7 +372,15 @@ fn render_target_entry(target: &TargetEntry, query: &Query, catalog: &dyn Catalo
     {
         rendered = format!("({inner} AT LOCAL)");
     }
-    if rendered == quote_identifier_if_needed(&target.name) {
+    if !options.include_aliases
+        || rendered == quote_identifier_if_needed(&target.name)
+        || matches!(
+            &target.expr,
+            Expr::Var(var)
+                if var_name(var, query, catalog, RenderOptions::default()).as_deref()
+                    == Some(target.name.as_str())
+        )
+    {
         rendered
     } else {
         format!("{rendered} AS {}", quote_identifier_if_needed(&target.name))
@@ -273,9 +392,10 @@ fn render_from_node(
     node: &JoinTreeNode,
     catalog: &dyn CatalogLookup,
     indent: usize,
+    options: RenderOptions,
 ) -> String {
     match node {
-        JoinTreeNode::RangeTblRef(index) => render_rte(query, *index, catalog),
+        JoinTreeNode::RangeTblRef(index) => render_rte(query, *index, catalog, options),
         JoinTreeNode::JoinExpr {
             left,
             right,
@@ -283,8 +403,8 @@ fn render_from_node(
             quals,
             rtindex,
         } => {
-            let left_sql = render_from_node(query, left, catalog, indent + 3);
-            let right_sql = render_from_node(query, right, catalog, indent + 3);
+            let left_sql = render_from_node(query, left, catalog, indent + 3, options);
+            let right_sql = render_from_node(query, right, catalog, indent + 3, options);
             let using_cols = query
                 .rtable
                 .get(rtindex.saturating_sub(1))
@@ -301,7 +421,7 @@ fn render_from_node(
                 })
                 .unwrap_or_default();
             let constraint = if using_cols.is_empty() {
-                format!("ON {}", render_expr(quals, query, catalog))
+                format!("ON {}", render_expr(quals, query, catalog, options))
             } else {
                 format!("USING ({})", using_cols.join(", "))
             };
@@ -316,7 +436,12 @@ fn render_from_node(
     }
 }
 
-fn render_rte(query: &Query, index: usize, catalog: &dyn CatalogLookup) -> String {
+fn render_rte(
+    query: &Query,
+    index: usize,
+    catalog: &dyn CatalogLookup,
+    options: RenderOptions,
+) -> String {
     let Some(rte) = query.rtable.get(index.saturating_sub(1)) else {
         return format!("rte{index}");
     };
@@ -330,6 +455,7 @@ fn render_rte(query: &Query, index: usize, catalog: &dyn CatalogLookup) -> Strin
                 .unwrap_or_default();
             if let Some(alias) = &rte.alias
                 && !alias.eq_ignore_ascii_case(&relname)
+                && !alias.eq_ignore_ascii_case(&base)
             {
                 format!("{base} {}", quote_identifier_if_needed(alias))
             } else {
@@ -337,7 +463,7 @@ fn render_rte(query: &Query, index: usize, catalog: &dyn CatalogLookup) -> Strin
             }
         }
         RangeTblEntryKind::Subquery { query } => {
-            let rendered = render_view_query(query, catalog);
+            let rendered = render_view_query_with_options(query, catalog, options);
             let body = rendered.strip_suffix(';').unwrap_or(&rendered);
             match &rte.alias {
                 Some(alias) => format!("({body}) {}", quote_identifier_if_needed(alias)),
@@ -346,16 +472,25 @@ fn render_rte(query: &Query, index: usize, catalog: &dyn CatalogLookup) -> Strin
         }
         RangeTblEntryKind::Join { .. } => rte.alias.clone().unwrap_or_else(|| "join".into()),
         RangeTblEntryKind::Values { .. } => "(VALUES (...))".into(),
-        RangeTblEntryKind::Function { .. } => "function_call".into(),
+        RangeTblEntryKind::Function { call } => {
+            render_set_returning_call(call, query, catalog, options)
+        }
         RangeTblEntryKind::Result => "(RESULT)".into(),
         RangeTblEntryKind::WorkTable { worktable_id } => format!("worktable {worktable_id}"),
         RangeTblEntryKind::Cte { cte_id, .. } => format!("cte {cte_id}"),
     }
 }
 
-fn render_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> String {
+fn render_expr(
+    expr: &Expr,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    options: RenderOptions,
+) -> String {
     match expr {
-        Expr::Var(var) => var_name(var, query).unwrap_or_else(|| format!("var{}", var.varattno)),
+        Expr::Var(var) => {
+            var_name(var, query, catalog, options).unwrap_or_else(|| format!("var{}", var.varattno))
+        }
         Expr::Const(value) => render_literal(value),
         Expr::Cast(inner, ty) => {
             if let Some(rendered) = render_datetime_cast_literal(inner, *ty) {
@@ -364,68 +499,153 @@ fn render_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> Strin
             if matches!(**inner, Expr::Const(_) | Expr::Var(_)) {
                 format!(
                     "{}::{}",
-                    render_expr(inner, query, catalog),
+                    render_expr(inner, query, catalog, options),
                     render_sql_type(*ty)
                 )
             } else {
                 format!(
                     "({})::{}",
-                    render_expr(inner, query, catalog),
+                    render_expr(inner, query, catalog, options),
                     render_sql_type(*ty)
                 )
             }
         }
-        Expr::Aggref(aggref) => render_aggregate(aggref, query, catalog),
+        Expr::Aggref(aggref) => render_aggregate(aggref, query, catalog, options),
         Expr::Bool(bool_expr) => match bool_expr.boolop {
             BoolExprType::Not => format!(
                 "NOT {}",
-                render_wrapped_expr(&bool_expr.args[0], query, catalog)
+                render_wrapped_expr(&bool_expr.args[0], query, catalog, options)
             ),
             BoolExprType::And => bool_expr
                 .args
                 .iter()
-                .map(|arg| render_wrapped_expr(arg, query, catalog))
+                .map(|arg| render_wrapped_expr(arg, query, catalog, options))
                 .collect::<Vec<_>>()
                 .join(" AND "),
             BoolExprType::Or => bool_expr
                 .args
                 .iter()
-                .map(|arg| render_wrapped_expr(arg, query, catalog))
+                .map(|arg| render_wrapped_expr(arg, query, catalog, options))
                 .collect::<Vec<_>>()
                 .join(" OR "),
         },
-        Expr::Op(op) => render_op(op.op, &op.args, query, catalog),
-        Expr::SubLink(sublink) => render_sublink(sublink, query, catalog),
-        Expr::ScalarArrayOp(saop) => render_scalar_array_op(saop, query, catalog),
-        Expr::Func(func) => render_function(func, query, catalog),
-        Expr::IsNull(inner) => format!("{} IS NULL", render_wrapped_expr(inner, query, catalog)),
+        Expr::Op(op) => render_op(op.op, &op.args, query, catalog, options),
+        Expr::SubLink(sublink) => render_sublink(sublink, query, catalog, options),
+        Expr::ScalarArrayOp(saop) => render_scalar_array_op(saop, query, catalog, options),
+        Expr::Func(func) => render_function(func, query, catalog, options),
+        Expr::SetReturning(srf) => render_set_returning_call(&srf.call, query, catalog, options),
+        Expr::IsNull(inner) => {
+            format!(
+                "{} IS NULL",
+                render_wrapped_expr(inner, query, catalog, options)
+            )
+        }
         Expr::IsNotNull(inner) => {
-            format!("{} IS NOT NULL", render_wrapped_expr(inner, query, catalog))
+            format!(
+                "{} IS NOT NULL",
+                render_wrapped_expr(inner, query, catalog, options)
+            )
         }
         Expr::IsDistinctFrom(left, right) => format!(
             "{} IS DISTINCT FROM {}",
-            render_wrapped_expr(left, query, catalog),
-            render_wrapped_expr(right, query, catalog)
+            render_wrapped_expr(left, query, catalog, options),
+            render_wrapped_expr(right, query, catalog, options)
         ),
         Expr::IsNotDistinctFrom(left, right) => format!(
             "{} IS NOT DISTINCT FROM {}",
-            render_wrapped_expr(left, query, catalog),
-            render_wrapped_expr(right, query, catalog)
+            render_wrapped_expr(left, query, catalog, options),
+            render_wrapped_expr(right, query, catalog, options)
         ),
         Expr::Coalesce(left, right) => format!(
             "COALESCE({}, {})",
-            render_expr(left, query, catalog),
-            render_expr(right, query, catalog)
+            render_expr(left, query, catalog, options),
+            render_expr(right, query, catalog, options)
         ),
         Expr::ArrayLiteral { elements, .. } => format!(
             "ARRAY[{}]",
             elements
                 .iter()
-                .map(|element| render_expr(element, query, catalog))
+                .map(|element| render_expr(element, query, catalog, options))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
         _ => format!("{expr:?}"),
+    }
+}
+
+fn render_set_returning_call(
+    call: &SetReturningCall,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    options: RenderOptions,
+) -> String {
+    match call {
+        SetReturningCall::GenerateSeries {
+            start,
+            stop,
+            step,
+            timezone,
+            with_ordinality,
+            ..
+        } => {
+            let mut args = vec![
+                render_expr(start, query, catalog, options),
+                render_expr(stop, query, catalog, options),
+            ];
+            let rendered_step = render_expr(step, query, catalog, options);
+            if rendered_step != "1" {
+                args.push(rendered_step);
+            }
+            if let Some(timezone) = timezone {
+                args.push(render_expr(timezone, query, catalog, options));
+            }
+            let mut sql = format!("generate_series({})", args.join(", "));
+            if *with_ordinality {
+                sql.push_str(" WITH ORDINALITY");
+            }
+            sql
+        }
+        SetReturningCall::Unnest {
+            args,
+            with_ordinality,
+            ..
+        } => {
+            let mut sql = format!(
+                "unnest({})",
+                args.iter()
+                    .map(|arg| render_expr(arg, query, catalog, options))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            if *with_ordinality {
+                sql.push_str(" WITH ORDINALITY");
+            }
+            sql
+        }
+        SetReturningCall::UserDefined {
+            proc_oid,
+            args,
+            with_ordinality,
+            ..
+        } => {
+            let name = catalog
+                .proc_row_by_oid(*proc_oid)
+                .map(|row| row.proname)
+                .unwrap_or_else(|| format!("proc_{proc_oid}"));
+            let mut sql = format!(
+                "{}({})",
+                name,
+                args.iter()
+                    .map(|arg| render_expr(arg, query, catalog, options))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            if *with_ordinality {
+                sql.push_str(" WITH ORDINALITY");
+            }
+            sql
+        }
+        other => format!("{other:?}"),
     }
 }
 
@@ -460,16 +680,26 @@ fn postgres_utc_datetime_config() -> DateTimeConfig {
     config
 }
 
-fn render_wrapped_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> String {
+fn render_wrapped_expr(
+    expr: &Expr,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    options: RenderOptions,
+) -> String {
     match expr {
         Expr::Op(_) | Expr::Bool(_) | Expr::ScalarArrayOp(_) => {
-            format!("({})", render_expr(expr, query, catalog))
+            format!("({})", render_expr(expr, query, catalog, options))
         }
-        _ => render_expr(expr, query, catalog),
+        _ => render_expr(expr, query, catalog, options),
     }
 }
 
-fn render_sublink(sublink: &SubLink, query: &Query, catalog: &dyn CatalogLookup) -> String {
+fn render_sublink(
+    sublink: &SubLink,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    options: RenderOptions,
+) -> String {
     let subquery = render_subquery_expr(&sublink.subselect, catalog);
     match sublink.sublink_type {
         SubLinkType::ExistsSubLink => format!("(EXISTS ({subquery}))"),
@@ -479,7 +709,7 @@ fn render_sublink(sublink: &SubLink, query: &Query, catalog: &dyn CatalogLookup)
             let Some(testexpr) = &sublink.testexpr else {
                 return format!("ANY ({subquery})");
             };
-            let left = render_wrapped_expr(testexpr, query, catalog);
+            let left = render_wrapped_expr(testexpr, query, catalog, options);
             if op == SubqueryComparisonOp::Eq {
                 format!("({left} IN ({subquery}))")
             } else {
@@ -492,7 +722,7 @@ fn render_sublink(sublink: &SubLink, query: &Query, catalog: &dyn CatalogLookup)
             };
             format!(
                 "({} {} ALL ({subquery}))",
-                render_wrapped_expr(testexpr, query, catalog),
+                render_wrapped_expr(testexpr, query, catalog, options),
                 render_subquery_op(op)
             )
         }
@@ -509,9 +739,10 @@ fn render_scalar_array_op(
     saop: &ScalarArrayOpExpr,
     query: &Query,
     catalog: &dyn CatalogLookup,
+    options: RenderOptions,
 ) -> String {
-    let left = render_wrapped_expr(&saop.left, query, catalog);
-    let right = render_scalar_array_rhs(&saop.right, query, catalog);
+    let left = render_wrapped_expr(&saop.left, query, catalog, options);
+    let right = render_scalar_array_rhs(&saop.right, query, catalog, options);
     let quantifier = if saop.use_or { "ANY" } else { "ALL" };
     if saop.use_or && saop.op == SubqueryComparisonOp::Eq {
         format!("{left} = {quantifier} ({right})")
@@ -523,19 +754,29 @@ fn render_scalar_array_op(
     }
 }
 
-fn render_scalar_array_rhs(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> String {
+fn render_scalar_array_rhs(
+    expr: &Expr,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    options: RenderOptions,
+) -> String {
     match expr {
-        Expr::SubLink(sublink) => render_sublink(sublink, query, catalog),
-        _ => render_expr(expr, query, catalog),
+        Expr::SubLink(sublink) => render_sublink(sublink, query, catalog, options),
+        _ => render_expr(expr, query, catalog, options),
     }
 }
 
-fn render_function(func: &FuncExpr, query: &Query, catalog: &dyn CatalogLookup) -> String {
+fn render_function(
+    func: &FuncExpr,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    options: RenderOptions,
+) -> String {
     if matches!(
         func.implementation,
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Timezone)
     ) {
-        return render_timezone_function(func, query, catalog);
+        return render_timezone_function(func, query, catalog, options);
     }
     let name = match func.implementation {
         ScalarFunctionImpl::Builtin(builtin) => render_builtin_function_name(builtin).into(),
@@ -549,23 +790,28 @@ fn render_function(func: &FuncExpr, query: &Query, catalog: &dyn CatalogLookup) 
         name,
         func.args
             .iter()
-            .map(|arg| render_expr(arg, query, catalog))
+            .map(|arg| render_expr(arg, query, catalog, options))
             .collect::<Vec<_>>()
             .join(", ")
     )
 }
 
-fn render_timezone_function(func: &FuncExpr, query: &Query, catalog: &dyn CatalogLookup) -> String {
+fn render_timezone_function(
+    func: &FuncExpr,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    options: RenderOptions,
+) -> String {
     match func.args.as_slice() {
-        [value] => format!("timezone({})", render_expr(value, query, catalog)),
+        [value] => format!("timezone({})", render_expr(value, query, catalog, options)),
         [zone, value] if is_local_timezone_marker(zone) => {
-            format!("({} AT LOCAL)", render_expr(value, query, catalog))
+            format!("({} AT LOCAL)", render_expr(value, query, catalog, options))
         }
         [zone, value] => {
             format!(
                 "({} AT TIME ZONE {})",
-                render_expr(value, query, catalog),
-                render_timezone_zone_arg(zone, query, catalog)
+                render_expr(value, query, catalog, options),
+                render_timezone_zone_arg(zone, query, catalog, options)
             )
         }
         _ => "timezone()".into(),
@@ -579,8 +825,13 @@ fn is_local_timezone_marker(expr: &Expr) -> bool {
     )
 }
 
-fn render_timezone_zone_arg(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> String {
-    let rendered = render_expr(expr, query, catalog);
+fn render_timezone_zone_arg(
+    expr: &Expr,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    options: RenderOptions,
+) -> String {
+    let rendered = render_expr(expr, query, catalog, options);
     if rendered == "current_setting('TimeZone')" {
         "current_setting('TimeZone'::text)".into()
     } else if rendered == "'00:00'::text" || rendered == "'00:00'::interval" {
@@ -590,7 +841,12 @@ fn render_timezone_zone_arg(expr: &Expr, query: &Query, catalog: &dyn CatalogLoo
     }
 }
 
-fn render_aggregate(aggref: &Aggref, query: &Query, catalog: &dyn CatalogLookup) -> String {
+fn render_aggregate(
+    aggref: &Aggref,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    options: RenderOptions,
+) -> String {
     let name = catalog
         .proc_row_by_oid(aggref.aggfnoid)
         .map(|row| row.proname)
@@ -598,7 +854,7 @@ fn render_aggregate(aggref: &Aggref, query: &Query, catalog: &dyn CatalogLookup)
     let mut args = aggref
         .args
         .iter()
-        .map(|arg| render_expr(arg, query, catalog))
+        .map(|arg| render_expr(arg, query, catalog, options))
         .collect::<Vec<_>>();
     if aggref.aggdistinct && !args.is_empty() {
         args[0] = format!("DISTINCT {}", args[0]);
@@ -606,16 +862,28 @@ fn render_aggregate(aggref: &Aggref, query: &Query, catalog: &dyn CatalogLookup)
     format!("{name}({})", args.join(", "))
 }
 
-fn render_op(op: OpExprKind, args: &[Expr], query: &Query, catalog: &dyn CatalogLookup) -> String {
+fn render_op(
+    op: OpExprKind,
+    args: &[Expr],
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    options: RenderOptions,
+) -> String {
     match (op, args) {
-        (OpExprKind::UnaryPlus, [arg]) => format!("+{}", render_wrapped_expr(arg, query, catalog)),
-        (OpExprKind::Negate, [arg]) => format!("-{}", render_wrapped_expr(arg, query, catalog)),
-        (OpExprKind::BitNot, [arg]) => format!("~{}", render_wrapped_expr(arg, query, catalog)),
+        (OpExprKind::UnaryPlus, [arg]) => {
+            format!("+{}", render_wrapped_expr(arg, query, catalog, options))
+        }
+        (OpExprKind::Negate, [arg]) => {
+            format!("-{}", render_wrapped_expr(arg, query, catalog, options))
+        }
+        (OpExprKind::BitNot, [arg]) => {
+            format!("~{}", render_wrapped_expr(arg, query, catalog, options))
+        }
         (_, [left, right]) => format!(
             "{} {} {}",
-            render_wrapped_expr(left, query, catalog),
+            render_wrapped_expr(left, query, catalog, options),
             render_binary_operator(op),
-            render_wrapped_expr(right, query, catalog)
+            render_wrapped_expr(right, query, catalog, options)
         ),
         _ => format!("{op:?}"),
     }
@@ -751,13 +1019,29 @@ fn render_sql_type(ty: SqlType) -> String {
     .into()
 }
 
-fn var_name(var: &Var, query: &Query) -> Option<String> {
+fn var_name(
+    var: &Var,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    options: RenderOptions,
+) -> Option<String> {
     let column_index = attrno_index(var.varattno)?;
-    query
-        .rtable
-        .get(var.varno.checked_sub(1)?)
-        .and_then(|rte| rte.desc.columns.get(column_index))
-        .map(|column| quote_identifier_if_needed(&column.name))
+    let rte = query.rtable.get(var.varno.checked_sub(1)?)?;
+    let column_name = rte
+        .desc
+        .columns
+        .get(column_index)
+        .map(|column| quote_identifier_if_needed(&column.name))?;
+    if !options.qualify_vars {
+        return Some(column_name);
+    }
+    let qualifier = rte.alias.clone().or_else(|| match &rte.kind {
+        RangeTblEntryKind::Relation { relation_oid, .. } => catalog
+            .class_row_by_oid(*relation_oid)
+            .map(|class| quote_identifier_if_needed(&class.relname)),
+        _ => None,
+    })?;
+    Some(format!("{qualifier}.{column_name}"))
 }
 
 fn relation_sql_name(relation_oid: u32, catalog: &dyn CatalogLookup) -> Option<String> {

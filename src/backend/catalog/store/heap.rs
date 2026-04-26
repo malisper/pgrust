@@ -828,6 +828,7 @@ impl CatalogStore {
             db_oid,
             relpersistence,
             'r',
+            true,
             toast_namespace_oid,
             toast_namespace_name,
             owner_oid,
@@ -845,6 +846,7 @@ impl CatalogStore {
         toast_namespace_oid: u32,
         toast_namespace_name: &str,
         owner_oid: u32,
+        relispopulated: bool,
         ctx: &CatalogWriteContext,
     ) -> Result<(CreateTableResult, CatalogMutationEffect), CatalogError> {
         self.create_storage_relation_mvcc_with_options(
@@ -854,6 +856,7 @@ impl CatalogStore {
             db_oid,
             relpersistence,
             'm',
+            relispopulated,
             toast_namespace_oid,
             toast_namespace_name,
             owner_oid,
@@ -869,6 +872,7 @@ impl CatalogStore {
         db_oid: u32,
         relpersistence: char,
         relkind: char,
+        relispopulated: bool,
         toast_namespace_oid: u32,
         toast_namespace_name: &str,
         owner_oid: u32,
@@ -884,7 +888,7 @@ impl CatalogStore {
             ));
         }
         let mut control = self.control_state()?;
-        let entry = build_relation_entry(
+        let mut entry = build_relation_entry(
             name.clone(),
             desc,
             namespace_oid,
@@ -894,6 +898,7 @@ impl CatalogStore {
             owner_oid,
             &mut control,
         )?;
+        entry.relispopulated = relispopulated;
         let toast = build_toast_catalog_changes(
             &name,
             &entry,
@@ -2775,9 +2780,33 @@ impl CatalogStore {
         &mut self,
         namespace_oid: u32,
         namespace_name: &str,
-        owner_oid: u32,
+        _owner_oid: u32,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
+        let snapshot = ctx
+            .txns
+            .read()
+            .snapshot_for_command(ctx.xid, ctx.cid)
+            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let existing_row = probe_system_catalog_rows_visible_in_db(
+            &ctx.pool,
+            &ctx.txns,
+            &snapshot,
+            ctx.client_id,
+            self.scope_db_oid(),
+            PG_NAMESPACE_OID_INDEX_OID,
+            vec![crate::include::access::scankey::ScanKeyData {
+                attribute_number: 1,
+                strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                argument: Value::Int64(i64::from(namespace_oid)),
+            }],
+        )?
+        .into_iter()
+        .map(crate::backend::catalog::rowcodec::namespace_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .next()
+        .ok_or_else(|| CatalogError::UnknownTable(namespace_oid.to_string()))?;
         let publication_namespaces =
             publication_namespace_rows_for_namespace_mvcc(self, ctx, namespace_oid)?;
         let mut depends = Vec::new();
@@ -2795,12 +2824,7 @@ impl CatalogStore {
             self.invalidate_relcache_init_for_kinds(&[BootstrapCatalogKind::PgNamespace]);
         }
         let rows = PhysicalCatalogRows {
-            namespaces: vec![PgNamespaceRow {
-                oid: namespace_oid,
-                nspname: namespace_name.to_string(),
-                nspowner: owner_oid,
-                nspacl: None,
-            }],
+            namespaces: vec![existing_row],
             publication_namespaces,
             depends,
             ..PhysicalCatalogRows::default()

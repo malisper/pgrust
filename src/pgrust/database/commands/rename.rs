@@ -497,15 +497,17 @@ impl Database {
             &new_column_name,
             rename_stmt.only,
         )?;
+        let mut dependent_views = Vec::new();
         for target in &targets {
-            reject_relation_with_dependent_views(
+            dependent_views.extend(dependent_view_rewrites_for_relation(
                 self,
                 client_id,
                 Some((xid, cid)),
                 target.relation_oid,
-                "ALTER TABLE RENAME COLUMN on relation without dependent views",
-            )?;
+            )?);
         }
+        dependent_views.sort_by_key(|view| view.relation_oid);
+        dependent_views.dedup_by_key(|view| view.relation_oid);
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -528,6 +530,15 @@ impl Database {
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
         }
+        rewrite_dependent_views(
+            self,
+            client_id,
+            Some((xid, cid.saturating_add(10))),
+            &dependent_views,
+            xid,
+            cid.saturating_add(10),
+            catalog_effects,
+        )?;
         Ok(StatementResult::AffectedRows(0))
     }
 

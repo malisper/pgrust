@@ -1247,7 +1247,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
-    ) -> Result<(), ExecError> {
+    ) -> Result<CommandId, ExecError> {
         let catcache = self
             .backend_catcache(client_id, Some((xid, cid)))
             .map_err(map_catalog_error)?;
@@ -1256,6 +1256,7 @@ impl Database {
             .class_rows()
             .into_iter()
             .filter(|row| row.relnamespace == schema_oid)
+            .filter(|row| matches!(row.relkind, 'r' | 'p' | 'm' | 'S' | 'v'))
             .collect::<Vec<_>>();
         let proc_rows = catcache
             .proc_rows()
@@ -1330,7 +1331,7 @@ impl Database {
             next_cid = next_cid.saturating_add(1);
         }
 
-        Ok(())
+        Ok(next_cid)
     }
 
     pub(crate) fn execute_drop_domain_stmt_with_search_path(
@@ -1661,6 +1662,11 @@ impl Database {
         for index_name in &drop_stmt.index_names {
             let Some(entry) = catalog.lookup_any_relation(index_name) else {
                 if drop_stmt.if_exists {
+                    let display_name = index_name.rsplit('.').next().unwrap_or(index_name);
+                    push_notice(format!(
+                        "index \"{}\" does not exist, skipping",
+                        display_name.trim_matches('"')
+                    ));
                     continue;
                 }
                 return Err(ExecError::DetailedError {
@@ -1911,23 +1917,33 @@ impl Database {
                     .role_by_oid(auth.current_user_oid())
                     .map(|row| row.rolname.as_str())
                     .unwrap_or("");
-                for relation in relation_rows
+                let notices = relation_rows
                     .iter()
                     .filter(|row| matches!(row.relkind, 'r' | 'p' | 'm' | 'S' | 'v'))
-                {
-                    push_notice(format!(
-                        "drop cascades to {} {}",
-                        drop_table_relation_kind_name(relation.relkind),
-                        drop_schema_display_relation_name(
-                            &catcache,
-                            relation.oid,
-                            current_role_name
+                    .map(|relation| {
+                        format!(
+                            "drop cascades to {} {}",
+                            drop_table_relation_kind_name(relation.relkind),
+                            drop_schema_display_relation_name(
+                                &catcache,
+                                relation.oid,
+                                current_role_name
+                            )
                         )
-                    ));
+                    })
+                    .collect::<Vec<_>>();
+                match notices.as_slice() {
+                    [] => {}
+                    [notice] => push_notice(notice.clone()),
+                    notices => push_notice_with_detail(
+                        format!("drop cascades to {} other objects", notices.len()),
+                        notices.join("\n"),
+                    ),
                 }
             }
+            let mut namespace_cid = cid;
             if has_relations || has_procs {
-                self.drop_schema_owned_objects_in_transaction(
+                namespace_cid = self.drop_schema_owned_objects_in_transaction(
                     client_id,
                     schema.oid,
                     xid,
@@ -1939,7 +1955,7 @@ impl Database {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),
                 xid,
-                cid,
+                cid: namespace_cid,
                 client_id,
                 waiter: Some(self.txn_waiter.clone()),
                 interrupts: self.interrupt_state(client_id),
@@ -2184,7 +2200,18 @@ impl Database {
                         expected: expected_name,
                     }));
                 }
-                None if if_exists => continue,
+                None if if_exists => {
+                    push_notice(format!(
+                        "{} \"{}\" does not exist, skipping",
+                        expected_name,
+                        relation_name
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(relation_name)
+                            .trim_matches('"')
+                    ));
+                    continue;
+                }
                 None => {
                     return Err(ExecError::Parse(ParseError::TableDoesNotExist(
                         relation_name.clone(),

@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::BTreeSet;
 
 use crate::backend::executor::{
@@ -15,6 +16,10 @@ use crate::include::nodes::primnodes::{
     set_returning_call_exprs,
 };
 use crate::include::storage::buf_internals::BufferUsageStats;
+
+thread_local! {
+    static EXPLAIN_TIMING_ENABLED: Cell<bool> = const { Cell::new(true) };
+}
 
 pub(crate) fn format_explain_lines(
     state: &dyn PlanNode,
@@ -39,6 +44,21 @@ pub(crate) fn format_explain_lines_with_costs(
     push_explain_state_line(state, indent, analyze, show_costs, lines);
     state.explain_details(indent, analyze, show_costs, lines);
     state.explain_children(indent, analyze, show_costs, lines);
+}
+
+pub(crate) fn format_explain_lines_with_costs_and_timing(
+    state: &dyn PlanNode,
+    indent: usize,
+    analyze: bool,
+    show_costs: bool,
+    timing: bool,
+    lines: &mut Vec<String>,
+) {
+    EXPLAIN_TIMING_ENABLED.with(|enabled| {
+        let previous = enabled.replace(timing);
+        format_explain_lines_with_costs(state, indent, analyze, show_costs, lines);
+        enabled.set(previous);
+    });
 }
 
 pub(crate) fn push_explain_line(
@@ -236,35 +256,35 @@ fn push_explain_state_line(
     show_costs: bool,
     lines: &mut Vec<String>,
 ) {
-    let prefix = explain_node_prefix(indent, false);
+    let prefix = explain_node_prefix(indent, indent > 0);
     let label = state.node_label();
     let plan_info = state.plan_info();
-    if analyze && show_costs {
+    if analyze {
         let stats = state.node_stats();
-        lines.push(format!(
-            "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={}) (actual time={:.3}..{:.3} rows={:.2} loops={})",
-            plan_info.startup_cost.as_f64(),
-            plan_info.total_cost.as_f64(),
-            plan_info.plan_rows.as_f64().round() as u64,
-            plan_info.plan_width,
-            stats
-                .first_tuple_time
-                .unwrap_or_default()
-                .as_secs_f64()
-                * 1000.0,
-            stats.total_time.as_secs_f64() * 1000.0,
-            stats.rows as f64,
-            stats.loops,
-        ));
-    } else if analyze {
-        let stats = state.node_stats();
-        lines.push(format!(
-            "{prefix}{label}  (actual time={:.3}..{:.3} rows={:.2} loops={})",
-            stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
-            stats.total_time.as_secs_f64() * 1000.0,
-            stats.rows as f64,
-            stats.loops,
-        ));
+        let actual = if stats.loops == 0 {
+            "never executed".to_string()
+        } else if EXPLAIN_TIMING_ENABLED.with(Cell::get) {
+            format!(
+                "actual time={:.3}..{:.3} rows={:.2} loops={}",
+                stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
+                stats.total_time.as_secs_f64() * 1000.0,
+                stats.rows as f64,
+                stats.loops,
+            )
+        } else {
+            format!("actual rows={:.2} loops={}", stats.rows as f64, stats.loops)
+        };
+        if show_costs {
+            lines.push(format!(
+                "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={}) ({actual})",
+                plan_info.startup_cost.as_f64(),
+                plan_info.total_cost.as_f64(),
+                plan_info.plan_rows.as_f64().round() as u64,
+                plan_info.plan_width,
+            ));
+        } else {
+            lines.push(format!("{prefix}{label} ({actual})"));
+        }
     } else if show_costs {
         lines.push(format!(
             "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={})",
@@ -317,11 +337,40 @@ fn push_nonverbose_plan_details(
                     .map(|item| render_verbose_expr(&item.expr, &input_names, ctx))
                     .collect::<Vec<_>>()
             } else {
-                display_items.clone()
+                display_items
+                    .iter()
+                    .map(|item| {
+                        remap_sort_display_item_through_aggregate(input, item)
+                            .unwrap_or_else(|| item.clone())
+                    })
+                    .collect()
             };
             let sort_key = sort_items.join(", ");
             if !sort_key.is_empty() {
                 lines.push(format!("{prefix}Sort Key: {sort_key}"));
+            }
+            true
+        }
+        Plan::Aggregate {
+            input,
+            group_by,
+            having,
+            ..
+        } => {
+            if !group_by.is_empty() {
+                let input_names = aggregate_group_key_input_names(input, ctx, indent > 0);
+                let group_key = group_by
+                    .iter()
+                    .map(|expr| render_verbose_expr(expr, &input_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push(format!("{prefix}Group Key: {group_key}"));
+            }
+            if let Some(having) = having {
+                lines.push(format!(
+                    "{prefix}Filter: {}",
+                    render_verbose_expr(having, &verbose_plan_output_exprs(plan, ctx, true), ctx)
+                ));
             }
             true
         }
@@ -403,6 +452,74 @@ fn push_nonverbose_plan_details(
             true
         }
         _ => false,
+    }
+}
+
+fn aggregate_group_key_input_names(
+    input: &Plan,
+    ctx: &VerboseExplainContext,
+    qualify_base_scan: bool,
+) -> Vec<String> {
+    if qualify_base_scan {
+        if let Some(names) = qualified_scan_output_names(input) {
+            return names;
+        }
+    }
+    verbose_plan_output_exprs(input, ctx, true)
+}
+
+fn remap_sort_display_item_through_aggregate(input: &Plan, item: &str) -> Option<String> {
+    if let Plan::Projection { input, .. }
+    | Plan::Filter { input, .. }
+    | Plan::SubqueryScan { input, .. } = input
+    {
+        return remap_sort_display_item_through_aggregate(input, item);
+    }
+    let Plan::Aggregate {
+        input: aggregate_input,
+        group_by,
+        ..
+    } = input
+    else {
+        return None;
+    };
+    let column = item.rsplit('.').next().unwrap_or(item);
+    let qualified_names = qualified_scan_output_names(aggregate_input)?;
+    group_by.iter().find_map(|expr| {
+        let Expr::Var(var) = expr else {
+            return None;
+        };
+        let index = crate::include::nodes::primnodes::attrno_index(var.varattno)?;
+        let qualified = qualified_names.get(index)?;
+        qualified
+            .rsplit('.')
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case(column))
+            .then(|| qualified.clone())
+    })
+}
+
+fn qualified_scan_output_names(plan: &Plan) -> Option<Vec<String>> {
+    match plan {
+        Plan::SeqScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexOnlyScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexScan {
+            relation_name,
+            desc,
+            ..
+        } => Some(qualified_base_scan_output_exprs(relation_name, desc)),
+        Plan::Filter { input, .. } | Plan::Projection { input, .. } => {
+            qualified_scan_output_names(input)
+        }
+        _ => None,
     }
 }
 

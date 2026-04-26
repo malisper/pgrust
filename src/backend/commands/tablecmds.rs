@@ -332,6 +332,7 @@ pub(crate) fn execute_explain(
         analyze,
         buffers,
         costs,
+        summary,
         timing,
         verbose,
         statement,
@@ -369,6 +370,14 @@ pub(crate) fn execute_explain(
 
     ctx.pool.reset_usage_stats();
     let plan_start = Instant::now();
+    let analyzed_create_table_as = if analyze {
+        match &explain_target {
+            EitherExplainTarget::CreateTableAs(create_table_as) => Some(create_table_as.clone()),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let (query_desc, merge_target_name) = match explain_target {
         EitherExplainTarget::Select(select) => (
             create_query_desc(
@@ -409,12 +418,21 @@ pub(crate) fn execute_explain(
         )));
     }
     if analyze {
+        if let Some(create_table_as) = analyzed_create_table_as.as_ref() {
+            execute_explain_analyze_create_table_as(create_table_as, ctx, planner_config)?;
+        }
         ctx.pool.reset_usage_stats();
         ctx.timed = timing;
         let saved_subplans =
             std::mem::replace(&mut ctx.subplans, query_desc.planned_stmt.subplans.clone());
         let exec_result: Result<(_, _, _), ExecError> = (|| {
             let mut state = executor_start(query_desc.planned_stmt.plan_tree.clone());
+            if analyzed_create_table_as
+                .as_ref()
+                .is_some_and(|create_table_as| create_table_as.skip_data)
+            {
+                return Ok((state, 0, std::time::Duration::ZERO));
+            }
             let mut row_count: u64 = 0;
             let started_at = Instant::now();
             while let Some(_slot) = state.exec_proc_node(ctx)? {
@@ -426,23 +444,34 @@ pub(crate) fn execute_explain(
         ctx.timed = false;
         let execution_buffer_stats = ctx.pool.usage_stats();
         let (state, row_count, elapsed) = exec_result?;
-        format_explain_lines_with_costs(state.as_ref(), 0, true, costs, &mut lines);
+        crate::backend::commands::explain::format_explain_lines_with_costs_and_timing(
+            state.as_ref(),
+            0,
+            true,
+            costs,
+            timing,
+            &mut lines,
+        );
         if buffers {
             lines.push("Planning:".into());
             lines.push(format!("  {}", format_buffer_usage(planning_buffer_stats)));
         }
-        lines.push(format!(
-            "Planning Time: {:.3} ms",
-            planning_elapsed.as_secs_f64() * 1000.0
-        ));
-        lines.push(format!(
-            "Execution Time: {:.3} ms",
-            elapsed.as_secs_f64() * 1000.0
-        ));
+        if summary {
+            lines.push(format!(
+                "Planning Time: {:.3} ms",
+                planning_elapsed.as_secs_f64() * 1000.0
+            ));
+            lines.push(format!(
+                "Execution Time: {:.3} ms",
+                elapsed.as_secs_f64() * 1000.0
+            ));
+        }
         if buffers {
             lines.push(format_buffer_usage(execution_buffer_stats));
         }
-        lines.push(format!("Result Rows: {}", row_count));
+        if summary {
+            lines.push(format!("Result Rows: {}", row_count));
+        }
     } else {
         let plan_tree = query_desc.planned_stmt.plan_tree;
         let subplans = query_desc.planned_stmt.subplans;
@@ -476,6 +505,45 @@ pub(crate) fn execute_explain(
     })
 }
 
+fn execute_explain_analyze_create_table_as(
+    stmt: &CreateTableAsStatement,
+    ctx: &mut ExecutorContext,
+    planner_config: PlannerConfig,
+) -> Result<(), ExecError> {
+    let db = ctx
+        .database
+        .clone()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "EXPLAIN ANALYZE CREATE TABLE AS requires database execution context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })?;
+    let xid = ctx.ensure_write_xid()?;
+    let cid = ctx.next_command_id;
+    let effect_start = ctx.catalog_effects.len();
+    db.execute_create_table_as_stmt_in_transaction_with_search_path(
+        ctx.client_id,
+        stmt,
+        xid,
+        cid,
+        None,
+        planner_config,
+        &mut ctx.catalog_effects,
+        &mut ctx.temp_effects,
+    )?;
+    let consumed_catalog_cids = ctx
+        .catalog_effects
+        .len()
+        .saturating_sub(effect_start)
+        .max(1);
+    ctx.next_command_id = ctx
+        .next_command_id
+        .saturating_add(consumed_catalog_cids as u32);
+    ctx.snapshot.current_cid = ctx.snapshot.current_cid.max(ctx.next_command_id);
+    Ok(())
+}
+
 enum EitherExplainTarget {
     Select(SelectStatement),
     Merge(MergeStatement),
@@ -486,9 +554,6 @@ fn explain_create_table_as_relation_exists(
     stmt: &CreateTableAsStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<bool, ExecError> {
-    if !stmt.if_not_exists {
-        return Ok(false);
-    }
     let name = match &stmt.schema_name {
         Some(schema) => format!("{schema}.{}", stmt.table_name),
         None => stmt.table_name.clone(),
@@ -500,7 +565,23 @@ fn explain_create_table_as_relation_exists(
         TableAsObjectType::Table => 'r',
         TableAsObjectType::MaterializedView => 'm',
     };
-    Ok(relation.relkind == expected_relkind)
+    if relation.relkind != expected_relkind {
+        return Ok(false);
+    }
+    let display_name = stmt.table_name.trim_matches('"');
+    if stmt.if_not_exists {
+        crate::backend::utils::misc::notices::push_notice(format!(
+            "relation \"{}\" already exists, skipping",
+            display_name
+        ));
+        return Ok(true);
+    }
+    Err(ExecError::DetailedError {
+        message: format!("relation \"{}\" already exists", display_name),
+        detail: None,
+        hint: None,
+        sqlstate: "42P07",
+    })
 }
 
 fn execute_explain_update(

@@ -873,8 +873,13 @@ fn project_set_targets_for_srf_level(
         let Expr::SetReturning(srf) = expr.clone() else {
             unreachable!("SRF collector only returns Expr::SetReturning")
         };
+        let name = target_list
+            .iter()
+            .find(|target| target.expr == expr)
+            .map(|target| target.name.clone())
+            .unwrap_or_else(|| srf.name.clone());
         targets.push(ProjectSetTarget::Set {
-            name: srf.name.clone(),
+            name,
             source_expr: expr,
             call: srf.call.clone(),
             sql_type: srf.sql_type,

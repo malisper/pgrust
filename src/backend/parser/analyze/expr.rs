@@ -1968,8 +1968,16 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     ctes,
                 )?
             };
-            let domain = domain_lookup_for_raw_type_name(ty, catalog);
-            let target_type = resolve_raw_type_name(ty, catalog)?;
+            let domain = if raw_type_name_is_unknown(ty) {
+                None
+            } else {
+                domain_lookup_for_raw_type_name(ty, catalog)
+            };
+            let target_type = if raw_type_name_is_unknown(ty) {
+                SqlType::new(SqlTypeKind::Text)
+            } else {
+                resolve_raw_type_name(ty, catalog)?
+            };
             if target_type.kind == SqlTypeKind::RegRole
                 && let Some(bound_regrole) = bind_regrole_literal_cast(inner, target_type, catalog)?
             {

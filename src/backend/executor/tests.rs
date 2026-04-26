@@ -925,6 +925,9 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         timed: false,
         allow_side_effects: true,
         pending_async_notifications: Vec::new(),
+        catalog_effects: Vec::new(),
+        temp_effects: Vec::new(),
+        database: None,
         catalog: None,
         compiled_functions: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
@@ -993,6 +996,9 @@ fn run_plan(
         timed: false,
         allow_side_effects: true,
         pending_async_notifications: Vec::new(),
+        catalog_effects: Vec::new(),
+        temp_effects: Vec::new(),
+        database: None,
         catalog: None,
         compiled_functions: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
@@ -1097,6 +1103,9 @@ fn first_tuple_slot_kind_for_sql(
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
+            catalog_effects: Vec::new(),
+            temp_effects: Vec::new(),
+            database: None,
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -1183,6 +1192,9 @@ fn first_tuple_slot_kind_for_plan(
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
+            catalog_effects: Vec::new(),
+            temp_effects: Vec::new(),
+            database: None,
             catalog: None,
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -1283,6 +1295,9 @@ fn run_sql_with_catalog(
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
+            catalog_effects: Vec::new(),
+            temp_effects: Vec::new(),
+            database: None,
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -4547,7 +4562,7 @@ fn explain_analyze_timing_off_still_reports_nonzero_actual_rows() {
                 .collect::<Vec<_>>();
             let plan_lines = rendered
                 .iter()
-                .filter(|line| line.contains("actual time="))
+                .filter(|line| line.contains("actual rows="))
                 .collect::<Vec<_>>();
             assert!(
                 !plan_lines.is_empty(),
@@ -10516,6 +10531,9 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         timed: false,
         allow_side_effects: true,
         pending_async_notifications: Vec::new(),
+        catalog_effects: Vec::new(),
+        temp_effects: Vec::new(),
+        database: None,
         catalog: catalog.materialize_visible_catalog(),
         compiled_functions: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
@@ -14699,7 +14717,7 @@ fn explain_primary_key_groupby_reduction_hides_trim_projection() {
                 rendered.join("\n")
             );
             assert!(
-                rendered.iter().any(|line| line.trim() == "Group Key: (id)"),
+                rendered.iter().any(|line| line.trim() == "Group Key: id"),
                 "{}",
                 rendered.join("\n")
             );
@@ -21936,6 +21954,9 @@ fn large_object_metadata_tracks_create_and_unlink() {
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
+            catalog_effects: Vec::new(),
+            temp_effects: Vec::new(),
+            database: None,
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
