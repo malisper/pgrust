@@ -1572,7 +1572,7 @@ impl Database {
             )?;
         }
 
-        Ok(foreign_key_base_cid.saturating_add(lowered.foreign_key_actions.len() as u32))
+        Ok(next_foreign_key_cid)
     }
 
     pub(super) fn refresh_partitioned_relation_metadata(

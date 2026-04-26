@@ -493,7 +493,7 @@ const INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_COLUMNS: &[SyntheticSystemViewColum
     SyntheticSystemViewColumn::text("dependent_column"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 21] = [
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 22] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgEnum,
         canonical_name: "pg_catalog.pg_enum",
