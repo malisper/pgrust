@@ -1061,6 +1061,7 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         "track_counts" => Some("on"),
         "track_functions" => Some("none"),
         "stats_fetch_consistency" => Some("cache"),
+        "restrict_nonsystem_relation_kind" => Some(""),
         _ => None,
     }
 }
@@ -7446,6 +7447,15 @@ impl Session {
             }
             "plpgsql.extra_warnings" | "plpgsql.extra_errors" => {
                 stored_value = parse_plpgsql_extra_checks(value)?;
+            }
+            "restrict_nonsystem_relation_kind" => {
+                let normalized_value = value.trim().trim_matches('\'').to_ascii_lowercase();
+                if !normalized_value.is_empty() && normalized_value != "view" {
+                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                        value.to_string(),
+                    )));
+                }
+                stored_value = normalized_value;
             }
             _ => {}
         }

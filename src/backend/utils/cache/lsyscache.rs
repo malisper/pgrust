@@ -1927,6 +1927,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         .unwrap_or_default()
     }
 
+    fn rewrite_rows(&self) -> Vec<PgRewriteRow> {
+        ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx)
+    }
+
     fn trigger_rows_for_relation(&self, relation_oid: u32) -> Vec<PgTriggerRow> {
         trigger_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
     }

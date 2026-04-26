@@ -495,7 +495,7 @@ pub(crate) fn rewrite_dependent_views(
     Ok(())
 }
 
-fn append_view_check_option(
+pub(crate) fn append_view_check_option(
     sql: String,
     check_option: crate::include::nodes::parsenodes::ViewCheckOption,
 ) -> String {

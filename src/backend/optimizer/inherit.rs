@@ -8,7 +8,7 @@ use crate::backend::parser::{
 };
 use crate::include::catalog::PgInheritsRow;
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::parsenodes::{RangeTblEntry, RangeTblEntryKind};
+use crate::include::nodes::parsenodes::{RangeTblEntry, RangeTblEntryKind, RangeTblEref};
 use crate::include::nodes::pathnodes::{
     AppendRelInfo, PartitionInfo, PartitionMember, PlannerInfo, RelOptInfo, RelOptKind,
 };
@@ -85,8 +85,19 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
             let child_rtindex = root.parse.rtable.len() + 1;
             let translated_vars =
                 translate_parent_vars_to_child(&parent_rte.desc, child_rtindex, &child.desc);
+            let child_alias = format!("{parent_alias}_{child_alias_index}");
             let child_rte = RangeTblEntry {
-                alias: Some(format!("{parent_alias}_{child_alias_index}")),
+                alias: Some(child_alias.clone()),
+                alias_preserves_source_names: false,
+                eref: RangeTblEref {
+                    aliasname: child_alias,
+                    colnames: child
+                        .desc
+                        .columns
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect(),
+                },
                 desc: child.desc.clone(),
                 inh: false,
                 security_quals: Vec::new(),

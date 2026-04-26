@@ -1364,6 +1364,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgGetConstraintDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgGetIndexDef => matches!(args.len(), 1 | 3),
             BuiltinScalarFunction::PgGetViewDef => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::PgGetRuleDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgGetStatisticsObjDef
             | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
             | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
@@ -2594,6 +2595,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pg_get_expr", BuiltinScalarFunction::PgGetExpr),
         ("pg_get_expr_ext", BuiltinScalarFunction::PgGetExpr),
         ("pg_get_viewdef", BuiltinScalarFunction::PgGetViewDef),
+        ("pg_get_ruledef", BuiltinScalarFunction::PgGetRuleDef),
+        ("pg_get_ruledef_ext", BuiltinScalarFunction::PgGetRuleDef),
         (
             "pg_get_statisticsobjdef",
             BuiltinScalarFunction::PgGetStatisticsObjDef,
@@ -3646,6 +3649,7 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             BuiltinScalarFunction::PgGetConstraintDef,
             BuiltinScalarFunction::PgGetIndexDef,
             BuiltinScalarFunction::PgGetViewDef,
+            BuiltinScalarFunction::PgGetRuleDef,
             BuiltinScalarFunction::PgGetStatisticsObjDef,
             BuiltinScalarFunction::PgGetStatisticsObjDefColumns,
         ] {
@@ -3871,6 +3875,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgGetConstraintDef
             | BuiltinScalarFunction::PgGetIndexDef
             | BuiltinScalarFunction::PgGetViewDef
+            | BuiltinScalarFunction::PgGetRuleDef
             | BuiltinScalarFunction::PgGetStatisticsObjDef
             | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
             | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
