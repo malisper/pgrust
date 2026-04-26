@@ -185,6 +185,7 @@ fn execute_statement_with_source(
         | Statement::AlterTableAlterColumnStorage(_)
         | Statement::AlterTableAlterColumnDefault(_)
         | Statement::AlterTableAlterColumnExpression(_)
+        | Statement::AlterTableAlterColumnIdentity(_)
         // :HACK: ALTER TABLE ... SET (...) is accepted narrowly for numeric.sql and ignored
         // until table reloptions are modeled for real.
         | Statement::AlterTableSet(_)
@@ -625,6 +626,7 @@ pub fn execute_readonly_statement_with_config(
         | Statement::AlterTableAlterColumnExpression(_)
         | Statement::AlterTableOf(_)
         | Statement::AlterTableNotOf(_)
+        | Statement::AlterTableAlterColumnIdentity(_)
         | Statement::AlterTableAttachPartition(_)
         | Statement::AlterTableDetachPartition(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableRename(_) | Statement::AlterViewRename(_) => {

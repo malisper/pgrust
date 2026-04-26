@@ -23,10 +23,11 @@ use crate::backend::parser::{
     BoundMergeStatement, BoundMergeWhenClause, BoundModifyRowSource, BoundOnConflictAction,
     BoundReferencedByForeignKey, BoundRelation, BoundRelationConstraints, BoundTemporalConstraint,
     BoundUpdateStatement, BoundUpdateTarget, Catalog, CatalogLookup, DropTableStatement,
-    ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement, ParseError,
-    SelectStatement, SqlType, SqlTypeKind, Statement, TruncateTableStatement, UpdateStatement,
-    VacuumStatement, bind_create_table, bind_generated_expr, bind_referenced_by_foreign_keys,
-    bind_relation_constraints, bind_scalar_expr_in_scope, bind_update,
+    ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement, OverridingKind,
+    ParseError, SelectStatement, SqlType, SqlTypeKind, Statement, TruncateTableStatement,
+    UpdateStatement, VacuumStatement, bind_create_table, bind_generated_expr,
+    bind_referenced_by_foreign_keys, bind_relation_constraints, bind_scalar_expr_in_scope,
+    bind_update,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -3742,6 +3743,24 @@ fn eval_implicit_insert_defaults(
     Ok((slot, values))
 }
 
+fn apply_overriding_user_identity_defaults(
+    stmt: &BoundInsertStatement,
+    values: &mut [Value],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    if !matches!(stmt.overriding, Some(OverridingKind::User)) {
+        return Ok(());
+    }
+    let mut slot = TupleSlot::virtual_row(values.to_vec());
+    for target in &stmt.target_columns {
+        if stmt.desc.columns[target.column_index].identity.is_some() {
+            values[target.column_index] =
+                eval_expr(&stmt.column_defaults[target.column_index], &mut slot, ctx)?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn materialize_insert_rows(
     stmt: &BoundInsertStatement,
     catalog: &dyn CatalogLookup,
@@ -3804,6 +3823,7 @@ pub(crate) fn materialize_insert_rows(
                     for (target, value) in stmt.target_columns.iter().zip(row_values.into_iter()) {
                         apply_assignment_target(&stmt.desc, &mut values, target, value, slot, ctx)?;
                     }
+                    apply_overriding_user_identity_defaults(stmt, &mut values, ctx)?;
                     rows.push(values);
                 }
                 ctx.subplans = saved_subplans;
