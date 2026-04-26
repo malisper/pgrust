@@ -1,6 +1,7 @@
 use super::super::*;
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::commands::tablecmds::{execute_insert_values, reinitialize_index_relation};
+use crate::backend::parser::{BoundIndexRelation, BoundRelation};
 use crate::backend::rewrite::load_view_return_select;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
@@ -199,12 +200,6 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        if refresh_stmt.concurrently {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
-                "REFRESH MATERIALIZED VIEW CONCURRENTLY is not supported".into(),
-            )));
-        }
-
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation = match catalog.lookup_any_relation(&refresh_stmt.relation_name) {
@@ -222,6 +217,7 @@ impl Database {
             }
         };
         ensure_relation_owner(self, client_id, &relation, &refresh_stmt.relation_name)?;
+        validate_concurrent_matview_refresh(refresh_stmt, &relation, &catalog)?;
         lock_tables_interruptible(
             &self.table_locks,
             client_id,
@@ -344,6 +340,7 @@ impl Database {
             configured_search_path,
             catalog_effects,
             None,
+            drop_stmt.cascade,
             'm',
             "materialized view",
         )
@@ -440,6 +437,77 @@ impl Database {
             trigger_depth: 0,
         })
     }
+}
+
+fn validate_concurrent_matview_refresh(
+    refresh_stmt: &RefreshMaterializedViewStatement,
+    relation: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    if !refresh_stmt.concurrently {
+        return Ok(());
+    }
+    if !relation.relispopulated {
+        return Err(ExecError::DetailedError {
+            message: "CONCURRENTLY cannot be used when the materialized view is not populated"
+                .into(),
+            detail: None,
+            hint: None,
+            sqlstate: "55000",
+        });
+    }
+    if refresh_stmt.skip_data {
+        return Err(ExecError::DetailedError {
+            message: "CONCURRENTLY and WITH NO DATA options cannot be used together".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
+    if catalog
+        .index_relations_for_heap(relation.relation_oid)
+        .iter()
+        .any(is_usable_unique_index_for_concurrent_refresh)
+    {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!(
+            "cannot refresh materialized view \"{}\" concurrently",
+            qualified_matview_name(catalog, relation)
+        ),
+        detail: None,
+        hint: Some(
+            "Create a unique index with no WHERE clause on one or more columns of the materialized view."
+                .into(),
+        ),
+        sqlstate: "55000",
+    })
+}
+
+fn is_usable_unique_index_for_concurrent_refresh(index: &BoundIndexRelation) -> bool {
+    let meta = &index.index_meta;
+    meta.indisunique
+        && meta.indimmediate
+        && meta.indisvalid
+        && meta.indisready
+        && meta.indislive
+        && meta.indpred.is_none()
+        && meta.indexprs.is_none()
+        && !meta.indkey.is_empty()
+        && meta.indkey.iter().all(|attnum| *attnum > 0)
+}
+
+fn qualified_matview_name(catalog: &dyn CatalogLookup, relation: &BoundRelation) -> String {
+    let relname = catalog
+        .class_row_by_oid(relation.relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation.relation_oid.to_string());
+    let nspname = catalog
+        .namespace_row_by_oid(relation.namespace_oid)
+        .map(|row| row.nspname)
+        .unwrap_or_else(|| "public".into());
+    format!("{nspname}.{relname}")
 }
 
 fn validate_matview_column_names(

@@ -606,6 +606,12 @@ fn run_statement(
                 stmt.relation_name, stmt.schema_name
             )),
         )),
+        Statement::AlterMaterializedViewSetSchema(stmt) => Err(ExecError::Parse(
+            ParseError::FeatureNotSupported(format!(
+                "ALTER MATERIALIZED VIEW SET SCHEMA in query_repl: {} -> {}",
+                stmt.relation_name, stmt.schema_name
+            )),
+        )),
         Statement::AlterSequence(stmt) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             format!("ALTER SEQUENCE in query_repl: {}", stmt.sequence_name),
         ))),

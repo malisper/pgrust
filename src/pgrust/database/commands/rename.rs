@@ -678,6 +678,20 @@ impl Database {
         )
     }
 
+    pub(crate) fn execute_alter_materialized_view_set_schema_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterRelationSetSchemaStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        self.execute_alter_relation_set_schema_stmt_with_search_path(
+            client_id,
+            alter_stmt,
+            configured_search_path,
+            'm',
+        )
+    }
+
     fn execute_alter_relation_set_schema_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -762,6 +776,28 @@ impl Database {
             cid,
             configured_search_path,
             'v',
+            catalog_effects,
+            temp_effects,
+        )
+    }
+
+    pub(crate) fn execute_alter_materialized_view_set_schema_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterRelationSetSchemaStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        self.execute_alter_relation_set_schema_stmt_in_transaction_with_search_path(
+            client_id,
+            alter_stmt,
+            xid,
+            cid,
+            configured_search_path,
+            'm',
             catalog_effects,
             temp_effects,
         )

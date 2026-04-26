@@ -222,6 +222,7 @@ fn execute_statement_with_source(
         | Statement::AlterViewRename(_)
         | Statement::AlterViewRenameColumn(_)
         | Statement::AlterViewSetSchema(_)
+        | Statement::AlterMaterializedViewSetSchema(_)
         | Statement::AlterIndexAlterColumnStatistics(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "ALTER TABLE/INDEX/VIEW handled by database/session layer",
@@ -598,6 +599,7 @@ pub fn execute_readonly_statement_with_config(
         | Statement::AlterTableRenameColumn(_)
         | Statement::AlterViewRenameColumn(_)
         | Statement::AlterViewSetSchema(_)
+        | Statement::AlterMaterializedViewSetSchema(_)
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableDropColumn(_)
         | Statement::AlterTableAlterColumnType(_)

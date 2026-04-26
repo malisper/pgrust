@@ -10682,6 +10682,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_view_set_schema_stmt => Ok(Statement::AlterViewSetSchema(
             build_alter_relation_set_schema(inner)?,
         )),
+        Rule::alter_materialized_view_set_schema_stmt => Ok(
+            Statement::AlterMaterializedViewSetSchema(build_alter_relation_set_schema(inner)?),
+        ),
         Rule::alter_schema_owner_stmt => Ok(Statement::AlterSchemaOwner(build_alter_schema_owner(
             inner,
         )?)),
@@ -14778,6 +14781,7 @@ fn build_drop_index(pair: Pair<'_, Rule>) -> Result<DropIndexStatement, ParseErr
 fn build_drop_view(pair: Pair<'_, Rule>) -> Result<DropViewStatement, ParseError> {
     let mut if_exists = false;
     let mut view_names = Vec::new();
+    let mut cascade = false;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::if_exists_clause => if_exists = true,
@@ -14785,6 +14789,7 @@ fn build_drop_view(pair: Pair<'_, Rule>) -> Result<DropViewStatement, ParseError
                 view_names.extend(part.into_inner().map(build_identifier));
             }
             Rule::identifier => view_names.push(build_identifier(part)),
+            Rule::drop_behavior => cascade = part.as_str().eq_ignore_ascii_case("cascade"),
             _ => {}
         }
     }
@@ -14794,6 +14799,7 @@ fn build_drop_view(pair: Pair<'_, Rule>) -> Result<DropViewStatement, ParseError
     Ok(DropViewStatement {
         if_exists,
         view_names,
+        cascade,
     })
 }
 
@@ -14802,6 +14808,7 @@ fn build_drop_materialized_view(
 ) -> Result<DropMaterializedViewStatement, ParseError> {
     let mut if_exists = false;
     let mut view_names = Vec::new();
+    let mut cascade = false;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::if_exists_clause => if_exists = true,
@@ -14809,6 +14816,7 @@ fn build_drop_materialized_view(
                 view_names.extend(part.into_inner().map(build_identifier));
             }
             Rule::identifier => view_names.push(build_identifier(part)),
+            Rule::drop_behavior => cascade = part.as_str().eq_ignore_ascii_case("cascade"),
             _ => {}
         }
     }
@@ -14818,6 +14826,7 @@ fn build_drop_materialized_view(
     Ok(DropMaterializedViewStatement {
         if_exists,
         view_names,
+        cascade,
     })
 }
 

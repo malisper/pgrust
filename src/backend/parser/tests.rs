@@ -3431,6 +3431,20 @@ fn parse_alter_view_set_schema_statement() {
 }
 
 #[test]
+fn parse_alter_materialized_view_set_schema_statement() {
+    let stmt =
+        parse_statement("alter materialized view if exists items_mv set schema archive").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterMaterializedViewSetSchema(AlterRelationSetSchemaStatement {
+            if_exists: true,
+            relation_name: "items_mv".into(),
+            schema_name: "archive".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_alter_index_set_statistics_statement() {
     let stmt = parse_statement("alter index attmp_idx alter column 2 set statistics 1000").unwrap();
     assert_eq!(
@@ -8410,10 +8424,10 @@ fn parse_insert_update_delete() {
         )
     );
     assert!(
-        matches!(parse_statement("drop view if exists item_names, recent_items").unwrap(), Statement::DropView(DropViewStatement { if_exists: true, view_names }) if view_names == vec!["item_names", "recent_items"])
+        matches!(parse_statement("drop view if exists item_names, recent_items cascade").unwrap(), Statement::DropView(DropViewStatement { if_exists: true, view_names, cascade: true }) if view_names == vec!["item_names", "recent_items"])
     );
     assert!(
-        matches!(parse_statement("drop materialized view if exists mv_items").unwrap(), Statement::DropMaterializedView(DropMaterializedViewStatement { if_exists: true, view_names }) if view_names == vec!["mv_items"])
+        matches!(parse_statement("drop materialized view if exists mv_items cascade").unwrap(), Statement::DropMaterializedView(DropMaterializedViewStatement { if_exists: true, view_names, cascade: true }) if view_names == vec!["mv_items"])
     );
     assert!(
         matches!(parse_statement("refresh materialized view mv_items").unwrap(), Statement::RefreshMaterializedView(RefreshMaterializedViewStatement { relation_name, concurrently: false, skip_data: false }) if relation_name == "mv_items")

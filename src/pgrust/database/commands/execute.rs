@@ -469,6 +469,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterMaterializedViewSetSchema(ref alter_stmt) => self
+                .execute_alter_materialized_view_set_schema_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterIndexAlterColumnStatistics(ref alter_stmt) => self
                 .execute_alter_index_alter_column_statistics_stmt_with_search_path(
                     client_id,

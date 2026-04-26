@@ -1782,6 +1782,138 @@ fn materialized_view_with_no_data_refreshes_and_rejects_writes() {
 }
 
 #[test]
+fn materialized_view_set_schema_refresh_concurrently_and_drop_cascade() {
+    let db = Database::open_ephemeral(64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table mv_reg_base(id int4 primary key, amount int4)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into mv_reg_base values (1, 10), (2, 20)")
+        .unwrap();
+    session.execute(&db, "create schema mv_reg_schema").unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mv_reg_mv as select id, amount from mv_reg_base",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter materialized view mv_reg_mv set schema mv_reg_schema",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace \
+             where c.relname = 'mv_reg_mv'",
+        ),
+        vec![vec![Value::Text("mv_reg_schema".into())]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create unique index mv_reg_mv_id on mv_reg_schema.mv_reg_mv(id)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into mv_reg_base values (3, 30)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "refresh materialized view concurrently mv_reg_schema.mv_reg_mv",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id, amount from mv_reg_schema.mv_reg_mv order by id",
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Int32(10)],
+            vec![Value::Int32(2), Value::Int32(20)],
+            vec![Value::Int32(3), Value::Int32(30)],
+        ]
+    );
+
+    session
+        .execute(
+            &db,
+            "create materialized view mv_reg_bad as select amount from mv_reg_base",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create unique index mv_reg_bad_pred on mv_reg_bad(amount) where amount < 0",
+        )
+        .unwrap();
+    let refresh_err = session
+        .execute(&db, "refresh materialized view concurrently mv_reg_bad")
+        .unwrap_err();
+    assert!(matches!(
+        refresh_err,
+        ExecError::DetailedError {
+            message,
+            hint: Some(hint),
+            ..
+        } if message == "cannot refresh materialized view \"public.mv_reg_bad\" concurrently"
+            && hint == "Create a unique index with no WHERE clause on one or more columns of the materialized view."
+    ));
+
+    session
+        .execute(&db, "create view mv_reg_v as select * from mv_reg_base")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mv_reg_dep_mv as select * from mv_reg_v",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view mv_reg_dep_v as select * from mv_reg_dep_mv",
+        )
+        .unwrap();
+    let drop_restrict_err = session.execute(&db, "drop view mv_reg_v").unwrap_err();
+    match drop_restrict_err {
+        ExecError::DetailedError {
+            detail: Some(detail),
+            ..
+        } => {
+            assert!(
+                detail.contains("materialized view mv_reg_dep_mv depends on view mv_reg_v")
+                    && detail
+                        .contains("view mv_reg_dep_v depends on materialized view mv_reg_dep_mv"),
+                "{detail}"
+            );
+        }
+        other => panic!("expected dependency detail, got {other:?}"),
+    }
+    session.execute(&db, "drop view mv_reg_v cascade").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_class where relname in \
+             ('mv_reg_v', 'mv_reg_dep_mv', 'mv_reg_dep_v')",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
 fn sql_cursor_fetch_move_close_and_cleanup() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);

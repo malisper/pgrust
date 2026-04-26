@@ -7066,7 +7066,20 @@ fn preserve_non_derived_relation_rows_mvcc(
     kinds: &[BootstrapCatalogKind],
     new_rows: &mut PhysicalCatalogRows,
 ) -> Result<(), CatalogError> {
+    if kinds.contains(&BootstrapCatalogKind::PgDepend) {
+        for row in relation_rewrites_mvcc(store, ctx, entry.relation_oid)? {
+            new_rows.depends.extend(depend_rows_for_object_mvcc(
+                store,
+                ctx,
+                PG_REWRITE_RELATION_OID,
+                row.oid,
+            )?);
+        }
+    }
+
     if !matches!(entry.relkind, 'r' | 'p') {
+        sort_pg_depend_rows(&mut new_rows.depends);
+        new_rows.depends.dedup();
         return Ok(());
     }
 
@@ -7088,6 +7101,7 @@ fn preserve_non_derived_relation_rows_mvcc(
             )?);
         }
         sort_pg_depend_rows(&mut new_rows.depends);
+        new_rows.depends.dedup();
     }
 
     Ok(())
