@@ -12,8 +12,8 @@ use crate::backend::utils::misc::notices::{
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BootstrapCatalogKind, CSTRING_TYPE_OID, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
-    PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID,
-    PG_TYPE_RELATION_OID, PgAggregateRow, TEXT_TYPE_OID,
+    PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_OPERATOR_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow, TEXT_TYPE_OID,
 };
 use crate::include::nodes::datum::{ArrayValue, IntervalValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
@@ -7329,6 +7329,100 @@ fn base_table_scan_exposes_ctid_system_column() {
 }
 
 #[test]
+fn outer_join_null_extended_ctid_is_null() {
+    let dir = temp_dir("outer_join_ctid");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table ctid_source(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table ctid_target(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into ctid_source values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into ctid_target values (2)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select t.ctid is not null, t.id, s.id from ctid_source s full outer join ctid_target t on s.id = t.id order by t.id, s.id"
+        ),
+        vec![
+            vec![Value::Bool(true), Value::Int32(2), Value::Null],
+            vec![Value::Bool(false), Value::Null, Value::Int32(1)],
+        ]
+    );
+}
+
+#[test]
+fn merge_checks_target_and_source_privileges() {
+    let dir = temp_dir("merge_privileges");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role merge_owner login")
+        .unwrap();
+    session
+        .execute(&db, "create role merge_tenant login")
+        .unwrap();
+    session
+        .execute(&db, "create table merge_target(id int4, value int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table merge_source(id int4, value int4)")
+        .unwrap();
+    session
+        .execute(&db, "alter table merge_target owner to merge_owner")
+        .unwrap();
+    session
+        .execute(&db, "alter table merge_source owner to merge_owner")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization merge_tenant")
+        .unwrap();
+
+    match session.execute(
+        &db,
+        "merge into merge_target t using merge_source s on t.id = s.id when matched then do nothing",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "permission denied for table merge_target");
+            assert_eq!(sqlstate, "42501");
+        }
+        other => panic!("expected merge target privilege error, got {other:?}"),
+    }
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "grant select on merge_target to merge_tenant")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization merge_tenant")
+        .unwrap();
+    match session.execute(
+        &db,
+        "merge into merge_target t using merge_source s on t.id = s.id when matched then do nothing",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "permission denied for table merge_source");
+            assert_eq!(sqlstate, "42501");
+        }
+        other => panic!("expected merge source privilege error, got {other:?}"),
+    }
+}
+
+#[test]
 fn inherited_update_delete_follow_postgres_targeting_rules() {
     let dir = temp_dir("inheritance_guardrails");
     let db = Database::open(&dir, 128).unwrap();
@@ -9065,7 +9159,7 @@ fn create_index_and_alter_table_set_are_noops() {
                     Value::Text("b".into()),
                 ],
                 vec![
-                    Value::Text("char".into()),
+                    Value::Text("bpchar".into()),
                     Value::Text("text".into()),
                     Value::Text("i".into()),
                     Value::Text("f".into()),
@@ -9145,7 +9239,7 @@ fn create_index_and_alter_table_set_are_noops() {
                         Value::Text("numeric".into()),
                     ],
                     vec![
-                        Value::Text("char".into()),
+                        Value::Text("bpchar".into()),
                         Value::Text("text".into()),
                         Value::Text("text".into()),
                     ],
@@ -16146,6 +16240,70 @@ fn without_overlaps_primary_key_records_catalog_metadata_and_enforces_overlaps()
 }
 
 #[test]
+fn without_overlaps_accepts_custom_range_period_column() {
+    let base = temp_dir("without_overlaps_custom_range");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create type textrange2 as range (subtype=text, collation=\"C\")",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table temporal_custom_range (\
+             id int4range, \
+             valid_at textrange2, \
+             constraint temporal_custom_range_pk primary key (id, valid_at without overlaps)\
+         )",
+    )
+    .unwrap();
+
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("temporal_custom_range").unwrap();
+    let constraint = lookup
+        .constraint_rows_for_relation(relation.relation_oid)
+        .into_iter()
+        .find(|row| row.conname == "temporal_custom_range_pk")
+        .unwrap();
+    assert!(constraint.conperiod);
+    assert_eq!(constraint.conexclop.as_deref(), Some(&[72_000, 3888][..]));
+}
+
+#[test]
+fn without_overlaps_replica_identity_using_index_marks_pg_index() {
+    let base = temp_dir("without_overlaps_replica_identity");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table temporal_rng (\
+             id int4range, \
+             valid_at daterange, \
+             constraint temporal_rng_pk primary key (id, valid_at without overlaps)\
+         )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table temporal_rng replica identity using index temporal_rng_pk",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select i.indisreplident \
+             from pg_index i \
+             join pg_class c on c.oid = i.indexrelid \
+             where c.relname = 'temporal_rng_pk'",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
 fn without_overlaps_unique_handles_nulls_empty_ranges_and_updates() {
     let base = temp_dir("without_overlaps_unique_runtime");
     let db = Database::open(&base, 16).unwrap();
@@ -18424,6 +18582,36 @@ fn alter_table_add_unique_using_index_include_derives_key_conkey() {
 }
 
 #[test]
+fn alter_table_add_constraint_using_nonunique_index_matches_postgres_error() {
+    let base = temp_dir("alter_using_nonunique_index");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(1, "create table using_items (a int4)").unwrap();
+    db.execute(1, "create index using_items_idx on using_items (a)")
+        .unwrap();
+
+    match db.execute(
+        1,
+        "alter table using_items add constraint using_items_key unique using index using_items_idx",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        })) => {
+            assert_eq!(message, "\"using_items_idx\" is not a unique index");
+            assert_eq!(
+                detail.as_deref(),
+                Some("Cannot create a primary key or unique constraint using such an index.")
+            );
+            assert_eq!(sqlstate, "42809");
+        }
+        other => panic!("expected nonunique USING INDEX error, got {other:?}"),
+    }
+}
+
+#[test]
 fn create_table_like_including_indexes_copies_deferrable_key_flags() {
     let base = temp_dir("create_table_like_deferrable_keys");
     let db = Database::open(&base, 16).unwrap();
@@ -19616,7 +19804,7 @@ fn rejected_create_table_like_sequence_does_not_poison_catalog_after_sequence_dr
     );
     assert_eq!(
         query_rows(&db, 1, "select count(*) from pg_namespace"),
-        vec![vec![Value::Int64(3)]]
+        vec![vec![Value::Int64(4)]]
     );
 }
 
@@ -25961,6 +26149,44 @@ fn create_language_c_function_without_link_symbol_uses_function_name() {
              where a.thepath ?# b.thepath",
         )
         .unwrap();
+}
+
+#[test]
+fn create_language_internal_function_dispatches_by_prosrc() {
+    let base = temp_dir("language_internal_function_prosrc");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function is_catalog_text_unique_index_oid(oid) returns bool \
+             as 'pg_rust_is_catalog_text_unique_index_oid' language internal strict",
+        )
+        .unwrap();
+
+    let visible = db.backend_catcache(1, None).unwrap();
+    let proc = visible
+        .proc_rows_by_name("is_catalog_text_unique_index_oid")
+        .into_iter()
+        .find(|row| row.proname == "is_catalog_text_unique_index_oid")
+        .expect("function row");
+    assert_eq!(proc.prolang, PG_LANGUAGE_INTERNAL_OID);
+    assert_eq!(proc.prosrc, "pg_rust_is_catalog_text_unique_index_oid");
+
+    let result = session
+        .execute(
+            &db,
+            "select is_catalog_text_unique_index_oid(6246::oid), \
+                    is_catalog_text_unique_index_oid(2675::oid)",
+        )
+        .unwrap();
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Bool(true), Value::Bool(false)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
 }
 
 #[test]

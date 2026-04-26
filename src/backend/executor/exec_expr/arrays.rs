@@ -420,35 +420,31 @@ fn build_filled_array(
 ) -> Result<Value, ExecError> {
     if matches!(dims, Value::Null) || lower_bounds.is_some_and(|value| matches!(value, Value::Null))
     {
-        return Ok(Value::Null);
+        return Err(array_fill_null_array_error());
     }
-    let dims = parse_int_array_argument("array_fill", dims)?;
+    let dims = parse_int_array_argument("array_fill", dims, ArrayFillArgKind::Dimension)?;
     let lower_bounds = lower_bounds
-        .map(|value| parse_int_array_argument("array_fill", value))
+        .map(|value| parse_int_array_argument("array_fill", value, ArrayFillArgKind::LowerBound))
         .transpose()?;
     if let Some(lbs) = &lower_bounds {
         if lbs.len() != dims.len() {
-            return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "matching dimension and lower-bound array lengths",
-                actual: "array_fill".into(),
-            }));
+            return Err(array_fill_low_bound_mismatch_error());
         }
     }
     if dims.iter().any(|dim| dim.is_none()) {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "dimension values cannot be null",
-            actual: "array_fill".into(),
-        }));
+        return Err(ExecError::DetailedError {
+            message: "dimension values cannot be null".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22004",
+        });
     }
     let dims = dims.into_iter().map(|dim| dim.unwrap()).collect::<Vec<_>>();
     if lower_bounds
         .as_ref()
         .is_some_and(|lbs| lbs.iter().any(|lb| lb.is_none()))
     {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "low bound values cannot be null",
-            actual: "array_fill".into(),
-        }));
+        return Err(array_fill_null_array_error());
     }
     if dims.is_empty() || dims.iter().any(|dim| *dim == 0) {
         return Ok(Value::PgArray(ArrayValue::empty()));
@@ -477,16 +473,9 @@ fn build_filled_array(
 
 pub(super) fn eval_string_to_array_function(values: &[Value]) -> Result<Value, ExecError> {
     match values {
-        [Value::Null, _] | [_, Value::Null] | [Value::Null, _, _] | [_, Value::Null, _] => {
-            Ok(Value::Null)
-        }
+        [Value::Null, _] | [Value::Null, _, _] => Ok(Value::Null),
         [input, delimiter] => string_to_array_values(input, delimiter, None),
-        [input, delimiter, null_text] => {
-            if matches!(input, Value::Null) || matches!(delimiter, Value::Null) {
-                return Ok(Value::Null);
-            }
-            string_to_array_values(input, delimiter, Some(null_text))
-        }
+        [input, delimiter, null_text] => string_to_array_values(input, delimiter, Some(null_text)),
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "string_to_array(text, delimiter [, null_string])",
             actual: format!("StringToArray({} args)", values.len()),
@@ -516,13 +505,17 @@ fn string_to_array_values(
         left: input.clone(),
         right: delimiter.clone(),
     })?;
-    let delimiter = delimiter.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "string_to_array",
-        left: delimiter.clone(),
-        right: Value::Text(input.into()),
-    })?;
+    let delimiter = if matches!(delimiter, Value::Null) {
+        None
+    } else {
+        Some(delimiter.as_text().ok_or_else(|| ExecError::TypeMismatch {
+            op: "string_to_array",
+            left: delimiter.clone(),
+            right: Value::Text(input.into()),
+        })?)
+    };
     let null_text = null_text.and_then(Value::as_text);
-    let parts = split_text_values(input, Some(delimiter), null_text);
+    let parts = split_text_values(input, delimiter, null_text);
     Ok(Value::PgArray(ArrayValue::from_dimensions(
         vec![ArrayDimension {
             lower_bound: 1,
@@ -943,19 +936,24 @@ fn array_replace_like(
     replace: Option<&Value>,
     remove: bool,
 ) -> Result<Value, ExecError> {
-    let Some(array) = normalize_array_value(array) else {
+    let Some(array) = normalize_array_for_replace_like(array, search, replace)? else {
         return Ok(Value::Null);
     };
     if array.ndim() > 1 {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "one-dimensional array",
-            actual: if remove {
-                "array_remove"
-            } else {
-                "array_replace"
-            }
-            .into(),
-        }));
+        if remove {
+            return Err(ExecError::DetailedError {
+                message: "removing elements from multidimensional arrays is not supported".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+        return Err(ExecError::DetailedError {
+            message: "replacing elements in multidimensional arrays is not supported".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
     }
     let mut items = Vec::new();
     for item in &array.elements {
@@ -978,6 +976,9 @@ fn array_replace_like(
             items.push(item.to_owned_value());
         }
     }
+    if items.is_empty() {
+        return Ok(Value::PgArray(ArrayValue::empty()));
+    }
     Ok(Value::PgArray(ArrayValue::from_dimensions(
         vec![ArrayDimension {
             lower_bound: array.lower_bound(0).unwrap_or(1),
@@ -987,11 +988,186 @@ fn array_replace_like(
     )))
 }
 
+fn normalize_array_for_replace_like(
+    array: &Value,
+    search: &Value,
+    replace: Option<&Value>,
+) -> Result<Option<ArrayValue>, ExecError> {
+    if let Some(array) = normalize_array_value(array) {
+        return Ok(Some(array));
+    }
+    let Some(text) = array.as_text() else {
+        return Ok(None);
+    };
+    let element_type = search
+        .sql_type_hint()
+        .filter(|ty| !ty.is_array && !matches!(ty.kind, SqlTypeKind::Text))
+        .or_else(|| {
+            replace.and_then(|value| {
+                value
+                    .sql_type_hint()
+                    .filter(|ty| !ty.is_array && !matches!(ty.kind, SqlTypeKind::Text))
+            })
+        })
+        .unwrap_or(SqlType::new(SqlTypeKind::Text));
+    match cast_value(
+        Value::Text(text.into()),
+        SqlType::array_of(element_type.element_type()),
+    )? {
+        Value::PgArray(array) => Ok(Some(array)),
+        Value::Array(items) => Ok(Some(ArrayValue::from_1d(items))),
+        _ => Ok(None),
+    }
+}
+
+pub(super) fn eval_trim_array_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [array, count] => trim_array_value(array, int4_array_count_arg(count, "trim_array")?),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "trim_array(array, n)",
+            actual: format!("TrimArray({} args)", values.len()),
+        })),
+    }
+}
+
+pub(super) fn eval_array_shuffle_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [array] => normalize_array_value(array)
+            .map(Value::PgArray)
+            .ok_or_else(|| array_function_type_error("array_shuffle", array.clone())),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_shuffle(array)",
+            actual: format!("ArrayShuffle({} args)", values.len()),
+        })),
+    }
+}
+
+pub(super) fn eval_array_sample_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [array, count] => sample_array_value(array, int4_array_count_arg(count, "array_sample")?),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_sample(array, n)",
+            actual: format!("ArraySample({} args)", values.len()),
+        })),
+    }
+}
+
+pub(super) fn eval_array_reverse_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [array] => reverse_array_value(array),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_reverse(array)",
+            actual: format!("ArrayReverse({} args)", values.len()),
+        })),
+    }
+}
+
+fn trim_array_value(array: &Value, count: i32) -> Result<Value, ExecError> {
+    let Some(array) = normalize_array_value(array) else {
+        return Err(array_function_type_error("trim_array", array.clone()));
+    };
+    let len = array.dimensions.first().map(|dim| dim.length).unwrap_or(0);
+    let count_usize = validate_array_count("number of elements to trim", count, len)?;
+    let keep = len - count_usize;
+    Ok(Value::PgArray(array_take_first_axis(array, keep, 1)))
+}
+
+fn sample_array_value(array: &Value, count: i32) -> Result<Value, ExecError> {
+    let Some(array) = normalize_array_value(array) else {
+        return Err(array_function_type_error("array_sample", array.clone()));
+    };
+    let len = array.dimensions.first().map(|dim| dim.length).unwrap_or(0);
+    let count_usize = validate_array_count("sample size", count, len)?;
+    Ok(Value::PgArray(array_take_first_axis(array, count_usize, 1)))
+}
+
+fn reverse_array_value(array: &Value) -> Result<Value, ExecError> {
+    let Some(array) = normalize_array_value(array) else {
+        return Err(array_function_type_error("array_reverse", array.clone()));
+    };
+    if array.dimensions.is_empty() {
+        return Ok(Value::PgArray(array));
+    }
+    let first_len = array.dimensions[0].length;
+    let stride = first_axis_stride(&array);
+    let mut elements = Vec::with_capacity(array.elements.len());
+    for idx in (0..first_len).rev() {
+        let start = idx * stride;
+        elements.extend(array.elements[start..start + stride].iter().cloned());
+    }
+    Ok(Value::PgArray(ArrayValue {
+        element_type_oid: array.element_type_oid,
+        dimensions: array.dimensions,
+        elements,
+    }))
+}
+
+fn array_take_first_axis(array: ArrayValue, first_len: usize, first_lower: i32) -> ArrayValue {
+    if first_len == 0 || array.dimensions.is_empty() {
+        return ArrayValue {
+            element_type_oid: array.element_type_oid,
+            ..ArrayValue::empty()
+        };
+    }
+    let stride = first_axis_stride(&array);
+    let mut dimensions = array.dimensions.clone();
+    dimensions[0].lower_bound = first_lower;
+    dimensions[0].length = first_len;
+    let elements = array
+        .elements
+        .into_iter()
+        .take(first_len.saturating_mul(stride))
+        .collect();
+    ArrayValue {
+        element_type_oid: array.element_type_oid,
+        dimensions,
+        elements,
+    }
+}
+
+fn first_axis_stride(array: &ArrayValue) -> usize {
+    array.dimensions[1..]
+        .iter()
+        .fold(1usize, |acc, dim| acc.saturating_mul(dim.length))
+}
+
+fn int4_array_count_arg(value: &Value, op: &'static str) -> Result<i32, ExecError> {
+    array_subscript_index(Some(value))?.ok_or_else(|| ExecError::TypeMismatch {
+        op,
+        left: value.clone(),
+        right: Value::Null,
+    })
+}
+
+fn validate_array_count(label: &'static str, count: i32, max: usize) -> Result<usize, ExecError> {
+    if count < 0 || count as usize > max {
+        return Err(ExecError::DetailedError {
+            message: format!("{label} must be between 0 and {max}"),
+            detail: None,
+            hint: None,
+            sqlstate: "2202E",
+        });
+    }
+    Ok(count as usize)
+}
+
+fn array_function_type_error(op: &'static str, value: Value) -> ExecError {
+    ExecError::TypeMismatch {
+        op,
+        left: value,
+        right: Value::Null,
+    }
+}
+
 pub(super) fn eval_array_sort_function(values: &[Value]) -> Result<Value, ExecError> {
     match values {
         [Value::Null] | [Value::Null, ..] => Ok(Value::Null),
         [array] => array_sort_value(array, false, false),
-        [array, Value::Bool(desc)] => array_sort_value(array, *desc, false),
+        [array, Value::Bool(desc)] => array_sort_value(array, *desc, *desc),
         [array, Value::Bool(desc), Value::Bool(nulls_first)] => {
             array_sort_value(array, *desc, *nulls_first)
         }
@@ -1013,11 +1189,21 @@ fn array_sort_value(
     if array.dimensions.is_empty() {
         return Ok(Value::PgArray(array));
     }
+    if array.element_type_oid == Some(crate::include::catalog::XID_TYPE_OID)
+        && array.elements.len() > 1
+    {
+        return Err(ExecError::DetailedError {
+            message: "could not identify a comparison function for type xid".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
+        });
+    }
     if array.ndim() == 1 {
         let mut items = array.elements.clone();
         let mut sort_error = None;
         items.sort_by(|left, right| {
-            match compare_order_values(left, right, None, Some(nulls_first), descending) {
+            match compare_array_sort_values(left, right, nulls_first, descending) {
                 Ok(ordering) => ordering,
                 Err(err) => {
                     if sort_error.is_none() {
@@ -1051,7 +1237,7 @@ fn array_sort_value(
         .collect::<Vec<_>>();
     let mut sort_error = None;
     slices.sort_by(|left, right| {
-        match compare_order_values(left, right, None, Some(nulls_first), descending) {
+        match compare_array_sort_values(left, right, nulls_first, descending) {
             Ok(ordering) => ordering,
             Err(err) => {
                 if sort_error.is_none() {
@@ -1076,22 +1262,67 @@ fn array_sort_value(
     )))
 }
 
+fn compare_array_sort_values(
+    left: &Value,
+    right: &Value,
+    nulls_first: bool,
+    descending: bool,
+) -> Result<std::cmp::Ordering, ExecError> {
+    let ordering = compare_order_values(left, right, None, Some(nulls_first), false)?;
+    if descending && !matches!((left, right), (Value::Null, _) | (_, Value::Null)) {
+        Ok(ordering.reverse())
+    } else {
+        Ok(ordering)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ArrayFillArgKind {
+    Dimension,
+    LowerBound,
+}
+
 fn parse_int_array_argument(
     op: &'static str,
     value: &Value,
+    kind: ArrayFillArgKind,
 ) -> Result<Vec<Option<i32>>, ExecError> {
-    let Some(array) = normalize_array_value(value) else {
-        return Err(ExecError::TypeMismatch {
-            op,
-            left: value.clone(),
-            right: Value::Null,
-        });
+    let array = match normalize_array_value(value) {
+        Some(array) => array,
+        None if value.as_text().is_some() => {
+            let text = value.as_text().unwrap();
+            match cast_value(
+                Value::Text(text.into()),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Int4)),
+            )? {
+                Value::PgArray(array) => array,
+                Value::Array(items) => ArrayValue::from_1d(items),
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op,
+                        left: other,
+                        right: Value::Null,
+                    });
+                }
+            }
+        }
+        None => {
+            return Err(ExecError::TypeMismatch {
+                op,
+                left: value.clone(),
+                right: Value::Null,
+            });
+        }
     };
     if array.ndim() > 1 {
-        return Err(ExecError::TypeMismatch {
-            op,
-            left: value.clone(),
-            right: Value::Null,
+        return Err(match kind {
+            ArrayFillArgKind::Dimension => ExecError::DetailedError {
+                message: "wrong number of array subscripts".into(),
+                detail: Some("Dimension array must be one dimensional.".into()),
+                hint: None,
+                sqlstate: "2202E",
+            },
+            ArrayFillArgKind::LowerBound => array_fill_low_bound_mismatch_error(),
         });
     }
     array
@@ -1099,6 +1330,24 @@ fn parse_int_array_argument(
         .iter()
         .map(|item| array_subscript_index(Some(item)))
         .collect()
+}
+
+fn array_fill_null_array_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "dimension array or low bound array cannot be null".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22004",
+    }
+}
+
+fn array_fill_low_bound_mismatch_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "wrong number of array subscripts".into(),
+        detail: Some("Low bound array has different size than dimensions array.".into()),
+        hint: None,
+        sqlstate: "2202E",
+    }
 }
 
 fn render_scalar_text(value: &Value) -> Result<String, ExecError> {
@@ -1120,34 +1369,29 @@ pub(super) fn eval_width_bucket_thresholds(values: &[Value]) -> Result<Value, Ex
     match values {
         [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
         [operand, thresholds] => {
-            let Some(thresholds) = normalize_array_value(thresholds) else {
-                return Err(ExecError::TypeMismatch {
-                    op: "width_bucket",
-                    left: operand.clone(),
-                    right: thresholds.clone(),
-                });
-            };
+            let thresholds = normalize_width_bucket_thresholds(operand, thresholds)?;
+            if thresholds.elements.is_empty() {
+                return Ok(Value::Int32(0));
+            }
             if thresholds.ndim() != 1 {
-                return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "one-dimensional thresholds array",
-                    actual: "width_bucket".into(),
-                }));
+                return Err(ExecError::DetailedError {
+                    message: "thresholds must be one-dimensional array".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "2202E",
+                });
             }
             if thresholds
                 .elements
                 .iter()
                 .any(|value| matches!(value, Value::Null))
             {
-                return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "thresholds array without NULLs",
-                    actual: "width_bucket".into(),
-                }));
-            }
-            if thresholds.elements.is_empty() {
-                return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "non-empty thresholds array",
-                    actual: "width_bucket".into(),
-                }));
+                return Err(ExecError::DetailedError {
+                    message: "thresholds array must not contain NULLs".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22004",
+                });
             }
             let mut bucket = 0i32;
             for threshold in &thresholds.elements {
@@ -1166,6 +1410,35 @@ pub(super) fn eval_width_bucket_thresholds(values: &[Value]) -> Result<Value, Ex
             actual: format!("WidthBucket({} args)", values.len()),
         })),
     }
+}
+
+fn normalize_width_bucket_thresholds(
+    operand: &Value,
+    thresholds: &Value,
+) -> Result<ArrayValue, ExecError> {
+    if let Some(array) = normalize_array_value(thresholds) {
+        return Ok(array);
+    }
+    if let Some(text) = thresholds.as_text() {
+        let element_type = operand
+            .sql_type_hint()
+            .filter(|ty| !ty.is_array && !matches!(ty.kind, SqlTypeKind::Text))
+            .unwrap_or(SqlType::new(SqlTypeKind::Int4));
+        return match cast_value(Value::Text(text.into()), SqlType::array_of(element_type))? {
+            Value::PgArray(array) => Ok(array),
+            Value::Array(items) => Ok(ArrayValue::from_1d(items)),
+            other => Err(ExecError::TypeMismatch {
+                op: "width_bucket",
+                left: operand.clone(),
+                right: other,
+            }),
+        };
+    }
+    Err(ExecError::TypeMismatch {
+        op: "width_bucket",
+        left: operand.clone(),
+        right: thresholds.clone(),
+    })
 }
 
 pub(super) fn eval_array_lower_function(values: &[Value]) -> Result<Value, ExecError> {

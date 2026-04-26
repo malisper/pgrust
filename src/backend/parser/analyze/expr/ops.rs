@@ -19,6 +19,15 @@ pub(super) fn bind_arithmetic_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
+    reject_arithmetic_quantified_array_call(
+        op,
+        right,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
     let raw_left_type =
         infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
     let raw_right_type =
@@ -684,6 +693,61 @@ pub(super) fn bind_arithmetic_expr(
         common,
     );
     Ok(Expr::op_auto(make, vec![left, right]))
+}
+
+fn reject_arithmetic_quantified_array_call(
+    op: &'static str,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<(), ParseError> {
+    let SqlExpr::FuncCall { name, args, .. } = right else {
+        return Ok(());
+    };
+    if !name.eq_ignore_ascii_case("any") && !name.eq_ignore_ascii_case("all") {
+        return Ok(());
+    }
+    let [arg] = args.args() else {
+        return Ok(());
+    };
+    if arg.name.is_some() {
+        return Ok(());
+    }
+    let arg_type = infer_sql_expr_type_with_ctes(
+        &arg.value,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    );
+    let string_literal = matches!(
+        arg.value,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    );
+    if !arg_type.is_array && !string_literal {
+        return Err(ParseError::DetailedError {
+            message: "op ANY/ALL (array) requires array on right side".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
+    // :HACK: The grammar only lowers comparison operators to QuantifiedArray today.
+    // Arithmetic operators followed by ANY/ALL parse as a function call on the
+    // right-hand side, so emit PostgreSQL's parse-analysis diagnostic here.
+    if matches!(op, "+" | "-" | "*" | "/" | "%") {
+        return Err(ParseError::DetailedError {
+            message: "op ANY/ALL (array) requires operator to yield boolean".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn bind_comparison_expr(

@@ -524,6 +524,13 @@ fn cast_text_to_regnamespace(
     Ok(Value::Int64(namespace_oid as i64))
 }
 
+fn cast_text_to_regtype(
+    text: &str,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    expr_reg::resolve_regtype_oid(text, catalog).map(|oid| Value::Int64(oid as i64))
+}
+
 fn regclass_text_input(value: &Value, source_type: Option<SqlType>) -> Option<&str> {
     let source_is_text_like = source_type.is_some_and(|ty| {
         matches!(
@@ -1548,6 +1555,7 @@ pub(crate) fn parse_interval_text_value_with_style(
 fn expand_interval_tokens(text: &str) -> Vec<String> {
     let tokens = text
         .split_whitespace()
+        .filter(|token| *token != "@")
         .flat_map(|token| {
             if token.contains(':') {
                 return vec![token.to_string()];
@@ -2553,7 +2561,8 @@ fn parse_text_array_literal_with_options_and_catalog(
     explicit: bool,
     catalog: Option<&dyn CatalogLookup>,
 ) -> Result<Value, ExecError> {
-    let (bounds, input) = parse_array_bounds_prefix(raw)?;
+    let parse_input = raw.trim_start();
+    let (bounds, input) = parse_array_bounds_prefix(parse_input, raw)?;
     let element_type_oid = array_element_type_oid(element_type);
     if input == "{}" {
         let mut array = ArrayValue::empty();
@@ -2562,13 +2571,13 @@ fn parse_text_array_literal_with_options_and_catalog(
         }
         return Ok(Value::PgArray(array));
     }
-    if !input.starts_with('{') || !input.ends_with('}') {
+    if !input.starts_with('{') {
         return Err(invalid_array_literal(
             raw,
             Some("Array value must start with \"{\" or dimension information.".into()),
         ));
     }
-    let mut parser = ArrayTextParser::new(input, element_type, explicit, catalog);
+    let mut parser = ArrayTextParser::new(input, raw, element_type, explicit, catalog);
     let value = parser.parse_array()?;
     parser.skip_ws();
     if !parser.is_eof() {
@@ -2620,14 +2629,17 @@ struct ParsedArrayBounds {
     lengths: Option<Vec<usize>>,
 }
 
-fn parse_array_bounds_prefix(raw: &str) -> Result<(ParsedArrayBounds, &str), ExecError> {
-    if !raw.starts_with('[') {
-        return Ok((ParsedArrayBounds::default(), raw));
+fn parse_array_bounds_prefix<'a>(
+    input: &'a str,
+    raw: &str,
+) -> Result<(ParsedArrayBounds, &'a str), ExecError> {
+    if !input.starts_with('[') {
+        return Ok((ParsedArrayBounds::default(), input));
     }
-    let Some(equals) = raw.find('=') else {
-        return Ok((ParsedArrayBounds::default(), raw));
+    let Some(equals) = input.find('=') else {
+        return Ok((ParsedArrayBounds::default(), input));
     };
-    let bounds = &raw[..equals];
+    let bounds = &input[..equals];
     let mut lower_bounds = Vec::new();
     let mut lengths = Vec::new();
     let mut remaining = bounds;
@@ -2636,26 +2648,25 @@ fn parse_array_bounds_prefix(raw: &str) -> Result<(ParsedArrayBounds, &str), Exe
             return Err(invalid_array_literal(raw, None));
         };
         let part = &rest[..end];
-        let Some((lower, upper)) = part.split_once(':') else {
-            return Err(invalid_array_literal(
-                raw,
-                Some("Specified array dimensions do not match array contents.".into()),
-            ));
+        let (lower, upper) = if let Some((lower, upper)) = part.split_once(':') {
+            (lower.trim(), upper.trim())
+        } else {
+            ("1", part.trim())
         };
-        if lower.trim().is_empty() {
+        if lower.is_empty() {
             return Err(invalid_array_literal(
                 raw,
                 Some("\"[\" must introduce explicitly-specified array dimensions.".into()),
             ));
         };
-        if upper.trim().is_empty() {
+        if upper.is_empty() {
             return Err(invalid_array_literal(
                 raw,
                 Some("Missing array dimension value.".into()),
             ));
         }
-        let lower = parse_array_bound(lower.trim(), raw)?;
-        let upper = parse_array_bound(upper.trim(), raw)?;
+        let lower = parse_array_bound(lower, raw)?;
+        let upper = parse_array_bound(upper, raw)?;
         if upper < lower {
             return Err(ExecError::ArrayInput {
                 message: "upper bound cannot be less than lower bound".into(),
@@ -2673,7 +2684,16 @@ fn parse_array_bounds_prefix(raw: &str) -> Result<(ParsedArrayBounds, &str), Exe
             });
         }
         lower_bounds.push(lower as i32);
-        lengths.push((upper - lower + 1) as usize);
+        lengths.push(
+            (upper - lower + 1)
+                .try_into()
+                .map_err(|_| ExecError::ArrayInput {
+                    message: "array bound is out of integer range".into(),
+                    value: raw.into(),
+                    detail: None,
+                    sqlstate: "22003",
+                })?,
+        );
         remaining = &rest[end + 1..];
     }
     Ok((
@@ -2681,17 +2701,26 @@ fn parse_array_bounds_prefix(raw: &str) -> Result<(ParsedArrayBounds, &str), Exe
             lower_bounds,
             lengths: Some(lengths),
         },
-        &raw[equals + 1..],
+        &input[equals + 1..],
     ))
 }
 
 fn parse_array_bound(text: &str, raw: &str) -> Result<i64, ExecError> {
-    text.parse::<i64>().map_err(|_| ExecError::ArrayInput {
+    let value = text.parse::<i64>().map_err(|_| ExecError::ArrayInput {
         message: "array bound is out of integer range".into(),
         value: raw.into(),
         detail: None,
         sqlstate: "22003",
-    })
+    })?;
+    if !(i32::MIN as i64..=i32::MAX as i64).contains(&value) {
+        return Err(ExecError::ArrayInput {
+            message: "array bound is out of integer range".into(),
+            value: raw.into(),
+            detail: None,
+            sqlstate: "22003",
+        });
+    }
+    Ok(value)
 }
 
 fn invalid_array_literal(raw: &str, detail: Option<String>) -> ExecError {
@@ -2705,21 +2734,29 @@ fn invalid_array_literal(raw: &str, detail: Option<String>) -> ExecError {
 
 struct ArrayTextParser<'a> {
     input: &'a str,
+    raw: &'a str,
     offset: usize,
     element_type: SqlType,
     explicit: bool,
     catalog: Option<&'a dyn CatalogLookup>,
 }
 
+struct UnquotedArrayToken {
+    text: String,
+    escaped: bool,
+}
+
 impl<'a> ArrayTextParser<'a> {
     fn new(
         input: &'a str,
+        raw: &'a str,
         element_type: SqlType,
         explicit: bool,
         catalog: Option<&'a dyn CatalogLookup>,
     ) -> Self {
         Self {
             input,
+            raw,
             offset: 0,
             element_type,
             explicit,
@@ -2745,7 +2782,7 @@ impl<'a> ArrayTextParser<'a> {
                     self.skip_ws();
                     if self.peek_char() == Some('}') {
                         return Err(invalid_array_literal(
-                            self.input,
+                            self.raw,
                             Some("Unexpected \"}\" character.".into()),
                         ));
                     }
@@ -2768,33 +2805,33 @@ impl<'a> ArrayTextParser<'a> {
                 let text = self.parse_quoted_string()?;
                 self.skip_ws();
                 if matches!(self.peek_char(), Some(ch) if !matches!(ch, ',' | '}')) {
+                    if self.peek_char() == Some('{') {
+                        return Err(invalid_array_literal(
+                            self.raw,
+                            Some("Unexpected \"{\" character.".into()),
+                        ));
+                    }
                     return Err(invalid_array_literal(
-                        self.input,
+                        self.raw,
                         Some("Incorrectly quoted array element.".into()),
                     ));
                 }
                 self.cast_item_text(&text)
             }
             Some(_) => {
-                let text = self.parse_unquoted_token();
-                if text.is_empty() {
+                let token = self.parse_unquoted_token()?;
+                if token.text.is_empty() {
                     let detail = match self.peek_char() {
                         Some(',') => "Unexpected \",\" character.",
                         Some('}') => "Unexpected \"}\" character.",
                         _ => "Unexpected array element.",
                     };
-                    return Err(invalid_array_literal(self.input, Some(detail.into())));
+                    return Err(invalid_array_literal(self.raw, Some(detail.into())));
                 }
-                if text.contains('{') {
-                    return Err(invalid_array_literal(
-                        self.input,
-                        Some("Unexpected \"{\" character.".into()),
-                    ));
-                }
-                if text.eq_ignore_ascii_case("NULL") {
+                if !token.escaped && token.text.eq_ignore_ascii_case("NULL") {
                     Ok(Value::Null)
                 } else {
-                    self.cast_item_text(text.trim_end())
+                    self.cast_item_text(token.text.trim_end())
                 }
             }
             None => self.type_mismatch(),
@@ -2825,7 +2862,7 @@ impl<'a> ArrayTextParser<'a> {
                 '\\' => {
                     let escaped = self
                         .bump_char()
-                        .ok_or_else(|| invalid_array_literal(self.input, None))?;
+                        .ok_or_else(|| invalid_array_literal(self.raw, None))?;
                     text.push(escaped);
                 }
                 other => text.push(other),
@@ -2834,15 +2871,50 @@ impl<'a> ArrayTextParser<'a> {
         self.type_mismatch()
     }
 
-    fn parse_unquoted_token(&mut self) -> &'a str {
-        let start = self.offset;
+    fn parse_unquoted_token(&mut self) -> Result<UnquotedArrayToken, ExecError> {
+        let mut text = String::new();
+        let mut escaped = false;
+        let mut escaped_brace_depth = 0usize;
         while let Some(ch) = self.peek_char() {
-            if matches!(ch, ',' | '}') {
+            if escaped_brace_depth == 0 && matches!(ch, ',' | '}') {
                 break;
             }
-            self.bump_char();
+            match ch {
+                '"' => {
+                    return Err(invalid_array_literal(
+                        self.raw,
+                        Some("Incorrectly quoted array element.".into()),
+                    ));
+                }
+                '{' => {
+                    return Err(invalid_array_literal(
+                        self.raw,
+                        Some("Unexpected \"{\" character.".into()),
+                    ));
+                }
+                '\\' => {
+                    self.bump_char();
+                    let escaped_ch = self
+                        .bump_char()
+                        .ok_or_else(|| invalid_array_literal(self.raw, None))?;
+                    if escaped_ch == '{' {
+                        escaped_brace_depth += 1;
+                    }
+                    text.push(escaped_ch);
+                    escaped = true;
+                }
+                '}' if escaped_brace_depth > 0 => {
+                    self.bump_char();
+                    escaped_brace_depth -= 1;
+                    text.push(ch);
+                }
+                other => {
+                    self.bump_char();
+                    text.push(other);
+                }
+            }
         }
-        &self.input[start..self.offset]
+        Ok(UnquotedArrayToken { text, escaped })
     }
 
     fn skip_ws(&mut self) {
@@ -2875,7 +2947,7 @@ impl<'a> ArrayTextParser<'a> {
 
     fn type_mismatch<T>(&self) -> Result<T, ExecError> {
         Err(invalid_array_literal(
-            self.input,
+            self.raw,
             Some("Unexpected array element.".into()),
         ))
     }
@@ -2974,7 +3046,7 @@ fn user_defined_base_type_row(
         return None;
     }
     let row = catalog.type_by_oid(ty.type_oid)?;
-    if row.typinput == 0 || row.typrelid != 0 || row.sql_type.is_array {
+    if row.typinput == 0 || row.typtype != 'b' || row.typrelid != 0 || row.sql_type.is_array {
         return None;
     }
     if row.typinput == DOMAIN_IN_PROC_OID {
@@ -4497,6 +4569,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         Value::Text(text) => {
             if matches!(ty.kind, SqlTypeKind::Enum) {
                 cast_text_to_enum(text.as_str(), ty, catalog)
+            } else if matches!(ty.kind, SqlTypeKind::RegType) {
+                cast_text_to_regtype(text.as_str(), catalog)
             } else {
                 cast_text_value_with_config(text.as_str(), ty, true, config)
             }
@@ -4507,6 +4581,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             };
             if matches!(ty.kind, SqlTypeKind::Enum) {
                 cast_text_to_enum(text, ty, catalog)
+            } else if matches!(ty.kind, SqlTypeKind::RegType) {
+                cast_text_to_regtype(text, catalog)
             } else {
                 cast_text_value_with_config(text, ty, true, config)
             }
@@ -5197,6 +5273,12 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     crate::backend::executor::value_io::format_array_text(&items),
                 )))
             }
+            SqlTypeKind::Int2Vector if items.is_empty() => {
+                Err(invalid_vector_array_error("int2vector"))
+            }
+            SqlTypeKind::OidVector if items.is_empty() => {
+                Err(invalid_vector_array_error("oidvector"))
+            }
             _ => Ok(Value::Array(items)),
         },
         Value::PgArray(array) => match ty.kind {
@@ -5204,6 +5286,12 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 Ok(Value::Text(CompactString::from_owned(
                     crate::backend::executor::value_io::format_array_value_text(&array),
                 )))
+            }
+            SqlTypeKind::Int2Vector if array.elements.is_empty() => {
+                Err(invalid_vector_array_error("int2vector"))
+            }
+            SqlTypeKind::OidVector if array.elements.is_empty() => {
+                Err(invalid_vector_array_error("oidvector"))
             }
             _ => Ok(Value::PgArray(array)),
         },
@@ -5251,6 +5339,9 @@ fn parse_int2vector_array_text(text: &str) -> Result<Value, ExecError> {
     for item in text.split_ascii_whitespace() {
         items.push(cast_text_to_int2(item)?);
     }
+    if items.is_empty() {
+        return Err(invalid_vector_array_error("int2vector"));
+    }
     Ok(Value::PgArray(
         ArrayValue::from_dimensions(vector_array_dimensions(items.len()), items)
             .with_element_type_oid(INT2_TYPE_OID),
@@ -5262,10 +5353,22 @@ fn parse_oidvector_array_text(text: &str, element_type_oid: u32) -> Result<Value
     for item in text.split_ascii_whitespace() {
         items.push(cast_text_to_oid(item)?);
     }
+    if items.is_empty() {
+        return Err(invalid_vector_array_error("oidvector"));
+    }
     Ok(Value::PgArray(
         ArrayValue::from_dimensions(vector_array_dimensions(items.len()), items)
             .with_element_type_oid(element_type_oid),
     ))
+}
+
+fn invalid_vector_array_error(type_name: &'static str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("array is not a valid {type_name}"),
+        detail: None,
+        hint: None,
+        sqlstate: "22P02",
+    }
 }
 
 fn is_oid_vector_array_element(kind: SqlTypeKind) -> bool {
@@ -6145,7 +6248,7 @@ fn has_nonzero_digit(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cast_float_to_int, cast_text_value_with_config, cast_value,
+        cast_float_to_int, cast_text_to_regtype, cast_text_value_with_config, cast_value,
         cast_value_with_source_type_and_config, parse_input_type_name, parse_interval_text_value,
         parse_pg_float, parse_text_array_literal, render_interval_text_with_style,
         soft_input_error_info,
@@ -6154,6 +6257,9 @@ mod tests {
     use crate::backend::executor::{ExecError, Value};
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::backend::utils::misc::guc_datetime::{DateTimeConfig, IntervalStyle};
+    use crate::include::catalog::{
+        BOOL_TYPE_OID, GTSVECTOR_TYPE_OID, INT4_TYPE_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
+    };
     use crate::include::nodes::datetime::{
         DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
     };
@@ -6266,28 +6372,127 @@ mod tests {
     }
 
     #[test]
+    fn regtype_cast_resolves_catalog_only_types() {
+        assert_eq!(
+            cast_text_to_regtype("gtsvector", None).unwrap(),
+            Value::Int64(GTSVECTOR_TYPE_OID as i64)
+        );
+    }
+
+    #[test]
     fn parse_text_array_literal_uses_scalar_input_parsers() {
         assert_eq!(
             parse_text_array_literal("{1,2}", SqlType::new(SqlTypeKind::Int4)).unwrap(),
-            Value::Array(vec![Value::Int32(1), Value::Int32(2)])
+            Value::PgArray(
+                ArrayValue::from_1d(vec![Value::Int32(1), Value::Int32(2)])
+                    .with_element_type_oid(INT4_TYPE_OID)
+            )
         );
         assert_eq!(
             parse_text_array_literal("{\"NULL\",NULL}", SqlType::new(SqlTypeKind::Text)).unwrap(),
-            Value::Array(vec![Value::Text("NULL".into()), Value::Null])
+            Value::PgArray(
+                ArrayValue::from_1d(vec![Value::Text("NULL".into()), Value::Null])
+                    .with_element_type_oid(TEXT_TYPE_OID)
+            )
         );
         assert_eq!(
             parse_text_array_literal("{true,false}", SqlType::new(SqlTypeKind::Bool)).unwrap(),
-            Value::Array(vec![Value::Bool(true), Value::Bool(false)])
+            Value::PgArray(
+                ArrayValue::from_1d(vec![Value::Bool(true), Value::Bool(false)])
+                    .with_element_type_oid(BOOL_TYPE_OID)
+            )
         );
         assert_eq!(
             parse_text_array_literal("{{1,4},{2,5},{3,6}}", SqlType::new(SqlTypeKind::Int4))
                 .unwrap(),
-            Value::Array(vec![
-                Value::Array(vec![Value::Int32(1), Value::Int32(4)]),
-                Value::Array(vec![Value::Int32(2), Value::Int32(5)]),
-                Value::Array(vec![Value::Int32(3), Value::Int32(6)]),
-            ])
+            Value::PgArray(
+                ArrayValue::from_dimensions(
+                    vec![
+                        crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 1,
+                            length: 3,
+                        },
+                        crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 1,
+                            length: 2,
+                        },
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(4),
+                        Value::Int32(2),
+                        Value::Int32(5),
+                        Value::Int32(3),
+                        Value::Int32(6),
+                    ],
+                )
+                .with_element_type_oid(INT4_TYPE_OID)
+            )
         );
+    }
+
+    #[test]
+    fn parse_text_array_literal_matches_postgres_escape_and_shape_rules() {
+        assert_eq!(
+            cast_value(
+                Value::Text("{null,n\\ull,\"null\"}".into()),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+            )
+            .unwrap(),
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::Null,
+                    Value::Text("null".into()),
+                    Value::Text("null".into())
+                ])
+                .with_element_type_oid(TEXT_TYPE_OID)
+            )
+        );
+        assert_eq!(
+            cast_value(
+                Value::Text("  {   {  \"  0 second  \"   ,  0 second  }   }".into()),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+            )
+            .unwrap(),
+            Value::PgArray(
+                ArrayValue::from_dimensions(
+                    vec![
+                        crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 1,
+                            length: 1,
+                        },
+                        crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 1,
+                            length: 2,
+                        },
+                    ],
+                    vec![
+                        Value::Text("  0 second  ".into()),
+                        Value::Text("0 second".into()),
+                    ],
+                )
+                .with_element_type_oid(TEXT_TYPE_OID)
+            )
+        );
+
+        for raw in [
+            "{{1},{{2}}}",
+            "{{{1}},{2}}",
+            "{{},{{}}}",
+            "{{1},{}}",
+            "{{},{1}}",
+        ] {
+            assert!(matches!(
+                parse_text_array_literal(raw, SqlType::new(SqlTypeKind::Text)),
+                Err(ExecError::ArrayInput { detail: Some(detail), .. })
+                    if detail == "Multidimensional arrays must have sub-arrays with matching dimensions."
+            ));
+        }
+        assert!(matches!(
+            parse_text_array_literal("{a\"b\"}", SqlType::new(SqlTypeKind::Text)),
+            Err(ExecError::ArrayInput { detail: Some(detail), .. })
+                if detail == "Incorrectly quoted array element."
+        ));
     }
 
     #[test]
@@ -6298,7 +6503,10 @@ mod tests {
                 SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
             )
             .unwrap(),
-            Value::Array(vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)])
+            Value::PgArray(
+                ArrayValue::from_1d(vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)])
+                    .with_element_type_oid(INT4_TYPE_OID)
+            )
         );
         assert_eq!(
             cast_value(
@@ -6306,8 +6514,56 @@ mod tests {
                 SqlType::array_of(SqlType::new(SqlTypeKind::Varchar))
             )
             .unwrap(),
-            Value::Array(vec![Value::Text("a".into()), Value::Text("b".into())])
+            Value::PgArray(
+                ArrayValue::from_1d(vec![Value::Text("a".into()), Value::Text("b".into())])
+                    .with_element_type_oid(VARCHAR_TYPE_OID)
+            )
         );
+    }
+
+    #[test]
+    fn parse_text_array_literal_handles_explicit_bounds_like_postgres() {
+        assert_eq!(
+            cast_value(
+                Value::Text("[2]={1,7}".into()),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+            )
+            .unwrap(),
+            Value::PgArray(
+                ArrayValue::from_1d(vec![Value::Int32(1), Value::Int32(7)])
+                    .with_element_type_oid(INT4_TYPE_OID)
+            )
+        );
+        assert!(matches!(
+            cast_value(
+                Value::Text("[2]={1}".into()),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+            ),
+            Err(ExecError::ArrayInput { detail: Some(detail), .. })
+                if detail == "Specified array dimensions do not match array contents."
+        ));
+        assert!(matches!(
+            cast_value(
+                Value::Text("[21474836488:21474836489]={1,2}".into()),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+            ),
+            Err(ExecError::ArrayInput { message, .. })
+                if message == "array bound is out of integer range"
+        ));
+    }
+
+    #[test]
+    fn empty_array_casts_to_vectors_are_rejected() {
+        assert!(matches!(
+            cast_value(Value::Array(vec![]), SqlType::new(SqlTypeKind::OidVector)),
+            Err(ExecError::DetailedError { message, .. })
+                if message == "array is not a valid oidvector"
+        ));
+        assert!(matches!(
+            cast_value(Value::Array(vec![]), SqlType::new(SqlTypeKind::Int2Vector)),
+            Err(ExecError::DetailedError { message, .. })
+                if message == "array is not a valid int2vector"
+        ));
     }
 
     #[test]
@@ -6331,6 +6587,21 @@ mod tests {
                         months: 0,
                     }),
                 ])
+                .with_element_type_oid(crate::include::catalog::INTERVAL_TYPE_OID),
+            )
+        );
+        assert_eq!(
+            cast_value(
+                Value::Text("{@ 1 hour @ 42 minutes @ 20 seconds}".into()),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Interval))
+            )
+            .unwrap(),
+            Value::PgArray(
+                ArrayValue::from_1d(vec![Value::Interval(IntervalValue {
+                    time_micros: 6_140_000_000,
+                    days: 0,
+                    months: 0,
+                })])
                 .with_element_type_oid(crate::include::catalog::INTERVAL_TYPE_OID),
             )
         );

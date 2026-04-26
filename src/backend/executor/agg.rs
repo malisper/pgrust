@@ -15,7 +15,9 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, IntervalValue, NumericValue, Value,
 };
-use crate::include::nodes::primnodes::{AggAccum, AggFunc, HypotheticalAggFunc};
+use crate::include::nodes::primnodes::{
+    AggAccum, AggFunc, HypotheticalAggFunc, expr_sql_type_hint,
+};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
 
@@ -129,6 +131,8 @@ pub(crate) enum AccumState {
     },
     ArrayAgg {
         values: Vec<Value>,
+        input_is_array: bool,
+        inner_dims: Option<Vec<ArrayDimension>>,
     },
     JsonObjectAgg {
         pairs: Vec<(Value, Value)>,
@@ -314,7 +318,11 @@ impl AccumState {
                 values: Vec::new(),
                 jsonb: false,
             },
-            (AggFunc::ArrayAgg, _) => AccumState::ArrayAgg { values: Vec::new() },
+            (AggFunc::ArrayAgg, _) => AccumState::ArrayAgg {
+                values: Vec::new(),
+                input_is_array: false,
+                inner_dims: None,
+            },
             (AggFunc::JsonbAgg, _) => AccumState::JsonAgg {
                 values: Vec::new(),
                 jsonb: true,
@@ -565,8 +573,16 @@ impl AccumState {
                 Ok(())
             },
             (AggFunc::ArrayAgg, _, _) => |state, arg_values| {
-                if let AccumState::ArrayAgg { values } = state {
+                if let AccumState::ArrayAgg {
+                    values,
+                    input_is_array,
+                    inner_dims,
+                } = state
+                {
                     let value = arg_values.first().unwrap_or(&Value::Null);
+                    if *input_is_array {
+                        validate_array_agg_array_input(value, inner_dims)?;
+                    }
                     values.push(value.to_owned_value());
                 }
                 Ok(())
@@ -878,7 +894,7 @@ impl AccumState {
                     ))
                 }
             }
-            AccumState::ArrayAgg { values } => finalize_array_agg(values),
+            AccumState::ArrayAgg { values, .. } => finalize_array_agg(values),
             AccumState::JsonObjectAgg { pairs, jsonb } => {
                 if *jsonb {
                     let built = JsonbValue::Object(
@@ -946,7 +962,17 @@ impl AggregateRuntime {
     pub(crate) fn initialize_state(&self, accum: &AggAccum) -> AccumState {
         match self {
             AggregateRuntime::Builtin { func, .. } => {
-                AccumState::new(*func, accum.distinct, accum.sql_type)
+                let mut state = AccumState::new(*func, accum.distinct, accum.sql_type);
+                if matches!(func, AggFunc::ArrayAgg)
+                    && let AccumState::ArrayAgg { input_is_array, .. } = &mut state
+                {
+                    *input_is_array = accum
+                        .args
+                        .first()
+                        .and_then(expr_sql_type_hint)
+                        .is_some_and(|ty| ty.is_array);
+                }
+                state
             }
             AggregateRuntime::Hypothetical { .. } => AccumState::Hypothetical,
             AggregateRuntime::Custom(custom) => {
@@ -1246,6 +1272,41 @@ fn string_agg_input_bytes(value: &Value, bytea: bool) -> Vec<u8> {
             .to_vec(),
         _ => panic!("bytea string_agg input must be bytea"),
     }
+}
+
+fn validate_array_agg_array_input(
+    value: &Value,
+    inner_dims: &mut Option<Vec<ArrayDimension>>,
+) -> Result<(), ExecError> {
+    let Some(array) = normalize_array_value(value) else {
+        return Err(ExecError::DetailedError {
+            message: "cannot accumulate null arrays".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22004",
+        });
+    };
+    if array.dimensions.is_empty() {
+        return Err(ExecError::DetailedError {
+            message: "cannot accumulate empty arrays".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "2202E",
+        });
+    }
+    match inner_dims {
+        None => *inner_dims = Some(array.dimensions),
+        Some(existing) if existing.as_slice() != array.dimensions.as_slice() => {
+            return Err(ExecError::DetailedError {
+                message: "cannot accumulate arrays of different dimensionality".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "2202E",
+            });
+        }
+        Some(_) => {}
+    }
+    Ok(())
 }
 
 fn finalize_array_agg(values: &[Value]) -> Value {

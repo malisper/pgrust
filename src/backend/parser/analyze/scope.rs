@@ -168,7 +168,7 @@ pub(super) fn bind_values_rows(
             common = Some(match common {
                 None => {
                     common_expr = row[col_idx].raw_expr();
-                    inferred.element_type()
+                    inferred
                 }
                 Some(existing) => {
                     let existing = common_expr
@@ -179,7 +179,7 @@ pub(super) fn bind_values_rows(
                         .map(|expr| coerce_unknown_string_literal_type(expr, inferred, existing))
                         .unwrap_or(inferred);
                     let resolved =
-                        resolve_common_scalar_type(existing, adjusted).ok_or_else(|| {
+                        resolve_common_values_type(existing, adjusted).ok_or_else(|| {
                             ParseError::UnexpectedToken {
                                 expected: "VALUES columns with a common type",
                                 actual: format!(
@@ -320,6 +320,14 @@ fn expand_values_row_exprs<'a>(
         expanded.push(ValuesCell::Raw(expr));
     }
     Ok(expanded)
+}
+
+fn resolve_common_values_type(left: SqlType, right: SqlType) -> Option<SqlType> {
+    if left.is_array && right.is_array {
+        return resolve_common_scalar_type(left.element_type(), right.element_type())
+            .map(SqlType::array_of);
+    }
+    resolve_common_scalar_type(left, right)
 }
 
 pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, ParseError> {
@@ -1062,6 +1070,117 @@ fn bind_function_from_item_with_ctes(
                     stop: coerce_bound_expr(stop, stop_type, common),
                     step,
                     timezone,
+                    output_columns,
+                    with_ordinality,
+                }),
+                scope,
+                !with_ordinality,
+            ))
+        }
+        "generate_subscripts" => {
+            if !(2..=3).contains(&args.len()) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "generate_subscripts(array, dimension [, reverse])",
+                    actual: format!("generate_subscripts with {} arguments", args.len()),
+                });
+            }
+            let array_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                &call_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            if !array_type.is_array
+                && !matches!(
+                    array_type.kind,
+                    SqlTypeKind::Int2Vector | SqlTypeKind::OidVector
+                )
+            {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "array argument to generate_subscripts",
+                    actual: sql_type_name(array_type),
+                });
+            }
+            let dimension_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                &call_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let array = bind_expr_with_outer_and_ctes(
+                &args[0],
+                &call_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            let dimension = bind_expr_with_outer_and_ctes(
+                &args[1],
+                &call_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            let reverse = if args.len() == 3 {
+                let reverse_type = infer_sql_expr_type_with_ctes(
+                    &args[2],
+                    &call_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                Some(coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        &args[2],
+                        &call_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    reverse_type,
+                    SqlType::new(SqlTypeKind::Bool),
+                ))
+            } else {
+                None
+            };
+            let mut output_columns = vec![QueryColumn {
+                name: "generate_subscripts".to_string(),
+                sql_type: SqlType::new(SqlTypeKind::Int4),
+                wire_type_oid: None,
+            }];
+            let mut desc_columns = vec![column_desc(
+                "generate_subscripts",
+                SqlType::new(SqlTypeKind::Int4),
+                false,
+            )];
+            maybe_append_function_ordinality(
+                with_ordinality,
+                &mut output_columns,
+                &mut desc_columns,
+            );
+            let desc = RelationDesc {
+                columns: desc_columns,
+            };
+            let scope = scope_for_relation(Some(name), &desc);
+            Ok((
+                AnalyzedFrom::function(SetReturningCall::GenerateSubscripts {
+                    func_oid: resolved_proc_oid,
+                    func_variadic: resolved_func_variadic,
+                    array,
+                    dimension: coerce_bound_expr(
+                        dimension,
+                        dimension_type,
+                        SqlType::new(SqlTypeKind::Int4),
+                    ),
+                    reverse,
                     output_columns,
                     with_ordinality,
                 }),

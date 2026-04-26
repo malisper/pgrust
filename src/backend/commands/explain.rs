@@ -1467,6 +1467,21 @@ fn render_verbose_set_returning_call(
             }
             args
         }
+        SetReturningCall::GenerateSubscripts {
+            array,
+            dimension,
+            reverse,
+            ..
+        } => {
+            let mut args = vec![
+                render_verbose_function_arg(array, ctx),
+                render_verbose_function_arg(dimension, ctx),
+            ];
+            if let Some(reverse) = reverse {
+                args.push(render_verbose_function_arg(reverse, ctx));
+            }
+            args
+        }
         SetReturningCall::PartitionTree { relid, .. }
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             vec![render_verbose_function_arg(relid, ctx)]
@@ -2271,6 +2286,18 @@ fn collect_direct_set_returning_call_subplans<'a>(
             collect_direct_expr_subplans(step, out);
             if let Some(timezone) = timezone {
                 collect_direct_expr_subplans(timezone, out);
+            }
+        }
+        SetReturningCall::GenerateSubscripts {
+            array,
+            dimension,
+            reverse,
+            ..
+        } => {
+            collect_direct_expr_subplans(array, out);
+            collect_direct_expr_subplans(dimension, out);
+            if let Some(reverse) = reverse {
+                collect_direct_expr_subplans(reverse, out);
             }
         }
         SetReturningCall::PartitionTree { relid, .. }

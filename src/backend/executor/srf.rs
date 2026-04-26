@@ -44,6 +44,12 @@ pub(crate) fn eval_set_returning_call(
             slot,
             ctx,
         ),
+        SetReturningCall::GenerateSubscripts {
+            array,
+            dimension,
+            reverse,
+            ..
+        } => eval_generate_subscripts(array, dimension, reverse.as_ref(), slot, ctx),
         SetReturningCall::Unnest { args, .. } => eval_unnest(args, slot, ctx),
         SetReturningCall::JsonTableFunction { kind, args, .. } => {
             eval_json_table_function(*kind, args, slot, ctx)
@@ -169,6 +175,7 @@ pub(crate) fn eval_project_set_returning_call(
 pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &'static str {
     match call {
         SetReturningCall::GenerateSeries { .. } => "generate_series",
+        SetReturningCall::GenerateSubscripts { .. } => "generate_subscripts",
         SetReturningCall::Unnest { .. } => "unnest",
         SetReturningCall::JsonTableFunction { kind, .. } => match kind {
             crate::include::nodes::primnodes::JsonTableFunction::ObjectKeys => "json_object_keys",
@@ -218,6 +225,78 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &'static str 
         },
         SetReturningCall::UserDefined { .. } => "user_defined_srf",
     }
+}
+
+fn eval_generate_subscripts(
+    array: &Expr,
+    dimension: &Expr,
+    reverse: Option<&Expr>,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let array_value = eval_expr(array, slot, ctx)?;
+    let dimension_value = eval_expr(dimension, slot, ctx)?;
+    let reverse_value = reverse
+        .map(|expr| eval_expr(expr, slot, ctx))
+        .transpose()?
+        .unwrap_or(Value::Bool(false));
+    if matches!(array_value, Value::Null)
+        || matches!(dimension_value, Value::Null)
+        || matches!(reverse_value, Value::Null)
+    {
+        return Ok(Vec::new());
+    }
+    let Some(array) = normalize_array_value(&array_value) else {
+        return Err(ExecError::TypeMismatch {
+            op: "generate_subscripts",
+            left: array_value,
+            right: Value::Null,
+        });
+    };
+    let dimension = match dimension_value {
+        Value::Int16(v) => i32::from(v),
+        Value::Int32(v) => v,
+        Value::Int64(v) => i32::try_from(v).map_err(|_| ExecError::Int4OutOfRange)?,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "generate_subscripts dimension",
+                left: other,
+                right: Value::Null,
+            });
+        }
+    };
+    let reverse = match reverse_value {
+        Value::Bool(v) => v,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "generate_subscripts reverse",
+                left: other,
+                right: Value::Null,
+            });
+        }
+    };
+    if dimension < 1 {
+        return Ok(Vec::new());
+    }
+    let Some(dim) = array.dimensions.get((dimension - 1) as usize) else {
+        return Ok(Vec::new());
+    };
+    if dim.length == 0 {
+        return Ok(Vec::new());
+    }
+    let lower = dim.lower_bound;
+    let upper = lower
+        .checked_add(dim.length as i32)
+        .and_then(|value| value.checked_sub(1))
+        .ok_or(ExecError::Int4OutOfRange)?;
+    let range: Box<dyn Iterator<Item = i32>> = if reverse {
+        Box::new((lower..=upper).rev())
+    } else {
+        Box::new(lower..=upper)
+    };
+    Ok(range
+        .map(|subscript| TupleSlot::virtual_row(vec![Value::Int32(subscript)]))
+        .collect())
 }
 
 fn eval_pg_lock_status(ctx: &ExecutorContext) -> Result<Vec<TupleSlot>, ExecError> {
@@ -724,6 +803,12 @@ fn eval_unnest(
                 arrays.push(Some(values));
             }
             other => {
+                if let Some(array) = normalize_array_value(&other) {
+                    let values = array.to_nested_values();
+                    max_len = max_len.max(values.len());
+                    arrays.push(Some(values));
+                    continue;
+                }
                 if expr_sql_type_hint(arg).is_some_and(|ty| {
                     !ty.is_array
                         && matches!(ty.kind, SqlTypeKind::Int2Vector | SqlTypeKind::OidVector)

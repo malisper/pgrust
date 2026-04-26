@@ -38,3 +38,19 @@ PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet index_matrix_o
 PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet inherited_minmax_explain_uses_desc_and_partial_child_indexes
 PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet planner_rewrites_inherited_minmax_with_directional_index_only_subplans
 PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh check
+
+PR update:
+Merged origin/perf-optimization after GitHub reported PR #237 dirty. Resolved
+the scope.rs conflict by combining VALUES(n.*) expansion with upstream
+array-aware VALUES common-type resolution. Added BitmapOr relation collection
+to the new MERGE privilege plan walker and aligned the older zero-column
+VALUES(n.*) executor expectation with PostgreSQL's zero-column row output.
+
+PR update tests run:
+PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet values_qualified_star_expands_zero_column_rows
+PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet lateral_values_can_reference_zero_column_whole_row
+PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet implicit_row_constructor_works_in_array_position
+PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet inherited_minmax_explain_uses_desc_and_partial_child_indexes
+PGRUST_TARGET_SLOT=6 scripts/cargo_isolated.sh test --lib --quiet index_matrix_or_predicate_falls_back_to_seqscan
+PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet planner_rewrites_inherited_minmax_with_directional_index_only_subplans
+PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh check

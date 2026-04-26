@@ -1258,6 +1258,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::XmlIsWellFormed
             | BuiltinScalarFunction::XmlIsWellFormedDocument
             | BuiltinScalarFunction::XmlIsWellFormedContent => args.len() == 1,
+            BuiltinScalarFunction::Pi => args.is_empty(),
             BuiltinScalarFunction::Random | BuiltinScalarFunction::RandomNormal => {
                 matches!(args.len(), 0 | 2)
             }
@@ -1333,6 +1334,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgRustTestFdwHandler => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncSetup => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncConversion => args.len() == 4,
+            BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid => args.len() == 1,
             BuiltinScalarFunction::PgRustTestWidgetIn
             | BuiltinScalarFunction::PgRustTestWidgetOut
             | BuiltinScalarFunction::PgRustTestInt44In
@@ -1583,11 +1585,17 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::ArrayPrepend
             | BuiltinScalarFunction::ArrayCat
             | BuiltinScalarFunction::ArrayPosition
-            | BuiltinScalarFunction::ArraySort => matches!(args.len(), 2 | 3),
+            | BuiltinScalarFunction::ArraySort => matches!(args.len(), 1 | 2 | 3),
             BuiltinScalarFunction::ArrayPositions | BuiltinScalarFunction::ArrayRemove => {
                 args.len() == 2
             }
             BuiltinScalarFunction::ArrayReplace => args.len() == 3,
+            BuiltinScalarFunction::TrimArray | BuiltinScalarFunction::ArraySample => {
+                args.len() == 2
+            }
+            BuiltinScalarFunction::ArrayShuffle | BuiltinScalarFunction::ArrayReverse => {
+                args.len() == 1
+            }
             BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,
             BuiltinScalarFunction::Greatest | BuiltinScalarFunction::Least => !args.is_empty(),
             BuiltinScalarFunction::BTrim
@@ -2345,6 +2353,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("random_normal", BuiltinScalarFunction::RandomNormal),
         ("drandom_normal", BuiltinScalarFunction::RandomNormal),
         ("drandom_normal_noargs", BuiltinScalarFunction::RandomNormal),
+        ("pi", BuiltinScalarFunction::Pi),
+        ("dpi", BuiltinScalarFunction::Pi),
         ("uuid_in", BuiltinScalarFunction::UuidIn),
         ("uuid_out", BuiltinScalarFunction::UuidOut),
         ("uuid_recv", BuiltinScalarFunction::UuidRecv),
@@ -2504,6 +2514,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_rust_test_enc_conversion",
             BuiltinScalarFunction::PgRustTestEncConversion,
+        ),
+        (
+            "pg_rust_is_catalog_text_unique_index_oid",
+            BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid,
         ),
         (
             "pg_rust_test_widget_in",
@@ -3053,6 +3067,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("array_positions", BuiltinScalarFunction::ArrayPositions),
         ("array_remove", BuiltinScalarFunction::ArrayRemove),
         ("array_replace", BuiltinScalarFunction::ArrayReplace),
+        ("trim_array", BuiltinScalarFunction::TrimArray),
+        ("array_shuffle", BuiltinScalarFunction::ArrayShuffle),
+        ("array_sample", BuiltinScalarFunction::ArraySample),
+        ("array_reverse", BuiltinScalarFunction::ArrayReverse),
         ("array_sort", BuiltinScalarFunction::ArraySort),
         ("enum_first", BuiltinScalarFunction::EnumFirst),
         ("enum_last", BuiltinScalarFunction::EnumLast),
@@ -4146,6 +4164,9 @@ fn catalog_builtin_type_oid(catalog: &dyn CatalogLookup, sql_type: SqlType) -> O
 
 fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) -> bool {
     if let Some(row) = catalog.type_by_oid(target_oid) {
+        if row.typtype == 'd' && row.typbasetype != 0 {
+            return catalog_text_input_cast_exists(catalog, row.typbasetype);
+        }
         if row.sql_type.is_array {
             return true;
         }
@@ -4155,7 +4176,12 @@ fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) 
         if matches!(row.sql_type.kind, SqlTypeKind::Enum) {
             return true;
         }
-        if is_builtin_text_like_type(row.sql_type) {
+        if is_builtin_text_like_type(row.sql_type)
+            || matches!(
+                row.sql_type.kind,
+                SqlTypeKind::Int2Vector | SqlTypeKind::OidVector
+            )
+        {
             return true;
         }
         if matches!(

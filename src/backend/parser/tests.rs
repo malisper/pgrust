@@ -2791,8 +2791,10 @@ fn parse_alter_table_constraint_statements() {
                     ..attrs()
                 },
                 columns: vec!["owner_id".into(), "owner_name".into()],
+                period: None,
                 referenced_table: "people".into(),
                 referenced_columns: Some(vec!["id".into(), "name".into()]),
+                referenced_period: None,
                 match_type: ForeignKeyMatchType::Full,
                 on_delete: ForeignKeyAction::NoAction,
                 on_delete_set_columns: None,
@@ -2814,8 +2816,10 @@ fn parse_alter_table_constraint_statements() {
             constraint: TableConstraint::ForeignKey {
                 attributes: attrs(),
                 columns: vec!["owner_id".into(), "owner_name".into()],
+                period: None,
                 referenced_table: "people".into(),
                 referenced_columns: Some(vec!["id".into(), "name".into()]),
+                referenced_period: None,
                 match_type: ForeignKeyMatchType::Full,
                 on_delete: ForeignKeyAction::NoAction,
                 on_delete_set_columns: None,
@@ -2837,13 +2841,66 @@ fn parse_alter_table_constraint_statements() {
             constraint: TableConstraint::ForeignKey {
                 attributes: attrs(),
                 columns: vec!["owner_id".into(), "owner_name".into()],
+                period: None,
                 referenced_table: "people".into(),
                 referenced_columns: Some(vec!["id".into(), "name".into()]),
+                referenced_period: None,
                 match_type: ForeignKeyMatchType::Simple,
                 on_delete: ForeignKeyAction::SetNull,
                 on_delete_set_columns: Some(vec!["owner_name".into()]),
                 on_update: ForeignKeyAction::NoAction,
             },
+        })
+    );
+
+    let stmt = parse_statement(
+        "alter table pets add constraint pets_owner_fk foreign key (owner_id, period valid_at) references people(id, period valid_at)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "pets".into(),
+            constraint: TableConstraint::ForeignKey {
+                attributes: ConstraintAttributes {
+                    name: Some("pets_owner_fk".into()),
+                    ..attrs()
+                },
+                columns: vec!["owner_id".into(), "valid_at".into()],
+                period: Some("valid_at".into()),
+                referenced_table: "people".into(),
+                referenced_columns: Some(vec!["id".into(), "valid_at".into()]),
+                referenced_period: Some("valid_at".into()),
+                match_type: ForeignKeyMatchType::Simple,
+                on_delete: ForeignKeyAction::NoAction,
+                on_delete_set_columns: None,
+                on_update: ForeignKeyAction::NoAction,
+            },
+        })
+    );
+
+    let stmt = parse_statement(
+        "alter table pets add column valid_at daterange, add constraint pets_pk primary key (owner_id, valid_at without overlaps)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableMulti(vec![
+            "ALTER TABLE pets add column valid_at daterange".into(),
+            "ALTER TABLE pets add constraint pets_pk primary key (owner_id, valid_at without overlaps)".into(),
+        ])
+    );
+
+    let stmt = parse_statement("alter table pets replica identity using index pets_pk").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableReplicaIdentity(AlterTableReplicaIdentityStatement {
+            if_exists: false,
+            only: false,
+            table_name: "pets".into(),
+            index_name: "pets_pk".into(),
         })
     );
 
@@ -9070,6 +9127,21 @@ fn parse_merge_statement() {
         MergeMatchKind::NotMatchedBySource
     );
     assert!(matches!(stmt.when_clauses[2].action, MergeAction::Delete));
+    assert!(stmt.returning.is_empty());
+}
+
+#[test]
+fn parse_merge_returning_clause() {
+    let stmt = parse_statement(
+        "merge into target t using source s on t.tid = s.sid \
+         when matched then delete returning merge_action(), old, new, t.*",
+    )
+    .unwrap();
+    let stmt = match stmt {
+        Statement::Merge(stmt) => stmt,
+        other => panic!("expected merge statement, got {other:?}"),
+    };
+    assert_eq!(stmt.returning.len(), 4);
 }
 
 #[test]
@@ -9102,6 +9174,21 @@ fn plan_merge_uses_join_shape_for_explain() {
         strip_projections(&bound.input_plan.plan_tree),
         Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. } | Plan::MergeJoin { .. }
     ));
+    assert_eq!(bound.visible_column_count, 5);
+    assert_eq!(bound.target_ctid_index, 5);
+    assert_eq!(bound.source_present_index, 6);
+    assert_eq!(
+        bound.input_plan.column_names(),
+        [
+            "id",
+            "name",
+            "note",
+            "id",
+            "owner_id",
+            "__merge_target_ctid",
+            "__merge_source_present",
+        ]
+    );
 }
 
 #[test]
@@ -11400,10 +11487,42 @@ fn parse_create_table_foreign_key_constraints() {
         vec![TableConstraint::ForeignKey {
             attributes: attrs(),
             columns: vec!["owner_name".into()],
+            period: None,
             referenced_table: "people".into(),
             referenced_columns: Some(vec!["name".into()]),
+            referenced_period: None,
             match_type: ForeignKeyMatchType::Simple,
             on_delete: ForeignKeyAction::Restrict,
+            on_delete_set_columns: None,
+            on_update: ForeignKeyAction::NoAction,
+        }]
+    );
+
+    let stmt = parse_statement(
+        "create table temporal_fk (
+            parent_id int4range,
+            valid_at daterange,
+            constraint temporal_fk_parent_fk foreign key (parent_id, period valid_at) references temporal_parent(id, period valid_at)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert_eq!(
+        ct.constraints().cloned().collect::<Vec<_>>(),
+        vec![TableConstraint::ForeignKey {
+            attributes: ConstraintAttributes {
+                name: Some("temporal_fk_parent_fk".into()),
+                ..attrs()
+            },
+            columns: vec!["parent_id".into(), "valid_at".into()],
+            period: Some("valid_at".into()),
+            referenced_table: "temporal_parent".into(),
+            referenced_columns: Some(vec!["id".into(), "valid_at".into()]),
+            referenced_period: Some("valid_at".into()),
+            match_type: ForeignKeyMatchType::Simple,
+            on_delete: ForeignKeyAction::NoAction,
             on_delete_set_columns: None,
             on_update: ForeignKeyAction::NoAction,
         }]
@@ -12208,9 +12327,13 @@ fn lower_create_table_resolves_named_domain_types() {
             typowner: BOOTSTRAP_SUPERUSER_OID,
             typacl: None,
             typlen: 4,
+            typbyval: true,
+            typtype: 'd',
+            typisdefined: true,
             typalign: AttributeAlign::Int,
             typstorage: AttributeStorage::Plain,
             typrelid: 0,
+            typsubscript: 0,
             typelem: 0,
             typarray: 0,
             typinput: 0,
@@ -12219,8 +12342,10 @@ fn lower_create_table_resolves_named_domain_types() {
             typsend: 0,
             typmodin: 0,
             typmodout: 0,
+            typdelim: ',',
             typanalyze: 0,
-            typsubscript: 0,
+            typbasetype: crate::include::catalog::INT4_TYPE_OID,
+            typcollation: 0,
             sql_type: SqlType::new(SqlTypeKind::Int4),
         }],
     };
@@ -12412,7 +12537,10 @@ fn build_plan_rejects_untyped_empty_array() {
     let stmt = parse_select("select ARRAY[]").unwrap();
     assert!(matches!(
         build_plan(&stmt, &catalog()),
-        Err(ParseError::UnexpectedToken { .. })
+        Err(ParseError::DetailedError { message, hint: Some(hint), sqlstate, .. })
+            if message == "cannot determine type of empty array"
+                && hint == "Explicitly cast to the desired type, for example ARRAY[]::integer[]."
+                && sqlstate == "42P18"
     ));
 }
 
@@ -12430,6 +12558,25 @@ fn build_plan_accepts_typed_empty_array() {
         }
         other => panic!("expected projection, got {other:?}"),
     }
+}
+
+#[test]
+fn build_plan_reports_postgres_any_all_array_errors() {
+    let stmt = parse_select("select 33 * any ('{1,2,3}')").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "op ANY/ALL (array) requires operator to yield boolean"
+                && sqlstate == "42809"
+    ));
+
+    let stmt = parse_select("select 33 * any (44)").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "op ANY/ALL (array) requires array on right side"
+                && sqlstate == "42809"
+    ));
 }
 
 #[test]

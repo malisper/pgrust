@@ -2601,6 +2601,34 @@ pub(super) fn bind_scalar_function_call(
         }
         BuiltinScalarFunction::WidthBucket => {
             if args.len() == 2 {
+                let operand_type = infer_sql_expr_type_with_ctes(
+                    &args[0],
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                let thresholds_type = infer_sql_expr_type_with_ctes(
+                    &args[1],
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                if thresholds_type.is_array {
+                    let element_type = thresholds_type.element_type();
+                    let operand_type =
+                        coerce_unknown_string_literal_type(&args[0], operand_type, element_type);
+                    if !width_bucket_threshold_types_compatible(operand_type, element_type) {
+                        return Err(function_does_not_exist_error(
+                            "width_bucket",
+                            &[operand_type, thresholds_type],
+                            catalog,
+                        ));
+                    }
+                }
                 return Ok(build_func(func_variadic, bound_args));
             }
             let raw_operand_type = infer_sql_expr_type_with_ctes(
@@ -3099,6 +3127,9 @@ pub(super) fn bind_scalar_function_call(
             ))
         }
         BuiltinScalarFunction::PgTypeof => {
+            if expr_contains_set_returning(&bound_args[0]) {
+                return Ok(build_func(func_variadic, bound_args));
+            }
             let arg_type = infer_sql_expr_type_with_ctes(
                 &args[0],
                 scope,
@@ -3478,4 +3509,13 @@ fn bind_regex_split_to_array_args(
         ));
     }
     out
+}
+
+fn width_bucket_threshold_types_compatible(operand: SqlType, threshold: SqlType) -> bool {
+    let operand = operand.element_type();
+    let threshold = threshold.element_type();
+    operand == threshold
+        || (is_numeric_family(operand) && is_numeric_family(threshold))
+        || (is_text_like_type(operand) && is_text_like_type(threshold))
+        || (!is_text_like_type(operand) && !is_text_like_type(threshold))
 }

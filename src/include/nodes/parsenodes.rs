@@ -359,6 +359,7 @@ pub enum Statement {
     AlterIndexAttachPartition(AlterIndexAttachPartitionStatement),
     AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
+    AlterTableMulti(Vec<String>),
     AlterTableAddConstraint(AlterTableAddConstraintStatement),
     AlterTableDropColumn(AlterTableDropColumnStatement),
     AlterTableDropConstraint(AlterTableDropConstraintStatement),
@@ -380,6 +381,7 @@ pub enum Statement {
     AlterViewOwner(AlterRelationOwnerStatement),
     AlterSchemaOwner(AlterSchemaOwnerStatement),
     AlterTableSet(AlterTableSetStatement),
+    AlterTableReplicaIdentity(AlterTableReplicaIdentityStatement),
     AlterTableSetRowSecurity(AlterTableSetRowSecurityStatement),
     AlterPolicy(AlterPolicyStatement),
     AlterTableSetNotNull(AlterTableSetNotNullStatement),
@@ -1662,6 +1664,7 @@ pub struct MergeStatement {
     pub source: FromItem,
     pub join_condition: SqlExpr,
     pub when_clauses: Vec<MergeWhenClause>,
+    pub returning: Vec<SelectItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2137,6 +2140,14 @@ pub struct AlterTableSetStatement {
     pub only: bool,
     pub table_name: String,
     pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableReplicaIdentityStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub index_name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3400,8 +3411,10 @@ pub enum TableConstraint {
     ForeignKey {
         attributes: ConstraintAttributes,
         columns: Vec<String>,
+        period: Option<String>,
         referenced_table: String,
         referenced_columns: Option<Vec<String>>,
+        referenced_period: Option<String>,
         match_type: ForeignKeyMatchType,
         on_delete: ForeignKeyAction,
         on_delete_set_columns: Option<Vec<String>>,

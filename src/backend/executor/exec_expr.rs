@@ -2,6 +2,7 @@ use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 use std::cmp::Ordering;
 
+use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
@@ -87,8 +88,9 @@ use super::expr_string::{
     eval_decode_function, eval_encode_function, eval_format_function, eval_get_bit_bytes,
     eval_get_byte, eval_initcap_function, eval_left_function, eval_length_function, eval_like,
     eval_lower_function, eval_lpad_function, eval_md5_function, eval_parse_ident_function,
-    eval_pg_rust_test_enc_conversion, eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler,
-    eval_pg_rust_test_int44in, eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
+    eval_pg_rust_is_catalog_text_unique_index_oid, eval_pg_rust_test_enc_conversion,
+    eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler, eval_pg_rust_test_int44in,
+    eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
     eval_pg_rust_test_pt_in_widget, eval_pg_rust_test_widget_in, eval_pg_rust_test_widget_out,
     eval_pg_size_bytes_function, eval_pg_size_pretty_function, eval_position_function,
     eval_quote_literal_function, eval_repeat_function, eval_replace_function,
@@ -118,7 +120,6 @@ use crate::backend::catalog::rowcodec::pg_description_row_from_values;
 use crate::backend::executor::jsonb::{
     JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
 };
-use crate::backend::executor::sqlfunc::execute_user_defined_sql_scalar_function;
 use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
@@ -146,11 +147,10 @@ use crate::include::catalog::{
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, HashFunctionKind, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr,
-    OpExprKind, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, ScalarFunctionImpl, SubLinkType,
-    TABLE_OID_ATTR_NO, attrno_index, is_executor_special_varno,
+    OpExprKind, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, SubLinkType, TABLE_OID_ATTR_NO,
+    attrno_index, is_executor_special_varno,
 };
 use crate::pgrust::compact_string::CompactString;
-use crate::pl::plpgsql::execute_user_defined_scalar_function;
 
 mod arrays;
 mod subquery;
@@ -162,10 +162,11 @@ use arrays::{
     eval_array_dims_function, eval_array_fill_function, eval_array_length_function,
     eval_array_lower_function, eval_array_ndims_function, eval_array_overlap,
     eval_array_position_function, eval_array_positions_function, eval_array_prepend_function,
-    eval_array_remove_function, eval_array_replace_function, eval_array_sort_function,
+    eval_array_remove_function, eval_array_replace_function, eval_array_reverse_function,
+    eval_array_sample_function, eval_array_shuffle_function, eval_array_sort_function,
     eval_array_subscript, eval_array_subscript_plpgsql, eval_array_to_string_function,
     eval_array_upper_function, eval_cardinality_function, eval_quantified_array,
-    eval_string_to_array_function, eval_width_bucket_thresholds,
+    eval_string_to_array_function, eval_trim_array_function, eval_width_bucket_thresholds,
 };
 use subquery::{
     eval_array_subquery, eval_exists_subquery, eval_quantified_subquery, eval_row_compare_subquery,
@@ -1548,33 +1549,29 @@ fn eval_least(values: &[Value]) -> Result<Value, ExecError> {
 fn lookup_system_binding(
     bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
     varno: usize,
-) -> Result<Value, ExecError> {
+) -> Value {
     bindings
         .iter()
         .find(|binding| binding.varno == varno)
         .map(|binding| Value::Int64(i64::from(binding.table_oid)))
-        .ok_or(ExecError::DetailedError {
-            message: "tableoid is not available for this row".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        })
+        .unwrap_or(Value::Null)
 }
 
-fn lookup_ctid(slot: &TupleSlot) -> Result<Value, ExecError> {
-    slot.tid()
+fn lookup_ctid(
+    bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
+    varno: usize,
+) -> Value {
+    bindings
+        .iter()
+        .find(|binding| binding.varno == varno)
+        .and_then(|binding| binding.tid)
         .map(|tid| {
             Value::Text(CompactString::from_owned(format!(
                 "({},{})",
                 tid.block_number, tid.offset_number
             )))
         })
-        .ok_or(ExecError::DetailedError {
-            message: "ctid is not available for this row".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        })
+        .unwrap_or(Value::Null)
 }
 
 fn builtin_function_for_expr(funcid: u32) -> Result<BuiltinScalarFunction, ExecError> {
@@ -2635,9 +2632,17 @@ fn format_foreign_key_constraintdef_for_catalog(
 ) -> Option<String> {
     let relation = catalog.lookup_relation_by_oid(row.conrelid)?;
     let referenced_relation = catalog.lookup_relation_by_oid(row.confrelid)?;
-    let local_columns = index_column_names_for_heap(&relation.desc, row.conkey.as_ref()?)?;
-    let referenced_columns =
+    let mut local_columns = index_column_names_for_heap(&relation.desc, row.conkey.as_ref()?)?;
+    let mut referenced_columns =
         index_column_names_for_heap(&referenced_relation.desc, row.confkey.as_ref()?)?;
+    if row.conperiod {
+        if let Some(column) = local_columns.last_mut() {
+            *column = format!("PERIOD {column}");
+        }
+        if let Some(column) = referenced_columns.last_mut() {
+            *column = format!("PERIOD {column}");
+        }
+    }
     let referenced_name = catalog
         .class_row_by_oid(row.confrelid)
         .map(|class| class.relname)
@@ -3661,48 +3666,7 @@ fn eval_func_expr(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    match func.implementation {
-        ScalarFunctionImpl::Builtin(builtin) => eval_builtin_function(
-            builtin,
-            func.funcresulttype,
-            &func.args,
-            func.funcvariadic,
-            slot,
-            ctx,
-        ),
-        ScalarFunctionImpl::UserDefined { proc_oid } => {
-            let catalog = ctx
-                .catalog
-                .as_ref()
-                .ok_or_else(|| ExecError::DetailedError {
-                    message: "user-defined functions require executor catalog context".into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "0A000",
-                })?;
-            let row =
-                catalog
-                    .proc_row_by_oid(proc_oid)
-                    .ok_or_else(|| ExecError::DetailedError {
-                        message: format!("unknown function oid {proc_oid}"),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "42883",
-                    })?;
-            match row.prolang {
-                crate::include::catalog::PG_LANGUAGE_SQL_OID => {
-                    execute_user_defined_sql_scalar_function(&row, &func.args, slot, ctx)
-                }
-                _ => execute_user_defined_scalar_function(
-                    proc_oid,
-                    func.funcresulttype,
-                    &func.args,
-                    slot,
-                    ctx,
-                ),
-            }
-        }
-    }
+    super::fmgr::call_scalar_function(func, slot, ctx)
 }
 
 fn current_temp_namespace_name(ctx: &ExecutorContext) -> Option<CompactString> {
@@ -3952,9 +3916,9 @@ pub fn eval_expr(
                     sqlstate: "XX000",
                 })
             } else if var.varattno == TABLE_OID_ATTR_NO {
-                lookup_system_binding(&ctx.system_bindings, var.varno)
+                Ok(lookup_system_binding(&ctx.system_bindings, var.varno))
             } else if var.varattno == SELF_ITEM_POINTER_ATTR_NO {
-                lookup_ctid(slot)
+                Ok(lookup_ctid(&ctx.system_bindings, var.varno))
             } else {
                 let index = attrno_index(var.varattno).ok_or_else(|| {
                     malformed_expr_error("system attribute outside executor support")
@@ -5055,6 +5019,10 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::ArrayPositions => eval_array_positions_function(&values),
         BuiltinScalarFunction::ArrayRemove => eval_array_remove_function(&values),
         BuiltinScalarFunction::ArrayReplace => eval_array_replace_function(&values),
+        BuiltinScalarFunction::TrimArray => eval_trim_array_function(&values),
+        BuiltinScalarFunction::ArrayShuffle => eval_array_shuffle_function(&values),
+        BuiltinScalarFunction::ArraySample => eval_array_sample_function(&values),
+        BuiltinScalarFunction::ArrayReverse => eval_array_reverse_function(&values),
         BuiltinScalarFunction::ArraySort => eval_array_sort_function(&values),
         BuiltinScalarFunction::BoolEq => eval_booleq(&values),
         BuiltinScalarFunction::BoolNe => eval_boolne(&values),
@@ -5713,7 +5681,7 @@ fn eval_text_search_builtin_function(
         }
         BuiltinScalarFunction::TsVectorIn => match values {
             [Value::Null] => Ok(Value::Null),
-            [_] => {
+            [_] | [_, _, _] => {
                 // :HACK: pgrust represents SQL cstring arguments through the
                 // existing text value path for type input wrappers.
                 let text = arg_text(values, 0, "tsvectorin")?.unwrap_or_default();
@@ -5734,7 +5702,7 @@ fn eval_text_search_builtin_function(
         },
         BuiltinScalarFunction::TsQueryIn => match values {
             [Value::Null] => Ok(Value::Null),
-            [_] => {
+            [_] | [_, _, _] => {
                 // :HACK: pgrust represents SQL cstring arguments through the
                 // existing text value path for type input wrappers.
                 let text = arg_text(values, 0, "tsqueryin")?.unwrap_or_default();
@@ -6222,7 +6190,7 @@ fn eval_domain_check_upper_less_than(values: &[Value]) -> Result<Value, ExecErro
     })
 }
 
-fn eval_builtin_function(
+pub(crate) fn eval_builtin_function(
     func: BuiltinScalarFunction,
     result_type: Option<SqlType>,
     args: &[Expr],
@@ -6306,6 +6274,13 @@ fn eval_builtin_function(
         && let Some(raw) = current_slot_raw_attr_bytes(slot, index)?
     {
         return eval_pg_column_compression_raw(raw);
+    }
+    if matches!(func, BuiltinScalarFunction::PgTypeof) {
+        let ty = args
+            .first()
+            .and_then(expr_sql_type_hint)
+            .unwrap_or(SqlType::new(SqlTypeKind::Text));
+        return Ok(Value::Text(sql_type_name(ty).into()));
     }
     let values = args
         .iter()
@@ -6628,6 +6603,9 @@ fn eval_builtin_function(
         BuiltinScalarFunction::PgRustTestInt44In => eval_pg_rust_test_int44in(&values),
         BuiltinScalarFunction::PgRustTestInt44Out => eval_pg_rust_test_int44out(&values),
         BuiltinScalarFunction::PgRustTestPtInWidget => eval_pg_rust_test_pt_in_widget(&values),
+        BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid => {
+            eval_pg_rust_is_catalog_text_unique_index_oid(&values)
+        }
         BuiltinScalarFunction::AmValidate | BuiltinScalarFunction::BtEqualImage => {
             Ok(Value::Bool(true))
         }
@@ -6829,6 +6807,10 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ArrayPositions => eval_array_positions_function(&values),
         BuiltinScalarFunction::ArrayRemove => eval_array_remove_function(&values),
         BuiltinScalarFunction::ArrayReplace => eval_array_replace_function(&values),
+        BuiltinScalarFunction::TrimArray => eval_trim_array_function(&values),
+        BuiltinScalarFunction::ArrayShuffle => eval_array_shuffle_function(&values),
+        BuiltinScalarFunction::ArraySample => eval_array_sample_function(&values),
+        BuiltinScalarFunction::ArrayReverse => eval_array_reverse_function(&values),
         BuiltinScalarFunction::ArraySort => eval_array_sort_function(&values),
         BuiltinScalarFunction::CurrentDatabase => {
             Ok(Value::Text(ctx.current_database_name.clone().into()))
@@ -6875,6 +6857,13 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Ceil | BuiltinScalarFunction::Ceiling => eval_ceil_function(&values),
         BuiltinScalarFunction::Floor => eval_floor_function(&values),
         BuiltinScalarFunction::Sign => eval_sign_function(&values),
+        BuiltinScalarFunction::Pi => {
+            if values.is_empty() {
+                Ok(Value::Float64(std::f64::consts::PI))
+            } else {
+                Err(malformed_expr_error("pi"))
+            }
+        }
         BuiltinScalarFunction::Sqrt => eval_sqrt_function(&values),
         BuiltinScalarFunction::Cbrt => eval_unary_float_function("cbrt", &values, |v| Ok(v.cbrt())),
         BuiltinScalarFunction::Power => eval_power_function(&values),
