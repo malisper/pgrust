@@ -1732,10 +1732,9 @@ impl Database {
                     .map(|row| row.rolname.as_str())
                     .unwrap_or("");
                 let mut notices = Vec::new();
-                for relation in relation_rows
-                    .iter()
-                    .filter(|row| matches!(row.relkind, 'c' | 'r' | 'p' | 'm' | 'S' | 'v'))
-                {
+                for relation in relation_rows.iter().filter(|row| {
+                    !row.relispartition && matches!(row.relkind, 'c' | 'r' | 'p' | 'm' | 'S' | 'v')
+                }) {
                     notices.push(format!(
                         "drop cascades to {} {}",
                         drop_table_relation_kind_name(relation.relkind),

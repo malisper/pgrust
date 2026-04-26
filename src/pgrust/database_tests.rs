@@ -1518,6 +1518,73 @@ fn stats_import_restores_and_clears_relation_stats() {
 }
 
 #[test]
+fn stats_import_locks_partitioned_index_and_parent() {
+    let db = Database::open_ephemeral(64).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema stats_import").unwrap();
+    session
+        .execute(
+            &db,
+            "create table stats_import.part_parent (i int4) partition by range (i)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table stats_import.part_child_1
+             partition of stats_import.part_parent
+             for values from (0) to (10)
+             with (autovacuum_enabled = false)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create index part_parent_i on stats_import.part_parent(i)",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select pg_catalog.pg_restore_relation_stats(
+                'schemaname', 'stats_import',
+                'relname', 'part_parent_i',
+                'relpages', 2::integer)",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_locks
+             where relation = 'stats_import.part_parent'::regclass
+               and pid = pg_backend_pid()
+               and mode = 'ShareUpdateExclusiveLock'
+               and granted",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_locks
+             where relation = 'stats_import.part_parent_i'::regclass
+               and pid = pg_backend_pid()
+               and mode = 'ShareUpdateExclusiveLock'
+               and granted",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
 fn filtered_cross_join_preserves_left_outer_row_order() {
     let base = temp_dir("filtered_cross_join_left_order");
     let db = Database::open(&base, 16).unwrap();

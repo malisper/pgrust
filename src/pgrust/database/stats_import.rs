@@ -1,17 +1,19 @@
-use super::Database;
 use super::ddl::map_catalog_error;
+use super::{Database, LOGICAL_RELATION_LOCK_SPC_OID};
 use crate::backend::catalog::store::CatalogWriteContext;
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatsImportRuntime, TypedFunctionArg, Value,
     parse_text_array_literal_with_catalog_and_op,
 };
 use crate::backend::libpq::pqformat::format_exec_error;
-use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
+use crate::backend::parser::{BoundRelation, CatalogLookup, SqlType, SqlTypeKind};
 use crate::backend::storage::lmgr::TableLockMode;
+use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::backend::utils::misc::notices::{push_backend_notice, push_warning};
 use crate::include::catalog::{
-    FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, PgStatisticRow, TEXT_TYPE_OID, relkind_is_analyzable,
+    FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, PgStatisticRow, TEXT_TYPE_OID, relkind_has_storage,
+    relkind_is_analyzable,
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::pgrust::compact_string::CompactString;
@@ -534,21 +536,22 @@ impl Database {
                 internal_error(format!("missing heap relation for \"{relname}\""))
             })?;
             validate_stats_relkind(&parent, relname)?;
-            self.lock_stats_relation(ctx, parent.rel)?;
-            self.lock_stats_relation(ctx, relation.rel)?;
+            self.lock_stats_relation(ctx, &parent)?;
+            self.lock_stats_relation(ctx, &relation)?;
             return Ok(relation);
         }
 
         validate_stats_relkind(&relation, relname)?;
-        self.lock_stats_relation(ctx, relation.rel)?;
+        self.lock_stats_relation(ctx, &relation)?;
         Ok(relation)
     }
 
     fn lock_stats_relation(
         &self,
         ctx: &mut ExecutorContext,
-        rel: crate::backend::storage::smgr::RelFileLocator,
+        relation: &BoundRelation,
     ) -> Result<(), ExecError> {
+        let rel = stats_relation_lock_tag(relation);
         self.table_locks.lock_table_interruptible(
             rel,
             TableLockMode::ShareUpdateExclusive,
@@ -557,6 +560,21 @@ impl Database {
         )?;
         ctx.record_table_lock(rel);
         Ok(())
+    }
+}
+
+fn stats_relation_lock_tag(relation: &BoundRelation) -> RelFileLocator {
+    if relkind_has_storage(relation.relkind) {
+        return relation.rel;
+    }
+
+    // :HACK: pgrust does not have PostgreSQL heavyweight lock tags separate
+    // from storage locators yet. Use an impossible tablespace OID to represent
+    // relation-OID locks for relkinds without physical storage.
+    RelFileLocator {
+        spc_oid: LOGICAL_RELATION_LOCK_SPC_OID,
+        db_oid: relation.rel.db_oid,
+        rel_number: relation.relation_oid,
     }
 }
 

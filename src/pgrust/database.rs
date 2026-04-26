@@ -152,6 +152,8 @@ pub(crate) use foreign_keys::{
     validate_deferred_constraints, validate_immediate_constraints,
 };
 
+pub(crate) const LOGICAL_RELATION_LOCK_SPC_OID: u32 = u32::MAX;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DatabaseOpenOptions {
     pub pool_size: usize,
@@ -1478,6 +1480,32 @@ impl Database {
     }
 
     fn resolve_relation_oid_for_lock(&self, rel: RelFileLocator) -> Option<u32> {
+        if rel.spc_oid == LOGICAL_RELATION_LOCK_SPC_OID {
+            if rel.db_oid == 0 {
+                return self
+                    .shared_catalog
+                    .read()
+                    .catcache()
+                    .ok()?
+                    .class_by_oid(rel.rel_number)
+                    .map(|row| row.oid);
+            }
+
+            let state = self
+                .cluster
+                .open_databases
+                .read()
+                .get(&rel.db_oid)
+                .cloned()?;
+
+            return state
+                .catalog
+                .read()
+                .catcache()
+                .ok()
+                .and_then(|catcache| catcache.class_by_oid(rel.rel_number).map(|row| row.oid));
+        }
+
         if rel.db_oid == 0 {
             return self
                 .shared_catalog
