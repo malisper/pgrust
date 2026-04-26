@@ -1872,17 +1872,9 @@ fn resolve_pending_self_referenced_key(
                 column_defs,
                 column_lookup,
             )?;
-            let referenced_key = referenced_columns
-                .iter()
-                .map(|column| column.to_ascii_lowercase())
-                .collect::<Vec<_>>();
             let matched = index_constraints.iter().find(|constraint| {
-                constraint
-                    .columns
-                    .iter()
-                    .map(|column| column.to_ascii_lowercase())
-                    .collect::<Vec<_>>()
-                    == referenced_key
+                !constraint.exclusion
+                    && string_key_columns_match_as_set(&constraint.columns, &referenced_columns)
             });
             let Some(matched) = matched else {
                 if period.is_some() && referenced_period.is_none() {
@@ -2238,15 +2230,18 @@ fn resolve_referenced_key(
             } else if period.is_none() && referenced_period.is_some() {
                 return Err(foreign_key_period_on_parent_only_error());
             } else {
-                let index =
-                    find_exact_index_for_attnums(catalog, relation.relation_oid, &attnums, true)
-                        .ok_or_else(|| ParseError::UnexpectedToken {
-                            expected: "referenced UNIQUE or PRIMARY KEY index",
-                            actual: format!(
-                                "table \"{}\" lacks an exact matching unique key",
-                                referenced_table
-                            ),
-                        })?;
+                let index = find_compatible_unique_index_for_attnums(
+                    catalog,
+                    relation.relation_oid,
+                    &attnums,
+                )
+                .ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "referenced UNIQUE or PRIMARY KEY index",
+                    actual: format!(
+                        "table \"{}\" lacks an exact matching unique key",
+                        referenced_table
+                    ),
+                })?;
                 (columns, attnums, index.relation_oid, None, false, false)
             }
         } else {
@@ -2353,7 +2348,10 @@ fn exact_referenced_constraint_for_attnums(
                 crate::include::catalog::CONSTRAINT_PRIMARY
                     | crate::include::catalog::CONSTRAINT_UNIQUE
             ) && row.conindid != 0
-                && row.conkey.as_deref() == Some(attnums)
+                && row
+                    .conkey
+                    .as_deref()
+                    .is_some_and(|conkey| attnum_key_columns_match_as_set(conkey, attnums))
         })
 }
 
@@ -2966,6 +2964,75 @@ fn find_exact_index_for_attnums(
                     .as_deref()
                     .is_some_and(|exprs| !exprs.is_empty())
         })
+}
+
+fn find_compatible_unique_index_for_attnums(
+    catalog: &dyn super::CatalogLookup,
+    relation_oid: u32,
+    attnums: &[i16],
+) -> Option<super::BoundIndexRelation> {
+    catalog
+        .index_relations_for_heap(relation_oid)
+        .into_iter()
+        .find(|index| {
+            index.index_meta.indisunique
+                && index.index_meta.indisvalid
+                && index.index_meta.indisready
+                && index.index_meta.am_oid == crate::include::catalog::BTREE_AM_OID
+                && index_key_attnums(index).is_some_and(|key_attnums| {
+                    attnum_key_columns_match_as_set(&key_attnums, attnums)
+                })
+                && !index
+                    .index_meta
+                    .indpred
+                    .as_deref()
+                    .is_some_and(|pred| !pred.is_empty())
+                && !index
+                    .index_meta
+                    .indexprs
+                    .as_deref()
+                    .is_some_and(|exprs| !exprs.is_empty())
+        })
+}
+
+fn index_key_attnums(index: &super::BoundIndexRelation) -> Option<Vec<i16>> {
+    let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).ok()?;
+    if key_count > index.index_meta.indkey.len() {
+        return None;
+    }
+    Some(
+        index
+            .index_meta
+            .indkey
+            .iter()
+            .take(key_count)
+            .copied()
+            .collect(),
+    )
+}
+
+fn string_key_columns_match_as_set(left: &[String], right: &[String]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let left = left
+        .iter()
+        .map(|column| column.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    let right = right
+        .iter()
+        .map(|column| column.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    left.len() == right.len() && left == right
+}
+
+fn attnum_key_columns_match_as_set(left: &[i16], right: &[i16]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let left = left.iter().copied().collect::<BTreeSet<_>>();
+    let right = right.iter().copied().collect::<BTreeSet<_>>();
+    left.len() == right.len() && left == right
 }
 
 fn foreign_key_match_keyword(match_type: ForeignKeyMatchType) -> &'static str {

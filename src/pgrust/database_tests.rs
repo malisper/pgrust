@@ -19408,6 +19408,71 @@ fn create_table_foreign_keys_are_enforced_and_persisted() {
 }
 
 #[test]
+fn foreign_keys_can_reference_unique_key_columns_out_of_order() {
+    let base = temp_dir("foreign_key_reordered_unique_key");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parents (
+            a int4,
+            b int4,
+            c int4,
+            unique (a, b, c)
+        )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table children (
+            b_ref int4,
+            a_ref int4,
+            c_ref int4,
+            foreign key (b_ref, a_ref, c_ref) references parents(b, a, c)
+        )",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into parents values (1, 2, 3)")
+        .unwrap();
+    db.execute(1, "insert into children values (2, 1, 3)")
+        .unwrap();
+
+    match db.execute(1, "insert into children values (2, 9, 3)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_b_ref_a_ref_c_ref_fkey");
+        }
+        other => panic!("expected reordered-key foreign-key violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn self_referential_foreign_key_can_reference_inserted_row() {
+    let base = temp_dir("foreign_key_self_reference_insert");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table selfref (
+            id int4 primary key,
+            parent_id int4 references selfref(id)
+        )",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into selfref values (1, 1)").unwrap();
+    db.execute(1, "insert into selfref values (3, 4), (4, 4)")
+        .unwrap();
+
+    match db.execute(1, "insert into selfref values (2, 9)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "selfref_parent_id_fkey");
+        }
+        other => panic!("expected self-reference foreign-key violation, got {other:?}"),
+    }
+}
+
+#[test]
 fn foreign_keys_support_match_full() {
     let base = temp_dir("foreign_keys_match_full");
     let db = Database::open(&base, 16).unwrap();

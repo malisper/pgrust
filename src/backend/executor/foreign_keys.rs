@@ -31,6 +31,12 @@ use super::expr_range::{range_contains_range, range_overlap};
 use super::relation_values_visible_for_error_detail;
 use super::{ConstraintTiming, ExecError, ExecutorContext, compare_order_values};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InsertForeignKeyCheckPhase {
+    BeforeHeapInsert,
+    AfterIndexInsert,
+}
+
 fn maybe_defer_constraint(
     ctx: &ExecutorContext,
     constraint_oid: u32,
@@ -151,6 +157,26 @@ fn foreign_key_update_proc_oid(action: crate::include::nodes::parsenodes::Foreig
     }
 }
 
+pub(crate) fn enforce_outbound_foreign_keys_for_insert(
+    relation_name: &str,
+    relation_rel: crate::backend::storage::smgr::RelFileLocator,
+    constraints: &[BoundForeignKeyConstraint],
+    values: &[Value],
+    phase: InsertForeignKeyCheckPhase,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for constraint in constraints {
+        let self_referential = constraint.referenced_rel == relation_rel;
+        match phase {
+            InsertForeignKeyCheckPhase::BeforeHeapInsert if self_referential => continue,
+            InsertForeignKeyCheckPhase::AfterIndexInsert if !self_referential => continue,
+            _ => {}
+        }
+        enforce_outbound_foreign_key(relation_name, constraint, None, values, ctx)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn enforce_outbound_foreign_keys(
     relation_name: &str,
     constraints: &[BoundForeignKeyConstraint],
@@ -159,72 +185,81 @@ pub(crate) fn enforce_outbound_foreign_keys(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     for constraint in constraints {
-        if !constraint.enforced {
-            continue;
-        }
-        if !foreign_key_check_trigger_enabled(constraint, previous_values.is_some(), ctx) {
-            continue;
-        }
-        if previous_values.is_some_and(|previous| {
-            !key_columns_changed(previous, values, &constraint.column_indexes)
-        }) {
-            continue;
-        }
-        let key_values = extract_key_values(values, &constraint.column_indexes);
-        if key_values.iter().any(|value| matches!(value, Value::Null)) {
-            match constraint.match_type {
-                ForeignKeyMatchType::Simple => continue,
-                ForeignKeyMatchType::Full => {
-                    if key_values.iter().all(|value| matches!(value, Value::Null)) {
-                        continue;
-                    }
-                    return Err(ExecError::ForeignKeyViolation {
-                        constraint: constraint.constraint_name.clone(),
-                        message: format!(
-                            "insert or update on table \"{relation_name}\" violates foreign key constraint \"{}\"",
-                            constraint.constraint_name
-                        ),
-                        detail: Some(
-                            "MATCH FULL does not allow mixing of null and nonnull key values."
-                                .into(),
-                        ),
-                    });
-                }
-                ForeignKeyMatchType::Partial => continue,
-            }
-        }
-        if maybe_defer_constraint(
-            ctx,
-            constraint.constraint_oid,
-            constraint.deferrable,
-            constraint.initially_deferred,
-        ) {
-            continue;
-        }
-        let exists = if constraint.period_column_index.is_some() {
-            temporal_referenced_key_exists(constraint, values, ctx)?
-        } else {
-            referenced_key_exists(constraint, &key_values, ctx)?
-        };
-        if exists {
-            continue;
-        }
-        return Err(ExecError::ForeignKeyViolation {
-            constraint: constraint.constraint_name.clone(),
-            message: format!(
-                "insert or update on table \"{relation_name}\" violates foreign key constraint \"{}\"",
-                constraint.constraint_name
-            ),
-            detail: Some(format!(
-                "Key ({})=({}) is not present in table \"{}\".",
-                constraint.column_names.join(", "),
-                render_key_values(&key_values, ctx),
-                constraint.referenced_relation_name
-            )),
-        });
+        enforce_outbound_foreign_key(relation_name, constraint, previous_values, values, ctx)?;
     }
 
     Ok(())
+}
+
+fn enforce_outbound_foreign_key(
+    relation_name: &str,
+    constraint: &BoundForeignKeyConstraint,
+    previous_values: Option<&[Value]>,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    if !constraint.enforced {
+        return Ok(());
+    }
+    if !foreign_key_check_trigger_enabled(constraint, previous_values.is_some(), ctx) {
+        return Ok(());
+    }
+    if previous_values
+        .is_some_and(|previous| !key_columns_changed(previous, values, &constraint.column_indexes))
+    {
+        return Ok(());
+    }
+    let key_values = extract_key_values(values, &constraint.column_indexes);
+    if key_values.iter().any(|value| matches!(value, Value::Null)) {
+        match constraint.match_type {
+            ForeignKeyMatchType::Simple => return Ok(()),
+            ForeignKeyMatchType::Full => {
+                if key_values.iter().all(|value| matches!(value, Value::Null)) {
+                    return Ok(());
+                }
+                return Err(ExecError::ForeignKeyViolation {
+                    constraint: constraint.constraint_name.clone(),
+                    message: format!(
+                        "insert or update on table \"{relation_name}\" violates foreign key constraint \"{}\"",
+                        constraint.constraint_name
+                    ),
+                    detail: Some(
+                        "MATCH FULL does not allow mixing of null and nonnull key values.".into(),
+                    ),
+                });
+            }
+            ForeignKeyMatchType::Partial => return Ok(()),
+        }
+    }
+    if maybe_defer_constraint(
+        ctx,
+        constraint.constraint_oid,
+        constraint.deferrable,
+        constraint.initially_deferred,
+    ) {
+        return Ok(());
+    }
+    let exists = if constraint.period_column_index.is_some() {
+        temporal_referenced_key_exists(constraint, values, ctx)?
+    } else {
+        referenced_key_exists(constraint, &key_values, ctx)?
+    };
+    if exists {
+        return Ok(());
+    }
+    Err(ExecError::ForeignKeyViolation {
+        constraint: constraint.constraint_name.clone(),
+        message: format!(
+            "insert or update on table \"{relation_name}\" violates foreign key constraint \"{}\"",
+            constraint.constraint_name
+        ),
+        detail: Some(format!(
+            "Key ({})=({}) is not present in table \"{}\".",
+            constraint.column_names.join(", "),
+            render_key_values(&key_values, ctx),
+            constraint.referenced_relation_name
+        )),
+    })
 }
 
 pub(crate) fn enforce_inbound_foreign_keys_on_update(
@@ -384,13 +419,72 @@ fn referenced_key_exists(
 ) -> Result<bool, ExecError> {
     let mut snapshot = ctx.snapshot.clone();
     snapshot.current_cid = CommandId::MAX;
+    let key_values = referenced_key_values_in_index_order(constraint, key_values)?;
     index_has_visible_row(
         constraint.referenced_rel,
         &constraint.referenced_index,
-        key_values,
+        &key_values,
         &snapshot,
         ctx,
     )
+}
+
+fn referenced_key_values_in_index_order(
+    constraint: &BoundForeignKeyConstraint,
+    key_values: &[Value],
+) -> Result<Vec<Value>, ExecError> {
+    let key_count = usize::try_from(constraint.referenced_index.index_meta.indnkeyatts.max(0))
+        .map_err(|_| foreign_key_internal_error("invalid referenced index key count"))?;
+    if key_count > constraint.referenced_index.index_meta.indkey.len() {
+        return Err(foreign_key_internal_error(
+            "referenced index key count exceeds index columns",
+        ));
+    }
+    if key_count != constraint.referenced_column_indexes.len() || key_count != key_values.len() {
+        return Err(foreign_key_internal_error(
+            "referenced index key count does not match foreign key columns",
+        ));
+    }
+
+    let mut reordered = Vec::with_capacity(key_count);
+    for index_attnum in constraint
+        .referenced_index
+        .index_meta
+        .indkey
+        .iter()
+        .take(key_count)
+    {
+        if *index_attnum <= 0 {
+            return Err(foreign_key_internal_error(
+                "referenced foreign key index uses an expression key",
+            ));
+        }
+        let Some(position) = constraint
+            .referenced_column_indexes
+            .iter()
+            .position(|column_index| (*column_index as i16) + 1 == *index_attnum)
+        else {
+            return Err(foreign_key_internal_error(
+                "referenced index columns do not match foreign key columns",
+            ));
+        };
+        reordered.push(
+            key_values
+                .get(position)
+                .cloned()
+                .ok_or_else(|| foreign_key_internal_error("missing foreign key value"))?,
+        );
+    }
+    Ok(reordered)
+}
+
+fn foreign_key_internal_error(detail: &'static str) -> ExecError {
+    ExecError::DetailedError {
+        message: "foreign key validation failed".into(),
+        detail: Some(detail.into()),
+        hint: None,
+        sqlstate: "XX000",
+    }
 }
 
 fn temporal_referenced_key_exists(
