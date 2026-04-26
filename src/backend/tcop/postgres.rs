@@ -6815,6 +6815,62 @@ mod tests {
     }
 
     #[test]
+    fn simple_query_rejects_query_copy_from_stdin_before_copy_in() {
+        let db = Database::open(temp_dir("query_copy_from_stdin_reject"), 16).unwrap();
+        db.execute(1, "create table test1 (id int)").unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "copy (select * from test1) from stdin;",
+        )
+        .unwrap();
+
+        assert!(state.copy_in.is_none());
+        assert_eq!(backend_message_count(&output, b'G'), 0);
+        assert!(output_contains_message(
+            &output,
+            "syntax error at or near \"from\""
+        ));
+    }
+
+    #[test]
+    fn simple_query_copy_to_rejects_view_relation() {
+        let db = Database::open(temp_dir("copy_to_view_reject"), 16).unwrap();
+        db.execute(1, "create table test1 (t text)").unwrap();
+        db.execute(1, "insert into test1 values ('a')").unwrap();
+        db.execute(1, "create view v_test1 as select 'v_' || t from test1")
+            .unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(&mut output, &db, &mut state, "copy v_test1 to stdout;").unwrap();
+
+        assert_eq!(backend_message_count(&output, b'H'), 0);
+        assert!(output_contains_message(
+            &output,
+            "cannot copy from view \"v_test1\""
+        ));
+        assert!(output_contains_message(
+            &output,
+            "Try the COPY (SELECT ...) TO variant."
+        ));
+    }
+
+    #[test]
     fn simple_query_role_creation_is_visible_to_next_query() {
         let db = Database::open(temp_dir("role_visibility"), 16).unwrap();
         let mut state = ConnectionState {
