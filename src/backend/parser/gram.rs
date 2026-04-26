@@ -12438,11 +12438,14 @@ fn build_set_operation_term(pair: Pair<'_, Rule>) -> Result<SelectStatement, Par
         Rule::set_operation_term => {
             build_set_operation_term(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
         }
-        Rule::parenthesized_set_operation_term => build_select(
-            pair.into_inner()
-                .find(|part| matches!(part.as_rule(), Rule::select_stmt))
-                .ok_or(ParseError::UnexpectedEof)?,
-        ),
+        Rule::parenthesized_set_operation_term => {
+            let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            if matches!(inner.as_rule(), Rule::parenthesized_set_operation_term) {
+                build_set_operation_term(inner)
+            } else {
+                build_select(inner)
+            }
+        }
         Rule::simple_select_core
         | Rule::simple_select_stmt
         | Rule::set_operation_stmt

@@ -21081,6 +21081,112 @@ fn in_subquery_where_qual_uses_semi_join() {
 }
 
 #[test]
+fn row_valued_in_subquery_matches_all_columns() {
+    let mut harness = seed_people_and_pets("row_valued_in_subquery");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select p.id
+                 from people p
+                 where (p.id, p.name) in (select q.owner_id, 'alice' from pets q)
+                 order by p.id",
+            )
+            .unwrap(),
+        vec![vec![Value::Int32(1)]],
+    );
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select p.id
+                 from people p
+                 where (p.id, p.name) not in (
+                     select q.owner_id, 'alice' from pets q where q.owner_id is not null
+                 )
+                 order by p.id",
+            )
+            .unwrap(),
+        vec![vec![Value::Int32(2)], vec![Value::Int32(3)]],
+    );
+}
+
+#[test]
+fn row_compare_scalar_subquery_uses_scalar_cardinality() {
+    let mut harness = seed_people_and_pets("row_compare_scalar_subquery");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select row(1, 2) = (select 1, 2),
+                        row(1, 2) = (select 3, 4),
+                        row(1, 2) = (select 1, null),
+                        row(1, 2) = (select 1, 2 where false)",
+            )
+            .unwrap(),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Null,
+            Value::Null,
+        ]],
+    );
+    let err = harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select row(1, 2) = (select id, owner_id from pets)",
+        )
+        .unwrap_err();
+    assert!(format_exec_error(&err).contains("more than one row returned by a subquery"));
+}
+
+#[test]
+fn set_operations_coerce_unknown_literals_from_peer_type() {
+    let mut harness = seed_people_and_pets("set_operation_unknown_literals");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select '42' union all select 43 order by 1",
+            )
+            .unwrap(),
+        vec![vec![Value::Int32(42)], vec![Value::Int32(43)]],
+    );
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select '42' union all select '43' order by 1",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Text("42".into())],
+            vec![Value::Text("43".into())],
+        ],
+    );
+}
+
+#[test]
+fn grouped_type_name_cast_and_mixed_numeric_comparison_work() {
+    let mut harness = seed_people_and_pets("grouped_cast_mixed_numeric");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select float8(count(*)) from people",
+            )
+            .unwrap(),
+        vec![vec![Value::Float64(3.0)]],
+    );
+    assert_query_rows(
+        harness
+            .execute(INVALID_TRANSACTION_ID, "select 1 where 3.0 = 3")
+            .unwrap(),
+        vec![vec![Value::Int32(1)]],
+    );
+}
+
+#[test]
 fn explain_exists_where_qual_uses_semi_join() {
     let mut harness = seed_people_and_pets("explain_exists_semi_join");
     match harness

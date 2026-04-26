@@ -486,6 +486,16 @@ fn render_sublink(sublink: &SubLink, query: &Query, catalog: &dyn CatalogLookup)
                 format!("({left} {} ANY ({subquery}))", render_subquery_op(op))
             }
         }
+        SubLinkType::RowCompareSubLink(op) => {
+            let Some(testexpr) = &sublink.testexpr else {
+                return format!("ROWCOMPARE ({subquery})");
+            };
+            format!(
+                "({} {} ({subquery}))",
+                render_wrapped_expr(testexpr, query, catalog),
+                render_subquery_op(op)
+            )
+        }
         SubLinkType::AllSubLink(op) => {
             let Some(testexpr) = &sublink.testexpr else {
                 return format!("ALL ({subquery})");

@@ -46,7 +46,7 @@ set_operation_stmt = {
   | cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause? ~ order_by_clause? ~ locking_clause ~ limit_clause? ~ offset_clause?
 }
 set_operation_term = { parenthesized_set_operation_term | simple_select_core }
-parenthesized_set_operation_term = { "(" ~ select_stmt ~ ")" }
+parenthesized_set_operation_term = { "(" ~ (select_stmt | parenthesized_set_operation_term) ~ ")" }
 set_operation_clause = { (kw_union | kw_intersect | kw_except) ~ kw_all? }
 values_stmt = { cte_clause? ~ kw_values ~ values_row ~ ("," ~ values_row)* ~ order_by_clause? ~ limit_clause? ~ offset_clause? }
 copy_stmt = { ^"copy" ~ identifier ~ ("(" ~ ident_list ~ ")")? ~ kw_from ~ quoted_string_literal }

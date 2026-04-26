@@ -10377,6 +10377,26 @@ fn parse_union_all_select_chain() {
 }
 
 #[test]
+fn parse_parenthesized_union_input_with_extra_parens() {
+    let stmt = parse_select("((select 2)) union select 2").unwrap();
+    let set_operation = stmt.set_operation.expect("set operation");
+    assert!(matches!(
+        set_operation.op,
+        SetOperator::Union { all: false }
+    ));
+    assert_eq!(set_operation.inputs.len(), 2);
+}
+
+#[test]
+fn parse_scalar_subquery_with_parenthesized_union_input() {
+    let stmt = parse_select("select (((select 2)) union select 2)").unwrap();
+    let SqlExpr::ScalarSubquery(subquery) = &stmt.targets[0].expr else {
+        panic!("expected scalar subquery, got {:?}", stmt.targets[0].expr);
+    };
+    assert!(subquery.set_operation.is_some());
+}
+
+#[test]
 fn parse_select_distinct_clause() {
     let stmt = parse_select("select distinct x from items").unwrap();
     assert!(stmt.distinct);

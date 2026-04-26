@@ -168,7 +168,8 @@ use arrays::{
     eval_string_to_array_function, eval_width_bucket_thresholds,
 };
 use subquery::{
-    eval_array_subquery, eval_exists_subquery, eval_quantified_subquery, eval_scalar_subquery,
+    eval_array_subquery, eval_exists_subquery, eval_quantified_subquery, eval_row_compare_subquery,
+    eval_scalar_subquery,
 };
 
 extern crate rand;
@@ -4031,6 +4032,17 @@ pub fn eval_expr(
                     slot,
                     ctx,
                 )
+            }
+            SubLinkType::RowCompareSubLink(op) => {
+                let left = subplan.testexpr.as_ref().ok_or(ExecError::DetailedError {
+                    message: "malformed row-comparison subplan".into(),
+                    detail: Some("row-comparison subplans must carry a test expression".into()),
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+                let collation_oid = top_level_explicit_collation(left);
+                let left_value = eval_expr(left, slot, ctx)?;
+                eval_row_compare_subquery(&left_value, op, collation_oid, subplan, slot, ctx)
             }
             SubLinkType::AllSubLink(op) => {
                 let left = subplan.testexpr.as_ref().ok_or(ExecError::DetailedError {
