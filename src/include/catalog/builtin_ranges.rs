@@ -202,6 +202,16 @@ pub fn builtin_range_rows() -> Vec<PgRangeRow> {
             rngsubtype: spec.range_type.subtype_oid(),
             rngmultitypid: spec.multirange_oid,
             rngcollation: 0,
+            rngsubopc: crate::include::catalog::default_btree_opclass_oid(
+                spec.range_type.subtype_oid(),
+            )
+            .unwrap_or_else(|| {
+                if spec.range_type.subtype.is_array {
+                    crate::include::catalog::ARRAY_BTREE_OPCLASS_OID
+                } else {
+                    0
+                }
+            }),
             rngcanonical: None,
             rngsubdiff: None,
             canonicalization: spec.range_type.canonicalization,

@@ -289,6 +289,7 @@ impl CatCache {
                 relpartbound: entry.relpartbound.clone(),
                 reloptions: entry.reloptions.clone(),
                 relacl: entry.relacl.clone(),
+                relreplident: 'd',
             };
             cache.classes_by_name.insert(
                 normalize_catalog_name(name).to_ascii_lowercase(),
@@ -342,38 +343,49 @@ impl CatCache {
                 .columns
                 .iter()
                 .enumerate()
-                .map(|(idx, column)| PgAttributeRow {
-                    attrelid: entry.relation_oid,
-                    attname: column.name.clone(),
-                    atttypid: catalog_entry_sql_type_oid(catalog, column.sql_type),
-                    attlen: column.storage.attlen,
-                    attnum: idx.saturating_add(1) as i16,
-                    attnotnull: !column.storage.nullable,
-                    attisdropped: column.dropped,
-                    atttypmod: column.sql_type.typmod,
-                    attalign: column.storage.attalign,
-                    attstorage: column.storage.attstorage,
-                    attcompression: column.storage.attcompression,
-                    attstattarget: column.attstattarget,
-                    attinhcount: column.attinhcount,
-                    attislocal: column.attislocal,
-                    attidentity: column
-                        .identity
-                        .map(|kind| kind.catalog_char())
-                        .unwrap_or('\0'),
-                    attgenerated: column
-                        .generated
-                        .map(|kind| kind.catalog_char())
-                        .unwrap_or('\0'),
-                    attcollation: catalog_attribute_collation_oid(
-                        entry.relation_oid,
-                        column.collation_oid,
-                    ),
-                    attacl: None,
-                    attoptions: None,
-                    attfdwoptions: None,
-                    attmissingval: None,
-                    sql_type: column.sql_type,
+                .map(|(idx, column)| {
+                    let atttypid = catalog_entry_sql_type_oid(catalog, column.sql_type);
+                    let type_row = cache.types_by_oid.get(&atttypid);
+                    PgAttributeRow {
+                        attrelid: entry.relation_oid,
+                        attname: column.name.clone(),
+                        atttypid,
+                        attlen: type_row
+                            .map(|row| row.typlen)
+                            .unwrap_or(column.storage.attlen),
+                        attnum: idx.saturating_add(1) as i16,
+                        attnotnull: !column.storage.nullable,
+                        attisdropped: column.dropped,
+                        atttypmod: column.sql_type.typmod,
+                        attalign: type_row
+                            .map(|row| row.typalign)
+                            .unwrap_or(column.storage.attalign),
+                        attstorage: type_row
+                            .map(|row| row.typstorage)
+                            .unwrap_or(column.storage.attstorage),
+                        attcompression: column.storage.attcompression,
+                        attstattarget: column.attstattarget,
+                        attinhcount: column.attinhcount,
+                        attislocal: column.attislocal,
+                        attidentity: column
+                            .identity
+                            .map(|kind| kind.catalog_char())
+                            .unwrap_or('\0'),
+                        attgenerated: column
+                            .generated
+                            .map(|kind| kind.catalog_char())
+                            .unwrap_or('\0'),
+                        attcollation: catalog_attribute_collation_oid(
+                            entry.relation_oid,
+                            column.collation_oid,
+                        ),
+                        attacl: None,
+                        attoptions: None,
+                        attfdwoptions: None,
+                        attmissingval: None,
+                        attbyval: type_row.is_some_and(|row| row.typbyval),
+                        sql_type: column.sql_type,
+                    }
                 })
                 .collect::<Vec<_>>();
             sort_pg_attribute_rows(&mut attrs);
@@ -1400,6 +1412,11 @@ mod tests {
         assert_eq!(
             cache.type_by_name("pg_class").map(|row| row.typrelid),
             Some(1259)
+        );
+        assert_eq!(cache.type_by_name("int4").map(|row| row.typtype), Some('b'));
+        assert_eq!(
+            cache.type_by_name("pg_class").map(|row| row.typtype),
+            Some('c')
         );
     }
 

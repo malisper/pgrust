@@ -12,7 +12,8 @@ use crate::include::catalog::{
     PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
     PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
     PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    composite_array_type_row, composite_type_row,
+    bootstrap_composite_type_rows, builtin_type_row_by_oid, composite_array_type_row,
+    composite_type_row,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -384,6 +385,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
         relpartbound: entry.relpartbound.clone(),
         reloptions: entry.reloptions.clone(),
         relacl: entry.relacl.clone(),
+        relreplident: 'd',
     });
 
     if entry.row_type_oid != 0 {
@@ -407,17 +409,28 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
 
     rows.attributes
         .extend(entry.desc.columns.iter().enumerate().map(|(idx, column)| {
+            let atttypid = catalog_sql_type_oid(catalog, column.sql_type);
+            let type_row = catalog_type_row_by_oid(atttypid);
             PgAttributeRow {
                 attrelid: entry.relation_oid,
                 attname: column.name.clone(),
-                atttypid: catalog_sql_type_oid(catalog, column.sql_type),
-                attlen: column.storage.attlen,
+                atttypid,
+                attlen: type_row
+                    .as_ref()
+                    .map(|row| row.typlen)
+                    .unwrap_or(column.storage.attlen),
                 attnum: idx.saturating_add(1) as i16,
                 attnotnull: !column.storage.nullable,
                 attisdropped: column.dropped,
                 atttypmod: column.sql_type.typmod,
-                attalign: column.storage.attalign,
-                attstorage: column.storage.attstorage,
+                attalign: type_row
+                    .as_ref()
+                    .map(|row| row.typalign)
+                    .unwrap_or(column.storage.attalign),
+                attstorage: type_row
+                    .as_ref()
+                    .map(|row| row.typstorage)
+                    .unwrap_or(column.storage.attstorage),
                 attcompression: column.storage.attcompression,
                 attstattarget: column.attstattarget,
                 attinhcount: column.attinhcount,
@@ -438,6 +451,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
                 attoptions: None,
                 attfdwoptions: None,
                 attmissingval: None,
+                attbyval: type_row.as_ref().is_some_and(|row| row.typbyval),
                 sql_type: column.sql_type,
             }
         }));
@@ -559,6 +573,14 @@ fn catalog_sql_type_oid(catalog: &Catalog, sql_type: SqlType) -> u32 {
         return entry.array_type_oid;
     }
     sql_type_oid(sql_type)
+}
+
+fn catalog_type_row_by_oid(oid: u32) -> Option<PgTypeRow> {
+    builtin_type_row_by_oid(oid).or_else(|| {
+        bootstrap_composite_type_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+    })
 }
 
 fn entry_object_oids(entry: &CatalogEntry) -> BTreeSet<u32> {

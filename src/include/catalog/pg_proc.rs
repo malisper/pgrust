@@ -1438,6 +1438,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             &[("validlen", INT4_TYPE_OID), ("result", BYTEA_TYPE_OID)],
         ),
         proc_row(
+            6407,
+            "pg_rust_is_catalog_text_unique_index_oid",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "pg_rust_is_catalog_text_unique_index_oid",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
             3100,
             "row_number",
             INT8_TYPE_OID,
@@ -3518,6 +3530,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            1610,
+            "pi",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[]),
+            "dpi",
+            0,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
             7000,
             "float8_accum",
             FLOAT8_ARRAY_TYPE_OID,
@@ -5160,9 +5184,9 @@ fn text_search_proc_rows() -> Vec<PgProcRow> {
             3610,
             "tsvectorin",
             TSVECTOR_TYPE_OID,
-            &oid_argtypes(&[TEXT_TYPE_OID]),
+            &oid_argtypes(&[CSTRING_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID]),
             "tsvectorin",
-            1,
+            3,
             false,
             true,
             'f',
@@ -5171,7 +5195,7 @@ fn text_search_proc_rows() -> Vec<PgProcRow> {
         proc_row(
             3611,
             "tsvectorout",
-            TEXT_TYPE_OID,
+            CSTRING_TYPE_OID,
             &oid_argtypes(&[TSVECTOR_TYPE_OID]),
             "tsvectorout",
             1,
@@ -5184,9 +5208,9 @@ fn text_search_proc_rows() -> Vec<PgProcRow> {
             3612,
             "tsqueryin",
             TSQUERY_TYPE_OID,
-            &oid_argtypes(&[TEXT_TYPE_OID]),
+            &oid_argtypes(&[CSTRING_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID]),
             "tsqueryin",
-            1,
+            3,
             false,
             true,
             'f',
@@ -5195,7 +5219,7 @@ fn text_search_proc_rows() -> Vec<PgProcRow> {
         proc_row(
             3613,
             "tsqueryout",
-            TEXT_TYPE_OID,
+            CSTRING_TYPE_OID,
             &oid_argtypes(&[TSQUERY_TYPE_OID]),
             "tsqueryout",
             1,
@@ -5479,17 +5503,47 @@ fn text_search_proc_rows() -> Vec<PgProcRow> {
 }
 
 fn type_io_proc_rows() -> Vec<PgProcRow> {
-    [
+    let mut rows = [
         (
             2304,
             "internal_in",
             INTERNAL_TYPE_OID,
             vec![CSTRING_TYPE_OID],
         ),
+        (
+            40,
+            "int2vectorin",
+            INT2VECTOR_TYPE_OID,
+            vec![CSTRING_TYPE_OID],
+        ),
+        (
+            41,
+            "int2vectorout",
+            CSTRING_TYPE_OID,
+            vec![INT2VECTOR_TYPE_OID],
+        ),
+        (46, "textin", TEXT_TYPE_OID, vec![CSTRING_TYPE_OID]),
+        (47, "textout", CSTRING_TYPE_OID, vec![TEXT_TYPE_OID]),
+        (
+            54,
+            "oidvectorin",
+            OIDVECTOR_TYPE_OID,
+            vec![CSTRING_TYPE_OID],
+        ),
+        (
+            55,
+            "oidvectorout",
+            CSTRING_TYPE_OID,
+            vec![OIDVECTOR_TYPE_OID],
+        ),
+        (2298, "void_in", VOID_TYPE_OID, vec![CSTRING_TYPE_OID]),
+        (2299, "void_out", CSTRING_TYPE_OID, vec![VOID_TYPE_OID]),
         (2296, "anyarray_in", ANYARRAYOID, vec![CSTRING_TYPE_OID]),
+        (2297, "anyarray_out", CSTRING_TYPE_OID, vec![ANYARRAYOID]),
         (2502, "anyarray_recv", ANYARRAYOID, vec![INTERNAL_TYPE_OID]),
         (2312, "anyelement_in", ANYELEMENTOID, vec![CSTRING_TYPE_OID]),
-        (3504, "anyenum_in", ANYENUMOID, vec![INTERNAL_TYPE_OID]),
+        (3504, "anyenum_in", ANYENUMOID, vec![CSTRING_TYPE_OID]),
+        (3505, "anyenum_out", CSTRING_TYPE_OID, vec![ANYENUMOID]),
         (
             2777,
             "anynonarray_in",
@@ -5509,6 +5563,21 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             ANYARRAYOID,
             vec![INTERNAL_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
         ),
+        (2401, "array_send", BYTEA_TYPE_OID, vec![ANYARRAYOID]),
+        (
+            2290,
+            "record_in",
+            RECORD_TYPE_OID,
+            vec![CSTRING_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
+        ),
+        (2291, "record_out", CSTRING_TYPE_OID, vec![RECORD_TYPE_OID]),
+        (
+            2402,
+            "record_recv",
+            RECORD_TYPE_OID,
+            vec![INTERNAL_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
+        ),
+        (2403, "record_send", BYTEA_TYPE_OID, vec![RECORD_TYPE_OID]),
         (
             2597,
             "domain_in",
@@ -5525,27 +5594,34 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             3506,
             "enum_in",
             ANYENUMOID,
-            vec![INTERNAL_TYPE_OID, OID_TYPE_OID],
+            vec![CSTRING_TYPE_OID, OID_TYPE_OID],
         ),
+        (3507, "enum_out", CSTRING_TYPE_OID, vec![ANYENUMOID]),
         (
             3532,
             "enum_recv",
             ANYENUMOID,
             vec![INTERNAL_TYPE_OID, OID_TYPE_OID],
         ),
+        (3533, "enum_send", BYTEA_TYPE_OID, vec![ANYENUMOID]),
         (
             4229,
             "anymultirange_in",
             ANYMULTIRANGEOID,
             vec![CSTRING_TYPE_OID],
         ),
+        (
+            4230,
+            "anymultirange_out",
+            CSTRING_TYPE_OID,
+            vec![ANYMULTIRANGEOID],
+        ),
         (3832, "anyrange_in", ANYRANGEOID, vec![CSTRING_TYPE_OID]),
+        (3833, "anyrange_out", CSTRING_TYPE_OID, vec![ANYRANGEOID]),
         (1242, "boolin", BOOL_TYPE_OID, vec![CSTRING_TYPE_OID]),
         (1243, "boolout", CSTRING_TYPE_OID, vec![BOOL_TYPE_OID]),
         (42, "int4in", INT4_TYPE_OID, vec![CSTRING_TYPE_OID]),
         (43, "int4out", CSTRING_TYPE_OID, vec![INT4_TYPE_OID]),
-        (46, "textin", TEXT_TYPE_OID, vec![CSTRING_TYPE_OID]),
-        (47, "textout", CSTRING_TYPE_OID, vec![TEXT_TYPE_OID]),
         (
             1046,
             "varcharin",
@@ -5553,7 +5629,6 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             vec![CSTRING_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
         ),
         (1047, "varcharout", CSTRING_TYPE_OID, vec![VARCHAR_TYPE_OID]),
-        (2401, "array_send", BYTEA_TYPE_OID, vec![ANYARRAYOID]),
         (
             2432,
             "varcharrecv",
@@ -5586,34 +5661,16 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             vec![INT4_TYPE_OID],
         ),
         (
-            3688,
-            "ts_typanalyze",
-            BOOL_TYPE_OID,
-            vec![INTERNAL_TYPE_OID],
-        ),
-        (
-            3816,
-            "array_typanalyze",
-            BOOL_TYPE_OID,
-            vec![INTERNAL_TYPE_OID],
-        ),
-        (
-            6179,
-            "array_subscript_handler",
-            INTERNAL_TYPE_OID,
-            vec![INTERNAL_TYPE_OID],
-        ),
-        (
-            6180,
-            "raw_array_subscript_handler",
-            INTERNAL_TYPE_OID,
-            vec![INTERNAL_TYPE_OID],
-        ),
-        (
             4231,
             "multirange_in",
             ANYMULTIRANGEOID,
             vec![CSTRING_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
+        ),
+        (
+            4232,
+            "multirange_out",
+            CSTRING_TYPE_OID,
+            vec![ANYMULTIRANGEOID],
         ),
         (
             4233,
@@ -5622,17 +5679,25 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             vec![INTERNAL_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
         ),
         (
+            4234,
+            "multirange_send",
+            BYTEA_TYPE_OID,
+            vec![ANYMULTIRANGEOID],
+        ),
+        (
             3834,
             "range_in",
             ANYRANGEOID,
             vec![CSTRING_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
         ),
+        (3835, "range_out", CSTRING_TYPE_OID, vec![ANYRANGEOID]),
         (
             3836,
             "range_recv",
             ANYRANGEOID,
             vec![INTERNAL_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
         ),
+        (3837, "range_send", BYTEA_TYPE_OID, vec![ANYRANGEOID]),
         (
             5086,
             "anycompatible_in",
@@ -5644,6 +5709,12 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             "anycompatiblearray_in",
             ANYCOMPATIBLEARRAYOID,
             vec![CSTRING_TYPE_OID],
+        ),
+        (
+            5089,
+            "anycompatiblearray_out",
+            CSTRING_TYPE_OID,
+            vec![ANYCOMPATIBLEARRAYOID],
         ),
         (
             5090,
@@ -5663,10 +5734,150 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             ANYCOMPATIBLERANGEOID,
             vec![CSTRING_TYPE_OID],
         ),
+        (
+            5095,
+            "anycompatiblerange_out",
+            CSTRING_TYPE_OID,
+            vec![ANYCOMPATIBLERANGEOID],
+        ),
+        (
+            4226,
+            "anycompatiblemultirange_in",
+            ANYCOMPATIBLEMULTIRANGEOID,
+            vec![CSTRING_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
+        ),
+        (
+            4227,
+            "anycompatiblemultirange_out",
+            CSTRING_TYPE_OID,
+            vec![ANYCOMPATIBLEMULTIRANGEOID],
+        ),
+        (
+            3816,
+            "array_typanalyze",
+            BOOL_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            2410,
+            "int2vectorrecv",
+            INT2VECTOR_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            2411,
+            "int2vectorsend",
+            BYTEA_TYPE_OID,
+            vec![INT2VECTOR_TYPE_OID],
+        ),
+        (2414, "textrecv", TEXT_TYPE_OID, vec![INTERNAL_TYPE_OID]),
+        (2415, "textsend", BYTEA_TYPE_OID, vec![TEXT_TYPE_OID]),
+        (
+            2420,
+            "oidvectorrecv",
+            OIDVECTOR_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            2421,
+            "oidvectorsend",
+            BYTEA_TYPE_OID,
+            vec![OIDVECTOR_TYPE_OID],
+        ),
+        (
+            3646,
+            "gtsvectorin",
+            GTSVECTOR_TYPE_OID,
+            vec![CSTRING_TYPE_OID],
+        ),
+        (
+            3647,
+            "gtsvectorout",
+            CSTRING_TYPE_OID,
+            vec![GTSVECTOR_TYPE_OID],
+        ),
+        (
+            4596,
+            "brin_bloom_summary_in",
+            PG_BRIN_BLOOM_SUMMARY_TYPE_OID,
+            vec![CSTRING_TYPE_OID],
+        ),
+        (
+            4597,
+            "brin_bloom_summary_out",
+            CSTRING_TYPE_OID,
+            vec![PG_BRIN_BLOOM_SUMMARY_TYPE_OID],
+        ),
+        (
+            4598,
+            "brin_bloom_summary_recv",
+            PG_BRIN_BLOOM_SUMMARY_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            4599,
+            "brin_bloom_summary_send",
+            BYTEA_TYPE_OID,
+            vec![PG_BRIN_BLOOM_SUMMARY_TYPE_OID],
+        ),
+        (
+            4638,
+            "brin_minmax_multi_summary_in",
+            PG_BRIN_MINMAX_MULTI_SUMMARY_TYPE_OID,
+            vec![CSTRING_TYPE_OID],
+        ),
+        (
+            4639,
+            "brin_minmax_multi_summary_out",
+            CSTRING_TYPE_OID,
+            vec![PG_BRIN_MINMAX_MULTI_SUMMARY_TYPE_OID],
+        ),
+        (
+            4640,
+            "brin_minmax_multi_summary_recv",
+            PG_BRIN_MINMAX_MULTI_SUMMARY_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            4641,
+            "brin_minmax_multi_summary_send",
+            BYTEA_TYPE_OID,
+            vec![PG_BRIN_MINMAX_MULTI_SUMMARY_TYPE_OID],
+        ),
+        (
+            3916,
+            "range_typanalyze",
+            BOOL_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            4242,
+            "multirange_typanalyze",
+            BOOL_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            6179,
+            "array_subscript_handler",
+            INTERNAL_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            6380,
+            "array_subscript_handler_support",
+            INTERNAL_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
+            6180,
+            "raw_array_subscript_handler",
+            INTERNAL_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
     ]
     .into_iter()
     .map(|(oid, proname, prorettype, args)| {
-        proc_row(
+        let mut row = proc_row(
             oid,
             proname,
             prorettype,
@@ -5674,12 +5885,95 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             proname,
             args.len() as i16,
             false,
-            true,
+            proname != "domain_in" && proname != "domain_recv",
             'f',
             'i',
-        )
+        );
+        if matches!(
+            proname,
+            "array_in"
+                | "array_out"
+                | "array_recv"
+                | "array_send"
+                | "record_in"
+                | "record_out"
+                | "record_recv"
+                | "record_send"
+                | "domain_in"
+                | "domain_recv"
+                | "enum_in"
+                | "enum_out"
+                | "enum_recv"
+                | "enum_send"
+                | "anyarray_out"
+                | "anyenum_out"
+                | "anyrange_out"
+                | "range_in"
+                | "range_out"
+                | "range_recv"
+                | "range_send"
+                | "anymultirange_out"
+                | "multirange_in"
+                | "multirange_out"
+                | "multirange_recv"
+                | "multirange_send"
+                | "brin_bloom_summary_in"
+                | "brin_bloom_summary_out"
+                | "brin_bloom_summary_recv"
+                | "brin_bloom_summary_send"
+                | "brin_minmax_multi_summary_in"
+                | "brin_minmax_multi_summary_out"
+                | "brin_minmax_multi_summary_recv"
+                | "brin_minmax_multi_summary_send"
+                | "array_typanalyze"
+                | "range_typanalyze"
+                | "multirange_typanalyze"
+        ) {
+            row.provolatile = 's';
+        }
+        row
     })
-    .collect()
+    .collect::<Vec<_>>();
+    // :HACK: These catalog-only I/O rows let pg_type look like PostgreSQL
+    // without claiming pgrust can execute every type's native C I/O routine.
+    // Unmapped LANGUAGE internal calls still route through fmgr and error.
+    rows.extend(catalog_only_type_io_proc_rows());
+    rows
+}
+
+fn catalog_only_type_io_proc_rows() -> Vec<PgProcRow> {
+    let mut rows = Vec::new();
+    for typ in builtin_type_rows() {
+        if typ.typinput == synthetic_type_input_proc_oid(typ.oid) {
+            rows.push(proc_row(
+                typ.typinput,
+                &format!("pg_rust_{}_in", typ.typname.trim_start_matches('_')),
+                typ.oid,
+                &oid_argtypes(&[CSTRING_TYPE_OID]),
+                &format!("pg_rust_type_{}_in", typ.oid),
+                1,
+                false,
+                true,
+                'f',
+                's',
+            ));
+        }
+        if typ.typoutput == synthetic_type_output_proc_oid(typ.oid) {
+            rows.push(proc_row(
+                typ.typoutput,
+                &format!("pg_rust_{}_out", typ.typname.trim_start_matches('_')),
+                CSTRING_TYPE_OID,
+                &oid_argtypes(&[typ.oid]),
+                &format!("pg_rust_type_{}_out", typ.oid),
+                1,
+                false,
+                true,
+                'f',
+                's',
+            ));
+        }
+    }
+    rows
 }
 
 fn pg_proc_alias_pair_rows() -> Vec<PgProcRow> {
@@ -7590,7 +7884,7 @@ pub fn proc_oid_for_builtin_window_function(func: BuiltinWindowFunction) -> Opti
         })
 }
 
-fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
+pub fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
     builtin_scalar_function_for_proc_src(&row.prosrc)
         .or_else(|| builtin_scalar_function_for_proc_src(&row.proname))
 }
@@ -7970,6 +8264,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_rust_test_enc_conversion",
             BuiltinScalarFunction::PgRustTestEncConversion,
+        ),
+        (
+            "pg_rust_is_catalog_text_unique_index_oid",
+            BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid,
         ),
         ("amvalidate", BuiltinScalarFunction::AmValidate),
         ("btequalimage", BuiltinScalarFunction::BtEqualImage),
@@ -8644,6 +8942,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("sqrt", BuiltinScalarFunction::Sqrt),
         ("dsqrt", BuiltinScalarFunction::Sqrt),
         ("numeric_sqrt", BuiltinScalarFunction::Sqrt),
+        ("pi", BuiltinScalarFunction::Pi),
+        ("dpi", BuiltinScalarFunction::Pi),
         ("cbrt", BuiltinScalarFunction::Cbrt),
         ("dcbrt", BuiltinScalarFunction::Cbrt),
         ("power", BuiltinScalarFunction::Power),

@@ -12,8 +12,8 @@ use crate::backend::utils::misc::notices::{
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BootstrapCatalogKind, CSTRING_TYPE_OID, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
-    PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID,
-    PG_TYPE_RELATION_OID, PgAggregateRow, TEXT_TYPE_OID,
+    PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_OPERATOR_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow, TEXT_TYPE_OID,
 };
 use crate::include::nodes::datum::{ArrayValue, IntervalValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
@@ -25267,6 +25267,44 @@ fn create_language_c_function_without_link_symbol_uses_function_name() {
              where a.thepath ?# b.thepath",
         )
         .unwrap();
+}
+
+#[test]
+fn create_language_internal_function_dispatches_by_prosrc() {
+    let base = temp_dir("language_internal_function_prosrc");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function is_catalog_text_unique_index_oid(oid) returns bool \
+             as 'pg_rust_is_catalog_text_unique_index_oid' language internal strict",
+        )
+        .unwrap();
+
+    let visible = db.backend_catcache(1, None).unwrap();
+    let proc = visible
+        .proc_rows_by_name("is_catalog_text_unique_index_oid")
+        .into_iter()
+        .find(|row| row.proname == "is_catalog_text_unique_index_oid")
+        .expect("function row");
+    assert_eq!(proc.prolang, PG_LANGUAGE_INTERNAL_OID);
+    assert_eq!(proc.prosrc, "pg_rust_is_catalog_text_unique_index_oid");
+
+    let result = session
+        .execute(
+            &db,
+            "select is_catalog_text_unique_index_oid(6246::oid), \
+                    is_catalog_text_unique_index_oid(2675::oid)",
+        )
+        .unwrap();
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Bool(true), Value::Bool(false)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
 }
 
 #[test]

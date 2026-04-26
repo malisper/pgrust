@@ -463,6 +463,13 @@ fn cast_text_to_regnamespace(
     Ok(Value::Int64(namespace_oid as i64))
 }
 
+fn cast_text_to_regtype(
+    text: &str,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    expr_reg::resolve_regtype_oid(text, catalog).map(|oid| Value::Int64(oid as i64))
+}
+
 fn regclass_text_input(value: &Value, source_type: Option<SqlType>) -> Option<&str> {
     let source_is_text_like = source_type.is_some_and(|ty| {
         matches!(
@@ -4388,6 +4395,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         Value::Text(text) => {
             if matches!(ty.kind, SqlTypeKind::Enum) {
                 cast_text_to_enum(text.as_str(), ty, catalog)
+            } else if matches!(ty.kind, SqlTypeKind::RegType) {
+                cast_text_to_regtype(text.as_str(), catalog)
             } else {
                 cast_text_value_with_config(text.as_str(), ty, true, config)
             }
@@ -4398,6 +4407,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             };
             if matches!(ty.kind, SqlTypeKind::Enum) {
                 cast_text_to_enum(text, ty, catalog)
+            } else if matches!(ty.kind, SqlTypeKind::RegType) {
+                cast_text_to_regtype(text, catalog)
             } else {
                 cast_text_value_with_config(text, ty, true, config)
             }
@@ -6040,14 +6051,16 @@ fn has_nonzero_digit(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cast_float_to_int, cast_value, cast_value_with_source_type_and_config,
-        parse_input_type_name, parse_interval_text_value, parse_pg_float, parse_text_array_literal,
-        render_interval_text_with_style, soft_input_error_info,
+        cast_float_to_int, cast_text_to_regtype, cast_value,
+        cast_value_with_source_type_and_config, parse_input_type_name, parse_interval_text_value,
+        parse_pg_float, parse_text_array_literal, render_interval_text_with_style,
+        soft_input_error_info,
     };
     use crate::backend::executor::exec_expr::parse_numeric_text;
     use crate::backend::executor::{ExecError, Value};
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::backend::utils::misc::guc_datetime::{DateTimeConfig, IntervalStyle};
+    use crate::include::catalog::GTSVECTOR_TYPE_OID;
     use crate::include::nodes::datetime::{
         DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
     };
@@ -6156,6 +6169,14 @@ mod tests {
         assert_eq!(
             parse_input_type_name("int4[][]", None).unwrap(),
             Some(SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
+        );
+    }
+
+    #[test]
+    fn regtype_cast_resolves_catalog_only_types() {
+        assert_eq!(
+            cast_text_to_regtype("gtsvector", None).unwrap(),
+            Value::Int64(GTSVECTOR_TYPE_OID as i64)
         );
     }
 

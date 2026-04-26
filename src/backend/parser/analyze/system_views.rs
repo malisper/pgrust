@@ -136,9 +136,13 @@ pub(super) fn bind_builtin_system_view(
                     Value::Int64(i64::from(row.typnamespace)),
                     Value::Int64(i64::from(row.typowner)),
                     Value::Int16(row.typlen),
+                    Value::Bool(row.typbyval),
+                    Value::InternalChar(row.typtype as u8),
+                    Value::Bool(row.typisdefined),
                     Value::InternalChar(row.typalign.as_char() as u8),
                     Value::InternalChar(row.typstorage.as_char() as u8),
                     Value::Int64(i64::from(row.typrelid)),
+                    Value::Int64(i64::from(row.typsubscript)),
                     Value::Int64(i64::from(row.typelem)),
                     Value::Int64(i64::from(row.typarray)),
                     Value::Int64(i64::from(row.typinput)),
@@ -147,8 +151,10 @@ pub(super) fn bind_builtin_system_view(
                     Value::Int64(i64::from(row.typsend)),
                     Value::Int64(i64::from(row.typmodin)),
                     Value::Int64(i64::from(row.typmodout)),
+                    Value::InternalChar(row.typdelim as u8),
                     Value::Int64(i64::from(row.typanalyze)),
-                    Value::Int64(i64::from(row.typsubscript)),
+                    Value::Int64(i64::from(row.typbasetype)),
+                    Value::Int64(i64::from(row.typcollation)),
                     match row.typacl {
                         Some(values) => Value::Array(
                             values
@@ -158,6 +164,31 @@ pub(super) fn bind_builtin_system_view(
                         ),
                         None => Value::Null,
                     },
+                ]
+            })
+            .collect(),
+        SyntheticSystemViewKind::PgRange => catalog
+            .range_rows()
+            .into_iter()
+            .map(|row| {
+                let rngcanonical = row
+                    .rngcanonical
+                    .as_deref()
+                    .and_then(|name| catalog.proc_rows_by_name(name).first().map(|proc| proc.oid))
+                    .unwrap_or(0);
+                let rngsubdiff = row
+                    .rngsubdiff
+                    .as_deref()
+                    .and_then(|name| catalog.proc_rows_by_name(name).first().map(|proc| proc.oid))
+                    .unwrap_or(0);
+                vec![
+                    Value::Int64(i64::from(row.rngtypid)),
+                    Value::Int64(i64::from(row.rngsubtype)),
+                    Value::Int64(i64::from(row.rngmultitypid)),
+                    Value::Int64(i64::from(row.rngcollation)),
+                    Value::Int64(i64::from(row.rngsubopc)),
+                    Value::Int64(i64::from(rngcanonical)),
+                    Value::Int64(i64::from(rngsubdiff)),
                 ]
             })
             .collect(),

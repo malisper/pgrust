@@ -13,6 +13,7 @@ use super::expr_bit::{
 use super::expr_bool::order_bool_values;
 use super::expr_casts::{
     cast_value, cast_value_with_source_type_catalog_and_config, pg_lsn_out_of_range,
+    render_internal_char_text,
 };
 use super::expr_money::{
     money_add, money_cash_div, money_cmp, money_div_float, money_div_int, money_mul_float,
@@ -20,10 +21,7 @@ use super::expr_money::{
 };
 use super::expr_network::{network_add, network_bitwise_binary, network_bitwise_not, network_sub};
 use super::node_types::*;
-use super::{
-    compare_multirange_values, expr_casts::render_internal_char_text,
-    expr_range::compare_range_values,
-};
+use super::{compare_multirange_values, expr_range::compare_range_values};
 use crate::backend::executor::jsonb::{
     JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb, jsonb_concat,
 };
@@ -99,6 +97,7 @@ pub(crate) fn compare_order_values(
         }
         (Value::Int32(a), Value::Int32(b)) => Ok(a.cmp(b)),
         (Value::EnumOid(a), Value::EnumOid(b)) => Ok(a.cmp(b)),
+        (Value::InternalChar(a), Value::InternalChar(b)) => Ok(a.cmp(b)),
         (Value::Int64(a), Value::Int64(b)) => Ok(a.cmp(b)),
         (Value::Xid8(a), Value::Xid8(b)) => Ok(a.cmp(b)),
         (Value::PgLsn(a), Value::PgLsn(b)) => Ok(a.cmp(b)),
@@ -210,13 +209,6 @@ pub(crate) fn compare_values(
         (Value::Int32(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i32))),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(l == r)),
         (Value::EnumOid(l), Value::EnumOid(r)) => Ok(Value::Bool(l == r)),
-        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Bool((*l as i64) == *r)),
-        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i64))),
-        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(*l == (*r as i64))),
-        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(l == r)),
-        (Value::Xid8(l), Value::Xid8(r)) => Ok(Value::Bool(l == r)),
-        (Value::PgLsn(l), Value::PgLsn(r)) => Ok(Value::Bool(l == r)),
-        (Value::Money(l), Value::Money(r)) => Ok(Value::Bool(l == r)),
         (Value::InternalChar(l), Value::InternalChar(r)) => Ok(Value::Bool(l == r)),
         (Value::InternalChar(l), r) if r.as_text().is_some() => Ok(Value::Bool(
             render_internal_char_text(*l) == r.as_text().unwrap(),
@@ -224,6 +216,13 @@ pub(crate) fn compare_values(
         (l, Value::InternalChar(r)) if l.as_text().is_some() => Ok(Value::Bool(
             l.as_text().unwrap() == render_internal_char_text(*r),
         )),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Bool((*l as i64) == *r)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i64))),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(*l == (*r as i64))),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(l == r)),
+        (Value::Xid8(l), Value::Xid8(r)) => Ok(Value::Bool(l == r)),
+        (Value::PgLsn(l), Value::PgLsn(r)) => Ok(Value::Bool(l == r)),
+        (Value::Money(l), Value::Money(r)) => Ok(Value::Bool(l == r)),
         (Value::Date(l), Value::Date(r)) => Ok(Value::Bool(l == r)),
         (Value::Time(l), Value::Time(r)) => Ok(Value::Bool(l == r)),
         (Value::TimeTz(l), Value::TimeTz(r)) => Ok(Value::Bool(l == r)),
@@ -2292,6 +2291,20 @@ mod tests {
             Err(crate::backend::executor::ExecError::DetailedError { sqlstate, .. })
                 if sqlstate == "0A000"
         ));
+    }
+
+    #[test]
+    fn compare_values_supports_internal_char_equality() {
+        assert_eq!(
+            super::compare_values(
+                "=",
+                Value::InternalChar(b'd'),
+                Value::InternalChar(b'd'),
+                None,
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
     }
 
     #[test]

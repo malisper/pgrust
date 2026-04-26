@@ -86,8 +86,9 @@ use super::expr_string::{
     eval_decode_function, eval_encode_function, eval_format_function, eval_get_bit_bytes,
     eval_get_byte, eval_initcap_function, eval_left_function, eval_length_function, eval_like,
     eval_lower_function, eval_lpad_function, eval_md5_function, eval_parse_ident_function,
-    eval_pg_rust_test_enc_conversion, eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler,
-    eval_pg_rust_test_int44in, eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
+    eval_pg_rust_is_catalog_text_unique_index_oid, eval_pg_rust_test_enc_conversion,
+    eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler, eval_pg_rust_test_int44in,
+    eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
     eval_pg_rust_test_pt_in_widget, eval_pg_rust_test_widget_in, eval_pg_rust_test_widget_out,
     eval_pg_size_bytes_function, eval_pg_size_pretty_function, eval_position_function,
     eval_quote_literal_function, eval_repeat_function, eval_replace_function,
@@ -117,7 +118,6 @@ use crate::backend::catalog::rowcodec::pg_description_row_from_values;
 use crate::backend::executor::jsonb::{
     JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
 };
-use crate::backend::executor::sqlfunc::execute_user_defined_sql_scalar_function;
 use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
@@ -145,11 +145,10 @@ use crate::include::catalog::{
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, HashFunctionKind, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr,
-    OpExprKind, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, ScalarFunctionImpl, SubLinkType,
-    TABLE_OID_ATTR_NO, attrno_index, is_executor_special_varno,
+    OpExprKind, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, SubLinkType, TABLE_OID_ATTR_NO,
+    attrno_index, is_executor_special_varno,
 };
 use crate::pgrust::compact_string::CompactString;
-use crate::pl::plpgsql::execute_user_defined_scalar_function;
 
 mod arrays;
 mod subquery;
@@ -3532,48 +3531,7 @@ fn eval_func_expr(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    match func.implementation {
-        ScalarFunctionImpl::Builtin(builtin) => eval_builtin_function(
-            builtin,
-            func.funcresulttype,
-            &func.args,
-            func.funcvariadic,
-            slot,
-            ctx,
-        ),
-        ScalarFunctionImpl::UserDefined { proc_oid } => {
-            let catalog = ctx
-                .catalog
-                .as_ref()
-                .ok_or_else(|| ExecError::DetailedError {
-                    message: "user-defined functions require executor catalog context".into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "0A000",
-                })?;
-            let row =
-                catalog
-                    .proc_row_by_oid(proc_oid)
-                    .ok_or_else(|| ExecError::DetailedError {
-                        message: format!("unknown function oid {proc_oid}"),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "42883",
-                    })?;
-            match row.prolang {
-                crate::include::catalog::PG_LANGUAGE_SQL_OID => {
-                    execute_user_defined_sql_scalar_function(&row, &func.args, slot, ctx)
-                }
-                _ => execute_user_defined_scalar_function(
-                    proc_oid,
-                    func.funcresulttype,
-                    &func.args,
-                    slot,
-                    ctx,
-                ),
-            }
-        }
-    }
+    super::fmgr::call_scalar_function(func, slot, ctx)
 }
 
 fn current_temp_namespace_name(ctx: &ExecutorContext) -> Option<CompactString> {
@@ -5552,7 +5510,7 @@ fn eval_text_search_builtin_function(
         }
         BuiltinScalarFunction::TsVectorIn => match values {
             [Value::Null] => Ok(Value::Null),
-            [_] => {
+            [_] | [_, _, _] => {
                 // :HACK: pgrust represents SQL cstring arguments through the
                 // existing text value path for type input wrappers.
                 let text = arg_text(values, 0, "tsvectorin")?.unwrap_or_default();
@@ -5573,7 +5531,7 @@ fn eval_text_search_builtin_function(
         },
         BuiltinScalarFunction::TsQueryIn => match values {
             [Value::Null] => Ok(Value::Null),
-            [_] => {
+            [_] | [_, _, _] => {
                 // :HACK: pgrust represents SQL cstring arguments through the
                 // existing text value path for type input wrappers.
                 let text = arg_text(values, 0, "tsqueryin")?.unwrap_or_default();
@@ -6061,7 +6019,7 @@ fn eval_domain_check_upper_less_than(values: &[Value]) -> Result<Value, ExecErro
     })
 }
 
-fn eval_builtin_function(
+pub(crate) fn eval_builtin_function(
     func: BuiltinScalarFunction,
     result_type: Option<SqlType>,
     args: &[Expr],
@@ -6399,6 +6357,9 @@ fn eval_builtin_function(
         BuiltinScalarFunction::PgRustTestInt44In => eval_pg_rust_test_int44in(&values),
         BuiltinScalarFunction::PgRustTestInt44Out => eval_pg_rust_test_int44out(&values),
         BuiltinScalarFunction::PgRustTestPtInWidget => eval_pg_rust_test_pt_in_widget(&values),
+        BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid => {
+            eval_pg_rust_is_catalog_text_unique_index_oid(&values)
+        }
         BuiltinScalarFunction::AmValidate | BuiltinScalarFunction::BtEqualImage => {
             Ok(Value::Bool(true))
         }
@@ -6646,6 +6607,13 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Ceil | BuiltinScalarFunction::Ceiling => eval_ceil_function(&values),
         BuiltinScalarFunction::Floor => eval_floor_function(&values),
         BuiltinScalarFunction::Sign => eval_sign_function(&values),
+        BuiltinScalarFunction::Pi => {
+            if values.is_empty() {
+                Ok(Value::Float64(std::f64::consts::PI))
+            } else {
+                Err(malformed_expr_error("pi"))
+            }
+        }
         BuiltinScalarFunction::Sqrt => eval_sqrt_function(&values),
         BuiltinScalarFunction::Cbrt => eval_unary_float_function("cbrt", &values, |v| Ok(v.cbrt())),
         BuiltinScalarFunction::Power => eval_power_function(&values),
