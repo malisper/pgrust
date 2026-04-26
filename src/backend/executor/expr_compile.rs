@@ -4,7 +4,7 @@ use super::pg_regex::{compile_pg_regex_predicate, pg_regex_is_match};
 use super::{ExecError, ExecutorContext};
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{
-    BoolExprType, OpExprKind, Var, attrno_index, is_special_varno,
+    BoolExprType, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExprKind, Var, attrno_index, is_special_varno,
 };
 
 pub(crate) type CompiledPredicate =
@@ -240,17 +240,11 @@ pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
             });
         }
         Expr::Op(op) if op.op == OpExprKind::RegexMatch => {
-            if let [Expr::Var(var), pattern] = op.args.as_slice() {
-                let col = match local_var_index(var) {
-                    Some(col) => col,
-                    None => return compile_fallback(expr),
-                };
-                if let Some(pattern) = const_text_pattern(pattern)
-                    && let Ok(regex) = compile_pg_regex_predicate(pattern)
-                {
+            if let Some((source, pat)) = regex_match_fast_path_parts(&op.args) {
+                if let Ok(regex) = compile_pg_regex_predicate(pat) {
                     let regex = std::sync::Arc::new(regex);
-                    return Box::new(move |slot, _ctx| {
-                        let val = slot.get_attr(col)?;
+                    return Box::new(move |slot, ctx| {
+                        let val = fast_var_value(source, slot, ctx)?;
                         if let Some(s) = val.as_text() {
                             pg_regex_is_match(&regex, s)
                         } else if matches!(val, Value::Null) {
@@ -272,13 +266,46 @@ pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
     compile_fallback(expr)
 }
 
-fn compile_fallback(expr: &Expr) -> CompiledPredicate {
-    let expr = expr.clone();
-    Box::new(move |slot, ctx| match eval_expr(&expr, slot, ctx)? {
-        Value::Bool(true) => Ok(true),
-        Value::Bool(false) | Value::Null => Ok(false),
-        other => Err(ExecError::NonBoolQual(other)),
-    })
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FastVarSource {
+    Slot(usize),
+    Outer(usize),
+    Inner(usize),
+    Index(usize),
+}
+
+fn regex_match_fast_path_parts(args: &[Expr]) -> Option<(FastVarSource, &str)> {
+    let [text, pattern] = args else {
+        return None;
+    };
+    let source = text_var_source(text)?;
+    let pattern = const_text_pattern(pattern)?;
+    Some((source, pattern))
+}
+
+fn text_var_source(expr: &Expr) -> Option<FastVarSource> {
+    match expr {
+        Expr::Var(var) => fast_var_source(var),
+        Expr::Cast(inner, ty) if ty.kind == SqlTypeKind::Text && !ty.is_array => {
+            text_var_source(inner)
+        }
+        Expr::Collate { expr, .. } => text_var_source(expr),
+        _ => None,
+    }
+}
+
+fn fast_var_source(var: &Var) -> Option<FastVarSource> {
+    if var.varlevelsup != 0 {
+        return None;
+    }
+    let index = attrno_index(var.varattno)?;
+    match var.varno {
+        OUTER_VAR => Some(FastVarSource::Outer(index)),
+        INNER_VAR => Some(FastVarSource::Inner(index)),
+        INDEX_VAR => Some(FastVarSource::Index(index)),
+        varno if !is_special_varno(varno) => Some(FastVarSource::Slot(index)),
+        _ => None,
+    }
 }
 
 fn const_text_pattern(expr: &Expr) -> Option<&str> {
@@ -290,6 +317,53 @@ fn const_text_pattern(expr: &Expr) -> Option<&str> {
         Expr::Collate { expr, .. } => const_text_pattern(expr),
         _ => None,
     }
+}
+
+fn fast_var_value<'a>(
+    source: FastVarSource,
+    slot: &'a mut TupleSlot,
+    ctx: &'a ExecutorContext,
+) -> Result<&'a Value, ExecError> {
+    match source {
+        FastVarSource::Slot(index) => slot.get_attr(index),
+        FastVarSource::Outer(index) => {
+            bound_tuple_value("outer", ctx.expr_bindings.outer_tuple.as_ref(), index)
+        }
+        FastVarSource::Inner(index) => {
+            bound_tuple_value("inner", ctx.expr_bindings.inner_tuple.as_ref(), index)
+        }
+        FastVarSource::Index(index) => {
+            bound_tuple_value("index", ctx.expr_bindings.index_tuple.as_ref(), index)
+        }
+    }
+}
+
+fn bound_tuple_value<'a>(
+    binding: &str,
+    tuple: Option<&'a Vec<Value>>,
+    index: usize,
+) -> Result<&'a Value, ExecError> {
+    let row = tuple.ok_or_else(|| ExecError::DetailedError {
+        message: format!("compiled regex predicate referenced missing {binding} tuple"),
+        detail: Some(format!("index={index}")),
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    row.get(index).ok_or_else(|| ExecError::DetailedError {
+        message: format!("compiled regex predicate referenced beyond {binding} tuple width"),
+        detail: Some(format!("index={index}, tuple_width={}", row.len())),
+        hint: None,
+        sqlstate: "XX000",
+    })
+}
+
+fn compile_fallback(expr: &Expr) -> CompiledPredicate {
+    let expr = expr.clone();
+    Box::new(move |slot, ctx| match eval_expr(&expr, slot, ctx)? {
+        Value::Bool(true) => Ok(true),
+        Value::Bool(false) | Value::Null => Ok(false),
+        other => Err(ExecError::NonBoolQual(other)),
+    })
 }
 
 fn flatten_and(expr: &Expr) -> Vec<CompiledPredicate> {
@@ -308,6 +382,87 @@ fn flatten_and_inner(expr: &Expr, out: &mut Vec<CompiledPredicate>) {
         _ => {
             out.push(compile_predicate(expr));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::user_attrno;
+
+    fn text_var(index: usize) -> Expr {
+        Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(index),
+            varlevelsup: 0,
+            vartype: SqlType::new(SqlTypeKind::Text),
+        })
+    }
+
+    #[test]
+    fn regex_fast_path_accepts_casted_text_constant_pattern() {
+        let expr = Expr::op_auto(
+            OpExprKind::RegexMatch,
+            vec![
+                text_var(0),
+                Expr::Cast(
+                    Box::new(Expr::Const(Value::Text("I- .*".into()))),
+                    SqlType::new(SqlTypeKind::Text),
+                ),
+            ],
+        );
+        let Expr::Op(op) = expr else {
+            panic!("expected regex operator expression");
+        };
+
+        assert_eq!(
+            regex_match_fast_path_parts(&op.args),
+            Some((FastVarSource::Slot(0), "I- .*"))
+        );
+    }
+
+    #[test]
+    fn regex_fast_path_accepts_casted_text_var() {
+        let expr = Expr::op_auto(
+            OpExprKind::RegexMatch,
+            vec![
+                Expr::Cast(Box::new(text_var(0)), SqlType::new(SqlTypeKind::Text)),
+                Expr::Const(Value::Text("I- .*".into())),
+            ],
+        );
+        let Expr::Op(op) = expr else {
+            panic!("expected regex operator expression");
+        };
+
+        assert_eq!(
+            regex_match_fast_path_parts(&op.args),
+            Some((FastVarSource::Slot(0), "I- .*"))
+        );
+    }
+
+    #[test]
+    fn regex_fast_path_accepts_outer_text_var() {
+        let expr = Expr::op_auto(
+            OpExprKind::RegexMatch,
+            vec![
+                Expr::Var(Var {
+                    varno: OUTER_VAR,
+                    varattno: user_attrno(0),
+                    varlevelsup: 0,
+                    vartype: SqlType::new(SqlTypeKind::Text),
+                }),
+                Expr::Const(Value::Text("I- .*".into())),
+            ],
+        );
+        let Expr::Op(op) = expr else {
+            panic!("expected regex operator expression");
+        };
+
+        assert_eq!(
+            regex_match_fast_path_parts(&op.args),
+            Some((FastVarSource::Outer(0), "I- .*"))
+        );
     }
 }
 

@@ -38,8 +38,9 @@ use crate::backend::utils::misc::guc::{
     is_postgres_guc, normalize_guc_name, plpgsql_guc_default_value,
 };
 use crate::backend::utils::misc::guc_datetime::{
-    DateTimeConfig, default_datestyle, default_datetime_config, default_timezone, format_datestyle,
-    parse_datestyle_with_fallback, parse_timezone,
+    DateTimeConfig, default_datestyle, default_datetime_config, default_intervalstyle,
+    default_timezone, format_datestyle, format_intervalstyle, parse_datestyle_with_fallback,
+    parse_intervalstyle, parse_timezone,
 };
 use crate::backend::utils::misc::guc_xml::{
     format_xmlbinary, format_xmloption, parse_xmlbinary, parse_xmloption,
@@ -6082,6 +6083,7 @@ impl Session {
             }
             match normalized.as_str() {
                 "datestyle" => self.guc_reset_datestyle(),
+                "intervalstyle" => self.guc_reset_intervalstyle(),
                 "timezone" => self.guc_reset_timezone(),
                 "max_stack_depth" => self.guc_reset_max_stack_depth(),
                 "xmlbinary" => self.datetime_config.xml.binary = Default::default(),
@@ -6111,7 +6113,10 @@ impl Session {
             }
         } else {
             self.gucs.clear();
-            self.datetime_config = self.reset_datetime_config.clone();
+            self.guc_reset_datestyle();
+            self.guc_reset_intervalstyle();
+            self.guc_reset_timezone();
+            self.guc_reset_max_stack_depth();
             self.datetime_config.xml = Default::default();
             self.stats_state
                 .write()
@@ -6144,6 +6149,7 @@ impl Session {
         let fallback_value = || -> String {
             match name.as_str() {
                 "datestyle" => default_datestyle().to_string(),
+                "intervalstyle" => default_intervalstyle().to_string(),
                 "timezone" => default_timezone().to_string(),
                 "xmlbinary" => format_xmlbinary(self.datetime_config.xml.binary).to_string(),
                 "xmloption" => format_xmloption(self.datetime_config.xml.option).to_string(),
@@ -6158,6 +6164,10 @@ impl Session {
             "datestyle" => (
                 "DateStyle".to_string(),
                 format_datestyle(&self.datetime_config),
+            ),
+            "intervalstyle" => (
+                "IntervalStyle".to_string(),
+                format_intervalstyle(self.datetime_config.interval_style).to_string(),
             ),
             "timezone" => (
                 "TimeZone".to_string(),
@@ -6232,6 +6242,11 @@ impl Session {
         self.datetime_config.date_order = self.reset_datetime_config.date_order;
     }
 
+    fn guc_reset_intervalstyle(&mut self) {
+        self.datetime_config.interval_style =
+            parse_intervalstyle(default_intervalstyle()).expect("default IntervalStyle must parse");
+    }
+
     fn guc_reset_timezone(&mut self) {
         self.datetime_config.time_zone = self.reset_datetime_config.time_zone.clone();
     }
@@ -6266,6 +6281,15 @@ impl Session {
                 };
                 self.datetime_config.date_style_format = date_style_format;
                 self.datetime_config.date_order = date_order;
+            }
+            "intervalstyle" => {
+                let Some(interval_style) = parse_intervalstyle(value) else {
+                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                        value.to_string(),
+                    )));
+                };
+                self.datetime_config.interval_style = interval_style;
+                stored_value = format_intervalstyle(interval_style).to_string();
             }
             "timezone" => {
                 let Some(time_zone) = parse_timezone(value) else {

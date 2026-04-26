@@ -15,6 +15,7 @@ use crate::backend::executor::jsonpath::{
 use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
 use crate::backend::executor::render_interval_text;
+use crate::backend::executor::render_interval_text_with_config;
 use crate::backend::executor::render_macaddr_text;
 use crate::backend::executor::render_macaddr8_text;
 use crate::backend::executor::render_range_text;
@@ -3168,7 +3169,9 @@ fn render_json_value_text_with_config(
         Value::Money(v) => crate::backend::executor::money_format_text(*v),
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
-        Value::Interval(v) => serde_json::to_string(&render_interval_text(*v)).unwrap(),
+        Value::Interval(v) => {
+            serde_json::to_string(&render_interval_text_with_config(*v, datetime_config)).unwrap()
+        }
         Value::Uuid(v) => {
             serde_json::to_string(&crate::backend::executor::value_io::render_uuid_text(v)).unwrap()
         }
