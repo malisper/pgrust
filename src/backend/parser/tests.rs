@@ -4041,6 +4041,8 @@ fn parse_create_function_statement_with_returns_table() {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                default_expr: None,
+                variadic: false,
             }],
             return_spec: CreateFunctionReturnSpec::Table(vec![
                 CreateFunctionTableColumn {
@@ -4080,6 +4082,8 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                default_expr: None,
+                variadic: false,
             }],
             return_spec: CreateFunctionReturnSpec::Table(vec![
                 CreateFunctionTableColumn {
@@ -4370,11 +4374,15 @@ fn parse_create_function_statement_with_unnamed_args() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    default_expr: None,
+                    variadic: false,
                 },
                 CreateFunctionArg {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    default_expr: None,
+                    variadic: false,
                 }
             ],
             return_spec: CreateFunctionReturnSpec::Type {
@@ -4410,11 +4418,15 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    default_expr: None,
+                    variadic: false,
                 },
                 CreateFunctionArg {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    default_expr: None,
+                    variadic: false,
                 }
             ],
             return_spec: CreateFunctionReturnSpec::Type {
@@ -4449,6 +4461,8 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
                 mode: FunctionArgMode::In,
                 name: None,
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bytea)),
+                default_expr: None,
+                variadic: false,
             }],
             return_spec: CreateFunctionReturnSpec::Type {
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
@@ -4482,6 +4496,8 @@ fn parse_create_function_statement_with_cost_clause() {
                 mode: FunctionArgMode::In,
                 name: None,
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                default_expr: None,
+                variadic: false,
             }],
             return_spec: CreateFunctionReturnSpec::Type {
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool)),
@@ -4509,6 +4525,104 @@ fn parse_drop_function_statement_with_signature() {
             function_name: "p2text".into(),
             arg_types: vec!["p2".into()],
             cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_call_statement_with_named_and_positional_args() {
+    let stmt = parse_statement("call public.ptest5(10, b => 'Hello')").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Call(CallStatement {
+            schema_name: Some("public".into()),
+            procedure_name: "ptest5".into(),
+            args: SqlCallArgs::Args(vec![
+                SqlFunctionArg::positional(SqlExpr::IntegerLiteral("10".into())),
+                SqlFunctionArg {
+                    name: Some("b".into()),
+                    value: SqlExpr::Const(Value::Text("Hello".into())),
+                },
+            ]),
+            raw_arg_sql: vec!["10".into(), "'Hello'".into()],
+        })
+    );
+}
+
+#[test]
+fn parse_create_procedure_statement() {
+    let stmt = parse_statement(
+        "create or replace procedure public.ptest1(inout x int4, y text default 'a') language sql as $$ insert into cp_test values (1, y) $$",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateProcedure(CreateProcedureStatement {
+            schema_name: Some("public".into()),
+            procedure_name: "ptest1".into(),
+            replace_existing: true,
+            args: vec![
+                CreateFunctionArg {
+                    mode: FunctionArgMode::InOut,
+                    name: Some("x".into()),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                    default_expr: None,
+                    variadic: false,
+                },
+                CreateFunctionArg {
+                    mode: FunctionArgMode::In,
+                    name: Some("y".into()),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                    default_expr: Some("'a'".into()),
+                    variadic: false,
+                },
+            ],
+            strict: false,
+            volatility: FunctionVolatility::Volatile,
+            language: "sql".into(),
+            body: " insert into cp_test values (1, y) ".into(),
+            sql_standard_body: false,
+        })
+    );
+}
+
+#[test]
+fn parse_create_procedure_sql_standard_body() {
+    let stmt = parse_statement(
+        "create procedure ptest1s(x text) language sql begin atomic insert into cp_test values (1, x); end",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::CreateProcedure(CreateProcedureStatement {
+            procedure_name,
+            sql_standard_body: true,
+            ..
+        }) if procedure_name == "ptest1s"
+    ));
+}
+
+#[test]
+fn parse_drop_and_alter_procedure_statements() {
+    assert_eq!(
+        parse_statement("drop procedure if exists public.ptest1(text) cascade").unwrap(),
+        Statement::DropProcedure(DropProcedureStatement {
+            if_exists: true,
+            procedures: vec![DropRoutineItem {
+                schema_name: Some("public".into()),
+                routine_name: "ptest1".into(),
+                arg_types: vec!["text".into()],
+            }],
+            cascade: true,
+        })
+    );
+    assert_eq!(
+        parse_statement("alter procedure public.ptest1(text) strict").unwrap(),
+        Statement::AlterProcedure(AlterProcedureStatement {
+            schema_name: Some("public".into()),
+            procedure_name: "ptest1".into(),
+            arg_types: vec!["text".into()],
+            action: AlterProcedureAction::Strict,
         })
     );
 }

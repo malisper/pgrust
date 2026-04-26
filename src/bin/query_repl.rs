@@ -922,7 +922,9 @@ fn run_statement(
         | Statement::CreateConversion(_)
         | Statement::CommentOnIndex(_)
         | Statement::CommentOnRule(_)
+        | Statement::Call(_)
         | Statement::CreateFunction(_)
+        | Statement::CreateProcedure(_)
         | Statement::CreateOperator(_)
         | Statement::CreateOperatorClass(_)
         | Statement::CreateRule(_)
@@ -934,12 +936,14 @@ fn run_statement(
         | Statement::AlterTypeOwner(_)
         | Statement::CreateSequence(_)
         | Statement::DropFunction(_)
+        | Statement::DropProcedure(_)
         | Statement::DropOperator(_)
         | Statement::DropDomain(_)
         | Statement::DropConversion(_)
         | Statement::DropRule(_)
         | Statement::DropType(_)
         | Statement::DropSequence(_)
+        | Statement::AlterProcedure(_)
         => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "conversion/domain/function/type/sequence/rule statements are not supported in query_repl"
                 .into(),

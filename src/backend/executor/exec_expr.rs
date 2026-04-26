@@ -825,7 +825,127 @@ fn function_identity_text(
     proc_row: &crate::include::catalog::PgProcRow,
     catalog: &dyn CatalogLookup,
 ) -> String {
-    format!("function {}", function_signature_text(proc_row, catalog))
+    let object_kind = if proc_row.prokind == 'p' {
+        "procedure"
+    } else {
+        "function"
+    };
+    format!(
+        "{object_kind} {}",
+        function_signature_text(proc_row, catalog)
+    )
+}
+
+fn function_arguments_text(
+    proc_row: &crate::include::catalog::PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let names = proc_row.proargnames.as_deref().unwrap_or(&[]);
+    if let (Some(types), Some(modes)) = (
+        proc_row.proallargtypes.as_deref(),
+        proc_row.proargmodes.as_deref(),
+    ) {
+        return types
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, type_oid)| {
+                let mode = modes.get(index).copied().unwrap_or(b'i');
+                format_function_arg(
+                    mode,
+                    names.get(index).map(String::as_str),
+                    type_oid,
+                    catalog,
+                    proc_row.prokind == 'p',
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
+    proc_row
+        .proargtypes
+        .split_whitespace()
+        .filter_map(|oid| oid.parse::<u32>().ok())
+        .enumerate()
+        .map(|(index, type_oid)| {
+            format_function_arg(
+                b'i',
+                names.get(index).map(String::as_str),
+                type_oid,
+                catalog,
+                proc_row.prokind == 'p',
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_function_arg(
+    mode: u8,
+    name: Option<&str>,
+    type_oid: u32,
+    catalog: &dyn CatalogLookup,
+    include_in_mode: bool,
+) -> String {
+    let mode_text = match mode {
+        b'i' if include_in_mode => Some("IN"),
+        b'o' => Some("OUT"),
+        b'b' => Some("INOUT"),
+        b'v' => Some("VARIADIC"),
+        b't' => Some("TABLE"),
+        _ => None,
+    };
+    let mut parts = Vec::new();
+    if let Some(mode_text) = mode_text {
+        parts.push(mode_text.to_string());
+    }
+    if let Some(name) = name.filter(|name| !name.is_empty()) {
+        parts.push(quote_identifier(name));
+    }
+    parts.push(type_identity_text(catalog, type_oid));
+    parts.join(" ")
+}
+
+fn function_definition_text(
+    proc_row: &crate::include::catalog::PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let kind = if proc_row.prokind == 'p' {
+        "PROCEDURE"
+    } else {
+        "FUNCTION"
+    };
+    let schema = catalog
+        .namespace_row_by_oid(proc_row.pronamespace)
+        .map(|row| row.nspname)
+        .unwrap_or_else(|| proc_row.pronamespace.to_string());
+    let language = catalog
+        .language_row_by_oid(proc_row.prolang)
+        .map(|row| row.lanname)
+        .unwrap_or_else(|| proc_row.prolang.to_string());
+    let signature = format!(
+        "CREATE OR REPLACE {kind} {}({})\n LANGUAGE {}",
+        quote_qualified_identifier(&schema, &proc_row.proname),
+        function_arguments_text(proc_row, catalog),
+        quote_identifier(&language),
+    );
+    if proc_row.prokind == 'p' && sql_standard_procedure_body(&proc_row.prosrc).is_some() {
+        return format!("{signature}\n {}\n", proc_row.prosrc.trim());
+    }
+    let tag = if proc_row.prokind == 'p' {
+        "$procedure$"
+    } else {
+        "$function$"
+    };
+    let body = proc_row.prosrc.replace(tag, &format!("{tag} "));
+    format!("{signature}\nAS {tag}\n{body}\n{tag}\n")
+}
+
+fn sql_standard_procedure_body(body: &str) -> Option<&str> {
+    body.trim_start()
+        .to_ascii_lowercase()
+        .starts_with("begin atomic")
+        .then_some(body.trim())
 }
 
 fn operator_identity_text(
@@ -1812,6 +1932,94 @@ fn eval_pg_statistics_obj_is_visible(
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "pg_statistics_obj_is_visible(oid)",
             actual: format!("PgStatisticsObjIsVisible({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_pg_function_is_visible(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [oid] => {
+            let oid = oid_arg_to_u32(oid, "pg_function_is_visible")?;
+            Ok(Value::Bool(
+                role_catalog(ctx)?.proc_row_by_oid(oid).is_some(),
+            ))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_function_is_visible(oid)",
+            actual: format!("PgFunctionIsVisible({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_pg_get_function_arguments(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [oid] => {
+            let oid = oid_arg_to_u32(oid, "pg_get_function_arguments")?;
+            let catalog = role_catalog(ctx)?;
+            let Some(proc_row) = catalog.proc_row_by_oid(oid) else {
+                return Ok(Value::Null);
+            };
+            Ok(Value::Text(
+                function_arguments_text(&proc_row, catalog).into(),
+            ))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_get_function_arguments(oid)",
+            actual: format!("PgGetFunctionArguments({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_pg_get_function_result(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [oid] => {
+            let oid = oid_arg_to_u32(oid, "pg_get_function_result")?;
+            let catalog = role_catalog(ctx)?;
+            let Some(proc_row) = catalog.proc_row_by_oid(oid) else {
+                return Ok(Value::Null);
+            };
+            if proc_row.prokind == 'p' {
+                return Ok(Value::Null);
+            }
+            Ok(Value::Text(
+                type_identity_text(catalog, proc_row.prorettype).into(),
+            ))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_get_function_result(oid)",
+            actual: format!("PgGetFunctionResult({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_pg_get_functiondef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [oid] => {
+            let oid = oid_arg_to_u32(oid, "pg_get_functiondef")?;
+            let catalog = role_catalog(ctx)?;
+            let Some(proc_row) = catalog.proc_row_by_oid(oid) else {
+                return Ok(Value::Null);
+            };
+            Ok(Value::Text(
+                function_definition_text(&proc_row, catalog).into(),
+            ))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_get_functiondef(oid)",
+            actual: format!("PgGetFunctionDef({} args)", values.len()),
         })),
     }
 }
@@ -4242,11 +4450,15 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::PgGetUserById
         | BuiltinScalarFunction::ObjDescription
         | BuiltinScalarFunction::PgDescribeObject
+        | BuiltinScalarFunction::PgGetFunctionArguments
+        | BuiltinScalarFunction::PgGetFunctionDef
+        | BuiltinScalarFunction::PgGetFunctionResult
         | BuiltinScalarFunction::PgGetExpr
         | BuiltinScalarFunction::PgGetStatisticsObjDef
         | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
         | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
         | BuiltinScalarFunction::PgStatisticsObjIsVisible
+        | BuiltinScalarFunction::PgFunctionIsVisible
         | BuiltinScalarFunction::PgRelationIsPublishable
         | BuiltinScalarFunction::PgIndexAmHasProperty
         | BuiltinScalarFunction::PgIndexHasProperty
@@ -5142,6 +5354,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::PgStatisticsObjIsVisible => {
             eval_pg_statistics_obj_is_visible(&values, ctx)
         }
+        BuiltinScalarFunction::PgFunctionIsVisible => eval_pg_function_is_visible(&values, ctx),
         BuiltinScalarFunction::Now | BuiltinScalarFunction::TransactionTimestamp => {
             let mut config = ctx.datetime_config.clone();
             config
@@ -5431,6 +5644,11 @@ fn eval_builtin_function(
         BuiltinScalarFunction::PgPartitionRoot => eval_pg_partition_root(&values, ctx),
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
         BuiltinScalarFunction::PgDescribeObject => eval_pg_describe_object(&values, ctx),
+        BuiltinScalarFunction::PgGetFunctionArguments => {
+            eval_pg_get_function_arguments(&values, ctx)
+        }
+        BuiltinScalarFunction::PgGetFunctionDef => eval_pg_get_functiondef(&values, ctx),
+        BuiltinScalarFunction::PgGetFunctionResult => eval_pg_get_function_result(&values, ctx),
         BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values),
         BuiltinScalarFunction::PgGetConstraintDef => eval_pg_get_constraintdef(&values, ctx),
         BuiltinScalarFunction::PgGetIndexDef => eval_pg_get_indexdef(&values, ctx),
