@@ -177,6 +177,12 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_alter_table_trigger_state_statement(&sql)? {
         return Ok(stmt);
     }
+    if create_table_uses_bare_with_oids(&sql) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "statement",
+            actual: "syntax error at or near \"OIDS\"".into(),
+        });
+    }
     if let Some(stmt) = try_parse_index_statement(&sql)? {
         return Ok(stmt);
     }
@@ -261,6 +267,23 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
     }
 
     None
+}
+
+fn create_table_uses_bare_with_oids(sql: &str) -> bool {
+    let trimmed = sql.trim_start();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("create table ") {
+        return false;
+    }
+    let Some(with_idx) = find_next_top_level_keyword(trimmed, &["with"]) else {
+        return false;
+    };
+    let after_with = trimmed[with_idx + "with".len()..].trim_start();
+    if !keyword_at_start(after_with, "oids") {
+        return false;
+    }
+    let after_oids = consume_keyword(after_with, "oids").trim();
+    after_oids.is_empty() || after_oids == ";"
 }
 
 fn is_select_with_trailing_operator(sql: &str) -> bool {
@@ -1545,7 +1568,19 @@ fn parse_partition_spec_clause(
         rest = consume_keyword(rest, "hash").trim_start();
         PartitionStrategy::Hash
     } else {
-        return Err(PartitionStatementParseError::Unsupported);
+        let strategy_name = rest
+            .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(rest)
+            .to_ascii_lowercase();
+        return Err(ParseError::DetailedError {
+            message: format!("unrecognized partitioning strategy \"{strategy_name}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        }
+        .into());
     };
     let (keys_sql, rest) = take_parenthesized_segment(rest)?;
     let mut keys = Vec::new();

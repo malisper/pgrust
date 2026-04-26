@@ -5893,6 +5893,155 @@ fn hash_partitioned_tables_route_rows_and_validate_bounds() {
 }
 
 #[test]
+fn create_table_partition_validation_matches_postgres_messages() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    match session.execute(
+        &db,
+        "create table partitioned (a int) inherits (missing_parent) partition by list (a)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) if message == "cannot create partitioned table as inheritance child"
+            && sqlstate == "42P16" => {}
+        other => panic!("expected partitioned inheritance-child rejection, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create table parent_part (a int) partition by list (a)",
+        )
+        .unwrap();
+    match session.execute(
+        &db,
+        "create table inherited_child () inherits (parent_part)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) if message == "cannot inherit from partitioned table \"parent_part\""
+            && sqlstate == "42P16" => {}
+        other => panic!("expected partitioned parent inheritance rejection, got {other:?}"),
+    }
+
+    match session.execute(
+        &db,
+        "create table bad_list (a int, b int) partition by list (a, b)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) if message == "cannot use \"list\" partition strategy with more than one column"
+            && sqlstate == "0A000" => {}
+        other => panic!("expected list partition key arity rejection, got {other:?}"),
+    }
+
+    match session.execute(
+        &db,
+        "create table missing_key (a int) partition by range (b)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) if message == "column \"b\" named in partition key does not exist"
+            && sqlstate == "42703" => {}
+        other => panic!("expected partition key missing-column rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn partition_bound_validation_and_catalog_describe_helpers() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table list_parted (a int) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table list_parted_3 partition of list_parted for values in ((2+1))",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(c.relpartbound, c.oid) from pg_class c where c.relname = 'list_parted_3'",
+        ),
+        vec![vec![Value::Text("FOR VALUES IN (3)".into())]]
+    );
+    match session.execute(
+        &db,
+        "create table bad_expr partition of list_parted for values in (sum(1))",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) if message == "aggregate functions are not allowed in partition bound"
+            && sqlstate == "42P17" => {}
+        other => panic!("expected partition bound aggregate rejection, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create table text_parted (a text) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table text_part_b partition of text_parted for values in ('b')",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_partition_constraintdef('text_part_b'::regclass)",
+        ),
+        vec![vec![Value::Text(
+            "((a IS NOT NULL) AND (a = 'b'::text))".into()
+        )]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table range_parted_expr (a int, b text) partition by range ((a+1), substr(b, 1, 5))",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_partkeydef('range_parted_expr'::regclass)",
+        ),
+        vec![vec![Value::Text(
+            "RANGE (((a + 1)), substr(b, 1, 5))".into()
+        )]]
+    );
+    session
+        .execute(
+            &db,
+            "create table range_parted_expr_1 partition of range_parted_expr for values from (-1, 'aaaaa') to (100, 'ccccc')",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(c.relpartbound, c.oid) from pg_class c where c.relname = 'range_parted_expr_1'",
+        ),
+        vec![vec![Value::Text(
+            "FOR VALUES FROM ('-1', 'aaaaa') TO (100, 'ccccc')".into()
+        )]]
+    );
+}
+
+#[test]
 fn enable_partitionwise_join_explains_append_of_child_joins() {
     let dir = temp_dir("partitionwise_join_explain");
     let db = Database::open(&dir, 64).unwrap();

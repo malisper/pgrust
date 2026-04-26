@@ -29,6 +29,10 @@ pub(crate) fn fold_query_constants_best_effort(query: Query) -> Query {
     fold_query_constants(query).unwrap_or(original)
 }
 
+pub(crate) fn fold_expr_constants(expr: Expr) -> Result<Expr, ParseError> {
+    simplify_expr(expr, None)
+}
+
 fn simplify_query(query: Query) -> Result<Query, ParseError> {
     Ok(Query {
         command_type: query.command_type,

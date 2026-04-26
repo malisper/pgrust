@@ -326,21 +326,15 @@ fn key_values(
 }
 
 fn partition_key_names(relation: &BoundRelation, spec: &LoweredPartitionSpec) -> Vec<String> {
-    let column_names = relation
-        .desc
-        .columns
-        .iter()
-        .map(|column| column.name.clone())
-        .collect::<Vec<_>>();
     spec.partattrs
         .iter()
         .enumerate()
         .map(|(index, attnum)| {
             if *attnum == 0 {
                 return spec
-                    .key_exprs
+                    .key_sqls
                     .get(index)
-                    .map(|expr| render_explain_expr(expr, &column_names))
+                    .map(|expr| format_partition_key_expr_name(expr))
                     .unwrap_or_else(|| format!("partition key {}", index + 1));
             }
             relation
@@ -351,6 +345,62 @@ fn partition_key_names(relation: &BoundRelation, spec: &LoweredPartitionSpec) ->
                 .unwrap_or_else(|| format!("partition key {}", index + 1))
         })
         .collect()
+}
+
+fn format_partition_key_expr_name(expr_sql: &str) -> String {
+    let stripped = strip_outer_expr_parens(expr_sql.trim());
+    let normalized = normalize_partition_expr_operator_spacing(stripped);
+    if normalized.contains(" + ")
+        || normalized.contains(" - ")
+        || normalized.contains(" * ")
+        || normalized.contains(" / ")
+        || normalized.contains(" % ")
+    {
+        format!("({normalized})")
+    } else {
+        normalized
+    }
+}
+
+fn strip_outer_expr_parens(expr: &str) -> &str {
+    if !expr.starts_with('(') || !expr.ends_with(')') {
+        return expr;
+    }
+    let mut depth = 0_i32;
+    for (index, ch) in expr.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 && index != expr.len() - 1 {
+                    return expr;
+                }
+            }
+            _ => {}
+        }
+    }
+    expr[1..expr.len() - 1].trim()
+}
+
+fn normalize_partition_expr_operator_spacing(expr: &str) -> String {
+    let mut out = String::with_capacity(expr.len());
+    let mut chars = expr.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if matches!(ch, '+' | '*' | '/' | '%') || (ch == '-' && !out.trim_end().is_empty()) {
+            while out.ends_with(' ') {
+                out.pop();
+            }
+            out.push(' ');
+            out.push(ch);
+            out.push(' ');
+            while chars.peek().is_some_and(|next| next.is_ascii_whitespace()) {
+                chars.next();
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn acl_item_grants_privilege(
@@ -966,6 +1016,24 @@ pub(crate) fn validate_new_partition_bound(
     skip_child_oid: Option<u32>,
 ) -> Result<(), ExecError> {
     let spec = relation_partition_spec(parent).map_err(ExecError::Parse)?;
+    if let PartitionBoundSpec::Range {
+        from,
+        to,
+        is_default: false,
+    } = bound
+        && compare_range_bounds(from, to, &spec.partcollation)? != Ordering::Less
+    {
+        return Err(ExecError::DetailedError {
+            message: format!("empty range bound specified for partition \"{new_relation_name}\""),
+            detail: Some(format!(
+                "Specified lower bound ({}) is greater than or equal to upper bound ({}).",
+                format_range_bound_for_error(from),
+                format_range_bound_for_error(to)
+            )),
+            hint: None,
+            sqlstate: "42P17",
+        });
+    }
     if bound.is_default()
         && let Some(existing) = default_partition(catalog, parent, skip_child_oid)?
     {
@@ -1029,6 +1097,24 @@ pub(crate) fn validate_new_partition_bound(
         }
     }
     Ok(())
+}
+
+fn format_range_bound_for_error(bound: &[PartitionRangeDatumValue]) -> String {
+    bound
+        .iter()
+        .map(|datum| match datum {
+            PartitionRangeDatumValue::MinValue => "MINVALUE".into(),
+            PartitionRangeDatumValue::MaxValue => "MAXVALUE".into(),
+            PartitionRangeDatumValue::Value(value) => {
+                let value = partition_value_to_value(value);
+                render_partition_key_value(
+                    &value,
+                    &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub(crate) fn validate_partition_relation_compatibility(

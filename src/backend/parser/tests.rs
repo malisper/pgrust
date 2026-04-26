@@ -9181,6 +9181,11 @@ fn parse_insert_update_delete() {
         parse_statement("create table withoid() with (oids = true)"),
         Err(ParseError::TablesDeclaredWithOidsNotSupported)
     ));
+    assert!(matches!(
+        parse_statement("create table withoid() with oids"),
+        Err(ParseError::UnexpectedToken { actual, .. })
+            if actual == "syntax error at or near \"OIDS\""
+    ));
     assert!(
         matches!(parse_statement("create table pg_temp.tempy (id int4)").unwrap(), Statement::CreateTable(CreateTableStatement { schema_name: Some(schema), table_name, persistence: TablePersistence::Permanent, .. }) if schema == "pg_temp" && table_name == "tempy")
     );
