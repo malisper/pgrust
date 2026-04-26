@@ -537,6 +537,10 @@ pub enum BuiltinScalarFunction {
     ArrayPositions,
     ArrayRemove,
     ArrayReplace,
+    TrimArray,
+    ArrayShuffle,
+    ArraySample,
+    ArrayReverse,
     ArraySort,
     Lower,
     Upper,
@@ -978,6 +982,15 @@ pub enum SetReturningCall {
         output_columns: Vec<QueryColumn>,
         with_ordinality: bool,
     },
+    GenerateSubscripts {
+        func_oid: u32,
+        func_variadic: bool,
+        array: Expr,
+        dimension: Expr,
+        reverse: Option<Expr>,
+        output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
+    },
     Unnest {
         func_oid: u32,
         func_variadic: bool,
@@ -1062,6 +1075,7 @@ impl SetReturningCall {
     pub fn output_columns(&self) -> &[QueryColumn] {
         match self {
             SetReturningCall::GenerateSeries { output_columns, .. }
+            | SetReturningCall::GenerateSubscripts { output_columns, .. }
             | SetReturningCall::Unnest { output_columns, .. }
             | SetReturningCall::JsonTableFunction { output_columns, .. }
             | SetReturningCall::JsonRecordFunction { output_columns, .. }
@@ -1079,6 +1093,10 @@ impl SetReturningCall {
     pub fn set_output_columns(&mut self, output_columns: Vec<QueryColumn>) {
         match self {
             SetReturningCall::GenerateSeries {
+                output_columns: existing,
+                ..
+            }
+            | SetReturningCall::GenerateSubscripts {
                 output_columns: existing,
                 ..
             }
@@ -1136,6 +1154,9 @@ impl SetReturningCall {
             SetReturningCall::GenerateSeries {
                 with_ordinality, ..
             }
+            | SetReturningCall::GenerateSubscripts {
+                with_ordinality, ..
+            }
             | SetReturningCall::Unnest {
                 with_ordinality, ..
             }
@@ -1186,6 +1207,23 @@ impl SetReturningCall {
                 stop: map(stop),
                 step: map(step),
                 timezone: timezone.map(&mut map),
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::GenerateSubscripts {
+                func_oid,
+                func_variadic,
+                array,
+                dimension,
+                reverse,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::GenerateSubscripts {
+                func_oid,
+                func_variadic,
+                array: map(array),
+                dimension: map(dimension),
+                reverse: reverse.map(&mut map),
                 output_columns,
                 with_ordinality,
             },
@@ -2173,6 +2211,18 @@ pub fn set_returning_call_exprs(call: &SetReturningCall) -> Vec<&Expr> {
             let mut exprs = vec![start, stop, step];
             if let Some(timezone) = timezone {
                 exprs.push(timezone);
+            }
+            exprs
+        }
+        SetReturningCall::GenerateSubscripts {
+            array,
+            dimension,
+            reverse,
+            ..
+        } => {
+            let mut exprs = vec![array, dimension];
+            if let Some(reverse) = reverse {
+                exprs.push(reverse);
             }
             exprs
         }

@@ -54,7 +54,7 @@ use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, Expr, HypotheticalAggFunc, JsonTableFunction,
     OrderByEntry, QueryColumn, RelationDesc, SetReturningCall, SortGroupClause, TargetEntry,
-    ToastRelationRef, Var, expr_contains_set_returning, user_attrno,
+    ToastRelationRef, Var, expr_contains_set_returning, expr_sql_type_hint, user_attrno,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -546,6 +546,41 @@ fn fallback_builtin_aggregate_declared_arg_types(
         }
         _ => arg_types.to_vec(),
     }
+}
+
+fn preserve_array_agg_array_arg_type(
+    func: Option<AggFunc>,
+    arg_types: &[SqlType],
+    raw_args: &[SqlExpr],
+    mut args: Vec<Expr>,
+    catalog: &dyn CatalogLookup,
+) -> Vec<Expr> {
+    let array_arg_type = arg_types
+        .first()
+        .copied()
+        .filter(|ty| ty.is_array)
+        .or_else(|| {
+            raw_args
+                .first()
+                .and_then(|arg| explicit_array_cast_type(arg, catalog))
+        });
+    if func == Some(AggFunc::ArrayAgg)
+        && let (Some(arg_type), Some(first_arg)) = (array_arg_type, args.first_mut())
+        && !expr_sql_type_hint(first_arg).is_some_and(|ty| ty.is_array)
+    {
+        *first_arg = Expr::Cast(Box::new(first_arg.clone()), arg_type);
+    }
+    args
+}
+
+fn explicit_array_cast_type(expr: &SqlExpr, catalog: &dyn CatalogLookup) -> Option<SqlType> {
+    if let SqlExpr::Cast(_, raw_type) = expr
+        && let Ok(ty) = resolve_raw_type_name(raw_type, catalog)
+        && ty.is_array
+    {
+        return Some(ty);
+    }
+    None
 }
 
 fn resolve_hypothetical_aggregate_call(name: &str) -> Option<ResolvedHypotheticalAggregateCall> {
@@ -4476,6 +4511,13 @@ fn bind_select_query_with_outer(
                                             coerce_bound_expr(arg, actual_type, declared_type)
                                         })
                                         .collect();
+                                    let coerced_args = preserve_array_agg_array_arg_type(
+                                        resolved.builtin_impl,
+                                        &arg_types,
+                                        &arg_values,
+                                        coerced_args,
+                                        catalog,
+                                    );
                                     (Vec::new(), coerced_args, bound_order_by)
                                 };
                             let (aggfnoid, agg_variadic, sql_type) = if hypothetical {

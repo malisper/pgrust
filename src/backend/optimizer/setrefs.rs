@@ -1744,6 +1744,23 @@ fn lower_set_returning_call(
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::GenerateSubscripts {
+            func_oid,
+            func_variadic,
+            array,
+            dimension,
+            reverse,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::GenerateSubscripts {
+            func_oid,
+            func_variadic,
+            array: lower_expr(ctx, array, mode),
+            dimension: lower_expr(ctx, dimension, mode),
+            reverse: reverse.map(|reverse| lower_expr(ctx, reverse, mode)),
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::PartitionTree {
             func_oid,
             func_variadic,
@@ -1939,6 +1956,24 @@ fn fix_set_returning_call_upper_exprs(
             step: fix_upper_expr_for_input(root, step, path, input_tlist),
             timezone: timezone
                 .map(|timezone| fix_upper_expr_for_input(root, timezone, path, input_tlist)),
+            output_columns,
+            with_ordinality,
+        },
+        SetReturningCall::GenerateSubscripts {
+            func_oid,
+            func_variadic,
+            array,
+            dimension,
+            reverse,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::GenerateSubscripts {
+            func_oid,
+            func_variadic,
+            array: fix_upper_expr_for_input(root, array, path, input_tlist),
+            dimension: fix_upper_expr_for_input(root, dimension, path, input_tlist),
+            reverse: reverse
+                .map(|reverse| fix_upper_expr_for_input(root, reverse, path, input_tlist)),
             output_columns,
             with_ordinality,
         },
@@ -2790,6 +2825,18 @@ fn validate_set_returning_call(
                 validate_executable_expr(timezone, plan_node, field);
             }
         }
+        SetReturningCall::GenerateSubscripts {
+            array,
+            dimension,
+            reverse,
+            ..
+        } => {
+            validate_executable_expr(array, plan_node, field);
+            validate_executable_expr(dimension, plan_node, field);
+            if let Some(reverse) = reverse {
+                validate_executable_expr(reverse, plan_node, field);
+            }
+        }
         SetReturningCall::PartitionTree { relid, .. }
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             validate_executable_expr(relid, plan_node, field);
@@ -3213,6 +3260,18 @@ fn validate_planner_set_returning_call(
             validate_planner_expr(step, path_node, field);
             if let Some(timezone) = timezone {
                 validate_planner_expr(timezone, path_node, field);
+            }
+        }
+        SetReturningCall::GenerateSubscripts {
+            array,
+            dimension,
+            reverse,
+            ..
+        } => {
+            validate_planner_expr(array, path_node, field);
+            validate_planner_expr(dimension, path_node, field);
+            if let Some(reverse) = reverse {
+                validate_planner_expr(reverse, path_node, field);
             }
         }
         SetReturningCall::PartitionTree { relid, .. }

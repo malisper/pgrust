@@ -16255,6 +16255,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::ArraySubscript { array, .. } => select_item_name(array, index),
         SqlExpr::FieldSelect { field, .. } => field.clone(),
         SqlExpr::Cast(inner, ty) => match inner.as_ref() {
+            SqlExpr::ArrayLiteral(_) | SqlExpr::ArraySubquery(_) => select_item_name(inner, index),
             SqlExpr::ArraySubscript { .. }
             | SqlExpr::Column(_)
             | SqlExpr::FieldSelect { .. }

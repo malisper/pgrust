@@ -2,6 +2,7 @@ use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 use std::cmp::Ordering;
 
+use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
@@ -162,10 +163,11 @@ use arrays::{
     eval_array_dims_function, eval_array_fill_function, eval_array_length_function,
     eval_array_lower_function, eval_array_ndims_function, eval_array_overlap,
     eval_array_position_function, eval_array_positions_function, eval_array_prepend_function,
-    eval_array_remove_function, eval_array_replace_function, eval_array_sort_function,
+    eval_array_remove_function, eval_array_replace_function, eval_array_reverse_function,
+    eval_array_sample_function, eval_array_shuffle_function, eval_array_sort_function,
     eval_array_subscript, eval_array_subscript_plpgsql, eval_array_to_string_function,
     eval_array_upper_function, eval_cardinality_function, eval_quantified_array,
-    eval_string_to_array_function, eval_width_bucket_thresholds,
+    eval_string_to_array_function, eval_trim_array_function, eval_width_bucket_thresholds,
 };
 use subquery::{
     eval_array_subquery, eval_exists_subquery, eval_quantified_subquery, eval_row_compare_subquery,
@@ -5055,6 +5057,10 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::ArrayPositions => eval_array_positions_function(&values),
         BuiltinScalarFunction::ArrayRemove => eval_array_remove_function(&values),
         BuiltinScalarFunction::ArrayReplace => eval_array_replace_function(&values),
+        BuiltinScalarFunction::TrimArray => eval_trim_array_function(&values),
+        BuiltinScalarFunction::ArrayShuffle => eval_array_shuffle_function(&values),
+        BuiltinScalarFunction::ArraySample => eval_array_sample_function(&values),
+        BuiltinScalarFunction::ArrayReverse => eval_array_reverse_function(&values),
         BuiltinScalarFunction::ArraySort => eval_array_sort_function(&values),
         BuiltinScalarFunction::BoolEq => eval_booleq(&values),
         BuiltinScalarFunction::BoolNe => eval_boolne(&values),
@@ -6307,6 +6313,13 @@ fn eval_builtin_function(
     {
         return eval_pg_column_compression_raw(raw);
     }
+    if matches!(func, BuiltinScalarFunction::PgTypeof) {
+        let ty = args
+            .first()
+            .and_then(expr_sql_type_hint)
+            .unwrap_or(SqlType::new(SqlTypeKind::Text));
+        return Ok(Value::Text(sql_type_name(ty).into()));
+    }
     let values = args
         .iter()
         .map(|arg| eval_expr(arg, slot, ctx))
@@ -6829,6 +6842,10 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ArrayPositions => eval_array_positions_function(&values),
         BuiltinScalarFunction::ArrayRemove => eval_array_remove_function(&values),
         BuiltinScalarFunction::ArrayReplace => eval_array_replace_function(&values),
+        BuiltinScalarFunction::TrimArray => eval_trim_array_function(&values),
+        BuiltinScalarFunction::ArrayShuffle => eval_array_shuffle_function(&values),
+        BuiltinScalarFunction::ArraySample => eval_array_sample_function(&values),
+        BuiltinScalarFunction::ArrayReverse => eval_array_reverse_function(&values),
         BuiltinScalarFunction::ArraySort => eval_array_sort_function(&values),
         BuiltinScalarFunction::CurrentDatabase => {
             Ok(Value::Text(ctx.current_database_name.clone().into()))

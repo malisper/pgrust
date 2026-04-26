@@ -301,6 +301,18 @@ fn query_references_local_cte(
                     SetReturningCall::GenerateSeries {
                         start, stop, step, ..
                     } => vec![start, stop, step],
+                    SetReturningCall::GenerateSubscripts {
+                        array,
+                        dimension,
+                        reverse,
+                        ..
+                    } => {
+                        let mut args = vec![array, dimension];
+                        if let Some(reverse) = reverse {
+                            args.push(reverse);
+                        }
+                        args
+                    }
                     SetReturningCall::PartitionTree { relid, .. }
                     | SetReturningCall::PartitionAncestors { relid, .. } => vec![relid],
                     SetReturningCall::PgLockStatus { .. } => Vec::new(),
@@ -507,6 +519,7 @@ fn bind_grouped_window_agg_call(
     } else {
         bound_args
     };
+    let coerced_args = preserve_array_agg_array_arg_type(Some(func), &arg_types, coerced_args);
     let bound_filter = filter
         .map(|expr| {
             with_windows_disallowed(|| {
@@ -791,6 +804,8 @@ fn bind_grouped_visible_outer_aggregate_call(
                 coerce_bound_expr(arg, actual_type, declared_type)
             })
             .collect();
+        let coerced_args =
+            preserve_array_agg_array_arg_type(resolved.builtin_impl, &arg_types, coerced_args);
         (Vec::new(), coerced_args, bound_order_by)
     };
     let (aggfnoid, aggtype, aggvariadic) = if hypothetical {
@@ -1473,6 +1488,11 @@ pub(super) fn bind_agg_output_expr_in_clause(
                             coerce_bound_expr(arg, actual_type, declared_type)
                         })
                         .collect();
+                    let coerced_args = preserve_array_agg_array_arg_type(
+                        resolved.builtin_impl,
+                        &arg_types,
+                        coerced_args,
+                    );
                     (Vec::new(), coerced_args, bound_order_by)
                 };
                 let (aggfnoid, aggtype, aggvariadic) = if hypothetical {
@@ -3581,4 +3601,19 @@ fn build_ungrouped_column_error(
         token: token.to_string(),
         clause,
     }
+}
+
+fn preserve_array_agg_array_arg_type(
+    func: Option<AggFunc>,
+    arg_types: &[SqlType],
+    mut args: Vec<Expr>,
+) -> Vec<Expr> {
+    if func == Some(AggFunc::ArrayAgg)
+        && let (Some(arg_type), Some(first_arg)) = (arg_types.first().copied(), args.first_mut())
+        && arg_type.is_array
+        && !expr_sql_type_hint(first_arg).is_some_and(|ty| ty.is_array)
+    {
+        *first_arg = Expr::Cast(Box::new(first_arg.clone()), arg_type);
+    }
+    args
 }

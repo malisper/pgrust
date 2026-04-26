@@ -514,6 +514,32 @@ fn rewrite_set_returning_call(
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::GenerateSubscripts {
+            func_oid,
+            func_variadic,
+            array,
+            dimension,
+            reverse,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::GenerateSubscripts {
+            func_oid,
+            func_variadic,
+            array: rewrite_semantic_expr(array, catalog, expanded_views, active_policy_relations)?,
+            dimension: rewrite_semantic_expr(
+                dimension,
+                catalog,
+                expanded_views,
+                active_policy_relations,
+            )?,
+            reverse: reverse
+                .map(|reverse| {
+                    rewrite_semantic_expr(reverse, catalog, expanded_views, active_policy_relations)
+                })
+                .transpose()?,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::PartitionTree {
             func_oid,
             func_variadic,

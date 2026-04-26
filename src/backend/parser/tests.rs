@@ -12329,7 +12329,10 @@ fn build_plan_rejects_untyped_empty_array() {
     let stmt = parse_select("select ARRAY[]").unwrap();
     assert!(matches!(
         build_plan(&stmt, &catalog()),
-        Err(ParseError::UnexpectedToken { .. })
+        Err(ParseError::DetailedError { message, hint: Some(hint), sqlstate, .. })
+            if message == "cannot determine type of empty array"
+                && hint == "Explicitly cast to the desired type, for example ARRAY[]::integer[]."
+                && sqlstate == "42P18"
     ));
 }
 
@@ -12347,6 +12350,25 @@ fn build_plan_accepts_typed_empty_array() {
         }
         other => panic!("expected projection, got {other:?}"),
     }
+}
+
+#[test]
+fn build_plan_reports_postgres_any_all_array_errors() {
+    let stmt = parse_select("select 33 * any ('{1,2,3}')").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "op ANY/ALL (array) requires operator to yield boolean"
+                && sqlstate == "42809"
+    ));
+
+    let stmt = parse_select("select 33 * any (44)").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "op ANY/ALL (array) requires array on right side"
+                && sqlstate == "42809"
+    ));
 }
 
 #[test]
