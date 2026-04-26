@@ -1473,10 +1473,12 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
         Plan::SubqueryScan {
             plan_info,
             input,
+            scan_name,
             output_columns,
         } => Plan::SubqueryScan {
             plan_info,
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
+            scan_name,
             output_columns,
         },
         Plan::CteScan {
@@ -1987,10 +1989,12 @@ pub(super) fn finalize_plan_subqueries(
         Plan::SubqueryScan {
             plan_info,
             input,
+            scan_name,
             output_columns,
         } => Plan::SubqueryScan {
             plan_info,
             input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
+            scan_name,
             output_columns,
         },
         Plan::CteScan {

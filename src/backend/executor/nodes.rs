@@ -2682,11 +2682,21 @@ fn render_explain_expr_inner_with_qualifier(
                     crate::include::nodes::primnodes::BoolExprType::And,
                     &mut args,
                 );
-                let rendered = args
+                let mut rendered = args
                     .into_iter()
-                    .map(|arg| render_explain_bool_arg(arg, qualifier, column_names))
+                    .map(|arg| {
+                        (
+                            explain_filter_conjunct_rank(arg),
+                            render_explain_bool_arg(arg, qualifier, column_names),
+                        )
+                    })
                     .collect::<Vec<_>>();
-                rendered.join(" AND ")
+                rendered.sort_by_key(|(rank, _)| *rank);
+                rendered
+                    .into_iter()
+                    .map(|(_, rendered)| rendered)
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
             }
             crate::include::nodes::primnodes::BoolExprType::Or => {
                 let mut args = Vec::new();
@@ -2798,6 +2808,38 @@ fn render_explain_func_expr_is_infix(func: &FuncExpr) -> bool {
         )
     );
     !render_as_named_call && builtin_scalar_function_infix_operator(func.implementation).is_some()
+}
+
+fn explain_filter_conjunct_rank(expr: &Expr) -> u8 {
+    if is_simple_equality_filter_conjunct(expr) {
+        1
+    } else {
+        0
+    }
+}
+
+fn is_simple_equality_filter_conjunct(expr: &Expr) -> bool {
+    let Expr::Op(op) = expr else {
+        return false;
+    };
+    if op.op != crate::include::nodes::primnodes::OpExprKind::Eq || op.args.len() != 2 {
+        return false;
+    }
+    let left = strip_explain_filter_casts(&op.args[0]);
+    let right = strip_explain_filter_casts(&op.args[1]);
+    matches!(
+        (left, right),
+        (Expr::Var(_), Expr::Const(_)) | (Expr::Const(_), Expr::Var(_))
+    )
+}
+
+fn strip_explain_filter_casts(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            strip_explain_filter_casts(inner)
+        }
+        other => other,
+    }
 }
 
 fn render_explain_func_expr(

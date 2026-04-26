@@ -1212,6 +1212,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
         Plan::SubqueryScan {
             plan_info,
             input,
+            scan_name: _,
             output_columns,
         } => Box::new(SubqueryScanState {
             input: executor_start(*input),

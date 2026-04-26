@@ -331,6 +331,7 @@ pub enum Plan {
     SubqueryScan {
         plan_info: PlanEstimate,
         input: Box<Plan>,
+        scan_name: Option<String>,
         output_columns: Vec<QueryColumn>,
     },
     CteScan {

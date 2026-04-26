@@ -4615,20 +4615,29 @@ fn set_cte_scan_references(
 fn set_subquery_scan_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
+    rtindex: usize,
     subroot: PlannerSubroot,
     input: Box<Path>,
     output_columns: Vec<QueryColumn>,
+    force_display: bool,
 ) -> Plan {
     let input = recurse_with_root(ctx, Some(subroot.as_ref()), *input);
-    if input.columns() == output_columns {
+    if input.columns() == output_columns && !force_display {
         input
     } else {
         Plan::SubqueryScan {
             plan_info,
             input: Box::new(input),
+            scan_name: subquery_scan_name(ctx, rtindex),
             output_columns,
         }
     }
+}
+
+fn subquery_scan_name(ctx: &SetRefsContext<'_>, rtindex: usize) -> Option<String> {
+    ctx.root
+        .and_then(|root| root.parse.rtable.get(rtindex.saturating_sub(1)))
+        .and_then(|rte| rte.alias.clone())
 }
 
 fn set_worktable_scan_references(
@@ -5047,14 +5056,24 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
         } => set_function_scan_references(ctx, plan_info, call, table_alias),
         Path::SubqueryScan {
             plan_info,
+            rtindex,
             subroot,
             query,
             input,
             output_columns,
+            pathkeys,
             ..
         } => {
             let _ = query;
-            set_subquery_scan_references(ctx, plan_info, subroot, input, output_columns)
+            set_subquery_scan_references(
+                ctx,
+                plan_info,
+                rtindex,
+                subroot,
+                input,
+                output_columns,
+                !pathkeys.is_empty(),
+            )
         }
         Path::CteScan {
             plan_info,

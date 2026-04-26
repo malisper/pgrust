@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
 use crate::backend::parser::CatalogLookup;
+use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerGlobal, PlannerInfo, RelOptInfo, RelOptKind,
@@ -8,15 +9,19 @@ use crate::include::nodes::pathnodes::{
 };
 use crate::include::nodes::plannodes::{AggregateStrategy, PlanEstimate, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    BuiltinScalarFunction, Expr, ProjectSetTarget, ScalarFunctionImpl, TargetEntry, WindowClause,
-    expr_contains_set_returning, set_returning_call_exprs,
+    BoolExprType, BuiltinScalarFunction, Expr, OpExprKind, ProjectSetTarget, QueryColumn,
+    ScalarFunctionImpl, TargetEntry, WindowClause, expr_contains_set_returning,
+    set_returning_call_exprs,
 };
 
 use super::super::bestpath;
 use super::super::create_plan_with_param_base;
 use super::super::groupby_rewrite;
 use super::super::has_grouping;
-use super::super::path::{query_planner, relation_ordered_index_paths, residual_where_qual};
+use super::super::path::{
+    query_planner, relation_index_only_full_scan_paths, relation_ordered_index_paths,
+    residual_where_qual,
+};
 use super::super::pathnodes::{expr_sql_type, next_synthetic_slot_id, window_output_columns};
 use super::super::root;
 use super::super::upperrels;
@@ -25,7 +30,9 @@ use super::super::util::{
     pathkeys_to_order_items, projection_is_identity, required_query_pathkeys_for_path,
     required_query_pathkeys_for_rel,
 };
-use super::super::{expand_join_rte_vars, optimize_path_with_config, pull_up_sublinks};
+use super::super::{
+    expand_join_rte_vars, expr_relids, optimize_path_with_config, pull_up_sublinks,
+};
 
 pub(super) fn make_pathtarget_projection_rel(
     root: &PlannerInfo,
@@ -1823,6 +1830,11 @@ fn sort_key_display_items(root: &PlannerInfo, pathkeys: &[PathKey]) -> Vec<Strin
             continue;
         }
         let mut rendered = render_sort_key_expr(root, &display_expr);
+        if sort_key_needs_extra_expression_parens(&display_expr)
+            || sort_key_rendering_needs_expression_parens(&rendered)
+        {
+            rendered = format!("({rendered})");
+        }
         if key.descending {
             rendered.push_str(" DESC");
         }
@@ -1837,6 +1849,20 @@ fn sort_key_display_items(root: &PlannerInfo, pathkeys: &[PathKey]) -> Vec<Strin
         display_items.push(rendered);
     }
     display_items
+}
+
+fn sort_key_needs_extra_expression_parens(expr: &Expr) -> bool {
+    match expr {
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            sort_key_needs_extra_expression_parens(inner)
+        }
+        Expr::Op(_) => true,
+        _ => false,
+    }
+}
+
+fn sort_key_rendering_needs_expression_parens(rendered: &str) -> bool {
+    rendered.contains('(') && !rendered.starts_with('(')
 }
 
 fn path_with_sort_display_items(mut path: Path, display_items: &[String]) -> Path {
