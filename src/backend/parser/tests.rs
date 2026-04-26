@@ -10856,6 +10856,25 @@ fn parse_scalar_subquery_with_parenthesized_union_input() {
 }
 
 #[test]
+fn parse_empty_select_set_operations() {
+    for sql in [
+        "select union select",
+        "select intersect select",
+        "select except select",
+    ] {
+        let stmt = parse_select(sql).unwrap();
+        let set_operation = stmt.set_operation.expect("set operation");
+        assert_eq!(set_operation.inputs.len(), 2);
+        assert!(
+            set_operation
+                .inputs
+                .iter()
+                .all(|input| input.targets.is_empty())
+        );
+    }
+}
+
+#[test]
 fn parse_select_distinct_clause() {
     let stmt = parse_select("select distinct x from items").unwrap();
     assert!(stmt.distinct);
@@ -10941,6 +10960,63 @@ fn parse_intersect_with_derived_union_inputs() {
         SetOperator::Intersect { all: false }
     ));
     assert_eq!(set_operation.inputs.len(), 2);
+}
+
+#[test]
+fn parse_parenthesized_select_statement() {
+    let stmt = parse_select("((select * from int8_tbl))").unwrap();
+    assert!(matches!(
+        stmt.from,
+        Some(FromItem::Table { ref name, .. }) if name == "int8_tbl"
+    ));
+}
+
+#[test]
+fn parse_parenthesized_set_operation_operand_with_order_limit() {
+    let stmt = parse_select(
+        "select q1 from int8_tbl except (((select q2 from int8_tbl order by q2 limit 1))) order by 1",
+    )
+    .unwrap();
+    assert_eq!(stmt.order_by.len(), 1);
+    let set_operation = stmt.set_operation.expect("set operation");
+    assert!(matches!(
+        set_operation.op,
+        SetOperator::Except { all: false }
+    ));
+    assert_eq!(set_operation.inputs.len(), 2);
+    assert_eq!(set_operation.inputs[1].order_by.len(), 1);
+    assert_eq!(set_operation.inputs[1].limit, Some(1));
+}
+
+#[test]
+fn parse_parenthesized_values_set_operation_operand() {
+    let stmt = parse_select("select 1 union all (values (2)) limit 1").unwrap();
+    assert_eq!(stmt.limit, Some(1));
+    let set_operation = stmt.set_operation.expect("set operation");
+    assert!(matches!(set_operation.op, SetOperator::Union { all: true }));
+    assert!(matches!(
+        set_operation.inputs[1].from,
+        Some(FromItem::Values { .. })
+    ));
+}
+
+#[test]
+fn parse_cte_materialization_markers() {
+    for sql in [
+        "with cte as materialized (select 1) select * from cte",
+        "with cte as not materialized (select 1) select * from cte",
+    ] {
+        match parse_statement(sql).unwrap() {
+            Statement::Select(SelectStatement { with, .. }) => {
+                assert_eq!(with.len(), 1);
+                assert!(matches!(
+                    with[0].body,
+                    crate::backend::parser::CteBody::Select(_)
+                ));
+            }
+            other => panic!("expected Select with CTE, got {other:?}"),
+        }
+    }
 }
 
 #[test]

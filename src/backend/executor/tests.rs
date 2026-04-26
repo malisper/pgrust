@@ -2978,6 +2978,102 @@ fn setop_join_branch_executes_with_child_local_vars() {
         vec![vec![Value::Int32(1)], vec![Value::Int32(3)]],
     );
 }
+
+#[test]
+fn union_deduplicates_bpchar_cast_to_varchar_padding() {
+    let base = temp_dir("union_bpchar_varchar_padding");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 'a'::varchar union select 'a   '::char(4)::varchar order by 1",
+        )
+        .unwrap(),
+        vec![vec![Value::Text("a".into())]],
+    );
+}
+
+#[test]
+fn empty_select_set_operations_execute() {
+    let base = temp_dir("empty_select_setops");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select union select").unwrap(),
+        vec![vec![]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select intersect select",
+        )
+        .unwrap(),
+        vec![vec![]],
+    );
+    assert_query_rows(
+        run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select except select").unwrap(),
+        Vec::new(),
+    );
+}
+
+#[test]
+fn set_operation_accepts_parenthesized_values_operand() {
+    let base = temp_dir("setop_parenthesized_values");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 1 union all (values (2)) order by 1",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]],
+    );
+}
+
+#[test]
+fn cte_materialization_markers_are_accepted_for_zero_column_setops() {
+    let base = temp_dir("cte_materialized_zero_column_setops");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    for sql in [
+        "with cte as materialized (select s from generate_series(1,2) s)
+         select from cte union select from cte",
+        "with cte as not materialized (select s from generate_series(1,2) s)
+         select from cte union select from cte",
+    ] {
+        assert_query_rows(
+            run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap(),
+            vec![vec![]],
+        );
+    }
+}
+
+#[test]
+fn set_operation_string_literal_follows_numeric_peer_type() {
+    let base = temp_dir("setop_unknown_literal_numeric_peer");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '3.4'::numeric union select 'foo'",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "invalid input syntax for type numeric: \"foo\""
+    );
+}
+
 #[test]
 fn select_sql_plain_varchar_cast_preserves_text() {
     let base = temp_dir("select_sql_plain_varchar_cast");
@@ -12933,6 +13029,28 @@ fn select_list_generate_series_expands_rows() {
             vec![Value::Int32(3)],
         ],
     );
+}
+
+#[test]
+fn select_list_generate_series_preserves_output_alias() {
+    let base = temp_dir("project_set_generate_series_alias");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select generate_series(1, 2) as x",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["x"]);
+            assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
 }
 
 #[test]
