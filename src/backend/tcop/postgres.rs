@@ -306,6 +306,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if let Some(position) = publication_where_error_position(sql, message, None) {
                 return Some(position);
             }
+            if let Some(position) = routine_definition_error_position(sql, message) {
+                return Some(position);
+            }
             if message.starts_with("column \"") && message.contains("WITHOUT OVERLAPS") {
                 return find_without_overlaps_constraint_position(sql);
             }
@@ -422,6 +425,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if let Some(position) =
                 publication_where_error_position(sql, message, detail.as_deref())
             {
+                return Some(position);
+            }
+            if let Some(position) = routine_definition_error_position(sql, message) {
                 return Some(position);
             }
             if message.starts_with("column \"") && message.contains("WITHOUT OVERLAPS") {
@@ -911,6 +917,10 @@ fn find_subscript_expression_position(sql: &str) -> Option<usize> {
 }
 
 fn find_routine_error_position(sql: &str, message: &str) -> Option<usize> {
+    let lower = sql.trim_start().to_ascii_lowercase();
+    if !lower.starts_with("call ") && !lower.starts_with("select ") {
+        return None;
+    }
     let signature = message
         .strip_prefix("function ")
         .and_then(|message| message.strip_suffix(" does not exist"))
@@ -925,6 +935,34 @@ fn find_routine_error_position(sql: &str, message: &str) -> Option<usize> {
         .split_once('(')
         .map_or(signature, |(name, _)| name);
     find_case_insensitive_token_position(sql, name)
+}
+
+fn routine_definition_error_position(sql: &str, message: &str) -> Option<usize> {
+    match message {
+        "invalid attribute in procedure definition" => {
+            find_case_insensitive_token_position(sql, "WINDOW")
+                .or_else(|| find_case_insensitive_token_position(sql, "STRICT"))
+        }
+        "VARIADIC parameter must be the last parameter" => {
+            find_parameter_after_keyword_position(sql, "VARIADIC")
+        }
+        "procedure OUT parameters cannot appear after one with a default value" => {
+            find_parameter_after_keyword_position(sql, "DEFAULT")
+        }
+        _ => None,
+    }
+}
+
+fn find_parameter_after_keyword_position(sql: &str, keyword: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let keyword_position = lower.find(&keyword.to_ascii_lowercase())?;
+    let comma_position = sql[keyword_position..].find(',')? + keyword_position;
+    let after_comma = &sql[comma_position + 1..];
+    let whitespace = after_comma
+        .bytes()
+        .take_while(|byte| byte.is_ascii_whitespace())
+        .count();
+    Some(comma_position + 1 + whitespace + 1)
 }
 
 fn find_range_cast_literal_position(sql: &str) -> Option<usize> {

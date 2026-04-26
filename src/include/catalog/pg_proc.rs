@@ -8046,6 +8046,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("gcd", BuiltinScalarFunction::Gcd),
         ("lcm", BuiltinScalarFunction::Lcm),
         ("greatest", BuiltinScalarFunction::Greatest),
+        ("least", BuiltinScalarFunction::Least),
         ("trunc", BuiltinScalarFunction::Trunc),
         ("macaddr_eq", BuiltinScalarFunction::MacAddrEq),
         ("macaddr_ne", BuiltinScalarFunction::MacAddrNe),

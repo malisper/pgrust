@@ -385,6 +385,7 @@ pub enum Statement {
     DropStatistics(DropStatisticsStatement),
     DropFunction(DropFunctionStatement),
     DropProcedure(DropProcedureStatement),
+    DropRoutine(DropProcedureStatement),
     DropOperator(DropOperatorStatement),
     DropAggregate(DropAggregateStatement),
     DropTable(DropTableStatement),
@@ -401,6 +402,7 @@ pub enum Statement {
     CreateRole(CreateRoleStatement),
     AlterRole(AlterRoleStatement),
     AlterProcedure(AlterProcedureStatement),
+    AlterRoutine(AlterRoutineStatement),
     AlterForeignDataWrapper(AlterForeignDataWrapperStatement),
     AlterForeignDataWrapperOwner(AlterForeignDataWrapperOwnerStatement),
     AlterForeignDataWrapperRename(AlterForeignDataWrapperRenameStatement),
@@ -660,6 +662,20 @@ pub struct CreateProcedureStatement {
     pub sql_standard_body: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutineKind {
+    Function,
+    Procedure,
+    Routine,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutineSignature {
+    pub schema_name: Option<String>,
+    pub routine_name: String,
+    pub arg_types: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlterProcedureAction {
     Strict,
@@ -672,6 +688,46 @@ pub struct AlterProcedureStatement {
     pub procedure_name: String,
     pub arg_types: Vec<String>,
     pub action: AlterProcedureAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterRoutineOption {
+    Strict(bool),
+    Volatility(FunctionVolatility),
+    SecurityDefiner(bool),
+    Leakproof(bool),
+    Parallel(FunctionParallel),
+    Cost(String),
+    Rows(String),
+    Support(String),
+    SetConfig { name: String, value: String },
+    ResetConfig(String),
+    ResetAll,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterRoutineAction {
+    Options(Vec<AlterRoutineOption>),
+    Rename {
+        new_name: String,
+    },
+    SetSchema {
+        new_schema: String,
+    },
+    OwnerTo {
+        new_owner: String,
+    },
+    DependsOnExtension {
+        extension_name: String,
+        remove: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterRoutineStatement {
+    pub kind: RoutineKind,
+    pub signature: RoutineSignature,
+    pub action: AlterRoutineAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2543,10 +2599,13 @@ pub enum GrantObjectPrivilege {
     CreateOnDatabase,
     AllPrivilegesOnTable,
     SelectOnTable,
+    InsertOnTable,
     AllPrivilegesOnSchema,
     UsageOnSchema,
     UsageOnType,
     ExecuteOnFunction,
+    ExecuteOnProcedure,
+    ExecuteOnRoutine,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

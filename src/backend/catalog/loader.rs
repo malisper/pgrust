@@ -734,10 +734,13 @@ fn append_catalog_kind_rows(
 ) -> Result<(), CatalogError> {
     match kind {
         BootstrapCatalogKind::PgNamespace => {
-            rows.namespaces = values
-                .into_iter()
-                .map(namespace_row_from_values)
-                .collect::<Result<Vec<_>, _>>()?;
+            rows.namespaces = dedup_by_oid_keep_last(
+                values
+                    .into_iter()
+                    .map(namespace_row_from_values)
+                    .collect::<Result<Vec<_>, _>>()?,
+                |row| row.oid,
+            );
         }
         BootstrapCatalogKind::PgClass => {
             rows.classes = values
@@ -758,10 +761,13 @@ fn append_catalog_kind_rows(
                 .collect::<Result<Vec<_>, _>>()?;
         }
         BootstrapCatalogKind::PgProc => {
-            rows.procs = values
-                .into_iter()
-                .map(pg_proc_row_from_values)
-                .collect::<Result<Vec<_>, _>>()?;
+            rows.procs = dedup_by_oid_keep_last(
+                values
+                    .into_iter()
+                    .map(pg_proc_row_from_values)
+                    .collect::<Result<Vec<_>, _>>()?,
+                |row| row.oid,
+            );
         }
         BootstrapCatalogKind::PgAggregate => {
             rows.aggregates = values
@@ -984,6 +990,14 @@ fn append_catalog_kind_rows(
         }
     }
     Ok(())
+}
+
+fn dedup_by_oid_keep_last<T>(rows: Vec<T>, oid: impl Fn(&T) -> u32) -> Vec<T> {
+    let mut by_oid = BTreeMap::new();
+    for row in rows {
+        by_oid.insert(oid(&row), row);
+    }
+    by_oid.into_values().collect()
 }
 
 fn restore_missing_first_class_catalog_rows(

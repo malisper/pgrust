@@ -690,7 +690,10 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             {
                 return target_type;
             }
-            if let Some(BuiltinScalarFunction::Greatest) = resolved {
+            if matches!(
+                resolved,
+                Some(BuiltinScalarFunction::Greatest | BuiltinScalarFunction::Least)
+            ) {
                 let values = args
                     .args()
                     .iter()
@@ -703,7 +706,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     outer_scopes,
                     grouped_outer,
                     ctes,
-                    "GREATEST arguments with a common type",
+                    "GREATEST/LEAST arguments with a common type",
                 )
                 .unwrap_or(SqlType::new(SqlTypeKind::Text));
             }

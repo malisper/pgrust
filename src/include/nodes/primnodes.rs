@@ -617,6 +617,7 @@ pub enum BuiltinScalarFunction {
     Gcd,
     Lcm,
     Greatest,
+    Least,
     Div,
     Mod,
     Scale,

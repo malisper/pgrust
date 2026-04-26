@@ -4076,6 +4076,21 @@ fn parse_grant_execute_on_function_statement() {
 }
 
 #[test]
+fn parse_grant_execute_on_procedure_statement() {
+    let stmt =
+        parse_statement("grant execute on procedure ptest1(text) to regress_cp_user1").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::ExecuteOnProcedure,
+            object_names: vec!["ptest1(text)".into()],
+            grantee_names: vec!["regress_cp_user1".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
 fn parse_create_tablespace_statement() {
     let stmt = parse_statement("create tablespace regress_tblspace location ''").unwrap();
     assert_eq!(
@@ -4955,11 +4970,26 @@ fn parse_drop_and_alter_procedure_statements() {
     );
     assert_eq!(
         parse_statement("alter procedure public.ptest1(text) strict").unwrap(),
-        Statement::AlterProcedure(AlterProcedureStatement {
-            schema_name: Some("public".into()),
-            procedure_name: "ptest1".into(),
-            arg_types: vec!["text".into()],
-            action: AlterProcedureAction::Strict,
+        Statement::AlterRoutine(AlterRoutineStatement {
+            kind: RoutineKind::Procedure,
+            signature: RoutineSignature {
+                schema_name: Some("public".into()),
+                routine_name: "ptest1".into(),
+                arg_types: vec!["text".into()],
+            },
+            action: AlterRoutineAction::Options(vec![AlterRoutineOption::Strict(true)]),
+        })
+    );
+    assert_eq!(
+        parse_statement("drop routine if exists public.ptest1(text) cascade").unwrap(),
+        Statement::DropRoutine(DropProcedureStatement {
+            if_exists: true,
+            procedures: vec![DropRoutineItem {
+                schema_name: Some("public".into()),
+                routine_name: "ptest1".into(),
+                arg_types: vec!["text".into()],
+            }],
+            cascade: true,
         })
     );
 }

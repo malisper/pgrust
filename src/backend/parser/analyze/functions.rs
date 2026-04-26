@@ -1536,7 +1536,7 @@ pub(super) fn validate_scalar_function_arity(
             }
             BuiltinScalarFunction::ArrayReplace => args.len() == 3,
             BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,
-            BuiltinScalarFunction::Greatest => !args.is_empty(),
+            BuiltinScalarFunction::Greatest | BuiltinScalarFunction::Least => !args.is_empty(),
             BuiltinScalarFunction::BTrim
             | BuiltinScalarFunction::LTrim
             | BuiltinScalarFunction::RTrim => matches!(args.len(), 1 | 2),
@@ -3017,6 +3017,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("gcd", BuiltinScalarFunction::Gcd),
         ("lcm", BuiltinScalarFunction::Lcm),
         ("greatest", BuiltinScalarFunction::Greatest),
+        ("least", BuiltinScalarFunction::Least),
         ("div", BuiltinScalarFunction::Div),
         ("mod", BuiltinScalarFunction::Mod),
         ("scale", BuiltinScalarFunction::Scale),

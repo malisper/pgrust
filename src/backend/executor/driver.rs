@@ -378,6 +378,10 @@ fn execute_statement_with_source(
             expected: "DROP PROCEDURE handled by database/session layer",
             actual: "DROP PROCEDURE".into(),
         })),
+        Statement::DropRoutine(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP ROUTINE handled by database/session layer",
+            actual: "DROP ROUTINE".into(),
+        })),
         Statement::DropAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP AGGREGATE handled by database/session layer",
             actual: "DROP AGGREGATE".into(),
@@ -397,6 +401,10 @@ fn execute_statement_with_source(
         Statement::AlterProcedure(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "ALTER PROCEDURE".into(),
         ))),
+        Statement::AlterRoutine(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER ROUTINE handled by database/session layer",
+            actual: "ALTER ROUTINE".into(),
+        })),
         Statement::CreateDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE DATABASE handled by database/session layer",
             actual: "CREATE DATABASE".into(),
@@ -681,6 +689,10 @@ pub fn execute_readonly_statement_with_config(
             expected: "read-only statement",
             actual: "DROP PROCEDURE".into(),
         })),
+        Statement::DropRoutine(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP ROUTINE".into(),
+        })),
         Statement::DropAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "DROP AGGREGATE".into(),
@@ -700,6 +712,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::AlterProcedure(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "ALTER PROCEDURE".into(),
         ))),
+        Statement::AlterRoutine(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER ROUTINE".into(),
+        })),
         Statement::CreateDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE DATABASE".into(),

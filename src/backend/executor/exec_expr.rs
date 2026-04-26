@@ -857,20 +857,30 @@ fn function_arguments_text(
     catalog: &dyn CatalogLookup,
 ) -> String {
     let names = proc_row.proargnames.as_deref().unwrap_or(&[]);
+    let defaults = proc_arg_defaults(proc_row);
     if let (Some(types), Some(modes)) = (
         proc_row.proallargtypes.as_deref(),
         proc_row.proargmodes.as_deref(),
     ) {
+        let mut input_index = 0usize;
         return types
             .iter()
             .copied()
             .enumerate()
             .map(|(index, type_oid)| {
                 let mode = modes.get(index).copied().unwrap_or(b'i');
+                let default = if matches!(mode, b'i' | b'b') {
+                    let default = defaults.get(input_index).and_then(|value| value.as_deref());
+                    input_index += 1;
+                    default
+                } else {
+                    None
+                };
                 format_function_arg(
                     mode,
                     names.get(index).map(String::as_str),
                     type_oid,
+                    default,
                     catalog,
                     proc_row.prokind == 'p',
                 )
@@ -888,6 +898,7 @@ fn function_arguments_text(
                 b'i',
                 names.get(index).map(String::as_str),
                 type_oid,
+                defaults.get(index).and_then(|value| value.as_deref()),
                 catalog,
                 proc_row.prokind == 'p',
             )
@@ -896,10 +907,31 @@ fn function_arguments_text(
         .join(", ")
 }
 
+fn proc_arg_defaults(proc_row: &crate::include::catalog::PgProcRow) -> Vec<Option<String>> {
+    let input_count = proc_row.pronargs.max(0) as usize;
+    let Some(defaults) = proc_row.proargdefaults.as_deref() else {
+        return vec![None; input_count];
+    };
+    if let Ok(parsed) = serde_json::from_str::<Vec<Option<String>>>(defaults)
+        && parsed.len() == input_count
+    {
+        return parsed;
+    }
+    let legacy = defaults
+        .split_whitespace()
+        .map(|default| Some(default.to_string()))
+        .collect::<Vec<_>>();
+    let mut aligned = vec![None; input_count.saturating_sub(legacy.len())];
+    aligned.extend(legacy);
+    aligned.resize(input_count, None);
+    aligned
+}
+
 fn format_function_arg(
     mode: u8,
     name: Option<&str>,
     type_oid: u32,
+    default: Option<&str>,
     catalog: &dyn CatalogLookup,
     include_in_mode: bool,
 ) -> String {
@@ -919,6 +951,10 @@ fn format_function_arg(
         parts.push(quote_identifier(name));
     }
     parts.push(type_identity_text(catalog, type_oid));
+    if let Some(default) = default {
+        parts.push("DEFAULT".into());
+        parts.push(default.into());
+    }
     parts.join(" ")
 }
 
@@ -945,15 +981,17 @@ fn function_definition_text(
         function_arguments_text(proc_row, catalog),
         quote_identifier(&language),
     );
-    if proc_row.prokind == 'p' && sql_standard_procedure_body(&proc_row.prosrc).is_some() {
-        return format!("{signature}\n {}\n", proc_row.prosrc.trim());
+    if proc_row.prokind == 'p'
+        && let Some(body) = format_sql_standard_procedure_body(proc_row, catalog)
+    {
+        return format!("{signature}\n {body}\n");
     }
     let tag = if proc_row.prokind == 'p' {
         "$procedure$"
     } else {
         "$function$"
     };
-    let body = proc_row.prosrc.replace(tag, &format!("{tag} "));
+    let body = proc_row.prosrc.trim().replace(tag, &format!("{tag} "));
     format!("{signature}\nAS {tag}\n{body}\n{tag}\n")
 }
 
@@ -962,6 +1000,153 @@ fn sql_standard_procedure_body(body: &str) -> Option<&str> {
         .to_ascii_lowercase()
         .starts_with("begin atomic")
         .then_some(body.trim())
+}
+
+fn sql_standard_procedure_body_inner(body: &str) -> Option<&str> {
+    let trimmed = sql_standard_procedure_body(body)?;
+    let without_trailing_semicolon = trimmed.trim_end_matches(';').trim_end();
+    let lowered_without_semicolon = without_trailing_semicolon.to_ascii_lowercase();
+    let end = if lowered_without_semicolon.ends_with("end") {
+        without_trailing_semicolon.len().saturating_sub("end".len())
+    } else {
+        trimmed.len()
+    };
+    trimmed.get("begin atomic".len()..end).map(str::trim)
+}
+
+fn format_sql_standard_procedure_body(
+    proc_row: &crate::include::catalog::PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
+    let inner = sql_standard_procedure_body_inner(&proc_row.prosrc)?;
+    let mut lines = vec!["BEGIN ATOMIC".to_string()];
+    for statement in split_sql_standard_body_statements_for_display(inner) {
+        if let Some(insert) = format_sql_standard_insert_statement(&statement, proc_row, catalog) {
+            lines.extend(insert.lines().map(str::to_string));
+        } else {
+            lines.push(format!("  {};", statement.trim().trim_end_matches(';')));
+        }
+    }
+    lines.push("END".to_string());
+    Some(lines.join("\n"))
+}
+
+fn split_sql_standard_body_statements_for_display(body: &str) -> Vec<String> {
+    body.split(';')
+        .map(str::trim)
+        .filter(|statement| !statement.is_empty() && !statement.eq_ignore_ascii_case("end"))
+        .map(str::to_string)
+        .collect()
+}
+
+fn format_sql_standard_insert_statement(
+    statement: &str,
+    proc_row: &crate::include::catalog::PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
+    let trimmed = statement.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let rest = lower
+        .starts_with("insert into ")
+        .then(|| trimmed.get("insert into ".len()..))??;
+    let values_pos = rest.to_ascii_lowercase().find(" values ")?;
+    let target = rest[..values_pos].trim();
+    if target.contains('(') {
+        return None;
+    }
+    let values = rest[values_pos + " values ".len()..].trim();
+    let relation = catalog.lookup_any_relation(target)?;
+    let column_names = relation
+        .desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .map(|column| quote_identifier(&column.name))
+        .collect::<Vec<_>>();
+    if column_names.is_empty() {
+        return None;
+    }
+    let qualified_values = qualify_sql_standard_body_args(values, proc_row);
+    Some(format!(
+        "  INSERT INTO {target} ({})\n    VALUES {qualified_values};",
+        column_names.join(", ")
+    ))
+}
+
+fn qualify_sql_standard_body_args(
+    sql: &str,
+    proc_row: &crate::include::catalog::PgProcRow,
+) -> String {
+    let Some(names) = proc_row.proargnames.as_ref() else {
+        return sql.to_string();
+    };
+    let modes = proc_row.proargmodes.as_deref().unwrap_or(&[]);
+    let input_names = names
+        .iter()
+        .enumerate()
+        .filter(|(index, name)| {
+            !name.is_empty() && !matches!(modes.get(*index).copied().unwrap_or(b'i'), b'o' | b't')
+        })
+        .map(|(_, name)| name.as_str())
+        .collect::<Vec<_>>();
+    if input_names.is_empty() {
+        return sql.to_string();
+    }
+
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            let start = index;
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'\'' {
+                    index += 1;
+                    if bytes.get(index) == Some(&b'\'') {
+                        index += 1;
+                        continue;
+                    }
+                    break;
+                }
+                index += 1;
+            }
+            out.push_str(&sql[start..index]);
+            continue;
+        }
+        if is_sql_identifier_start(bytes[index]) {
+            let start = index;
+            index += 1;
+            while index < bytes.len() && is_sql_identifier_continue(bytes[index]) {
+                index += 1;
+            }
+            let ident = &sql[start..index];
+            let preceded_by_dot = sql[..start].trim_end().ends_with('.');
+            if !preceded_by_dot
+                && input_names
+                    .iter()
+                    .any(|name| ident.eq_ignore_ascii_case(name))
+            {
+                out.push_str(&quote_identifier(&proc_row.proname));
+                out.push('.');
+                out.push_str(&quote_identifier(ident));
+            } else {
+                out.push_str(ident);
+            }
+            continue;
+        }
+        out.push(bytes[index] as char);
+        index += 1;
+    }
+    out
+}
+
+fn is_sql_identifier_start(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphabetic()
+}
+
+fn is_sql_identifier_continue(byte: u8) -> bool {
+    is_sql_identifier_start(byte) || byte.is_ascii_digit()
 }
 
 fn operator_identity_text(
@@ -1242,6 +1427,26 @@ fn eval_greatest(values: &[Value]) -> Result<Value, ExecError> {
             None => true,
             Some(current) => {
                 compare_order_values(current, value, None, None, false)? == std::cmp::Ordering::Less
+            }
+        };
+        if replace {
+            best = Some(value.clone());
+        }
+    }
+    Ok(best.unwrap_or(Value::Null))
+}
+
+fn eval_least(values: &[Value]) -> Result<Value, ExecError> {
+    let mut best: Option<Value> = None;
+    for value in values {
+        if matches!(value, Value::Null) {
+            continue;
+        }
+        let replace = match best.as_ref() {
+            None => true,
+            Some(current) => {
+                compare_order_values(current, value, None, None, false)?
+                    == std::cmp::Ordering::Greater
             }
         };
         if replace {
@@ -4626,6 +4831,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
         BuiltinScalarFunction::Greatest => eval_greatest(&values),
+        BuiltinScalarFunction::Least => eval_least(&values),
         BuiltinScalarFunction::ArrayNdims => eval_array_ndims_function(&values),
         BuiltinScalarFunction::ArrayDims => eval_array_dims_function(&values),
         BuiltinScalarFunction::ArrayLower => eval_array_lower_function(&values),
@@ -6195,6 +6401,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
         BuiltinScalarFunction::Greatest => eval_greatest(&values),
+        BuiltinScalarFunction::Least => eval_least(&values),
         BuiltinScalarFunction::Length => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
