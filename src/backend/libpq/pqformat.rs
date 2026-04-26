@@ -201,15 +201,25 @@ fn enum_array_type_oid(
     let labels = enum_labels?;
     if let Some(sql_type) = sql_type
         && sql_type.is_array
-        && matches!(sql_type.element_type().kind, SqlTypeKind::Enum)
-        && sql_type.element_type().type_oid != 0
+        && let Some(enum_type_oid) = enum_label_type_oid(sql_type.element_type())
     {
-        return Some(sql_type.element_type().type_oid);
+        return Some(enum_type_oid);
     }
     array.element_type_oid.filter(|type_oid| {
         labels
             .keys()
             .any(|(enum_type_oid, _)| enum_type_oid == type_oid)
+    })
+}
+
+fn enum_label_type_oid(sql_type: SqlType) -> Option<u32> {
+    if !matches!(sql_type.kind, SqlTypeKind::Enum) || sql_type.type_oid == 0 {
+        return None;
+    }
+    Some(if sql_type.typrelid != 0 {
+        sql_type.typrelid
+    } else {
+        sql_type.type_oid
     })
 }
 
@@ -1183,8 +1193,8 @@ pub(crate) fn send_typed_data_row(
             }
             Value::EnumOid(v) => {
                 let rendered = sql_type
-                    .filter(|ty| matches!(ty.kind, SqlTypeKind::Enum))
-                    .and_then(|ty| enum_labels.and_then(|labels| labels.get(&(ty.type_oid, *v))))
+                    .and_then(enum_label_type_oid)
+                    .and_then(|type_oid| enum_labels.and_then(|labels| labels.get(&(type_oid, *v))))
                     .cloned()
                     .unwrap_or_else(|| v.to_string());
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
@@ -2693,6 +2703,39 @@ mod tests {
         assert!(
             out.windows("{00:00:00,01:42:20}".len())
                 .any(|window| window == b"{00:00:00,01:42:20}")
+        );
+    }
+
+    #[test]
+    fn typed_data_row_renders_enum_domain_with_base_label() {
+        let mut out = Vec::new();
+        let mut row_buf = Vec::new();
+        let mut enum_labels = HashMap::new();
+        enum_labels.insert((7001, 1313634107), "red".to_string());
+
+        send_typed_data_row(
+            &mut out,
+            &[Value::EnumOid(1313634107)],
+            &[QueryColumn {
+                name: "rgb".into(),
+                sql_type: SqlType::new(SqlTypeKind::Enum).with_identity(8001, 7001),
+                wire_type_oid: None,
+            }],
+            &[],
+            &mut row_buf,
+            FloatFormatOptions::default(),
+            None,
+            None,
+            None,
+            None,
+            Some(&enum_labels),
+        )
+        .unwrap();
+
+        assert!(out.windows(3).any(|window| window == b"red"));
+        assert!(
+            !out.windows("1313634107".len())
+                .any(|window| window == b"1313634107")
         );
     }
 
