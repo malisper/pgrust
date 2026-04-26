@@ -465,7 +465,7 @@ export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
 export PGTZ="America/Los_Angeles"
 export PGDATESTYLE="Postgres, MDY"
 setup_pg_regress_env
-export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=${STATEMENT_TIMEOUT}s"
+export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c intervalstyle=postgres_verbose -c statement_timeout=${STATEMENT_TIMEOUT}s"
 # PG18 psql adds a verbose \d+ Compression column by default. Keep the
 # regression client surface aligned with the checked-in expected files until
 # the repo moves those fixtures to the new default shape.
