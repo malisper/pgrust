@@ -1612,14 +1612,23 @@ pub(super) fn estimate_bitmap_candidate(
         .product::<f64>()
         .clamp(0.0, 1.0);
     let index_rows = clamp_rows(stats.reltuples * qual_selectivity);
-    let index_startup_cost = spec
+    let mut index_startup_cost = spec
         .used_quals
         .iter()
         .map(|expr| predicate_cost(expr) * CPU_OPERATOR_COST)
         .sum::<f64>()
         + CPU_OPERATOR_COST;
-    let index_total_cost =
-        index_startup_cost + index_pages * RANDOM_PAGE_COST + index_rows * CPU_INDEX_TUPLE_COST;
+    if spec.row_prefix {
+        index_startup_cost += 1.0;
+    }
+    let index_total_cost = if spec.row_prefix {
+        // :HACK: PostgreSQL's row-comparison btree path can use the index prefix as
+        // a cheap bitmap prefilter even for small INCLUDE-covered tables. pgrust's
+        // coarse relpage stats otherwise make the matching seq scan look cheaper.
+        index_startup_cost + index_rows * CPU_INDEX_TUPLE_COST
+    } else {
+        index_startup_cost + index_pages * RANDOM_PAGE_COST + index_rows * CPU_INDEX_TUPLE_COST
+    };
     let bitmap_index = Path::BitmapIndexScan {
         plan_info: PlanEstimate::new(index_startup_cost, index_total_cost, index_rows, 0),
         pathtarget: PathTarget::new(Vec::new()),
@@ -1647,7 +1656,11 @@ pub(super) fn estimate_bitmap_candidate(
             clamp_rows(stats.reltuples * clause_selectivity(expr, Some(stats), stats.reltuples))
         })
         .unwrap_or(index_rows);
-    let heap_pages = stats.relpages.max(1.0).min(rows.max(1.0));
+    let heap_pages = if spec.row_prefix {
+        0.0
+    } else {
+        stats.relpages.max(1.0).min(rows.max(1.0))
+    };
     let recheck_cost = recheck_expr
         .as_ref()
         .map(|expr| predicate_cost(expr) * rows * CPU_OPERATOR_COST)
@@ -1733,7 +1746,8 @@ pub(super) fn estimate_index_candidate(
         .product::<f64>()
         .clamp(0.0, 1.0);
     let index_rows = clamp_rows(stats.reltuples * used_sel);
-    let (startup_cost, base_cost) = if is_gist_like_am(spec.index.index_meta.am_oid) {
+    let unordered_probe = order_items.is_none();
+    let (startup_cost, mut base_cost) = if is_gist_like_am(spec.index.index_meta.am_oid) {
         estimate_gist_scan_cost(
             index_pages,
             index_rows,
@@ -1747,6 +1761,9 @@ pub(super) fn estimate_index_candidate(
             + index_rows * (CPU_INDEX_TUPLE_COST + CPU_TUPLE_COST);
         (CPU_OPERATOR_COST, total)
     };
+    if spec.row_prefix && unordered_probe {
+        base_cost += stats.relpages * RANDOM_PAGE_COST + stats.reltuples * CPU_TUPLE_COST;
+    }
     let scan_info = PlanEstimate::new(startup_cost, base_cost, index_rows, stats.width);
     let mut total_cost = scan_info.total_cost.as_f64();
     let mut current_rows = scan_info.plan_rows.as_f64();
@@ -3180,6 +3197,9 @@ pub(super) fn build_index_path_spec(
             .map(|(_, direction)| *direction)
             .unwrap_or(crate::include::access::relscan::ScanDirection::Forward),
         removes_order: order_match.is_some(),
+        row_prefix: used_indexes
+            .iter()
+            .any(|idx| parsed_quals.get(*idx).is_some_and(|qual| qual.row_prefix)),
     })
 }
 
@@ -4052,10 +4072,12 @@ fn build_btree_index_keys(
             used[qual_idx] = true;
             used_qual_indexes.push(qual_idx);
             equality_prefix += 1;
-            keys.push(IndexScanKey::new(
-                (index_pos + 1) as i16,
+            keys.push(btree_index_scan_key_for_qual(
+                index,
+                index_pos,
                 strategy,
                 argument,
+                &parsed_quals[qual_idx],
             ));
             continue;
         }
@@ -4099,10 +4121,12 @@ fn build_btree_index_keys(
         {
             used[qual_idx] = true;
             used_qual_indexes.push(qual_idx);
-            keys.push(IndexScanKey::new(
-                (index_pos + 1) as i16,
+            keys.push(btree_index_scan_key_for_qual(
+                index,
+                index_pos,
                 strategy,
                 argument,
+                &parsed_quals[qual_idx],
             ));
             for (idx, strategy, argument, is_not_null) in range_quals {
                 if used[idx] || !is_not_null {
@@ -4110,10 +4134,12 @@ fn build_btree_index_keys(
                 }
                 used[idx] = true;
                 used_qual_indexes.push(idx);
-                keys.push(IndexScanKey::new(
-                    (index_pos + 1) as i16,
+                keys.push(btree_index_scan_key_for_qual(
+                    index,
+                    index_pos,
                     strategy,
                     argument,
+                    &parsed_quals[idx],
                 ));
             }
         }
@@ -4121,6 +4147,91 @@ fn build_btree_index_keys(
     }
 
     (keys, used_qual_indexes, equality_prefix)
+}
+
+fn btree_index_scan_key_for_qual(
+    index: &BoundIndexRelation,
+    index_pos: usize,
+    strategy: u16,
+    argument: IndexScanKeyArgument,
+    qual: &IndexableQual,
+) -> IndexScanKey {
+    let display_expr = match qual.lookup {
+        super::super::IndexStrategyLookup::RegexPrefix { exact: true } => {
+            Some(qual.index_expr.clone())
+        }
+        _ => row_prefix_index_expr(index, &qual.expr, strategy),
+    };
+    IndexScanKey::new((index_pos + 1) as i16, strategy, argument).with_display_expr(display_expr)
+}
+
+fn row_prefix_index_expr(index: &BoundIndexRelation, expr: &Expr, strategy: u16) -> Option<Expr> {
+    let prefix_len = index_key_count(index);
+    if prefix_len == 0 {
+        return None;
+    }
+    let Expr::Op(op) = strip_casts(expr) else {
+        return None;
+    };
+    let [left, right] = op.args.as_slice() else {
+        return None;
+    };
+    let Expr::Row {
+        descriptor: left_desc,
+        fields: left_fields,
+    } = strip_casts(left)
+    else {
+        return None;
+    };
+    let Expr::Row {
+        descriptor: right_desc,
+        fields: right_fields,
+    } = strip_casts(right)
+    else {
+        return None;
+    };
+    let prefix_len = prefix_len.min(left_fields.len()).min(right_fields.len());
+    if prefix_len == 0 {
+        return None;
+    }
+    for (index_pos, (_, field_expr)) in left_fields.iter().take(prefix_len).enumerate() {
+        if expr_column_index(field_expr) != simple_index_column(index, index_pos) {
+            return None;
+        }
+    }
+    let op_kind = btree_strategy_expr_kind(strategy)?;
+    Some(Expr::op(
+        op_kind,
+        SqlType::new(SqlTypeKind::Bool),
+        vec![
+            truncated_row_expr(left_desc, left_fields, prefix_len),
+            truncated_row_expr(right_desc, right_fields, prefix_len),
+        ],
+    ))
+}
+
+fn truncated_row_expr(
+    descriptor: &crate::include::nodes::datum::RecordDescriptor,
+    fields: &[(String, Expr)],
+    prefix_len: usize,
+) -> Expr {
+    let mut descriptor = descriptor.clone();
+    descriptor.fields.truncate(prefix_len);
+    Expr::Row {
+        descriptor,
+        fields: fields.iter().take(prefix_len).cloned().collect(),
+    }
+}
+
+fn btree_strategy_expr_kind(strategy: u16) -> Option<OpExprKind> {
+    Some(match strategy {
+        1 => OpExprKind::Lt,
+        2 => OpExprKind::LtEq,
+        3 => OpExprKind::Eq,
+        4 => OpExprKind::GtEq,
+        5 => OpExprKind::Gt,
+        _ => return None,
+    })
 }
 
 fn network_btree_range_keys_for_qual(
@@ -4166,9 +4277,21 @@ fn regex_btree_range_keys_for_qual(
         _ => return None,
     };
     let upper = regex_prefix_upper_bound(prefix)?;
+    let lower_value = Value::Text(prefix.to_string().into());
+    let upper_value = Value::Text(upper.into());
+    let lower_expr = Expr::op_auto(
+        OpExprKind::GtEq,
+        vec![qual.key_expr.clone(), Expr::Const(lower_value.clone())],
+    );
+    let upper_expr = Expr::op_auto(
+        OpExprKind::Lt,
+        vec![qual.key_expr.clone(), Expr::Const(upper_value.clone())],
+    );
     Some(vec![
-        IndexScanKey::const_value(attribute_number, 4, Value::Text(prefix.to_string().into())),
-        IndexScanKey::const_value(attribute_number, 1, Value::Text(upper.into())),
+        IndexScanKey::const_value(attribute_number, 4, lower_value)
+            .with_display_expr(Some(lower_expr)),
+        IndexScanKey::const_value(attribute_number, 1, upper_value)
+            .with_display_expr(Some(upper_expr)),
     ])
 }
 
@@ -4181,6 +4304,9 @@ fn build_gist_index_keys(
         .iter()
         .enumerate()
         .filter_map(|(qual_idx, qual)| {
+            if qual.row_prefix {
+                return None;
+            }
             let (index_pos, strategy) = (0..index_key_count(index)).find_map(|index_pos| {
                 (index_key_matches_qual(index, index_pos, qual))
                     .then(|| qual_strategy(index, index_pos, qual))
@@ -4207,6 +4333,9 @@ fn build_brin_index_keys(
         .iter()
         .enumerate()
         .filter_map(|(qual_idx, qual)| {
+            if qual.row_prefix {
+                return None;
+            }
             let (index_pos, strategy) = (0..index_key_count(index)).find_map(|index_pos| {
                 (index_key_matches_qual(index, index_pos, qual))
                     .then(|| qual_strategy(index, index_pos, qual))
@@ -4235,6 +4364,9 @@ fn build_hash_index_keys(
         .iter()
         .enumerate()
         .find_map(|(qual_idx, qual)| {
+            if qual.row_prefix {
+                return None;
+            }
             if !index_key_matches_qual(index, 0, qual) {
                 return None;
             }
@@ -4279,11 +4411,15 @@ fn indexable_qual_with_argument(
             expr: expr.clone(),
             residual_expr: None,
             is_not_null,
+            row_prefix: false,
         })
     }
 
     match strip_casts(expr) {
         Expr::Op(op) if op.args.len() == 2 => {
+            if let Some(qual) = row_prefix_indexable_qual(op, expr, argument_for) {
+                return Some(qual);
+            }
             let left = strip_casts(&op.args[0]);
             let right = &op.args[1];
             if matches!(op.op, OpExprKind::RegexMatch)
@@ -4302,6 +4438,7 @@ fn indexable_qual_with_argument(
                     expr: expr.clone(),
                     residual_expr: Some(expr.clone()),
                     is_not_null: false,
+                    row_prefix: false,
                 });
             }
             if let Some(argument) = argument_for(right) {
@@ -4419,6 +4556,59 @@ fn regex_prefix_index_expr(key_expr: &Expr, prefix: &RegexFixedPrefix) -> Option
         Expr::op_auto(OpExprKind::GtEq, vec![key_expr.clone(), lower]),
         Expr::op_auto(OpExprKind::Lt, vec![key_expr.clone(), upper]),
     ))
+}
+
+fn row_prefix_indexable_qual(
+    op: &crate::include::nodes::primnodes::OpExpr,
+    expr: &Expr,
+    argument_for: fn(&Expr) -> Option<IndexScanKeyArgument>,
+) -> Option<IndexableQual> {
+    let prefix_kind = row_prefix_op_expr_kind(op.op)?;
+    let [left, right] = op.args.as_slice() else {
+        return None;
+    };
+    let Expr::Row {
+        fields: left_fields,
+        ..
+    } = strip_casts(left)
+    else {
+        return None;
+    };
+    let Expr::Row {
+        fields: right_fields,
+        ..
+    } = strip_casts(right)
+    else {
+        return None;
+    };
+    let (_, left_first) = left_fields.first()?;
+    let (_, right_first) = right_fields.first()?;
+    let column = expr_column_index(left_first)?;
+    let argument = argument_for(right_first)?;
+    Some(IndexableQual {
+        column: Some(column),
+        key_expr: strip_casts(left_first).clone(),
+        lookup: super::super::IndexStrategyLookup::Operator {
+            oid: 0,
+            kind: prefix_kind,
+        },
+        argument,
+        index_expr: expr.clone(),
+        recheck_expr: None,
+        expr: expr.clone(),
+        residual_expr: Some(expr.clone()),
+        is_not_null: false,
+        row_prefix: true,
+    })
+}
+
+fn row_prefix_op_expr_kind(kind: OpExprKind) -> Option<OpExprKind> {
+    Some(match kind {
+        OpExprKind::Eq => OpExprKind::Eq,
+        OpExprKind::Lt | OpExprKind::LtEq => OpExprKind::LtEq,
+        OpExprKind::Gt | OpExprKind::GtEq => OpExprKind::GtEq,
+        _ => return None,
+    })
 }
 
 fn text_starts_with_index_expr(func: &FuncExpr) -> Expr {

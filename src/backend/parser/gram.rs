@@ -261,6 +261,8 @@ fn try_parse_alter_table_add_unnamed_constraint_statement(
         | TableConstraint::Check { attributes, .. }
         | TableConstraint::PrimaryKey { attributes, .. }
         | TableConstraint::Unique { attributes, .. }
+        | TableConstraint::PrimaryKeyUsingIndex { attributes, .. }
+        | TableConstraint::UniqueUsingIndex { attributes, .. }
         | TableConstraint::Exclusion { attributes, .. }
         | TableConstraint::ForeignKey { attributes, .. }
             if attributes.name.as_deref() == Some("__pgrust_internal_unnamed_constraint__") =>
@@ -12682,10 +12684,11 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .into_inner()
                 .find(|part| part.as_rule() == Rule::primary_key_table_constraint_body)
                 .ok_or(ParseError::UnexpectedEof)?;
-            let (columns, without_overlaps) = build_key_column_list(body)?;
+            let (columns, include_columns, without_overlaps) = build_key_constraint_body(body)?;
             Ok(TableConstraint::PrimaryKey {
                 attributes,
                 columns,
+                include_columns,
                 without_overlaps,
             })
         }
@@ -12700,10 +12703,11 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .any(|part| part.as_rule() == Rule::unique_nulls_not_distinct_clause);
             let mut attributes = attributes;
             attributes.nulls_not_distinct = nulls_not_distinct;
-            let (columns, without_overlaps) = build_key_column_list(body)?;
+            let (columns, include_columns, without_overlaps) = build_key_constraint_body(body)?;
             Ok(TableConstraint::Unique {
                 attributes,
                 columns,
+                include_columns,
                 without_overlaps,
             })
         }
@@ -12863,6 +12867,23 @@ fn build_key_column_list(
     Ok((columns, without_overlaps))
 }
 
+fn build_key_constraint_body(
+    pair: Pair<'_, Rule>,
+) -> Result<(Vec<String>, Vec<String>, Option<String>), ParseError> {
+    let mut include_columns = Vec::new();
+    for part in pair.clone().into_inner() {
+        if part.as_rule() == Rule::create_index_include_clause {
+            include_columns.extend(
+                part.into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::ident_list)
+                    .flat_map(|inner| inner.into_inner().map(build_identifier)),
+            );
+        }
+    }
+    let (columns, without_overlaps) = build_key_column_list(pair)?;
+    Ok((columns, include_columns, without_overlaps))
+}
+
 fn set_enforced_attribute(enforced: &mut Option<bool>, value: bool) -> Result<(), ParseError> {
     if enforced.is_some() {
         return Err(ParseError::FeatureNotSupportedMessage(
@@ -12965,6 +12986,8 @@ fn set_table_constraint_name(constraint: &mut TableConstraint, name: String) {
         | TableConstraint::Check { attributes, .. }
         | TableConstraint::PrimaryKey { attributes, .. }
         | TableConstraint::Unique { attributes, .. }
+        | TableConstraint::PrimaryKeyUsingIndex { attributes, .. }
+        | TableConstraint::UniqueUsingIndex { attributes, .. }
         | TableConstraint::Exclusion { attributes, .. }
         | TableConstraint::ForeignKey { attributes, .. } => attributes.name = Some(name),
     }
@@ -14767,6 +14790,9 @@ fn build_alter_table_add_constraint(
             }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::table_constraint => constraint = Some(build_table_constraint(part)?),
+            Rule::alter_table_add_using_index_constraint => {
+                constraint = Some(build_alter_table_add_using_index_constraint(part)?)
+            }
             _ => {}
         }
     }
@@ -14776,6 +14802,37 @@ fn build_alter_table_add_constraint(
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         constraint: constraint.ok_or(ParseError::UnexpectedEof)?,
     })
+}
+
+fn build_alter_table_add_using_index_constraint(
+    pair: Pair<'_, Rule>,
+) -> Result<TableConstraint, ParseError> {
+    let mut attributes = build_constraint_attributes(pair.clone())?;
+    let mut identifiers = pair
+        .clone()
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier)
+        .collect::<Vec<_>>();
+    let raw = pair.as_str().trim_start().to_ascii_lowercase();
+    if raw.starts_with("constraint ") {
+        attributes.name = identifiers.first().cloned();
+        if !identifiers.is_empty() {
+            identifiers.remove(0);
+        }
+    }
+    let index_name = identifiers.pop().ok_or(ParseError::UnexpectedEof)?;
+    if raw.contains("primary key") {
+        Ok(TableConstraint::PrimaryKeyUsingIndex {
+            attributes,
+            index_name,
+        })
+    } else {
+        Ok(TableConstraint::UniqueUsingIndex {
+            attributes,
+            index_name,
+        })
+    }
 }
 
 fn build_alter_table_drop_column(

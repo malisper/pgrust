@@ -2798,6 +2798,40 @@ fn parse_alter_table_constraint_statements() {
             },
         })
     );
+
+    let stmt =
+        parse_statement("alter table items add constraint items_key unique using index items_idx")
+            .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            constraint: TableConstraint::UniqueUsingIndex {
+                attributes: ConstraintAttributes {
+                    name: Some("items_key".into()),
+                    ..attrs()
+                },
+                index_name: "items_idx".into(),
+            },
+        })
+    );
+
+    let stmt =
+        parse_statement("alter table items add primary key using index items_pkey_idx").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            constraint: TableConstraint::PrimaryKeyUsingIndex {
+                attributes: attrs(),
+                index_name: "items_pkey_idx".into(),
+            },
+        })
+    );
     let stmt = parse_statement("alter table items drop constraint items_id_check").unwrap();
     assert_eq!(
         stmt,
@@ -3765,6 +3799,7 @@ fn parse_alter_role_rename_statement() {
             constraint: TableConstraint::PrimaryKey {
                 attributes: attrs(),
                 columns: vec!["id".into()],
+                include_columns: Vec::new(),
                 without_overlaps: None,
             },
         })
@@ -3781,6 +3816,7 @@ fn parse_alter_role_rename_statement() {
             constraint: TableConstraint::PrimaryKey {
                 attributes: attrs(),
                 columns: vec!["id".into(), "valid_at".into()],
+                include_columns: Vec::new(),
                 without_overlaps: Some("valid_at".into()),
             },
         })
@@ -3796,6 +3832,7 @@ fn parse_alter_role_rename_statement() {
             constraint: TableConstraint::Unique {
                 attributes: attrs(),
                 columns: vec!["note".into()],
+                include_columns: Vec::new(),
                 without_overlaps: None,
             },
         })
@@ -10091,11 +10128,38 @@ fn parse_create_table_primary_key_and_unique_constraints() {
             TableConstraint::PrimaryKey {
                 attributes: attrs(),
                 columns: vec!["id".into(), "note".into()],
+                include_columns: Vec::new(),
                 without_overlaps: None,
             },
             TableConstraint::Unique {
                 attributes: attrs(),
                 columns: vec!["note".into(), "id".into()],
+                include_columns: Vec::new(),
+                without_overlaps: None,
+            },
+        ]
+    );
+
+    let stmt = parse_statement(
+        "create table items (id int4, note text, payload int4, primary key (id, note) include (payload), unique (note) include (id, payload))",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert_eq!(
+        ct.constraints().cloned().collect::<Vec<_>>(),
+        vec![
+            TableConstraint::PrimaryKey {
+                attributes: attrs(),
+                columns: vec!["id".into(), "note".into()],
+                include_columns: vec!["payload".into()],
+                without_overlaps: None,
+            },
+            TableConstraint::Unique {
+                attributes: attrs(),
+                columns: vec!["note".into()],
+                include_columns: vec!["id".into(), "payload".into()],
                 without_overlaps: None,
             },
         ]
@@ -10115,6 +10179,7 @@ fn parse_create_table_primary_key_and_unique_constraints() {
                 ..attrs()
             },
             columns: vec!["id".into()],
+            include_columns: Vec::new(),
             without_overlaps: None,
         }]
     );
@@ -10135,11 +10200,13 @@ fn parse_create_table_primary_key_and_unique_constraints() {
                     ..attrs()
                 },
                 columns: vec!["id".into(), "valid_at".into()],
+                include_columns: Vec::new(),
                 without_overlaps: Some("valid_at".into()),
             },
             TableConstraint::Unique {
                 attributes: attrs(),
                 columns: vec!["id".into(), "valid_at".into()],
+                include_columns: Vec::new(),
                 without_overlaps: Some("valid_at".into()),
             },
         ]
@@ -10197,6 +10264,7 @@ fn parse_create_table_deferrable_key_constraints() {
                 ..attrs()
             },
             columns: vec!["code".into()],
+            include_columns: Vec::new(),
             without_overlaps: None,
         }]
     );

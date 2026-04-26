@@ -477,12 +477,14 @@ fn expand_like_clause(
                     TableConstraint::PrimaryKey {
                         attributes,
                         columns,
+                        include_columns: Vec::new(),
                         without_overlaps,
                     }
                 } else {
                     TableConstraint::Unique {
                         attributes,
                         columns,
+                        include_columns: Vec::new(),
                         without_overlaps,
                     }
                 },

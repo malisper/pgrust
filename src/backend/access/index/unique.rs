@@ -21,6 +21,10 @@ pub fn probe_unique_conflict(
     ctx: &IndexInsertContext,
     key_values: &[Value],
 ) -> Result<Option<UniqueProbeConflict>, CatalogError> {
+    let key_count = usize::try_from(ctx.index_meta.indnkeyatts.max(0))
+        .unwrap_or_default()
+        .min(key_values.len());
+    let key_values = &key_values[..key_count];
     if !matches!(ctx.unique_check, IndexUniqueCheck::Yes)
         || (!ctx.index_meta.indnullsnotdistinct && keys_contain_null(key_values))
     {

@@ -392,12 +392,16 @@ fn validate_unique_constraints(
                 ctx,
             );
             if probe_unique_conflict(&insert_ctx, &pending.key_values)?.is_some() {
+                let key_count = usize::try_from(insert_ctx.index_meta.indnkeyatts.max(0))
+                    .unwrap_or_default()
+                    .min(insert_ctx.index_desc.columns.len())
+                    .min(pending.key_values.len());
                 return Err(ExecError::UniqueViolation {
                     constraint: row.conname.clone(),
                     detail: Some(
                         crate::backend::executor::value_io::format_unique_key_detail(
-                            &insert_ctx.index_desc.columns,
-                            &pending.key_values,
+                            &insert_ctx.index_desc.columns[..key_count],
+                            &pending.key_values[..key_count],
                         ),
                     ),
                 });

@@ -70,6 +70,7 @@ struct IndexableQual {
     expr: Expr,
     residual_expr: Option<Expr>,
     is_not_null: bool,
+    row_prefix: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +84,7 @@ struct IndexPathSpec {
     filter_quals: Vec<Expr>,
     direction: crate::include::access::relscan::ScanDirection,
     removes_order: bool,
+    row_prefix: bool,
 }
 
 #[derive(Debug, Clone)]

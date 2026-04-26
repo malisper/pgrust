@@ -225,12 +225,14 @@ fn inherited_table_constraints(
                         constraints.push(TableConstraint::PrimaryKey {
                             attributes,
                             columns,
+                            include_columns: Vec::new(),
                             without_overlaps,
                         });
                     } else {
                         constraints.push(TableConstraint::Unique {
                             attributes,
                             columns,
+                            include_columns: Vec::new(),
                             without_overlaps,
                         });
                     }

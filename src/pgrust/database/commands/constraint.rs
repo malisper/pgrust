@@ -1116,6 +1116,66 @@ impl Database {
                     }
                 }
 
+                if let Some(existing_index_name) = action.existing_index_name.as_deref() {
+                    let constraint_name = action
+                        .constraint_name
+                        .clone()
+                        .expect("normalized key constraint name");
+                    let existing_index = catalog
+                        .index_relations_for_heap(relation.relation_oid)
+                        .into_iter()
+                        .find(|index| index.name.eq_ignore_ascii_case(existing_index_name))
+                        .ok_or_else(|| {
+                            ExecError::Parse(ParseError::UnknownTable(
+                                existing_index_name.to_string(),
+                            ))
+                        })?;
+                    let mut index_entry = super::index::catalog_entry_from_bound_index_relation(
+                        &existing_index,
+                        relation.namespace_oid,
+                        relation.owner_oid,
+                        relation.relpersistence,
+                    );
+                    if let Some(index_meta) = index_entry.index_meta.as_mut() {
+                        index_meta.indisprimary = action.primary;
+                    }
+                    let table_entry = super::index::catalog_entry_from_bound_relation(&relation);
+                    let constraint_ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid: cid
+                            .saturating_add(1)
+                            .saturating_add(catalog_effects.len() as u32),
+                        client_id,
+                        waiter: None,
+                        interrupts,
+                    };
+                    let effect = self
+                        .catalog
+                        .write()
+                        .create_index_backed_constraint_for_entries_mvcc_with_period(
+                            &table_entry,
+                            &index_entry,
+                            constraint_name,
+                            if action.primary {
+                                CONSTRAINT_PRIMARY
+                            } else {
+                                CONSTRAINT_UNIQUE
+                            },
+                            &primary_key_owned_not_null_oids,
+                            false,
+                            None,
+                            action.deferrable,
+                            action.initially_deferred,
+                            &constraint_ctx,
+                        )
+                        .map_err(map_catalog_error)?;
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    catalog_effects.push(effect);
+                    return Ok(StatementResult::AffectedRows(0));
+                }
+
                 let index_cid = cid
                     .saturating_add(1)
                     .saturating_add(catalog_effects.len() as u32);

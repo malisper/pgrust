@@ -766,6 +766,7 @@ impl Database {
                 Some(&partition_spec),
                 &[IndexBackedConstraintAction {
                     constraint_name: Some(index_name.to_string()),
+                    existing_index_name: None,
                     columns: key_columns,
                     include_columns: Vec::new(),
                     primary: false,

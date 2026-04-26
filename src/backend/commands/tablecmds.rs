@@ -826,12 +826,16 @@ pub(crate) fn insert_index_key_values(
         build_index_insert_context(heap_rel, heap_desc, index, key_values, heap_tid, ctx);
     indexam::index_insert_stub(&insert_ctx, index.index_meta.am_oid).map_err(|err| match err {
         crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
+            let key_count = usize::try_from(insert_ctx.index_meta.indnkeyatts.max(0))
+                .unwrap_or_default()
+                .min(insert_ctx.index_desc.columns.len())
+                .min(insert_ctx.values.len());
             ExecError::UniqueViolation {
                 constraint,
                 detail: Some(
                     crate::backend::executor::value_io::format_unique_key_detail(
-                        &insert_ctx.index_desc.columns,
-                        &insert_ctx.values,
+                        &insert_ctx.index_desc.columns[..key_count],
+                        &insert_ctx.values[..key_count],
                     ),
                 ),
             }
@@ -1601,9 +1605,41 @@ fn eval_exclusion_operator(proc_oid: u32, left: &Value, right: &Value) -> Result
     {
         return result;
     }
+    if is_scalar_equality_proc_oid(proc_oid) {
+        return crate::backend::executor::expr_ops::compare_values(
+            "=",
+            left.clone(),
+            right.clone(),
+            None,
+        );
+    }
     Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
         "exclusion operator function oid {proc_oid}"
     ))))
+}
+
+fn is_scalar_equality_proc_oid(proc_oid: u32) -> bool {
+    matches!(
+        proc_oid,
+        crate::include::catalog::BOOL_CMP_EQ_PROC_OID
+            | crate::include::catalog::INT4_CMP_EQ_PROC_OID
+            | crate::include::catalog::TEXT_CMP_EQ_PROC_OID
+            | crate::include::catalog::TID_CMP_EQ_PROC_OID
+            | crate::include::catalog::BIT_CMP_EQ_PROC_OID
+            | crate::include::catalog::VARBIT_CMP_EQ_PROC_OID
+            | crate::include::catalog::BYTEA_CMP_EQ_PROC_OID
+            | crate::include::catalog::JSONB_CMP_EQ_PROC_OID
+            | crate::include::catalog::INTERVAL_CMP_EQ_PROC_OID
+            | crate::include::catalog::MACADDR_EQ_PROC_OID
+            | crate::include::catalog::MACADDR8_EQ_PROC_OID
+            | crate::include::catalog::NAME_CMP_EQ_PROC_OID
+            | crate::include::catalog::VARCHAR_CMP_EQ_PROC_OID
+            | crate::include::catalog::NUMERIC_CMP_EQ_PROC_OID
+            | crate::include::catalog::ARRAY_CMP_EQ_PROC_OID
+            | crate::include::catalog::MULTIRANGE_CMP_EQ_PROC_OID
+            | crate::include::catalog::UUID_CMP_EQ_PROC_OID
+            | crate::include::catalog::OIDVECTOR_CMP_EQ_PROC_OID
+    )
 }
 
 fn exclusion_violation(

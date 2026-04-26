@@ -79,6 +79,7 @@ pub struct IndexScanKey {
     pub attribute_number: i16,
     pub strategy: u16,
     pub argument: IndexScanKeyArgument,
+    pub display_expr: Option<Expr>,
 }
 
 impl IndexScanKey {
@@ -87,7 +88,13 @@ impl IndexScanKey {
             attribute_number,
             strategy,
             argument,
+            display_expr: None,
         }
+    }
+
+    pub fn with_display_expr(mut self, display_expr: Option<Expr>) -> Self {
+        self.display_expr = display_expr;
+        self
     }
 
     pub fn const_value(attribute_number: i16, strategy: u16, argument: Value) -> Self {

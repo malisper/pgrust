@@ -3018,12 +3018,22 @@ pub enum TableConstraint {
     PrimaryKey {
         attributes: ConstraintAttributes,
         columns: Vec<String>,
+        include_columns: Vec<String>,
         without_overlaps: Option<String>,
     },
     Unique {
         attributes: ConstraintAttributes,
         columns: Vec<String>,
+        include_columns: Vec<String>,
         without_overlaps: Option<String>,
+    },
+    PrimaryKeyUsingIndex {
+        attributes: ConstraintAttributes,
+        index_name: String,
+    },
+    UniqueUsingIndex {
+        attributes: ConstraintAttributes,
+        index_name: String,
     },
     Exclusion {
         attributes: ConstraintAttributes,
@@ -3056,6 +3066,8 @@ impl TableConstraint {
             | Self::Check { attributes, .. }
             | Self::PrimaryKey { attributes, .. }
             | Self::Unique { attributes, .. }
+            | Self::PrimaryKeyUsingIndex { attributes, .. }
+            | Self::UniqueUsingIndex { attributes, .. }
             | Self::Exclusion { attributes, .. }
             | Self::ForeignKey { attributes, .. } => attributes,
         }
