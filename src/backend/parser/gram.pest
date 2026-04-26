@@ -406,10 +406,15 @@ shift_expr = { mul_expr ~ (shift_op ~ mul_expr)* }
 mul_expr = { pow_expr ~ (mul_op ~ pow_expr)* }
 pow_expr = { postfix_expr ~ (pow_op ~ postfix_expr)* }
 concat_op = { "||" }
-add_op = { "+" | "-" }
-bit_op = { "&" | "|" | hash_bit_op }
+add_op = { "+" | neg_add_op }
+neg_add_op = @{ "-" ~ !("|" | ">") }
+bit_op = { amp_bit_op | pipe_bit_op | hash_bit_op }
+amp_bit_op = @{ "&" ~ !("&" | "<" | ">") }
+pipe_bit_op = @{ "|" ~ !("|" | "&" | ">" | "/") }
 hash_bit_op = @{ "#" ~ !("#" | ">") }
-shift_op = { "<<" | ">>" }
+shift_op = { left_shift_op | right_shift_op }
+left_shift_op = @{ "<<" ~ !("|" | "=") }
+right_shift_op = @{ ">>" ~ !"=" }
 mul_op = { "*" | "/" | "%" }
 pow_op = { "^" }
 null_predicate_suffix = { is_not_distinct_suffix | is_distinct_suffix | is_not_unknown_suffix | is_unknown_suffix | is_not_true_suffix | is_true_suffix | is_not_false_suffix | is_false_suffix | is_not_null_suffix | is_null_suffix | notnull_suffix | isnull_suffix }
