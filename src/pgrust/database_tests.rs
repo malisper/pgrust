@@ -815,7 +815,14 @@ fn quantified_similar_any_all_array_operators_work() {
 }
 
 fn assert_stack_depth_limit_error(err: ExecError) {
-    match err {
+    fn root_error(err: &ExecError) -> &ExecError {
+        match err {
+            ExecError::WithContext { source, .. } => root_error(source),
+            other => other,
+        }
+    }
+
+    match root_error(&err) {
         ExecError::DetailedError {
             message,
             hint: Some(hint),
@@ -828,7 +835,7 @@ fn assert_stack_depth_limit_error(err: ExecError) {
             sqlstate,
             ..
         }) if message == "stack depth limit exceeded"
-            && sqlstate == "54001"
+            && *sqlstate == "54001"
             && hint.contains("\"max_stack_depth\" (currently 100kB)") => {}
         other => panic!("expected stack depth error, got {other:?}"),
     }
