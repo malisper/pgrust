@@ -2199,14 +2199,15 @@ fn append_constraint_deferrability(
 }
 
 fn eval_pg_get_indexdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
-    let (index_oid, column_no) = match values {
+    let (index_oid, column_no, qualify_table_name) = match values {
         [Value::Null] | [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => {
             return Ok(Value::Null);
         }
-        [index_oid] => (oid_arg_to_u32(index_oid, "pg_get_indexdef")?, 0),
+        [index_oid] => (oid_arg_to_u32(index_oid, "pg_get_indexdef")?, 0, true),
         [index_oid, column_no, _pretty] => (
             oid_arg_to_u32(index_oid, "pg_get_indexdef")?,
             int32_arg(column_no, "pg_get_indexdef")?,
+            false,
         ),
         _ => {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -2227,7 +2228,7 @@ fn eval_pg_get_indexdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value
             .unwrap_or(Value::Null));
     }
     Ok(Value::Text(
-        format_indexdef_for_catalog(catalog, &relation, &index).into(),
+        format_indexdef_for_catalog(catalog, &relation, &index, qualify_table_name).into(),
     ))
 }
 
@@ -2264,14 +2265,19 @@ fn format_indexdef_for_catalog(
     catalog: &dyn CatalogLookup,
     relation: &crate::backend::parser::BoundRelation,
     index: &crate::backend::parser::BoundIndexRelation,
+    qualify_table_name: bool,
 ) -> String {
     let table_name = catalog
         .class_row_by_oid(relation.relation_oid)
         .map(|class| {
-            catalog
-                .namespace_row_by_oid(class.relnamespace)
-                .map(|namespace| format!("{}.{}", namespace.nspname, class.relname))
-                .unwrap_or(class.relname)
+            if qualify_table_name {
+                catalog
+                    .namespace_row_by_oid(class.relnamespace)
+                    .map(|namespace| format!("{}.{}", namespace.nspname, class.relname))
+                    .unwrap_or(class.relname)
+            } else {
+                class.relname
+            }
         })
         .unwrap_or_else(|| relation.relation_oid.to_string());
     let amname = bootstrap_pg_am_rows()
