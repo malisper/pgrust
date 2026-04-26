@@ -578,10 +578,11 @@ pub(crate) fn eval_extract_function_with_config(
         .trim()
         .to_ascii_lowercase();
     let field = normalize_date_part_field(&field);
+    let source_value = &values[1];
     match eval_date_part_function_with_config(values, config)? {
         Value::Float64(value) => Ok(Value::Numeric(extract_numeric_value(
             value,
-            extract_numeric_scale(field),
+            extract_numeric_scale(field, source_value),
         ))),
         other => Ok(other),
     }
@@ -591,9 +592,10 @@ pub(crate) fn eval_extract_function(values: &[Value]) -> Result<Value, ExecError
     eval_extract_function_with_config(values, &DateTimeConfig::default())
 }
 
-fn extract_numeric_scale(field: &str) -> u32 {
+fn extract_numeric_scale(field: &str, source_value: &Value) -> u32 {
     match field {
         "millisecond" | "milliseconds" => 3,
+        "epoch" if matches!(source_value, Value::Date(_)) => 0,
         "second" | "epoch" => 6,
         _ => 0,
     }
@@ -1366,10 +1368,17 @@ pub(crate) fn eval_date_trunc_function(
                     hint: None,
                     sqlstate: "0A000",
                 })?;
-            let offset_seconds = i64::from(timezone_offset_seconds(config));
-            Ok(Value::TimestampTz(TimestampTzADT(
-                i64::from(days) * USECS_PER_DAY - offset_seconds * USECS_PER_SEC,
-            )))
+            let local_midnight = TimestampADT(local_timestamp_usecs(days, 0)?);
+            timestamp_at_time_zone(local_midnight, current_timezone_name(config))
+                .map(Value::TimestampTz)
+                .map_err(|err| ExecError::InvalidStorageValue {
+                    column: "time zone".into(),
+                    details: super::expr_casts::datetime_parse_error_details(
+                        "time zone",
+                        current_timezone_name(config),
+                        err,
+                    ),
+                })
         }
         Value::Timestamp(timestamp) => {
             if !timestamp.is_finite() {
@@ -2370,6 +2379,27 @@ mod tests {
             .unwrap(),
             Value::TimestampTz(TimestampTzADT(
                 i64::from(days_from_ymd(0, 1, 1).unwrap()) * USECS_PER_DAY,
+            ))
+        );
+    }
+
+    #[test]
+    fn date_trunc_date_uses_local_zone_rules() {
+        let config = DateTimeConfig {
+            time_zone: "America/Los_Angeles".into(),
+            ..DateTimeConfig::default()
+        };
+        assert_eq!(
+            eval_date_trunc_function(
+                &[
+                    Value::Text("century".into()),
+                    Value::Date(DateADT(days_from_ymd(2004, 8, 10).unwrap())),
+                ],
+                &config,
+            )
+            .unwrap(),
+            Value::TimestampTz(TimestampTzADT(
+                i64::from(days_from_ymd(2001, 1, 1).unwrap()) * USECS_PER_DAY + 8 * USECS_PER_HOUR,
             ))
         );
     }

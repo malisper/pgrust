@@ -6379,7 +6379,8 @@ fn select_extract_returns_numeric_with_postgres_scale() {
          extract(microseconds from timestamp '1997-02-10 17:32:01.4'), \
          extract(milliseconds from timestamp '1997-02-10 17:32:01.4'), \
          extract(seconds from timestamp '1997-02-10 17:32:01.4'), \
-         extract(epoch from timestamp '1970-01-01 00:00:00')",
+         extract(epoch from timestamp '1970-01-01 00:00:00'), \
+         extract(epoch from date '1970-01-01')",
     )
     .unwrap()
     {
@@ -6393,7 +6394,7 @@ fn select_extract_returns_numeric_with_postgres_scale() {
                 .collect::<Vec<_>>();
             assert_eq!(
                 rendered,
-                vec!["1400000", "1400.000", "1.400000", "0.000000"]
+                vec!["1400000", "1400.000", "1.400000", "0.000000", "0"]
             );
         }
         other => panic!("expected query result, got {other:?}"),
