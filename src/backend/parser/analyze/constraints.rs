@@ -193,7 +193,7 @@ pub enum NormalizedAlterTableConstraint {
 struct PendingIndexConstraint {
     explicit_name: Option<String>,
     existing_index_name: Option<String>,
-    generated_base: String,
+    generated_base: GeneratedConstraintName,
     columns: Vec<String>,
     include_columns: Vec<String>,
     primary: bool,
@@ -209,7 +209,7 @@ struct PendingIndexConstraint {
 #[derive(Debug, Clone)]
 struct PendingCheckConstraint {
     explicit_name: Option<String>,
-    generated_base: String,
+    generated_base: GeneratedConstraintName,
     expr_sql: String,
     not_valid: bool,
     no_inherit: bool,
@@ -219,7 +219,7 @@ struct PendingCheckConstraint {
 #[derive(Debug, Clone)]
 struct PendingNotNullConstraint {
     explicit_name: Option<String>,
-    generated_base: String,
+    generated_base: GeneratedConstraintName,
     column: String,
     not_valid: bool,
     no_inherit: bool,
@@ -230,7 +230,7 @@ struct PendingNotNullConstraint {
 #[derive(Debug, Clone)]
 struct PendingForeignKeyConstraint {
     explicit_name: Option<String>,
-    generated_base: String,
+    generated_base: GeneratedConstraintName,
     columns: Vec<String>,
     period: Option<String>,
     referenced_table: String,
@@ -244,6 +244,23 @@ struct PendingForeignKeyConstraint {
     initially_deferred: bool,
     not_valid: bool,
     enforced: bool,
+}
+
+#[derive(Debug, Clone)]
+struct GeneratedConstraintName {
+    name1: String,
+    name2: Option<String>,
+    label: String,
+}
+
+impl GeneratedConstraintName {
+    fn new(name1: &str, name2: Option<String>, label: &str) -> Self {
+        Self {
+            name1: name1.to_string(),
+            name2,
+            label: label.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -323,7 +340,11 @@ pub fn normalize_create_table_constraints(
                     validate_check_attributes(attributes)?;
                     check_constraints.push(PendingCheckConstraint {
                         explicit_name: attributes.name.clone(),
-                        generated_base: format!("{}_{}_check", stmt.table_name, column.name),
+                        generated_base: GeneratedConstraintName::new(
+                            &stmt.table_name,
+                            Some(column.name.clone()),
+                            "check",
+                        ),
                         expr_sql: expr_sql.clone(),
                         not_valid: attributes.not_valid,
                         no_inherit: attributes.no_inherit,
@@ -336,7 +357,11 @@ pub fn normalize_create_table_constraints(
                     index_constraints.push(PendingIndexConstraint {
                         explicit_name: attributes.name.clone(),
                         existing_index_name: None,
-                        generated_base: format!("{}_pkey", stmt.table_name),
+                        generated_base: GeneratedConstraintName::new(
+                            &stmt.table_name,
+                            None,
+                            "pkey",
+                        ),
                         columns: vec![column.name.clone()],
                         include_columns: Vec::new(),
                         primary: true,
@@ -355,7 +380,11 @@ pub fn normalize_create_table_constraints(
                     index_constraints.push(PendingIndexConstraint {
                         explicit_name: attributes.name.clone(),
                         existing_index_name: None,
-                        generated_base: format!("{}_{}_key", stmt.table_name, column.name),
+                        generated_base: GeneratedConstraintName::new(
+                            &stmt.table_name,
+                            Some(column.name.clone()),
+                            "key",
+                        ),
                         columns: vec![column.name.clone()],
                         include_columns: Vec::new(),
                         primary: false,
@@ -387,7 +416,11 @@ pub fn normalize_create_table_constraints(
                     let (deferrable, initially_deferred) = foreign_key_deferrability(attributes);
                     foreign_keys.push(PendingForeignKeyConstraint {
                         explicit_name: attributes.name.clone(),
-                        generated_base: format!("{}_{}_fkey", stmt.table_name, column.name),
+                        generated_base: GeneratedConstraintName::new(
+                            &stmt.table_name,
+                            Some(column.name.clone()),
+                            "fkey",
+                        ),
                         columns: vec![column.name.clone()],
                         period: None,
                         referenced_table: referenced_table.clone(),
@@ -427,7 +460,7 @@ pub fn normalize_create_table_constraints(
                 validate_check_attributes(attributes)?;
                 check_constraints.push(PendingCheckConstraint {
                     explicit_name: attributes.name.clone(),
-                    generated_base: format!("{}_check", stmt.table_name),
+                    generated_base: GeneratedConstraintName::new(&stmt.table_name, None, "check"),
                     expr_sql: expr_sql.clone(),
                     not_valid: attributes.not_valid,
                     no_inherit: attributes.no_inherit,
@@ -460,7 +493,7 @@ pub fn normalize_create_table_constraints(
                 index_constraints.push(PendingIndexConstraint {
                     explicit_name: attributes.name.clone(),
                     existing_index_name: None,
-                    generated_base: format!("{}_pkey", stmt.table_name),
+                    generated_base: GeneratedConstraintName::new(&stmt.table_name, None, "pkey"),
                     columns: resolved,
                     include_columns: resolved_include,
                     primary: true,
@@ -504,10 +537,10 @@ pub fn normalize_create_table_constraints(
                 index_constraints.push(PendingIndexConstraint {
                     explicit_name: attributes.name.clone(),
                     existing_index_name: None,
-                    generated_base: format!(
-                        "{}_{}_key",
-                        stmt.table_name,
-                        generated_columns.join("_")
+                    generated_base: GeneratedConstraintName::new(
+                        &stmt.table_name,
+                        Some(generated_columns.join("_")),
+                        "key",
                     ),
                     columns: resolved,
                     include_columns: resolved_include,
@@ -544,10 +577,10 @@ pub fn normalize_create_table_constraints(
                 index_constraints.push(PendingIndexConstraint {
                     explicit_name: attributes.name.clone(),
                     existing_index_name: None,
-                    generated_base: format!(
-                        "{}_{}_excl",
-                        stmt.table_name,
-                        generated_columns.join("_")
+                    generated_base: GeneratedConstraintName::new(
+                        &stmt.table_name,
+                        Some(generated_columns.join("_")),
+                        "excl",
                     ),
                     columns: resolved,
                     include_columns: resolved_include,
@@ -599,7 +632,11 @@ pub fn normalize_create_table_constraints(
                 )?;
                 foreign_keys.push(PendingForeignKeyConstraint {
                     explicit_name: attributes.name.clone(),
-                    generated_base: format!("{}_{}_fkey", stmt.table_name, resolved.join("_")),
+                    generated_base: GeneratedConstraintName::new(
+                        &stmt.table_name,
+                        Some(resolved.join("_")),
+                        "fkey",
+                    ),
                     columns: resolved,
                     period: period.clone(),
                     referenced_table: referenced_table.clone(),
@@ -1084,7 +1121,7 @@ pub fn normalize_alter_table_add_constraint(
             if desc.columns[column_index].storage.nullable {
                 let constraint_name = assign_constraint_name(
                     attributes.name.clone(),
-                    format!("{table_name}_{column}_not_null"),
+                    GeneratedConstraintName::new(table_name, Some(column.clone()), "not_null"),
                     &mut used_names,
                 )?;
                 Ok(NormalizedAlterTableConstraint::NotNull(
@@ -1124,7 +1161,7 @@ pub fn normalize_alter_table_add_constraint(
             validate_check_attributes(attributes)?;
             let constraint_name = assign_constraint_name(
                 attributes.name.clone(),
-                format!("{table_name}_check"),
+                GeneratedConstraintName::new(table_name, None, "check"),
                 &mut used_names,
             )?;
             Ok(NormalizedAlterTableConstraint::Check(
@@ -1159,7 +1196,7 @@ pub fn normalize_alter_table_add_constraint(
             }
             let constraint_name = assign_constraint_name(
                 attributes.name.clone(),
-                format!("{table_name}_pkey"),
+                GeneratedConstraintName::new(table_name, None, "pkey"),
                 &mut used_names,
             )?;
             let resolved = resolve_relation_index_constraint_columns(
@@ -1221,7 +1258,7 @@ pub fn normalize_alter_table_add_constraint(
                 .collect::<Vec<_>>();
             let constraint_name = assign_constraint_name(
                 attributes.name.clone(),
-                format!("{table_name}_{}_key", generated_columns.join("_")),
+                GeneratedConstraintName::new(table_name, Some(generated_columns.join("_")), "key"),
                 &mut used_names,
             )?;
             Ok(NormalizedAlterTableConstraint::IndexBacked(
@@ -1262,7 +1299,7 @@ pub fn normalize_alter_table_add_constraint(
                 .collect::<Vec<_>>();
             let constraint_name = assign_constraint_name(
                 attributes.name.clone(),
-                format!("{table_name}_{}_excl", generated_columns.join("_")),
+                GeneratedConstraintName::new(table_name, Some(generated_columns.join("_")), "excl"),
                 &mut used_names,
             )?;
             Ok(NormalizedAlterTableConstraint::IndexBacked(
@@ -1314,7 +1351,7 @@ pub fn normalize_alter_table_add_constraint(
                         .clone()
                         .unwrap_or_else(|| index_name.clone()),
                 ),
-                index_name.clone(),
+                GeneratedConstraintName::new(index_name, None, ""),
                 &mut used_names,
             )?;
             Ok(NormalizedAlterTableConstraint::IndexBacked(
@@ -1353,7 +1390,7 @@ pub fn normalize_alter_table_add_constraint(
                         .clone()
                         .unwrap_or_else(|| index_name.clone()),
                 ),
-                index_name.clone(),
+                GeneratedConstraintName::new(index_name, None, ""),
                 &mut used_names,
             )?;
             Ok(NormalizedAlterTableConstraint::IndexBacked(
@@ -1410,7 +1447,7 @@ pub fn normalize_alter_table_add_constraint(
                 .collect::<Result<Vec<_>, ParseError>>()?;
             let constraint_name = assign_constraint_name(
                 attributes.name.clone(),
-                format!("{table_name}_{}_fkey", resolved.join("_")),
+                GeneratedConstraintName::new(table_name, Some(resolved.join("_")), "fkey"),
                 &mut used_names,
             )?;
             let referenced = resolve_referenced_key(
@@ -1488,7 +1525,11 @@ pub fn normalize_alter_table_add_column_constraints(
                 validate_check_attributes(attributes)?;
                 checks.push(PendingCheckConstraint {
                     explicit_name: attributes.name.clone(),
-                    generated_base: format!("{table_name}_{}_check", column.name),
+                    generated_base: GeneratedConstraintName::new(
+                        table_name,
+                        Some(column.name.clone()),
+                        "check",
+                    ),
                     expr_sql: expr_sql.clone(),
                     not_valid: attributes.not_valid,
                     no_inherit: attributes.no_inherit,
@@ -1555,7 +1596,7 @@ pub fn generated_not_null_constraint_name(
 ) -> String {
     let mut used_names = existing_constraint_names(existing_constraints);
     choose_generated_constraint_name(
-        &format!("{table_name}_{column_name}_not_null"),
+        &GeneratedConstraintName::new(table_name, Some(column_name.to_string()), "not_null"),
         &mut used_names,
     )
 }
@@ -2541,7 +2582,11 @@ fn merge_not_null_constraint(
         .entry(normalized)
         .or_insert_with(|| PendingNotNullConstraint {
             explicit_name: None,
-            generated_base: format!("{relation_name}_{column_name}_not_null"),
+            generated_base: GeneratedConstraintName::new(
+                relation_name,
+                Some(column_name.to_string()),
+                "not_null",
+            ),
             column: column_name.to_string(),
             not_valid: attributes.not_valid,
             no_inherit: attributes.no_inherit,
@@ -3078,7 +3123,7 @@ fn existing_constraint_names(existing_constraints: &[PgConstraintRow]) -> BTreeS
 
 fn assign_constraint_name(
     explicit_name: Option<String>,
-    generated_base: String,
+    generated_base: GeneratedConstraintName,
     used_names: &mut BTreeSet<String>,
 ) -> Result<String, ParseError> {
     if let Some(name) = explicit_name {
@@ -3097,6 +3142,8 @@ fn assign_constraint_name(
     }
 }
 
+const MAX_IDENTIFIER_BYTES: usize = 63;
+
 fn reserve_explicit_constraint_names<'a>(
     used_names: &mut BTreeSet<String>,
     names: impl Iterator<Item = &'a str>,
@@ -3113,19 +3160,55 @@ fn reserve_explicit_constraint_names<'a>(
     Ok(())
 }
 
-fn choose_generated_constraint_name(base: &str, used_names: &mut BTreeSet<String>) -> String {
-    if used_names.insert(base.to_ascii_lowercase()) {
-        return base.to_string();
-    }
-
-    for suffix in 1.. {
-        let candidate = format!("{base}{suffix}");
+fn choose_generated_constraint_name(
+    base: &GeneratedConstraintName,
+    used_names: &mut BTreeSet<String>,
+) -> String {
+    for suffix in std::iter::once(String::new()).chain((1..).map(|pass| pass.to_string())) {
+        let candidate = make_generated_constraint_name(base, &suffix);
         if used_names.insert(candidate.to_ascii_lowercase()) {
             return candidate;
         }
     }
 
     unreachable!("constraint name suffix space exhausted")
+}
+
+fn make_generated_constraint_name(base: &GeneratedConstraintName, label_suffix: &str) -> String {
+    let label = format!("{}{}", base.label, label_suffix);
+    let name2 = base.name2.as_deref();
+    let overhead =
+        if label.is_empty() { 0 } else { label.len() + 1 } + usize::from(name2.is_some());
+    let avail = MAX_IDENTIFIER_BYTES.saturating_sub(overhead);
+    let mut name1_len = base.name1.len();
+    let mut name2_len = name2.map(str::len).unwrap_or_default();
+
+    while name1_len + name2_len > avail {
+        if name1_len > name2_len {
+            name1_len = name1_len.saturating_sub(1);
+        } else {
+            name2_len = name2_len.saturating_sub(1);
+        }
+    }
+
+    let mut name = clip_to_char_boundary(&base.name1, name1_len).to_string();
+    if let Some(name2) = name2 {
+        name.push('_');
+        name.push_str(clip_to_char_boundary(name2, name2_len));
+    }
+    if !label.is_empty() {
+        name.push('_');
+        name.push_str(&label);
+    }
+    name
+}
+
+fn clip_to_char_boundary(value: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(value.len());
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {

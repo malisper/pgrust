@@ -19473,6 +19473,51 @@ fn self_referential_foreign_key_can_reference_inserted_row() {
 }
 
 #[test]
+fn generated_foreign_key_names_preserve_label_when_truncated_and_suffix_collisions() {
+    let base = temp_dir("foreign_key_generated_name_truncation");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pktable1 (a int primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table pktable2 (a int, b int, primary key (a, b))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fktable2 (
+            a int,
+            b int,
+            very_very_long_column_name_to_exceed_63_characters int,
+            foreign key (very_very_long_column_name_to_exceed_63_characters) references pktable1,
+            foreign key (a, very_very_long_column_name_to_exceed_63_characters) references pktable2,
+            foreign key (a, very_very_long_column_name_to_exceed_63_characters) references pktable2
+        )",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname from pg_constraint where conrelid = 'fktable2'::regclass order by conname",
+        ),
+        vec![
+            vec![Value::Text(
+                "fktable2_a_very_very_long_column_name_to_exceed_63_charac_fkey1".into()
+            )],
+            vec![Value::Text(
+                "fktable2_a_very_very_long_column_name_to_exceed_63_charact_fkey".into()
+            )],
+            vec![Value::Text(
+                "fktable2_very_very_long_column_name_to_exceed_63_character_fkey".into()
+            )],
+        ]
+    );
+}
+
+#[test]
 fn foreign_keys_support_match_full() {
     let base = temp_dir("foreign_keys_match_full");
     let db = Database::open(&base, 16).unwrap();
@@ -19513,6 +19558,73 @@ fn foreign_keys_support_match_full() {
         }
         other => panic!("expected MATCH FULL foreign-key violation, got {other:?}"),
     }
+}
+
+#[test]
+fn pg_get_constraintdef_formats_foreign_key_actions_and_delete_columns() {
+    let base = temp_dir("pg_get_constraintdef_fk_actions");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parents (a int4, b int4, primary key (a, b))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table children (
+            id int4 primary key,
+            a int4,
+            b int4,
+            c int4,
+            d int4,
+            constraint children_cascade_fk
+                foreign key (a, b) references parents(a, b)
+                match full on update cascade on delete set null (a)
+                deferrable initially deferred,
+            constraint children_default_fk
+                foreign key (a, b) references parents(a, b)
+                on update set default on delete set default (a),
+            constraint children_restrict_fk
+                foreign key (c, d) references parents(a, b)
+                on update restrict on delete restrict
+        )",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, pg_get_constraintdef(oid)
+               from pg_constraint
+              where conrelid = 'children'::regclass and contype = 'f'
+              order by conname",
+        ),
+        vec![
+            vec![
+                Value::Text("children_cascade_fk".into()),
+                Value::Text(
+                    "FOREIGN KEY (a, b) REFERENCES parents(a, b) MATCH FULL ON UPDATE CASCADE ON DELETE SET NULL (a) DEFERRABLE INITIALLY DEFERRED"
+                        .into(),
+                ),
+            ],
+            vec![
+                Value::Text("children_default_fk".into()),
+                Value::Text(
+                    "FOREIGN KEY (a, b) REFERENCES parents(a, b) ON UPDATE SET DEFAULT ON DELETE SET DEFAULT (a)"
+                        .into(),
+                ),
+            ],
+            vec![
+                Value::Text("children_restrict_fk".into()),
+                Value::Text(
+                    "FOREIGN KEY (c, d) REFERENCES parents(a, b) ON UPDATE RESTRICT ON DELETE RESTRICT"
+                        .into(),
+                ),
+            ],
+        ]
+    );
 }
 
 #[test]
