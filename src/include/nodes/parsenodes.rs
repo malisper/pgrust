@@ -2192,6 +2192,7 @@ pub struct AlterTableDropColumnStatement {
     pub only: bool,
     pub table_name: String,
     pub column_name: String,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -12,8 +12,9 @@ use crate::backend::utils::misc::notices::{
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BootstrapCatalogKind, CSTRING_TYPE_OID, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
-    PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_OPERATOR_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow, TEXT_TYPE_OID,
+    PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID,
+    PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
+    TEXT_TYPE_OID,
 };
 use crate::include::nodes::datum::{ArrayValue, IntervalValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
@@ -7881,6 +7882,303 @@ fn information_schema_view_metadata_tracks_updatable_views() {
                 Value::Text("YES".into()),
             ],
         ]
+    );
+}
+
+#[test]
+fn information_schema_columns_reports_generated_column_metadata() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table gtest0 (a int primary key, b int generated always as (55) virtual)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table gtest1 (a int primary key, b int generated always as (a * 2) virtual)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select table_name, column_name, column_default, is_nullable, is_generated, generation_expression
+             from information_schema.columns
+             where table_schema = 'public' and table_name in ('gtest0', 'gtest1')
+             order by 1, 2",
+        ),
+        vec![
+            vec![
+                Value::Text("gtest0".into()),
+                Value::Text("a".into()),
+                Value::Null,
+                Value::Text("NO".into()),
+                Value::Text("NEVER".into()),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("gtest0".into()),
+                Value::Text("b".into()),
+                Value::Null,
+                Value::Text("YES".into()),
+                Value::Text("ALWAYS".into()),
+                Value::Text("55".into()),
+            ],
+            vec![
+                Value::Text("gtest1".into()),
+                Value::Text("a".into()),
+                Value::Null,
+                Value::Text("NO".into()),
+                Value::Text("NEVER".into()),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("gtest1".into()),
+                Value::Text("b".into()),
+                Value::Null,
+                Value::Text("YES".into()),
+                Value::Text("ALWAYS".into()),
+                Value::Text("(a * 2)".into()),
+            ],
+        ]
+    );
+
+    let rows = query_rows(
+        &db,
+        1,
+        "select * from information_schema.columns where table_name = 'gtest1' and column_name = 'b'",
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].len(), 44);
+}
+
+#[test]
+fn information_schema_column_column_usage_reports_generated_dependencies() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table gtest1 (a int primary key, b int generated always as (a * 2) virtual)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select table_name, column_name, dependent_column
+             from information_schema.column_column_usage
+             where table_schema = 'public'
+             order by 1, 2, 3",
+        ),
+        vec![vec![
+            Value::Text("gtest1".into()),
+            Value::Text("a".into()),
+            Value::Text("b".into()),
+        ]]
+    );
+
+    let relation = db
+        .lazy_catalog_lookup(1, None, None)
+        .lookup_any_relation("gtest1")
+        .unwrap();
+    let attrdef_oid = relation.desc.columns[1].attrdef_oid.unwrap();
+    assert!(
+        db.backend_catcache(1, None)
+            .unwrap()
+            .depend_rows()
+            .iter()
+            .any(|row| {
+                row.classid == PG_ATTRDEF_RELATION_OID
+                    && row.objid == attrdef_oid
+                    && row.refclassid == PG_CLASS_RELATION_OID
+                    && row.refobjid == relation.relation_oid
+                    && row.refobjsubid == 1
+                    && row.deptype == 'n'
+            })
+    );
+}
+
+#[test]
+fn generated_column_source_drop_uses_dependency_metadata_for_restrict_and_cascade() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table gtest10 (
+            a int primary key,
+            b int,
+            c int generated always as (b * 2) virtual
+        )",
+    )
+    .unwrap();
+
+    match db.execute(1, "alter table gtest10 drop column b") {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(
+                message,
+                "cannot drop column b of table gtest10 because other objects depend on it"
+            );
+            assert_eq!(
+                detail.as_deref(),
+                Some("column c of table gtest10 depends on column b of table gtest10")
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some("Use DROP ... CASCADE to drop the dependent objects too.")
+            );
+            assert_eq!(sqlstate, "2BP01");
+        }
+        other => panic!("expected generated dependency restrict error, got {other:?}"),
+    }
+
+    clear_backend_notices();
+    db.execute(1, "alter table gtest10 drop column b cascade")
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec!["drop cascades to column c of table gtest10".to_string()]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select column_name
+             from information_schema.columns
+             where table_name = 'gtest10'
+             order by ordinal_position",
+        ),
+        vec![vec![Value::Text("a".into())]]
+    );
+}
+
+#[test]
+fn generated_inheritance_metadata_conflicts_and_not_null_names_match_parent() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table gtest1 (a int primary key, b int generated always as (a * 2) virtual)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table gtesty (x int, b int generated always as (x * 22) virtual)",
+    )
+    .unwrap();
+
+    match db.execute(1, "create table gtest1_y () inherits (gtest1, gtesty)") {
+        Err(ExecError::Parse(ParseError::DetailedError { message, hint, .. })) => {
+            assert_eq!(
+                message,
+                "column \"b\" inherits conflicting generation expressions"
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some("To resolve the conflict, specify a generation expression explicitly.")
+            );
+        }
+        other => panic!("expected generated inheritance conflict, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "create table gtest1_y (b int generated always as (x + 1) virtual) inherits (gtest1, gtesty)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select generation_expression
+             from information_schema.columns
+             where table_name = 'gtest1_y' and column_name = 'b'",
+        ),
+        vec![vec![Value::Text("(x + 1)".into())]]
+    );
+
+    db.execute(1, "create table gtest_normal (a int, b int)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table gtest_normal_child (a int, b int generated always as (a * 2) virtual)",
+    )
+    .unwrap();
+    match db.execute(1, "alter table gtest_normal_child inherit gtest_normal") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "column \"b\" in child table must not be a generated column"
+            );
+        }
+        other => panic!("expected alter inherit generated mismatch, got {other:?}"),
+    }
+
+    db.execute(1, "create table gtestxx_1 (a int not null, b int)")
+        .unwrap();
+    match db.execute(1, "alter table gtestxx_1 inherit gtest1") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "column \"b\" in child table must be a generated column"
+            );
+        }
+        other => panic!("expected alter inherit missing generated column, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "create table gtestx (x int, b int generated always as (a * 22) virtual) inherits (gtest1)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.conname
+             from pg_constraint c
+             join pg_class r on r.oid = c.conrelid
+             where r.relname = 'gtestx' and c.contype = 'n'",
+        ),
+        vec![vec![Value::Text("gtest1_a_not_null".into())]]
+    );
+}
+
+#[test]
+fn drop_table_cascade_notice_uses_visible_search_path_name() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create schema generated_virtual_tests")
+        .unwrap();
+    session
+        .execute(&db, "set search_path = generated_virtual_tests")
+        .unwrap();
+    session
+        .execute(&db, "create table gtestp (f1 int)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table gtestc (f2 int generated always as (f1 + 1) virtual) inherits (gtestp)",
+        )
+        .unwrap();
+    take_backend_notice_messages();
+
+    session.execute(&db, "drop table gtestp cascade").unwrap();
+
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from("drop cascades to table gtestc")]
     );
 }
 
