@@ -542,6 +542,8 @@ fn merge_local_column(
                 "cannot define not-null constraint with NO INHERIT on column \"{}\"",
                 merged.column.name
             )));
+        } else {
+            replace_not_null_constraint(&mut merged.column, attributes.clone());
         }
     } else if !local.nullable() {
         ensure_not_null_constraint(&mut merged.column);
@@ -642,6 +644,8 @@ fn merge_partition_column_override(
                 "cannot define not-null constraint with NO INHERIT on column \"{}\"",
                 merged.column.name
             )));
+        } else {
+            replace_not_null_constraint(&mut merged.column, attributes.clone());
         }
     }
     if let Some(default_expr) = &override_.default_expr {
@@ -741,6 +745,18 @@ fn ensure_not_null_constraint(column: &mut crate::backend::parser::ColumnDef) {
     column.constraints.push(ColumnConstraint::NotNull {
         attributes: ConstraintAttributes::default(),
     });
+}
+
+fn replace_not_null_constraint(
+    column: &mut crate::backend::parser::ColumnDef,
+    attributes: ConstraintAttributes,
+) {
+    column
+        .constraints
+        .retain(|constraint| !matches!(constraint, ColumnConstraint::NotNull { .. }));
+    column
+        .constraints
+        .push(ColumnConstraint::NotNull { attributes });
 }
 
 fn ensure_primary_key_constraint(column: &mut crate::backend::parser::ColumnDef) {
