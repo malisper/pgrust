@@ -89,6 +89,9 @@ fn simple_comparison_implies(filter: &Expr, predicate: &Expr) -> bool {
     if filter.key != predicate.key {
         return false;
     }
+    if !text_like_range_implication(&filter) || !text_like_range_implication(&predicate) {
+        return false;
+    }
     let Some(ordering) =
         compare_order_values(&filter.value, &predicate.value, None, None, false).ok()
     else {
@@ -125,6 +128,11 @@ fn simple_comparison_implies(filter: &Expr, predicate: &Expr) -> bool {
         },
         _ => false,
     }
+}
+
+fn text_like_range_implication(comparison: &SimpleComparison) -> bool {
+    comparison.value.as_text().is_some()
+        && expr_sql_type_hint(&comparison.key).is_some_and(is_text_like_type)
 }
 
 fn extract_simple_comparison(expr: &Expr) -> Option<SimpleComparison> {
@@ -437,6 +445,34 @@ mod tests {
         assert!(predicate_implies_index_predicate(
             Some(&cmp(OpExprKind::Eq, "A")),
             Some(&predicate),
+        ));
+    }
+
+    fn int_var() -> Expr {
+        Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(0),
+            varlevelsup: 0,
+            vartype: SqlType::new(SqlTypeKind::Int4),
+        })
+    }
+
+    fn int_cmp(op: OpExprKind, value: i32) -> Expr {
+        Expr::Op(Box::new(OpExpr {
+            opno: 0,
+            opfuncid: 0,
+            op,
+            opresulttype: SqlType::new(SqlTypeKind::Bool),
+            args: vec![int_var(), Expr::Const(Value::Int32(value))],
+            collation_oid: None,
+        }))
+    }
+
+    #[test]
+    fn numeric_filter_does_not_imply_range_partial_predicate() {
+        assert!(!predicate_implies_index_predicate(
+            Some(&int_cmp(OpExprKind::Eq, 1)),
+            Some(&int_cmp(OpExprKind::Gt, 0)),
         ));
     }
 }

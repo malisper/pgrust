@@ -39,6 +39,20 @@ PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet inherited_minm
 PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet planner_rewrites_inherited_minmax_with_directional_index_only_subplans
 PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh check
 
+CI partial-index follow-up:
+GitHub cargo-test-run (1/2) failed
+bind_delete_ignores_partial_index_when_filter_does_not_imply_predicate and
+bind_insert_rejects_partial_index_when_inference_predicate_is_missing_or_weaker.
+Root cause was the new partial-index implication accepting numeric comparisons
+like id = 1 => id > 0. Kept the select-regression behavior scoped to text-like
+range predicates and added a numeric guard test.
+
+CI partial-index tests run:
+PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet bind_delete_ignores_partial_index_when_filter_does_not_imply_predicate
+PGRUST_TARGET_SLOT=6 scripts/cargo_isolated.sh test --lib --quiet bind_insert_rejects_partial_index_when_inference_predicate_is_missing_or_weaker
+PGRUST_TARGET_SLOT=5 scripts/cargo_isolated.sh test --lib --quiet index_predicates
+PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh check
+
 PR update:
 Merged origin/perf-optimization after GitHub reported PR #237 dirty. Resolved
 the scope.rs conflict by combining VALUES(n.*) expansion with upstream
