@@ -1818,16 +1818,23 @@ pub(super) fn bind_prefix_operator_expr(
         ));
     }
     match op {
-        "!!" if matches!(raw_type.kind, SqlTypeKind::TsQuery) => Ok(Expr::builtin_func(
-            BuiltinScalarFunction::TsQueryNot,
-            Some(SqlType::new(SqlTypeKind::TsQuery)),
-            false,
-            vec![coerce_bound_expr(
-                bound,
-                raw_type,
-                SqlType::new(SqlTypeKind::TsQuery),
-            )],
-        )),
+        "!!" => {
+            let target_type = SqlType::new(SqlTypeKind::TsQuery);
+            let operand_type = coerce_unknown_string_literal_type(expr, raw_type, target_type);
+            if matches!(operand_type.kind, SqlTypeKind::TsQuery) {
+                Ok(Expr::builtin_func(
+                    BuiltinScalarFunction::TsQueryNot,
+                    Some(target_type),
+                    false,
+                    vec![coerce_bound_expr(bound, raw_type, operand_type)],
+                ))
+            } else {
+                Err(ParseError::UnexpectedToken {
+                    expected: "supported prefix operator",
+                    actual: op.into(),
+                })
+            }
+        }
         _ => Err(ParseError::UnexpectedToken {
             expected: "supported prefix operator",
             actual: op.into(),
@@ -1904,6 +1911,28 @@ pub(crate) fn bind_concat_operands(
     right_type: SqlType,
     right_bound: Expr,
 ) -> Result<Expr, ParseError> {
+    let raw_left_type = left_type;
+    let raw_right_type = right_type;
+    let mut left_type = left_type;
+    let mut right_type = right_type;
+    let left_is_string_literal = matches!(
+        left_sql,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    );
+    let right_is_string_literal = matches!(
+        right_sql,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    );
+    if matches!(left_type.kind, SqlTypeKind::TsVector) && right_is_string_literal {
+        right_type = SqlType::new(SqlTypeKind::TsVector);
+    } else if matches!(right_type.kind, SqlTypeKind::TsVector) && left_is_string_literal {
+        left_type = SqlType::new(SqlTypeKind::TsVector);
+    } else if matches!(left_type.kind, SqlTypeKind::TsQuery) && right_is_string_literal {
+        right_type = SqlType::new(SqlTypeKind::TsQuery);
+    } else if matches!(right_type.kind, SqlTypeKind::TsQuery) && left_is_string_literal {
+        left_type = SqlType::new(SqlTypeKind::TsQuery);
+    }
+
     if left_type.kind == SqlTypeKind::Jsonb
         && !left_type.is_array
         && right_type.kind == SqlTypeKind::Jsonb
@@ -1972,8 +2001,16 @@ pub(crate) fn bind_concat_operands(
             Some(SqlType::new(SqlTypeKind::TsVector)),
             false,
             vec![
-                coerce_bound_expr(left_bound, left_type, SqlType::new(SqlTypeKind::TsVector)),
-                coerce_bound_expr(right_bound, right_type, SqlType::new(SqlTypeKind::TsVector)),
+                coerce_bound_expr(
+                    left_bound,
+                    raw_left_type,
+                    SqlType::new(SqlTypeKind::TsVector),
+                ),
+                coerce_bound_expr(
+                    right_bound,
+                    raw_right_type,
+                    SqlType::new(SqlTypeKind::TsVector),
+                ),
             ],
         ));
     }
@@ -1986,8 +2023,16 @@ pub(crate) fn bind_concat_operands(
             Some(SqlType::new(SqlTypeKind::TsQuery)),
             false,
             vec![
-                coerce_bound_expr(left_bound, left_type, SqlType::new(SqlTypeKind::TsQuery)),
-                coerce_bound_expr(right_bound, right_type, SqlType::new(SqlTypeKind::TsQuery)),
+                coerce_bound_expr(
+                    left_bound,
+                    raw_left_type,
+                    SqlType::new(SqlTypeKind::TsQuery),
+                ),
+                coerce_bound_expr(
+                    right_bound,
+                    raw_right_type,
+                    SqlType::new(SqlTypeKind::TsQuery),
+                ),
             ],
         ));
     }

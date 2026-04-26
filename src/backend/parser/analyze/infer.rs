@@ -740,9 +740,29 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 Some(
                     BuiltinScalarFunction::TsQueryAnd
                     | BuiltinScalarFunction::TsQueryOr
-                    | BuiltinScalarFunction::TsQueryNot,
+                    | BuiltinScalarFunction::TsQueryNot
+                    | BuiltinScalarFunction::TsQueryPhrase,
                 ) => SqlType::new(SqlTypeKind::TsQuery),
+                Some(BuiltinScalarFunction::TsQueryNumnode) => SqlType::new(SqlTypeKind::Int4),
+                Some(BuiltinScalarFunction::TsVectorIn) => SqlType::new(SqlTypeKind::TsVector),
+                Some(BuiltinScalarFunction::TsQueryIn) => SqlType::new(SqlTypeKind::TsQuery),
+                Some(BuiltinScalarFunction::TsVectorOut | BuiltinScalarFunction::TsQueryOut) => {
+                    SqlType::new(SqlTypeKind::Text)
+                }
                 Some(BuiltinScalarFunction::TsVectorConcat) => SqlType::new(SqlTypeKind::TsVector),
+                Some(
+                    BuiltinScalarFunction::TsVectorStrip
+                    | BuiltinScalarFunction::TsVectorDelete
+                    | BuiltinScalarFunction::ArrayToTsVector
+                    | BuiltinScalarFunction::TsVectorSetWeight
+                    | BuiltinScalarFunction::TsVectorFilter,
+                ) => SqlType::new(SqlTypeKind::TsVector),
+                Some(BuiltinScalarFunction::TsVectorToArray) => {
+                    SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+                }
+                Some(BuiltinScalarFunction::TsRank | BuiltinScalarFunction::TsRankCd) => {
+                    SqlType::new(SqlTypeKind::Float4)
+                }
                 Some(BuiltinScalarFunction::Random) => SqlType::new(SqlTypeKind::Float8),
                 Some(BuiltinScalarFunction::CashLarger | BuiltinScalarFunction::CashSmaller) => {
                     SqlType::new(SqlTypeKind::Money)

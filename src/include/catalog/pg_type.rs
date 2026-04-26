@@ -1246,6 +1246,8 @@ fn annotate_type_io_procs(rows: &mut [PgTypeRow]) {
             TIMESTAMPTZ_TYPE_OID => 1150,
             TXID_SNAPSHOT_TYPE_OID => 2939,
             PG_SNAPSHOT_TYPE_OID => 5055,
+            TSVECTOR_TYPE_OID => 3610,
+            TSQUERY_TYPE_OID => 3612,
             _ if row.sql_type.is_array => ARRAY_IN_PROC_OID,
             _ if matches!(row.sql_type.kind, SqlTypeKind::Range) => RANGE_IN_PROC_OID,
             _ if matches!(row.sql_type.kind, SqlTypeKind::Multirange) => MULTIRANGE_IN_PROC_OID,
@@ -1254,6 +1256,8 @@ fn annotate_type_io_procs(rows: &mut [PgTypeRow]) {
         row.typoutput = match row.oid {
             TXID_SNAPSHOT_TYPE_OID => 2940,
             PG_SNAPSHOT_TYPE_OID => 5056,
+            TSVECTOR_TYPE_OID => 3611,
+            TSQUERY_TYPE_OID => 3613,
             _ => row.typoutput,
         };
     }

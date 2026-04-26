@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::pgrust::compact_string::CompactString;
 
@@ -51,19 +51,31 @@ pub struct TsVector {
 
 impl TsVector {
     pub fn new(mut lexemes: Vec<TsLexeme>) -> Self {
-        let mut by_lexeme = BTreeMap::<String, BTreeSet<TsPosition>>::new();
+        let mut by_lexeme = BTreeMap::<String, BTreeMap<u16, Option<TsWeight>>>::new();
         for lexeme in lexemes.drain(..) {
-            by_lexeme
+            let positions = by_lexeme
                 .entry(lexeme.text.as_str().to_string())
-                .or_default()
-                .extend(lexeme.positions);
+                .or_default();
+            for position in lexeme.positions {
+                positions
+                    .entry(position.position)
+                    .and_modify(|weight| {
+                        if ts_weight_rank(position.weight) > ts_weight_rank(*weight) {
+                            *weight = position.weight;
+                        }
+                    })
+                    .or_insert(position.weight);
+            }
         }
         Self {
             lexemes: by_lexeme
                 .into_iter()
                 .map(|(text, positions)| TsLexeme {
                     text: text.into(),
-                    positions: positions.into_iter().collect(),
+                    positions: positions
+                        .into_iter()
+                        .map(|(position, weight)| TsPosition { position, weight })
+                        .collect(),
                 })
                 .collect(),
         }
@@ -94,13 +106,28 @@ impl TsVector {
                     let position = digits
                         .parse::<u16>()
                         .map_err(|_| "invalid tsvector position".to_string())?;
-                    let weight = match chars.peek().copied() {
-                        Some(ch) if TsWeight::from_char(ch).is_some() => {
-                            let ch = chars.next().unwrap();
+                    if position == 0 {
+                        return Err("invalid tsvector position".into());
+                    }
+                    let mut weight = None;
+                    while let Some(ch) = chars.peek().copied() {
+                        let next_weight = if ch == '*' {
+                            Some(TsWeight::A)
+                        } else {
                             TsWeight::from_char(ch)
+                        };
+                        let Some(next_weight) = next_weight else {
+                            break;
+                        };
+                        chars.next();
+                        if next_weight == TsWeight::D {
+                            if weight.is_some() {
+                                return Err("invalid tsvector position weight".into());
+                            }
+                        } else if weight.replace(next_weight).is_some() {
+                            return Err("invalid tsvector position weight".into());
                         }
-                        _ => None,
-                    };
+                    }
                     positions.push(TsPosition { position, weight });
                     if !matches!(chars.peek(), Some(',')) {
                         break;
@@ -141,6 +168,14 @@ impl TsVector {
 
     pub fn contains_term(&self, operand: &TsQueryOperand) -> bool {
         self.positions_for_operand(operand).next().is_some()
+            || self.lexemes.iter().any(|lexeme| {
+                let text_matches = if operand.prefix {
+                    lexeme.text.as_str().starts_with(operand.lexeme.as_str())
+                } else {
+                    lexeme.text == operand.lexeme
+                };
+                text_matches && lexeme.positions.is_empty()
+            })
     }
 
     pub fn positions_for_operand<'a>(
@@ -162,7 +197,7 @@ impl TsVector {
                         || operand
                             .weights
                             .iter()
-                            .any(|weight| Some(*weight) == position.weight)
+                            .any(|weight| *weight == position.weight.unwrap_or(TsWeight::D))
                     {
                         Some(position.position)
                     } else {
@@ -170,6 +205,15 @@ impl TsVector {
                     }
                 })
             })
+    }
+}
+
+fn ts_weight_rank(weight: Option<TsWeight>) -> u8 {
+    match weight.unwrap_or(TsWeight::D) {
+        TsWeight::D => 0,
+        TsWeight::C => 1,
+        TsWeight::B => 2,
+        TsWeight::A => 3,
     }
 }
 
@@ -240,15 +284,29 @@ where
     I: Iterator<Item = char>,
 {
     match chars.peek().copied() {
-        Some('\'') => parse_quoted_ts_text(chars),
+        Some('\'') => {
+            let lexeme = parse_quoted_ts_text(chars)?;
+            if lexeme.is_empty() {
+                Err("empty lexeme is not allowed".into())
+            } else {
+                Ok(lexeme)
+            }
+        }
         Some(_) => {
             let mut out = String::new();
             while let Some(ch) = chars.peek().copied() {
                 if ch.is_whitespace() || ch == ':' {
                     break;
                 }
-                out.push(ch);
                 chars.next();
+                if ch == '\\' {
+                    let Some(escaped) = chars.next() else {
+                        return Err("there is no escaped character".into());
+                    };
+                    out.push(escaped);
+                } else {
+                    out.push(ch);
+                }
             }
             if out.is_empty() {
                 Err("expected tsvector lexeme".into())
@@ -270,6 +328,12 @@ where
     let mut out = String::new();
     loop {
         match chars.next() {
+            Some('\\') => {
+                let Some(escaped) = chars.next() else {
+                    return Err("there is no escaped character".into());
+                };
+                out.push(escaped);
+            }
             Some('\'') if matches!(chars.peek(), Some('\'')) => {
                 chars.next();
                 out.push('\'');
@@ -290,6 +354,18 @@ fn parse_quoted_ts_text_with_consumed(input: &str) -> Result<(String, usize), St
     let mut index = 1usize;
     while index < bytes.len() {
         match bytes[index] {
+            b'\\' => {
+                index += 1;
+                if index >= bytes.len() {
+                    return Err("there is no escaped character".into());
+                }
+                let ch = input[index..]
+                    .chars()
+                    .next()
+                    .ok_or_else(|| "unterminated quoted text".to_string())?;
+                out.push(ch);
+                index += ch.len_utf8();
+            }
             b'\'' if bytes.get(index + 1).copied() == Some(b'\'') => {
                 out.push('\'');
                 index += 2;
@@ -309,7 +385,16 @@ fn parse_quoted_ts_text_with_consumed(input: &str) -> Result<(String, usize), St
 }
 
 fn quote_ts_text(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "''"))
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('\'');
+    for ch in text.chars() {
+        if ch == '\'' || ch == '\\' {
+            out.push(ch);
+        }
+        out.push(ch);
+    }
+    out.push('\'');
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,6 +440,9 @@ impl<'a> TsQueryTokenizer<'a> {
                         let distance = digits
                             .parse::<u16>()
                             .map_err(|_| "invalid phrase distance".to_string())?;
+                        if distance > 16_384 {
+                            return Err("invalid phrase distance".into());
+                        }
                         tokens.push(TsQueryToken::Phrase(distance));
                         continue;
                     }
@@ -400,6 +488,9 @@ impl<'a> TsQueryTokenizer<'a> {
 
     fn parse_operand_quoted(&mut self) -> Result<TsQueryOperand, String> {
         let (lexeme, consumed) = parse_quoted_ts_text_with_consumed(&self.input[self.index..])?;
+        if lexeme.is_empty() {
+            return Err("empty lexeme is not allowed".into());
+        }
         self.index += consumed;
         self.finish_operand(lexeme)
     }
@@ -413,8 +504,16 @@ impl<'a> TsQueryTokenizer<'a> {
             if ch == ':' {
                 break;
             }
-            lexeme.push(ch);
             self.index += ch.len_utf8();
+            if ch == '\\' {
+                let Some(escaped) = self.input[self.index..].chars().next() else {
+                    return Err("there is no escaped character".into());
+                };
+                self.index += escaped.len_utf8();
+                lexeme.push(escaped);
+            } else {
+                lexeme.push(ch);
+            }
         }
         if lexeme.is_empty() {
             return Err("expected tsquery operand".into());
@@ -557,7 +656,7 @@ fn render_tsquery_node(node: &TsQueryNode, parent_precedence: u8) -> String {
                 } else {
                     format!("<{}>", distance)
                 },
-                render_tsquery_node(right, 3)
+                render_tsquery_node(right, 4)
             ),
             3,
         ),
@@ -579,7 +678,7 @@ fn render_tsquery_node(node: &TsQueryNode, parent_precedence: u8) -> String {
         ),
     };
     if precedence < parent_precedence {
-        format!("({rendered})")
+        format!("( {rendered} )")
     } else {
         rendered
     }
@@ -589,11 +688,11 @@ fn render_tsquery_operand(operand: &TsQueryOperand) -> String {
     let mut out = quote_ts_text(operand.lexeme.as_str());
     if operand.prefix || !operand.weights.is_empty() {
         out.push(':');
-        for weight in &operand.weights {
-            out.push(weight.as_char());
-        }
         if operand.prefix {
             out.push('*');
+        }
+        for weight in &operand.weights {
+            out.push(weight.as_char());
         }
     }
     out
@@ -612,6 +711,31 @@ mod tests {
     #[test]
     fn tsquery_round_trip() {
         let query = TsQuery::parse("foo & !bar <2> baz:*A").unwrap();
-        assert_eq!(query.render(), "'foo' & !'bar' <2> 'baz':A*");
+        assert_eq!(query.render(), "'foo' & !'bar' <2> 'baz':*A");
+    }
+
+    #[test]
+    fn tsquery_phrase_render_parenthesizes_right_phrase() {
+        let query = TsQuery::new(TsQueryNode::Phrase {
+            left: Box::new(TsQuery::parse("a & g").unwrap().root),
+            right: Box::new(TsQuery::parse("b <-> d").unwrap().root),
+            distance: 1,
+        });
+
+        assert_eq!(query.render(), "( 'a' & 'g' ) <-> ( 'b' <-> 'd' )");
+    }
+
+    #[test]
+    fn tsvector_default_d_weight_matches_explicit_d_query() {
+        let vector = TsVector::parse("wa:1D wb:2A").unwrap();
+        let query = TsQuery::parse("w:*D").unwrap();
+        let TsQueryNode::Operand(operand) = &query.root else {
+            panic!("expected operand");
+        };
+
+        assert_eq!(
+            vector.positions_for_operand(operand).collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 }

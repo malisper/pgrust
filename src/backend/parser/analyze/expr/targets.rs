@@ -531,6 +531,34 @@ fn bind_select_list_srf_call(
                     grouped_outer,
                     ctes,
                 );
+                if !arg_type.is_array && matches!(arg_type.kind, SqlTypeKind::TsVector) {
+                    bound_args.push(bind_expr_with_outer_and_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?);
+                    output_columns.extend([
+                        QueryColumn {
+                            name: "lexeme".into(),
+                            sql_type: SqlType::new(SqlTypeKind::Text),
+                            wire_type_oid: None,
+                        },
+                        QueryColumn {
+                            name: "positions".into(),
+                            sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Int2)),
+                            wire_type_oid: None,
+                        },
+                        QueryColumn {
+                            name: "weights".into(),
+                            sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                            wire_type_oid: None,
+                        },
+                    ]);
+                    continue;
+                }
                 let Some(element_type) = unnest_element_type(arg_type) else {
                     return Err(ParseError::UnexpectedToken {
                         expected: "array or multirange argument to unnest",
@@ -554,12 +582,6 @@ fn bind_select_list_srf_call(
                     name: column_name,
                     sql_type: element_type,
                     wire_type_oid: None,
-                });
-            }
-            if output_columns.len() != 1 {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "single-column set-returning function in select list",
-                    actual: name.to_string(),
                 });
             }
             Ok(SetReturningCall::Unnest {

@@ -3,7 +3,7 @@ use crate::include::nodes::tsearch::{TsLexeme, TsPosition, TsVector, TsWeight};
 use crate::pgrust::compact_string::CompactString;
 
 pub(crate) fn parse_tsvector_text(text: &str) -> Result<TsVector, ExecError> {
-    TsVector::parse(text).map_err(tsvector_input_error)
+    TsVector::parse(text).map_err(|message| tsvector_input_parse_error(text, message))
 }
 
 pub(crate) fn render_tsvector_text(vector: &TsVector) -> String {
@@ -53,6 +53,15 @@ pub(crate) fn tsvector_input_error(message: String) -> ExecError {
     ExecError::InvalidStorageValue {
         column: "<tsvector>".into(),
         details: message,
+    }
+}
+
+fn tsvector_input_parse_error(text: &str, _message: String) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("syntax error in tsvector: \"{text}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "42601",
     }
 }
 

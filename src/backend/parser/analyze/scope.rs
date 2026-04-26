@@ -1040,6 +1040,41 @@ fn bind_function_from_item_with_ctes(
                     grouped_outer,
                     ctes,
                 );
+                if !arg_type.is_array && matches!(arg_type.kind, SqlTypeKind::TsVector) {
+                    if args.len() != 1 {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "single tsvector argument to unnest",
+                            actual: format!("unnest with {} arguments", args.len()),
+                        });
+                    }
+                    bound_args.push(bind_expr_with_outer_and_ctes(
+                        arg,
+                        &call_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?);
+                    for (name, sql_type) in [
+                        ("lexeme", SqlType::new(SqlTypeKind::Text)),
+                        (
+                            "positions",
+                            SqlType::array_of(SqlType::new(SqlTypeKind::Int2)),
+                        ),
+                        (
+                            "weights",
+                            SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                        ),
+                    ] {
+                        output_columns.push(QueryColumn {
+                            name: name.into(),
+                            sql_type,
+                            wire_type_oid: None,
+                        });
+                        desc_columns.push(column_desc(name, sql_type, true));
+                    }
+                    continue;
+                }
                 let Some(element_type) = unnest_element_type(arg_type) else {
                     return Err(ParseError::UnexpectedToken {
                         expected: "array or multirange argument to unnest",

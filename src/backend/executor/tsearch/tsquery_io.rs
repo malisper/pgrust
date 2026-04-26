@@ -10,7 +10,7 @@ const NODE_NOT: u8 = 4;
 const NODE_PHRASE: u8 = 5;
 
 pub(crate) fn parse_tsquery_text(text: &str) -> Result<TsQuery, ExecError> {
-    TsQuery::parse(text).map_err(tsquery_input_error)
+    TsQuery::parse(text).map_err(|message| tsquery_input_parse_error(text, message))
 }
 
 pub(crate) fn render_tsquery_text(query: &TsQuery) -> String {
@@ -34,6 +34,25 @@ pub(crate) fn tsquery_input_error(message: String) -> ExecError {
     ExecError::InvalidStorageValue {
         column: "<tsquery>".into(),
         details: message,
+    }
+}
+
+fn tsquery_input_parse_error(text: &str, message: String) -> ExecError {
+    if message == "invalid phrase distance" {
+        return ExecError::DetailedError {
+            message:
+                "distance in phrase operator must be an integer value between zero and 16384 inclusive"
+                    .into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        };
+    }
+    ExecError::DetailedError {
+        message: format!("syntax error in tsquery: \"{text}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "42601",
     }
 }
 

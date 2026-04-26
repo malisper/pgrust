@@ -507,7 +507,7 @@ mod tests {
         );
         assert_eq!(
             websearch("english", "cat -\"fat rat\" cheese"),
-            "'cat' & !('fat' <-> 'rat') & 'chees'"
+            "'cat' & !( 'fat' <-> 'rat' ) & 'chees'"
         );
         assert_eq!(websearch("english", "this is ----fine"), "!!!!'fine'");
         assert_eq!(

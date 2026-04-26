@@ -696,6 +696,15 @@ fn eval_unnest(
         let arg_value = eval_expr(arg, slot, ctx)?;
         match arg_value {
             Value::Null => arrays.push(None),
+            Value::TsVector(vector) if args.len() == 1 => {
+                return Ok(crate::backend::executor::unnest_tsvector(&vector)
+                    .into_iter()
+                    .map(|value| match value {
+                        Value::Record(record) => TupleSlot::virtual_row(record.fields),
+                        other => TupleSlot::virtual_row(vec![other]),
+                    })
+                    .collect());
+            }
             Value::Multirange(multirange) => {
                 let values = multirange
                     .ranges

@@ -1268,6 +1268,26 @@ pub(crate) fn order_values(
                 _ => unreachable!(),
             }))
         }
+        (Value::TsVector(l), Value::TsVector(r)) => {
+            let ordering = crate::backend::executor::compare_tsvector(l, r);
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
+        (Value::TsQuery(l), Value::TsQuery(r)) => {
+            let ordering = crate::backend::executor::compare_tsquery(l, r);
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
         (Value::Multirange(l), Value::Multirange(r)) => {
             let ordering = compare_multirange_values(l, r);
             Ok(Value::Bool(match op {
