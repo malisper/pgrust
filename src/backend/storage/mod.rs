@@ -27,6 +27,17 @@ pub fn fsync_file(_file: &std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(all(unix, not(test)))]
+pub fn fsync_dir(path: &std::path::Path) -> std::io::Result<()> {
+    let dir = std::fs::File::open(path)?;
+    fsync_file(&dir)
+}
+
+#[cfg(any(not(unix), test))]
+pub fn fsync_dir(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(not(test))]
 pub fn sync_file_data(file: &std::fs::File) -> std::io::Result<()> {
     file.sync_data()

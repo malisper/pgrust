@@ -922,16 +922,18 @@ pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, C
     let typrelid = expect_oid(&values[7])?;
     let typelem = expect_oid(&values[8])?;
     let typarray = expect_oid(&values[9])?;
+    let typalign = AttributeAlign::from_char(expect_char(&values[5], "typalign")?)
+        .ok_or(CatalogError::Corrupt("invalid typalign"))?;
+    let typstorage = AttributeStorage::from_char(expect_char(&values[6], "typstorage")?)
+        .ok_or(CatalogError::Corrupt("invalid typstorage"))?;
     Ok(PgTypeRow {
         oid,
         typname: expect_text(&values[1])?,
         typnamespace: expect_oid(&values[2])?,
         typowner: expect_oid(&values[3])?,
         typlen: expect_int16(&values[4])?,
-        typalign: AttributeAlign::from_char(expect_char(&values[5], "typalign")?)
-            .ok_or(CatalogError::Corrupt("invalid typalign"))?,
-        typstorage: AttributeStorage::from_char(expect_char(&values[6], "typstorage")?)
-            .ok_or(CatalogError::Corrupt("invalid typstorage"))?,
+        typalign,
+        typstorage,
         typrelid,
         typelem,
         typarray,
@@ -939,9 +941,22 @@ pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, C
             if typrelid != 0 {
                 SqlType::named_composite(oid, typrelid)
             } else if typelem != 0 {
-                SqlType::array_of(SqlType::record(typelem))
+                // :HACK: Dynamic user base arrays and composite arrays both
+                // persist only typelem today. Use the array row alignment to
+                // keep existing composite arrays as records until pg_type rows
+                // carry enough metadata to decode this directly.
+                let element = decode_builtin_sql_type(typelem).unwrap_or_else(|| {
+                    if matches!(typalign, AttributeAlign::Double) {
+                        SqlType::record(typelem)
+                    } else {
+                        SqlType::new(SqlTypeKind::Text).with_identity(typelem, 0)
+                    }
+                });
+                SqlType::array_of(element)
+            } else if typarray != 0 {
+                SqlType::new(SqlTypeKind::Text).with_identity(oid, 0)
             } else {
-                SqlType::new(SqlTypeKind::Text)
+                SqlType::new(SqlTypeKind::Shell).with_identity(oid, 0)
             }
         }),
     })

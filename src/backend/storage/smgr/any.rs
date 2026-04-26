@@ -25,6 +25,20 @@ impl AnyStorageManager {
             smgr.release_external_fd();
         }
     }
+
+    pub fn replace_relation_main_fork_from_shadow(
+        &mut self,
+        shadow: RelFileLocator,
+        target: RelFileLocator,
+    ) -> Result<(), SmgrError> {
+        match self {
+            Self::Md(smgr) => smgr.replace_relation_main_fork_from_shadow(shadow, target),
+            Self::Mem(_) => Err(SmgrError::Io(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "atomic relfile replacement is not supported by memory storage",
+            ))),
+        }
+    }
 }
 
 impl StorageManager for AnyStorageManager {
