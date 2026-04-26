@@ -7680,6 +7680,47 @@ fn composite_array_field_assignment_and_selection_work() {
 }
 
 #[test]
+fn composite_field_array_assignment_uses_ordered_indirection() {
+    let db = Database::open(temp_dir("composite_field_array_assignment"), 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create type arrpair as (q1 int4, q2 text[])")
+        .unwrap();
+    db.execute(1, "create temp table t1 (f1 arrpair, f2 arrpair[])")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into t1 (f1.q1, f1.q2[1], f2[1].q2[1]) values (7, 'left', 'right')",
+    )
+    .unwrap();
+
+    match session.execute(&db, "select f1, f2 from t1").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            let [row] = rows.as_slice() else {
+                panic!("expected one row, got {rows:?}");
+            };
+            let Value::Record(f1) = &row[0] else {
+                panic!("expected record f1, got {:?}", row[0]);
+            };
+            assert_eq!(f1.fields[0], Value::Int32(7));
+            assert_eq!(f1.fields[1], Value::Array(vec![Value::Text("left".into())]));
+
+            let Value::PgArray(f2) = &row[1] else {
+                panic!("expected array f2, got {:?}", row[1]);
+            };
+            let Value::Record(f2_first) = &f2.elements[0] else {
+                panic!("expected record array element, got {:?}", f2.elements[0]);
+            };
+            assert_eq!(
+                f2_first.fields[1],
+                Value::Array(vec![Value::Text("right".into())])
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
 fn named_composite_array_field_selection_after_row_cast_works() {
     let db = Database::open(temp_dir("named_composite_array_field_selection"), 16).unwrap();
     let mut session = Session::new(1);

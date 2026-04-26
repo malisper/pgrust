@@ -1671,11 +1671,11 @@ pub(crate) fn encode_value_with_config(
             Ok(TupleValue::Bytes(encode_anyarray_bytes(&array)?))
         }
         (ScalarType::Array(_), Value::Array(items)) => Ok(TupleValue::Bytes(encode_array_bytes(
-            column.sql_type.element_type(),
+            array_storage_element_type(column.sql_type),
             &ArrayValue::from_1d(items),
         )?)),
         (ScalarType::Array(_), Value::PgArray(array)) => Ok(TupleValue::Bytes(encode_array_bytes(
-            column.sql_type.element_type(),
+            array_storage_element_type(column.sql_type),
             &array,
         )?)),
         (_, other) => Err(ExecError::TypeMismatch {
@@ -1684,6 +1684,19 @@ pub(crate) fn encode_value_with_config(
             right: other,
         }),
     }
+}
+
+fn array_storage_element_type(sql_type: SqlType) -> SqlType {
+    let mut element_type = sql_type.element_type();
+    if sql_type.type_oid != 0
+        && !matches!(
+            element_type.kind,
+            SqlTypeKind::Composite | SqlTypeKind::Record | SqlTypeKind::Enum
+        )
+    {
+        element_type.type_oid = 0;
+    }
+    element_type
 }
 
 fn text_value_for_storage(value: &Value) -> Result<String, ExecError> {
@@ -2445,7 +2458,7 @@ pub(crate) fn decode_value_with_toast(
             if column.sql_type.kind == SqlTypeKind::AnyArray {
                 decode_anyarray_bytes(bytes)
             } else {
-                decode_array_bytes(column.sql_type.element_type(), bytes)
+                decode_array_bytes(array_storage_element_type(column.sql_type), bytes)
             }
         }
         ScalarType::Multirange(multirange_type) => {

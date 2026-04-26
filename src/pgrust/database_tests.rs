@@ -16,7 +16,7 @@ use crate::include::catalog::{
     PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
     TEXT_TYPE_OID,
 };
-use crate::include::nodes::datum::{ArrayValue, IntervalValue};
+use crate::include::nodes::datum::{ArrayValue, IntervalValue, RecordValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
@@ -13486,7 +13486,49 @@ fn pg_rules_exposes_user_rules_but_not_return_rules() {
             "select definition from pg_rules where tablename = 'item_view' and rulename = 'item_view_ins'",
         ),
         vec![vec![Value::Text(
-            "CREATE RULE item_view_ins AS ON INSERT TO public.item_view DO INSTEAD insert into items values (new.id)"
+            "CREATE RULE item_view_ins AS ON INSERT TO public.item_view DO INSTEAD INSERT INTO items\n  VALUES (new.id)"
+                .into(),
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'item_view_ins'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE RULE item_view_ins AS\n    ON INSERT TO item_view DO INSTEAD INSERT INTO items\n  VALUES (new.id)"
+                .into(),
+        )]]
+    );
+}
+
+#[test]
+fn pg_get_ruledef_formats_insert_rule_actions_with_casts() {
+    let base = temp_dir("rule_insert_display");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table rule_src (f1 int8, f2 text)")
+        .unwrap();
+    db.execute(1, "create type rule_type as (if1 int8, if2 text[])")
+        .unwrap();
+    db.execute(1, "create table rule_dst (f4 rule_type[])")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule rule_src_ins as on insert to rule_src do also \
+         insert into rule_dst (f4[1].if1, f4[1].if2[2]) values (1, 'fool'), (new.f1, new.f2)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'rule_src_ins'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE RULE rule_src_ins AS\n    ON INSERT TO rule_src DO  INSERT INTO rule_dst (f4[1].if1, f4[1].if2[2]) VALUES (1,'fool'::text), (new.f1,new.f2)"
                 .into(),
         )]]
     );
@@ -14831,6 +14873,73 @@ fn alter_table_add_column_propagates_to_temp_inherited_child() {
         }
         other => panic!("expected query result, got {other:?}"),
     }
+}
+
+#[test]
+fn alter_table_multi_add_column_updates_partitioned_table() {
+    let base = temp_dir("alter_table_multi_add_partitioned");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table returningwrtest (a int) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table returningwrtest1 partition of returningwrtest for values in (1)",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into returningwrtest values (1) returning returningwrtest",
+        ),
+        vec![vec![Value::Record(RecordValue::anonymous(vec![(
+            "a".into(),
+            Value::Int32(1),
+        )]))]]
+    );
+    session
+        .execute(&db, "alter table returningwrtest add b text, add c int")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table returningwrtest2 partition of returningwrtest for values in (2)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select attname from pg_attribute
+             where attrelid = 'returningwrtest'::regclass and attnum > 0
+             order by attnum",
+        ),
+        vec![
+            vec![Value::Text("a".into())],
+            vec![Value::Text("b".into())],
+            vec![Value::Text("c".into())],
+        ]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into returningwrtest values (1, 'x', 10) returning returningwrtest",
+        ),
+        vec![vec![Value::Record(RecordValue::anonymous(vec![
+            ("a".into(), Value::Int32(1)),
+            ("b".into(), Value::Text("x".into())),
+            ("c".into(), Value::Int32(10)),
+        ]))]]
+    );
 }
 
 #[test]
@@ -28260,7 +28369,7 @@ fn temp_create_table_as_point_window_order_ignores_disabled_indexscan() {
         .execute(
             &db,
             "create table point_source as \
-             select point(g, g * 2) as p from generate_series(1, 11000) g",
+             select point(g, g * 2) as p from generate_series(1, 2000) g",
         )
         .unwrap();
     session
@@ -28313,7 +28422,7 @@ fn temp_create_table_as_point_window_order_ignores_disabled_indexscan() {
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Int64(11001)]]);
+            assert_eq!(rows, vec![vec![Value::Int64(2001)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }

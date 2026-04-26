@@ -123,7 +123,7 @@ use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
 };
-use crate::backend::rewrite::{format_stored_rule_definition, format_view_definition};
+use crate::backend::rewrite::{format_stored_rule_definition_with_catalog, format_view_definition};
 use crate::backend::statistics::{
     render_pg_dependencies_text, render_pg_mcv_list_text, render_pg_ndistinct_text,
 };
@@ -1548,29 +1548,29 @@ fn eval_least(values: &[Value]) -> Result<Value, ExecError> {
 fn lookup_system_binding(
     bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
     varno: usize,
-) -> Value {
+) -> Option<Value> {
     bindings
         .iter()
         .find(|binding| binding.varno == varno)
         .map(|binding| Value::Int64(i64::from(binding.table_oid)))
-        .unwrap_or(Value::Null)
 }
 
-fn lookup_ctid(
+fn ctid_value(tid: crate::include::access::htup::ItemPointerData) -> Value {
+    Value::Text(CompactString::from_owned(format!(
+        "({},{})",
+        tid.block_number, tid.offset_number
+    )))
+}
+
+fn lookup_ctid_binding(
     bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
     varno: usize,
-) -> Value {
+) -> Option<Value> {
     bindings
         .iter()
         .find(|binding| binding.varno == varno)
         .and_then(|binding| binding.tid)
-        .map(|tid| {
-            Value::Text(CompactString::from_owned(format!(
-                "({},{})",
-                tid.block_number, tid.offset_number
-            )))
-        })
-        .unwrap_or(Value::Null)
+        .map(ctid_value)
 }
 
 fn builtin_function_for_expr(funcid: u32) -> Result<BuiltinScalarFunction, ExecError> {
@@ -2477,24 +2477,53 @@ fn eval_pg_get_functiondef(values: &[Value], ctx: &ExecutorContext) -> Result<Va
     }
 }
 
-fn eval_pg_get_expr(values: &[Value]) -> Result<Value, ExecError> {
+fn eval_pg_get_expr(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
     match values {
         [Value::Null, _] | [Value::Null, _, _] | [_, Value::Null] | [_, Value::Null, _] => {
             Ok(Value::Null)
         }
-        [expr, _relation] => Ok(expr
-            .as_text()
-            .map(|text| Value::Text(text.into()))
-            .unwrap_or(Value::Null)),
-        [expr, _relation, _pretty] => Ok(expr
-            .as_text()
-            .map(|text| Value::Text(text.into()))
-            .unwrap_or(Value::Null)),
+        [expr, _relation] | [expr, _relation, _] => {
+            let Some(text) = expr.as_text() else {
+                return Ok(Value::Null);
+            };
+            if let Ok(bound) = crate::backend::parser::deserialize_partition_bound(text) {
+                return Ok(Value::Text(
+                    crate::backend::commands::partition::render_partition_bound(
+                        &bound,
+                        &ctx.datetime_config,
+                    )
+                    .into(),
+                ));
+            }
+            Ok(Value::Text(text.into()))
+        }
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "pg_get_expr(pg_node_tree, oid [, pretty])",
             actual: format!("PgGetExpr({} args)", values.len()),
         })),
     }
+}
+
+fn eval_pg_get_partkeydef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let catalog = executor_catalog(ctx)?;
+    let relation_oid = match values {
+        [Value::Null] => return Ok(Value::Null),
+        [value] => oid_arg_to_u32(value, "pg_get_partkeydef")?,
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "pg_get_partkeydef(oid)",
+                actual: format!("PgGetPartKeyDef({} args)", values.len()),
+            }));
+        }
+    };
+    let Some(relation) = catalog.relation_by_oid(relation_oid) else {
+        return Ok(Value::Null);
+    };
+    crate::backend::commands::partition::render_partition_keydef(&relation).map(|value| {
+        value
+            .map(|text| Value::Text(text.into()))
+            .unwrap_or(Value::Null)
+    })
 }
 
 fn eval_pg_get_constraintdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -2898,9 +2927,13 @@ fn eval_pg_get_viewdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value,
 
 fn eval_pg_get_ruledef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
     let catalog = executor_catalog(ctx)?;
-    let rule_oid = match values {
+    let (rule_oid, pretty) = match values {
         [Value::Null] | [Value::Null, _] | [_, Value::Null] => return Ok(Value::Null),
-        [value] | [value, _] => oid_arg_to_u32(value, "pg_get_ruledef")?,
+        [value] => (oid_arg_to_u32(value, "pg_get_ruledef")?, false),
+        [value, pretty] => (
+            oid_arg_to_u32(value, "pg_get_ruledef")?,
+            matches!(pretty, Value::Bool(true)),
+        ),
         _ => {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "pg_get_ruledef(rule [, pretty])",
@@ -2911,20 +2944,26 @@ fn eval_pg_get_ruledef(values: &[Value], ctx: &ExecutorContext) -> Result<Value,
     if rule_oid == 0 {
         return Ok(Value::Null);
     }
-    let Some(rule) = catalog
-        .rewrite_rows()
-        .into_iter()
-        .find(|row| row.oid == rule_oid)
-    else {
+    let Some(rule) = catalog.rewrite_row_by_oid(rule_oid) else {
         return Ok(Value::Null);
     };
     let relation_name = catalog
         .class_row_by_oid(rule.ev_class)
         .map(|row| row.relname)
+        .or_else(|| {
+            catalog
+                .relcache()
+                .relation_name_by_oid(rule.ev_class)
+                .map(|name| name.rsplit('.').next().unwrap_or(&name).to_string())
+        })
         .unwrap_or_else(|| rule.ev_class.to_string());
-    Ok(Value::Text(
-        format_stored_rule_definition(&rule, &relation_name).into(),
-    ))
+    let mut definition = format_stored_rule_definition_with_catalog(&rule, &relation_name, catalog);
+    if pretty {
+        definition = definition
+            .replace(" AS ON ", " AS\n    ON ")
+            .replace(" DO ALSO ", " DO  ");
+    }
+    Ok(Value::Text(definition.into()))
 }
 
 fn eval_pg_get_triggerdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -3107,13 +3146,22 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
 }
 
 fn eval_pg_relation_size(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
-    let [value] = values else {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "pg_relation_size(regclass)",
-            actual: format!("PgRelationSize({} args)", values.len()),
-        }));
+    let value = match values {
+        [value] | [value, _] => value,
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "pg_relation_size(regclass)",
+                actual: format!("PgRelationSize({} args)", values.len()),
+            }));
+        }
     };
     if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    if values
+        .get(1)
+        .is_some_and(|fork| matches!(fork, Value::Null))
+    {
         return Ok(Value::Null);
     }
 
@@ -3983,9 +4031,13 @@ pub fn eval_expr(
                     sqlstate: "XX000",
                 })
             } else if var.varattno == TABLE_OID_ATTR_NO {
-                Ok(lookup_system_binding(&ctx.system_bindings, var.varno))
+                Ok(lookup_system_binding(&ctx.system_bindings, var.varno)
+                    .or_else(|| slot.table_oid.map(|table_oid| Value::Int64(i64::from(table_oid))))
+                    .unwrap_or(Value::Null))
             } else if var.varattno == SELF_ITEM_POINTER_ATTR_NO {
-                Ok(lookup_ctid(&ctx.system_bindings, var.varno))
+                Ok(lookup_ctid_binding(&ctx.system_bindings, var.varno)
+                    .or_else(|| slot.tid().map(ctid_value))
+                    .unwrap_or(Value::Null))
             } else {
                 let index = attrno_index(var.varattno).ok_or_else(|| {
                     malformed_expr_error("system attribute outside executor support")
@@ -5190,6 +5242,7 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::PgGetFunctionDef
         | BuiltinScalarFunction::PgGetFunctionResult
         | BuiltinScalarFunction::PgGetExpr
+        | BuiltinScalarFunction::PgGetPartKeyDef
         | BuiltinScalarFunction::PgGetStatisticsObjDef
         | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
         | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
@@ -6896,11 +6949,12 @@ pub(crate) fn eval_builtin_function(
         }
         BuiltinScalarFunction::PgGetFunctionDef => eval_pg_get_functiondef(&values, ctx),
         BuiltinScalarFunction::PgGetFunctionResult => eval_pg_get_function_result(&values, ctx),
-        BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values),
+        BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values, ctx),
+        BuiltinScalarFunction::PgGetPartKeyDef => eval_pg_get_partkeydef(&values, ctx),
         BuiltinScalarFunction::PgGetConstraintDef => eval_pg_get_constraintdef(&values, ctx),
         BuiltinScalarFunction::PgGetIndexDef => eval_pg_get_indexdef(&values, ctx),
-        BuiltinScalarFunction::PgGetViewDef => eval_pg_get_viewdef(&values, ctx),
         BuiltinScalarFunction::PgGetRuleDef => eval_pg_get_ruledef(&values, ctx),
+        BuiltinScalarFunction::PgGetViewDef => eval_pg_get_viewdef(&values, ctx),
         BuiltinScalarFunction::PgGetTriggerDef => eval_pg_get_triggerdef(&values, ctx),
         BuiltinScalarFunction::PgTriggerDepth => Ok(Value::Int32(ctx.trigger_depth as i32)),
         BuiltinScalarFunction::PgRelationIsPublishable => {

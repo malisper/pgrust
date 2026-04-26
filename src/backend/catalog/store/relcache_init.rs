@@ -82,6 +82,8 @@ struct ColumnDescFile {
     not_null_constraint_inhcount: i16,
     not_null_constraint_no_inherit: bool,
     not_null_primary_key_owned: bool,
+    #[serde(default)]
+    attacl: Option<Vec<String>>,
     attrdef_oid: Option<u32>,
     default_expr: Option<String>,
     #[serde(default)]
@@ -274,6 +276,7 @@ fn column_desc_to_file(column: &ColumnDesc) -> ColumnDescFile {
         not_null_constraint_inhcount: column.not_null_constraint_inhcount,
         not_null_constraint_no_inherit: column.not_null_constraint_no_inherit,
         not_null_primary_key_owned: column.not_null_primary_key_owned,
+        attacl: column.attacl.clone(),
         attrdef_oid: column.attrdef_oid,
         default_expr: column.default_expr.clone(),
         generated: column.generated,
@@ -307,6 +310,7 @@ fn column_desc_from_file(column: ColumnDescFile) -> ColumnDesc {
         not_null_constraint_inhcount: column.not_null_constraint_inhcount,
         not_null_constraint_no_inherit: column.not_null_constraint_no_inherit,
         not_null_primary_key_owned: column.not_null_primary_key_owned,
+        attacl: column.attacl,
         attrdef_oid: column.attrdef_oid,
         default_expr: column.default_expr,
         default_sequence_oid,

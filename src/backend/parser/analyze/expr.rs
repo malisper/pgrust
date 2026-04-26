@@ -171,6 +171,17 @@ fn supports_array_subscripts(array_type: SqlType) -> bool {
         )
 }
 
+fn expression_navigation_sql_type(sql_type: SqlType, catalog: &dyn CatalogLookup) -> SqlType {
+    let Some(domain) = catalog.domain_by_type_oid(sql_type.type_oid) else {
+        return sql_type;
+    };
+    if sql_type.is_array && !domain.sql_type.is_array {
+        SqlType::array_of(domain.sql_type)
+    } else {
+        domain.sql_type
+    }
+}
+
 fn unsupported_subscript_type_error(sql_type: SqlType) -> ParseError {
     ParseError::DetailedError {
         message: format!(
@@ -2982,13 +2993,16 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             })?,
         },
         SqlExpr::ArraySubscript { array, subscripts } => {
-            let array_type = infer_sql_expr_type_with_ctes(
-                array,
-                scope,
+            let array_type = expression_navigation_sql_type(
+                infer_sql_expr_type_with_ctes(
+                    array,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                ),
                 catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
             );
             if array_type.kind == SqlTypeKind::Jsonb && !array_type.is_array {
                 return bind_jsonb_subscript_expr(
@@ -4036,6 +4050,7 @@ pub(crate) fn resolve_bound_field_select_type(
             actual: format!("field selection .{field}"),
         });
     };
+    let row_type = expression_navigation_sql_type(row_type, catalog);
 
     if matches!(row_type.kind, SqlTypeKind::Composite) && row_type.typrelid != 0 {
         let relation = catalog

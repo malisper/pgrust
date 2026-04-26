@@ -249,10 +249,12 @@ fn execute_statement_with_source(
                 actual: "ALTER TABLE RENAME COLUMN".into(),
             }))
         }
-        Statement::AlterTableAddColumn(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+        Statement::AlterTableAddColumn(_) | Statement::AlterTableAddColumns(_) => {
+            Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ALTER TABLE ADD COLUMN handled by database/session layer",
             actual: "ALTER TABLE ADD COLUMN".into(),
-        })),
+        }))
+        }
         Statement::AlterTableAddConstraint(_)
         | Statement::AlterTableDropConstraint(_)
         | Statement::AlterTableRenameConstraint(_)
@@ -630,6 +632,7 @@ pub fn execute_readonly_statement_with_config(
         | Statement::AlterViewRenameColumn(_)
         | Statement::AlterViewSetSchema(_)
         | Statement::AlterTableAddColumn(_)
+        | Statement::AlterTableAddColumns(_)
         | Statement::AlterTableDropColumn(_)
         | Statement::AlterTableAlterColumnType(_)
         | Statement::AlterTableAlterColumnCompression(_)

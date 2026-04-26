@@ -582,14 +582,52 @@ fn try_parse_alter_table_multi_action_statement(
         return Ok(None);
     }
     let mut statements = Vec::with_capacity(actions.len());
+    let mut parsed_statements = Vec::with_capacity(actions.len());
     for action in actions {
         let action = action.trim();
         if action.is_empty() {
             continue;
         }
         let sub_sql = format!("ALTER TABLE {target_sql} {action}");
-        parse_statement_with_options_inner(sub_sql.clone(), options)?;
+        let parsed = parse_statement_with_options_inner(sub_sql.clone(), options)?;
         statements.push(sub_sql);
+        parsed_statements.push(parsed);
+    }
+    if !parsed_statements.is_empty()
+        && parsed_statements
+            .iter()
+            .all(|stmt| matches!(stmt, Statement::AlterTableAddColumn(_)))
+    {
+        let mut if_exists = false;
+        let mut only = false;
+        let mut table_name = None;
+        let mut columns = Vec::with_capacity(parsed_statements.len());
+        for stmt in parsed_statements {
+            let Statement::AlterTableAddColumn(add_column) = stmt else {
+                unreachable!("all parsed statements are ADD COLUMN");
+            };
+            if let Some(table_name) = &table_name {
+                if add_column.if_exists != if_exists
+                    || add_column.only != only
+                    || add_column.table_name != *table_name
+                {
+                    return Ok(Some(Statement::AlterTableMulti(statements)));
+                }
+            } else {
+                if_exists = add_column.if_exists;
+                only = add_column.only;
+                table_name = Some(add_column.table_name.clone());
+            }
+            columns.push(add_column.column);
+        }
+        return Ok(Some(Statement::AlterTableAddColumns(
+            AlterTableAddColumnsStatement {
+                if_exists,
+                only,
+                table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+                columns,
+            },
+        )));
     }
     Ok(Some(Statement::AlterTableMulti(statements)))
 }
@@ -4656,6 +4694,11 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("grant execute on routine ") {
         return Ok(Statement::GrantObject(build_grant_routine_execute(sql)?));
     }
+    if lowered.starts_with("grant select (") {
+        return Ok(Statement::GrantObject(build_grant_table_column_select(
+            sql,
+        )?));
+    }
     if let Some(stmt) = try_build_grant_table_acl_statement(sql)? {
         return Ok(Statement::GrantObject(stmt));
     }
@@ -4686,6 +4729,11 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("revoke execute on routine ") {
         return Ok(Statement::RevokeObject(build_revoke_routine_execute(sql)?));
     }
+    if lowered.starts_with("revoke select (") {
+        return Ok(Statement::RevokeObject(build_revoke_table_column_select(
+            sql,
+        )?));
+    }
     if let Some(stmt) = try_build_revoke_table_acl_statement(sql)? {
         return Ok(Statement::RevokeObject(stmt));
     }
@@ -4712,6 +4760,7 @@ fn try_build_grant_table_acl_statement(
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(Some(GrantObjectStatement {
         privilege,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         with_grant_option,
@@ -4737,6 +4786,7 @@ fn try_build_revoke_table_acl_statement(
     let (grantee_names, grantee_cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(Some(RevokeObjectStatement {
         privilege,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade: cascade || grantee_cascade,
@@ -4818,6 +4868,68 @@ fn table_privilege_from_chars(chars: String) -> GrantObjectPrivilege {
     }
 }
 
+fn build_grant_table_column_select(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let after_privilege = sql
+        .get("grant select".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let close = after_privilege
+        .find(')')
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "column privilege list",
+            actual: after_privilege.into(),
+        })?;
+    let columns = parse_identifier_list(&after_privilege[1..close])?;
+    let rest = after_privilege[close + 1..].trim_start();
+    if !keyword_at_start(rest, "on") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "on").trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege: GrantObjectPrivilege::SelectOnTable,
+        columns,
+        object_names: vec![normalize_simple_identifier(object_name)?],
+        grantee_names,
+        with_grant_option,
+    })
+}
+
+fn build_revoke_table_column_select(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let after_privilege = sql
+        .get("revoke select".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let close = after_privilege
+        .find(')')
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "column privilege list",
+            actual: after_privilege.into(),
+        })?;
+    let columns = parse_identifier_list(&after_privilege[1..close])?;
+    let rest = after_privilege[close + 1..].trim_start();
+    if !keyword_at_start(rest, "on") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "on").trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege: GrantObjectPrivilege::SelectOnTable,
+        columns,
+        object_names: vec![normalize_simple_identifier(object_name)?],
+        grantee_names,
+        cascade,
+    })
+}
+
 fn build_alter_type_owner_statement(sql: &str) -> Result<AlterTypeOwnerStatement, ParseError> {
     let prefix = "alter type ";
     let rest = sql
@@ -4864,6 +4976,7 @@ fn build_grant_database_create(sql: &str) -> Result<GrantObjectStatement, ParseE
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::CreateOnDatabase,
+        columns: Vec::new(),
         object_names: vec![normalize_simple_identifier(object_name)?],
         grantee_names,
         with_grant_option,
@@ -4880,6 +4993,7 @@ fn build_grant_schema_all(sql: &str) -> Result<GrantObjectStatement, ParseError>
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::AllPrivilegesOnSchema,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         with_grant_option,
@@ -4896,6 +5010,7 @@ fn build_grant_schema_usage(sql: &str) -> Result<GrantObjectStatement, ParseErro
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnSchema,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         with_grant_option,
@@ -4912,6 +5027,7 @@ fn build_grant_type_usage(sql: &str) -> Result<GrantObjectStatement, ParseError>
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnType,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         with_grant_option,
@@ -4928,6 +5044,7 @@ fn build_grant_function_execute(sql: &str) -> Result<GrantObjectStatement, Parse
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::ExecuteOnFunction,
+        columns: Vec::new(),
         object_names: vec![object_name.trim().to_ascii_lowercase()],
         grantee_names,
         with_grant_option,
@@ -4960,6 +5077,7 @@ fn build_grant_routine_execute_with_prefix(
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege,
+        columns: Vec::new(),
         object_names: vec![object_name.trim().to_ascii_lowercase()],
         grantee_names,
         with_grant_option,
@@ -4976,6 +5094,7 @@ fn build_revoke_database_create(sql: &str) -> Result<RevokeObjectStatement, Pars
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::CreateOnDatabase,
+        columns: Vec::new(),
         object_names: vec![normalize_simple_identifier(object_name)?],
         grantee_names,
         cascade,
@@ -4992,6 +5111,7 @@ fn build_revoke_schema_usage(sql: &str) -> Result<RevokeObjectStatement, ParseEr
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnSchema,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade,
@@ -5008,6 +5128,7 @@ fn build_revoke_type_usage(sql: &str) -> Result<RevokeObjectStatement, ParseErro
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnType,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade,
@@ -5024,6 +5145,7 @@ fn build_revoke_function_execute(sql: &str) -> Result<RevokeObjectStatement, Par
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::ExecuteOnFunction,
+        columns: Vec::new(),
         object_names: vec![object_name.trim().to_ascii_lowercase()],
         grantee_names,
         cascade,
@@ -5056,6 +5178,7 @@ fn build_revoke_routine_execute_with_prefix(
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege,
+        columns: Vec::new(),
         object_names: vec![object_name.trim().to_ascii_lowercase()],
         grantee_names,
         cascade,
@@ -13612,6 +13735,7 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
             Ok(CteBody::Select(Box::new(build_select(pair)?)))
         }
         Rule::values_stmt => Ok(CteBody::Values(build_values_statement(pair)?)),
+        Rule::insert_stmt => Ok(CteBody::Insert(Box::new(build_insert(pair)?))),
         Rule::recursive_union_cte_body => {
             let all = contains_union_all(pair.as_str());
             let mut inner = pair.into_inner();
@@ -13635,7 +13759,7 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
             })
         }
         _ => Err(ParseError::UnexpectedToken {
-            expected: "SELECT or VALUES CTE body",
+            expected: "SELECT, VALUES, or INSERT CTE body",
             actual: pair.as_str().into(),
         }),
     }
@@ -14119,7 +14243,16 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
                 ))
             }
             Rule::insert_default_values_source => source = Some(InsertSource::DefaultValues),
-            Rule::select_stmt => source = Some(InsertSource::Select(Box::new(build_select(part)?))),
+            Rule::insert_select_source | Rule::select_stmt => {
+                let select = match part.as_rule() {
+                    Rule::select_stmt => part,
+                    _ => part
+                        .into_inner()
+                        .find(|inner| inner.as_rule() == Rule::select_stmt)
+                        .ok_or(ParseError::UnexpectedEof)?,
+                };
+                source = Some(InsertSource::Select(Box::new(build_select(select)?)));
+            }
             Rule::on_conflict_clause => on_conflict = Some(build_on_conflict_clause(part)?),
             Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
@@ -17081,19 +17214,16 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
     let column = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
     let mut subscripts = Vec::new();
     let mut field_path = Vec::new();
+    let mut indirection = Vec::new();
     for part in inner {
         match part.as_rule() {
             Rule::assignment_target_suffix => {
                 let suffix = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
                 match suffix.as_rule() {
                     Rule::subscript_suffix => {
-                        if !field_path.is_empty() {
-                            return Err(ParseError::UnexpectedToken {
-                                expected: "record field selection at end of assignment target",
-                                actual: suffix.as_str().into(),
-                            });
-                        }
-                        subscripts.push(build_array_subscript(suffix)?);
+                        let subscript = build_array_subscript(suffix)?;
+                        subscripts.push(subscript.clone());
+                        indirection.push(AssignmentTargetIndirection::Subscript(subscript));
                     }
                     Rule::field_select_suffix => {
                         let field = suffix
@@ -17101,19 +17231,16 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
                             .find(|part| part.as_rule() == Rule::identifier)
                             .map(build_identifier)
                             .ok_or(ParseError::UnexpectedEof)?;
-                        field_path.push(field);
+                        field_path.push(field.clone());
+                        indirection.push(AssignmentTargetIndirection::Field(field));
                     }
                     _ => {}
                 }
             }
             Rule::subscript_suffix => {
-                if !field_path.is_empty() {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "record field selection at end of assignment target",
-                        actual: part.as_str().into(),
-                    });
-                }
-                subscripts.push(build_array_subscript(part)?);
+                let subscript = build_array_subscript(part)?;
+                subscripts.push(subscript.clone());
+                indirection.push(AssignmentTargetIndirection::Subscript(subscript));
             }
             Rule::field_select_suffix => {
                 let field = part
@@ -17121,7 +17248,8 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
                     .find(|inner| inner.as_rule() == Rule::identifier)
                     .map(build_identifier)
                     .ok_or(ParseError::UnexpectedEof)?;
-                field_path.push(field);
+                field_path.push(field.clone());
+                indirection.push(AssignmentTargetIndirection::Field(field));
             }
             _ => {}
         }
@@ -17130,6 +17258,7 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
         column,
         subscripts,
         field_path,
+        indirection,
     })
 }
 
