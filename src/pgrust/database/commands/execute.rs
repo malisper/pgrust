@@ -659,6 +659,9 @@ impl Database {
                     unsupported_stmt.feature, unsupported_stmt.sql
                 ))))
             }
+            Statement::Call(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "CALL execution".into(),
+            ))),
             Statement::CopyFrom(_) | Statement::CopyTo(_) => {
                 Err(ExecError::Parse(ParseError::UnexpectedToken {
                     expected: "COPY handled by session layer",
@@ -667,6 +670,12 @@ impl Database {
             }
             Statement::CreateFunction(ref create_stmt) => self
                 .execute_create_function_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
+            Statement::CreateProcedure(ref create_stmt) => self
+                .execute_create_procedure_stmt_with_search_path(
                     client_id,
                     create_stmt,
                     configured_search_path,
@@ -716,6 +725,9 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterProcedure(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "ALTER PROCEDURE".into(),
+            ))),
             Statement::CreateSequence(ref create_stmt) => self
                 .execute_create_sequence_stmt_with_search_path(
                     client_id,
@@ -1508,6 +1520,12 @@ impl Database {
             ),
             Statement::DropFunction(ref drop_stmt) => self
                 .execute_drop_function_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
+            Statement::DropProcedure(ref drop_stmt) => self
+                .execute_drop_procedure_stmt_with_search_path(
                     client_id,
                     drop_stmt,
                     configured_search_path,

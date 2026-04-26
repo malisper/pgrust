@@ -85,6 +85,12 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_aggregate_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_call_statement(&sql)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_procedure_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_function_statement(&sql)? {
         return Ok(stmt);
     }
@@ -3772,6 +3778,34 @@ fn try_parse_drop_function_statement(sql: &str) -> Result<Option<Statement>, Par
     )))
 }
 
+fn try_parse_call_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.to_ascii_lowercase().starts_with("call ") {
+        return Ok(None);
+    }
+    Ok(Some(Statement::Call(build_call_statement(trimmed)?)))
+}
+
+fn try_parse_procedure_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create procedure ")
+        || lowered.starts_with("create or replace procedure ")
+    {
+        return build_create_procedure_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateProcedure(stmt)));
+    }
+    if lowered.starts_with("drop procedure ") {
+        return build_drop_procedure_statement(trimmed)
+            .map(|stmt| Some(Statement::DropProcedure(stmt)));
+    }
+    if lowered.starts_with("alter procedure ") {
+        return build_alter_procedure_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterProcedure(stmt)));
+    }
+    Ok(None)
+}
+
 fn try_parse_comment_on_function_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -5087,6 +5121,444 @@ fn build_drop_function_statement(sql: &str) -> Result<DropFunctionStatement, Par
         arg_types,
         cascade,
     })
+}
+
+fn build_call_statement(sql: &str) -> Result<CallStatement, ParseError> {
+    let rest = sql
+        .get("call".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let ((schema_name, procedure_name), rest) = parse_qualified_sql_name(rest)?;
+    let (arg_sql, rest) = take_parenthesized_segment(rest.trim_start())?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of CALL statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CallStatement {
+        schema_name,
+        procedure_name,
+        args: parse_sql_call_args(&arg_sql)?,
+        raw_arg_sql: parse_call_arg_sql_items(&arg_sql)?,
+    })
+}
+
+fn build_create_procedure_statement(sql: &str) -> Result<CreateProcedureStatement, ParseError> {
+    let (prefix, replace_existing) = if sql
+        .to_ascii_lowercase()
+        .starts_with("create or replace procedure")
+    {
+        ("create or replace procedure", true)
+    } else {
+        ("create procedure", false)
+    };
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedToken {
+            expected: "CREATE PROCEDURE name(args) ...",
+            actual: sql.into(),
+        })?
+        .trim_start();
+    let ((schema_name, procedure_name), rest) = parse_qualified_sql_name(rest)?;
+    let (arg_list, mut rest) = take_parenthesized_segment(rest)?;
+    let args = parse_create_procedure_args(&arg_list)?;
+
+    let mut language = None;
+    let mut body = None;
+    let mut sql_standard_body = false;
+    let mut strict = false;
+    let mut volatility = crate::backend::parser::FunctionVolatility::Volatile;
+
+    while !rest.trim_start().is_empty() {
+        rest = rest.trim_start();
+        if keyword_at_start(rest, "language") {
+            if language.is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "single LANGUAGE clause",
+                    actual: rest.into(),
+                });
+            }
+            let (parsed, next_rest) = parse_create_function_language(rest)?;
+            language = Some(parsed);
+            rest = next_rest;
+            continue;
+        }
+        if keyword_at_start(rest, "as") {
+            if body.is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "single procedure body",
+                    actual: rest.into(),
+                });
+            }
+            let (parsed, _link_symbol, next_rest) = parse_create_function_body(rest)?;
+            body = Some(parsed);
+            rest = next_rest;
+            continue;
+        }
+        if keyword_at_start(rest, "begin") {
+            if body.is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "single procedure body",
+                    actual: rest.into(),
+                });
+            }
+            body = Some(rest.trim().to_string());
+            sql_standard_body = true;
+            language.get_or_insert_with(|| "sql".into());
+            rest = "";
+            continue;
+        }
+        if keyword_at_start(rest, "strict") {
+            strict = true;
+            rest = consume_keyword(rest, "strict");
+            continue;
+        }
+        if keyword_at_start(rest, "immutable") {
+            volatility = crate::backend::parser::FunctionVolatility::Immutable;
+            rest = consume_keyword(rest, "immutable");
+            continue;
+        }
+        if keyword_at_start(rest, "stable") {
+            volatility = crate::backend::parser::FunctionVolatility::Stable;
+            rest = consume_keyword(rest, "stable");
+            continue;
+        }
+        if keyword_at_start(rest, "volatile") {
+            volatility = crate::backend::parser::FunctionVolatility::Volatile;
+            rest = consume_keyword(rest, "volatile");
+            continue;
+        }
+        return Err(ParseError::FeatureNotSupported(format!(
+            "unsupported CREATE PROCEDURE clause: {}",
+            rest.split_whitespace().next().unwrap_or(rest)
+        )));
+    }
+
+    Ok(CreateProcedureStatement {
+        schema_name,
+        procedure_name,
+        replace_existing,
+        args,
+        strict,
+        volatility,
+        language: language.ok_or(ParseError::UnexpectedEof)?,
+        body: body.ok_or(ParseError::UnexpectedEof)?,
+        sql_standard_body,
+    })
+}
+
+fn build_drop_procedure_statement(sql: &str) -> Result<DropProcedureStatement, ParseError> {
+    let prefix = "drop procedure";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "DROP PROCEDURE name(args)",
+            actual: sql.into(),
+        });
+    };
+    let mut rest = rest.trim_start();
+    let mut if_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        if_exists = true;
+        rest = next.trim_start();
+    }
+    let (routine_list, cascade) = split_drop_routine_suffix(rest)?;
+    let procedures = split_top_level_items(routine_list, ',')?
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .map(|item| parse_drop_routine_item(&item))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(DropProcedureStatement {
+        if_exists,
+        procedures,
+        cascade,
+    })
+}
+
+fn split_drop_routine_suffix(input: &str) -> Result<(&str, bool), ParseError> {
+    let trimmed = input.trim_end();
+    if let Some(prefix) = trim_keyword_suffix(trimmed, "cascade") {
+        return Ok((prefix.trim_end(), true));
+    }
+    if let Some(prefix) = trim_keyword_suffix(trimmed, "restrict") {
+        return Ok((prefix.trim_end(), false));
+    }
+    Ok((trimmed, false))
+}
+
+fn trim_keyword_suffix<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    let index = input.len().checked_sub(keyword.len())?;
+    input[index..].eq_ignore_ascii_case(keyword).then(|| {
+        let prefix = &input[..index];
+        prefix
+            .chars()
+            .last()
+            .is_none_or(|ch| ch.is_whitespace())
+            .then_some(prefix)
+    })?
+}
+
+fn parse_drop_routine_item(input: &str) -> Result<DropRoutineItem, ParseError> {
+    let ((schema_name, routine_name), rest) = parse_qualified_sql_name(input.trim())?;
+    let rest = rest.trim_start();
+    let (arg_types, rest) = if rest.starts_with('(') {
+        let (arg_sql, rest) = take_parenthesized_segment(rest)?;
+        let arg_types = split_comma_separated_sql(&arg_sql)?
+            .into_iter()
+            .filter(|item| !item.trim().is_empty())
+            .map(|item| item.trim().to_string())
+            .collect();
+        (arg_types, rest)
+    } else {
+        (Vec::new(), rest)
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "comma or end of DROP PROCEDURE list",
+            actual: rest.into(),
+        });
+    }
+    Ok(DropRoutineItem {
+        schema_name,
+        routine_name,
+        arg_types,
+    })
+}
+
+fn build_alter_procedure_statement(sql: &str) -> Result<AlterProcedureStatement, ParseError> {
+    let rest = sql
+        .get("alter procedure".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let ((schema_name, procedure_name), rest_after_name) = parse_qualified_sql_name(rest)?;
+    let (arg_sql, suffix) = take_parenthesized_segment(rest_after_name.trim_start())?;
+    let suffix = suffix.trim();
+    let action = if keyword_at_start(suffix, "strict") {
+        if !consume_keyword(suffix, "strict").trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER PROCEDURE statement",
+                actual: suffix.into(),
+            });
+        }
+        AlterProcedureAction::Strict
+    } else if keyword_at_start(suffix, "volatile") {
+        if !consume_keyword(suffix, "volatile").trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER PROCEDURE statement",
+                actual: suffix.into(),
+            });
+        }
+        AlterProcedureAction::Volatility(crate::backend::parser::FunctionVolatility::Volatile)
+    } else if keyword_at_start(suffix, "stable") {
+        if !consume_keyword(suffix, "stable").trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER PROCEDURE statement",
+                actual: suffix.into(),
+            });
+        }
+        AlterProcedureAction::Volatility(crate::backend::parser::FunctionVolatility::Stable)
+    } else if keyword_at_start(suffix, "immutable") {
+        if !consume_keyword(suffix, "immutable").trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER PROCEDURE statement",
+                actual: suffix.into(),
+            });
+        }
+        AlterProcedureAction::Volatility(crate::backend::parser::FunctionVolatility::Immutable)
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "procedure attribute",
+            actual: suffix.into(),
+        });
+    };
+    Ok(AlterProcedureStatement {
+        schema_name,
+        procedure_name,
+        arg_types: split_comma_separated_sql(&arg_sql)?
+            .into_iter()
+            .filter(|item| !item.is_empty())
+            .map(str::to_string)
+            .collect(),
+        action,
+    })
+}
+
+fn build_drop_routine_like_statement(
+    sql: &str,
+    prefix: &str,
+    expected: &'static str,
+) -> Result<DropFunctionStatement, ParseError> {
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected,
+            actual: sql.into(),
+        });
+    };
+    let mut rest = rest.trim_start();
+    let mut if_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        if_exists = true;
+        rest = next.trim_start();
+    }
+    let ((schema_name, function_name), rest_after_name) = parse_qualified_sql_name(rest)?;
+    let rest_after_name = rest_after_name.trim_start();
+    let (arg_sql, suffix) = if rest_after_name.starts_with('(') {
+        take_parenthesized_segment(rest_after_name)?
+    } else {
+        ("".to_string(), rest_after_name)
+    };
+    let suffix = suffix.trim();
+    let cascade = if suffix.is_empty() || keyword_at_start(suffix, "restrict") {
+        false
+    } else if keyword_at_start(suffix, "cascade") {
+        true
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CASCADE, RESTRICT, or end of statement",
+            actual: suffix.into(),
+        });
+    };
+    let arg_types = split_comma_separated_sql(&arg_sql)?
+        .into_iter()
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect();
+    Ok(DropFunctionStatement {
+        if_exists,
+        schema_name,
+        function_name,
+        arg_types,
+        cascade,
+    })
+}
+
+fn parse_sql_call_args(input: &str) -> Result<SqlCallArgs, ParseError> {
+    if input.trim().is_empty() {
+        return Ok(SqlCallArgs::Args(Vec::new()));
+    }
+    let pair = SqlParser::parse(Rule::function_arg_list, input)
+        .map_err(|err| map_pest_error("function argument list", input, err))?
+        .next()
+        .ok_or(ParseError::UnexpectedEof)?;
+    let parsed = build_function_arg_list(pair)?;
+    Ok(SqlCallArgs::Args(parsed.args))
+}
+
+fn parse_call_arg_sql_items(input: &str) -> Result<Vec<String>, ParseError> {
+    if input.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    split_top_level_items(input, ',')?
+        .into_iter()
+        .map(|item| strip_call_arg_name(&item).map(str::to_string))
+        .collect()
+}
+
+fn strip_call_arg_name(input: &str) -> Result<&str, ParseError> {
+    let trimmed = input.trim();
+    if let Some(index) = find_top_level_named_arg_operator(trimmed, "=>") {
+        return Ok(trimmed[index + 2..].trim());
+    }
+    if let Some(index) = find_top_level_named_arg_operator(trimmed, ":=") {
+        return Ok(trimmed[index + 2..].trim());
+    }
+    Ok(trimmed)
+}
+
+fn find_top_level_named_arg_operator(input: &str, operator: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let op = operator.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i + op.len() <= bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = parse_delimited_token_end(bytes, i, b'\'');
+                continue;
+            }
+            b'"' => {
+                i = parse_delimited_token_end(bytes, i, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0 && &bytes[i..i + op.len()] == op {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn parse_create_procedure_args(input: &str) -> Result<Vec<CreateFunctionArg>, ParseError> {
+    let items = split_top_level_items(input, ',')?;
+    if items.len() == 1 && items[0].trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    items
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .map(|item| parse_create_procedure_arg(&item))
+        .collect()
+}
+
+fn parse_create_procedure_arg(input: &str) -> Result<CreateFunctionArg, ParseError> {
+    let (trimmed, default_expr) = split_create_procedure_arg_default(input.trim())?;
+    let prefix_variadic = keyword_at_start(trimmed, "variadic");
+    let trimmed = if prefix_variadic {
+        consume_keyword(trimmed, "variadic").trim_start()
+    } else {
+        trimmed
+    };
+    if !prefix_variadic && let Ok((name, rest)) = parse_sql_identifier(trimmed) {
+        let rest = rest.trim_start();
+        let (mode, variadic, type_sql) = if keyword_at_start(rest, "inout") {
+            (
+                FunctionArgMode::InOut,
+                false,
+                consume_keyword(rest, "inout"),
+            )
+        } else if keyword_at_start(rest, "out") {
+            (FunctionArgMode::Out, false, consume_keyword(rest, "out"))
+        } else if keyword_at_start(rest, "in") {
+            (FunctionArgMode::In, false, consume_keyword(rest, "in"))
+        } else if keyword_at_start(rest, "variadic") {
+            (FunctionArgMode::In, true, consume_keyword(rest, "variadic"))
+        } else {
+            (FunctionArgMode::In, false, "")
+        };
+        if !type_sql.trim().is_empty() {
+            return Ok(CreateFunctionArg {
+                mode,
+                name: Some(name),
+                ty: parse_type_name(type_sql.trim())?,
+                default_expr: default_expr.map(str::to_string),
+                variadic,
+            });
+        }
+    }
+    let mut arg = parse_create_function_arg(trimmed)?;
+    arg.default_expr = default_expr.map(str::to_string);
+    arg.variadic = prefix_variadic;
+    Ok(arg)
+}
+
+fn split_create_procedure_arg_default(input: &str) -> Result<(&str, Option<&str>), ParseError> {
+    if let Some((arg, default_expr)) = split_optional_keyword(input, "default") {
+        return Ok((arg.trim_end(), default_expr.map(str::trim)));
+    }
+    if let Some(index) = input.find(":=") {
+        return Ok((input[..index].trim_end(), Some(input[index + 2..].trim())));
+    }
+    Ok((input, None))
 }
 
 #[derive(Debug, Default)]
@@ -7458,6 +7930,8 @@ fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseErro
             mode,
             name: None,
             ty,
+            default_expr: None,
+            variadic: false,
         });
     }
     let (name, type_sql) = match parse_sql_identifier(rest) {
@@ -7474,6 +7948,8 @@ fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseErro
         mode,
         name,
         ty: parse_type_name(type_sql.trim())?,
+        default_expr: None,
+        variadic: false,
     })
 }
 
@@ -8784,6 +9260,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match inner.as_rule() {
         Rule::do_stmt => Ok(Statement::Do(build_do(inner)?)),
+        Rule::call_stmt => Ok(Statement::Call(build_call_statement(inner.as_str())?)),
         Rule::explain_stmt => Ok(Statement::Explain(build_explain(inner)?)),
         Rule::table_stmt => Ok(Statement::Select(build_table_select(inner)?)),
         Rule::select_into_stmt => Ok(Statement::CreateTableAs(build_select_into(inner)?)),
