@@ -117,6 +117,7 @@ pub(crate) use expr_xml::validate_xml_input;
 pub(crate) use nodes::{
     render_explain_expr, render_explain_join_expr, render_explain_projection_expr_with_qualifier,
     render_index_order_by, render_index_scan_condition_with_key_names,
+    render_index_scan_condition_with_key_names_and_runtime_renderer,
     render_verbose_range_support_expr,
 };
 pub use random::PgPrngState;
@@ -386,6 +387,7 @@ pub enum SessionReplicationRole {
 
 pub struct ExecutorContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
+    pub data_dir: Option<std::path::PathBuf>,
     pub txns: std::sync::Arc<parking_lot::RwLock<TransactionManager>>,
     pub txn_waiter: Option<std::sync::Arc<TransactionWaiter>>,
     pub lock_status_provider: Option<std::sync::Arc<dyn LockStatusProvider>>,

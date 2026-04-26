@@ -79,6 +79,7 @@ pub(super) fn estimate_seqscan_candidate(
     stats: &RelationStats,
     filter: Option<Expr>,
     order_items: Option<Vec<OrderByEntry>>,
+    catalog: &dyn CatalogLookup,
 ) -> AccessCandidate {
     costsize::estimate_seqscan_candidate(
         source_id,
@@ -93,6 +94,7 @@ pub(super) fn estimate_seqscan_candidate(
         filter,
         order_items,
         None,
+        catalog,
     )
 }
 
@@ -163,6 +165,7 @@ pub(super) fn estimate_bitmap_candidate(
 
 pub(super) fn build_join_paths_with_root(
     root: &PlannerInfo,
+    catalog: &dyn CatalogLookup,
     left: Path,
     right: Path,
     left_relids: &[usize],
@@ -174,6 +177,7 @@ pub(super) fn build_join_paths_with_root(
 ) -> Vec<Path> {
     costsize::build_join_paths_with_root(
         root,
+        catalog,
         left,
         right,
         left_relids,

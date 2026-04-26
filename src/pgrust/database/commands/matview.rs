@@ -396,6 +396,7 @@ impl Database {
     ) -> Result<ExecutorContext, ExecError> {
         Ok(ExecutorContext {
             pool: Arc::clone(&self.pool),
+            data_dir: None,
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(self.clone())),

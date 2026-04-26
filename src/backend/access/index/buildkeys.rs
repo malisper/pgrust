@@ -123,6 +123,7 @@ impl IndexBuildKeyProjector {
             compiled_predicate,
             exec_ctx: Some(ExecutorContext {
                 pool: ctx.pool.clone(),
+                data_dir: None,
                 txns: ctx.txns.clone(),
                 txn_waiter: expr_ctx.txn_waiter.clone(),
                 lock_status_provider: None,

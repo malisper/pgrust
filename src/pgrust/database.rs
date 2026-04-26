@@ -1644,9 +1644,18 @@ impl Database {
                     Value::Text(usename.into()),
                     Value::Text(entry.state.as_str().into()),
                     Value::Text(entry.query.into()),
+                    Value::Text("client backend".into()),
                 ]
             })
             .collect::<Vec<_>>();
+        rows.push(vec![
+            Value::Int32(0),
+            Value::Text(self.current_database_name().into()),
+            Value::Text("postgres".into()),
+            Value::Text("".into()),
+            Value::Text("".into()),
+            Value::Text("checkpointer".into()),
+        ]);
         rows.sort_by_key(|row| match row.first() {
             Some(Value::Int32(pid)) => *pid,
             _ => i32::MAX,

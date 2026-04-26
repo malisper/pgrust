@@ -2,7 +2,9 @@ use super::functions::{resolve_function_call, resolve_scalar_function};
 use super::multiranges::infer_multirange_special_expr_type_with_ctes;
 use super::ranges::infer_range_special_expr_type_with_ctes;
 use super::*;
-use crate::backend::utils::record::assign_anonymous_record_descriptor;
+use crate::backend::utils::record::{
+    assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
+};
 use crate::include::catalog::range_type_ref_for_sql_type;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 
@@ -153,6 +155,37 @@ fn infer_relation_row_expr_type(
         )
         .sql_type()
     })
+}
+
+fn infer_record_field_type(
+    row_type: SqlType,
+    field: &str,
+    catalog: &dyn CatalogLookup,
+) -> Option<SqlType> {
+    if matches!(row_type.kind, SqlTypeKind::Composite)
+        && row_type.typrelid != 0
+        && let Some(relation) = catalog.lookup_relation_by_oid(row_type.typrelid)
+    {
+        return relation
+            .desc
+            .columns
+            .iter()
+            .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(field))
+            .map(|column| column.sql_type);
+    }
+
+    if matches!(row_type.kind, SqlTypeKind::Record)
+        && row_type.typmod > 0
+        && let Some(descriptor) = lookup_anonymous_record_descriptor(row_type.typmod)
+    {
+        return descriptor
+            .fields
+            .iter()
+            .find(|candidate| candidate.name.eq_ignore_ascii_case(field))
+            .map(|candidate| candidate.sql_type);
+    }
+
+    None
 }
 
 fn infer_visible_outer_aggregate_type(
@@ -480,7 +513,16 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             {
                 expr_sql_type_hint(field_expr).unwrap_or(SqlType::new(SqlTypeKind::Text))
             } else {
-                SqlType::new(SqlTypeKind::Text)
+                let row_type = infer_sql_expr_type_with_ctes(
+                    expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                infer_record_field_type(row_type, field, catalog)
+                    .unwrap_or(SqlType::new(SqlTypeKind::Text))
             }
         }
         SqlExpr::Eq(_, _)

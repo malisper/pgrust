@@ -118,6 +118,7 @@ fn toast_executor_context(
 ) -> ExecutorContext {
     ExecutorContext {
         pool: db.pool.clone(),
+        data_dir: None,
         txns: db.txns.clone(),
         txn_waiter: Some(db.txn_waiter.clone()),
         lock_status_provider: Some(std::sync::Arc::new(db.clone())),

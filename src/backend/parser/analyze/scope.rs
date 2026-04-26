@@ -602,10 +602,10 @@ pub(super) fn bind_from_item_with_ctes(
             let entry = catalog
                 .lookup_any_relation(name)
                 .ok_or_else(|| ParseError::UnknownTable(name.to_string()))?;
-            if !matches!(entry.relkind, 'r' | 'p' | 'v' | 'm' | 'S') {
+            if !matches!(entry.relkind, 'r' | 'p' | 'v' | 'm' | 'S' | 't') {
                 return Err(ParseError::WrongObjectType {
                     name: name.to_string(),
-                    expected: "table, view, materialized view, or sequence",
+                    expected: "table, view, materialized view, sequence, or TOAST table",
                 });
             }
             let desc = entry.desc.clone();
@@ -1762,6 +1762,7 @@ fn bind_function_from_item_with_ctes(
                 Ok((
                     AnalyzedFrom::function(SetReturningCall::UserDefined {
                         proc_oid: resolved.proc_oid,
+                        function_name: name.to_string(),
                         func_variadic: resolved.func_variadic,
                         args: bound_args,
                         output_columns,
@@ -1828,6 +1829,7 @@ fn bind_single_row_function_from_item_with_ctes(
         return Ok((
             AnalyzedFrom::function(SetReturningCall::UserDefined {
                 proc_oid: resolved.proc_oid,
+                function_name: name.to_string(),
                 func_variadic: resolved.func_variadic,
                 args: bound_args,
                 output_columns,

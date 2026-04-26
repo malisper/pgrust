@@ -250,6 +250,7 @@ mod tests {
         let snapshot = txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap();
         let mut ctx = crate::backend::executor::ExecutorContext {
             pool,
+            data_dir: None,
             txns,
             txn_waiter: None,
             lock_status_provider: None,

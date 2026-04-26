@@ -186,6 +186,7 @@ fn analyze_executor_context(
 ) -> crate::backend::executor::ExecutorContext {
     crate::backend::executor::ExecutorContext {
         pool: Arc::clone(&db.pool),
+        data_dir: None,
         txns: db.txns.clone(),
         txn_waiter: Some(db.txn_waiter.clone()),
         lock_status_provider: Some(Arc::new(db.clone())),
