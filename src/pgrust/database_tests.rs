@@ -12368,6 +12368,51 @@ fn regoperator_literal_cast_resolves_operator_signature() {
 }
 
 #[test]
+fn case_and_nullif_preserve_array_domain_function_results() {
+    let base = temp_dir("case_array_domain_function_result");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create domain arrdomain as int[]").unwrap();
+    db.execute(
+        1,
+        "create function make_ad(int,int) returns arrdomain as \
+         'declare x arrdomain; begin x := array[$1,$2]; return x; end' \
+         language plpgsql volatile",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function ad_eq(arrdomain, arrdomain) returns boolean as \
+         'begin return array_eq($1, $2); end' language plpgsql",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create operator = (procedure = ad_eq, leftarg = arrdomain, rightarg = arrdomain)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select make_ad(1,2)"),
+        vec![vec![Value::Array(vec![Value::Int32(1), Value::Int32(2)])]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select case make_ad(1,2) \
+             when array[2,4]::arrdomain then 'wrong' \
+             when array[1,2]::arrdomain then 'right' end",
+        ),
+        vec![vec![Value::Text("right".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select nullif(make_ad(1,2), array[2,3]::arrdomain)"),
+        vec![vec![Value::Array(vec![Value::Int32(1), Value::Int32(2)])]]
+    );
+}
+
+#[test]
 fn create_function_accepts_cstring_but_table_columns_reject_it() {
     let base = temp_dir("cstring_type_signature");
     let db = Database::open(&base, 16).unwrap();

@@ -2027,6 +2027,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             )
         }
         SqlExpr::Cast(inner, ty) => {
+            let target_type = resolve_raw_type_name(ty, catalog)?;
             let source_type = infer_sql_expr_type_with_ctes(
                 inner,
                 scope,
@@ -2050,7 +2051,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                             )
                         })
                         .collect::<Result<_, _>>()?,
-                    array_type: raw_type_name_hint(ty),
+                    array_type: target_type,
                 }
             } else {
                 bind_expr_with_outer_and_ctes(
@@ -2063,7 +2064,6 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 )?
             };
             let domain = domain_lookup_for_raw_type_name(ty, catalog);
-            let target_type = resolve_raw_type_name(ty, catalog)?;
             if let SqlExpr::Negate(negated_inner) = inner.as_ref()
                 && matches!(
                     target_type.kind,
@@ -4220,66 +4220,54 @@ fn bind_nullif_call(
         });
     }
 
-    let lowered_args = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
-    let common_type = infer_common_scalar_expr_type_with_ctes(
-        &lowered_args,
-        scope,
-        catalog,
-        outer_scopes,
-        grouped_outer,
-        ctes,
-        "NULLIF arguments with a common type",
-    )?;
-
-    let left_type = infer_sql_expr_type_with_ctes(
+    let left = bind_typed_expr_with_outer_and_ctes(
         &args[0].value,
         scope,
         catalog,
         outer_scopes,
         grouped_outer,
         ctes,
-    );
-    let right_type = infer_sql_expr_type_with_ctes(
+    )?;
+    reject_typed_srf(&left, "NULLIF")?;
+    let right = bind_typed_expr_with_outer_and_ctes(
         &args[1].value,
         scope,
         catalog,
         outer_scopes,
         grouped_outer,
         ctes,
-    );
-    let left = coerce_bound_expr(
-        bind_expr_with_outer_and_ctes(
-            &args[0].value,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
-        left_type,
-        common_type,
-    );
-    let right = coerce_bound_expr(
-        bind_expr_with_outer_and_ctes(
-            &args[1].value,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
+    )?;
+    reject_typed_srf(&right, "NULLIF")?;
+    let (right_expr, right_type) = if matches!(right.expr, Expr::Const(Value::Null)) {
+        (
+            coerce_bound_expr(right.expr, right.sql_type, left.sql_type),
+            left.sql_type,
+        )
+    } else {
+        (right.expr, right.sql_type)
+    };
+    let comparison = bind_lowered_comparison_expr(
+        "=",
+        OpExprKind::Eq,
+        left.expr.clone(),
+        left.sql_type,
+        left.sql_type,
+        right_expr,
+        right.sql_type,
         right_type,
-        common_type,
-    );
+        None,
+        None,
+        catalog,
+    )?;
 
     Ok(Expr::Case(Box::new(BoundCaseExpr {
-        casetype: common_type,
+        casetype: left.sql_type,
         arg: None,
         args: vec![BoundCaseWhen {
-            expr: Expr::op_auto(OpExprKind::Eq, vec![left.clone(), right]),
-            result: Expr::Cast(Box::new(Expr::Const(Value::Null)), common_type),
+            expr: comparison,
+            result: Expr::Cast(Box::new(Expr::Const(Value::Null)), left.sql_type),
         }],
-        defresult: Box::new(left),
+        defresult: Box::new(left.expr),
     })))
 }
 
