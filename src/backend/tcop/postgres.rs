@@ -430,6 +430,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             {
                 return Some(position);
             }
+            if message.ends_with(" is not a unique index") {
+                return find_case_insensitive_token_position(sql, "ADD CONSTRAINT");
+            }
             if let Some(value) = extract_quoted_error_value(message) {
                 value
             } else {
@@ -4398,7 +4401,7 @@ fn foreign_key_constraint_def(
     relation: &crate::backend::utils::cache::relcache::RelCacheEntry,
     row: &crate::include::catalog::PgConstraintRow,
 ) -> Option<String> {
-    let local_columns = row
+    let mut local_columns = row
         .conkey
         .as_ref()?
         .iter()
@@ -4422,7 +4425,7 @@ fn foreign_key_constraint_def(
         None,
         row.confrelid,
     )?;
-    let referenced_columns = row
+    let mut referenced_columns = row
         .confkey
         .as_ref()?
         .iter()
@@ -4438,6 +4441,14 @@ fn foreign_key_constraint_def(
                 .map(|column| column.name.clone())
         })
         .collect::<Option<Vec<_>>>()?;
+    if row.conperiod {
+        if let Some(column) = local_columns.last_mut() {
+            *column = format!("PERIOD {column}");
+        }
+        if let Some(column) = referenced_columns.last_mut() {
+            *column = format!("PERIOD {column}");
+        }
+    }
     let mut def = format!(
         "FOREIGN KEY ({}) REFERENCES {}({})",
         local_columns.join(", "),

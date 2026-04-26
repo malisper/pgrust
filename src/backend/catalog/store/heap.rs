@@ -4121,6 +4121,7 @@ impl CatalogStore {
         confdeltype: char,
         confmatchtype: char,
         confdelsetcols: Option<&[i16]>,
+        conperiod: bool,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let conname = conname.into();
@@ -4181,7 +4182,7 @@ impl CatalogStore {
             conislocal: true,
             coninhcount: 0,
             connoinherit: false,
-            conperiod: false,
+            conperiod,
         };
         control.next_oid = control.next_oid.saturating_add(1);
 
@@ -4228,6 +4229,7 @@ impl CatalogStore {
         confdeltype: char,
         confmatchtype: char,
         confdelsetcols: Option<&[i16]>,
+        conperiod: bool,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let conname = conname.into();
@@ -4281,7 +4283,7 @@ impl CatalogStore {
             conislocal: true,
             coninhcount: 0,
             connoinherit: false,
-            conperiod: false,
+            conperiod,
         };
         control.next_oid = control.next_oid.saturating_add(1);
 
@@ -5042,6 +5044,57 @@ impl CatalogStore {
         if let Some(index_meta) = &new_entry.index_meta {
             effect_record_oid(&mut effect.relation_oids, index_meta.indrelid);
         }
+        Ok(effect)
+    }
+
+    pub fn set_replica_identity_index_mvcc(
+        &mut self,
+        relation_oid: u32,
+        index_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let old_indexes = index_rows_for_relation_mvcc(self, ctx, relation_oid)?;
+        let target = old_indexes
+            .iter()
+            .find(|row| row.indexrelid == index_oid)
+            .ok_or_else(|| CatalogError::UnknownTable(index_oid.to_string()))?;
+        if !target.indisunique {
+            return Err(CatalogError::Corrupt(
+                "replica identity index must be unique",
+            ));
+        }
+        let mut new_indexes = old_indexes.clone();
+        for row in &mut new_indexes {
+            row.indisreplident = row.indexrelid == index_oid;
+        }
+
+        let control = self.control_state()?;
+        self.persist_control_values(control.next_oid, control.next_rel_number)?;
+        let kinds = vec![BootstrapCatalogKind::PgIndex];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                indexes: old_indexes,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                indexes: new_indexes,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        self.control = control;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.relation_oids, index_oid);
         Ok(effect)
     }
 
@@ -8368,7 +8421,7 @@ fn index_rows_for_relation_mvcc(
     relation_oid: u32,
 ) -> Result<Vec<crate::include::catalog::PgIndexRow>, CatalogError> {
     Ok(store
-        .search_sys_cache_list1(ctx, SysCacheId::IndexRelId, oid_key(relation_oid))?
+        .search_sys_cache_list1(ctx, SysCacheId::IndexIndRelId, oid_key(relation_oid))?
         .into_iter()
         .filter_map(|tuple| match tuple {
             SysCacheTuple::Index(row) => Some(row),

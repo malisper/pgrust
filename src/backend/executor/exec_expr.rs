@@ -2637,9 +2637,17 @@ fn format_foreign_key_constraintdef_for_catalog(
 ) -> Option<String> {
     let relation = catalog.lookup_relation_by_oid(row.conrelid)?;
     let referenced_relation = catalog.lookup_relation_by_oid(row.confrelid)?;
-    let local_columns = index_column_names_for_heap(&relation.desc, row.conkey.as_ref()?)?;
-    let referenced_columns =
+    let mut local_columns = index_column_names_for_heap(&relation.desc, row.conkey.as_ref()?)?;
+    let mut referenced_columns =
         index_column_names_for_heap(&referenced_relation.desc, row.confkey.as_ref()?)?;
+    if row.conperiod {
+        if let Some(column) = local_columns.last_mut() {
+            *column = format!("PERIOD {column}");
+        }
+        if let Some(column) = referenced_columns.last_mut() {
+            *column = format!("PERIOD {column}");
+        }
+    }
     let referenced_name = catalog
         .class_row_by_oid(row.confrelid)
         .map(|class| class.relname)
