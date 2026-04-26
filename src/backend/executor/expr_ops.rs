@@ -20,7 +20,10 @@ use super::expr_money::{
 };
 use super::expr_network::{network_add, network_bitwise_binary, network_bitwise_not, network_sub};
 use super::node_types::*;
-use super::{compare_multirange_values, expr_range::compare_range_values};
+use super::{
+    compare_multirange_values, expr_casts::render_internal_char_text,
+    expr_range::compare_range_values,
+};
 use crate::backend::executor::jsonb::{
     JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb, jsonb_concat,
 };
@@ -214,6 +217,13 @@ pub(crate) fn compare_values(
         (Value::Xid8(l), Value::Xid8(r)) => Ok(Value::Bool(l == r)),
         (Value::PgLsn(l), Value::PgLsn(r)) => Ok(Value::Bool(l == r)),
         (Value::Money(l), Value::Money(r)) => Ok(Value::Bool(l == r)),
+        (Value::InternalChar(l), Value::InternalChar(r)) => Ok(Value::Bool(l == r)),
+        (Value::InternalChar(l), r) if r.as_text().is_some() => Ok(Value::Bool(
+            render_internal_char_text(*l) == r.as_text().unwrap(),
+        )),
+        (l, Value::InternalChar(r)) if l.as_text().is_some() => Ok(Value::Bool(
+            l.as_text().unwrap() == render_internal_char_text(*r),
+        )),
         (Value::Date(l), Value::Date(r)) => Ok(Value::Bool(l == r)),
         (Value::Time(l), Value::Time(r)) => Ok(Value::Bool(l == r)),
         (Value::TimeTz(l), Value::TimeTz(r)) => Ok(Value::Bool(l == r)),

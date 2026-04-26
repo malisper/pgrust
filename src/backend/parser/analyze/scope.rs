@@ -169,7 +169,7 @@ pub(super) fn bind_values_rows(
             common = Some(match common {
                 None => {
                     common_expr = Some(&row[col_idx]);
-                    inferred.element_type()
+                    inferred
                 }
                 Some(existing) => {
                     let existing = coerce_unknown_string_literal_type(

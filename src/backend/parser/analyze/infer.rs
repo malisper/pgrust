@@ -969,6 +969,10 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 }
                 Some(BuiltinScalarFunction::Age) => SqlType::new(SqlTypeKind::Interval),
                 Some(BuiltinScalarFunction::IntervalHash) => SqlType::new(SqlTypeKind::Int4),
+                Some(BuiltinScalarFunction::HashValue(_)) => SqlType::new(SqlTypeKind::Int4),
+                Some(BuiltinScalarFunction::HashValueExtended(_)) => {
+                    SqlType::new(SqlTypeKind::Int8)
+                }
                 Some(BuiltinScalarFunction::ToJson)
                 | Some(BuiltinScalarFunction::ArrayToJson)
                 | Some(BuiltinScalarFunction::JsonBuildArray)
@@ -1540,7 +1544,7 @@ pub(super) fn infer_array_literal_type_with_ctes(
         );
         common = Some(match common {
             None => ty.element_type(),
-            Some(existing) => resolve_common_scalar_type(existing, ty)?,
+            Some(existing) => resolve_common_scalar_type(existing, ty.element_type())?,
         });
     }
     common.map(SqlType::array_of)

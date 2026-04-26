@@ -485,10 +485,15 @@ pub(super) fn coerce_unknown_string_literal_type(
             SqlTypeKind::Bytea => return SqlType::new(SqlTypeKind::Bytea),
             SqlTypeKind::Uuid => return SqlType::new(SqlTypeKind::Uuid),
             SqlTypeKind::Enum if peer_type.type_oid != 0 => return peer_type,
-            SqlTypeKind::InternalChar => return SqlType::new(SqlTypeKind::Text),
+            SqlTypeKind::InternalChar => return SqlType::new(SqlTypeKind::InternalChar),
             SqlTypeKind::Name => return SqlType::new(SqlTypeKind::Name),
+            SqlTypeKind::Inet => return SqlType::new(SqlTypeKind::Inet),
+            SqlTypeKind::Cidr => return SqlType::new(SqlTypeKind::Cidr),
+            SqlTypeKind::Interval => return SqlType::new(SqlTypeKind::Interval),
             SqlTypeKind::MacAddr => return SqlType::new(SqlTypeKind::MacAddr),
             SqlTypeKind::MacAddr8 => return SqlType::new(SqlTypeKind::MacAddr8),
+            SqlTypeKind::OidVector => return SqlType::new(SqlTypeKind::OidVector),
+            SqlTypeKind::Int2Vector => return SqlType::new(SqlTypeKind::Int2Vector),
             SqlTypeKind::TsQuery => return SqlType::new(SqlTypeKind::TsQuery),
             SqlTypeKind::TsVector => return SqlType::new(SqlTypeKind::TsVector),
             SqlTypeKind::Tid => return SqlType::new(SqlTypeKind::Tid),
@@ -576,6 +581,14 @@ pub(super) fn should_use_text_concat(
 }
 
 pub(super) fn resolve_common_scalar_type(left: SqlType, right: SqlType) -> Option<SqlType> {
+    if left.is_array || right.is_array {
+        if left.is_array && right.is_array {
+            let common_element =
+                resolve_common_scalar_type(left.element_type(), right.element_type())?;
+            return Some(SqlType::array_of(common_element));
+        }
+        return None;
+    }
     let left = left.element_type();
     let right = right.element_type();
     if left == right {

@@ -1970,6 +1970,47 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             };
             let domain = domain_lookup_for_raw_type_name(ty, catalog);
             let target_type = resolve_raw_type_name(ty, catalog)?;
+            if let SqlExpr::Negate(negated_inner) = inner.as_ref()
+                && matches!(
+                    target_type.kind,
+                    SqlTypeKind::Float4
+                        | SqlTypeKind::Float8
+                        | SqlTypeKind::Numeric
+                        | SqlTypeKind::Money
+                        | SqlTypeKind::Interval
+                )
+            {
+                let negated_source_type = infer_sql_expr_type_with_ctes(
+                    negated_inner,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                if !matches!(negated_inner.as_ref(), SqlExpr::Const(Value::Null)) {
+                    validate_catalog_backed_explicit_cast(
+                        negated_source_type,
+                        target_type,
+                        catalog,
+                    )?;
+                }
+                let bound_negated_inner = bind_expr_with_outer_and_ctes(
+                    negated_inner,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                let coerced_inner =
+                    coerce_bound_expr(bound_negated_inner, negated_source_type, target_type);
+                return Ok(bind_domain_constraint_expr(
+                    Expr::op_auto(OpExprKind::Negate, vec![coerced_inner]),
+                    target_type,
+                    domain.as_ref(),
+                ));
+            }
             if target_type.kind == SqlTypeKind::RegRole
                 && let Some(bound_regrole) = bind_regrole_literal_cast(inner, target_type, catalog)?
             {

@@ -326,6 +326,43 @@ impl BuiltinWindowFunction {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HashFunctionKind {
+    Bool,
+    Int2,
+    Int4,
+    Int8,
+    Oid,
+    InternalChar,
+    Name,
+    Text,
+    Varchar,
+    BpChar,
+    Float4,
+    Float8,
+    Numeric,
+    Timestamp,
+    TimestampTz,
+    Date,
+    Time,
+    TimeTz,
+    Bytea,
+    OidVector,
+    AclItem,
+    Inet,
+    MacAddr,
+    MacAddr8,
+    Array,
+    Interval,
+    Uuid,
+    PgLsn,
+    Enum,
+    Jsonb,
+    Range,
+    Multirange,
+    Record,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinScalarFunction {
     Random,
@@ -612,6 +649,8 @@ pub enum BuiltinScalarFunction {
     MakeTimestampTz,
     ToTimestamp,
     IntervalHash,
+    HashValue(HashFunctionKind),
+    HashValueExtended(HashFunctionKind),
     Abs,
     Log,
     Log10,
