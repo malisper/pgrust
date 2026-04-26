@@ -2166,9 +2166,26 @@ fn eval_pg_describe_object(values: &[Value], ctx: &ExecutorContext) -> Result<Va
                 "pg_namespace" => catalog
                     .namespace_row_by_oid(objid)
                     .map(|row| format!("schema {}", row.nspname)),
+                "pg_type" => catalog.type_by_oid(objid).map(|row| {
+                    format!(
+                        "type {}",
+                        expr_reg::format_type_text(row.oid, None, catalog)
+                    )
+                }),
                 "pg_proc" => catalog
                     .proc_row_by_oid(objid)
                     .map(|row| function_identity_text(&row, catalog)),
+                "pg_cast" => catalog
+                    .cast_rows()
+                    .into_iter()
+                    .find(|row| row.oid == objid)
+                    .map(|row| {
+                        format!(
+                            "cast from {} to {}",
+                            expr_reg::format_type_text(row.castsource, None, catalog),
+                            expr_reg::format_type_text(row.casttarget, None, catalog)
+                        )
+                    }),
                 "pg_operator" => catalog
                     .operator_by_oid(objid)
                     .map(|row| operator_identity_text(&row, catalog)),

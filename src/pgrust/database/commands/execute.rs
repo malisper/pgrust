@@ -715,6 +715,12 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateCast(ref create_stmt) => self
+                .execute_create_cast_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateOperator(ref create_stmt) => self
                 .execute_create_operator_stmt_with_search_path(
                     client_id,
@@ -1503,6 +1509,11 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::DropCast(ref drop_stmt) => self.execute_drop_cast_stmt_with_search_path(
+                client_id,
+                drop_stmt,
+                configured_search_path,
+            ),
             Statement::AlterType(ref alter_stmt) => self.execute_alter_type_stmt_with_search_path(
                 client_id,
                 alter_stmt,

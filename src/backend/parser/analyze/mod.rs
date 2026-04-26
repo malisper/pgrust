@@ -767,6 +767,10 @@ pub trait CatalogLookup {
             .find(|row| row.castsource == source_type_oid && row.casttarget == target_type_oid)
     }
 
+    fn cast_rows(&self) -> Vec<PgCastRow> {
+        bootstrap_pg_cast_rows()
+    }
+
     fn type_rows(&self) -> Vec<PgTypeRow> {
         builtin_type_rows()
     }
@@ -1210,6 +1214,10 @@ impl CatalogLookup for IndexExpressionCatalogLookup<'_> {
     ) -> Option<PgCastRow> {
         self.inner
             .cast_by_source_target(source_type_oid, target_type_oid)
+    }
+
+    fn cast_rows(&self) -> Vec<PgCastRow> {
+        self.inner.cast_rows()
     }
 
     fn type_rows(&self) -> Vec<PgTypeRow> {

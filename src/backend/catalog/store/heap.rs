@@ -17,7 +17,7 @@ use crate::backend::catalog::pg_depend::{
     relation_constraint_depend_rows, relation_rule_depend_rows, sort_pg_depend_rows,
     statistic_ext_depend_rows, trigger_depend_rows, view_rewrite_depend_rows,
 };
-use crate::backend::catalog::rowcodec::pg_description_row_from_values;
+use crate::backend::catalog::rowcodec::{pg_cast_row_from_values, pg_description_row_from_values};
 use crate::backend::catalog::rows::{
     PhysicalCatalogRows, create_composite_type_sync_kinds, create_index_sync_kinds,
     create_table_sync_kinds, create_view_sync_kinds, drop_relation_delete_kinds,
@@ -35,19 +35,20 @@ use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, s
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::backend::utils::cache::syscache::{SysCacheId, SysCacheTuple};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
+use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
     BootstrapCatalogKind, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
     CONSTRAINT_UNIQUE, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_AM_RELATION_OID,
     PG_AMOP_RELATION_OID, PG_AMPROC_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_AUTHID_RELATION_OID,
-    PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
-    PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
-    PG_OPFAMILY_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
-    PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
+    PG_CAST_RELATION_OID, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
+    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID,
+    PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID, PG_POLICY_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
     PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_RELATION_OID,
     PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow, PgAmopRow, PgAmprocRow,
-    PgAttrdefRow, PgAttributeRow, PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
-    PgDescriptionRow, PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
+    PgAttrdefRow, PgAttributeRow, PgCastRow, PgClassRow, PgConstraintRow, PgDatabaseRow,
+    PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
     PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
     PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTypeRow,
     relkind_has_storage,
@@ -60,6 +61,8 @@ use super::{
 };
 
 const PG_DESCRIPTION_O_C_O_INDEX_OID: u32 = 2675;
+const PG_CAST_OID_INDEX_OID: u32 = 2660;
+const PG_CAST_SOURCE_TARGET_INDEX_OID: u32 = 2661;
 const PG_NAMESPACE_OID_INDEX_OID: u32 = 2685;
 const PG_STATISTIC_RELID_ATT_INH_INDEX_OID: u32 = 2696;
 
@@ -1467,6 +1470,70 @@ impl CatalogStore {
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         Ok((proc_row, effect))
+    }
+
+    pub fn create_cast_mvcc(
+        &mut self,
+        mut row: PgCastRow,
+        mut depends: Vec<PgDependRow>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let mut control = self.control_state()?;
+        if row.oid == 0 {
+            row.oid = control.next_oid;
+        }
+        control.next_oid = control.next_oid.max(row.oid.saturating_add(1));
+        self.persist_control_values_without_relcache_invalidation(
+            control.next_oid,
+            control.next_rel_number,
+        )?;
+        self.control = control;
+
+        for depend in &mut depends {
+            depend.classid = PG_CAST_RELATION_OID;
+            depend.objid = row.oid;
+            depend.objsubid = 0;
+        }
+        sort_pg_depend_rows(&mut depends);
+        let rows = PhysicalCatalogRows {
+            casts: vec![row.clone()],
+            depends,
+            ..PhysicalCatalogRows::default()
+        };
+        let kinds = [BootstrapCatalogKind::PgCast, BootstrapCatalogKind::PgDepend];
+        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok((row.oid, effect))
+    }
+
+    pub fn drop_cast_by_oid_mvcc(
+        &mut self,
+        cast_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(PgCastRow, CatalogMutationEffect), CatalogError> {
+        let cast_row = cast_row_by_oid_mvcc(self, ctx, cast_oid)?
+            .ok_or_else(|| CatalogError::UnknownType(cast_oid.to_string()))?;
+        let depends = depend_rows_for_object_mvcc(self, ctx, PG_CAST_RELATION_OID, cast_oid)?;
+        let description_rows =
+            description_rows_for_object_mvcc(self, ctx, cast_oid, PG_CAST_RELATION_OID, 0)?;
+        let rows = PhysicalCatalogRows {
+            casts: vec![cast_row.clone()],
+            depends,
+            descriptions: description_rows,
+            ..PhysicalCatalogRows::default()
+        };
+        let kinds = [
+            BootstrapCatalogKind::PgCast,
+            BootstrapCatalogKind::PgDepend,
+            BootstrapCatalogKind::PgDescription,
+        ];
+        delete_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok((cast_row, effect))
     }
 
     pub fn create_operator_class_mvcc(
@@ -7752,6 +7819,70 @@ fn operator_row_by_oid_mvcc(
             SysCacheTuple::Operator(row) => Some(row),
             _ => None,
         }))
+}
+
+fn cast_row_by_oid_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    cast_oid: u32,
+) -> Result<Option<PgCastRow>, CatalogError> {
+    let snapshot = ctx
+        .txns
+        .read()
+        .snapshot_for_command(ctx.xid, ctx.cid)
+        .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+    Ok(probe_system_catalog_rows_visible_in_db(
+        &ctx.pool,
+        &ctx.txns,
+        &snapshot,
+        ctx.client_id,
+        store.scope_db_oid(),
+        PG_CAST_OID_INDEX_OID,
+        vec![ScanKeyData {
+            attribute_number: 1,
+            strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+            argument: Value::Int64(i64::from(cast_oid)),
+        }],
+    )?
+    .into_iter()
+    .filter_map(|values| pg_cast_row_from_values(values).ok())
+    .next())
+}
+
+fn cast_row_by_source_target_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    source_oid: u32,
+    target_oid: u32,
+) -> Result<Option<PgCastRow>, CatalogError> {
+    let snapshot = ctx
+        .txns
+        .read()
+        .snapshot_for_command(ctx.xid, ctx.cid)
+        .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+    Ok(probe_system_catalog_rows_visible_in_db(
+        &ctx.pool,
+        &ctx.txns,
+        &snapshot,
+        ctx.client_id,
+        store.scope_db_oid(),
+        PG_CAST_SOURCE_TARGET_INDEX_OID,
+        vec![
+            ScanKeyData {
+                attribute_number: 1,
+                strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                argument: Value::Int64(i64::from(source_oid)),
+            },
+            ScanKeyData {
+                attribute_number: 2,
+                strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                argument: Value::Int64(i64::from(target_oid)),
+            },
+        ],
+    )?
+    .into_iter()
+    .filter_map(|values| pg_cast_row_from_values(values).ok())
+    .next())
 }
 
 fn type_row_by_oid_mvcc(

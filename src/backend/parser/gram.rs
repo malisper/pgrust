@@ -99,6 +99,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_create_function_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_cast_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_drop_function_statement(&sql)? {
         return Ok(stmt);
     }
@@ -4381,6 +4384,18 @@ fn try_parse_comment_on_type_or_column_statement(
     Ok(None)
 }
 
+fn try_parse_cast_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create cast ") {
+        return build_create_cast_statement(trimmed).map(|stmt| Some(Statement::CreateCast(stmt)));
+    }
+    if lowered.starts_with("drop cast ") {
+        return build_drop_cast_statement(trimmed).map(|stmt| Some(Statement::DropCast(stmt)));
+    }
+    Ok(None)
+}
+
 fn try_parse_create_operator_class_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -5679,8 +5694,9 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     };
     let rest = rest.trim_start();
     let ((schema_name, function_name), rest) = parse_qualified_sql_name(rest)?;
+    let arg_list_position = parenthesized_inner_position(sql, rest);
     let (arg_list, mut rest) = take_parenthesized_segment(rest)?;
-    let args = parse_create_function_args(&arg_list)?;
+    let args = parse_create_function_args_with_base(&arg_list, arg_list_position)?;
 
     let mut return_spec = None;
     let mut language = None;
@@ -6557,6 +6573,7 @@ fn parse_create_procedure_arg(input: &str) -> Result<CreateFunctionArg, ParseErr
                 mode,
                 name: Some(name),
                 ty: parse_type_name(type_sql.trim())?,
+                type_position: None,
                 default_expr: default_expr.map(str::to_string),
                 variadic,
             });
@@ -8082,6 +8099,134 @@ fn build_create_type_statement(sql: &str) -> Result<CreateTypeStatement, ParseEr
     ))
 }
 
+fn build_create_cast_statement(sql: &str) -> Result<CreateCastStatement, ParseError> {
+    let prefix = "create cast";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CREATE CAST (source AS target)",
+            actual: sql.into(),
+        });
+    };
+    let (type_pair, rest) = take_parenthesized_segment(rest.trim_start())?;
+    let (source_type, target_type) = parse_cast_type_pair(&type_pair)?;
+    let rest = rest.trim_start();
+    let (method, rest) = if keyword_at_start(rest, "with") {
+        let rest = consume_keyword(rest, "with").trim_start();
+        if keyword_at_start(rest, "function") {
+            let rest = consume_keyword(rest, "function").trim_start();
+            let ((schema_name, function_name), rest) = parse_qualified_sql_name(rest)?;
+            let (args_sql, rest) = take_parenthesized_segment(rest.trim_start())?;
+            let arg_types = parse_cast_function_arg_types(&args_sql)?;
+            (
+                CreateCastMethod::Function {
+                    schema_name,
+                    function_name,
+                    arg_types,
+                },
+                rest,
+            )
+        } else if keyword_at_start(rest, "inout") {
+            (CreateCastMethod::InOut, consume_keyword(rest, "inout"))
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "FUNCTION or INOUT",
+                actual: rest.into(),
+            });
+        }
+    } else if let Some(rest) = consume_keywords(rest, &["without", "function"]) {
+        (CreateCastMethod::WithoutFunction, rest)
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "WITH FUNCTION, WITHOUT FUNCTION, or WITH INOUT",
+            actual: rest.into(),
+        });
+    };
+    let (context, rest) = parse_cast_context(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of CREATE CAST statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CreateCastStatement {
+        source_type,
+        target_type,
+        method,
+        context,
+    })
+}
+
+fn build_drop_cast_statement(sql: &str) -> Result<DropCastStatement, ParseError> {
+    let prefix = "drop cast";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "DROP CAST (source AS target)",
+            actual: sql.into(),
+        });
+    };
+    let mut rest = rest.trim_start();
+    let mut if_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        if_exists = true;
+        rest = next.trim_start();
+    }
+    let (type_pair, rest) = take_parenthesized_segment(rest)?;
+    let (source_type, target_type) = parse_cast_type_pair(&type_pair)?;
+    let suffix = rest.trim();
+    let cascade = if suffix.is_empty() || keyword_at_start(suffix, "restrict") {
+        false
+    } else if keyword_at_start(suffix, "cascade") {
+        true
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CASCADE, RESTRICT, or end of statement",
+            actual: suffix.into(),
+        });
+    };
+    Ok(DropCastStatement {
+        if_exists,
+        source_type,
+        target_type,
+        cascade,
+    })
+}
+
+fn parse_cast_type_pair(input: &str) -> Result<(RawTypeName, RawTypeName), ParseError> {
+    let as_index =
+        find_next_top_level_keyword(input, &["as"]).ok_or(ParseError::UnexpectedToken {
+            expected: "source type AS target type",
+            actual: input.into(),
+        })?;
+    let source_sql = input[..as_index].trim();
+    let target_sql = input[as_index + "as".len()..].trim();
+    if source_sql.is_empty() || target_sql.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "source type AS target type",
+            actual: input.into(),
+        });
+    }
+    Ok((parse_type_name(source_sql)?, parse_type_name(target_sql)?))
+}
+
+fn parse_cast_function_arg_types(input: &str) -> Result<Vec<RawTypeName>, ParseError> {
+    split_top_level_items(input, ',')?
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .map(|item| parse_type_name(item.trim()))
+        .collect()
+}
+
+fn parse_cast_context(input: &str) -> Result<(CastContext, &str), ParseError> {
+    let rest = input.trim_start();
+    if let Some(rest) = consume_keywords(rest, &["as", "implicit"]) {
+        return Ok((CastContext::Implicit, rest));
+    }
+    if let Some(rest) = consume_keywords(rest, &["as", "assignment"]) {
+        return Ok((CastContext::Assignment, rest));
+    }
+    Ok((CastContext::Explicit, rest))
+}
+
 fn build_create_operator_class_statement(
     sql: &str,
 ) -> Result<CreateOperatorClassStatement, ParseError> {
@@ -9197,18 +9342,34 @@ fn build_drop_type_statement(sql: &str) -> Result<DropTypeStatement, ParseError>
 }
 
 fn parse_create_function_args(input: &str) -> Result<Vec<CreateFunctionArg>, ParseError> {
-    let items = split_top_level_items(input, ',')?;
-    if items.len() == 1 && items[0].trim().is_empty() {
+    parse_create_function_args_with_base(input, None)
+}
+
+fn parse_create_function_args_with_base(
+    input: &str,
+    base_offset: Option<usize>,
+) -> Result<Vec<CreateFunctionArg>, ParseError> {
+    let items = split_top_level_items_with_spans(input, ',')?;
+    if items.len() == 1 && items[0].0.trim().is_empty() {
         return Ok(Vec::new());
     }
     items
         .into_iter()
-        .filter(|item| !item.trim().is_empty())
-        .map(|item| parse_create_function_arg(&item))
+        .filter(|(item, _)| !item.trim().is_empty())
+        .map(|(item, item_offset)| {
+            parse_create_function_arg_with_base(item, base_offset.map(|base| base + item_offset))
+        })
         .collect()
 }
 
 fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseError> {
+    parse_create_function_arg_with_base(input, None)
+}
+
+fn parse_create_function_arg_with_base(
+    input: &str,
+    arg_base_offset: Option<usize>,
+) -> Result<CreateFunctionArg, ParseError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(ParseError::UnexpectedToken {
@@ -9240,16 +9401,18 @@ fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseErro
     if !rest.chars().any(char::is_whitespace)
         && let Ok(ty) = parse_type_name(rest)
     {
+        let type_position = named_type_position(&ty, input, rest, arg_base_offset);
         return Ok(CreateFunctionArg {
             mode,
             name: None,
             ty,
+            type_position,
             default_expr: None,
             variadic: false,
         });
     }
     let (name, type_sql) = match parse_sql_identifier(rest) {
-        Ok((name, rest)) if !rest.trim().is_empty() => (Some(name), rest.trim()),
+        Ok((name, rest)) if !rest.trim().is_empty() => (Some(name), rest.trim_start()),
         _ => (None, rest),
     };
     if type_sql.trim().is_empty() {
@@ -9258,10 +9421,13 @@ fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseErro
             actual: input.into(),
         });
     }
+    let ty = parse_type_name(type_sql.trim())?;
+    let type_position = named_type_position(&ty, input, type_sql, arg_base_offset);
     Ok(CreateFunctionArg {
         mode,
         name,
-        ty: parse_type_name(type_sql.trim())?,
+        ty,
+        type_position,
         default_expr: None,
         variadic: false,
     })
@@ -9515,6 +9681,15 @@ fn take_parenthesized_segment(input: &str) -> Result<(String, &str), ParseError>
     Err(ParseError::UnexpectedEof)
 }
 
+fn parenthesized_inner_position(sql: &str, input: &str) -> Option<usize> {
+    let input_offset = sql.len().checked_sub(input.len())?;
+    let leading = input.len().checked_sub(input.trim_start().len())?;
+    input
+        .trim_start()
+        .starts_with('(')
+        .then_some(input_offset + leading + 1)
+}
+
 fn split_top_level_items(input: &str, separator: char) -> Result<Vec<String>, ParseError> {
     let mut items = Vec::new();
     let mut start = 0usize;
@@ -9550,6 +9725,75 @@ fn split_top_level_items(input: &str, separator: char) -> Result<Vec<String>, Pa
     }
     items.push(input[start..].trim().to_string());
     Ok(items)
+}
+
+fn split_top_level_items_with_spans(
+    input: &str,
+    separator: char,
+) -> Result<Vec<(&str, usize)>, ParseError> {
+    let mut items = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let bytes = input.as_bytes();
+    let sep = separator as u8;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = parse_delimited_token_end(bytes, i, b'\'');
+                continue;
+            }
+            b'"' => {
+                i = parse_delimited_token_end(bytes, i, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            byte if byte == sep && depth == 0 => {
+                items.push(trim_ascii_span(input, start, i));
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    items.push(trim_ascii_span(input, start, input.len()));
+    Ok(items)
+}
+
+fn trim_ascii_span(input: &str, mut start: usize, mut end: usize) -> (&str, usize) {
+    let bytes = input.as_bytes();
+    while start < end && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    (&input[start..end], start)
+}
+
+fn type_position(parent: &str, child: &str, base_offset: Option<usize>) -> Option<usize> {
+    let base = base_offset?;
+    let child = child.trim_start();
+    parent
+        .len()
+        .checked_sub(child.len())
+        .map(|relative| base + relative + 1)
+}
+
+fn named_type_position(
+    ty: &RawTypeName,
+    parent: &str,
+    child: &str,
+    base_offset: Option<usize>,
+) -> Option<usize> {
+    matches!(ty, RawTypeName::Named { .. }).then(|| type_position(parent, child, base_offset))?
 }
 
 fn split_top_level_once(input: &str, separator: char) -> Result<Option<(&str, &str)>, ParseError> {
