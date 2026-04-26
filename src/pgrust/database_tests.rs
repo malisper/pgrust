@@ -12,7 +12,8 @@ use crate::backend::utils::misc::notices::{
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BootstrapCatalogKind, CSTRING_TYPE_OID, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
-    PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
+    PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID,
+    PgAggregateRow, TEXT_TYPE_OID,
 };
 use crate::include::nodes::datum::{ArrayValue, IntervalValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
@@ -6960,6 +6961,138 @@ fn create_view_selects_and_persists_rewrite_rule() {
 }
 
 #[test]
+fn comment_on_view_upserts_and_clears_pg_description() {
+    let dir = temp_dir("comment_on_view");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table items(id int4)").unwrap();
+    db.execute(1, "create view item_view as select id from items")
+        .unwrap();
+    db.execute(1, "comment on view item_view is 'visible ids'")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.description \
+             from pg_description d \
+             join pg_class c on c.oid = d.objoid \
+             where c.relname = 'item_view' and d.classoid = 1259 and d.objsubid = 0",
+        ),
+        vec![vec![Value::Text("visible ids".into())]]
+    );
+
+    db.execute(1, "comment on view item_view is null").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_description d \
+             join pg_class c on c.oid = d.objoid \
+             where c.relname = 'item_view' and d.classoid = 1259 and d.objsubid = 0",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn create_view_referencing_temp_relation_becomes_temp_view() {
+    let dir = temp_dir("create_view_infers_temp");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+    clear_backend_notices();
+
+    session.execute(&db, "create schema tenant").unwrap();
+    session
+        .execute(&db, "set search_path to tenant, public")
+        .unwrap();
+    session
+        .execute(&db, "create table base_items(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "create temp table temp_items(id int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view temp_item_view as select id from temp_items",
+        )
+        .unwrap();
+
+    assert_eq!(
+        take_backend_notices()
+            .into_iter()
+            .map(|notice| notice.message)
+            .collect::<Vec<_>>(),
+        vec!["view \"temp_item_view\" will be a temporary view"]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relpersistence, n.nspname like 'pg_temp_%' \
+             from pg_class c join pg_namespace n on n.oid = c.relnamespace \
+             where c.relname = 'temp_item_view'",
+        ),
+        vec![vec![Value::Text("t".into()), Value::Bool(true)]]
+    );
+
+    let err = session
+        .execute(
+            &db,
+            "create view tenant.bad_temp_view as select id from temp_items",
+        )
+        .unwrap_err();
+    match err {
+        ExecError::Parse(ParseError::TempTableInNonTempSchema(_)) => {}
+        other => panic!("expected temp relation in non-temp schema error, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_view_persists_security_reloptions() {
+    let dir = temp_dir("create_view_reloptions");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table items(id int4)").unwrap();
+    db.execute(
+        1,
+        "create view secure_items with (security_barrier, security_invoker=false) as select id from items",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'secure_items'",
+        ),
+        vec![vec![Value::PgArray(
+            crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                Value::Text("security_barrier=true".into()),
+                Value::Text("security_invoker=false".into()),
+            ])
+            .with_element_type_oid(TEXT_TYPE_OID)
+        )]]
+    );
+
+    db.execute(
+        1,
+        "create or replace view secure_items as select id from items",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'secure_items'",
+        ),
+        vec![vec![Value::Null]]
+    );
+}
+
+#[test]
 fn set_operation_inputs_expand_views() {
     let dir = temp_dir("set_operation_view_inputs");
     let db = Database::open(&dir, 128).unwrap();
@@ -7417,7 +7550,7 @@ fn view_relfilenode_is_zero_and_drop_table_rejects_view_name() {
 }
 
 #[test]
-fn dependent_views_block_alter_and_drop() {
+fn dependent_views_allow_add_column_but_block_drop() {
     let dir = temp_dir("dependent_views_block_ddl");
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
@@ -7429,11 +7562,9 @@ fn dependent_views_block_alter_and_drop() {
         .execute(&db, "create view base_view as select id from base_items")
         .unwrap();
 
-    match session.execute(&db, "alter table base_items add column note text") {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
-            if actual.contains("view depends on it: base_view") => {}
-        other => panic!("expected dependent-view alter-table error, got {other:?}"),
-    }
+    session
+        .execute(&db, "alter table base_items add column note text")
+        .unwrap();
 
     match session.execute(&db, "drop table base_items") {
         Err(ExecError::DetailedError {
@@ -7469,6 +7600,116 @@ fn drop_view_rejects_depended_on_view() {
         Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
             if actual.contains("view depends on it: second_view") => {}
         other => panic!("expected dependent-view drop-view error, got {other:?}"),
+    }
+}
+
+#[test]
+fn dependent_views_track_relation_rename_and_set_schema() {
+    let dir = temp_dir("dependent_views_track_renames");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema archive").unwrap();
+    session
+        .execute(&db, "create table items(id int4, note text, extra int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view item_view as select id, note from items where note is not null",
+        )
+        .unwrap();
+
+    session
+        .execute(&db, "alter table items rename to items_new")
+        .unwrap();
+    let renamed = query_rows(&db, 1, "select pg_get_viewdef('item_view'::regclass)");
+    let Value::Text(renamed_sql) = &renamed[0][0] else {
+        panic!("expected view definition text, got {renamed:?}");
+    };
+    assert!(renamed_sql.contains("FROM items_new"));
+    assert_eq!(
+        query_rows(&db, 1, "select * from item_view where id = 1 order by id",),
+        Vec::<Vec<Value>>::new()
+    );
+
+    session
+        .execute(&db, "alter table items_new set schema archive")
+        .unwrap();
+    let moved = query_rows(&db, 1, "select pg_get_viewdef('item_view'::regclass)");
+    let Value::Text(moved_sql) = &moved[0][0] else {
+        panic!("expected view definition text, got {moved:?}");
+    };
+    assert!(moved_sql.contains("archive.items_new"));
+}
+
+#[test]
+fn dependent_views_allow_safe_add_and_drop_column() {
+    let dir = temp_dir("dependent_views_safe_column_ddl");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items(id int4, note text, extra int4)")
+        .unwrap();
+    session
+        .execute(&db, "create view item_view as select id, note from items")
+        .unwrap();
+
+    session
+        .execute(&db, "alter table items add column status text")
+        .unwrap();
+    session
+        .execute(&db, "alter table items drop column extra")
+        .unwrap();
+
+    match session.execute(&db, "alter table items drop column note") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
+            if actual.contains("dependent view uses column note") => {}
+        other => panic!("expected dependent-view drop-column restriction, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_or_replace_view_rejects_incompatible_column_changes() {
+    let dir = temp_dir("create_or_replace_view_incompatible_columns");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items(id int4, note text)")
+        .unwrap();
+    session
+        .execute(&db, "create view item_view as select id, note from items")
+        .unwrap();
+
+    match session.execute(
+        &db,
+        "create or replace view item_view as select id as item_id, note from items",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "cannot change name of view column \"id\" to \"item_id\""
+            );
+            assert_eq!(sqlstate, "42P16");
+        }
+        other => panic!("expected create-or-replace name error, got {other:?}"),
+    }
+
+    match session.execute(
+        &db,
+        "create or replace view item_view as select id::int8 as id, note from items",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert!(message.contains("cannot change data type of view column \"id\""));
+            assert_eq!(sqlstate, "42P16");
+        }
+        other => panic!("expected create-or-replace type error, got {other:?}"),
     }
 }
 
@@ -8844,6 +9085,23 @@ fn create_schema_validates_embedded_element_schema_names() {
 }
 
 #[test]
+fn create_schema_rejects_embedded_temp_view() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    let err = session
+        .execute(
+            &db,
+            "create schema tenant create temp view testview as select 1",
+        )
+        .unwrap_err();
+    match err {
+        ExecError::Parse(ParseError::TempTableInNonTempSchema(_)) => {}
+        other => panic!("expected temp relation in non-temp schema error, got {other:?}"),
+    }
+}
+
+#[test]
 fn create_schema_executes_supported_embedded_elements_in_order() {
     let db = Database::open_ephemeral(16).unwrap();
     let mut session = Session::new(1);
@@ -8927,14 +9185,13 @@ fn create_schema_supports_authorization_and_if_not_exists() {
                 rows,
                 vec![vec![
                     Value::Text("postgres".into()),
-                    Value::Text("postgres".into()),
+                    Value::Text("postgres".into())
                 ]]
             );
         }
         other => panic!("expected query result, got {:?}", other),
     }
 }
-
 #[test]
 fn create_schema_authorization_current_role_uses_active_role() {
     let db = Database::open_ephemeral(16).unwrap();
@@ -13412,9 +13669,10 @@ fn create_brin_index_explain_uses_bitmap_scan_and_recheck() {
         "expected Bitmap Heap Scan in EXPLAIN, got {lines:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains(&format!("Bitmap Index Scan using rel {relfilenode} "))),
+        lines.iter().any(|line| {
+            line.contains(&format!("Bitmap Index Scan using rel {relfilenode} "))
+                || line.contains("Bitmap Index Scan on items_a_brin")
+        }),
         "expected Bitmap Index Scan on items_a_brin, got {lines:?}"
     );
     assert!(
@@ -13478,9 +13736,10 @@ fn create_gin_jsonb_index_uses_bitmap_scan_and_rechecks() {
         "expected Bitmap Heap Scan in EXPLAIN, got {lines:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains(&format!("Bitmap Index Scan using rel {relfilenode} "))),
+        lines.iter().any(|line| {
+            line.contains(&format!("Bitmap Index Scan using rel {relfilenode} "))
+                || line.contains("Bitmap Index Scan on docs_j_gin")
+        }),
         "expected Bitmap Index Scan on docs_j_gin, got {lines:?}"
     );
     assert!(
@@ -13609,22 +13868,86 @@ fn create_gist_box_index_supports_knn_order_by() {
 }
 
 #[test]
-fn create_spgist_text_index_reports_missing_default_opclass() {
-    let base = temp_dir("spgist_missing_default_opclass");
+fn create_spgist_text_index_supports_pattern_and_prefix_ops() {
+    let base = temp_dir("spgist_text_pattern_prefix");
     let db = Database::open(&base, 16).unwrap();
 
-    db.execute(1, "create table texts (t text)").unwrap();
+    db.execute(1, "create table texts (id int4 not null, t text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into texts values \
+         (1, 'alpha'), \
+         (2, 'beta'), \
+         (3, 'delta'), \
+         (4, 'omega'), \
+         (5, 'word'), \
+         (6, 'world')",
+    )
+    .unwrap();
+    db.execute(1, "create index texts_t_spgist on texts using spgist (t)")
+        .unwrap();
 
-    match db.execute(1, "create index texts_t_spgist on texts using spgist (t)") {
-        Err(ExecError::Parse(ParseError::MissingDefaultOpclass {
-            access_method,
-            type_name,
-        })) => {
-            assert_eq!(access_method, "spgist");
-            assert_eq!(type_name, "text");
-        }
-        other => panic!("expected missing default opclass error, got {:?}", other),
-    }
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indclass \
+             from pg_index \
+             where indexrelid = (select oid from pg_class where relname = 'texts_t_spgist')",
+        ),
+        vec![vec![Value::Text(
+            crate::include::catalog::TEXT_SPGIST_OPCLASS_OID
+                .to_string()
+                .into()
+        )]]
+    );
+
+    let lt_sql = "select id from texts where t ~<~ 'delta' order by id";
+    assert_explain_uses_index(&db, 1, lt_sql, "texts_t_spgist");
+    assert_eq!(
+        query_rows(&db, 1, lt_sql),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from texts where t ~<=~ 'beta' order by id",
+        ),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from texts where t ~>=~ 'word' order by id",
+        ),
+        vec![vec![Value::Int32(5)], vec![Value::Int32(6)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from texts where t ~>~ 'word' order by id",
+        ),
+        vec![vec![Value::Int32(6)]]
+    );
+
+    let prefix_sql = "select id from texts where t ^@ 'wo' order by id";
+    assert_explain_uses_index(&db, 1, prefix_sql, "texts_t_spgist");
+    assert_eq!(
+        query_rows(&db, 1, prefix_sql),
+        vec![vec![Value::Int32(5)], vec![Value::Int32(6)]]
+    );
+
+    let function_sql = "select id from texts where starts_with(t, 'wo') order by id";
+    assert_explain_uses_index(&db, 1, function_sql, "texts_t_spgist");
+    assert_eq!(
+        query_rows(&db, 1, function_sql),
+        vec![vec![Value::Int32(5)], vec![Value::Int32(6)]]
+    );
 }
 
 #[test]
@@ -13672,6 +13995,296 @@ fn create_spgist_rejects_expression_indexes() {
             assert_eq!(sqlstate, "0A000");
         }
         other => panic!("expected expression SP-GiST rejection, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_spgist_point_indexes_support_point_ops() {
+    let base = temp_dir("spgist_point_ops");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table points (id int4 not null, p point)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into points values \
+         (1, '(0,0)'::point), \
+         (2, '(5,5)'::point), \
+         (3, '(-1,2)'::point), \
+         (4, '(3,-2)'::point), \
+         (5, '(10,1)'::point)",
+    )
+    .unwrap();
+    db.execute(1, "create index points_p_spgist on points using spgist (p)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indclass \
+             from pg_index \
+             where indexrelid = (select oid from pg_class where relname = 'points_p_spgist')",
+        ),
+        vec![vec![Value::Text(
+            crate::include::catalog::QUAD_POINT_SPGIST_OPCLASS_OID
+                .to_string()
+                .into()
+        )]]
+    );
+
+    let left_sql = "select id from points where p << '(3,0)'::point order by id";
+    assert_explain_uses_index(&db, 1, left_sql, "points_p_spgist");
+    assert_eq!(
+        query_rows(&db, 1, left_sql),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(3)]]
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from points where p >> '(3,0)'::point order by id",
+        ),
+        vec![vec![Value::Int32(2)], vec![Value::Int32(5)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from points where p <<| '(0,1)'::point order by id",
+        ),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(4)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from points where p |>> '(0,1)'::point order by id",
+        ),
+        vec![vec![Value::Int32(2)], vec![Value::Int32(3)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from points where p ~= '(5,5)'::point order by id",
+        ),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from points where p <@ '(0,0),(5,5)'::box order by id",
+        ),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+
+    let knn_sql = "select id from points order by p <-> '(0,0)'::point limit 3";
+    assert_explain_uses_index(&db, 1, knn_sql, "points_p_spgist");
+    assert_eq!(
+        query_rows(&db, 1, knn_sql),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(3)],
+            vec![Value::Int32(4)],
+        ]
+    );
+
+    db.execute(1, "create table kd_points (id int4 not null, p point)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into kd_points values \
+         (1, '(0,0)'::point), \
+         (2, '(5,5)'::point), \
+         (3, '(-1,2)'::point), \
+         (4, '(3,-2)'::point), \
+         (5, '(10,1)'::point)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index kd_points_p_spgist on kd_points using spgist (p kd_point_ops)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indclass \
+             from pg_index \
+             where indexrelid = (select oid from pg_class where relname = 'kd_points_p_spgist')",
+        ),
+        vec![vec![Value::Text(
+            crate::include::catalog::KD_POINT_SPGIST_OPCLASS_OID
+                .to_string()
+                .into()
+        )]]
+    );
+
+    let kd_sql = "select id from kd_points where p >^ '(0,1)'::point order by id";
+    assert_explain_uses_index(&db, 1, kd_sql, "kd_points_p_spgist");
+    assert_eq!(
+        query_rows(&db, 1, kd_sql),
+        vec![vec![Value::Int32(2)], vec![Value::Int32(3)]]
+    );
+}
+
+#[test]
+fn create_spgist_index_supports_include_columns() {
+    let base = temp_dir("spgist_include_columns");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table points (p point, dist float8)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into points values \
+         ('(0,0)'::point, 0.0), \
+         ('(3,4)'::point, 5.0), \
+         ('(1,1)'::point, 1.41421356237)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index points_p_dist_spgist on points using spgist (p) include (dist)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indnatts, indnkeyatts, indkey, indclass \
+             from pg_index \
+             where indexrelid = (select oid from pg_class where relname = 'points_p_dist_spgist')",
+        ),
+        vec![vec![
+            Value::Int16(2),
+            Value::Int16(1),
+            Value::Text("1 2".into()),
+            Value::Text(
+                crate::include::catalog::QUAD_POINT_SPGIST_OPCLASS_OID
+                    .to_string()
+                    .into(),
+            ),
+        ]]
+    );
+
+    let sql = "select dist from points order by p <-> '(0,0)'::point limit 2";
+    let lines = explain_lines(&db, 1, sql);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Index Only Scan using points_p_dist_spgist")),
+        "expected SP-GiST INCLUDE query to use index-only scan, got {lines:?}"
+    );
+    assert_eq!(
+        query_rows(&db, 1, sql),
+        vec![
+            vec![Value::Float64(0.0)],
+            vec![Value::Float64(1.41421356237)]
+        ]
+    );
+}
+
+#[test]
+fn spgist_index_supports_null_and_bitmap_scans() {
+    let base = temp_dir("spgist_null_bitmap_scans");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table points (p point)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into points values \
+         (NULL), \
+         ('(0,0)'::point), \
+         (NULL), \
+         ('(5,5)'::point)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create index points_p_spgist on points using spgist (p)",
+        )
+        .unwrap();
+
+    session.execute(&db, "set enable_seqscan to off").unwrap();
+    session.execute(&db, "set enable_indexscan to off").unwrap();
+    session.execute(&db, "set enable_bitmapscan to on").unwrap();
+
+    let null_sql = "select count(*) from points where p is null";
+    let null_lines = match session
+        .execute(&db, &format!("explain {null_sql}"))
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => rows
+            .into_iter()
+            .map(|row| match row.first() {
+                Some(Value::Text(text)) => text.to_string(),
+                other => panic!("expected explain text row, got {:?}", other),
+            })
+            .collect::<Vec<_>>(),
+        other => panic!("expected query result, got {:?}", other),
+    };
+    assert!(
+        null_lines
+            .iter()
+            .any(|line| line.contains("Bitmap Index Scan")),
+        "expected bitmap index scan for SP-GiST IS NULL, got {null_lines:?}"
+    );
+    assert!(
+        null_lines
+            .iter()
+            .any(|line| line.starts_with("        ->  Bitmap Index Scan")),
+        "expected PostgreSQL-style bitmap index indentation, got {null_lines:?}"
+    );
+    assert!(
+        null_lines
+            .iter()
+            .any(|line| line.contains("Index Cond: (p IS NULL)")),
+        "expected SP-GiST IS NULL index condition, got {null_lines:?}"
+    );
+    match session.execute(&db, null_sql).unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let not_null_sql = "select count(*) from points where p is not null";
+    let not_null_lines = match session
+        .execute(&db, &format!("explain {not_null_sql}"))
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => rows
+            .into_iter()
+            .map(|row| match row.first() {
+                Some(Value::Text(text)) => text.to_string(),
+                other => panic!("expected explain text row, got {:?}", other),
+            })
+            .collect::<Vec<_>>(),
+        other => panic!("expected query result, got {:?}", other),
+    };
+    assert!(
+        not_null_lines
+            .iter()
+            .any(|line| line.contains("Index Cond: (p IS NOT NULL)")),
+        "expected SP-GiST IS NOT NULL index condition, got {not_null_lines:?}"
+    );
+    match session.execute(&db, not_null_sql).unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
     }
 }
 
@@ -23277,6 +23890,82 @@ fn create_function_uses_search_path_for_unqualified_creation() {
 }
 
 #[test]
+fn create_language_c_function_uses_link_symbol_as_rust_backing_function() {
+    let base = temp_dir("language_c_function_link_symbol");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function binary_coercible(oid, oid) returns bool \
+             as 'regress', 'binary_coercible' language c strict stable parallel safe",
+        )
+        .unwrap();
+
+    let visible = db.backend_catcache(1, None).unwrap();
+    let proc = visible
+        .proc_rows_by_name("binary_coercible")
+        .into_iter()
+        .find(|row| row.proname == "binary_coercible")
+        .expect("function row");
+    assert_eq!(proc.prolang, PG_LANGUAGE_C_OID);
+    assert_eq!(proc.prosrc, "binary_coercible");
+
+    let result = session
+        .execute(
+            &db,
+            "select binary_coercible(1043::oid, 25::oid), binary_coercible(23::oid, 25::oid)",
+        )
+        .unwrap();
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Bool(true), Value::Bool(false)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_language_c_function_without_link_symbol_uses_function_name() {
+    let base = temp_dir("language_c_function_default_symbol");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function interpt_pp(path, path) returns point as 'regress' language c strict",
+        )
+        .unwrap();
+
+    let visible = db.backend_catcache(1, None).unwrap();
+    let proc = visible
+        .proc_rows_by_name("interpt_pp")
+        .into_iter()
+        .find(|row| row.proname == "interpt_pp")
+        .expect("function row");
+    assert_eq!(proc.prolang, PG_LANGUAGE_C_OID);
+    assert_eq!(proc.prosrc, "interpt_pp");
+
+    session
+        .execute(&db, "create table paths_a(thepath path)")
+        .unwrap();
+    session
+        .execute(&db, "create table paths_b(thepath path)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view path_intersections as \
+             select interpt_pp(a.thepath, b.thepath) as exit \
+             from paths_a a, paths_b b \
+             where a.thepath ?# b.thepath",
+        )
+        .unwrap();
+}
+
+#[test]
 fn create_function_persists_explicit_cost() {
     let base = temp_dir("search_path_function_cost");
     let db = Database::open(&base, 16).unwrap();
@@ -23920,6 +24609,75 @@ fn temp_create_table_as_select_works() {
 }
 
 #[test]
+fn temp_create_table_as_point_window_order_ignores_disabled_indexscan() {
+    let base = temp_dir("temp_ctas_point_window_order");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table point_source as \
+             select point(g, g * 2) as p from generate_series(1, 11000) g",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into point_source values (null)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create index point_source_sp on point_source using spgist (p)",
+        )
+        .unwrap();
+    session.execute(&db, "set enable_seqscan to on").unwrap();
+    session.execute(&db, "set enable_indexscan to off").unwrap();
+    session
+        .execute(&db, "set enable_bitmapscan to off")
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "explain (costs off) \
+             select row_number() over (order by p <-> '0,0') n, p <-> '0,0' dist, p \
+             from point_source",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let plan = rows
+                .iter()
+                .filter_map(|row| row.first().and_then(Value::as_text))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(plan.contains("Seq Scan"), "{plan}");
+            assert!(!plan.contains("Index Scan"), "{plan}");
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    session
+        .execute(
+            &db,
+            "create temp table point_ord as \
+             select row_number() over (order by p <-> '0,0') n, p <-> '0,0' dist, p \
+             from point_source",
+        )
+        .unwrap();
+
+    match session
+        .execute(&db, "select count(*) from point_ord")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(11001)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn select_into_creates_table_from_query() {
     let base = temp_dir("select_into_ctas");
     let db = Database::open(&base, 16).unwrap();
@@ -24307,6 +25065,40 @@ fn temp_slot_reuse_starts_from_clean_namespace_contents() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn stale_temp_cleanup_skips_dependents_dropped_with_parent() {
+    let base = temp_dir("temp_cleanup_skips_dependents");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table stale_temp (payload text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create index stale_temp_payload_idx on stale_temp (payload)",
+        )
+        .unwrap();
+    db.temp_relations.write().clear();
+
+    session
+        .execute(&db, "create temp table fresh_temp (id int4)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname from pg_class \
+             where relpersistence = 't' \
+               and relname in ('fresh_temp', 'stale_temp', 'stale_temp_payload_idx') \
+             order by relname",
+        ),
+        vec![vec![Value::Text("fresh_temp".into())]]
+    );
 }
 
 #[test]
@@ -27700,6 +28492,39 @@ fn pg_get_viewdef_returns_canonical_view_query() {
                 .into()
         )]]
     );
+}
+
+#[test]
+fn pg_get_viewdef_renders_sublinks_as_sql() {
+    let dir = temp_dir("pg_get_viewdef_sublinks");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table t1 (f1 int4)").unwrap();
+    db.execute(1, "create table t2 (f1 int4)").unwrap();
+    db.execute(
+        1,
+        "create view v_exists as select f1 from t1 where exists (select 1 from t2 where t2.f1 = t1.f1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view v_in as select f1 from t1 where f1 in (select f1 from t2)",
+    )
+    .unwrap();
+
+    let exists_def = query_rows(&db, 1, "select pg_get_viewdef('v_exists'::regclass)");
+    let Value::Text(exists_sql) = &exists_def[0][0] else {
+        panic!("expected text view definition, got {exists_def:?}");
+    };
+    assert!(exists_sql.contains("EXISTS ( SELECT 1"));
+    assert!(!exists_sql.contains("SubLink("));
+
+    let in_def = query_rows(&db, 1, "select pg_get_viewdef('v_in'::regclass)");
+    let Value::Text(in_sql) = &in_def[0][0] else {
+        panic!("expected text view definition, got {in_def:?}");
+    };
+    assert!(in_sql.contains(" IN ( SELECT"));
+    assert!(!in_sql.contains("SubLink("));
 }
 
 #[test]

@@ -28,7 +28,8 @@ mod tests {
         assert_eq!(am.amsupport, 7);
         assert!(am.amcanorderbyop);
         assert!(!am.amcanmulticol);
-        assert!(!am.amsearchnulls);
+        assert!(am.amsearchnulls);
+        assert!(am.amgetbitmap.is_some());
     }
 
     #[test]

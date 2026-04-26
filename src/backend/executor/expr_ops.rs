@@ -26,10 +26,15 @@ use crate::backend::executor::jsonb::{
 };
 use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::time::datetime::{
+    days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
+};
 use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
 use crate::include::nodes::datetime::{
-    TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeTzADT, USECS_PER_DAY, USECS_PER_SEC,
+    DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT,
+    TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
 };
+use crate::include::nodes::datum::IntervalValue;
 use crate::pgrust::compact_string::CompactString;
 
 pub(crate) fn compare_order_by_keys(
@@ -212,7 +217,7 @@ pub(crate) fn compare_values(
         (Value::TimeTz(l), Value::TimeTz(r)) => Ok(Value::Bool(l == r)),
         (Value::Timestamp(l), Value::Timestamp(r)) => Ok(Value::Bool(l == r)),
         (Value::TimestampTz(l), Value::TimestampTz(r)) => Ok(Value::Bool(l == r)),
-        (Value::Interval(l), Value::Interval(r)) => Ok(Value::Bool(l == r)),
+        (Value::Interval(l), Value::Interval(r)) => Ok(Value::Bool(l.cmp_key() == r.cmp_key())),
         (Value::Bytea(l), Value::Bytea(r)) => Ok(Value::Bool(l == r)),
         (Value::Uuid(l), Value::Uuid(r)) => Ok(Value::Bool(l == r)),
         (Value::Inet(l), Value::Inet(r))
@@ -348,7 +353,7 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (Value::TimeTz(l), Value::TimeTz(r)) => l != r,
         (Value::Timestamp(l), Value::Timestamp(r)) => l != r,
         (Value::TimestampTz(l), Value::TimestampTz(r)) => l != r,
-        (Value::Interval(l), Value::Interval(r)) => l != r,
+        (Value::Interval(l), Value::Interval(r)) => l.cmp_key() != r.cmp_key(),
         (Value::Bytea(l), Value::Bytea(r)) => l != r,
         (Value::Uuid(l), Value::Uuid(r)) => l != r,
         (Value::Bit(l), Value::Bit(r)) => l != r,
@@ -409,6 +414,20 @@ pub(crate) fn add_values(left: Value, right: Value) -> Result<Value, ExecError> 
             Ok(Value::PgLsn(add_pg_lsn_offset(*r, l)?))
         }
         (Value::Money(l), Value::Money(r)) => Ok(Value::Money(money_add(*l, *r)?)),
+        (Value::Interval(l), Value::Interval(r)) => l
+            .checked_add(*r)
+            .map(Value::Interval)
+            .ok_or_else(interval_out_of_range),
+        (Value::Date(l), Value::Interval(r)) => date_interval_op(*l, *r, false),
+        (Value::Interval(l), Value::Date(r)) => date_interval_op(*r, *l, false),
+        (Value::Timestamp(l), Value::Interval(r)) => timestamp_interval_op(*l, *r, false),
+        (Value::Interval(l), Value::Timestamp(r)) => timestamp_interval_op(*r, *l, false),
+        (Value::TimestampTz(l), Value::Interval(r)) => timestamptz_interval_op(*l, *r, false),
+        (Value::Interval(l), Value::TimestampTz(r)) => timestamptz_interval_op(*r, *l, false),
+        (Value::Time(l), Value::Interval(r)) => time_interval_op(*l, *r, false, true),
+        (Value::Interval(l), Value::Time(r)) => time_interval_op(*r, *l, false, true),
+        (Value::TimeTz(l), Value::Interval(r)) => timetz_interval_op(*l, *r, false, true),
+        (Value::Interval(l), Value::TimeTz(r)) => timetz_interval_op(*r, *l, false, true),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l + r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| Some(lv.add(rv)), "+")
@@ -505,6 +524,15 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Timestamp(l), Value::Timestamp(r)) => timestamp_diff_interval(l.0, r.0),
         (Value::TimestampTz(l), Value::TimestampTz(r)) => timestamp_diff_interval(l.0, r.0),
         (Value::Money(l), Value::Money(r)) => Ok(Value::Money(money_sub(*l, *r)?)),
+        (Value::Interval(l), Value::Interval(r)) => l
+            .checked_sub(*r)
+            .map(Value::Interval)
+            .ok_or_else(interval_out_of_range),
+        (Value::Date(l), Value::Interval(r)) => date_interval_op(*l, *r, true),
+        (Value::Timestamp(l), Value::Interval(r)) => timestamp_interval_op(*l, *r, true),
+        (Value::TimestampTz(l), Value::Interval(r)) => timestamptz_interval_op(*l, *r, true),
+        (Value::Time(l), Value::Interval(r)) => time_interval_op(*l, *r, true, false),
+        (Value::TimeTz(l), Value::Interval(r)) => timetz_interval_op(*l, *r, true, false),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l - r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| Some(lv.sub(rv)), "-")
@@ -514,15 +542,6 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
             left,
             right,
         }),
-    }
-}
-
-fn interval_out_of_range() -> ExecError {
-    ExecError::DetailedError {
-        message: "interval out of range".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "22008",
     }
 }
 
@@ -541,8 +560,8 @@ fn timestamp_difference_interval(left: i64, right: i64) -> Result<Value, ExecErr
         }
         _ => {
             let diff = left.checked_sub(right).ok_or_else(interval_out_of_range)?;
-            let days = diff / crate::include::nodes::datetime::USECS_PER_DAY;
-            let time_micros = diff % crate::include::nodes::datetime::USECS_PER_DAY;
+            let days = diff / USECS_PER_DAY;
+            let time_micros = diff % USECS_PER_DAY;
             Ok(Value::Interval(IntervalValue {
                 time_micros,
                 days: i32::try_from(days).map_err(|_| interval_out_of_range())?,
@@ -552,15 +571,175 @@ fn timestamp_difference_interval(left: i64, right: i64) -> Result<Value, ExecErr
     }
 }
 
+fn timestamp_out_of_range() -> ExecError {
+    ExecError::DetailedError {
+        message: "timestamp out of range".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    }
+}
+
+fn add_months_to_days(days: i32, months: i32) -> Option<i32> {
+    let (year, month, day) = ymd_from_days(days);
+    let month_index = i64::from(year) * 12 + i64::from(month) - 1 + i64::from(months);
+    let new_year = i32::try_from(month_index.div_euclid(12)).ok()?;
+    let new_month = (month_index.rem_euclid(12) + 1) as u32;
+    let new_day = day.min(days_in_month(new_year, new_month));
+    days_from_ymd(new_year, new_month, new_day)
+}
+
+fn finite_timestamp_interval(timestamp: i64, interval: IntervalValue) -> Result<i64, ExecError> {
+    let (mut days, time_usecs) = timestamp_parts_from_usecs(timestamp);
+    if interval.months != 0 {
+        days = add_months_to_days(days, interval.months).ok_or_else(timestamp_out_of_range)?;
+    }
+    days = days
+        .checked_add(interval.days)
+        .ok_or_else(timestamp_out_of_range)?;
+    let total = i128::from(days) * i128::from(USECS_PER_DAY)
+        + i128::from(time_usecs)
+        + i128::from(interval.time_micros);
+    if total <= i128::from(TIMESTAMP_NOBEGIN) || total >= i128::from(TIMESTAMP_NOEND) {
+        return Err(timestamp_out_of_range());
+    }
+    Ok(total as i64)
+}
+
+fn timestamp_interval_value(
+    timestamp: i64,
+    interval: IntervalValue,
+    subtract: bool,
+) -> Result<i64, ExecError> {
+    let interval = if subtract {
+        interval
+            .checked_negate()
+            .ok_or_else(interval_out_of_range)?
+    } else {
+        interval
+    };
+    if interval.is_neg_infinity() {
+        if timestamp == TIMESTAMP_NOEND {
+            return Err(timestamp_out_of_range());
+        }
+        return Ok(TIMESTAMP_NOBEGIN);
+    }
+    if interval.is_infinity() {
+        if timestamp == TIMESTAMP_NOBEGIN {
+            return Err(timestamp_out_of_range());
+        }
+        return Ok(TIMESTAMP_NOEND);
+    }
+    if timestamp == TIMESTAMP_NOBEGIN || timestamp == TIMESTAMP_NOEND {
+        return Ok(timestamp);
+    }
+    finite_timestamp_interval(timestamp, interval)
+}
+
+fn date_timestamp_value(date: DateADT) -> i64 {
+    match date.0 {
+        DATEVAL_NOBEGIN => TIMESTAMP_NOBEGIN,
+        DATEVAL_NOEND => TIMESTAMP_NOEND,
+        days => i64::from(days) * USECS_PER_DAY,
+    }
+}
+
+fn date_interval_op(
+    date: DateADT,
+    interval: IntervalValue,
+    subtract: bool,
+) -> Result<Value, ExecError> {
+    timestamp_interval_value(date_timestamp_value(date), interval, subtract)
+        .map(|value| Value::Timestamp(TimestampADT(value)))
+}
+
+fn timestamp_interval_op(
+    timestamp: TimestampADT,
+    interval: IntervalValue,
+    subtract: bool,
+) -> Result<Value, ExecError> {
+    timestamp_interval_value(timestamp.0, interval, subtract)
+        .map(|value| Value::Timestamp(TimestampADT(value)))
+}
+
+fn timestamptz_interval_op(
+    timestamp: TimestampTzADT,
+    interval: IntervalValue,
+    subtract: bool,
+) -> Result<Value, ExecError> {
+    timestamp_interval_value(timestamp.0, interval, subtract)
+        .map(|value| Value::TimestampTz(TimestampTzADT(value)))
+}
+
+fn time_interval_error(add: bool) -> ExecError {
+    ExecError::DetailedError {
+        message: if add {
+            "cannot add infinite interval to time".into()
+        } else {
+            "cannot subtract infinite interval from time".into()
+        },
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    }
+}
+
+fn apply_interval_time_component(
+    time: TimeADT,
+    interval: IntervalValue,
+    subtract: bool,
+) -> TimeADT {
+    let delta = if subtract {
+        -i128::from(interval.time_micros)
+    } else {
+        i128::from(interval.time_micros)
+    };
+    let day = i128::from(USECS_PER_DAY);
+    let wrapped = (i128::from(time.0) + delta).rem_euclid(day);
+    TimeADT(wrapped as i64)
+}
+
+fn time_interval_op(
+    time: TimeADT,
+    interval: IntervalValue,
+    subtract: bool,
+    add_message: bool,
+) -> Result<Value, ExecError> {
+    if !interval.is_finite() {
+        return Err(time_interval_error(add_message));
+    }
+    Ok(Value::Time(apply_interval_time_component(
+        time, interval, subtract,
+    )))
+}
+
+fn timetz_interval_op(
+    timetz: TimeTzADT,
+    interval: IntervalValue,
+    subtract: bool,
+    add_message: bool,
+) -> Result<Value, ExecError> {
+    if !interval.is_finite() {
+        return Err(time_interval_error(add_message));
+    }
+    Ok(Value::TimeTz(TimeTzADT {
+        time: apply_interval_time_component(timetz.time, interval, subtract),
+        offset_seconds: timetz.offset_seconds,
+    }))
+}
+
 fn multiply_interval_by_i64(value: IntervalValue, factor: i64) -> Result<Value, ExecError> {
     if !value.is_finite() {
+        if factor == 0 {
+            return Err(interval_out_of_range());
+        }
         return Ok(Value::Interval(if factor < 0 {
             value.negate()
         } else {
             value
         }));
     }
-    Ok(Value::Interval(IntervalValue {
+    let result = IntervalValue {
         time_micros: value
             .time_micros
             .checked_mul(factor)
@@ -577,7 +756,12 @@ fn multiply_interval_by_i64(value: IntervalValue, factor: i64) -> Result<Value, 
                 .ok_or_else(interval_out_of_range)?,
         )
         .map_err(|_| interval_out_of_range())?,
-    }))
+    };
+    if result.is_finite() {
+        Ok(Value::Interval(result))
+    } else {
+        Err(interval_out_of_range())
+    }
 }
 
 pub(crate) fn mul_values(left: Value, right: Value) -> Result<Value, ExecError> {
@@ -608,6 +792,12 @@ pub(crate) fn mul_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Money(r)) => Ok(Value::Money(money_mul_int(*r, *l)?)),
         (Value::Money(l), Value::Float64(r)) => Ok(Value::Money(money_mul_float(*l, *r)?)),
         (Value::Float64(l), Value::Money(r)) => Ok(Value::Money(money_mul_float(*r, *l)?)),
+        (Value::Interval(l), Value::Float64(r)) => interval_mul_float(*l, *r)
+            .map(Value::Interval)
+            .ok_or_else(interval_out_of_range),
+        (Value::Float64(l), Value::Interval(r)) => interval_mul_float(*r, *l)
+            .map(Value::Interval)
+            .ok_or_else(interval_out_of_range),
         (Value::Float64(l), Value::Float64(r)) => {
             let product = l * r;
             if l.is_finite() && r.is_finite() && *l != 0.0 && *r != 0.0 && product.is_infinite() {
@@ -796,6 +986,9 @@ pub(crate) fn div_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Money(l), Value::Int32(r)) => Ok(Value::Money(money_div_int(*l, i64::from(*r))?)),
         (Value::Money(l), Value::Int64(r)) => Ok(Value::Money(money_div_int(*l, *r)?)),
         (Value::Money(l), Value::Float64(r)) => Ok(Value::Money(money_div_float(*l, *r)?)),
+        (Value::Interval(l), Value::Float64(r)) => interval_div_float(*l, *r)
+            .map(Value::Interval)
+            .ok_or_else(interval_out_of_range),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l / r)),
         _ => Err(ExecError::TypeMismatch {
             op: "/",
@@ -949,6 +1142,10 @@ pub(crate) fn negate_value(value: Value) -> Result<Value, ExecError> {
         Value::Money(v) => Ok(Value::Money(checked_neg_i64(v)?)),
         Value::Float64(v) => Ok(Value::Float64(-v)),
         Value::Numeric(v) => Ok(Value::Numeric(v.negate())),
+        Value::Interval(v) => v
+            .checked_negate()
+            .map(Value::Interval)
+            .ok_or_else(interval_out_of_range),
         other => Err(ExecError::TypeMismatch {
             op: "unary -",
             left: other,
@@ -1018,6 +1215,9 @@ pub(crate) fn order_values(
         ))),
         (Value::Timestamp(l), Value::Timestamp(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::TimestampTz(l), Value::TimestampTz(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::Interval(l), Value::Interval(r)) => {
+            Ok(Value::Bool(compare_ord(l.cmp_key(), r.cmp_key(), op)))
+        }
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(match op {
             "<" => pg_float_cmp(*l, *r) == Ordering::Less,
             "<=" => pg_float_cmp(*l, *r) != Ordering::Greater,
@@ -1168,6 +1368,124 @@ fn compare_ord<T: Ord>(left: T, right: T, op: &'static str) -> bool {
 
 fn timetz_order_key(value: TimeTzADT) -> i64 {
     value.time.0 - i64::from(value.offset_seconds) * USECS_PER_SEC
+}
+
+fn interval_mul_float(span: IntervalValue, factor: f64) -> Option<IntervalValue> {
+    if factor.is_nan() {
+        return None;
+    }
+    if !span.is_finite() {
+        if factor == 0.0 {
+            return None;
+        }
+        return if factor < 0.0 {
+            span.checked_negate()
+        } else {
+            Some(span)
+        };
+    }
+    if factor.is_infinite() {
+        return match span.cmp_key().cmp(&0) {
+            Ordering::Equal => None,
+            Ordering::Less if factor.is_sign_positive() => Some(IntervalValue::neg_infinity()),
+            Ordering::Less => Some(IntervalValue::infinity()),
+            Ordering::Greater if factor.is_sign_positive() => Some(IntervalValue::infinity()),
+            Ordering::Greater => Some(IntervalValue::neg_infinity()),
+        };
+    }
+    scale_interval_by_float(span, factor, false)
+}
+
+pub(crate) fn interval_div_float(span: IntervalValue, factor: f64) -> Option<IntervalValue> {
+    if factor == 0.0 || factor.is_nan() {
+        return None;
+    }
+    if !span.is_finite() {
+        if factor.is_infinite() {
+            return None;
+        }
+        return if factor < 0.0 {
+            span.checked_negate()
+        } else {
+            Some(span)
+        };
+    }
+    scale_interval_by_float(span, factor, true)
+}
+
+fn scale_interval_by_float(
+    span: IntervalValue,
+    factor: f64,
+    divide: bool,
+) -> Option<IntervalValue> {
+    let orig_month = f64::from(span.months);
+    let orig_day = f64::from(span.days);
+    let scaled_month = if divide {
+        orig_month / factor
+    } else {
+        orig_month * factor
+    };
+    let scaled_day = if divide {
+        orig_day / factor
+    } else {
+        orig_day * factor
+    };
+    let months = float_trunc_to_i32(scaled_month)?;
+    let mut days = float_trunc_to_i32(scaled_day)?;
+
+    let month_remainder_days = ts_round((scaled_month - f64::from(months)) * 30.0);
+    let mut sec_remainder =
+        ts_round((scaled_day - f64::from(days) + month_remainder_days.fract()) * 86_400.0);
+    if sec_remainder.abs() >= 86_400.0 {
+        let whole_days = float_trunc_to_i32(sec_remainder / 86_400.0)?;
+        days = days.checked_add(whole_days)?;
+        sec_remainder -= f64::from(whole_days) * 86_400.0;
+    }
+
+    days = days.checked_add(float_trunc_to_i32(month_remainder_days)?)?;
+    let scaled_time = if divide {
+        span.time_micros as f64 / factor
+    } else {
+        span.time_micros as f64 * factor
+    };
+    let time_micros = float_round_to_i64(scaled_time + sec_remainder * 1_000_000.0)?;
+    let result = IntervalValue {
+        time_micros,
+        days,
+        months,
+    };
+    result.is_finite().then_some(result)
+}
+
+fn ts_round(value: f64) -> f64 {
+    (value * 1_000_000.0).round() / 1_000_000.0
+}
+
+fn float_trunc_to_i32(value: f64) -> Option<i32> {
+    if value.is_nan() || value < f64::from(i32::MIN) || value >= -(f64::from(i32::MIN)) {
+        return None;
+    }
+    Some(value as i32)
+}
+
+fn float_round_to_i64(value: f64) -> Option<i64> {
+    if value.is_nan() {
+        return None;
+    }
+    let rounded = value.round();
+    if rounded < i64::MIN as f64 || rounded >= 9_223_372_036_854_775_808.0 {
+        return None;
+    }
+    Some(rounded as i64)
+}
+
+fn interval_out_of_range() -> ExecError {
+    ExecError::DetailedError {
+        message: "interval out of range".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    }
 }
 
 fn compare_record_values(

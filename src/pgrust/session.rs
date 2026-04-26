@@ -38,8 +38,9 @@ use crate::backend::utils::misc::guc::{
     is_postgres_guc, normalize_guc_name, plpgsql_guc_default_value,
 };
 use crate::backend::utils::misc::guc_datetime::{
-    DateTimeConfig, default_datestyle, default_datetime_config, default_timezone, format_datestyle,
-    parse_datestyle_with_fallback, parse_timezone,
+    DateTimeConfig, default_datestyle, default_datetime_config, default_intervalstyle,
+    default_timezone, format_datestyle, format_intervalstyle, parse_datestyle_with_fallback,
+    parse_intervalstyle, parse_timezone,
 };
 use crate::backend::utils::misc::guc_xml::{
     format_xmlbinary, format_xmloption, parse_xmlbinary, parse_xmloption,
@@ -1330,6 +1331,21 @@ impl Session {
                 .get("enable_seqscan")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
+            enable_indexscan: self
+                .gucs
+                .get("enable_indexscan")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            enable_indexonlyscan: self
+                .gucs
+                .get("enable_indexonlyscan")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            enable_bitmapscan: self
+                .gucs
+                .get("enable_bitmapscan")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
         }
     }
 
@@ -2394,6 +2410,24 @@ impl Session {
                     )
                 }
             }
+            Statement::AlterTableSetSchema(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_set_schema_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::AlterIndexRename(ref rename_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -2462,6 +2496,42 @@ impl Session {
                     db.execute_alter_view_rename_stmt_with_search_path(
                         self.client_id,
                         rename_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterViewRenameColumn(ref rename_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_view_rename_column_stmt_with_search_path(
+                        self.client_id,
+                        rename_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterViewSetSchema(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_view_set_schema_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
                         search_path.as_deref(),
                     )
                 }
@@ -3153,6 +3223,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_comment_on_table_stmt_with_search_path(
+                        self.client_id,
+                        comment_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::CommentOnView(ref comment_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_comment_on_view_stmt_with_search_path(
                         self.client_id,
                         comment_stmt,
                         search_path.as_deref(),
@@ -4280,6 +4368,28 @@ impl Session {
                     &mut txn.temp_effects,
                 )
             }
+            Statement::AlterTableSetSchema(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.relation_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.relation_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_table_set_schema_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                    &mut txn.temp_effects,
+                )
+            }
             Statement::AlterIndexRename(ref rename_stmt) => {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
@@ -4339,6 +4449,49 @@ impl Session {
                     cid,
                     search_path.as_deref(),
                     &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterViewRenameColumn(ref rename_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&rename_stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            rename_stmt.table_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_view_rename_column_stmt_in_transaction_with_search_path(
+                    client_id,
+                    rename_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterViewSetSchema(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.relation_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.relation_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_view_set_schema_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                    &mut txn.temp_effects,
                 )
             }
             Statement::AlterViewOwner(ref alter_stmt) => {
@@ -5228,6 +5381,40 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::CommentOnView(ref comment_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = match catalog.lookup_any_relation(&comment_stmt.view_name) {
+                    Some(relation) if relation.relkind == 'v' => relation,
+                    Some(_) => {
+                        return Err(ExecError::Parse(ParseError::WrongObjectType {
+                            name: comment_stmt.view_name.clone(),
+                            expected: "view",
+                        }));
+                    }
+                    None => {
+                        return Err(ExecError::DetailedError {
+                            message: format!(
+                                "relation \"{}\" does not exist",
+                                comment_stmt.view_name
+                            ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42P01",
+                        });
+                    }
+                };
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_comment_on_view_stmt_in_transaction_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::CommentOnIndex(ref comment_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relation = match catalog.lookup_any_relation(&comment_stmt.index_name) {
@@ -5804,6 +5991,7 @@ impl Session {
             }
             Statement::CreateTableAs(ref create_stmt) => {
                 let search_path = self.configured_search_path();
+                let planner_config = self.planner_config();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_create_table_as_stmt_in_transaction_with_search_path(
                     client_id,
@@ -5811,6 +5999,7 @@ impl Session {
                     xid,
                     cid,
                     search_path.as_deref(),
+                    planner_config,
                     &mut txn.catalog_effects,
                     &mut txn.temp_effects,
                 )
@@ -6116,6 +6305,7 @@ impl Session {
             }
             match normalized.as_str() {
                 "datestyle" => self.guc_reset_datestyle(),
+                "intervalstyle" => self.guc_reset_intervalstyle(),
                 "timezone" => self.guc_reset_timezone(),
                 "max_stack_depth" => self.guc_reset_max_stack_depth(),
                 "xmlbinary" => self.datetime_config.xml.binary = Default::default(),
@@ -6145,7 +6335,10 @@ impl Session {
             }
         } else {
             self.gucs.clear();
-            self.datetime_config = self.reset_datetime_config.clone();
+            self.guc_reset_datestyle();
+            self.guc_reset_intervalstyle();
+            self.guc_reset_timezone();
+            self.guc_reset_max_stack_depth();
             self.datetime_config.xml = Default::default();
             self.stats_state
                 .write()
@@ -6178,6 +6371,7 @@ impl Session {
         let fallback_value = || -> String {
             match name.as_str() {
                 "datestyle" => default_datestyle().to_string(),
+                "intervalstyle" => default_intervalstyle().to_string(),
                 "timezone" => default_timezone().to_string(),
                 "xmlbinary" => format_xmlbinary(self.datetime_config.xml.binary).to_string(),
                 "xmloption" => format_xmloption(self.datetime_config.xml.option).to_string(),
@@ -6192,6 +6386,10 @@ impl Session {
             "datestyle" => (
                 "DateStyle".to_string(),
                 format_datestyle(&self.datetime_config),
+            ),
+            "intervalstyle" => (
+                "IntervalStyle".to_string(),
+                format_intervalstyle(self.datetime_config.interval_style).to_string(),
             ),
             "timezone" => (
                 "TimeZone".to_string(),
@@ -6266,6 +6464,11 @@ impl Session {
         self.datetime_config.date_order = self.reset_datetime_config.date_order;
     }
 
+    fn guc_reset_intervalstyle(&mut self) {
+        self.datetime_config.interval_style =
+            parse_intervalstyle(default_intervalstyle()).expect("default IntervalStyle must parse");
+    }
+
     fn guc_reset_timezone(&mut self) {
         self.datetime_config.time_zone = self.reset_datetime_config.time_zone.clone();
     }
@@ -6300,6 +6503,15 @@ impl Session {
                 };
                 self.datetime_config.date_style_format = date_style_format;
                 self.datetime_config.date_order = date_order;
+            }
+            "intervalstyle" => {
+                let Some(interval_style) = parse_intervalstyle(value) else {
+                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                        value.to_string(),
+                    )));
+                };
+                self.datetime_config.interval_style = interval_style;
+                stored_value = format_intervalstyle(interval_style).to_string();
             }
             "timezone" => {
                 let Some(time_zone) = parse_timezone(value) else {
@@ -6351,7 +6563,12 @@ impl Session {
                     .write()
                     .set_track_functions(track_functions);
             }
-            "row_security" | "enable_partitionwise_join" | "enable_seqscan" => {
+            "row_security"
+            | "enable_partitionwise_join"
+            | "enable_seqscan"
+            | "enable_indexscan"
+            | "enable_indexonlyscan"
+            | "enable_bitmapscan" => {
                 parse_bool_guc(value).ok_or_else(|| {
                     ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
                 })?;

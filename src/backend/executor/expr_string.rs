@@ -2,7 +2,7 @@ use super::ExecError;
 use super::expr_bit::render_bit_text;
 use super::expr_casts::{
     cast_value, numeric_input_would_overflow, parse_bytea_text, render_internal_char_text,
-    render_interval_text,
+    render_interval_text, render_interval_text_with_config,
 };
 use super::expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 use super::expr_format::{
@@ -633,6 +633,7 @@ fn eval_to_char_function_with_float4(
             let offset = timezone_offset_seconds_at_utc(datetime_config, v.0);
             to_char_timestamp_usecs(v.0 + i64::from(offset) * USECS_PER_SEC, fmt, Some(offset))
         }
+        Value::Interval(v) if !v.is_finite() => String::new(),
         Value::Interval(v) => {
             to_char_interval_value(*v, fmt).ok_or_else(|| ExecError::TypeMismatch {
                 op: "to_char",
@@ -988,7 +989,7 @@ fn value_output_text_with_config(
         Value::Money(v) => crate::backend::executor::money_format_text(*v),
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
-        Value::Interval(v) => render_interval_text(*v),
+        Value::Interval(v) => render_interval_text_with_config(*v, datetime_config),
         Value::Uuid(v) => crate::backend::executor::value_io::render_uuid_text(v),
         Value::Bool(v) => {
             if *v {
@@ -1559,6 +1560,29 @@ pub(super) fn eval_lower_function(values: &[Value]) -> Result<Value, ExecError> 
             right: Value::Text("".into()),
         })?;
     Ok(Value::Text(CompactString::from_owned(text.to_lowercase())))
+}
+
+pub(super) fn eval_text_starts_with_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [left, right] => {
+            let left = left.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "starts_with",
+                left: left.clone(),
+                right: Value::Text("".into()),
+            })?;
+            let right = right.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "starts_with",
+                left: right.clone(),
+                right: Value::Text("".into()),
+            })?;
+            Ok(Value::Bool(left.starts_with(right)))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "starts_with(text, text)",
+            actual: format!("starts_with({} args)", values.len()),
+        })),
+    }
 }
 
 pub(super) fn eval_unistr_function(values: &[Value]) -> Result<Value, ExecError> {

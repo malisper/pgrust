@@ -15,7 +15,7 @@ pub(crate) use view_dml::{
 };
 pub(crate) use views::{
     format_view_definition, load_view_return_query, load_view_return_select,
-    split_stored_view_definition_sql,
+    refresh_query_relation_descriptors, render_view_query_sql, split_stored_view_definition_sql,
 };
 
 use crate::backend::parser::{CatalogLookup, ParseError};

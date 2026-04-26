@@ -81,6 +81,12 @@ pub const JSONB_CMP_GT_PROC_OID: u32 = 4040;
 pub const JSONB_CMP_LE_PROC_OID: u32 = 4041;
 pub const JSONB_CMP_GE_PROC_OID: u32 = 4042;
 pub const JSONB_CMP_EQ_PROC_OID: u32 = 4043;
+pub const INTERVAL_CMP_EQ_PROC_OID: u32 = 1162;
+pub const INTERVAL_CMP_NE_PROC_OID: u32 = 1163;
+pub const INTERVAL_CMP_LT_PROC_OID: u32 = 1164;
+pub const INTERVAL_CMP_LE_PROC_OID: u32 = 1165;
+pub const INTERVAL_CMP_GE_PROC_OID: u32 = 1166;
+pub const INTERVAL_CMP_GT_PROC_OID: u32 = 1167;
 pub const JSONB_CONTAINS_PROC_OID: u32 = 4044;
 pub const JSONB_CONTAINED_PROC_OID: u32 = 4045;
 pub const JSONB_EXISTS_PROC_OID: u32 = 4046;
@@ -113,6 +119,20 @@ pub const GIST_NETWORK_UNION_PROC_OID: u32 = 76611;
 pub const GIST_NETWORK_PENALTY_PROC_OID: u32 = 76612;
 pub const GIST_NETWORK_PICKSPLIT_PROC_OID: u32 = 76613;
 pub const GIST_NETWORK_SAME_PROC_OID: u32 = 76614;
+pub const SPG_QUAD_CONFIG_PROC_OID: u32 = 4018;
+pub const SPG_QUAD_CHOOSE_PROC_OID: u32 = 4019;
+pub const SPG_QUAD_PICKSPLIT_PROC_OID: u32 = 4020;
+pub const SPG_QUAD_INNER_CONSISTENT_PROC_OID: u32 = 4021;
+pub const SPG_QUAD_LEAF_CONSISTENT_PROC_OID: u32 = 4022;
+pub const SPG_KD_CONFIG_PROC_OID: u32 = 4023;
+pub const SPG_KD_CHOOSE_PROC_OID: u32 = 4024;
+pub const SPG_KD_PICKSPLIT_PROC_OID: u32 = 4025;
+pub const SPG_KD_INNER_CONSISTENT_PROC_OID: u32 = 4026;
+pub const SPG_TEXT_CONFIG_PROC_OID: u32 = 4027;
+pub const SPG_TEXT_CHOOSE_PROC_OID: u32 = 4028;
+pub const SPG_TEXT_PICKSPLIT_PROC_OID: u32 = 4029;
+pub const SPG_TEXT_INNER_CONSISTENT_PROC_OID: u32 = 4030;
+pub const SPG_TEXT_LEAF_CONSISTENT_PROC_OID: u32 = 4031;
 pub const SPG_BOX_QUAD_CONFIG_PROC_OID: u32 = 5012;
 pub const SPG_BOX_QUAD_CHOOSE_PROC_OID: u32 = 5013;
 pub const SPG_BOX_QUAD_PICKSPLIT_PROC_OID: u32 = 5014;
@@ -150,6 +170,7 @@ pub const HASH_TIMETZ_PROC_OID: u32 = 76517;
 pub const HASH_BYTEA_PROC_OID: u32 = 76518;
 pub const HASH_MULTIRANGE_PROC_OID: u32 = 76519;
 pub const HASH_UUID_PROC_OID: u32 = 2963;
+pub const HASH_INTERVAL_PROC_OID: u32 = 1697;
 pub const MACADDR_EQ_PROC_OID: u32 = 830;
 pub const MACADDR_LT_PROC_OID: u32 = 831;
 pub const MACADDR_LE_PROC_OID: u32 = 832;
@@ -3961,6 +3982,36 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "jsonb_eq",
             &[JSONB_TYPE_OID, JSONB_TYPE_OID],
         ),
+        comparison_proc_row(
+            INTERVAL_CMP_EQ_PROC_OID,
+            "interval_eq",
+            &[INTERVAL_TYPE_OID, INTERVAL_TYPE_OID],
+        ),
+        comparison_proc_row(
+            INTERVAL_CMP_NE_PROC_OID,
+            "interval_ne",
+            &[INTERVAL_TYPE_OID, INTERVAL_TYPE_OID],
+        ),
+        comparison_proc_row(
+            INTERVAL_CMP_LT_PROC_OID,
+            "interval_lt",
+            &[INTERVAL_TYPE_OID, INTERVAL_TYPE_OID],
+        ),
+        comparison_proc_row(
+            INTERVAL_CMP_LE_PROC_OID,
+            "interval_le",
+            &[INTERVAL_TYPE_OID, INTERVAL_TYPE_OID],
+        ),
+        comparison_proc_row(
+            INTERVAL_CMP_GE_PROC_OID,
+            "interval_ge",
+            &[INTERVAL_TYPE_OID, INTERVAL_TYPE_OID],
+        ),
+        comparison_proc_row(
+            INTERVAL_CMP_GT_PROC_OID,
+            "interval_gt",
+            &[INTERVAL_TYPE_OID, INTERVAL_TYPE_OID],
+        ),
         proc_row(
             JSONB_CONTAINS_PROC_OID,
             "jsonb_contains",
@@ -4770,11 +4821,16 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("date_add", BuiltinScalarFunction::DateAdd),
         ("date_subtract", BuiltinScalarFunction::DateSubtract),
         ("age", BuiltinScalarFunction::Age),
+        ("justify_days", BuiltinScalarFunction::JustifyDays),
+        ("justify_hours", BuiltinScalarFunction::JustifyHours),
+        ("justify_interval", BuiltinScalarFunction::JustifyInterval),
         ("isfinite", BuiltinScalarFunction::IsFinite),
+        ("make_interval", BuiltinScalarFunction::MakeInterval),
         ("make_date", BuiltinScalarFunction::MakeDate),
         ("make_time", BuiltinScalarFunction::MakeTime),
         ("make_timestamp", BuiltinScalarFunction::MakeTimestamp),
         ("make_timestamptz", BuiltinScalarFunction::MakeTimestampTz),
+        ("interval_hash", BuiltinScalarFunction::IntervalHash),
         (
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
@@ -4786,7 +4842,15 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgRustInternalBinaryCoercible,
         ),
         (
+            "binary_coercible",
+            BuiltinScalarFunction::PgRustInternalBinaryCoercible,
+        ),
+        (
             "pg_rust_test_fdw_handler",
+            BuiltinScalarFunction::PgRustTestFdwHandler,
+        ),
+        (
+            "test_fdw_handler",
             BuiltinScalarFunction::PgRustTestFdwHandler,
         ),
         (
@@ -5228,6 +5292,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("convert_from", BuiltinScalarFunction::ConvertFrom),
         ("md5", BuiltinScalarFunction::Md5),
         ("reverse", BuiltinScalarFunction::Reverse),
+        ("starts_with", BuiltinScalarFunction::TextStartsWith),
         ("encode", BuiltinScalarFunction::Encode),
         ("decode", BuiltinScalarFunction::Decode),
         ("sha224", BuiltinScalarFunction::Sha224),
@@ -5392,6 +5457,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("distance", BuiltinScalarFunction::GeoDistance),
         ("close_pt", BuiltinScalarFunction::GeoClosestPoint),
         ("interpt", BuiltinScalarFunction::GeoIntersection),
+        ("interpt_pp", BuiltinScalarFunction::GeoIntersection),
         ("intersects", BuiltinScalarFunction::GeoIntersects),
         ("parallel", BuiltinScalarFunction::GeoParallel),
         ("perpendicular", BuiltinScalarFunction::GeoPerpendicular),
@@ -6644,6 +6710,174 @@ fn gist_support_proc_rows() -> Vec<PgProcRow> {
 fn spgist_support_proc_rows() -> Vec<PgProcRow> {
     vec![
         proc_row(
+            SPG_QUAD_CONFIG_PROC_OID,
+            "spg_quad_config",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_quad_config",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_QUAD_CHOOSE_PROC_OID,
+            "spg_quad_choose",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_quad_choose",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_QUAD_PICKSPLIT_PROC_OID,
+            "spg_quad_picksplit",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_quad_picksplit",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_QUAD_INNER_CONSISTENT_PROC_OID,
+            "spg_quad_inner_consistent",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_quad_inner_consistent",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_QUAD_LEAF_CONSISTENT_PROC_OID,
+            "spg_quad_leaf_consistent",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_quad_leaf_consistent",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_KD_CONFIG_PROC_OID,
+            "spg_kd_config",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_kd_config",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_KD_CHOOSE_PROC_OID,
+            "spg_kd_choose",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_kd_choose",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_KD_PICKSPLIT_PROC_OID,
+            "spg_kd_picksplit",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_kd_picksplit",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_KD_INNER_CONSISTENT_PROC_OID,
+            "spg_kd_inner_consistent",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_kd_inner_consistent",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_TEXT_CONFIG_PROC_OID,
+            "spg_text_config",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_text_config",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_TEXT_CHOOSE_PROC_OID,
+            "spg_text_choose",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_text_choose",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_TEXT_PICKSPLIT_PROC_OID,
+            "spg_text_picksplit",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_text_picksplit",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_TEXT_INNER_CONSISTENT_PROC_OID,
+            "spg_text_inner_consistent",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_text_inner_consistent",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_TEXT_LEAF_CONSISTENT_PROC_OID,
+            "spg_text_leaf_consistent",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_text_leaf_consistent",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
             SPG_BOX_QUAD_CONFIG_PROC_OID,
             "spg_box_quad_config",
             VOID_TYPE_OID,
@@ -6874,6 +7108,7 @@ fn hash_support_proc_rows() -> Vec<PgProcRow> {
             "hash_multirange",
             ANYMULTIRANGEOID,
         ),
+        (HASH_INTERVAL_PROC_OID, "interval_hash", INTERVAL_TYPE_OID),
     ]
     .into_iter()
     .map(|(oid, proname, type_oid)| {

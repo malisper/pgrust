@@ -13,7 +13,7 @@ use super::joininfo;
 use super::path::build_join_paths_with_root;
 use super::pathnodes::next_synthetic_slot_id;
 use super::util::strip_binary_coercible_casts;
-use super::{flatten_join_alias_vars, optimize_path, relids_union};
+use super::{flatten_join_alias_vars, optimize_path_with_config, relids_union};
 
 pub(super) fn generate_partitionwise_join_path(
     root: &mut PlannerInfo,
@@ -58,7 +58,7 @@ pub(super) fn generate_partitionwise_join_path(
     }
 
     let desc = relation_desc_for_output_columns(output_columns);
-    let append = optimize_path(
+    let append = optimize_path_with_config(
         Path::Append {
             plan_info: PlanEstimate::default(),
             pathtarget: reltarget.clone(),
@@ -68,6 +68,7 @@ pub(super) fn generate_partitionwise_join_path(
             children,
         },
         catalog,
+        root.config,
     );
     let partition_info = join_partition_info(left_info, right_info, kind, members);
     Some((append, partition_info))

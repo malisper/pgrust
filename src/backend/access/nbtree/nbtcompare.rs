@@ -41,6 +41,7 @@ pub fn compare_bt_values(left: &Value, right: &Value) -> Ordering {
                 .expect("btree array comparisons use implicit default collation")
         }
         (Value::InternalChar(a), Value::InternalChar(b)) => a.cmp(b),
+        (Value::Interval(a), Value::Interval(b)) => a.cmp_key().cmp(&b.cmp_key()),
         (Value::Multirange(a), Value::Multirange(b)) => compare_multirange_values(a, b),
         (Value::Inet(a) | Value::Cidr(a), Value::Inet(b) | Value::Cidr(b)) => {
             compare_network_values(a, b)

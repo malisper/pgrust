@@ -21,6 +21,7 @@ pub const BTREE_MACADDR_FAMILY_OID: u32 = 76040;
 pub const BTREE_MACADDR8_FAMILY_OID: u32 = 76041;
 pub const BTREE_DATETIME_FAMILY_OID: u32 = 434;
 pub const BTREE_FLOAT_FAMILY_OID: u32 = 1970;
+pub const BTREE_INTERVAL_FAMILY_OID: u32 = 1982;
 pub const BTREE_VARBIT_FAMILY_OID: u32 = 2002;
 pub const BTREE_MULTIRANGE_FAMILY_OID: u32 = 4199;
 pub const BTREE_NETWORK_FAMILY_OID: u32 = 1974;
@@ -32,6 +33,9 @@ pub const GIST_RANGE_FAMILY_OID: u32 = 3919;
 pub const GIST_NETWORK_FAMILY_OID: u32 = 76112;
 pub const GIST_MULTIRANGE_FAMILY_OID: u32 = 6158;
 pub const GIN_JSONB_FAMILY_OID: u32 = 4036;
+pub const SPGIST_QUAD_POINT_FAMILY_OID: u32 = 4015;
+pub const SPGIST_KD_POINT_FAMILY_OID: u32 = 4016;
+pub const SPGIST_TEXT_FAMILY_OID: u32 = 4017;
 pub const SPGIST_BOX_FAMILY_OID: u32 = 4001;
 pub const SPGIST_POLY_FAMILY_OID: u32 = 4002;
 pub const SPGIST_NETWORK_FAMILY_OID: u32 = 76113;
@@ -58,6 +62,7 @@ pub const HASH_CHAR_FAMILY_OID: u32 = 431;
 pub const HASH_DATE_FAMILY_OID: u32 = 435;
 pub const HASH_FLOAT_FAMILY_OID: u32 = 1971;
 pub const HASH_INTEGER_FAMILY_OID: u32 = 1977;
+pub const HASH_INTERVAL_FAMILY_OID: u32 = 1983;
 pub const HASH_NUMERIC_FAMILY_OID: u32 = 1998;
 pub const HASH_OID_FAMILY_OID: u32 = 1990;
 pub const HASH_TEXT_FAMILY_OID: u32 = 1995;
@@ -173,6 +178,13 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },
         PgOpfamilyRow {
+            oid: BTREE_INTERVAL_FAMILY_OID,
+            opfmethod: BTREE_AM_OID,
+            opfname: "interval_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
             oid: BTREE_OIDVECTOR_FAMILY_OID,
             opfmethod: BTREE_AM_OID,
             opfname: "oidvector_ops".into(),
@@ -271,6 +283,27 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },
         PgOpfamilyRow {
+            oid: SPGIST_QUAD_POINT_FAMILY_OID,
+            opfmethod: SPGIST_AM_OID,
+            opfname: "quad_point_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: SPGIST_KD_POINT_FAMILY_OID,
+            opfmethod: SPGIST_AM_OID,
+            opfname: "kd_point_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: SPGIST_TEXT_FAMILY_OID,
+            opfmethod: SPGIST_AM_OID,
+            opfname: "text_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
             oid: SPGIST_BOX_FAMILY_OID,
             opfmethod: SPGIST_AM_OID,
             opfname: "box_ops".into(),
@@ -329,6 +362,7 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
         hash_row(HASH_DATE_FAMILY_OID, "date_ops"),
         hash_row(HASH_FLOAT_FAMILY_OID, "float_ops"),
         hash_row(HASH_INTEGER_FAMILY_OID, "integer_ops"),
+        hash_row(HASH_INTERVAL_FAMILY_OID, "interval_ops"),
         hash_row(HASH_NUMERIC_FAMILY_OID, "numeric_ops"),
         hash_row(HASH_OID_FAMILY_OID, "oid_ops"),
         hash_row(HASH_TEXT_FAMILY_OID, "text_ops"),

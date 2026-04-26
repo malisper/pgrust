@@ -37,6 +37,7 @@ pub(super) fn catalog_entry_from_bound_relation(
         namespace_oid: relation.namespace_oid,
         owner_oid: relation.owner_oid,
         relacl: None,
+        reloptions: None,
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: relation.toast.map(|toast| toast.relation_oid).unwrap_or(0),
@@ -73,6 +74,7 @@ pub(super) fn catalog_entry_from_bound_index_relation(
         namespace_oid,
         owner_oid,
         relacl: None,
+        reloptions: None,
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,
@@ -324,6 +326,13 @@ impl Database {
             ))));
         }
         Ok(resolved)
+    }
+
+    fn access_method_can_include(access_method_oid: u32) -> bool {
+        matches!(
+            access_method_oid,
+            BTREE_AM_OID | GIST_AM_OID | SPGIST_AM_OID
+        )
     }
 
     fn resolve_index_support_metadata(
@@ -1383,8 +1392,8 @@ impl Database {
                 "BRIN expression indexes".into(),
             )));
         }
-        let mut index_columns = create_stmt.columns.clone();
-        for column in &mut index_columns {
+        let mut key_columns = create_stmt.columns.clone();
+        for column in &mut key_columns {
             if let Some(expr_sql) = column.expr_sql.as_deref() {
                 column.expr_type = Some(
                     crate::backend::parser::infer_relation_expr_sql_type(
@@ -1403,6 +1412,21 @@ impl Database {
                 );
             }
         }
+        let include_columns = create_stmt
+            .include_columns
+            .iter()
+            .map(|name| {
+                if !entry
+                    .desc
+                    .columns
+                    .iter()
+                    .any(|column| column.name.eq_ignore_ascii_case(name))
+                {
+                    return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
+                }
+                Ok(crate::backend::parser::IndexColumnDef::from(name.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         if let Some(predicate_sql) = create_stmt.predicate_sql.as_deref() {
             crate::backend::parser::bind_index_predicate_sql_expr(
                 predicate_sql,
@@ -1424,7 +1448,7 @@ impl Database {
                 Some((xid, cid)),
                 access_method_name,
                 &entry,
-                &index_columns,
+                &key_columns,
                 &create_stmt.options,
             )?;
         let am_routine = crate::backend::access::index::amapi::index_am_handler(access_method_oid)
@@ -1434,7 +1458,24 @@ impl Database {
                     actual: format!("unknown access method oid {access_method_oid}"),
                 })
             })?;
-        if index_columns.len() > 1 && !am_routine.amcanmulticol {
+        if !include_columns.is_empty() && !Self::access_method_can_include(access_method_oid) {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "access method \"{access_method_name}\" does not support included columns"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+        if create_stmt.unique && !include_columns.is_empty() {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "unique indexes with INCLUDE columns".into(),
+            )));
+        }
+        let mut index_columns = key_columns.clone();
+        index_columns.extend(include_columns);
+        if key_columns.len() > 1 && !am_routine.amcanmulticol {
             return Err(ExecError::DetailedError {
                 message: format!(
                     "access method \"{access_method_name}\" does not support multicolumn indexes"
@@ -1445,7 +1486,7 @@ impl Database {
             });
         }
         if access_method_oid == SPGIST_AM_OID
-            && index_columns.iter().any(|column| column.expr_sql.is_some())
+            && key_columns.iter().any(|column| column.expr_sql.is_some())
         {
             return Err(ExecError::DetailedError {
                 message: "access method \"spgist\" does not support expression indexes".into(),

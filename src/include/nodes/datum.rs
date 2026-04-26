@@ -631,6 +631,21 @@ impl IntervalValue {
         }
     }
 
+    pub fn checked_negate(self) -> Option<Self> {
+        if self.is_neg_infinity() {
+            return Some(Self::infinity());
+        }
+        if self.is_infinity() {
+            return Some(Self::neg_infinity());
+        }
+        let result = Self {
+            time_micros: self.time_micros.checked_neg()?,
+            days: self.days.checked_neg()?,
+            months: self.months.checked_neg()?,
+        };
+        result.is_finite().then_some(result)
+    }
+
     pub fn abs_for_display(self) -> (Self, bool) {
         if self.is_negative() {
             (self.negate(), true)
@@ -653,15 +668,34 @@ impl IntervalValue {
                 _ => None,
             };
         }
-        Some(Self {
+        let result = Self {
             time_micros: self.time_micros.checked_add(rhs.time_micros)?,
             days: self.days.checked_add(rhs.days)?,
             months: self.months.checked_add(rhs.months)?,
-        })
+        };
+        result.is_finite().then_some(result)
     }
 
     pub fn checked_sub(self, rhs: Self) -> Option<Self> {
-        self.checked_add(rhs.negate())
+        if !self.is_finite() || !rhs.is_finite() {
+            return match (
+                self.is_infinity(),
+                self.is_neg_infinity(),
+                rhs.is_infinity(),
+                rhs.is_neg_infinity(),
+            ) {
+                (true, _, true, _) | (_, true, _, true) => None,
+                (true, _, _, _) | (_, _, _, true) => Some(Self::infinity()),
+                (_, true, _, _) | (_, _, true, _) => Some(Self::neg_infinity()),
+                _ => None,
+            };
+        }
+        let result = Self {
+            time_micros: self.time_micros.checked_sub(rhs.time_micros)?,
+            days: self.days.checked_sub(rhs.days)?,
+            months: self.months.checked_sub(rhs.months)?,
+        };
+        result.is_finite().then_some(result)
     }
 }
 
@@ -1258,7 +1292,7 @@ impl PartialEq for Value {
             (Value::TimeTz(a), Value::TimeTz(b)) => a == b,
             (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
             (Value::TimestampTz(a), Value::TimestampTz(b)) => a == b,
-            (Value::Interval(a), Value::Interval(b)) => a == b,
+            (Value::Interval(a), Value::Interval(b)) => a.cmp_key() == b.cmp_key(),
             (Value::Bit(a), Value::Bit(b)) => a == b,
             (Value::Bytea(a), Value::Bytea(b)) => a == b,
             (Value::Uuid(a), Value::Uuid(b)) => a == b,
@@ -1382,7 +1416,7 @@ impl std::hash::Hash for Value {
             }
             Value::Interval(v) => {
                 28u8.hash(state);
-                v.hash(state);
+                v.cmp_key().hash(state);
             }
             Value::Bit(v) => {
                 14u8.hash(state);

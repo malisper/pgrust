@@ -692,8 +692,12 @@ pub(super) fn sql_expr_name(expr: &SqlExpr) -> String {
     match expr {
         SqlExpr::Column(name) => name.clone(),
         SqlExpr::FuncCall { name, .. } => name.clone(),
-        SqlExpr::ScalarSubquery(_)
-        | SqlExpr::ArraySubquery(_)
+        SqlExpr::ScalarSubquery(select) => select
+            .targets
+            .first()
+            .map(|target| target.output_name.clone())
+            .unwrap_or_else(|| "?column?".to_string()),
+        SqlExpr::ArraySubquery(_)
         | SqlExpr::Exists(_)
         | SqlExpr::InSubquery { .. }
         | SqlExpr::QuantifiedSubquery { .. }

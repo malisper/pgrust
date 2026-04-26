@@ -13,7 +13,7 @@ use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
 use crate::include::catalog::{CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};
 use crate::include::nodes::datetime::{
-    DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT,
+    DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT, TimestampADT, TimestampTzADT,
 };
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::{OrderByEntry, Var, user_attrno};
@@ -177,6 +177,7 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         namespace_oid: crate::include::catalog::PUBLIC_NAMESPACE_OID,
         owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         relacl: None,
+        reloptions: None,
         row_type_oid: 60_000u32.saturating_add(rel.rel_number),
         array_type_oid: 61_000u32.saturating_add(rel.rel_number),
         reltoastrelid: 0,
@@ -6482,6 +6483,73 @@ fn select_isfinite_and_make_date_for_date() {
 }
 
 #[test]
+fn select_interval_literals_comparison_and_arithmetic() {
+    let base = temp_dir("select_interval_literals_comparison_arithmetic");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select interval '1.5 weeks', interval '-1 +02:03', interval '1-2', interval '1' year, interval '999' second",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Interval(IntervalValue {
+                time_micros: 43_200_000_000,
+                days: 10,
+                months: 0,
+            }),
+            Value::Interval(IntervalValue {
+                time_micros: 7_380_000_000,
+                days: -1,
+                months: 0,
+            }),
+            Value::Interval(IntervalValue {
+                time_micros: 0,
+                days: 0,
+                months: 14,
+            }),
+            Value::Interval(IntervalValue {
+                time_micros: 0,
+                days: 0,
+                months: 12,
+            }),
+            Value::Interval(IntervalValue {
+                time_micros: 999_000_000,
+                days: 0,
+                months: 0,
+            }),
+        ]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select interval '2 hours' > interval '1 hour', -interval '1 hour', interval '2 hours' - interval '30 minutes', isfinite(interval 'infinity')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Bool(true),
+            Value::Interval(IntervalValue {
+                time_micros: -3_600_000_000,
+                days: 0,
+                months: 0,
+            }),
+            Value::Interval(IntervalValue {
+                time_micros: 5_400_000_000,
+                days: 0,
+                months: 0,
+            }),
+            Value::Bool(false),
+        ]],
+    );
+}
+
+#[test]
 fn pg_input_error_info_supports_oidvector_tokens() {
     let valid = expr_casts::soft_input_error_info(" 1 2  4 ", "oidvector").unwrap();
     assert!(valid.is_none());
@@ -7061,6 +7129,182 @@ fn interval_text_cast_canonicalizes_interval_value() {
 }
 
 #[test]
+fn interval_multiply_and_divide_bind_to_float8_scaling() {
+    let base = temp_dir("interval_mul_div");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select interval '1 day' * 2.5, 2.5 * interval '1 hour', interval '3 hours' / 2.0",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Interval(IntervalValue {
+                time_micros: 43_200_000_000,
+                days: 2,
+                months: 0,
+            }),
+            Value::Interval(IntervalValue {
+                time_micros: 9_000_000_000,
+                days: 0,
+                months: 0,
+            }),
+            Value::Interval(IntervalValue {
+                time_micros: 5_400_000_000,
+                days: 0,
+                months: 0,
+            }),
+        ]],
+    );
+
+    assert!(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select interval 'infinity' * 'nan'",
+        )
+        .is_err()
+    );
+    assert!(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select interval 'infinity' * 0",
+        )
+        .is_err()
+    );
+    assert!(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select interval '-1073741824 months -1073741824 days -4611686018427387904 us' * 2",
+        )
+        .is_err()
+    );
+    assert!(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select interval 'infinity' / 'infinity'",
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn time_interval_arithmetic_rejects_infinite_intervals() {
+    let base = temp_dir("time_interval_infinite");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select time '23:30' + interval '2 hours'",
+        )
+        .unwrap(),
+        vec![vec![Value::Time(TimeADT(5_400_000_000))]],
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select time '11:27:42' + interval 'infinity'",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "cannot add infinite interval to time"
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select timetz '11:27:42' - interval '-infinity'",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "cannot subtract infinite interval from time"
+    );
+}
+
+#[test]
+fn interval_infinite_function_edges_match_postgres_errors() {
+    let base = temp_dir("interval_infinite_function_edges");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select date_bin('infinity', timestamp '2001-02-16 20:38:40', timestamp '2001-02-16 20:05:00')",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "timestamps cannot be binned into infinite intervals"
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select timezone('infinity'::interval, '1995-08-06 12:12:12'::timestamp)",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "interval time zone \"infinity\" must be finite"
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select timezone('infinity'::interval, '12:12:12'::timetz)",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "interval time zone \"infinity\" must be finite"
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select to_char('infinity'::interval, 'YYYY')",
+        )
+        .unwrap(),
+        vec![vec![Value::Text("".into())]],
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select 'infinity'::interval::time",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "cannot convert infinite interval to time"
+    );
+}
+
+#[test]
 fn interval_array_text_casts_render_postgres_interval_style() {
     let base = temp_dir("interval_array_text_casts");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -7074,8 +7318,8 @@ fn interval_array_text_casts_render_postgres_interval_style() {
         )
         .unwrap(),
         vec![vec![
-            Value::Text("{\"@ 0\",\"@ 1 hour 42 mins 20 secs\"}".into()),
-            Value::Text("@ 0".into()),
+            Value::Text("{00:00:00,01:42:20}".into()),
+            Value::Text("00:00:00".into()),
         ]],
     );
 }
@@ -10799,7 +11043,7 @@ fn cte_filtered_self_join_aliases_keep_distinct_columns() {
 }
 
 #[test]
-fn cte_filtered_self_join_uses_filtered_side_as_outer_order() {
+fn cte_filtered_self_join_materializes_filtered_inner_order() {
     let base = temp_dir("cte_filtered_self_join_outer_order");
     let txns = TransactionManager::new_durable(&base).unwrap();
     match run_sql(
@@ -10815,10 +11059,10 @@ fn cte_filtered_self_join_uses_filtered_side_as_outer_order() {
                 rows,
                 vec![
                     vec![Value::Numeric("0".into()), Value::Numeric("1".into())],
-                    vec![Value::Numeric("1".into()), Value::Numeric("1".into())],
-                    vec![Value::Numeric("2".into()), Value::Numeric("1".into())],
                     vec![Value::Numeric("0".into()), Value::Numeric("2".into())],
+                    vec![Value::Numeric("1".into()), Value::Numeric("1".into())],
                     vec![Value::Numeric("1".into()), Value::Numeric("2".into())],
+                    vec![Value::Numeric("2".into()), Value::Numeric("1".into())],
                     vec![Value::Numeric("2".into()), Value::Numeric("2".into())],
                 ]
             );

@@ -20,6 +20,7 @@ use std::sync::OnceLock;
 #[derive(Clone, Copy)]
 enum NamedArgDefault {
     Bool(bool),
+    Int4(i32),
     Float8(f64),
     Text(&'static str),
     JsonbEmptyObject,
@@ -1083,16 +1084,20 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::DatePart | BuiltinScalarFunction::Extract => args.len() == 2,
             BuiltinScalarFunction::DateTrunc => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::DateBin => args.len() == 3,
-            BuiltinScalarFunction::TimeZone => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::DateAdd | BuiltinScalarFunction::DateSubtract => {
                 matches!(args.len(), 2 | 3)
             }
             BuiltinScalarFunction::Age => matches!(args.len(), 1 | 2),
-            BuiltinScalarFunction::IsFinite => args.len() == 1,
+            BuiltinScalarFunction::JustifyDays
+            | BuiltinScalarFunction::JustifyHours
+            | BuiltinScalarFunction::JustifyInterval
+            | BuiltinScalarFunction::IsFinite => args.len() == 1,
+            BuiltinScalarFunction::MakeInterval => args.len() <= 7,
             BuiltinScalarFunction::MakeDate | BuiltinScalarFunction::MakeTime => args.len() == 3,
             BuiltinScalarFunction::MakeTimestamp => args.len() == 6,
             BuiltinScalarFunction::MakeTimestampTz => matches!(args.len(), 6 | 7),
             BuiltinScalarFunction::ToTimestamp => args.len() == 1,
+            BuiltinScalarFunction::IntervalHash => args.len() == 1,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
             BuiltinScalarFunction::PgMyTempSchema => args.is_empty(),
             BuiltinScalarFunction::PgRustInternalBinaryCoercible => args.len() == 2,
@@ -1369,6 +1374,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::Repeat
             | BuiltinScalarFunction::Encode
             | BuiltinScalarFunction::Decode
+            | BuiltinScalarFunction::TextStartsWith
             | BuiltinScalarFunction::ToChar
             | BuiltinScalarFunction::ToDate
             | BuiltinScalarFunction::ToNumber
@@ -1654,8 +1660,23 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::CurrentSetting => {
             return Some(SqlType::new(SqlTypeKind::Text));
         }
-        BuiltinScalarFunction::TimeZone => {
-            return Some(SqlType::new(SqlTypeKind::TimeTz));
+        BuiltinScalarFunction::Extract => {
+            return Some(SqlType::new(SqlTypeKind::Numeric));
+        }
+        BuiltinScalarFunction::MakeInterval => {
+            return Some(SqlType::new(SqlTypeKind::Interval));
+        }
+        BuiltinScalarFunction::MakeTime => {
+            return Some(SqlType::new(SqlTypeKind::Time));
+        }
+        BuiltinScalarFunction::MakeTimestamp => {
+            return Some(SqlType::new(SqlTypeKind::Timestamp));
+        }
+        BuiltinScalarFunction::Age => {
+            return Some(SqlType::new(SqlTypeKind::Interval));
+        }
+        BuiltinScalarFunction::IntervalHash => {
+            return Some(SqlType::new(SqlTypeKind::Int4));
         }
         BuiltinScalarFunction::TxidCurrent | BuiltinScalarFunction::TxidCurrentIfAssigned => {
             return Some(SqlType::new(SqlTypeKind::Int8));
@@ -1663,11 +1684,11 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::TxidVisibleInSnapshot => {
             return Some(SqlType::new(SqlTypeKind::Bool));
         }
+        BuiltinScalarFunction::TextStartsWith => {
+            return Some(SqlType::new(SqlTypeKind::Bool));
+        }
         BuiltinScalarFunction::ParseIdent => {
             return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text)));
-        }
-        BuiltinScalarFunction::Age => {
-            return Some(SqlType::new(SqlTypeKind::Interval));
         }
         _ => {}
     }
@@ -1796,6 +1817,7 @@ fn lower_named_function_args(
 fn default_sql_expr(default: NamedArgDefault) -> SqlExpr {
     match default {
         NamedArgDefault::Bool(value) => SqlExpr::Const(Value::Bool(value)),
+        NamedArgDefault::Int4(value) => SqlExpr::Const(Value::Int32(value)),
         NamedArgDefault::Float8(value) => SqlExpr::Const(Value::Float64(value)),
         NamedArgDefault::Text(value) => SqlExpr::Const(Value::Text(value.into())),
         NamedArgDefault::JsonbEmptyObject => SqlExpr::Cast(
@@ -1807,6 +1829,19 @@ fn default_sql_expr(default: NamedArgDefault) -> SqlExpr {
 
 fn scalar_named_arg_signature(func: BuiltinScalarFunction) -> Option<NamedArgSignature> {
     match func {
+        BuiltinScalarFunction::MakeInterval => Some(NamedArgSignature {
+            params: &["years", "months", "weeks", "days", "hours", "mins", "secs"],
+            required: 0,
+            defaults: &[
+                Some(NamedArgDefault::Int4(0)),
+                Some(NamedArgDefault::Int4(0)),
+                Some(NamedArgDefault::Int4(0)),
+                Some(NamedArgDefault::Int4(0)),
+                Some(NamedArgDefault::Int4(0)),
+                Some(NamedArgDefault::Int4(0)),
+                Some(NamedArgDefault::Float8(0.0)),
+            ],
+        }),
         BuiltinScalarFunction::ParseIdent => Some(NamedArgSignature {
             params: &["str", "strict"],
             required: 1,
@@ -1993,11 +2028,16 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("date_add", BuiltinScalarFunction::DateAdd),
         ("date_subtract", BuiltinScalarFunction::DateSubtract),
         ("age", BuiltinScalarFunction::Age),
+        ("justify_days", BuiltinScalarFunction::JustifyDays),
+        ("justify_hours", BuiltinScalarFunction::JustifyHours),
+        ("justify_interval", BuiltinScalarFunction::JustifyInterval),
         ("isfinite", BuiltinScalarFunction::IsFinite),
+        ("make_interval", BuiltinScalarFunction::MakeInterval),
         ("make_date", BuiltinScalarFunction::MakeDate),
         ("make_time", BuiltinScalarFunction::MakeTime),
         ("make_timestamp", BuiltinScalarFunction::MakeTimestamp),
         ("make_timestamptz", BuiltinScalarFunction::MakeTimestampTz),
+        ("interval_hash", BuiltinScalarFunction::IntervalHash),
         (
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
@@ -2009,6 +2049,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgRustInternalBinaryCoercible,
         ),
         (
+            "binary_coercible",
+            BuiltinScalarFunction::PgRustInternalBinaryCoercible,
+        ),
+        (
             "pg_rust_test_opclass_options_func",
             BuiltinScalarFunction::PgRustTestOpclassOptionsFunc,
         ),
@@ -2016,6 +2060,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_rust_test_fdw_handler",
             BuiltinScalarFunction::PgRustTestFdwHandler,
         ),
+        (
+            "test_fdw_handler",
+            BuiltinScalarFunction::PgRustTestFdwHandler,
+        ),
+        ("interpt_pp", BuiltinScalarFunction::GeoIntersection),
         (
             "pg_rust_test_enc_setup",
             BuiltinScalarFunction::PgRustTestEncSetup,
@@ -2540,6 +2589,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("similar_substring", BuiltinScalarFunction::SimilarSubstring),
         ("overlay", BuiltinScalarFunction::Overlay),
         ("reverse", BuiltinScalarFunction::Reverse),
+        ("starts_with", BuiltinScalarFunction::TextStartsWith),
         ("trim", BuiltinScalarFunction::BTrim),
         ("btrim", BuiltinScalarFunction::BTrim),
         ("ltrim", BuiltinScalarFunction::LTrim),

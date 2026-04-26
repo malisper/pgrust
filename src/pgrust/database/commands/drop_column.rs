@@ -1,6 +1,7 @@
 use super::super::*;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
+    any_dependent_view_references_column, dependent_view_rewrites_for_relation,
     is_system_column_name, lookup_heap_relation_for_alter_table,
     reject_column_referenced_by_generated_columns, reject_column_with_trigger_dependencies,
 };
@@ -101,13 +102,25 @@ impl Database {
             column_index,
             "drop",
         )?;
-        reject_relation_with_dependent_views(
+        let dependent_views = dependent_view_rewrites_for_relation(
             self,
             client_id,
             Some((xid, cid)),
             relation.relation_oid,
-            "ALTER TABLE DROP COLUMN on relation without dependent views",
         )?;
+        if any_dependent_view_references_column(
+            &dependent_views,
+            relation.relation_oid,
+            (column_index + 1) as i16,
+        ) {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "ALTER TABLE DROP COLUMN on column without dependent views",
+                actual: format!(
+                    "cannot ALTER TABLE DROP COLUMN on relation because a dependent view uses column {}",
+                    relation.desc.columns[column_index].name
+                ),
+            }));
+        }
         reject_column_with_foreign_key_dependencies(
             &catalog,
             relation.relation_oid,

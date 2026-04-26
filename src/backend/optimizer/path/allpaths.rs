@@ -25,7 +25,6 @@ use super::super::inherit::{
     translate_append_rel_expr,
 };
 use super::super::joininfo;
-use super::super::optimize_path;
 use super::super::partition_prune::partition_may_satisfy_filter;
 use super::super::partitionwise;
 use super::super::pathnodes::{next_synthetic_slot_id, rte_slot_id, slot_output_target};
@@ -40,8 +39,9 @@ use super::super::{
     relids_subset, relids_union, reverse_join_type,
 };
 use super::{
-    build_index_path_spec, build_join_paths_with_root, estimate_index_candidate,
-    estimate_seqscan_candidate, relation_stats,
+    build_index_path_spec, build_join_paths_with_root, estimate_bitmap_candidate,
+    estimate_index_candidate, estimate_seqscan_candidate, optimize_path_with_config,
+    relation_stats,
 };
 
 fn collect_inner_join_clauses(root: &PlannerInfo) -> Vec<RestrictInfo> {
@@ -363,6 +363,16 @@ fn relation_display_name(
     }
 }
 
+fn access_method_supports_index_scan(am_oid: u32) -> bool {
+    crate::backend::access::index::amapi::index_am_handler(am_oid)
+        .is_some_and(|routine| routine.amgettuple.is_some())
+}
+
+fn access_method_supports_bitmap_scan(am_oid: u32) -> bool {
+    crate::backend::access::index::amapi::index_am_handler(am_oid)
+        .is_some_and(|routine| routine.amgetbitmap.is_some())
+}
+
 fn collect_relation_access_paths(
     rtindex: usize,
     heap_rel: RelFileLocator,
@@ -433,24 +443,49 @@ fn collect_relation_access_paths(
         })
     {
         if let Some(spec) = build_index_path_spec(filter.as_ref(), None, index) {
-            paths.push(
-                estimate_index_candidate(
-                    rtindex,
-                    heap_rel,
-                    relation_name.clone(),
-                    relation_oid,
-                    toast,
-                    desc.clone(),
-                    &stats,
-                    spec,
-                    None,
-                    catalog,
-                )
-                .plan,
-            );
+            if config.enable_indexscan && access_method_supports_index_scan(index.index_meta.am_oid)
+            {
+                paths.push(
+                    estimate_index_candidate(
+                        rtindex,
+                        heap_rel,
+                        relation_name.clone(),
+                        relation_oid,
+                        toast,
+                        desc.clone(),
+                        &stats,
+                        spec.clone(),
+                        None,
+                        config,
+                        catalog,
+                    )
+                    .plan,
+                );
+            }
+            if config.enable_bitmapscan
+                && access_method_supports_bitmap_scan(index.index_meta.am_oid)
+            {
+                paths.push(
+                    estimate_bitmap_candidate(
+                        rtindex,
+                        heap_rel,
+                        relation_name.clone(),
+                        relation_oid,
+                        toast,
+                        desc.clone(),
+                        &stats,
+                        spec,
+                        None,
+                        catalog,
+                    )
+                    .plan,
+                );
+            }
         }
-        if let Some(order_items) = query_order_items.as_ref()
+        if config.enable_indexscan
+            && let Some(order_items) = query_order_items.as_ref()
             && let Some(spec) = build_index_path_spec(filter.as_ref(), Some(order_items), index)
+            && access_method_supports_index_scan(index.index_meta.am_oid)
         {
             paths.push(
                 estimate_index_candidate(
@@ -463,6 +498,7 @@ fn collect_relation_access_paths(
                     &stats,
                     spec,
                     Some(order_items.clone()),
+                    config,
                     catalog,
                 )
                 .plan,
@@ -484,8 +520,12 @@ fn collect_relation_ordered_index_paths(
     desc: RelationDesc,
     filter: Option<Expr>,
     order_items: &[OrderByEntry],
+    config: PlannerConfig,
     catalog: &dyn CatalogLookup,
 ) -> Vec<Path> {
+    if !config.enable_indexscan {
+        return Vec::new();
+    }
     let stats = relation_stats(catalog, relation_oid, &desc);
     let mut paths = Vec::new();
     for index in catalog
@@ -497,6 +537,9 @@ fn collect_relation_ordered_index_paths(
                 && !index.index_meta.indkey.is_empty()
         })
     {
+        if !access_method_supports_index_scan(index.index_meta.am_oid) {
+            continue;
+        }
         if let Some(spec) = build_index_path_spec(filter.as_ref(), Some(order_items), index) {
             if !spec.removes_order {
                 continue;
@@ -512,6 +555,7 @@ fn collect_relation_ordered_index_paths(
                     &stats,
                     spec,
                     Some(order_items.to_vec()),
+                    config,
                     catalog,
                 )
                 .plan,
@@ -552,6 +596,7 @@ pub(super) fn relation_ordered_index_paths(
             rte.desc.clone(),
             base_filter_expr(rel),
             &order_items,
+            root.config,
             catalog,
         ),
         _ => Vec::new(),
@@ -640,7 +685,7 @@ fn build_recursive_union_path(
             wire_type_oid: None,
         })
         .collect::<Vec<_>>();
-    optimize_path(
+    optimize_path_with_config(
         Path::RecursiveUnion {
             plan_info: PlanEstimate::default(),
             pathtarget: slot_output_target(slot_id, &output_columns, |column| column.sql_type),
@@ -657,6 +702,7 @@ fn build_recursive_union_path(
             recursive: Box::new(recursive_path),
         },
         catalog,
+        config,
     )
 }
 
@@ -694,7 +740,7 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
             wire_type_oid: None,
         })
         .collect::<Vec<_>>();
-    let set_op = optimize_path(
+    let set_op = optimize_path_with_config(
         Path::SetOp {
             plan_info: PlanEstimate::default(),
             pathtarget: slot_output_target(source_id, &output_columns, |column| column.sql_type),
@@ -705,6 +751,7 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
             children,
         },
         catalog,
+        root.config,
     );
     let mut rel = RelOptInfo::new(
         Vec::new(),
@@ -1196,6 +1243,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     rte.desc.clone(),
                     filter.clone(),
                     order_items,
+                    root.config,
                     catalog,
                 ))
                 .map(|path| normalize_rte_path(rtindex, &rte.desc, path, catalog));
@@ -1281,7 +1329,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 }
             }
         }
-        let append = optimize_path(
+        let append = optimize_path_with_config(
             Path::Append {
                 plan_info: PlanEstimate::default(),
                 pathtarget: slot_output_target(rtindex, &rte.desc.columns, |column| {
@@ -1293,6 +1341,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 children,
             },
             catalog,
+            root.config,
         );
         let Some(rel) = root
             .simple_rel_array
@@ -1303,7 +1352,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         };
         rel.add_path(append);
         if ordered_ok && let Some(items) = query_order_items {
-            rel.add_path(optimize_path(
+            rel.add_path(optimize_path_with_config(
                 Path::MergeAppend {
                     plan_info: PlanEstimate::default(),
                     pathtarget: slot_output_target(rtindex, &rte.desc.columns, |column| {
@@ -1315,6 +1364,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     children: ordered_children,
                 },
                 catalog,
+                root.config,
             ));
         }
         bestpath::set_cheapest(rel);
@@ -1330,12 +1380,13 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
     };
 
     match rte.kind {
-        RangeTblEntryKind::Result => rel.add_path(optimize_path(
+        RangeTblEntryKind::Result => rel.add_path(optimize_path_with_config(
             Path::Result {
                 plan_info: PlanEstimate::default(),
                 pathtarget: PathTarget::new(Vec::new()),
             },
             catalog,
+            root.config,
         )),
         RangeTblEntryKind::Relation {
             rel: heap_rel,
@@ -1361,7 +1412,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             rows,
             output_columns,
         } => {
-            let mut path = optimize_path(
+            let mut path = optimize_path_with_config(
                 Path::Values {
                     plan_info: PlanEstimate::default(),
                     pathtarget: slot_output_target(rtindex, &output_columns, |column| {
@@ -1372,10 +1423,11 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     output_columns,
                 },
                 catalog,
+                root.config,
             );
             path = normalize_rte_path(rtindex, &rte.desc, path, catalog);
             if let Some(filter) = base_filter_expr(rel) {
-                path = optimize_path(
+                path = optimize_path_with_config(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
                         pathtarget: path.semantic_output_target(),
@@ -1383,12 +1435,13 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                         input: Box::new(path),
                     },
                     catalog,
+                    root.config,
                 );
             }
             rel.add_path(path);
         }
         RangeTblEntryKind::Function { call } => {
-            let mut path = optimize_path(
+            let mut path = optimize_path_with_config(
                 Path::FunctionScan {
                     plan_info: PlanEstimate::default(),
                     pathtarget: slot_output_target(rtindex, call.output_columns(), |column| {
@@ -1399,10 +1452,11 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     table_alias: rte.alias.clone(),
                 },
                 catalog,
+                root.config,
             );
             path = normalize_rte_path(rtindex, &rte.desc, path, catalog);
             if let Some(filter) = base_filter_expr(rel) {
-                path = optimize_path(
+                path = optimize_path_with_config(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
                         pathtarget: path.semantic_output_target(),
@@ -1410,12 +1464,13 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                         input: Box::new(path),
                     },
                     catalog,
+                    root.config,
                 );
             }
             rel.add_path(path);
         }
         RangeTblEntryKind::WorkTable { worktable_id } => {
-            let mut path = optimize_path(
+            let mut path = optimize_path_with_config(
                 Path::WorkTableScan {
                     plan_info: PlanEstimate::default(),
                     pathtarget: slot_output_target(
@@ -1445,10 +1500,11 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                         .collect(),
                 },
                 catalog,
+                root.config,
             );
             path = normalize_rte_path(rtindex, &rte.desc, path, catalog);
             if let Some(filter) = base_filter_expr(rel) {
-                path = optimize_path(
+                path = optimize_path_with_config(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
                         pathtarget: path.semantic_output_target(),
@@ -1456,6 +1512,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                         input: Box::new(path),
                     },
                     catalog,
+                    root.config,
                 );
             }
             rel.add_path(path);
@@ -1465,7 +1522,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 build_cte_scan_path(rtindex, cte_id, *query, &rte.desc, catalog, root.config);
             path = normalize_rte_path(rtindex, &rte.desc, path, catalog);
             if let Some(filter) = base_filter_expr(rel) {
-                path = optimize_path(
+                path = optimize_path_with_config(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
                         pathtarget: path.semantic_output_target(),
@@ -1473,6 +1530,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                         input: Box::new(path),
                     },
                     catalog,
+                    root.config,
                 );
             }
             rel.add_path(path);
@@ -1482,7 +1540,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             let mut path =
                 build_subquery_scan_path(rtindex, query, &rte.desc, catalog, root.config);
             if let Some(filter) = filter {
-                path = optimize_path(
+                path = optimize_path_with_config(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
                         pathtarget: path.semantic_output_target(),
@@ -1490,6 +1548,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                         input: Box::new(path),
                     },
                     catalog,
+                    root.config,
                 );
             }
             rel.add_path(path);
@@ -2182,7 +2241,7 @@ fn collect_partitionwise_join_candidate_path(
         };
         children.push(child_path);
     }
-    let mut append_path = optimize_path(
+    let mut append_path = optimize_path_with_config(
         Path::Append {
             plan_info: PlanEstimate::default(),
             pathtarget: reltarget.clone(),
@@ -2192,6 +2251,7 @@ fn collect_partitionwise_join_candidate_path(
             children,
         },
         catalog,
+        root.config,
     );
     if let Path::Append { plan_info, .. } = &mut append_path {
         // :HACK: Prefer a compatible partitionwise join shape over a cheaper
@@ -2486,12 +2546,13 @@ pub(super) fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
             RelOptKind::UpperRel,
             PathTarget::new(Vec::new()),
         );
-        rel.add_path(optimize_path(
+        rel.add_path(optimize_path_with_config(
             Path::Result {
                 plan_info: PlanEstimate::default(),
                 pathtarget: PathTarget::new(Vec::new()),
             },
             catalog,
+            root.config,
         ));
         bestpath::set_cheapest(&mut rel);
         return rel;

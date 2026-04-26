@@ -89,9 +89,10 @@ fn build_catalog_index_entry(
         column.default_expr = None;
         index_columns.push(column);
     }
-    if options.indclass.len() > columns.len()
-        || options.indcollation.len() != options.indclass.len()
-        || options.indoption.len() != options.indclass.len()
+    let key_count = options.indclass.len();
+    if key_count > columns.len()
+        || options.indcollation.len() != key_count
+        || options.indoption.len() != key_count
     {
         return Err(CatalogError::Corrupt("index build options length mismatch"));
     }
@@ -106,6 +107,7 @@ fn build_catalog_index_entry(
         namespace_oid: table.namespace_oid,
         owner_oid: table.owner_oid,
         relacl: None,
+        reloptions: None,
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,
@@ -204,6 +206,7 @@ pub struct CatalogEntry {
     pub namespace_oid: u32,
     pub owner_oid: u32,
     pub relacl: Option<Vec<String>>,
+    pub reloptions: Option<Vec<String>>,
     pub row_type_oid: u32,
     pub array_type_oid: u32,
     pub reltoastrelid: u32,
@@ -594,6 +597,7 @@ impl Catalog {
             namespace_oid,
             owner_oid,
             relacl: None,
+            reloptions: None,
             row_type_oid,
             array_type_oid,
             reltoastrelid: 0,

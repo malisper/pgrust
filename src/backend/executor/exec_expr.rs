@@ -5,7 +5,9 @@ use std::cmp::Ordering;
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
 use crate::backend::utils::trigger::format_trigger_definition;
-use crate::include::nodes::datetime::MAX_TIME_PRECISION;
+use crate::include::nodes::datetime::{
+    MAX_TIME_PRECISION, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_SEC,
+};
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 use rand::{Rng, RngCore};
 use std::sync::Mutex;
@@ -29,11 +31,13 @@ pub(crate) use super::expr_compile::{
 };
 use super::expr_date::{
     eval_age_function, eval_date_bin_function, eval_date_part_function_with_config,
-    eval_date_trunc_function, eval_datetime_add_function, eval_extract_function_with_config,
-    eval_isfinite_function, eval_make_date_function, eval_make_time_function,
-    eval_make_timestamp_function, eval_make_timestamptz_function,
-    eval_timezone_function as eval_timetz_timezone_function, eval_to_date_function,
-    eval_to_timestamp_function,
+    eval_date_trunc_function, eval_datetime_add_function, eval_extract_function,
+    eval_extract_function_with_config, eval_isfinite_function, eval_justify_days_function,
+    eval_justify_hours_function, eval_justify_interval_function, eval_make_date_function,
+    eval_make_interval_function, eval_make_time_function, eval_make_timestamp_function,
+    eval_make_timestamptz_function, eval_timezone_function as eval_timetz_timezone_function,
+    eval_to_date_function, eval_to_timestamp_function, timezone_interval_seconds,
+    timezone_target_offset_seconds,
 };
 use super::expr_datetime::{
     current_date_value, current_date_value_from_timestamp_with_config, current_time_value,
@@ -89,9 +93,10 @@ use super::expr_string::{
     eval_reverse_function, eval_right_function, eval_rpad_function, eval_set_bit_bytes,
     eval_set_byte, eval_sha224_function, eval_sha256_function, eval_sha384_function,
     eval_sha512_function, eval_split_part_function, eval_strpos_function, eval_text_overlay,
-    eval_text_substring, eval_to_bin_function, eval_to_char_float4_function, eval_to_char_function,
-    eval_to_hex_function, eval_to_number_function, eval_to_oct_function, eval_translate_function,
-    eval_trim_function, eval_unistr_function,
+    eval_text_starts_with_function, eval_text_substring, eval_to_bin_function,
+    eval_to_char_float4_function, eval_to_char_function, eval_to_hex_function,
+    eval_to_number_function, eval_to_oct_function, eval_translate_function, eval_trim_function,
+    eval_unistr_function,
 };
 use super::expr_txid::eval_txid_builtin_function;
 use super::expr_xml::{eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function};
@@ -127,10 +132,11 @@ use crate::include::catalog::{
     BOX_SPGIST_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID, BYTEA_TYPE_OID, CONSTRAINT_CHECK,
     CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
     CONSTRAINT_UNIQUE, CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID,
-    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID,
-    PG_DEPENDENCIES_TYPE_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID,
-    PG_NDISTINCT_TYPE_OID, PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID,
-    POLY_SPGIST_OPCLASS_OID, SPGIST_AM_OID, bootstrap_pg_am_rows,
+    INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID,
+    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
+    PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, POLY_SPGIST_OPCLASS_OID,
+    QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_SPGIST_OPCLASS_OID, bootstrap_pg_am_rows,
     builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
@@ -369,7 +375,7 @@ enum IndexPropertyKind {
 enum IndexReturnability {
     Never,
     Always,
-    SpgistBox,
+    SpgistCanReturnData,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -506,7 +512,7 @@ fn index_am_profile(am_oid: u32) -> Option<IndexAmPropertyProfile> {
             amcaninclude: true,
             amindexscan: true,
             ambitmapscan: true,
-            returnability: IndexReturnability::SpgistBox,
+            returnability: IndexReturnability::SpgistCanReturnData,
         }),
         _ => crate::backend::access::index::amapi::index_am_handler(am_oid).map(|routine| {
             IndexAmPropertyProfile {
@@ -683,10 +689,17 @@ fn eval_pg_index_column_has_property(
                 Some(IndexPropertyKind::Returnable) => Value::Bool(match profile.returnability {
                     IndexReturnability::Never => false,
                     IndexReturnability::Always => true,
-                    IndexReturnability::SpgistBox => {
+                    IndexReturnability::SpgistCanReturnData => {
                         matches!(
                             index_meta.indclass.get(column_index).copied(),
-                            Some(BOX_SPGIST_OPCLASS_OID | POLY_SPGIST_OPCLASS_OID)
+                            Some(
+                                BOX_SPGIST_OPCLASS_OID
+                                    | POLY_SPGIST_OPCLASS_OID
+                                    | INET_SPGIST_OPCLASS_OID
+                                    | QUAD_POINT_SPGIST_OPCLASS_OID
+                                    | KD_POINT_SPGIST_OPCLASS_OID
+                                    | TEXT_SPGIST_OPCLASS_OID
+                            )
                         )
                     }
                 }),
@@ -4147,6 +4160,29 @@ fn cast_record_value_for_target(
     ))
 }
 
+fn eval_interval_hash_function(values: &[Value]) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::DetailedError {
+            message: "malformed interval_hash call".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Interval(interval) => {
+            let span = interval.cmp_key() as i64;
+            Ok(Value::Int32((span ^ (span >> 32)) as i32))
+        }
+        other => Err(ExecError::TypeMismatch {
+            op: "interval_hash",
+            left: other.clone(),
+            right: Value::Interval(crate::include::nodes::datum::IntervalValue::zero()),
+        }),
+    }
+}
+
 fn eval_plpgsql_builtin_function(
     func: BuiltinScalarFunction,
     result_type: Option<SqlType>,
@@ -4408,6 +4444,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
         BuiltinScalarFunction::Md5 => eval_md5_function(&values),
         BuiltinScalarFunction::Reverse => eval_reverse_function(&values),
+        BuiltinScalarFunction::TextStartsWith => eval_text_starts_with_function(&values),
         BuiltinScalarFunction::Encode => eval_encode_function(&values),
         BuiltinScalarFunction::Decode => eval_decode_function(&values),
         BuiltinScalarFunction::Sha224 => eval_sha224_function(&values),
@@ -4456,6 +4493,13 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::BoolNe => eval_boolne(&values),
         BuiltinScalarFunction::BoolAndStateFunc => eval_booland_statefunc(&values),
         BuiltinScalarFunction::BoolOrStateFunc => eval_boolor_statefunc(&values),
+        BuiltinScalarFunction::Extract => eval_extract_function(&values),
+        BuiltinScalarFunction::DateBin => eval_date_bin_function(&values),
+        BuiltinScalarFunction::JustifyDays => eval_justify_days_function(&values),
+        BuiltinScalarFunction::JustifyHours => eval_justify_hours_function(&values),
+        BuiltinScalarFunction::JustifyInterval => eval_justify_interval_function(&values),
+        BuiltinScalarFunction::MakeInterval => eval_make_interval_function(&values),
+        BuiltinScalarFunction::IntervalHash => eval_interval_hash_function(&values),
         BuiltinScalarFunction::XmlComment => eval_xml_comment_function(&values, None),
         BuiltinScalarFunction::XmlIsWellFormed => eval_xml_is_well_formed_function(
             &values,
@@ -4652,22 +4696,21 @@ fn eval_timezone_function(
 ) -> Result<Value, ExecError> {
     let (zone, value) = match values {
         [value] => (
-            crate::backend::utils::time::datetime::current_timezone_name(config),
+            Value::Text(
+                crate::backend::utils::time::datetime::current_timezone_name(config).into(),
+            ),
             value,
         ),
         [zone, value] => {
             if matches!(zone, Value::Null) {
                 return Ok(Value::Null);
             }
-            let zone = zone.as_text().ok_or_else(|| ExecError::TypeMismatch {
-                op: "timezone",
-                left: zone.clone(),
-                right: value.clone(),
-            })?;
-            let zone = if zone == "__pgrust_local_timezone__" {
-                crate::backend::utils::time::datetime::current_timezone_name(config)
+            let zone = if zone.as_text() == Some("__pgrust_local_timezone__") {
+                Value::Text(
+                    crate::backend::utils::time::datetime::current_timezone_name(config).into(),
+                )
             } else {
-                zone
+                zone.clone()
             };
             (zone, value)
         }
@@ -4686,32 +4729,97 @@ fn eval_timezone_function(
         Value::TimeTz(_) => {
             let mut timetz_args = Vec::new();
             if values.len() == 2 {
-                timetz_args.push(Value::Text(zone.into()));
+                timetz_args.push(zone.clone());
             }
             timetz_args.push(value.clone());
             eval_timetz_timezone_function(&timetz_args, config)
         }
-        Value::Timestamp(timestamp) => timestamp_at_time_zone(*timestamp, zone)
-            .map(Value::TimestampTz)
-            .map_err(|err| ExecError::InvalidStorageValue {
-                column: "timestamptz".into(),
-                details: super::expr_casts::datetime_parse_error_details(
-                    "timestamp with time zone",
-                    zone,
-                    err,
-                ),
-            }),
-        Value::TimestampTz(timestamptz) => timestamptz_at_time_zone(*timestamptz, zone)
-            .map(Value::Timestamp)
-            .map_err(|err| ExecError::InvalidStorageValue {
-                column: "timestamp".into(),
-                details: super::expr_casts::datetime_parse_error_details("timestamp", zone, err),
-            }),
+        Value::Time(time) => Ok(Value::TimeTz(TimeTzADT {
+            time: *time,
+            offset_seconds: timezone_target_offset_seconds(&zone, config)?,
+        })),
+        Value::Timestamp(timestamp) => match &zone {
+            Value::Interval(interval) => {
+                let micros = timezone_interval_seconds(*interval)?
+                    .checked_mul(USECS_PER_SEC)
+                    .ok_or_else(timezone_timestamp_out_of_range)?;
+                if !timestamp.is_finite() {
+                    Ok(Value::TimestampTz(TimestampTzADT(timestamp.0)))
+                } else {
+                    Ok(Value::TimestampTz(TimestampTzADT(
+                        timestamp
+                            .0
+                            .checked_sub(micros)
+                            .ok_or_else(timezone_timestamp_out_of_range)?,
+                    )))
+                }
+            }
+            _ => {
+                let zone_text = zone.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                    op: "timezone",
+                    left: zone.clone(),
+                    right: value.clone(),
+                })?;
+                timestamp_at_time_zone(*timestamp, zone_text)
+                    .map(Value::TimestampTz)
+                    .map_err(|err| ExecError::InvalidStorageValue {
+                        column: "timestamptz".into(),
+                        details: super::expr_casts::datetime_parse_error_details(
+                            "timestamp with time zone",
+                            zone_text,
+                            err,
+                        ),
+                    })
+            }
+        },
+        Value::TimestampTz(timestamptz) => match &zone {
+            Value::Interval(interval) => {
+                let micros = timezone_interval_seconds(*interval)?
+                    .checked_mul(USECS_PER_SEC)
+                    .ok_or_else(timezone_timestamp_out_of_range)?;
+                if !timestamptz.is_finite() {
+                    Ok(Value::Timestamp(TimestampADT(timestamptz.0)))
+                } else {
+                    Ok(Value::Timestamp(TimestampADT(
+                        timestamptz
+                            .0
+                            .checked_add(micros)
+                            .ok_or_else(timezone_timestamp_out_of_range)?,
+                    )))
+                }
+            }
+            _ => {
+                let zone_text = zone.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                    op: "timezone",
+                    left: zone.clone(),
+                    right: value.clone(),
+                })?;
+                timestamptz_at_time_zone(*timestamptz, zone_text)
+                    .map(Value::Timestamp)
+                    .map_err(|err| ExecError::InvalidStorageValue {
+                        column: "timestamp".into(),
+                        details: super::expr_casts::datetime_parse_error_details(
+                            "timestamp",
+                            zone_text,
+                            err,
+                        ),
+                    })
+            }
+        },
         other => Err(ExecError::TypeMismatch {
             op: "timezone",
-            left: Value::Text(zone.into()),
+            left: zone,
             right: other.clone(),
         }),
+    }
+}
+
+fn timezone_timestamp_out_of_range() -> ExecError {
+    ExecError::DetailedError {
+        message: "timestamp out of range".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
     }
 }
 
@@ -5481,13 +5589,15 @@ fn eval_builtin_function(
         }
         BuiltinScalarFunction::DateTrunc => eval_date_trunc_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::DateBin => eval_date_bin_function(&values),
-        BuiltinScalarFunction::TimeZone => {
-            eval_timetz_timezone_function(&values, &ctx.datetime_config)
-        }
+        BuiltinScalarFunction::Timezone => eval_timezone_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::DateAdd => eval_datetime_add_function(&values, false),
         BuiltinScalarFunction::DateSubtract => eval_datetime_add_function(&values, true),
         BuiltinScalarFunction::Age => eval_age_function(&values, &ctx.datetime_config),
+        BuiltinScalarFunction::JustifyDays => eval_justify_days_function(&values),
+        BuiltinScalarFunction::JustifyHours => eval_justify_hours_function(&values),
+        BuiltinScalarFunction::JustifyInterval => eval_justify_interval_function(&values),
         BuiltinScalarFunction::IsFinite => eval_isfinite_function(&values),
+        BuiltinScalarFunction::MakeInterval => eval_make_interval_function(&values),
         BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
         BuiltinScalarFunction::MakeTime => eval_make_time_function(&values),
         BuiltinScalarFunction::MakeTimestamp => eval_make_timestamp_function(&values),
@@ -5495,6 +5605,7 @@ fn eval_builtin_function(
             eval_make_timestamptz_function(&values, &ctx.datetime_config)
         }
         BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(&values),
+        BuiltinScalarFunction::IntervalHash => eval_interval_hash_function(&values),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
         BuiltinScalarFunction::PgMyTempSchema => Ok(Value::Int64(i64::from(
             current_temp_namespace_oid(ctx).unwrap_or(0),
@@ -5702,7 +5813,6 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ArrayLower => eval_array_lower_function(&values),
         BuiltinScalarFunction::ArrayUpper => eval_array_upper_function(&values),
         BuiltinScalarFunction::PgSleep => eval_pg_sleep_function(&values),
-        BuiltinScalarFunction::Timezone => eval_timezone_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::ArrayFill => eval_array_fill_function(&values),
         BuiltinScalarFunction::StringToArray => eval_string_to_array_function(&values),
         BuiltinScalarFunction::ArrayToString => eval_array_to_string_function(&values),
@@ -5890,6 +6000,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::RPad => eval_rpad_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
+        BuiltinScalarFunction::TextStartsWith => eval_text_starts_with_function(&values),
         BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
         BuiltinScalarFunction::Initcap => eval_initcap_function(&values),
         BuiltinScalarFunction::BTrim => eval_trim_function("btrim", &values),

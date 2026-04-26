@@ -1,6 +1,12 @@
 use super::*;
 use crate::backend::parser::analyze::multiranges::bind_maybe_multirange_overlap_or_adjacent;
 use crate::backend::parser::analyze::ranges::bind_maybe_range_overlap_or_adjacent;
+use crate::include::catalog::{
+    C_COLLATION_OID, TEXT_CMP_GE_PROC_OID, TEXT_CMP_GT_PROC_OID, TEXT_CMP_LE_PROC_OID,
+    TEXT_CMP_LT_PROC_OID, TEXT_PATTERN_GE_OPERATOR_OID, TEXT_PATTERN_GT_OPERATOR_OID,
+    TEXT_PATTERN_LE_OPERATOR_OID, TEXT_PATTERN_LT_OPERATOR_OID,
+};
+use crate::include::nodes::primnodes::OpExpr;
 
 pub(super) fn bind_arithmetic_expr(
     op: &'static str,
@@ -19,6 +25,14 @@ pub(super) fn bind_arithmetic_expr(
         infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
     let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
     let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    let right_is_string_literal = matches!(
+        right,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    );
+    let left_is_string_literal = matches!(
+        left,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    );
     if !left_type.is_array
         && !right_type.is_array
         && matches!(left_type.kind, SqlTypeKind::PgLsn)
@@ -304,6 +318,304 @@ pub(super) fn bind_arithmetic_expr(
             ),
         ));
     }
+    if !left_type.is_array
+        && !right_type.is_array
+        && matches!(op, "+" | "-")
+        && matches!(left_type.kind, SqlTypeKind::Interval)
+        && matches!(right_type.kind, SqlTypeKind::Interval)
+    {
+        let interval = SqlType::new(SqlTypeKind::Interval);
+        return Ok(Expr::binary_op(
+            make,
+            interval,
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_left_type,
+                interval,
+            ),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_right_type,
+                interval,
+            ),
+        ));
+    }
+    if !left_type.is_array
+        && !right_type.is_array
+        && matches!(op, "+" | "-")
+        && matches!(
+            left_type.kind,
+            SqlTypeKind::Date | SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+        )
+        && matches!(right_type.kind, SqlTypeKind::Interval)
+    {
+        let result_type = match left_type.kind {
+            SqlTypeKind::Date => SqlType::new(SqlTypeKind::Timestamp),
+            _ => left_type,
+        };
+        return Ok(Expr::binary_op(
+            make,
+            result_type,
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_left_type,
+                left_type,
+            ),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_right_type,
+                SqlType::new(SqlTypeKind::Interval),
+            ),
+        ));
+    }
+    if !left_type.is_array
+        && !right_type.is_array
+        && op == "+"
+        && matches!(left_type.kind, SqlTypeKind::Interval)
+        && matches!(
+            right_type.kind,
+            SqlTypeKind::Date | SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+        )
+    {
+        let result_type = match right_type.kind {
+            SqlTypeKind::Date => SqlType::new(SqlTypeKind::Timestamp),
+            _ => right_type,
+        };
+        return Ok(Expr::binary_op(
+            make,
+            result_type,
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_left_type,
+                SqlType::new(SqlTypeKind::Interval),
+            ),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_right_type,
+                right_type,
+            ),
+        ));
+    }
+    if !left_type.is_array
+        && !right_type.is_array
+        && matches!(op, "*" | "/")
+        && (matches!(left_type.kind, SqlTypeKind::Interval)
+            || matches!(right_type.kind, SqlTypeKind::Interval))
+    {
+        let interval = SqlType::new(SqlTypeKind::Interval);
+        let float8 = SqlType::new(SqlTypeKind::Float8);
+        if op == "*"
+            && matches!(left_type.kind, SqlTypeKind::Interval)
+            && (is_numeric_family(right_type) || right_is_string_literal)
+        {
+            return Ok(Expr::binary_op(
+                make,
+                interval,
+                coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_left_type,
+                    interval,
+                ),
+                coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_right_type,
+                    float8,
+                ),
+            ));
+        }
+        if op == "*"
+            && (is_numeric_family(left_type) || left_is_string_literal)
+            && matches!(right_type.kind, SqlTypeKind::Interval)
+        {
+            return Ok(Expr::binary_op(
+                make,
+                interval,
+                coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_left_type,
+                    float8,
+                ),
+                coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_right_type,
+                    interval,
+                ),
+            ));
+        }
+        if op == "/"
+            && matches!(left_type.kind, SqlTypeKind::Interval)
+            && (is_numeric_family(right_type) || right_is_string_literal)
+        {
+            return Ok(Expr::binary_op(
+                make,
+                interval,
+                coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_left_type,
+                    interval,
+                ),
+                coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_right_type,
+                    float8,
+                ),
+            ));
+        }
+    }
+    if !left_type.is_array
+        && !right_type.is_array
+        && matches!(op, "+" | "-")
+        && matches!(left_type.kind, SqlTypeKind::Time | SqlTypeKind::TimeTz)
+        && matches!(right_type.kind, SqlTypeKind::Interval)
+    {
+        return Ok(Expr::binary_op(
+            make,
+            left_type,
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_left_type,
+                left_type,
+            ),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_right_type,
+                SqlType::new(SqlTypeKind::Interval),
+            ),
+        ));
+    }
+    if !left_type.is_array
+        && !right_type.is_array
+        && op == "+"
+        && matches!(left_type.kind, SqlTypeKind::Interval)
+        && matches!(right_type.kind, SqlTypeKind::Time | SqlTypeKind::TimeTz)
+    {
+        return Ok(Expr::binary_op(
+            make,
+            right_type,
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_left_type,
+                SqlType::new(SqlTypeKind::Interval),
+            ),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_right_type,
+                right_type,
+            ),
+        ));
+    }
     let common = resolve_numeric_binary_type(op, left_type, right_type)?;
     let left = coerce_bound_expr(
         bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,
@@ -385,6 +697,143 @@ pub(super) fn bind_comparison_expr(
         right_explicit_collation,
         catalog,
     )
+}
+
+fn text_pattern_operator_metadata(
+    op: &'static str,
+) -> Option<(crate::include::nodes::primnodes::OpExprKind, u32, u32)> {
+    Some(match op {
+        "~<~" => (
+            crate::include::nodes::primnodes::OpExprKind::Lt,
+            TEXT_PATTERN_LT_OPERATOR_OID,
+            TEXT_CMP_LT_PROC_OID,
+        ),
+        "~<=~" => (
+            crate::include::nodes::primnodes::OpExprKind::LtEq,
+            TEXT_PATTERN_LE_OPERATOR_OID,
+            TEXT_CMP_LE_PROC_OID,
+        ),
+        "~>=~" => (
+            crate::include::nodes::primnodes::OpExprKind::GtEq,
+            TEXT_PATTERN_GE_OPERATOR_OID,
+            TEXT_CMP_GE_PROC_OID,
+        ),
+        "~>~" => (
+            crate::include::nodes::primnodes::OpExprKind::Gt,
+            TEXT_PATTERN_GT_OPERATOR_OID,
+            TEXT_CMP_GT_PROC_OID,
+        ),
+        _ => return None,
+    })
+}
+
+pub(super) fn bind_text_pattern_comparison_expr(
+    op: &'static str,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let (kind, operator_oid, proc_oid) =
+        text_pattern_operator_metadata(op).ok_or(ParseError::UnexpectedToken {
+            expected: "text pattern comparison operator",
+            actual: op.into(),
+        })?;
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    if !supports_pattern_ordering_operator(left_type)
+        || !supports_pattern_ordering_operator(right_type)
+    {
+        return Err(ParseError::UndefinedOperator {
+            op,
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        });
+    }
+    let text_type = SqlType::new(SqlTypeKind::Text);
+    let left = coerce_bound_expr(
+        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,
+        raw_left_type,
+        text_type,
+    );
+    let right = coerce_bound_expr(
+        bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?,
+        raw_right_type,
+        text_type,
+    );
+    Ok(Expr::Op(Box::new(OpExpr {
+        opno: operator_oid,
+        opfuncid: proc_oid,
+        op: kind,
+        opresulttype: SqlType::new(SqlTypeKind::Bool),
+        args: vec![left, right],
+        collation_oid: Some(C_COLLATION_OID),
+    })))
+}
+
+pub(super) fn bind_text_starts_with_expr(
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    if !supports_pattern_ordering_operator(left_type)
+        || !supports_pattern_ordering_operator(right_type)
+    {
+        return Err(ParseError::UndefinedOperator {
+            op: "^@",
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        });
+    }
+    let text_type = SqlType::new(SqlTypeKind::Text);
+    Ok(Expr::builtin_func(
+        BuiltinScalarFunction::TextStartsWith,
+        Some(SqlType::new(SqlTypeKind::Bool)),
+        false,
+        vec![
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_left_type,
+                text_type,
+            ),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_right_type,
+                text_type,
+            ),
+        ],
+    ))
 }
 
 pub(super) fn bind_bound_comparison_expr(
@@ -638,6 +1087,9 @@ pub(super) fn supports_comparison_operator(
     if supports_builtin_datetime_comparison(op, left, right) {
         return true;
     }
+    if supports_builtin_interval_comparison(op, left, right) {
+        return true;
+    }
     if supports_builtin_money_comparison(op, left, right) {
         return true;
     }
@@ -824,6 +1276,17 @@ fn supports_builtin_datetime_comparison(op: &str, left: SqlType, right: SqlType)
                 | SqlTypeKind::Timestamp
                 | SqlTypeKind::TimestampTz
         )
+        && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
+}
+
+// :HACK: PostgreSQL exposes interval comparison operators through pg_operator.
+// pgrust's bootstrap operator catalog is still sparse, while the executor
+// already compares interval values using the same normalized sort key.
+fn supports_builtin_interval_comparison(op: &str, left: SqlType, right: SqlType) -> bool {
+    !left.is_array
+        && !right.is_array
+        && left.kind == right.kind
+        && matches!(left.kind, SqlTypeKind::Interval)
         && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
 }
 
