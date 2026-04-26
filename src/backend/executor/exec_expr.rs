@@ -4566,6 +4566,9 @@ fn eval_plpgsql_builtin_function(
     if let Some(result) = crate::backend::executor::eval_network_function(func, &values) {
         return result;
     }
+    if is_text_search_builtin_function(func) {
+        return eval_text_search_builtin_function(func, &values);
+    }
     match func {
         BuiltinScalarFunction::ToTsVector
         | BuiltinScalarFunction::JsonbToTsVector
@@ -5185,6 +5188,33 @@ fn timezone_timestamp_out_of_range() -> ExecError {
     }
 }
 
+fn is_text_search_builtin_function(func: BuiltinScalarFunction) -> bool {
+    matches!(
+        func,
+        BuiltinScalarFunction::ToTsVector
+            | BuiltinScalarFunction::JsonbToTsVector
+            | BuiltinScalarFunction::ToTsQuery
+            | BuiltinScalarFunction::PlainToTsQuery
+            | BuiltinScalarFunction::PhraseToTsQuery
+            | BuiltinScalarFunction::WebSearchToTsQuery
+            | BuiltinScalarFunction::TsLexize
+            | BuiltinScalarFunction::TsQueryPhrase
+            | BuiltinScalarFunction::TsQueryNumnode
+            | BuiltinScalarFunction::TsVectorIn
+            | BuiltinScalarFunction::TsVectorOut
+            | BuiltinScalarFunction::TsQueryIn
+            | BuiltinScalarFunction::TsQueryOut
+            | BuiltinScalarFunction::TsVectorStrip
+            | BuiltinScalarFunction::TsVectorDelete
+            | BuiltinScalarFunction::TsVectorToArray
+            | BuiltinScalarFunction::ArrayToTsVector
+            | BuiltinScalarFunction::TsVectorSetWeight
+            | BuiltinScalarFunction::TsVectorFilter
+            | BuiltinScalarFunction::TsRank
+            | BuiltinScalarFunction::TsRankCd
+    )
+}
+
 fn eval_text_search_builtin_function(
     func: BuiltinScalarFunction,
     values: &[Value],
@@ -5208,6 +5238,123 @@ fn eval_text_search_builtin_function(
                 left: values.first().cloned().unwrap_or(Value::Null),
                 right: values.get(1).cloned().unwrap_or(Value::Null),
             })
+    }
+
+    fn arg_tsvector<'a>(
+        values: &'a [Value],
+        index: usize,
+        op: &'static str,
+    ) -> Result<&'a crate::include::nodes::tsearch::TsVector, ExecError> {
+        match values.get(index) {
+            Some(Value::TsVector(vector)) => Ok(vector),
+            Some(other) => Err(ExecError::TypeMismatch {
+                op,
+                left: other.clone(),
+                right: Value::Null,
+            }),
+            None => Err(ExecError::TypeMismatch {
+                op,
+                left: Value::Null,
+                right: Value::Null,
+            }),
+        }
+    }
+
+    fn arg_tsquery<'a>(
+        values: &'a [Value],
+        index: usize,
+        op: &'static str,
+    ) -> Result<&'a crate::include::nodes::tsearch::TsQuery, ExecError> {
+        match values.get(index) {
+            Some(Value::TsQuery(query)) => Ok(query),
+            Some(other) => Err(ExecError::TypeMismatch {
+                op,
+                left: other.clone(),
+                right: Value::Null,
+            }),
+            None => Err(ExecError::TypeMismatch {
+                op,
+                left: Value::Null,
+                right: Value::Null,
+            }),
+        }
+    }
+
+    fn phrase_distance(value: Option<&Value>) -> Result<u16, ExecError> {
+        let distance = match value {
+            Some(value) => int32_arg(value, "tsquery_phrase")?,
+            None => 1,
+        };
+        if !(0..=16_384).contains(&distance) {
+            return Err(ExecError::DetailedError {
+                message: "distance in phrase operator must be an integer value between zero and 16384 inclusive".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            });
+        }
+        Ok(distance as u16)
+    }
+
+    fn rank_weights(value: &Value, op: &'static str) -> Result<[f64; 4], ExecError> {
+        let items = match value {
+            Value::Array(items) => items.clone(),
+            Value::PgArray(array) => array.to_nested_values(),
+            other => {
+                return Err(ExecError::TypeMismatch {
+                    op,
+                    left: other.clone(),
+                    right: Value::Null,
+                });
+            }
+        };
+        if items.len() != 4 {
+            return Err(ExecError::DetailedError {
+                message: "array of weight is too short".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            });
+        }
+        Ok([
+            expect_float8_arg(op, &items[0])?,
+            expect_float8_arg(op, &items[1])?,
+            expect_float8_arg(op, &items[2])?,
+            expect_float8_arg(op, &items[3])?,
+        ])
+    }
+
+    fn eval_rank_builtin(
+        func: BuiltinScalarFunction,
+        values: &[Value],
+    ) -> Result<Value, ExecError> {
+        let op = if matches!(func, BuiltinScalarFunction::TsRank) {
+            "ts_rank"
+        } else {
+            "ts_rank_cd"
+        };
+        let mut offset = 0usize;
+        let mut weights = None;
+        if (values.len() == 3
+            && matches!(values.first(), Some(Value::Array(_) | Value::PgArray(_))))
+            || values.len() == 4
+        {
+            weights = Some(rank_weights(&values[0], op)?);
+            offset = 1;
+        }
+        let vector = arg_tsvector(values, offset, op)?;
+        let query = arg_tsquery(values, offset + 1, op)?;
+        let normalization = if values.len() > offset + 2 {
+            int32_arg(&values[offset + 2], op)?
+        } else {
+            0
+        };
+        let score = if matches!(func, BuiltinScalarFunction::TsRank) {
+            crate::backend::executor::ts_rank(vector, query, weights, normalization)
+        } else {
+            crate::backend::executor::ts_rank_cd(vector, query, weights, normalization)
+        };
+        Ok(Value::Float64(score))
     }
 
     let parse_error = |op: &'static str, message: String| {
@@ -5352,6 +5499,156 @@ fn eval_text_search_builtin_function(
             result
                 .map(Value::TsQuery)
                 .map_err(|e| parse_error("websearch_to_tsquery", e))
+        }
+        BuiltinScalarFunction::TsVectorIn => match values {
+            [Value::Null] => Ok(Value::Null),
+            [_] => {
+                // :HACK: pgrust represents SQL cstring arguments through the
+                // existing text value path for type input wrappers.
+                let text = arg_text(values, 0, "tsvectorin")?.unwrap_or_default();
+                crate::backend::executor::parse_tsvector_text(&text).map(Value::TsVector)
+            }
+            _ => unreachable!(),
+        },
+        BuiltinScalarFunction::TsVectorOut => match values {
+            [Value::Null] => Ok(Value::Null),
+            [Value::TsVector(vector)] => Ok(Value::Text(
+                crate::backend::executor::render_tsvector_text(vector).into(),
+            )),
+            _ => Err(ExecError::TypeMismatch {
+                op: "tsvectorout",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: Value::Null,
+            }),
+        },
+        BuiltinScalarFunction::TsQueryIn => match values {
+            [Value::Null] => Ok(Value::Null),
+            [_] => {
+                // :HACK: pgrust represents SQL cstring arguments through the
+                // existing text value path for type input wrappers.
+                let text = arg_text(values, 0, "tsqueryin")?.unwrap_or_default();
+                crate::backend::executor::parse_tsquery_text(&text).map(Value::TsQuery)
+            }
+            _ => unreachable!(),
+        },
+        BuiltinScalarFunction::TsQueryOut => match values {
+            [Value::Null] => Ok(Value::Null),
+            [Value::TsQuery(query)] => Ok(Value::Text(
+                crate::backend::executor::render_tsquery_text(query).into(),
+            )),
+            _ => Err(ExecError::TypeMismatch {
+                op: "tsqueryout",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: Value::Null,
+            }),
+        },
+        BuiltinScalarFunction::TsQueryPhrase => {
+            if values.iter().any(|value| matches!(value, Value::Null)) {
+                return Ok(Value::Null);
+            }
+            Ok(Value::TsQuery(crate::backend::executor::tsquery_phrase(
+                arg_tsquery(values, 0, "tsquery_phrase")?.clone(),
+                arg_tsquery(values, 1, "tsquery_phrase")?.clone(),
+                phrase_distance(values.get(2))?,
+            )))
+        }
+        BuiltinScalarFunction::TsQueryNumnode => {
+            if values.iter().any(|value| matches!(value, Value::Null)) {
+                return Ok(Value::Null);
+            }
+            Ok(Value::Int32(crate::backend::executor::numnode(
+                arg_tsquery(values, 0, "numnode")?,
+            )))
+        }
+        BuiltinScalarFunction::TsVectorStrip => {
+            if values.iter().any(|value| matches!(value, Value::Null)) {
+                return Ok(Value::Null);
+            }
+            Ok(Value::TsVector(crate::backend::executor::strip_tsvector(
+                arg_tsvector(values, 0, "strip")?,
+            )))
+        }
+        BuiltinScalarFunction::TsVectorDelete => {
+            if values.iter().any(|value| matches!(value, Value::Null)) {
+                return Ok(Value::Null);
+            }
+            let lexemes = match values.get(1) {
+                Some(value @ (Value::Array(_) | Value::PgArray(_))) => {
+                    crate::backend::executor::text_array_items(value, "ts_delete")?
+                        .into_iter()
+                        .flatten()
+                        .filter(|text: &String| !text.is_empty())
+                        .collect::<Vec<_>>()
+                }
+                Some(value) if value.as_text().is_some() => {
+                    vec![value.as_text().unwrap().to_string()]
+                }
+                Some(other) => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "ts_delete",
+                        left: other.clone(),
+                        right: Value::Null,
+                    });
+                }
+                None => unreachable!(),
+            };
+            Ok(Value::TsVector(
+                crate::backend::executor::delete_tsvector_lexemes(
+                    arg_tsvector(values, 0, "ts_delete")?,
+                    &lexemes,
+                ),
+            ))
+        }
+        BuiltinScalarFunction::TsVectorToArray => {
+            if values.iter().any(|value| matches!(value, Value::Null)) {
+                return Ok(Value::Null);
+            }
+            Ok(crate::backend::executor::tsvector_to_array(arg_tsvector(
+                values,
+                0,
+                "tsvector_to_array",
+            )?))
+        }
+        BuiltinScalarFunction::ArrayToTsVector => {
+            if values.iter().any(|value| matches!(value, Value::Null)) {
+                return Ok(Value::Null);
+            }
+            Ok(Value::TsVector(
+                crate::backend::executor::array_to_tsvector(
+                    values.first().unwrap_or(&Value::Null),
+                )?,
+            ))
+        }
+        BuiltinScalarFunction::TsVectorSetWeight => {
+            if values.iter().any(|value| matches!(value, Value::Null)) {
+                return Ok(Value::Null);
+            }
+            let weight = crate::backend::executor::parse_ts_weight(
+                values.get(1).unwrap_or(&Value::Null),
+                "setweight",
+            )?;
+            Ok(Value::TsVector(
+                crate::backend::executor::setweight_tsvector(
+                    arg_tsvector(values, 0, "setweight")?,
+                    weight,
+                    values.get(2),
+                )?,
+            ))
+        }
+        BuiltinScalarFunction::TsVectorFilter => {
+            if values.iter().any(|value| matches!(value, Value::Null)) {
+                return Ok(Value::Null);
+            }
+            Ok(Value::TsVector(crate::backend::executor::filter_tsvector(
+                arg_tsvector(values, 0, "ts_filter")?,
+                values.get(1).unwrap_or(&Value::Null),
+            )?))
+        }
+        BuiltinScalarFunction::TsRank | BuiltinScalarFunction::TsRankCd => {
+            if values.iter().any(|value| matches!(value, Value::Null)) {
+                return Ok(Value::Null);
+            }
+            eval_rank_builtin(func, values)
         }
         BuiltinScalarFunction::TsLexize => match values {
             [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
@@ -5806,6 +6103,9 @@ fn eval_builtin_function(
     }
     if let Some(result) = eval_advisory_lock_builtin_function(func, &values, ctx) {
         return result;
+    }
+    if is_text_search_builtin_function(func) {
+        return eval_text_search_builtin_function(func, &values);
     }
     if matches!(
         func,

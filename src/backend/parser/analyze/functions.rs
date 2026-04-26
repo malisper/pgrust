@@ -1201,6 +1201,20 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Int8Avg => args.len() == 1,
             BuiltinScalarFunction::TsLexize => args.len() == 2,
             BuiltinScalarFunction::TsQueryNot => args.len() == 1,
+            BuiltinScalarFunction::TsQueryNumnode
+            | BuiltinScalarFunction::TsVectorIn
+            | BuiltinScalarFunction::TsVectorOut
+            | BuiltinScalarFunction::TsQueryIn
+            | BuiltinScalarFunction::TsQueryOut
+            | BuiltinScalarFunction::TsVectorStrip
+            | BuiltinScalarFunction::TsVectorToArray
+            | BuiltinScalarFunction::ArrayToTsVector => args.len() == 1,
+            BuiltinScalarFunction::TsQueryPhrase => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::TsVectorDelete
+            | BuiltinScalarFunction::TsVectorFilter
+            | BuiltinScalarFunction::TsRank
+            | BuiltinScalarFunction::TsRankCd => matches!(args.len(), 2 | 3 | 4),
+            BuiltinScalarFunction::TsVectorSetWeight => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::TsMatch
             | BuiltinScalarFunction::TsQueryAnd
             | BuiltinScalarFunction::TsQueryOr
@@ -1836,11 +1850,37 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         }
         BuiltinScalarFunction::TsQueryAnd
         | BuiltinScalarFunction::TsQueryOr
-        | BuiltinScalarFunction::TsQueryNot => {
+        | BuiltinScalarFunction::TsQueryNot
+        | BuiltinScalarFunction::TsQueryPhrase => {
+            return Some(SqlType::new(SqlTypeKind::TsQuery));
+        }
+        BuiltinScalarFunction::TsQueryNumnode => {
+            return Some(SqlType::new(SqlTypeKind::Int4));
+        }
+        BuiltinScalarFunction::TsVectorIn => {
+            return Some(SqlType::new(SqlTypeKind::TsVector));
+        }
+        BuiltinScalarFunction::TsVectorOut | BuiltinScalarFunction::TsQueryOut => {
+            return Some(SqlType::new(SqlTypeKind::Text));
+        }
+        BuiltinScalarFunction::TsQueryIn => {
             return Some(SqlType::new(SqlTypeKind::TsQuery));
         }
         BuiltinScalarFunction::TsVectorConcat => {
             return Some(SqlType::new(SqlTypeKind::TsVector));
+        }
+        BuiltinScalarFunction::TsVectorStrip
+        | BuiltinScalarFunction::TsVectorDelete
+        | BuiltinScalarFunction::ArrayToTsVector
+        | BuiltinScalarFunction::TsVectorSetWeight
+        | BuiltinScalarFunction::TsVectorFilter => {
+            return Some(SqlType::new(SqlTypeKind::TsVector));
+        }
+        BuiltinScalarFunction::TsVectorToArray => {
+            return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text)));
+        }
+        BuiltinScalarFunction::TsRank | BuiltinScalarFunction::TsRankCd => {
+            return Some(SqlType::new(SqlTypeKind::Float4));
         }
         BuiltinScalarFunction::CurrentSetting => {
             return Some(SqlType::new(SqlTypeKind::Text));
@@ -2745,6 +2785,45 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::WebSearchToTsQuery,
         ),
         ("ts_lexize", BuiltinScalarFunction::TsLexize),
+        ("tsvectorin", BuiltinScalarFunction::TsVectorIn),
+        ("tsvectorout", BuiltinScalarFunction::TsVectorOut),
+        ("tsqueryin", BuiltinScalarFunction::TsQueryIn),
+        ("tsqueryout", BuiltinScalarFunction::TsQueryOut),
+        ("tsquery_phrase", BuiltinScalarFunction::TsQueryPhrase),
+        (
+            "tsquery_phrase_distance",
+            BuiltinScalarFunction::TsQueryPhrase,
+        ),
+        ("tsquery_numnode", BuiltinScalarFunction::TsQueryNumnode),
+        ("numnode", BuiltinScalarFunction::TsQueryNumnode),
+        ("tsvector_strip", BuiltinScalarFunction::TsVectorStrip),
+        ("strip", BuiltinScalarFunction::TsVectorStrip),
+        ("tsvector_delete_str", BuiltinScalarFunction::TsVectorDelete),
+        ("tsvector_delete_arr", BuiltinScalarFunction::TsVectorDelete),
+        ("ts_delete", BuiltinScalarFunction::TsVectorDelete),
+        ("tsvector_to_array", BuiltinScalarFunction::TsVectorToArray),
+        ("array_to_tsvector", BuiltinScalarFunction::ArrayToTsVector),
+        (
+            "tsvector_setweight",
+            BuiltinScalarFunction::TsVectorSetWeight,
+        ),
+        (
+            "tsvector_setweight_by_filter",
+            BuiltinScalarFunction::TsVectorSetWeight,
+        ),
+        ("setweight", BuiltinScalarFunction::TsVectorSetWeight),
+        ("tsvector_filter", BuiltinScalarFunction::TsVectorFilter),
+        ("ts_filter", BuiltinScalarFunction::TsVectorFilter),
+        ("ts_rank", BuiltinScalarFunction::TsRank),
+        ("ts_rank_wttf", BuiltinScalarFunction::TsRank),
+        ("ts_rank_wtt", BuiltinScalarFunction::TsRank),
+        ("ts_rank_ttf", BuiltinScalarFunction::TsRank),
+        ("ts_rank_tt", BuiltinScalarFunction::TsRank),
+        ("ts_rank_cd", BuiltinScalarFunction::TsRankCd),
+        ("ts_rankcd_wttf", BuiltinScalarFunction::TsRankCd),
+        ("ts_rankcd_wtt", BuiltinScalarFunction::TsRankCd),
+        ("ts_rankcd_ttf", BuiltinScalarFunction::TsRankCd),
+        ("ts_rankcd_tt", BuiltinScalarFunction::TsRankCd),
         ("array_to_json", BuiltinScalarFunction::ArrayToJson),
         ("row_to_json", BuiltinScalarFunction::RowToJson),
         ("row_to_json_pretty", BuiltinScalarFunction::RowToJson),
@@ -3589,7 +3668,21 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::TsQueryAnd
             | BuiltinScalarFunction::TsQueryOr
             | BuiltinScalarFunction::TsQueryNot
+            | BuiltinScalarFunction::TsQueryPhrase
+            | BuiltinScalarFunction::TsQueryNumnode
+            | BuiltinScalarFunction::TsVectorIn
+            | BuiltinScalarFunction::TsVectorOut
+            | BuiltinScalarFunction::TsQueryIn
+            | BuiltinScalarFunction::TsQueryOut
             | BuiltinScalarFunction::TsVectorConcat
+            | BuiltinScalarFunction::TsVectorStrip
+            | BuiltinScalarFunction::TsVectorDelete
+            | BuiltinScalarFunction::TsVectorToArray
+            | BuiltinScalarFunction::ArrayToTsVector
+            | BuiltinScalarFunction::TsVectorSetWeight
+            | BuiltinScalarFunction::TsVectorFilter
+            | BuiltinScalarFunction::TsRank
+            | BuiltinScalarFunction::TsRankCd
             | BuiltinScalarFunction::RandomNormal
             | BuiltinScalarFunction::UuidIn
             | BuiltinScalarFunction::UuidOut
@@ -3915,6 +4008,9 @@ fn catalog_builtin_type_oid(catalog: &dyn CatalogLookup, sql_type: SqlType) -> O
 
 fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) -> bool {
     if let Some(row) = catalog.type_by_oid(target_oid) {
+        if row.sql_type.is_array {
+            return true;
+        }
         if row.sql_type.is_range() || row.sql_type.is_multirange() {
             return true;
         }

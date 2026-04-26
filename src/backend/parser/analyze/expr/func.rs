@@ -925,6 +925,164 @@ pub(super) fn bind_scalar_function_call(
                 })
                 .collect(),
         )),
+        BuiltinScalarFunction::TsVectorIn | BuiltinScalarFunction::TsQueryIn => {
+            // :HACK: pgrust uses text values for SQL cstring input shims.
+            Ok(build_func(
+                false,
+                vec![coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_types[0],
+                    SqlType::new(SqlTypeKind::Text),
+                )],
+            ))
+        }
+        BuiltinScalarFunction::TsVectorOut => Ok(build_func(
+            false,
+            vec![coerce_bound_expr(
+                bound_args[0].clone(),
+                arg_types[0],
+                SqlType::new(SqlTypeKind::TsVector),
+            )],
+        )),
+        BuiltinScalarFunction::TsQueryOut | BuiltinScalarFunction::TsQueryNumnode => {
+            Ok(build_func(
+                false,
+                vec![coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_types[0],
+                    SqlType::new(SqlTypeKind::TsQuery),
+                )],
+            ))
+        }
+        BuiltinScalarFunction::TsQueryPhrase => {
+            let mut coerced = vec![
+                coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_types[0],
+                    SqlType::new(SqlTypeKind::TsQuery),
+                ),
+                coerce_bound_expr(
+                    bound_args[1].clone(),
+                    arg_types[1],
+                    SqlType::new(SqlTypeKind::TsQuery),
+                ),
+            ];
+            if bound_args.len() == 3 {
+                coerced.push(coerce_bound_expr(
+                    bound_args[2].clone(),
+                    arg_types[2],
+                    SqlType::new(SqlTypeKind::Int4),
+                ));
+            }
+            Ok(build_func(false, coerced))
+        }
+        BuiltinScalarFunction::TsVectorStrip | BuiltinScalarFunction::TsVectorToArray => {
+            Ok(build_func(
+                false,
+                vec![coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_types[0],
+                    SqlType::new(SqlTypeKind::TsVector),
+                )],
+            ))
+        }
+        BuiltinScalarFunction::ArrayToTsVector => Ok(build_func(
+            false,
+            vec![coerce_bound_expr(
+                bound_args[0].clone(),
+                arg_types[0],
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+            )],
+        )),
+        BuiltinScalarFunction::TsVectorDelete => {
+            let second_target = if arg_types
+                .get(1)
+                .is_some_and(|ty| ty.is_array || matches!(ty.kind, SqlTypeKind::Text))
+                && arg_types.get(1).is_some_and(|ty| ty.is_array)
+            {
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+            } else {
+                SqlType::new(SqlTypeKind::Text)
+            };
+            Ok(build_func(
+                false,
+                vec![
+                    coerce_bound_expr(
+                        bound_args[0].clone(),
+                        arg_types[0],
+                        SqlType::new(SqlTypeKind::TsVector),
+                    ),
+                    coerce_bound_expr(bound_args[1].clone(), arg_types[1], second_target),
+                ],
+            ))
+        }
+        BuiltinScalarFunction::TsVectorSetWeight => {
+            let mut coerced = vec![
+                coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_types[0],
+                    SqlType::new(SqlTypeKind::TsVector),
+                ),
+                coerce_bound_expr(
+                    bound_args[1].clone(),
+                    arg_types[1],
+                    SqlType::new(SqlTypeKind::InternalChar),
+                ),
+            ];
+            if bound_args.len() == 3 {
+                coerced.push(coerce_bound_expr(
+                    bound_args[2].clone(),
+                    arg_types[2],
+                    SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                ));
+            }
+            Ok(build_func(false, coerced))
+        }
+        BuiltinScalarFunction::TsVectorFilter => Ok(build_func(
+            false,
+            vec![
+                coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_types[0],
+                    SqlType::new(SqlTypeKind::TsVector),
+                ),
+                coerce_bound_expr(
+                    bound_args[1].clone(),
+                    arg_types[1],
+                    SqlType::array_of(SqlType::new(SqlTypeKind::InternalChar)),
+                ),
+            ],
+        )),
+        BuiltinScalarFunction::TsRank | BuiltinScalarFunction::TsRankCd => {
+            let mut coerced = Vec::with_capacity(bound_args.len());
+            let mut offset = 0usize;
+            if bound_args.len() == 3 && arg_types[0].is_array || bound_args.len() == 4 {
+                coerced.push(coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_types[0],
+                    SqlType::array_of(SqlType::new(SqlTypeKind::Float4)),
+                ));
+                offset = 1;
+            }
+            coerced.push(coerce_bound_expr(
+                bound_args[offset].clone(),
+                arg_types[offset],
+                SqlType::new(SqlTypeKind::TsVector),
+            ));
+            coerced.push(coerce_bound_expr(
+                bound_args[offset + 1].clone(),
+                arg_types[offset + 1],
+                SqlType::new(SqlTypeKind::TsQuery),
+            ));
+            if bound_args.len() > offset + 2 {
+                coerced.push(coerce_bound_expr(
+                    bound_args[offset + 2].clone(),
+                    arg_types[offset + 2],
+                    SqlType::new(SqlTypeKind::Int4),
+                ));
+            }
+            Ok(build_func(false, coerced))
+        }
         BuiltinScalarFunction::Left
         | BuiltinScalarFunction::Right
         | BuiltinScalarFunction::Repeat => {

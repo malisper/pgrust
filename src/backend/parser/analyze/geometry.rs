@@ -236,6 +236,48 @@ pub(super) fn bind_geometry_binary_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
+    if matches!(op, GeometryBinaryOp::Distance) {
+        let raw_left_type =
+            infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+        let raw_right_type =
+            infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+        let mut left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+        let mut right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+        if matches!(left_type.kind, SqlTypeKind::TsQuery) && is_string_literal_expr(right) {
+            right_type = SqlType::new(SqlTypeKind::TsQuery);
+        } else if matches!(right_type.kind, SqlTypeKind::TsQuery) && is_string_literal_expr(left) {
+            left_type = SqlType::new(SqlTypeKind::TsQuery);
+        }
+        if matches!(left_type.kind, SqlTypeKind::TsQuery)
+            && matches!(right_type.kind, SqlTypeKind::TsQuery)
+        {
+            let left = bind_expr_with_outer_and_ctes(
+                left,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            let right = bind_expr_with_outer_and_ctes(
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            return Ok(Expr::builtin_func(
+                BuiltinScalarFunction::TsQueryPhrase,
+                Some(SqlType::new(SqlTypeKind::TsQuery)),
+                false,
+                vec![
+                    coerce_bound_expr(left, raw_left_type, SqlType::new(SqlTypeKind::TsQuery)),
+                    coerce_bound_expr(right, raw_right_type, SqlType::new(SqlTypeKind::TsQuery)),
+                ],
+            ));
+        }
+    }
     let func = match op {
         GeometryBinaryOp::Same => BuiltinScalarFunction::GeoSame,
         GeometryBinaryOp::Distance => BuiltinScalarFunction::GeoDistance,
@@ -314,7 +356,26 @@ pub(super) fn infer_geometry_special_expr_type_with_ctes(
             }
         }),
         SqlExpr::GeometryBinaryOp { op, .. } => Some(match op {
-            GeometryBinaryOp::Distance => SqlType::new(SqlTypeKind::Float8),
+            GeometryBinaryOp::Distance => {
+                if let SqlExpr::GeometryBinaryOp { left, right, .. } = expr {
+                    let left_type =
+                        infer_arg_type(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+                    let right_type =
+                        infer_arg_type(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+                    if (matches!(left_type.kind, SqlTypeKind::TsQuery)
+                        && (matches!(right_type.kind, SqlTypeKind::TsQuery)
+                            || is_string_literal_expr(right)))
+                        || (matches!(right_type.kind, SqlTypeKind::TsQuery)
+                            && is_string_literal_expr(left))
+                    {
+                        SqlType::new(SqlTypeKind::TsQuery)
+                    } else {
+                        SqlType::new(SqlTypeKind::Float8)
+                    }
+                } else {
+                    SqlType::new(SqlTypeKind::Float8)
+                }
+            }
             GeometryBinaryOp::ClosestPoint => SqlType::new(SqlTypeKind::Point),
             GeometryBinaryOp::Same
             | GeometryBinaryOp::Intersects
