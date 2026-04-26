@@ -11042,7 +11042,7 @@ fn cte_filtered_self_join_aliases_keep_distinct_columns() {
 }
 
 #[test]
-fn cte_filtered_self_join_uses_filtered_side_as_outer_order() {
+fn cte_filtered_self_join_materializes_filtered_inner_order() {
     let base = temp_dir("cte_filtered_self_join_outer_order");
     let txns = TransactionManager::new_durable(&base).unwrap();
     match run_sql(
@@ -11058,10 +11058,10 @@ fn cte_filtered_self_join_uses_filtered_side_as_outer_order() {
                 rows,
                 vec![
                     vec![Value::Numeric("0".into()), Value::Numeric("1".into())],
-                    vec![Value::Numeric("1".into()), Value::Numeric("1".into())],
-                    vec![Value::Numeric("2".into()), Value::Numeric("1".into())],
                     vec![Value::Numeric("0".into()), Value::Numeric("2".into())],
+                    vec![Value::Numeric("1".into()), Value::Numeric("1".into())],
                     vec![Value::Numeric("1".into()), Value::Numeric("2".into())],
+                    vec![Value::Numeric("2".into()), Value::Numeric("1".into())],
                     vec![Value::Numeric("2".into()), Value::Numeric("2".into())],
                 ]
             );

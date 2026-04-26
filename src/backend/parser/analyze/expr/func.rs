@@ -2121,7 +2121,15 @@ pub(super) fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            if !is_numeric_family(value_type) && !matches!(value_type.kind, SqlTypeKind::Interval) {
+            if !is_numeric_family(value_type)
+                && !matches!(
+                    value_type.kind,
+                    SqlTypeKind::Date
+                        | SqlTypeKind::Timestamp
+                        | SqlTypeKind::TimestampTz
+                        | SqlTypeKind::Interval
+                )
+            {
                 return Err(ParseError::UnexpectedToken {
                     expected: "numeric or datetime argument",
                     actual: format!("{func:?}({})", sql_type_name(value_type)),
