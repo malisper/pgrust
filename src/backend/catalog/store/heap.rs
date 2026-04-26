@@ -3113,9 +3113,13 @@ impl CatalogStore {
             typowner: owner_oid,
             typacl: None,
             typlen: -1,
+            typbyval: false,
+            typtype: 'p',
+            typisdefined: false,
             typalign: AttributeAlign::Int,
             typstorage: AttributeStorage::Plain,
             typrelid: 0,
+            typsubscript: 0,
             typelem: 0,
             typarray: 0,
             typinput: 0,
@@ -3124,8 +3128,10 @@ impl CatalogStore {
             typsend: 0,
             typmodin: 0,
             typmodout: 0,
+            typdelim: ',',
             typanalyze: 0,
-            typsubscript: 0,
+            typbasetype: 0,
+            typcollation: 0,
             sql_type: SqlType::new(SqlTypeKind::Shell).with_identity(oid, 0),
         };
         let kinds = [BootstrapCatalogKind::PgType];
@@ -3178,9 +3184,13 @@ impl CatalogStore {
             typowner: old_row.typowner,
             typacl: old_row.typacl.clone(),
             typlen,
+            typbyval: matches!(typlen, 1 | 2 | 4 | 8),
+            typtype: 'b',
+            typisdefined: true,
             typalign,
             typstorage,
             typrelid: 0,
+            typsubscript: support_proc_oids.get(7).copied().unwrap_or(0),
             typelem,
             typarray: array_oid,
             typinput: support_proc_oids.first().copied().unwrap_or(0),
@@ -3189,8 +3199,10 @@ impl CatalogStore {
             typsend: support_proc_oids.get(3).copied().unwrap_or(0),
             typmodin: support_proc_oids.get(4).copied().unwrap_or(0),
             typmodout: support_proc_oids.get(5).copied().unwrap_or(0),
+            typdelim: ',',
             typanalyze: support_proc_oids.get(6).copied().unwrap_or(0),
-            typsubscript: support_proc_oids.get(7).copied().unwrap_or(0),
+            typbasetype: 0,
+            typcollation: 0,
             sql_type: base_sql_type,
         };
         let array_row = PgTypeRow {
@@ -3200,19 +3212,25 @@ impl CatalogStore {
             typowner: old_row.typowner,
             typacl: old_row.typacl.clone(),
             typlen: -1,
+            typbyval: false,
+            typtype: 'b',
+            typisdefined: true,
             typalign: AttributeAlign::Int,
             typstorage: AttributeStorage::Extended,
             typrelid: 0,
+            typsubscript: 6179,
             typelem: type_oid,
             typarray: 0,
             typinput: 750,
             typoutput: 751,
             typreceive: 2400,
             typsend: 2401,
-            typmodin: support_proc_oids.get(4).copied().unwrap_or(0),
-            typmodout: support_proc_oids.get(5).copied().unwrap_or(0),
+            typmodin: 0,
+            typmodout: 0,
+            typdelim: ',',
             typanalyze: 3816,
-            typsubscript: 6179,
+            typbasetype: 0,
+            typcollation: 0,
             sql_type: SqlType::array_of(base_sql_type),
         };
         let mut depends = vec![
@@ -4121,6 +4139,7 @@ impl CatalogStore {
         confdeltype: char,
         confmatchtype: char,
         confdelsetcols: Option<&[i16]>,
+        conperiod: bool,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let conname = conname.into();
@@ -4181,7 +4200,7 @@ impl CatalogStore {
             conislocal: true,
             coninhcount: 0,
             connoinherit: false,
-            conperiod: false,
+            conperiod,
         };
         control.next_oid = control.next_oid.saturating_add(1);
 
@@ -4228,6 +4247,7 @@ impl CatalogStore {
         confdeltype: char,
         confmatchtype: char,
         confdelsetcols: Option<&[i16]>,
+        conperiod: bool,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let conname = conname.into();
@@ -4281,7 +4301,7 @@ impl CatalogStore {
             conislocal: true,
             coninhcount: 0,
             connoinherit: false,
-            conperiod: false,
+            conperiod,
         };
         control.next_oid = control.next_oid.saturating_add(1);
 
@@ -5042,6 +5062,57 @@ impl CatalogStore {
         if let Some(index_meta) = &new_entry.index_meta {
             effect_record_oid(&mut effect.relation_oids, index_meta.indrelid);
         }
+        Ok(effect)
+    }
+
+    pub fn set_replica_identity_index_mvcc(
+        &mut self,
+        relation_oid: u32,
+        index_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let old_indexes = index_rows_for_relation_mvcc(self, ctx, relation_oid)?;
+        let target = old_indexes
+            .iter()
+            .find(|row| row.indexrelid == index_oid)
+            .ok_or_else(|| CatalogError::UnknownTable(index_oid.to_string()))?;
+        if !target.indisunique {
+            return Err(CatalogError::Corrupt(
+                "replica identity index must be unique",
+            ));
+        }
+        let mut new_indexes = old_indexes.clone();
+        for row in &mut new_indexes {
+            row.indisreplident = row.indexrelid == index_oid;
+        }
+
+        let control = self.control_state()?;
+        self.persist_control_values(control.next_oid, control.next_rel_number)?;
+        let kinds = vec![BootstrapCatalogKind::PgIndex];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                indexes: old_indexes,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                indexes: new_indexes,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        self.control = control;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.relation_oids, index_oid);
         Ok(effect)
     }
 
@@ -7454,10 +7525,11 @@ fn rows_for_new_relation_entry(
             .iter()
             .enumerate()
             .map(|(idx, column)| {
+                let atttypid = resolved_sql_type_oid(type_lookup, entry, column.sql_type)?;
                 Ok(PgAttributeRow {
                     attrelid: entry.relation_oid,
                     attname: column.name.clone(),
-                    atttypid: resolved_sql_type_oid(type_lookup, entry, column.sql_type)?,
+                    atttypid,
                     attlen: column.storage.attlen,
                     attnum: idx.saturating_add(1) as i16,
                     attnotnull: !column.storage.nullable,
@@ -7485,6 +7557,8 @@ fn rows_for_new_relation_entry(
                     attoptions: None,
                     attfdwoptions: None,
                     attmissingval: None,
+                    attbyval: crate::include::catalog::builtin_type_row_by_oid(atttypid)
+                        .is_some_and(|row| row.typbyval),
                     sql_type: column.sql_type,
                 })
             })
@@ -7869,6 +7943,7 @@ fn class_row_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> PgC
         relpartbound: entry.relpartbound.clone(),
         reloptions: entry.reloptions.clone(),
         relacl: entry.relacl.clone(),
+        relreplident: 'd',
         reloftype: entry.of_type_oid,
     }
 }
@@ -8394,7 +8469,7 @@ fn index_rows_for_relation_mvcc(
     relation_oid: u32,
 ) -> Result<Vec<crate::include::catalog::PgIndexRow>, CatalogError> {
     Ok(store
-        .search_sys_cache_list1(ctx, SysCacheId::IndexRelId, oid_key(relation_oid))?
+        .search_sys_cache_list1(ctx, SysCacheId::IndexIndRelId, oid_key(relation_oid))?
         .into_iter()
         .filter_map(|tuple| match tuple {
             SysCacheTuple::Index(row) => Some(row),

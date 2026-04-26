@@ -1,13 +1,15 @@
 use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, DateTimeConfig};
 use crate::backend::utils::time::datetime::{
-    DateTimeKeyword, DateTimeParseError, TimeZoneSpec, current_timezone_name, days_from_ymd,
-    format_offset, format_time_usecs, month_number, named_timezone_offset_seconds,
-    named_timezone_offset_seconds_for_date, parse_date_token_with_config, parse_fraction_to_usecs,
-    parse_keyword, parse_time_components, parse_timezone_spec, postgres_date_from_ymd_i64,
-    split_time_and_offset, timezone_offset_seconds, today_pg_days, ymd_from_days,
+    DateTimeKeyword, DateTimeParseError, TimeZoneSpec, current_postgres_timestamp_usecs,
+    current_timezone_name, days_from_ymd, format_offset, format_time_usecs, month_number,
+    named_timezone_offset_seconds, named_timezone_offset_seconds_for_date,
+    parse_date_token_with_config, parse_fraction_to_usecs, parse_keyword, parse_time_components,
+    parse_timezone_spec, postgres_date_from_ymd_i64, split_time_and_offset,
+    timezone_offset_seconds, timezone_offset_seconds_at_utc, today_pg_days, ymd_from_days,
 };
 use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, POSTGRES_EPOCH_JDATE, TimeADT, TimeTzADT,
+    USECS_PER_DAY, USECS_PER_SEC,
 };
 use std::sync::OnceLock;
 
@@ -618,11 +620,24 @@ fn parse_time_token(text: &str) -> Result<Option<(i64, Option<TimeZoneSpec>)>, D
 }
 
 pub fn parse_time_text(text: &str, config: &DateTimeConfig) -> Result<TimeADT, DateTimeParseError> {
+    if matches!(parse_keyword(text), Some(DateTimeKeyword::Now)) {
+        let (time_usecs, _) = current_local_time_and_offset(config);
+        return Ok(TimeADT(time_usecs));
+    }
     if matches!(parse_keyword(text), Some(DateTimeKeyword::Allballs)) {
         return Ok(TimeADT(0));
     }
     let (time_usecs, _, _) = parse_time_input(text, config)?;
     Ok(TimeADT(time_usecs))
+}
+
+fn current_local_time_and_offset(config: &DateTimeConfig) -> (i64, i32) {
+    let utc_usecs = config
+        .transaction_timestamp_usecs
+        .unwrap_or_else(current_postgres_timestamp_usecs);
+    let offset_seconds = timezone_offset_seconds_at_utc(config, utc_usecs);
+    let local_usecs = utc_usecs + i64::from(offset_seconds) * USECS_PER_SEC;
+    (local_usecs.rem_euclid(USECS_PER_DAY), offset_seconds)
 }
 
 fn parse_time_input(
@@ -717,6 +732,13 @@ pub fn parse_timetz_text(
     text: &str,
     config: &DateTimeConfig,
 ) -> Result<TimeTzADT, DateTimeParseError> {
+    if matches!(parse_keyword(text), Some(DateTimeKeyword::Now)) {
+        let (time_usecs, offset_seconds) = current_local_time_and_offset(config);
+        return Ok(TimeTzADT {
+            time: TimeADT(time_usecs),
+            offset_seconds,
+        });
+    }
     if matches!(parse_keyword(text), Some(DateTimeKeyword::Allballs)) {
         return Ok(TimeTzADT {
             time: TimeADT(0),
@@ -1222,6 +1244,37 @@ mod tests {
             Ok(TimeADT(
                 4 * 60 * 60 * 1_000_000 + 5 * 60 * 1_000_000 + 6 * 1_000_000 + 789_000
             ))
+        );
+    }
+
+    #[test]
+    fn parse_time_text_accepts_now_keyword() {
+        let mut config = DateTimeConfig {
+            time_zone: "UTC".into(),
+            transaction_timestamp_usecs: Some(
+                3 * 60 * 60 * 1_000_000 + 4 * 60 * 1_000_000 + 5 * 1_000_000,
+            ),
+            ..DateTimeConfig::default()
+        };
+        assert_eq!(
+            parse_time_text("now", &config),
+            Ok(TimeADT(
+                3 * 60 * 60 * 1_000_000 + 4 * 60 * 1_000_000 + 5 * 1_000_000
+            ))
+        );
+        assert_eq!(
+            parse_timetz_text("now", &config),
+            Ok(TimeTzADT {
+                time: TimeADT(3 * 60 * 60 * 1_000_000 + 4 * 60 * 1_000_000 + 5 * 1_000_000),
+                offset_seconds: 0,
+            })
+        );
+
+        config.time_zone = "Europe/Berlin".into();
+        config.transaction_timestamp_usecs = Some(12 * 60 * 60 * 1_000_000);
+        assert_eq!(
+            parse_timetz_text("now", &config).unwrap().time,
+            TimeADT(13 * 60 * 60 * 1_000_000)
         );
     }
 

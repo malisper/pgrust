@@ -71,6 +71,7 @@ pub struct PgAttributeRow {
     pub attoptions: Option<Vec<String>>,
     pub attfdwoptions: Option<Vec<String>>,
     pub attmissingval: Option<Vec<Value>>,
+    pub attbyval: bool,
     pub sql_type: SqlType,
 }
 
@@ -122,6 +123,7 @@ pub fn pg_attribute_desc() -> RelationDesc {
                 true,
             ),
             column_desc("attmissingval", SqlType::new(SqlTypeKind::AnyArray), true),
+            column_desc("attbyval", SqlType::new(SqlTypeKind::Bool), false),
         ],
     }
 }
@@ -268,37 +270,97 @@ fn attribute_rows_for_desc(relid: u32, desc: &RelationDesc) -> Vec<PgAttributeRo
     desc.columns
         .iter()
         .enumerate()
-        .map(|(idx, column)| PgAttributeRow {
-            attrelid: relid,
-            attname: column.name.clone(),
-            atttypid: sql_type_oid(column.sql_type),
-            attlen: column.storage.attlen,
-            attnum: idx.saturating_add(1) as i16,
-            attnotnull: !column.storage.nullable,
-            attisdropped: column.dropped,
-            atttypmod: column.sql_type.typmod,
-            attalign: column.storage.attalign,
-            attstorage: column.storage.attstorage,
-            attcompression: column.storage.attcompression,
-            attstattarget: column.attstattarget,
-            attinhcount: column.attinhcount,
-            attislocal: column.attislocal,
-            attidentity: column
-                .identity
-                .map(|kind| kind.catalog_char())
-                .unwrap_or('\0'),
-            attgenerated: column
-                .generated
-                .map(|kind| kind.catalog_char())
-                .unwrap_or('\0'),
-            attcollation: catalog_attribute_collation_oid(relid, column.collation_oid),
-            attacl: column.attacl.clone(),
-            attoptions: None,
-            attfdwoptions: None,
-            attmissingval: None,
-            sql_type: column.sql_type,
+        .map(|(idx, column)| {
+            let atttypid = sql_type_oid(column.sql_type);
+            let type_row = catalog_type_row_by_oid(atttypid);
+            PgAttributeRow {
+                attrelid: relid,
+                attname: column.name.clone(),
+                atttypid,
+                attlen: type_row
+                    .as_ref()
+                    .map(|row| row.typlen)
+                    .unwrap_or(column.storage.attlen),
+                attnum: idx.saturating_add(1) as i16,
+                attnotnull: !column.storage.nullable,
+                attisdropped: column.dropped,
+                atttypmod: column.sql_type.typmod,
+                attalign: type_row
+                    .as_ref()
+                    .map(|row| row.typalign)
+                    .unwrap_or(column.storage.attalign),
+                attstorage: type_row
+                    .as_ref()
+                    .map(|row| row.typstorage)
+                    .unwrap_or(column.storage.attstorage),
+                attcompression: column.storage.attcompression,
+                attstattarget: column.attstattarget,
+                attinhcount: column.attinhcount,
+                attislocal: column.attislocal,
+                attidentity: column
+                    .identity
+                    .map(|kind| kind.catalog_char())
+                    .unwrap_or('\0'),
+                attgenerated: column
+                    .generated
+                    .map(|kind| kind.catalog_char())
+                    .unwrap_or('\0'),
+                attcollation: catalog_attribute_collation_oid(relid, column.collation_oid),
+                attacl: column.attacl.clone(),
+                attoptions: None,
+                attfdwoptions: None,
+                attmissingval: None,
+                attbyval: type_row
+                    .as_ref()
+                    .map(|row| row.typbyval)
+                    .unwrap_or_else(|| type_byval(column.sql_type, column.storage.attlen)),
+                sql_type: column.sql_type,
+            }
         })
         .collect()
+}
+
+fn catalog_type_row_by_oid(oid: u32) -> Option<crate::include::catalog::PgTypeRow> {
+    builtin_type_rows()
+        .into_iter()
+        .chain(bootstrap_composite_type_rows())
+        .find(|row| row.oid == oid)
+}
+
+fn type_byval(sql_type: SqlType, attlen: i16) -> bool {
+    if sql_type.is_array || attlen < 0 {
+        return false;
+    }
+    matches!(
+        sql_type.kind,
+        SqlTypeKind::Bool
+            | SqlTypeKind::InternalChar
+            | SqlTypeKind::Int2
+            | SqlTypeKind::Int4
+            | SqlTypeKind::Oid
+            | SqlTypeKind::RegProc
+            | SqlTypeKind::RegClass
+            | SqlTypeKind::RegType
+            | SqlTypeKind::RegRole
+            | SqlTypeKind::RegNamespace
+            | SqlTypeKind::RegOper
+            | SqlTypeKind::RegOperator
+            | SqlTypeKind::RegProcedure
+            | SqlTypeKind::RegCollation
+            | SqlTypeKind::Xid
+            | SqlTypeKind::Date
+            | SqlTypeKind::Float4
+            | SqlTypeKind::Int8
+            | SqlTypeKind::Float8
+            | SqlTypeKind::Money
+            | SqlTypeKind::Time
+            | SqlTypeKind::Timestamp
+            | SqlTypeKind::TimestampTz
+            | SqlTypeKind::PgLsn
+            | SqlTypeKind::Enum
+            | SqlTypeKind::AnyElement
+            | SqlTypeKind::AnyEnum
+    )
 }
 
 fn sql_type_oid(sql_type: SqlType) -> u32 {
