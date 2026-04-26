@@ -310,6 +310,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             return extract_at_or_near_token(actual)
                 .and_then(|value| find_error_value_position(sql, value));
         }
+        ExecError::Parse(crate::backend::parser::ParseError::UnsupportedType(name)) => {
+            return find_case_insensitive_token_position(sql, name);
+        }
         ExecError::Parse(crate::backend::parser::ParseError::UnknownColumn(name)) => {
             if suppress_unknown_column_position(sql) {
                 return None;
@@ -323,6 +326,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return find_case_insensitive_token_position(sql, name);
             }
             return None;
+        }
+        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            expected: "supported explicit cast",
+            actual,
+        }) if actual.starts_with("cannot cast type ") => {
+            return find_explicit_cast_target_position(sql);
         }
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. })
             if message == "duplicate trigger events specified at or near \"ON\"" =>
@@ -544,6 +553,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message == "interval out of range" {
                 return find_interval_input_position(sql);
             }
+            if message == "cannot alter column type of typed table" {
+                return find_token_after_case_insensitive_phrase(sql, "ALTER COLUMN");
+            }
             if message == "range lower bound must be less than or equal to range upper bound" {
                 return find_range_literal_position(sql);
             }
@@ -584,7 +596,8 @@ fn is_missing_function_message(message: &str) -> bool {
 
 fn suppress_unknown_column_position(sql: &str) -> bool {
     let lower = sql.trim_start().to_ascii_lowercase();
-    lower.starts_with("alter table ") && lower.contains(" rename column ")
+    (lower.starts_with("alter table ") && lower.contains(" rename column "))
+        || (lower.starts_with("create table ") && lower.contains(" of "))
 }
 
 fn find_interval_input_position(sql: &str) -> Option<usize> {
@@ -998,6 +1011,15 @@ fn find_bytea_cast_literal_position(sql: &str) -> Option<usize> {
     Some(quote_index + 1)
 }
 
+fn find_explicit_cast_target_position(sql: &str) -> Option<usize> {
+    let cast_index = sql.rfind("::")?;
+    let mut position = cast_index + 2;
+    while position < sql.len() && sql.as_bytes()[position].is_ascii_whitespace() {
+        position += 1;
+    }
+    (position < sql.len()).then_some(position + 1)
+}
+
 fn find_detailed_operator_position(sql: &str, message: &str) -> Option<usize> {
     let (_, detail) = message.rsplit_once(": ")?;
     for op in ["<>", "<=", ">=", "+", "-", "*", "/", "%", "<", ">", "="] {
@@ -1199,6 +1221,16 @@ fn find_case_insensitive_token_position(sql: &str, token: &str) -> Option<usize>
     sql.to_ascii_lowercase()
         .find(&token_lower)
         .map(|index| index + 1)
+}
+
+fn find_token_after_case_insensitive_phrase(sql: &str, phrase: &str) -> Option<usize> {
+    let phrase_position = find_case_insensitive_token_position(sql, phrase)?;
+    let mut index = phrase_position - 1 + phrase.len();
+    let bytes = sql.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    (index < bytes.len()).then_some(index + 1)
 }
 
 fn find_last_case_insensitive_token_position(sql: &str, token: &str) -> Option<usize> {
@@ -3487,6 +3519,15 @@ fn psql_describe_tableinfo_query(
     let entry = db.describe_relation_by_oid(session.client_id, txn_ctx, oid)?;
     let relhasindex = db.has_index_on_relation(session.client_id, txn_ctx, oid);
     let amname = db.access_method_name_for_relation(session.client_id, txn_ctx, oid);
+    let reloftype = if entry.of_type_oid == 0 {
+        String::new()
+    } else {
+        session
+            .catalog_lookup(db)
+            .type_by_oid(entry.of_type_oid)
+            .map(|row| row.typname)
+            .unwrap_or_default()
+    };
     let visible_amname = match entry.relkind {
         // :HACK: psql's verbose \d+ footer only renders a table access method
         // when pg_class.relam points at a non-default AM. pgrust stores the
@@ -3573,7 +3614,7 @@ fn psql_describe_tableinfo_query(
             Value::Bool(false),
             Value::Text("".into()),
             Value::Int32(0),
-            Value::Text("".into()),
+            Value::Text(reloftype.into()),
             Value::InternalChar(entry.relpersistence as u8),
             Value::InternalChar(b'd'),
             visible_amname
@@ -4791,12 +4832,21 @@ fn format_psql_default(
     sql_type: SqlType,
     expr_sql: &str,
 ) -> String {
+    let expr_sql = expr_sql.trim();
     if let Some(rendered) = format_regclass_nextval_default(db, session, sql_type, expr_sql) {
         return rendered;
     }
     if let Ok(expr) = parse_expr(expr_sql) {
-        if let crate::backend::parser::SqlExpr::Const(Value::Bit(bits)) = expr {
-            return format!("'{}'::\"bit\"", bits.render());
+        match expr {
+            crate::backend::parser::SqlExpr::Const(Value::Bit(bits)) => {
+                return format!("'{}'::\"bit\"", bits.render());
+            }
+            crate::backend::parser::SqlExpr::Const(Value::Text(_))
+                if matches!(sql_type.kind, SqlTypeKind::Text) =>
+            {
+                return format!("{expr_sql}::text");
+            }
+            _ => {}
         }
     }
     match sql_type.kind {
@@ -5536,7 +5586,10 @@ fn select_sql_requires_command_end_xid_handling(sql: &str) -> bool {
     // through Session::execute until SelectGuard owns that finalization.
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        regex::Regex::new(r"(?i)\b(txid_current|pg_current_xact_id)\s*\(").unwrap()
+        regex::Regex::new(
+            r"(?i)\b(txid_current|pg_current_xact_id|pg_restore_relation_stats|pg_clear_relation_stats|pg_restore_attribute_stats|pg_clear_attribute_stats)\s*\(",
+        )
+        .unwrap()
     });
     re.is_match(sql)
 }
@@ -5709,6 +5762,7 @@ fn raw_expr_contains_pg_notify(expr: &crate::backend::parser::SqlExpr) -> bool {
         | crate::backend::parser::SqlExpr::Or(left, right)
         | crate::backend::parser::SqlExpr::IsDistinctFrom(left, right)
         | crate::backend::parser::SqlExpr::IsNotDistinctFrom(left, right)
+        | crate::backend::parser::SqlExpr::Overlaps(left, right)
         | crate::backend::parser::SqlExpr::ArrayOverlap(left, right)
         | crate::backend::parser::SqlExpr::ArrayContains(left, right)
         | crate::backend::parser::SqlExpr::ArrayContained(left, right)
@@ -8998,6 +9052,17 @@ mod tests {
         };
 
         assert_eq!(exec_error_position(sql, &err), Some(8));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_failed_explicit_cast_target() {
+        let sql = "SELECT 1234::int4::casttesttype;";
+        let err = ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            expected: "supported explicit cast",
+            actual: "cannot cast type integer to casttesttype".into(),
+        });
+
+        assert_eq!(exec_error_position(sql, &err), Some(20));
     }
 
     #[test]

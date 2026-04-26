@@ -859,6 +859,7 @@ fn validate_publication_filter_expr(expr: &SqlExpr) -> Result<(), ExecError> {
         | Or(left, right)
         | IsDistinctFrom(left, right)
         | IsNotDistinctFrom(left, right)
+        | Overlaps(left, right)
         | ArrayOverlap(left, right)
         | ArrayContains(left, right)
         | ArrayContained(left, right)
@@ -1780,6 +1781,7 @@ mod tests {
             toast: None,
             namespace_oid: crate::include::catalog::PUBLIC_NAMESPACE_OID,
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            of_type_oid: 0,
             relpersistence: 't',
             relkind: 'r',
             relispopulated: true,
@@ -1820,6 +1822,7 @@ mod tests {
             toast: None,
             namespace_oid: crate::include::catalog::PUBLIC_NAMESPACE_OID,
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            of_type_oid: 0,
             relpersistence: 'u',
             relkind: 'r',
             relispopulated: true,

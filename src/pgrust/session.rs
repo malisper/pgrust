@@ -4,7 +4,7 @@ use std::io::Write as _;
 use std::mem;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::backend::access::transam::xact::{
@@ -401,6 +401,17 @@ fn compare_copy_str(left: &str, op: &str, literal: &str) -> bool {
 // threads; moving the owned guard with that Session does not create cross-thread
 // aliases to its executor Rc state.
 unsafe impl Send for SelectGuard {}
+
+fn select_sql_requires_command_end_xid_handling(sql: &str) -> bool {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)\b(txid_current|pg_current_xact_id|pg_restore_relation_stats|pg_clear_relation_stats|pg_restore_attribute_stats|pg_clear_attribute_stats)\s*\(",
+        )
+        .unwrap()
+    });
+    re.is_match(sql)
+}
 
 impl Drop for SelectGuard {
     fn drop(&mut self) {
@@ -1702,6 +1713,7 @@ impl Session {
             lock_status_provider: Some(Arc::new(db.clone())),
             sequences: Some(db.sequences.clone()),
             large_objects: Some(db.large_objects.clone()),
+            stats_import_runtime: Some(Arc::new(db.clone())),
             async_notify_runtime: Some(db.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&db.advisory_locks),
             row_locks: Arc::clone(&db.row_locks),
@@ -1727,6 +1739,8 @@ impl Session {
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
@@ -1966,6 +1980,22 @@ impl Session {
         ctx: &mut ExecutorContext,
         succeeded: bool,
     ) {
+        let pending_catalog_effects = mem::take(&mut ctx.pending_catalog_effects);
+        let pending_table_locks = mem::take(&mut ctx.pending_table_locks);
+        if let Some(txn) = self.active_txn.as_mut() {
+            txn.catalog_effects.extend(pending_catalog_effects);
+            for rel in pending_table_locks {
+                txn.held_table_locks
+                    .entry(rel)
+                    .and_modify(|existing| {
+                        *existing = existing.strongest(TableLockMode::ShareUpdateExclusive)
+                    })
+                    .or_insert(TableLockMode::ShareUpdateExclusive);
+            }
+        } else {
+            debug_assert!(pending_catalog_effects.is_empty());
+            debug_assert!(pending_table_locks.is_empty());
+        }
         if !succeeded {
             ctx.pending_async_notifications.clear();
             return;
@@ -2350,6 +2380,24 @@ impl Session {
                     )
                 }
             }
+            Statement::CreateCast(ref create_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_create_cast_stmt_with_search_path(
+                        self.client_id,
+                        create_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::CreateOperator(ref create_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -2452,6 +2500,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_drop_operator_stmt_with_search_path(
+                        self.client_id,
+                        drop_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::DropCast(ref drop_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_drop_cast_stmt_with_search_path(
                         self.client_id,
                         drop_stmt,
                         search_path.as_deref(),
@@ -3264,6 +3330,42 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_alter_table_no_inherit_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterTableOf(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_of_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterTableNotOf(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_not_of_stmt_with_search_path(
                         self.client_id,
                         alter_stmt,
                         search_path.as_deref(),
@@ -4363,6 +4465,40 @@ impl Session {
         let created_in_transaction = self.active_txn.is_some();
         match stmt {
             Statement::Select(select_stmt) => {
+                if select_sql_requires_command_end_xid_handling(&source_text) {
+                    return match self.execute(db, &source_text)? {
+                        StatementResult::Query {
+                            columns,
+                            column_names,
+                            rows,
+                        } => Ok(Portal::materialized_select(
+                            name,
+                            source_text,
+                            prep_stmt_name,
+                            result_formats,
+                            options,
+                            created_in_transaction,
+                            columns,
+                            column_names,
+                            rows,
+                        )),
+                        StatementResult::AffectedRows(n) => {
+                            let mut portal = Portal::pending_sql(
+                                name,
+                                source_text.clone(),
+                                prep_stmt_name,
+                                result_formats,
+                                options,
+                                created_in_transaction,
+                                None,
+                            );
+                            portal.command_tag =
+                                crate::backend::libpq::pqformat::infer_command_tag(&source_text, n);
+                            portal.execution = crate::pgrust::portal::PortalExecution::CommandDone;
+                            Ok(portal)
+                        }
+                    };
+                }
                 let guard = self.execute_streaming(db, &select_stmt)?;
                 let mut portal = Portal::streaming_select(
                     name,
@@ -5451,6 +5587,48 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::AlterTableOf(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.table_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_table_of_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterTableNotOf(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.table_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_table_not_of_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::AlterTableAttachPartition(ref alter_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 if let Some(parent) = catalog.lookup_any_relation(&alter_stmt.parent_table) {
@@ -6274,6 +6452,18 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::CreateCast(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_create_cast_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::AlterOperator(ref alter_stmt) => {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
@@ -6449,6 +6639,18 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_drop_operator_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::DropCast(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_drop_cast_stmt_in_transaction_with_search_path(
                     client_id,
                     drop_stmt,
                     xid,

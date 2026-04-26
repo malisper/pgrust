@@ -289,6 +289,7 @@ impl CatCache {
                 relpartbound: entry.relpartbound.clone(),
                 reloptions: entry.reloptions.clone(),
                 relacl: entry.relacl.clone(),
+                reloftype: entry.of_type_oid,
             };
             cache.classes_by_name.insert(
                 normalize_catalog_name(name).to_ascii_lowercase(),

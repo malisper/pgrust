@@ -63,6 +63,7 @@ pub fn system_catalog_index_entry_for_db(
         owner_oid: BOOTSTRAP_SUPERUSER_OID,
         relacl: None,
         reloptions: None,
+        of_type_oid: 0,
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,

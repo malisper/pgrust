@@ -13,11 +13,12 @@ use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec,
     AlterColumnExpressionAction, AlterTableTriggerMode, AlterTableTriggerStateStatement,
     AlterTableTriggerTarget, AlterTriggerRenameStatement, AlterTypeSetOptionsStatement,
-    ColumnConstraint, ColumnGeneratedKind, CommentOnAggregateStatement, CommentOnColumnStatement,
-    CommentOnFunctionStatement, CommentOnOperatorStatement, CommentOnTypeStatement,
-    CommentOnViewStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
-    CreateBaseTypeOption, CreateBaseTypeStatement, CreateCompositeTypeStatement,
-    CreateShellTypeStatement, CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement,
+    CastContext, ColumnConstraint, ColumnGeneratedKind, CommentOnAggregateStatement,
+    CommentOnColumnStatement, CommentOnFunctionStatement, CommentOnOperatorStatement,
+    CommentOnTypeStatement, CommentOnViewStatement, CompositeTypeAttributeDef,
+    CreateAggregateStatement, CreateBaseTypeOption, CreateBaseTypeStatement, CreateCastMethod,
+    CreateCastStatement, CreateCompositeTypeStatement, CreateShellTypeStatement,
+    CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement, DropCastStatement,
     DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType,
     GrantObjectPrivilege, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
     PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
@@ -468,6 +469,7 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         relacl: None,
         reloptions: None,
+        of_type_oid: 0,
         row_type_oid: 60_000u32.saturating_add(rel_number),
         array_type_oid: 61_000u32.saturating_add(rel_number),
         reltoastrelid: 0,
@@ -529,6 +531,7 @@ fn people_view_entry() -> CatalogEntry {
         owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         relacl: None,
         reloptions: None,
+        of_type_oid: 0,
         row_type_oid: 60020,
         array_type_oid: 60021,
         reltoastrelid: 0,
@@ -743,6 +746,7 @@ fn catalog_with_people_id_index() -> Catalog {
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60010,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -809,6 +813,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60011,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -904,6 +909,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60013,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -967,6 +973,7 @@ fn catalog_with_people_ctid_partial_unique_index() -> Catalog {
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60015,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1030,6 +1037,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60014,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1208,6 +1216,7 @@ fn bind_expression_index_metadata_does_not_discover_heap_indexes() {
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60041,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1279,6 +1288,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60015,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1350,6 +1360,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             relacl: None,
             reloptions: None,
+            of_type_oid: 0,
             row_type_oid: 60031,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -4435,6 +4446,82 @@ fn parse_do_statement_with_explicit_language() {
 }
 
 #[test]
+fn parse_create_cast_with_function_and_implicit_context() {
+    let stmt = parse_statement(
+        "create cast (int4 as casttesttype) with function pg_catalog.int4_casttesttype(int4) as implicit",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateCast(CreateCastStatement {
+            source_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+            target_type: RawTypeName::Named {
+                name: "casttesttype".into(),
+                array_bounds: 0,
+            },
+            method: CreateCastMethod::Function {
+                schema_name: Some("pg_catalog".into()),
+                function_name: "int4_casttesttype".into(),
+                arg_types: vec![RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4))],
+            },
+            context: CastContext::Implicit,
+        })
+    );
+}
+
+#[test]
+fn parse_create_cast_without_function_and_assignment_context() {
+    let stmt = parse_statement("create cast (text as casttesttype) without function as assignment")
+        .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateCast(CreateCastStatement {
+            source_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+            target_type: RawTypeName::Named {
+                name: "casttesttype".into(),
+                array_bounds: 0,
+            },
+            method: CreateCastMethod::WithoutFunction,
+            context: CastContext::Assignment,
+        })
+    );
+}
+
+#[test]
+fn parse_create_cast_with_inout_defaults_to_explicit_context() {
+    let stmt = parse_statement("create cast (int4 as casttesttype) with inout").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateCast(CreateCastStatement {
+            source_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+            target_type: RawTypeName::Named {
+                name: "casttesttype".into(),
+                array_bounds: 0,
+            },
+            method: CreateCastMethod::InOut,
+            context: CastContext::Explicit,
+        })
+    );
+}
+
+#[test]
+fn parse_drop_cast_if_exists_cascade() {
+    let stmt = parse_statement("drop cast if exists (int4 as casttesttype) cascade").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropCast(DropCastStatement {
+            if_exists: true,
+            source_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+            target_type: RawTypeName::Named {
+                name: "casttesttype".into(),
+                array_bounds: 0,
+            },
+            cascade: true,
+        })
+    );
+}
+
+#[test]
 fn parse_create_function_statement_with_returns_table() {
     let stmt = parse_statement(
         "create function public.pair_rows(x int4) returns table(a int4, b text) language plpgsql as $$ begin return next; end $$",
@@ -4451,6 +4538,7 @@ fn parse_create_function_statement_with_returns_table() {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                type_position: None,
                 default_expr: None,
                 variadic: false,
             }],
@@ -4492,6 +4580,7 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                type_position: None,
                 default_expr: None,
                 variadic: false,
             }],
@@ -4829,6 +4918,7 @@ fn parse_create_function_statement_with_unnamed_args() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    type_position: None,
                     default_expr: None,
                     variadic: false,
                 },
@@ -4836,6 +4926,7 @@ fn parse_create_function_statement_with_unnamed_args() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    type_position: None,
                     default_expr: None,
                     variadic: false,
                 }
@@ -4873,6 +4964,7 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    type_position: None,
                     default_expr: None,
                     variadic: false,
                 },
@@ -4880,6 +4972,7 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    type_position: None,
                     default_expr: None,
                     variadic: false,
                 }
@@ -4916,6 +5009,7 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
                 mode: FunctionArgMode::In,
                 name: None,
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bytea)),
+                type_position: None,
                 default_expr: None,
                 variadic: false,
             }],
@@ -4951,6 +5045,7 @@ fn parse_create_function_statement_with_cost_clause() {
                 mode: FunctionArgMode::In,
                 name: None,
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                type_position: None,
                 default_expr: None,
                 variadic: false,
             }],
@@ -5021,6 +5116,7 @@ fn parse_create_procedure_statement() {
                     mode: FunctionArgMode::InOut,
                     name: Some("x".into()),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                    type_position: None,
                     default_expr: None,
                     variadic: false,
                 },
@@ -5028,6 +5124,7 @@ fn parse_create_procedure_statement() {
                     mode: FunctionArgMode::In,
                     name: Some("y".into()),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                    type_position: None,
                     default_expr: Some("'a'".into()),
                     variadic: false,
                 },
@@ -5329,6 +5426,17 @@ fn parse_reset_statement() {
         stmt,
         Statement::Reset(ResetStatement {
             name: Some("extra_float_digits".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_reset_time_zone_statement() {
+    let stmt = parse_statement("reset time zone").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Reset(ResetStatement {
+            name: Some("timezone".into()),
         })
     );
 }
@@ -7252,6 +7360,15 @@ fn parse_at_time_zone_expression() {
 }
 
 #[test]
+fn parse_overlaps_expression() {
+    let stmt = parse_select(
+        "select (timestamp '2000-11-27', timestamp '2000-11-28') overlaps (timestamp '2000-11-27 12:00', interval '1 day')",
+    )
+    .unwrap();
+    assert!(matches!(&stmt.targets[0].expr, SqlExpr::Overlaps(_, _)));
+}
+
+#[test]
 fn analyze_at_time_zone_uses_timezone_function_types() {
     let stmt =
         parse_select("select timestamptz '2001-02-16 20:38:40+00' at time zone 'America/Denver'")
@@ -7306,6 +7423,136 @@ fn analyze_timetz_at_time_zone_keeps_timetz_and_interval_types() {
                     }
                 )
         ]
+    ));
+}
+
+#[test]
+fn analyze_date_time_arithmetic_uses_postgres_result_types() {
+    let stmt = parse_select(
+        "select date '2001-01-02' + time '03:04', date '2001-01-02' + timetz '03:04+02', date '2001-01-02' - time '03:04'",
+    )
+    .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+    assert!(matches!(
+        &query.target_list[0].expr,
+        Expr::Op(op) if op.opresulttype == SqlType::new(SqlTypeKind::Timestamp)
+    ));
+    assert!(matches!(
+        &query.target_list[1].expr,
+        Expr::Op(op) if op.opresulttype == SqlType::new(SqlTypeKind::TimestampTz)
+    ));
+    assert!(matches!(
+        &query.target_list[2].expr,
+        Expr::Op(op) if op.opresulttype == SqlType::new(SqlTypeKind::Timestamp)
+    ));
+
+    let err = analyze_select_query_with_outer(
+        &parse_select("select date '2001-01-02' - timetz '03:04+02'").unwrap(),
+        &catalog(),
+        &[],
+        None,
+        None,
+        &[],
+        &[],
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UndefinedOperator {
+            op: "-",
+            left_type,
+            right_type,
+        } if left_type == "date" && right_type == "time with time zone"
+    ));
+}
+
+#[test]
+fn analyze_rejects_unsupported_timetz_interval_casts_with_postgres_error() {
+    for (sql, expected) in [
+        (
+            "select cast(time with time zone '01:02-08' as interval)",
+            "cannot cast type time with time zone to interval",
+        ),
+        (
+            "select cast(interval '02:03' as time with time zone)",
+            "cannot cast type interval to time with time zone",
+        ),
+    ] {
+        let err = analyze_select_query_with_outer(
+            &parse_select(sql).unwrap(),
+            &catalog(),
+            &[],
+            None,
+            None,
+            &[],
+            &[],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::DetailedError {
+                message,
+                sqlstate: "42846",
+                ..
+            } if message == expected
+        ));
+    }
+}
+
+#[test]
+fn analyze_timestamptz_date_time_constructor_overloads() {
+    let stmt = parse_select(
+        "select timestamptz(date '2001-01-02', time '03:04'), timestamptz(date '2001-01-02', timetz '03:04+02')",
+    )
+    .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+    for target in &query.target_list {
+        assert!(matches!(
+            &target.expr,
+            Expr::Func(func)
+                if func.implementation == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+                    crate::include::nodes::primnodes::BuiltinScalarFunction::TimestampTzConstructor
+                )
+                    && func.funcresulttype == Some(SqlType::new(SqlTypeKind::TimestampTz))
+        ));
+    }
+}
+
+#[test]
+fn analyze_mixed_date_timestamp_comparisons_keep_cross_type_ops() {
+    let stmt = parse_select(
+        "select date '2001-01-02' < timestamp '2001-01-03', date '2001-01-02' <= timestamptz '2001-01-03 00:00+00', timestamp '2001-01-02' = timestamptz '2001-01-02 00:00+00'",
+    )
+    .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+
+    assert!(matches!(
+        &query.target_list[0].expr,
+        Expr::Op(op)
+            if matches!(op.args.as_slice(), [
+                Expr::Cast(_, SqlType { kind: SqlTypeKind::Date, .. }) | Expr::Const(Value::Date(_)),
+                Expr::Cast(_, SqlType { kind: SqlTypeKind::Timestamp, .. }) | Expr::Const(Value::Timestamp(_)),
+            ])
+    ));
+    assert!(matches!(
+        &query.target_list[1].expr,
+        Expr::Op(op)
+            if matches!(op.args.as_slice(), [
+                Expr::Cast(_, SqlType { kind: SqlTypeKind::Date, .. }) | Expr::Const(Value::Date(_)),
+                Expr::Cast(_, SqlType { kind: SqlTypeKind::TimestampTz, .. }) | Expr::Const(Value::TimestampTz(_)),
+            ])
+    ));
+    assert!(matches!(
+        &query.target_list[2].expr,
+        Expr::Op(op)
+            if op.args.iter().all(|arg| matches!(
+                arg,
+                Expr::Const(Value::TimestampTz(_))
+                    | Expr::Cast(_, SqlType { kind: SqlTypeKind::TimestampTz, .. })
+            ))
     ));
 }
 
@@ -9466,6 +9713,29 @@ fn parse_show_timezone() {
         parse_statement("show timezone").unwrap(),
         Statement::Show(ShowStatement { name }) if name == "timezone"
     ));
+    assert!(matches!(
+        parse_statement("show time zone").unwrap(),
+        Statement::Show(ShowStatement { name }) if name == "timezone"
+    ));
+}
+
+#[test]
+fn parse_between_symmetric_expression() {
+    let stmt = parse_select("select time '01:00' between symmetric time '02:00' and time '00:00'")
+        .unwrap();
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::Or(_, _)));
+}
+
+#[test]
+fn parse_not_between_lowers_like_postgres() {
+    let stmt =
+        parse_select("select f1 not between date '1997-01-01' and date '1998-01-01'").unwrap();
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::Or(_, _)));
+
+    let stmt =
+        parse_select("select f1 not between symmetric date '1997-01-01' and date '1998-01-01'")
+            .unwrap();
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::And(_, _)));
 }
 
 #[test]
@@ -9514,6 +9784,7 @@ fn create_table_temp_name_validation() {
         crate::backend::parser::normalize_create_table_name(&CreateTableStatement {
             schema_name: Some("public".into()),
             table_name: "t".into(),
+            of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![],
@@ -9530,6 +9801,7 @@ fn create_table_temp_name_validation() {
     let err = crate::backend::parser::normalize_create_table_name(&CreateTableStatement {
         schema_name: Some("public".into()),
         table_name: "t".into(),
+        of_type_name: None,
         persistence: TablePersistence::Temporary,
         on_commit: OnCommitAction::PreserveRows,
         elements: vec![],
@@ -9545,6 +9817,7 @@ fn create_table_temp_name_validation() {
     let err = crate::backend::parser::normalize_create_table_name(&CreateTableStatement {
         schema_name: None,
         table_name: "t".into(),
+        of_type_name: None,
         persistence: TablePersistence::Permanent,
         on_commit: OnCommitAction::DeleteRows,
         elements: vec![],
@@ -9586,6 +9859,60 @@ fn parse_create_table_inherits_clause() {
         }
         other => panic!("expected CreateTable, got {:?}", other),
     }
+}
+
+#[test]
+fn parse_create_table_of_with_typed_column_options() {
+    let Statement::CreateTable(ct) = parse_statement(
+        "create table persons of person_type (id with options primary key, name not null default 'x')",
+    )
+    .unwrap()
+    else {
+        panic!("expected CreateTable");
+    };
+    assert_eq!(ct.table_name, "persons");
+    assert_eq!(ct.of_type_name.as_deref(), Some("person_type"));
+    assert_eq!(ct.elements.len(), 2);
+    let CreateTableElement::TypedColumnOptions(id_options) = &ct.elements[0] else {
+        panic!("expected typed column options");
+    };
+    assert_eq!(id_options.name, "id");
+    assert!(
+        id_options
+            .constraints
+            .iter()
+            .any(|constraint| matches!(constraint, ColumnConstraint::PrimaryKey { .. }))
+    );
+    let CreateTableElement::TypedColumnOptions(name_options) = &ct.elements[1] else {
+        panic!("expected typed column options");
+    };
+    assert_eq!(name_options.name, "name");
+    assert_eq!(name_options.default_expr.as_deref(), Some("'x'"));
+    assert!(
+        name_options
+            .constraints
+            .iter()
+            .any(|constraint| matches!(constraint, ColumnConstraint::NotNull { .. }))
+    );
+}
+
+#[test]
+fn parse_alter_table_of_and_not_of() {
+    let Statement::AlterTableOf(alter_of) =
+        parse_statement("alter table persons of person_type").unwrap()
+    else {
+        panic!("expected AlterTableOf");
+    };
+    assert_eq!(alter_of.table_name, "persons");
+    assert_eq!(alter_of.type_name, "person_type");
+
+    let Statement::AlterTableNotOf(not_of) =
+        parse_statement("alter table if exists persons not of").unwrap()
+    else {
+        panic!("expected AlterTableNotOf");
+    };
+    assert_eq!(not_of.table_name, "persons");
+    assert!(not_of.if_exists);
 }
 
 #[test]
@@ -9718,6 +10045,34 @@ fn parse_create_table_partition_of_with_subpartition_spec() {
                     }],
                 })
             );
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_table_partition_of_with_storage_clause() {
+    match parse_statement(
+        "create table measurement_lo partition of measurement \
+         for values from (0) to (10) with (autovacuum_enabled = false)",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.partition_of.as_deref(), Some("measurement"));
+            assert_eq!(
+                ct.partition_bound,
+                Some(RawPartitionBoundSpec::Range {
+                    from: vec![RawPartitionRangeDatum::Value(SqlExpr::IntegerLiteral(
+                        "0".into()
+                    ))],
+                    to: vec![RawPartitionRangeDatum::Value(SqlExpr::IntegerLiteral(
+                        "10".into()
+                    ))],
+                    is_default: false,
+                })
+            );
+            assert_eq!(ct.partition_spec, None);
         }
         other => panic!("expected CreateTable, got {:?}", other),
     }
@@ -11106,6 +11461,39 @@ fn parse_alter_type_rename_to_statement() {
     assert_eq!(rename.schema_name, None);
     assert_eq!(rename.type_name, "bogus");
     assert_eq!(rename.new_type_name, "bogon");
+}
+
+#[test]
+fn parse_alter_type_composite_attribute_actions() {
+    let Statement::AlterType(AlterTypeStatement::AlterComposite(stmt)) = parse_statement(
+        "alter type person add attribute age int4 cascade, rename attribute name to full_name restrict",
+    )
+    .unwrap()
+    else {
+        panic!("expected alter type composite");
+    };
+    assert_eq!(stmt.type_name, "person");
+    assert_eq!(stmt.actions.len(), 2);
+    match &stmt.actions[0] {
+        AlterCompositeTypeAction::AddAttribute { attribute, cascade } => {
+            assert_eq!(attribute.name, "age");
+            assert_eq!(attribute.ty, RawTypeName::builtin(SqlTypeKind::Int4));
+            assert!(*cascade);
+        }
+        other => panic!("expected add attribute, got {other:?}"),
+    }
+    match &stmt.actions[1] {
+        AlterCompositeTypeAction::RenameAttribute {
+            old_name,
+            new_name,
+            cascade,
+        } => {
+            assert_eq!(old_name, "name");
+            assert_eq!(new_name, "full_name");
+            assert!(!*cascade);
+        }
+        other => panic!("expected rename attribute, got {other:?}"),
+    }
 }
 
 #[test]

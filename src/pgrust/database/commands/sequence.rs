@@ -232,6 +232,7 @@ impl Database {
                     xid,
                     cid,
                     'S',
+                    0,
                     None,
                     catalog_effects,
                     temp_effects,

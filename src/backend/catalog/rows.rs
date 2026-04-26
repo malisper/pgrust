@@ -384,6 +384,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
         relpartbound: entry.relpartbound.clone(),
         reloptions: entry.reloptions.clone(),
         relacl: entry.relacl.clone(),
+        reloftype: entry.of_type_oid,
     });
 
     if entry.row_type_oid != 0 {

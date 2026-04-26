@@ -481,6 +481,7 @@ pub(super) fn coerce_unknown_string_literal_type(
             SqlTypeKind::TimeTz => return SqlType::new(SqlTypeKind::TimeTz),
             SqlTypeKind::Timestamp => return SqlType::new(SqlTypeKind::Timestamp),
             SqlTypeKind::TimestampTz => return SqlType::new(SqlTypeKind::TimestampTz),
+            SqlTypeKind::Interval => return SqlType::new(SqlTypeKind::Interval),
             SqlTypeKind::Jsonb => return SqlType::new(SqlTypeKind::Jsonb),
             SqlTypeKind::Bytea => return SqlType::new(SqlTypeKind::Bytea),
             SqlTypeKind::Uuid => return SqlType::new(SqlTypeKind::Uuid),
@@ -628,6 +629,19 @@ pub(super) fn resolve_common_scalar_type(left: SqlType, right: SqlType) -> Optio
     {
         return Some(SqlType::new(SqlTypeKind::Inet));
     }
+    match (left.kind, right.kind) {
+        (SqlTypeKind::Date, SqlTypeKind::Timestamp)
+        | (SqlTypeKind::Timestamp, SqlTypeKind::Date) => {
+            return Some(SqlType::new(SqlTypeKind::Timestamp));
+        }
+        (SqlTypeKind::Date, SqlTypeKind::TimestampTz)
+        | (SqlTypeKind::TimestampTz, SqlTypeKind::Date)
+        | (SqlTypeKind::Timestamp, SqlTypeKind::TimestampTz)
+        | (SqlTypeKind::TimestampTz, SqlTypeKind::Timestamp) => {
+            return Some(SqlType::new(SqlTypeKind::TimestampTz));
+        }
+        _ => {}
+    }
     if is_numeric_family(left) && is_numeric_family(right) {
         return resolve_numeric_binary_type("+", left, right).ok();
     }
@@ -690,9 +704,43 @@ pub(super) fn infer_arithmetic_sql_type(expr: &SqlExpr, left: SqlType, right: Sq
     let left = left.element_type();
     let right = right.element_type();
 
+    match expr {
+        SqlExpr::Add(_, _) if matches!((left.kind, right.kind), (Date, Time) | (Time, Date)) => {
+            return SqlType::new(Timestamp);
+        }
+        SqlExpr::Add(_, _)
+            if matches!((left.kind, right.kind), (Date, TimeTz) | (TimeTz, Date)) =>
+        {
+            return SqlType::new(TimestampTz);
+        }
+        SqlExpr::Sub(_, _) if matches!((left.kind, right.kind), (Date, Time)) => {
+            return SqlType::new(Timestamp);
+        }
+        _ => {}
+    }
+
     let has_interval = matches!(left.kind, Interval) || matches!(right.kind, Interval);
     if has_interval {
         return match expr {
+            SqlExpr::Add(_, _)
+                if matches!((left.kind, right.kind), (Time, Interval) | (Interval, Time)) =>
+            {
+                SqlType::new(Time)
+            }
+            SqlExpr::Sub(_, _) if matches!((left.kind, right.kind), (Time, Interval)) => {
+                SqlType::new(Time)
+            }
+            SqlExpr::Add(_, _)
+                if matches!(
+                    (left.kind, right.kind),
+                    (TimeTz, Interval) | (Interval, TimeTz)
+                ) =>
+            {
+                SqlType::new(TimeTz)
+            }
+            SqlExpr::Sub(_, _) if matches!((left.kind, right.kind), (TimeTz, Interval)) => {
+                SqlType::new(TimeTz)
+            }
             SqlExpr::Add(_, _) if matches!(left.kind, Date) || matches!(right.kind, Date) => {
                 SqlType::new(Timestamp)
             }

@@ -8,7 +8,9 @@ use crate::backend::parser::{
     RelOption, SequenceOptionsSpec, SqlType, SqlTypeKind, Statement, parse_statement,
     pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
 };
-use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
+use crate::backend::utils::misc::notices::{
+    push_backend_notice, push_notice, push_notice_with_detail,
+};
 use crate::include::catalog::{
     ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
     BOOTSTRAP_SUPERUSER_OID, BYTEA_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
@@ -1312,6 +1314,7 @@ impl Database {
                     xid,
                     cid,
                     'S',
+                    0,
                     None,
                     catalog_effects,
                     temp_effects,
@@ -1747,10 +1750,16 @@ impl Database {
         for arg in &create_stmt.args {
             let sql_type = resolve_raw_type_name(&arg.ty, &catalog).map_err(ExecError::Parse)?;
             if matches!(sql_type.kind, SqlTypeKind::Shell) {
-                push_notice(format!(
-                    "argument type {} is only a shell",
-                    notice_name_for_type(&arg.ty, sql_type)
-                ));
+                push_backend_notice(
+                    "NOTICE",
+                    "00000",
+                    format!(
+                        "argument type {} is only a shell",
+                        notice_name_for_type(&arg.ty, sql_type)
+                    ),
+                    None,
+                    arg.type_position,
+                );
             }
             let type_oid = create_function_type_oid(
                 &catalog,
@@ -2420,6 +2429,9 @@ impl Database {
         if create_stmt.if_not_exists
             && relation_exists_in_namespace(&catalog, &table_name, namespace_oid)
         {
+            push_notice(format!(
+                "relation \"{table_name}\" already exists, skipping"
+            ));
             return Ok(StatementResult::AffectedRows(0));
         }
         validate_partitioned_table_ddl(&table_name, &lowered)?;
@@ -2478,7 +2490,7 @@ impl Database {
                     interrupts: Arc::clone(&interrupts),
                 };
                 let result = if relation_relkind == 'r' {
-                    catalog_guard.create_table_mvcc_with_options(
+                    catalog_guard.create_typed_table_mvcc_with_options(
                         table_name.clone(),
                         desc.clone(),
                         namespace_oid,
@@ -2487,6 +2499,7 @@ impl Database {
                         crate::include::catalog::PG_TOAST_NAMESPACE_OID,
                         crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                         self.auth_state(client_id).current_user_oid(),
+                        lowered.of_type_oid,
                         &ctx,
                     )
                 } else {
@@ -2596,6 +2609,7 @@ impl Database {
                                 }),
                                 namespace_oid: created.entry.namespace_oid,
                                 owner_oid: created.entry.owner_oid,
+                                of_type_oid: created.entry.of_type_oid,
                                 relpersistence: created.entry.relpersistence,
                                 relkind: created.entry.relkind,
                                 relispopulated: created.entry.relispopulated,
@@ -2676,6 +2690,7 @@ impl Database {
                     xid,
                     table_cid,
                     relation_relkind,
+                    lowered.of_type_oid,
                     None,
                     catalog_effects,
                     temp_effects,
@@ -2754,6 +2769,7 @@ impl Database {
                             }),
                             namespace_oid: created.entry.namespace_oid,
                             owner_oid: created.entry.owner_oid,
+                            of_type_oid: created.entry.of_type_oid,
                             relpersistence: created.entry.relpersistence,
                             relkind: created.entry.relkind,
                             relispopulated: created.entry.relispopulated,
@@ -2982,6 +2998,7 @@ impl Database {
                         xid,
                         cid,
                         'v',
+                        0,
                         reloptions.clone(),
                         catalog_effects,
                         temp_effects,
@@ -3092,6 +3109,7 @@ impl Database {
             lock_status_provider: Some(Arc::new(self.clone())),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            stats_import_runtime: None,
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&self.advisory_locks),
             row_locks: Arc::clone(&self.row_locks),
@@ -3122,6 +3140,8 @@ impl Database {
             timed: false,
             allow_side_effects: false,
             pending_async_notifications: Vec::new(),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -3165,6 +3185,7 @@ impl Database {
                 let stmt = CreateTableStatement {
                     schema_name: None,
                     table_name: table_name.clone(),
+                    of_type_name: None,
                     persistence,
                     on_commit: create_stmt.on_commit,
                     elements: desc
@@ -3262,6 +3283,7 @@ impl Database {
             lock_status_provider: Some(Arc::new(self.clone())),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            stats_import_runtime: None,
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&self.advisory_locks),
             row_locks: Arc::clone(&self.row_locks),
@@ -3292,6 +3314,8 @@ impl Database {
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
+            pending_catalog_effects: Vec::new(),
+            pending_table_locks: Vec::new(),
             catalog: insert_catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),

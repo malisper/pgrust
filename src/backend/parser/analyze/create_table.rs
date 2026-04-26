@@ -20,6 +20,7 @@ use super::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoweredCreateTable {
+    pub of_type_oid: u32,
     pub relation_desc: RelationDesc,
     pub not_null_actions: Vec<NotNullConstraintAction>,
     pub check_actions: Vec<CheckConstraintAction>,
@@ -59,7 +60,9 @@ pub fn lower_create_table(
     stmt: &CreateTableStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<LoweredCreateTable, ParseError> {
-    let (expanded, like_post_create_actions) = expand_create_table_like_clauses(stmt, catalog)?;
+    let (typed_stmt, of_type_oid) = expand_create_table_of_type(stmt, catalog)?;
+    let (expanded, like_post_create_actions) =
+        expand_create_table_like_clauses(&typed_stmt, catalog)?;
     let columns = expanded.columns().cloned().collect::<Vec<_>>();
     let normalized = normalize_create_table_constraints(&expanded, catalog)?;
     let constraint_actions = normalized.index_backed.clone();
@@ -248,6 +251,7 @@ pub fn lower_create_table(
     validate_generated_columns(&relation_desc, catalog)?;
 
     Ok(LoweredCreateTable {
+        of_type_oid,
         relation_desc,
         not_null_actions: normalized.not_nulls,
         check_actions: normalized.checks,
@@ -260,6 +264,159 @@ pub fn lower_create_table(
         partition_parent_oid: None,
         partition_bound: None,
     })
+}
+
+fn expand_create_table_of_type(
+    stmt: &CreateTableStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<(CreateTableStatement, u32), ParseError> {
+    let Some(type_name) = stmt.of_type_name.as_deref() else {
+        return Ok((stmt.clone(), 0));
+    };
+    if !stmt.inherits.is_empty() {
+        return Err(ParseError::DetailedError {
+            message: "typed tables cannot inherit".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
+    if stmt.partition_spec.is_some() || stmt.partition_of.is_some() {
+        return Err(ParseError::DetailedError {
+            message: "typed tables cannot be partitioned".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
+    let type_row = catalog
+        .type_by_name(type_name)
+        .ok_or_else(|| ParseError::UnsupportedType(type_name.to_string()))?;
+    if matches!(type_row.sql_type.kind, SqlTypeKind::Shell) {
+        return Err(ParseError::DetailedError {
+            message: format!("type \"{}\" is only a shell", type_row.typname),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
+    if !matches!(type_row.sql_type.kind, SqlTypeKind::Composite) || type_row.typrelid == 0 {
+        return Err(ParseError::DetailedError {
+            message: format!("type {} is not a composite type", type_row.typname),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
+    let class_row =
+        catalog
+            .class_row_by_oid(type_row.typrelid)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "composite type relation",
+                actual: format!("missing relation oid {}", type_row.typrelid),
+            })?;
+    if class_row.relkind != 'c' {
+        return Err(ParseError::DetailedError {
+            message: format!("type {} is the row type of another table", type_row.typname),
+            detail: Some(
+                "A typed table must use a stand-alone composite type created with CREATE TYPE."
+                    .into(),
+            ),
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
+    let type_relation = catalog
+        .lookup_relation_by_oid(type_row.typrelid)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "composite type relation",
+            actual: format!("missing relation oid {}", type_row.typrelid),
+        })?;
+
+    let mut typed_columns = type_relation
+        .desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .map(|column| {
+            CreateTableElement::Column(crate::backend::parser::ColumnDef {
+                name: column.name.clone(),
+                ty: RawTypeName::Builtin(column.sql_type),
+                collation: None,
+                default_expr: None,
+                generated: None,
+                identity: None,
+                storage: None,
+                compression: None,
+                constraints: Vec::new(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut seen_options = BTreeSet::new();
+    let mut table_constraints = Vec::new();
+    for element in &stmt.elements {
+        match element {
+            CreateTableElement::TypedColumnOptions(options) => {
+                let lookup_name = options.name.to_ascii_lowercase();
+                if !seen_options.insert(lookup_name.clone()) {
+                    return Err(ParseError::DetailedError {
+                        message: format!("column \"{}\" specified more than once", options.name),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42701",
+                    });
+                }
+                let Some(CreateTableElement::Column(column)) =
+                    typed_columns.iter_mut().find(|element| match element {
+                        CreateTableElement::Column(column) => {
+                            column.name.eq_ignore_ascii_case(&lookup_name)
+                        }
+                        _ => false,
+                    })
+                else {
+                    return Err(ParseError::UnknownColumn(options.name.clone()));
+                };
+                column.collation = options.collation.clone();
+                column.default_expr = options.default_expr.clone();
+                column.generated = options.generated.clone();
+                column.identity = options.identity;
+                column.storage = options.storage;
+                column.compression = options.compression;
+                column.constraints = options.constraints.clone();
+            }
+            CreateTableElement::Constraint(constraint) => {
+                table_constraints.push(CreateTableElement::Constraint(constraint.clone()));
+            }
+            CreateTableElement::Column(column) => {
+                return Err(ParseError::DetailedError {
+                    message: format!(
+                        "column \"{}\" conflicts with typed table row type",
+                        column.name
+                    ),
+                    detail: Some(
+                        "Use WITH OPTIONS to add column options to typed-table columns.".into(),
+                    ),
+                    hint: None,
+                    sqlstate: "42701",
+                });
+            }
+            CreateTableElement::PartitionColumnOverride(_) | CreateTableElement::Like(_) => {
+                return Err(ParseError::DetailedError {
+                    message: "CREATE TABLE OF does not support this table element".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                });
+            }
+        }
+    }
+    typed_columns.extend(table_constraints);
+
+    let mut expanded = stmt.clone();
+    expanded.of_type_name = None;
+    expanded.elements = typed_columns;
+    Ok((expanded, type_row.oid))
 }
 
 fn expand_create_table_like_clauses(
@@ -280,6 +437,7 @@ fn expand_create_table_like_clauses(
     for element in &stmt.elements {
         match element {
             CreateTableElement::Column(_)
+            | CreateTableElement::TypedColumnOptions(_)
             | CreateTableElement::PartitionColumnOverride(_)
             | CreateTableElement::Constraint(_) => {
                 expanded.elements.push(element.clone());
@@ -598,6 +756,7 @@ mod tests {
         let stmt = CreateTableStatement {
             schema_name: None,
             table_name: "bad_anyarray".into(),
+            of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![CreateTableElement::Column(ColumnDef {
@@ -632,6 +791,7 @@ mod tests {
         let stmt = CreateTableStatement {
             schema_name: None,
             table_name: "items".into(),
+            of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![
@@ -719,6 +879,7 @@ mod tests {
                 toast: None,
                 namespace_oid: crate::include::catalog::PUBLIC_NAMESPACE_OID,
                 owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                of_type_oid: 0,
                 relpersistence: 'p',
                 relkind: 'r',
                 relispopulated: true,
@@ -793,6 +954,7 @@ mod tests {
         let stmt = CreateTableStatement {
             schema_name: None,
             table_name: "copy_table".into(),
+            of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![CreateTableElement::Like(CreateTableLikeClause {
@@ -841,6 +1003,7 @@ mod tests {
                 toast: None,
                 namespace_oid: crate::include::catalog::PUBLIC_NAMESPACE_OID,
                 owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                of_type_oid: 0,
                 relpersistence: 'p',
                 relkind: 'r',
                 relispopulated: true,
@@ -854,6 +1017,7 @@ mod tests {
         let stmt = CreateTableStatement {
             schema_name: None,
             table_name: "copy_table".into(),
+            of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![CreateTableElement::Like(CreateTableLikeClause {
@@ -895,6 +1059,7 @@ mod tests {
         let stmt = CreateTableStatement {
             schema_name: None,
             table_name: "items".into(),
+            of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![
@@ -943,6 +1108,7 @@ mod tests {
         let stmt = CreateTableStatement {
             schema_name: None,
             table_name: "items".into(),
+            of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![CreateTableElement::Column(ColumnDef {
@@ -984,6 +1150,7 @@ mod tests {
         let stmt = CreateTableStatement {
             schema_name: None,
             table_name: "items".into(),
+            of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![CreateTableElement::Column(ColumnDef {
@@ -1021,6 +1188,7 @@ mod tests {
         let stmt = CreateTableStatement {
             schema_name: None,
             table_name: "cmdata".into(),
+            of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![CreateTableElement::Column(ColumnDef {
@@ -1057,6 +1225,7 @@ mod tests {
         let stmt = CreateTableStatement {
             schema_name: None,
             table_name: "cmdata".into(),
+            of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![CreateTableElement::Column(ColumnDef {

@@ -139,6 +139,62 @@ pub(super) fn bind_arithmetic_expr(
     }
     if !left_type.is_array
         && !right_type.is_array
+        && op == "-"
+        && matches!(left_type.kind, SqlTypeKind::Date)
+        && matches!(right_type.kind, SqlTypeKind::TimeTz)
+    {
+        return Err(ParseError::UndefinedOperator {
+            op,
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        });
+    }
+    if !left_type.is_array && !right_type.is_array {
+        let result_type = match (op, left_type.kind, right_type.kind) {
+            ("+", SqlTypeKind::Date, SqlTypeKind::Time)
+            | ("+", SqlTypeKind::Time, SqlTypeKind::Date)
+            | ("-", SqlTypeKind::Date, SqlTypeKind::Time) => {
+                Some(SqlType::new(SqlTypeKind::Timestamp))
+            }
+            ("+", SqlTypeKind::Date, SqlTypeKind::TimeTz)
+            | ("+", SqlTypeKind::TimeTz, SqlTypeKind::Date) => {
+                Some(SqlType::new(SqlTypeKind::TimestampTz))
+            }
+            _ => None,
+        };
+        if let Some(result_type) = result_type {
+            return Ok(Expr::binary_op(
+                make,
+                result_type,
+                coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_left_type,
+                    left_type,
+                ),
+                coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_right_type,
+                    right_type,
+                ),
+            ));
+        }
+    }
+    if !left_type.is_array
+        && !right_type.is_array
         && (matches!(left_type.kind, SqlTypeKind::Money)
             || matches!(right_type.kind, SqlTypeKind::Money))
     {
@@ -940,6 +996,7 @@ pub(crate) fn bind_lowered_comparison_expr(
             if !left_type.is_array && !right_type.is_array {
                 if let Some(common) = resolve_common_scalar_type(left_type, right_type)
                     .filter(|ty| !is_numeric_family(*ty))
+                    .filter(|_| !is_mixed_date_timestamp_comparison(left_type, right_type))
                 {
                     (
                         coerce_bound_expr(left_bound, raw_left_type, common),
@@ -1269,16 +1326,29 @@ fn supports_array_comparison_operator(op: &str, left: SqlType, right: SqlType) -
 fn supports_builtin_datetime_comparison(op: &str, left: SqlType, right: SqlType) -> bool {
     !left.is_array
         && !right.is_array
-        && left.kind == right.kind
-        && matches!(
-            left.kind,
-            SqlTypeKind::Date
-                | SqlTypeKind::Time
-                | SqlTypeKind::TimeTz
-                | SqlTypeKind::Timestamp
-                | SqlTypeKind::TimestampTz
-        )
+        && (left.kind == right.kind
+            && matches!(
+                left.kind,
+                SqlTypeKind::Date
+                    | SqlTypeKind::Time
+                    | SqlTypeKind::TimeTz
+                    | SqlTypeKind::Timestamp
+                    | SqlTypeKind::TimestampTz
+            )
+            || is_mixed_date_timestamp_comparison(left, right))
         && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
+}
+
+fn is_mixed_date_timestamp_comparison(left: SqlType, right: SqlType) -> bool {
+    !left.is_array
+        && !right.is_array
+        && matches!(
+            (left.kind, right.kind),
+            (SqlTypeKind::Date, SqlTypeKind::Timestamp)
+                | (SqlTypeKind::Timestamp, SqlTypeKind::Date)
+                | (SqlTypeKind::Date, SqlTypeKind::TimestampTz)
+                | (SqlTypeKind::TimestampTz, SqlTypeKind::Date)
+        )
 }
 
 // :HACK: PostgreSQL exposes interval comparison operators through pg_operator.
