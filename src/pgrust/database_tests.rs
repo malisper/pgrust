@@ -12,9 +12,8 @@ use crate::backend::utils::misc::notices::{
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BootstrapCatalogKind, CSTRING_TYPE_OID, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
-    PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_OPERATOR_RELATION_OID, PG_OPERATOR_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PG_TYPE_RELATION_OID,
-    PgAggregateRow, TEXT_TYPE_OID,
+    PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID,
+    PG_TYPE_RELATION_OID, PgAggregateRow, TEXT_TYPE_OID,
 };
 use crate::include::nodes::datum::{ArrayValue, IntervalValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
