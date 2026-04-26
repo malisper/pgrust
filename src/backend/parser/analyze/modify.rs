@@ -961,7 +961,7 @@ pub fn plan_merge(
             .with_input_resno(index + 1),
         );
     }
-    let source_start = target_visible_count + 1;
+    let source_start = target_visible_count + 2;
     for source_index in 0..source_visible_count {
         let input_index = source_start + source_index;
         projection_targets.push(
@@ -983,7 +983,7 @@ pub fn plan_merge(
         )
         .with_input_resno(target_visible_count + 1),
     );
-    let source_marker_input = target_visible_count + 1 + source_visible_count;
+    let source_marker_input = target_visible_count + 2 + source_visible_count;
     projection_targets.push(
         TargetEntry::new(
             merge_hidden_source_present_name(),

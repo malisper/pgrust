@@ -193,6 +193,12 @@ impl VisibleCatalog {
             .unwrap_or_default()
     }
 
+    pub fn class_row_by_oid(&self, oid: u32) -> Option<PgClassRow> {
+        self.catcache
+            .as_ref()
+            .and_then(|catcache| catcache.class_by_oid(oid).cloned())
+    }
+
     pub fn proc_rows(&self) -> Vec<PgProcRow> {
         self.catcache
             .as_ref()

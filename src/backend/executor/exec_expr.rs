@@ -1562,14 +1562,22 @@ fn lookup_system_binding(
         })
 }
 
-fn lookup_ctid(slot: &TupleSlot) -> Result<Value, ExecError> {
-    slot.tid()
-        .map(|tid| {
-            Value::Text(CompactString::from_owned(format!(
-                "({},{})",
-                tid.block_number, tid.offset_number
-            )))
-        })
+fn ctid_value(tid: crate::include::access::htup::ItemPointerData) -> Value {
+    Value::Text(CompactString::from_owned(format!(
+        "({},{})",
+        tid.block_number, tid.offset_number
+    )))
+}
+
+fn lookup_ctid_binding(
+    bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
+    varno: usize,
+) -> Result<Value, ExecError> {
+    bindings
+        .iter()
+        .find(|binding| binding.varno == varno)
+        .and_then(|binding| binding.tid)
+        .map(ctid_value)
         .ok_or(ExecError::DetailedError {
             message: "ctid is not available for this row".into(),
             detail: None,
@@ -4005,7 +4013,8 @@ pub fn eval_expr(
                         .ok_or(err)
                 })
             } else if var.varattno == SELF_ITEM_POINTER_ATTR_NO {
-                lookup_ctid(slot)
+                lookup_ctid_binding(&ctx.system_bindings, var.varno)
+                    .or_else(|err| slot.tid().map(ctid_value).ok_or(err))
             } else {
                 let index = attrno_index(var.varattno).ok_or_else(|| {
                     malformed_expr_error("system attribute outside executor support")

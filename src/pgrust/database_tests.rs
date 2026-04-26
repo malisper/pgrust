@@ -7292,6 +7292,100 @@ fn base_table_scan_exposes_ctid_system_column() {
 }
 
 #[test]
+fn outer_join_null_extended_ctid_is_null() {
+    let dir = temp_dir("outer_join_ctid");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table ctid_source(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table ctid_target(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into ctid_source values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into ctid_target values (2)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select t.ctid is not null, t.id, s.id from ctid_source s full outer join ctid_target t on s.id = t.id order by t.id, s.id"
+        ),
+        vec![
+            vec![Value::Bool(true), Value::Int32(2), Value::Null],
+            vec![Value::Bool(false), Value::Null, Value::Int32(1)],
+        ]
+    );
+}
+
+#[test]
+fn merge_checks_target_and_source_privileges() {
+    let dir = temp_dir("merge_privileges");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role merge_owner login")
+        .unwrap();
+    session
+        .execute(&db, "create role merge_tenant login")
+        .unwrap();
+    session
+        .execute(&db, "create table merge_target(id int4, value int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table merge_source(id int4, value int4)")
+        .unwrap();
+    session
+        .execute(&db, "alter table merge_target owner to merge_owner")
+        .unwrap();
+    session
+        .execute(&db, "alter table merge_source owner to merge_owner")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization merge_tenant")
+        .unwrap();
+
+    match session.execute(
+        &db,
+        "merge into merge_target t using merge_source s on t.id = s.id when matched then do nothing",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "permission denied for table merge_target");
+            assert_eq!(sqlstate, "42501");
+        }
+        other => panic!("expected merge target privilege error, got {other:?}"),
+    }
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "grant select on merge_target to merge_tenant")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization merge_tenant")
+        .unwrap();
+    match session.execute(
+        &db,
+        "merge into merge_target t using merge_source s on t.id = s.id when matched then do nothing",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "permission denied for table merge_source");
+            assert_eq!(sqlstate, "42501");
+        }
+        other => panic!("expected merge source privilege error, got {other:?}"),
+    }
+}
+
+#[test]
 fn inherited_update_delete_follow_postgres_targeting_rules() {
     let dir = temp_dir("inheritance_guardrails");
     let db = Database::open(&dir, 128).unwrap();
