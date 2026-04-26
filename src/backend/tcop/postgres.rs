@@ -297,7 +297,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if is_create_type_missing_subtype_diff_function(sql, message) {
                 return None;
             }
-            if let Some(position) = find_function_error_position(sql, message) {
+            if let Some(position) = find_routine_error_position(sql, message) {
                 return Some(position);
             }
             if let Some(position) = trigger_when_error_position(sql, message) {
@@ -415,7 +415,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if is_create_type_missing_subtype_diff_function(sql, message) {
                 return None;
             }
-            if let Some(position) = find_function_error_position(sql, message) {
+            if let Some(position) = find_routine_error_position(sql, message) {
                 return Some(position);
             }
             if let Some(position) = trigger_when_error_position(sql, message) {
@@ -818,10 +818,17 @@ fn find_subscript_expression_position(sql: &str) -> Option<usize> {
     Some(start + 1)
 }
 
-fn find_function_error_position(sql: &str, message: &str) -> Option<usize> {
+fn find_routine_error_position(sql: &str, message: &str) -> Option<usize> {
     let signature = message
-        .strip_prefix("function ")?
-        .strip_suffix(" does not exist")?;
+        .strip_prefix("function ")
+        .and_then(|message| message.strip_suffix(" does not exist"))
+        .or_else(|| {
+            message
+                .strip_prefix("procedure ")
+                .and_then(|message| message.strip_suffix(" does not exist"))
+        })
+        .or_else(|| message.strip_suffix(" is not a procedure"))
+        .or_else(|| message.strip_suffix(" is a procedure"))?;
     let name = signature
         .split_once('(')
         .map_or(signature, |(name, _)| name);

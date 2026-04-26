@@ -875,6 +875,7 @@ fn range_proc_row(
         proparallel: 's',
         pronargs: arg_oids.len() as i16,
         pronargdefaults: 0,
+        proargdefaults: None,
         prorettype,
         proargtypes: oid_argtypes(arg_oids),
         proallargtypes: None,

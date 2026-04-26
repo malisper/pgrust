@@ -286,7 +286,9 @@ pub enum Statement {
     Set(SetStatement),
     SetConstraints(SetConstraintsStatement),
     Reset(ResetStatement),
+    Call(CallStatement),
     CreateFunction(CreateFunctionStatement),
+    CreateProcedure(CreateProcedureStatement),
     CreateAggregate(CreateAggregateStatement),
     CreateTrigger(CreateTriggerStatement),
     CreateType(CreateTypeStatement),
@@ -376,6 +378,7 @@ pub enum Statement {
     DropPublication(DropPublicationStatement),
     DropStatistics(DropStatisticsStatement),
     DropFunction(DropFunctionStatement),
+    DropProcedure(DropProcedureStatement),
     DropOperator(DropOperatorStatement),
     DropAggregate(DropAggregateStatement),
     DropTable(DropTableStatement),
@@ -390,6 +393,7 @@ pub enum Statement {
     DropSchema(DropSchemaStatement),
     CreateRole(CreateRoleStatement),
     AlterRole(AlterRoleStatement),
+    AlterProcedure(AlterProcedureStatement),
     AlterForeignDataWrapper(AlterForeignDataWrapperStatement),
     AlterForeignDataWrapperOwner(AlterForeignDataWrapperOwnerStatement),
     AlterForeignDataWrapperRename(AlterForeignDataWrapperRenameStatement),
@@ -594,6 +598,8 @@ pub struct CreateFunctionArg {
     pub mode: FunctionArgMode,
     pub name: Option<String>,
     pub ty: RawTypeName,
+    pub default_expr: Option<String>,
+    pub variadic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -624,6 +630,41 @@ pub struct CreateFunctionStatement {
     pub language: String,
     pub body: String,
     pub link_symbol: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallStatement {
+    pub schema_name: Option<String>,
+    pub procedure_name: String,
+    pub args: SqlCallArgs,
+    pub raw_arg_sql: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateProcedureStatement {
+    pub schema_name: Option<String>,
+    pub procedure_name: String,
+    pub replace_existing: bool,
+    pub args: Vec<CreateFunctionArg>,
+    pub strict: bool,
+    pub volatility: FunctionVolatility,
+    pub language: String,
+    pub body: String,
+    pub sql_standard_body: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterProcedureAction {
+    Strict,
+    Volatility(FunctionVolatility),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterProcedureStatement {
+    pub schema_name: Option<String>,
+    pub procedure_name: String,
+    pub arg_types: Vec<String>,
+    pub action: AlterProcedureAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2364,6 +2405,20 @@ pub struct DropFunctionStatement {
     pub schema_name: Option<String>,
     pub function_name: String,
     pub arg_types: Vec<String>,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropRoutineItem {
+    pub schema_name: Option<String>,
+    pub routine_name: String,
+    pub arg_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropProcedureStatement {
+    pub if_exists: bool,
+    pub procedures: Vec<DropRoutineItem>,
     pub cascade: bool,
 }
 

@@ -221,6 +221,7 @@ pub struct PgProcRow {
     pub proparallel: char,
     pub pronargs: i16,
     pub pronargdefaults: i16,
+    pub proargdefaults: Option<Vec<String>>,
     pub prorettype: u32,
     pub proargtypes: String,
     pub proallargtypes: Option<Vec<u32>>,
@@ -278,6 +279,11 @@ pub fn pg_proc_desc() -> RelationDesc {
                 true,
             ),
             column_desc("prosrc", SqlType::new(SqlTypeKind::Text), false),
+            column_desc(
+                "proargdefaults",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                true,
+            ),
         ],
     }
 }
@@ -1303,6 +1309,7 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
         ),
         PgProcRow {
             pronargdefaults: 2,
+            proargdefaults: None,
             proargnames: Some(vec!["mean".into(), "stddev".into()]),
             ..proc_row(
                 6342,
@@ -1500,6 +1507,54 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             NAME_TYPE_OID,
             &oid_argtypes(&[OID_TYPE_OID]),
             "pg_get_userbyid",
+            1,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            76720,
+            "pg_get_function_arguments",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "pg_get_function_arguments",
+            1,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            76721,
+            "pg_get_functiondef",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "pg_get_functiondef",
+            1,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            76722,
+            "pg_get_function_result",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "pg_get_function_result",
+            1,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            76723,
+            "pg_function_is_visible",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "pg_function_is_visible",
             1,
             false,
             true,
@@ -5457,6 +5512,22 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgDescribeObject,
         ),
         (
+            "pg_get_function_arguments",
+            BuiltinScalarFunction::PgGetFunctionArguments,
+        ),
+        (
+            "pg_get_functiondef",
+            BuiltinScalarFunction::PgGetFunctionDef,
+        ),
+        (
+            "pg_get_function_result",
+            BuiltinScalarFunction::PgGetFunctionResult,
+        ),
+        (
+            "pg_function_is_visible",
+            BuiltinScalarFunction::PgFunctionIsVisible,
+        ),
+        (
             "pg_get_constraintdef",
             BuiltinScalarFunction::PgGetConstraintDef,
         ),
@@ -9184,6 +9255,7 @@ fn proc_row_with_parallel(
         proparallel,
         pronargs,
         pronargdefaults: 0,
+        proargdefaults: None,
         prorettype,
         proargtypes: proargtypes.into(),
         proallargtypes: None,
@@ -9443,6 +9515,7 @@ mod tests {
                 "proargmodes",
                 "proargnames",
                 "prosrc",
+                "proargdefaults",
             ]
         );
     }

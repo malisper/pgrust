@@ -2,16 +2,17 @@ use super::super::*;
 use crate::backend::commands::partition::validate_new_partition_bound;
 use crate::backend::parser::{
     AggregateArgType, AggregateSignatureKind, CreateAggregateStatement, CreateFunctionReturnSpec,
-    CreateFunctionStatement, FunctionArgMode, FunctionParallel, FunctionVolatility,
-    OwnedSequenceSpec, PartitionBoundSpec, RawTypeName, SequenceOptionsSpec, SqlType, SqlTypeKind,
-    pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
+    CreateFunctionStatement, CreateProcedureStatement, FunctionArgMode, FunctionParallel,
+    FunctionVolatility, OwnedSequenceSpec, PartitionBoundSpec, RawTypeName, SequenceOptionsSpec,
+    SqlType, SqlTypeKind, Statement, parse_statement, pg_partitioned_table_row,
+    resolve_raw_type_name, serialize_partition_bound,
 };
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
 use crate::include::catalog::{
     ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
     BOOTSTRAP_SUPERUSER_OID, BYTEA_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
     PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PgAggregateRow,
-    PgProcRow, RECORD_TYPE_OID,
+    PgProcRow, RECORD_TYPE_OID, VOID_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::include::nodes::primnodes::{QueryColumn, RelationDesc};
@@ -24,6 +25,176 @@ use crate::pgrust::database::{
 pub(super) struct CreatedOwnedSequence {
     pub(super) column_index: usize,
     pub(super) sequence_oid: u32,
+}
+
+fn validate_sql_procedure_body(
+    create_stmt: &CreateProcedureStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    if !create_stmt.language.eq_ignore_ascii_case("sql") {
+        return Ok(());
+    }
+    if create_stmt.sql_standard_body && sql_body_contains_create_table(&create_stmt.body) {
+        return Err(ExecError::DetailedError {
+            message: "CREATE TABLE is not yet supported in unquoted SQL function body".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    for stmt_sql in split_sql_body_statements(&create_stmt.body)? {
+        let Ok(Statement::Call(call_stmt)) = parse_statement(&stmt_sql) else {
+            continue;
+        };
+        if call_targets_procedure_with_output_args(&call_stmt, catalog) {
+            return Err(ExecError::WithContext {
+                source: Box::new(ExecError::DetailedError {
+                    message:
+                        "calling procedures with output arguments is not supported in SQL functions"
+                            .into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                }),
+                context: format!("SQL function \"{}\"", create_stmt.procedure_name),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn sql_body_contains_create_table(body: &str) -> bool {
+    split_sql_body_statements(body).is_ok_and(|statements| {
+        statements.into_iter().any(|stmt| {
+            stmt.split_whitespace()
+                .map(str::to_ascii_lowercase)
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|words| words == ["create", "table"])
+        })
+    })
+}
+
+fn call_targets_procedure_with_output_args(
+    call_stmt: &crate::backend::parser::CallStatement,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    let actual_count = call_stmt.raw_arg_sql.len();
+    catalog
+        .proc_rows_by_name(&call_stmt.procedure_name)
+        .into_iter()
+        .filter(|row| row.prokind == 'p')
+        .filter(|row| {
+            call_stmt.schema_name.as_deref().is_none_or(|schema_name| {
+                catalog
+                    .namespace_row_by_oid(row.pronamespace)
+                    .is_some_and(|namespace| namespace.nspname.eq_ignore_ascii_case(schema_name))
+            })
+        })
+        .filter(|row| procedure_accepts_arg_count(row, actual_count))
+        .any(|row| procedure_has_output_args(&row))
+}
+
+fn procedure_accepts_arg_count(row: &PgProcRow, actual: usize) -> bool {
+    let input_count = row.pronargs.max(0) as usize;
+    let all_count = row
+        .proallargtypes
+        .as_ref()
+        .map(Vec::len)
+        .unwrap_or(input_count);
+    actual == input_count || actual == all_count
+}
+
+fn procedure_has_output_args(row: &PgProcRow) -> bool {
+    row.proargmodes
+        .as_deref()
+        .is_some_and(|modes| modes.iter().any(|mode| matches!(*mode, b'o' | b'b')))
+}
+
+fn split_sql_body_statements(body: &str) -> Result<Vec<String>, ExecError> {
+    let body = sql_standard_body_inner(body).unwrap_or(body);
+    let mut statements = Vec::new();
+    let mut start = 0usize;
+    let bytes = body.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => i = scan_sql_delimited_end(bytes, i, b'\'')?,
+            b'"' => i = scan_sql_delimited_end(bytes, i, b'"')?,
+            b'$' => {
+                if let Some(end) = scan_sql_dollar_string_end(body, i) {
+                    i = end;
+                }
+            }
+            b';' => {
+                let statement = body[start..i].trim();
+                if !statement.is_empty() {
+                    statements.push(statement.to_string());
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let statement = body[start..].trim();
+    if !statement.is_empty() && !statement.eq_ignore_ascii_case("end") {
+        statements.push(statement.to_string());
+    }
+    Ok(statements)
+}
+
+fn sql_standard_body_inner(body: &str) -> Option<&str> {
+    let trimmed = body.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("begin atomic") {
+        return None;
+    }
+    let without_trailing_semicolon = trimmed.trim_end_matches(';').trim_end();
+    let lowered_without_semicolon = without_trailing_semicolon.to_ascii_lowercase();
+    let end = if lowered_without_semicolon.ends_with("end") {
+        without_trailing_semicolon.len().saturating_sub("end".len())
+    } else {
+        trimmed.len()
+    };
+    trimmed.get("begin atomic".len()..end).map(str::trim)
+}
+
+fn scan_sql_delimited_end(bytes: &[u8], start: usize, delimiter: u8) -> Result<usize, ExecError> {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == delimiter {
+            if i + 1 < bytes.len() && bytes[i + 1] == delimiter {
+                i += 2;
+                continue;
+            }
+            return Ok(i + 1);
+        }
+        i += 1;
+    }
+    Err(ExecError::Parse(ParseError::UnexpectedEof))
+}
+
+fn scan_sql_dollar_string_end(input: &str, start: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut tag_end = start + 1;
+    while tag_end < bytes.len() {
+        let byte = bytes[tag_end];
+        if byte == b'$' {
+            break;
+        }
+        if !(byte.is_ascii_alphanumeric() || byte == b'_') {
+            return None;
+        }
+        tag_end += 1;
+    }
+    if bytes.get(tag_end) != Some(&b'$') {
+        return None;
+    }
+    let tag = &input[start..=tag_end];
+    input[tag_end + 1..]
+        .find(tag)
+        .map(|offset| tag_end + 1 + offset + tag.len())
 }
 
 fn relation_exists_in_namespace(
@@ -1221,6 +1392,102 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        self.execute_create_function_stmt_in_transaction_with_kind(
+            client_id,
+            create_stmt,
+            xid,
+            cid,
+            configured_search_path,
+            catalog_effects,
+            'f',
+            "function",
+        )
+    }
+
+    pub(crate) fn execute_create_procedure_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateProcedureStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_create_procedure_stmt_in_transaction_with_search_path(
+            client_id,
+            create_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_create_procedure_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateProcedureStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        validate_sql_procedure_body(create_stmt, &catalog)?;
+        let function_stmt = CreateFunctionStatement {
+            schema_name: create_stmt.schema_name.clone(),
+            function_name: create_stmt.procedure_name.clone(),
+            replace_existing: create_stmt.replace_existing,
+            cost: None,
+            args: create_stmt.args.clone(),
+            return_spec: if create_stmt
+                .args
+                .iter()
+                .any(|arg| matches!(arg.mode, FunctionArgMode::Out | FunctionArgMode::InOut))
+            {
+                CreateFunctionReturnSpec::DerivedFromOutArgs {
+                    setof_record: false,
+                }
+            } else {
+                CreateFunctionReturnSpec::Type {
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Void)),
+                    setof: false,
+                }
+            },
+            strict: create_stmt.strict,
+            leakproof: false,
+            volatility: create_stmt.volatility,
+            parallel: FunctionParallel::Unsafe,
+            language: create_stmt.language.clone(),
+            body: create_stmt.body.clone(),
+            link_symbol: None,
+        };
+        self.execute_create_function_stmt_in_transaction_with_kind(
+            client_id,
+            &function_stmt,
+            xid,
+            cid,
+            configured_search_path,
+            catalog_effects,
+            'p',
+            "procedure",
+        )
+    }
+
+    fn execute_create_function_stmt_in_transaction_with_kind(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateFunctionStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        proc_kind: char,
+        object_kind: &'static str,
+    ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let (function_name, namespace_oid) = normalize_create_proc_name_for_search_path(
@@ -1229,7 +1496,7 @@ impl Database {
             Some((xid, cid)),
             create_stmt.schema_name.as_deref(),
             &create_stmt.function_name,
-            "function",
+            object_kind,
             configured_search_path,
         )?;
 
@@ -1252,10 +1519,12 @@ impl Database {
         }
 
         let mut callable_arg_oids = Vec::new();
+        let mut callable_arg_defaults = Vec::new();
         let mut all_arg_oids = Vec::new();
         let mut all_arg_modes = Vec::new();
         let mut all_arg_names = Vec::new();
         let mut output_args = Vec::new();
+        let mut provariadic = 0;
 
         for arg in &create_stmt.args {
             let sql_type = resolve_raw_type_name(&arg.ty, &catalog).map_err(ExecError::Parse)?;
@@ -1273,6 +1542,25 @@ impl Database {
 
             if matches!(arg.mode, FunctionArgMode::In | FunctionArgMode::InOut) {
                 callable_arg_oids.push(type_oid);
+                callable_arg_defaults.push(arg.default_expr.clone());
+                if arg.variadic {
+                    provariadic = catalog
+                        .type_rows()
+                        .into_iter()
+                        .find(|row| row.typarray == type_oid)
+                        .map(|row| row.oid)
+                        .or_else(|| {
+                            catalog.type_by_oid(type_oid).map(|row| {
+                                if row.sql_type.is_array {
+                                    row.sql_type.type_oid
+                                } else {
+                                    row.typelem
+                                }
+                            })
+                        })
+                        .filter(|element_oid| *element_oid != 0)
+                        .unwrap_or(type_oid);
+                }
             }
             if matches!(arg.mode, FunctionArgMode::Out | FunctionArgMode::InOut) {
                 output_args.push(QueryColumn {
@@ -1451,11 +1739,18 @@ impl Database {
         let existing_proc = catalog
             .proc_rows_by_name(&function_name)
             .into_iter()
-            .find(|row| row.pronamespace == namespace_oid && row.proargtypes == proargtypes);
+            .find(|row| {
+                row.pronamespace == namespace_oid
+                    && row.proargtypes == proargtypes
+                    && row.prokind == proc_kind
+            });
         if existing_proc.is_some() && !create_stmt.replace_existing {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "unique function signature",
-                actual: format!("function {}({}) already exists", function_name, proargtypes),
+                expected: "unique routine signature",
+                actual: format!(
+                    "{object_kind} {}({}) already exists",
+                    function_name, proargtypes
+                ),
             }));
         }
 
@@ -1474,9 +1769,9 @@ impl Database {
                 })
                 .unwrap_or(100.0),
             prorows: if proretset { 1000.0 } else { 0.0 },
-            provariadic: 0,
+            provariadic,
             prosupport: 0,
-            prokind: 'f',
+            prokind: proc_kind,
             prosecdef: false,
             proleakproof: create_stmt.leakproof,
             proisstrict: create_stmt.strict,
@@ -1488,8 +1783,21 @@ impl Database {
             },
             proparallel: proc_parallel_code(create_stmt.parallel),
             pronargs: callable_arg_oids.len() as i16,
-            pronargdefaults: 0,
-            prorettype,
+            pronargdefaults: callable_arg_defaults
+                .iter()
+                .filter(|default_expr| default_expr.is_some())
+                .count() as i16,
+            proargdefaults: callable_arg_defaults.iter().any(Option::is_some).then(|| {
+                callable_arg_defaults
+                    .into_iter()
+                    .map(|default_expr| default_expr.unwrap_or_default())
+                    .collect()
+            }),
+            prorettype: if proc_kind == 'p' {
+                VOID_TYPE_OID
+            } else {
+                prorettype
+            },
             proargtypes,
             proallargtypes,
             proargmodes,
@@ -1737,6 +2045,7 @@ impl Database {
             proparallel: create_stmt.parallel.map(proc_parallel_code).unwrap_or('u'),
             pronargs: arg_oids.len() as i16,
             pronargdefaults: 0,
+            proargdefaults: None,
             prorettype: result_type_oid,
             proargtypes,
             proallargtypes: None,
