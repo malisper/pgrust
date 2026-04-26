@@ -537,8 +537,16 @@ pub struct QueryRowMark {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeTblEref {
+    pub aliasname: String,
+    pub colnames: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RangeTblEntry {
     pub alias: Option<String>,
+    pub alias_preserves_source_names: bool,
+    pub eref: RangeTblEref,
     pub desc: RelationDesc,
     pub inh: bool,
     pub security_quals: Vec<Expr>,

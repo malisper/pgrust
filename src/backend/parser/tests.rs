@@ -14634,14 +14634,10 @@ fn parse_values_from_item() {
 fn build_plan_partial_derived_table_column_aliases_preserve_suffix() {
     let stmt = parse_select("select p.x, p.name from (select id, name from people) p(x)").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
-    match plan {
-        Plan::Projection { targets, .. } => {
-            assert_eq!(targets.len(), 2);
-            assert_eq!(targets[0].name, "x");
-            assert_eq!(targets[1].name, "name");
-        }
-        other => panic!("expected projection, got {:?}", other),
-    }
+    assert_eq!(
+        plan.column_names(),
+        vec!["x".to_string(), "name".to_string()]
+    );
 }
 
 #[test]

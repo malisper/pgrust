@@ -637,6 +637,7 @@ pub enum BuiltinScalarFunction {
     PgGetConstraintDef,
     PgGetIndexDef,
     PgGetViewDef,
+    PgGetRuleDef,
     PgGetTriggerDef,
     PgTriggerDepth,
     PgGetStatisticsObjDef,
