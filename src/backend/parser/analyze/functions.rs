@@ -57,7 +57,7 @@ pub(super) enum ResolvedFunctionRowShape {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ResolvedFunctionCall {
+pub(crate) struct ResolvedFunctionCall {
     pub proc_oid: u32,
     pub proname: String,
     pub prokind: char,
@@ -83,7 +83,7 @@ struct CandidateMatch {
     vatype_oid: u32,
 }
 
-pub(super) fn resolve_function_call(
+pub(crate) fn resolve_function_call(
     catalog: &dyn CatalogLookup,
     name: &str,
     actual_types: &[SqlType],

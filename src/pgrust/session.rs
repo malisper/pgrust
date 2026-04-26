@@ -703,7 +703,7 @@ fn procedure_params(row: &PgProcRow) -> Vec<ProcedureParam> {
         .enumerate()
         .map(|(index, type_oid)| {
             let mode = modes.get(index).copied().unwrap_or(b'i');
-            let current_input_index = matches!(mode, b'i' | b'b').then(|| {
+            let current_input_index = matches!(mode, b'i' | b'b' | b'v').then(|| {
                 let index = input_index;
                 input_index += 1;
                 index
@@ -714,7 +714,9 @@ fn procedure_params(row: &PgProcRow) -> Vec<ProcedureParam> {
                 type_oid,
                 mode,
                 variadic: row.provariadic != 0
-                    && current_input_index == Some(row.pronargs.max(0).saturating_sub(1) as usize),
+                    && (mode == b'v'
+                        || current_input_index
+                            == Some(row.pronargs.max(0).saturating_sub(1) as usize)),
             }
         })
         .collect()
@@ -891,7 +893,7 @@ fn inline_sql_procedure_body(row: &PgProcRow, args: &[Value]) -> Result<String, 
         let input_arg_names = names
             .iter()
             .zip(row.proargmodes.as_deref().unwrap_or(&[]).iter().copied())
-            .filter(|(_, mode)| matches!(*mode, b'i' | b'b'))
+            .filter(|(_, mode)| matches!(*mode, b'i' | b'b' | b'v'))
             .map(|(name, _)| name)
             .collect::<Vec<_>>();
         let names = if input_arg_names.is_empty() {
@@ -2376,6 +2378,24 @@ impl Session {
                     db.execute_create_aggregate_stmt_with_search_path(
                         self.client_id,
                         create_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterAggregateRename(ref rename_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_aggregate_rename_stmt_with_search_path(
+                        self.client_id,
+                        rename_stmt,
                         search_path.as_deref(),
                     )
                 }
@@ -6446,6 +6466,18 @@ impl Session {
                 db.execute_create_aggregate_stmt_in_transaction_with_search_path(
                     client_id,
                     create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterAggregateRename(ref rename_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_aggregate_rename_stmt_in_transaction_with_search_path(
+                    client_id,
+                    rename_stmt,
                     xid,
                     cid,
                     search_path.as_deref(),

@@ -2397,6 +2397,9 @@ fn execute_query_statement(
         return Ok(QueryStatementFlow::Continue);
     }
 
+    clear_backend_notices();
+    clear_notices();
+
     let parsed = if state.session.standard_conforming_strings() {
         db.plan_cache
             .get_statement_with_options(
@@ -2440,8 +2443,11 @@ fn execute_query_statement(
         });
     }
 
-    clear_backend_notices();
-    clear_notices();
+    if parsed.is_err() {
+        clear_backend_notices();
+        clear_notices();
+    }
+
     match state.session.execute(db, &sql) {
         Ok(StatementResult::Query {
             mut columns, rows, ..

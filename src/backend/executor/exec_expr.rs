@@ -133,8 +133,8 @@ use crate::backend::utils::misc::guc::plpgsql_guc_default_value;
 use crate::backend::utils::time::datetime::current_postgres_timestamp_usecs;
 use crate::include::access::toast_compression::ToastCompressionId;
 use crate::include::catalog::{
-    BOX_SPGIST_OPCLASS_OID, BPCHAR_HASH_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID, BYTEA_TYPE_OID,
-    CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
+    ANYOID, BOX_SPGIST_OPCLASS_OID, BPCHAR_HASH_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID,
+    BYTEA_TYPE_OID, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
     CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, GIN_AM_OID,
     GIST_AM_OID, HASH_AM_OID, INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID,
     PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID,
@@ -813,6 +813,23 @@ fn type_identity_text(catalog: &dyn CatalogLookup, type_oid: u32) -> String {
     catalog
         .type_by_oid(type_oid)
         .map(|row| {
+            if type_oid == ANYOID {
+                return "\"any\"".to_string();
+            }
+            if matches!(
+                row.sql_type.kind,
+                SqlTypeKind::AnyElement
+                    | SqlTypeKind::AnyArray
+                    | SqlTypeKind::AnyRange
+                    | SqlTypeKind::AnyMultirange
+                    | SqlTypeKind::AnyCompatible
+                    | SqlTypeKind::AnyCompatibleArray
+                    | SqlTypeKind::AnyCompatibleRange
+                    | SqlTypeKind::AnyCompatibleMultirange
+                    | SqlTypeKind::AnyEnum
+            ) {
+                return row.typname;
+            }
             if !row.sql_type.is_array
                 && row.sql_type.type_oid == row.oid
                 && row.sql_type.kind == SqlTypeKind::Bytea
@@ -859,6 +876,12 @@ fn function_arguments_text(
     proc_row: &crate::include::catalog::PgProcRow,
     catalog: &dyn CatalogLookup,
 ) -> String {
+    if proc_row.prokind == 'a'
+        && let Some(aggregate_row) = catalog.aggregate_by_fnoid(proc_row.oid)
+        && matches!(aggregate_row.aggkind, 'o' | 'h')
+    {
+        return aggregate_function_arguments_text(proc_row, &aggregate_row, catalog);
+    }
     let names = proc_row.proargnames.as_deref().unwrap_or(&[]);
     let defaults = proc_arg_defaults(proc_row);
     if let (Some(types), Some(modes)) = (
@@ -928,6 +951,69 @@ fn proc_arg_defaults(proc_row: &crate::include::catalog::PgProcRow) -> Vec<Optio
     aligned.extend(legacy);
     aligned.resize(input_count, None);
     aligned
+}
+
+fn aggregate_function_arguments_text(
+    proc_row: &crate::include::catalog::PgProcRow,
+    aggregate_row: &crate::include::catalog::PgAggregateRow,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let types = proc_arg_type_oids(proc_row);
+    let names = proc_row.proargnames.as_deref().unwrap_or(&[]);
+    let modes = proc_row.proargmodes.as_deref().unwrap_or(&[]);
+    let direct_count = usize::try_from(aggregate_row.aggnumdirectargs)
+        .unwrap_or(0)
+        .min(types.len());
+    let direct_text = types
+        .iter()
+        .copied()
+        .take(direct_count)
+        .enumerate()
+        .map(|(index, type_oid)| {
+            format_function_arg(
+                modes.get(index).copied().unwrap_or(b'i'),
+                names.get(index).map(String::as_str),
+                type_oid,
+                None,
+                catalog,
+                false,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let order_text = types
+        .iter()
+        .copied()
+        .enumerate()
+        .skip(direct_count)
+        .map(|(index, type_oid)| {
+            format_function_arg(
+                modes.get(index).copied().unwrap_or(b'i'),
+                names.get(index).map(String::as_str),
+                type_oid,
+                None,
+                catalog,
+                false,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    match (direct_text.is_empty(), order_text.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => direct_text,
+        (true, false) => format!("ORDER BY {order_text}"),
+        (false, false) => format!("{direct_text} ORDER BY {order_text}"),
+    }
+}
+
+fn proc_arg_type_oids(proc_row: &crate::include::catalog::PgProcRow) -> Vec<u32> {
+    proc_row.proallargtypes.clone().unwrap_or_else(|| {
+        proc_row
+            .proargtypes
+            .split_whitespace()
+            .filter_map(|oid| oid.parse::<u32>().ok())
+            .collect()
+    })
 }
 
 fn format_function_arg(

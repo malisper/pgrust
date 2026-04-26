@@ -2,7 +2,7 @@ use super::{
     AggGroup, ExecError, ExecutorContext, OrderedAggInput, build_aggregate_runtime, executor_start,
 };
 use crate::backend::access::heap::heapam::{
-    heap_fetch_visible_with_txns, heap_scan_begin_visible, heap_scan_end,
+    heap_fetch_visible_with_txns, heap_scan_begin_visible, heap_scan_end, heap_scan_next_visible,
     heap_scan_page_next_tuple, heap_scan_prepare_next_page,
 };
 use crate::backend::access::index::indexam;
@@ -37,7 +37,7 @@ use crate::include::access::visibilitymap::visibilitymap_get_status;
 use crate::include::access::visibilitymapdefs::VISIBILITYMAP_ALL_VISIBLE;
 use crate::include::catalog::{
     BTREE_AM_OID, DATE_TYPE_OID, GIST_AM_OID, HASH_AM_OID, PG_LARGEOBJECT_METADATA_RELATION_OID,
-    SPGIST_AM_OID, TEXT_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
+    PG_NAMESPACE_RELATION_OID, SPGIST_AM_OID, TEXT_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
 };
 use crate::include::nodes::datetime::{DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimestampTzADT};
 use crate::include::nodes::datum::Value;
@@ -55,7 +55,7 @@ use crate::include::nodes::primnodes::{
     ParamKind, RelationDesc, ScalarFunctionImpl, Var, attrno_index,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::rc::Rc;
 
 const EMPTY_SYSTEM_BINDINGS: [SystemVarBinding; 0] = [];
@@ -1006,6 +1006,77 @@ impl PlanNode for SeqScanState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if self.relation_oid == PG_NAMESPACE_RELATION_OID {
+            let start = if ctx.timed {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            begin_node(&mut self.stats, ctx)?;
+            if self.scan_rows.is_empty() {
+                let mut rows_by_oid = BTreeMap::<i64, Vec<Value>>::new();
+                let mut scan = heap_scan_begin_visible(
+                    &ctx.pool,
+                    ctx.client_id,
+                    self.rel,
+                    ctx.snapshot.clone(),
+                )?;
+                let txns = ctx.txns.read();
+                while let Some((_tid, tuple)) =
+                    heap_scan_next_visible(&ctx.pool, ctx.client_id, &txns, &mut scan)?
+                {
+                    let raw = tuple.deform(&self.attr_descs)?;
+                    let mut values = Vec::with_capacity(self.desc.columns.len());
+                    for (index, column) in self.desc.columns.iter().enumerate() {
+                        if let Some(datum) = raw.get(index) {
+                            values.push(decode_value_with_toast(column, *datum, None)?);
+                        } else {
+                            values.push(missing_column_value(column));
+                        }
+                    }
+                    let oid = match values.first() {
+                        Some(Value::Int64(oid)) => *oid,
+                        Some(Value::Int32(oid)) => i64::from(*oid),
+                        _ => continue,
+                    };
+                    let prefer_new = rows_by_oid
+                        .get(&oid)
+                        .is_none_or(|existing| matches!(existing.get(3), Some(Value::Null)))
+                        && !matches!(values.get(3), Some(Value::Null));
+                    if prefer_new || !rows_by_oid.contains_key(&oid) {
+                        rows_by_oid.insert(oid, values);
+                    }
+                }
+                self.scan_rows = rows_by_oid.into_values().collect();
+            }
+            loop {
+                let Some(values) = self.scan_rows.get(self.scan_index).cloned() else {
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                };
+                self.scan_index += 1;
+                self.slot
+                    .store_virtual_row(values, None, Some(self.relation_oid));
+                self.current_bindings = vec![SystemVarBinding {
+                    varno: self.source_id,
+                    table_oid: self.relation_oid,
+                    tid: None,
+                }];
+                set_active_system_bindings(ctx, &self.current_bindings);
+                if let Some(qual) = &self.qual {
+                    let outer_values = materialize_slot_values(&mut self.slot)?;
+                    let current_bindings = self.current_bindings.clone();
+                    set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                    clear_inner_expr_bindings(ctx);
+                    if !qual(&mut self.slot, ctx)? {
+                        note_filtered_row(&mut self.stats);
+                        continue;
+                    }
+                }
+                finish_row(&mut self.stats, start);
+                return Ok(Some(&mut self.slot));
+            }
+        }
         if self.relation_oid == PG_LARGEOBJECT_METADATA_RELATION_OID {
             let start = if ctx.timed {
                 Some(Instant::now())

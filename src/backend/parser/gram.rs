@@ -857,6 +857,10 @@ fn try_parse_aggregate_statement(sql: &str) -> Result<Option<Statement>, ParseEr
         return build_drop_aggregate_statement(trimmed)
             .map(|stmt| Some(Statement::DropAggregate(stmt)));
     }
+    if lowered.starts_with("alter aggregate ") {
+        return build_alter_aggregate_rename_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterAggregateRename(stmt)));
+    }
     if lowered.starts_with("comment on aggregate ") {
         return build_comment_on_aggregate_statement(trimmed)
             .map(|stmt| Some(Statement::CommentOnAggregate(stmt)));
@@ -2916,13 +2920,27 @@ where
     // Keep executor/runtime checks tied to the GUC, but give parser-only work a
     // floor until those recursive builders are flattened.
     let max_stack_depth_kb = max_stack_depth_kb.max(PARSER_STACK_DEPTH_FLOOR_KB);
-    std::thread::Builder::new()
+    let (result, notices) = std::thread::Builder::new()
         .name("pgrust-parser".into())
         .stack_size(PARSER_THREAD_STACK_BYTES)
-        .spawn(move || StackDepthGuard::enter(max_stack_depth_kb).run(f))
+        .spawn(move || {
+            let result = StackDepthGuard::enter(max_stack_depth_kb).run(f);
+            let notices = crate::backend::utils::misc::notices::take_notices();
+            (result, notices)
+        })
         .expect("spawn parser thread")
         .join()
-        .expect("parser thread panicked")
+        .expect("parser thread panicked");
+    for notice in notices {
+        crate::backend::utils::misc::notices::push_backend_notice(
+            notice.severity,
+            notice.sqlstate,
+            notice.message,
+            notice.detail,
+            notice.position,
+        );
+    }
+    result
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -6625,6 +6643,7 @@ struct ParsedCreateAggregateOptions {
     mtransspace: i32,
     mfinalfunc_extra: bool,
     mfinalfunc_modify: char,
+    hypothetical: bool,
 }
 
 fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatement, ParseError> {
@@ -6660,6 +6679,14 @@ fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatemen
     }
 
     let parsed_options = parse_create_aggregate_options(&options_sql)?;
+    if signature.is_none() && parsed_options.basetype.is_none() && parsed_options.stype.is_some() {
+        return Err(ParseError::DetailedError {
+            message: "aggregate input type must be specified".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
     let signature = match signature {
         Some(signature) => {
             if parsed_options.basetype.is_some() {
@@ -6673,32 +6700,29 @@ fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatemen
         None => parsed_options
             .basetype
             .clone()
-            .ok_or_else(|| ParseError::DetailedError {
-                message: "aggregate input type must be specified".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "42601",
-            })?,
+            .unwrap_or(AggregateSignatureKind::Star),
     };
 
     let missing_actual = aggregate_name.clone();
+    let stype = parsed_options
+        .stype
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "STYPE or STYPE1 option",
+            actual: "aggregate stype must be specified".into(),
+        })?;
+    let sfunc_name = parsed_options
+        .sfunc_name
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "SFUNC or SFUNC1 option",
+            actual: missing_actual.clone(),
+        })?;
     Ok(CreateAggregateStatement {
         schema_name,
         aggregate_name,
         replace_existing,
         signature,
-        sfunc_name: parsed_options
-            .sfunc_name
-            .ok_or_else(|| ParseError::UnexpectedToken {
-                expected: "SFUNC or SFUNC1 option",
-                actual: missing_actual.clone(),
-            })?,
-        stype: parsed_options
-            .stype
-            .ok_or_else(|| ParseError::UnexpectedToken {
-                expected: "STYPE or STYPE1 option",
-                actual: missing_actual.clone(),
-            })?,
+        sfunc_name,
+        stype,
         finalfunc_name: parsed_options.finalfunc_name,
         initcond: parsed_options.initcond,
         parallel: parsed_options.parallel,
@@ -6716,6 +6740,7 @@ fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatemen
         mtransspace: parsed_options.mtransspace,
         mfinalfunc_extra: parsed_options.mfinalfunc_extra,
         mfinalfunc_modify: parsed_options.mfinalfunc_modify,
+        hypothetical: parsed_options.hypothetical,
     })
 }
 
@@ -6762,6 +6787,49 @@ fn build_drop_aggregate_statement(sql: &str) -> Result<DropAggregateStatement, P
         aggregate_name,
         signature: parse_aggregate_signature_kind(&signature_sql)?,
         cascade,
+    })
+}
+
+fn build_alter_aggregate_rename_statement(
+    sql: &str,
+) -> Result<AlterAggregateRenameStatement, ParseError> {
+    let prefix = "alter aggregate";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER AGGREGATE name(signature) RENAME TO new_name",
+            actual: sql.into(),
+        });
+    };
+    let rest = rest.trim_start();
+    let ((schema_name, aggregate_name), rest_after_name) = parse_schema_qualified_name(rest)?;
+    let (signature_sql, rest) = take_parenthesized_segment(rest_after_name.trim_start())?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "rename") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "RENAME TO",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "rename").trim_start();
+    if !keyword_at_start(rest, "to") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "TO",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "to").trim_start();
+    let (new_name, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER AGGREGATE RENAME statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(AlterAggregateRenameStatement {
+        schema_name,
+        aggregate_name,
+        signature: parse_aggregate_signature_kind(&signature_sql)?,
+        new_name,
     })
 }
 
@@ -6995,6 +7063,7 @@ fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOp
     for item in split_top_level_items(input, ',')? {
         let Some(eq_idx) = item.find('=') else {
             if item.trim().eq_ignore_ascii_case("hypothetical") {
+                parsed.hypothetical = true;
                 continue;
             }
             return Err(ParseError::UnexpectedToken {
@@ -7002,7 +7071,17 @@ fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOp
                 actual: item,
             });
         };
-        let key = item[..eq_idx].trim().to_ascii_lowercase();
+        let raw_key = item[..eq_idx].trim();
+        if raw_key.starts_with('"') {
+            let attr = parse_sql_identifier(raw_key)
+                .map(|(ident, _)| ident)
+                .unwrap_or_else(|_| raw_key.trim_matches('"').to_string());
+            crate::backend::utils::misc::notices::push_warning(format!(
+                "aggregate attribute \"{attr}\" not recognized"
+            ));
+            continue;
+        }
+        let key = raw_key.to_ascii_lowercase();
         let value = item[eq_idx + 1..].trim();
         match key.as_str() {
             "sfunc" | "sfunc1" => parsed.sfunc_name = Some(parse_aggregate_proc_name(value)?),
@@ -7025,7 +7104,7 @@ fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOp
             "msspace" => parsed.mtransspace = parse_aggregate_i32(value)?,
             "mfinalfunc_extra" => parsed.mfinalfunc_extra = parse_aggregate_bool(value)?,
             "mfinalfunc_modify" => parsed.mfinalfunc_modify = parse_aggregate_final_modify(value)?,
-            "sortop" | "hypothetical" => {
+            "sortop" => {
                 return Err(ParseError::FeatureNotSupported(format!(
                     "{key} aggregate option is not supported"
                 )));
@@ -7051,19 +7130,38 @@ fn parse_aggregate_signature_kind(input: &str) -> Result<AggregateSignatureKind,
             actual: "()".into(),
         });
     }
-    if keyword_boundary(trimmed, "order by").is_some() {
-        return Err(ParseError::FeatureNotSupported(
-            "ordered-set aggregate signatures are not supported".into(),
-        ));
-    }
-    let args = split_top_level_items(trimmed, ',')?
-        .into_iter()
-        .map(|item| parse_aggregate_signature_arg(&item))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(AggregateSignatureKind::Args(args))
+    let (arg_sql, order_by_sql) =
+        if let Some(order_by_idx) = find_next_top_level_keyword(trimmed, &["order by"]) {
+            (
+                trimmed[..order_by_idx].trim(),
+                Some(consume_keyword(&trimmed[order_by_idx..], "order by").trim()),
+            )
+        } else {
+            (trimmed, None)
+        };
+    let args = if arg_sql.is_empty() {
+        Vec::new()
+    } else {
+        split_top_level_items(arg_sql, ',')?
+            .into_iter()
+            .map(|item| parse_aggregate_signature_arg(&item))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let order_by = if let Some(order_by_sql) = order_by_sql {
+        split_top_level_items(order_by_sql, ',')?
+            .into_iter()
+            .map(|item| parse_aggregate_signature_arg(&item))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    Ok(AggregateSignatureKind::Args(AggregateSignature {
+        args,
+        order_by,
+    }))
 }
 
-fn parse_aggregate_signature_arg(input: &str) -> Result<AggregateArgType, ParseError> {
+fn parse_aggregate_signature_arg(input: &str) -> Result<AggregateSignatureArg, ParseError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(ParseError::UnexpectedToken {
@@ -7071,22 +7169,102 @@ fn parse_aggregate_signature_arg(input: &str) -> Result<AggregateArgType, ParseE
             actual: input.into(),
         });
     }
-    if keyword_at_start(trimmed, "variadic") {
-        return Err(ParseError::FeatureNotSupported(
-            "VARIADIC aggregate signatures are not supported".into(),
-        ));
+    let variadic = keyword_at_start(trimmed, "variadic");
+    let type_or_named = if variadic {
+        consume_keyword(trimmed, "variadic").trim_start()
+    } else {
+        trimmed
+    };
+    let named_candidate = parse_sql_identifier(type_or_named)
+        .ok()
+        .and_then(|(name, rest)| {
+            let rest = rest.trim();
+            (!rest.is_empty()
+                && !aggregate_type_phrase_starts_with_identifier(type_or_named)
+                && parse_aggregate_arg_type(rest).is_ok())
+            .then_some((name, rest))
+        });
+    let (name, type_sql) = if let Some((name, rest)) = named_candidate {
+        (Some(name), rest)
+    } else if let Ok(arg_type) = parse_aggregate_arg_type(type_or_named)
+        && aggregate_arg_type_consumes_all(type_or_named, &arg_type)
+    {
+        (None, type_or_named)
+    } else if let Ok((name, rest)) = parse_sql_identifier(type_or_named)
+        && !rest.trim().is_empty()
+    {
+        (Some(name), rest.trim())
+    } else {
+        (None, type_or_named)
+    };
+    Ok(AggregateSignatureArg {
+        name,
+        arg_type: parse_aggregate_arg_type(type_sql)?,
+        variadic,
+    })
+}
+
+fn aggregate_type_phrase_starts_with_identifier(input: &str) -> bool {
+    let lower = input.trim_start().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "double precision"
+            | "character varying"
+            | "bit varying"
+            | "time with time zone"
+            | "time without time zone"
+            | "timestamp with time zone"
+            | "timestamp without time zone"
+    ) || lower.starts_with("time(")
+        || lower.starts_with("time ")
+        || lower.starts_with("timestamp(")
+        || lower.starts_with("timestamp ")
+        || lower.starts_with("character(")
+        || lower.starts_with("character ")
+        || lower.starts_with("interval ")
+        || lower.starts_with("interval(")
+}
+
+fn aggregate_arg_type_consumes_all(input: &str, arg_type: &AggregateArgType) -> bool {
+    match arg_type {
+        AggregateArgType::AnyPseudo => parse_sql_identifier(input)
+            .is_ok_and(|(ident, rest)| ident.eq_ignore_ascii_case("any") && rest.trim().is_empty()),
+        AggregateArgType::Type(_) => parse_type_name(input).is_ok(),
     }
+}
+
+fn parse_aggregate_arg_type(input: &str) -> Result<AggregateArgType, ParseError> {
+    let trimmed = input.trim();
     if let Ok((ident, rest)) = parse_sql_identifier(trimmed)
         && rest.trim().is_empty()
         && ident.eq_ignore_ascii_case("any")
     {
         return Ok(AggregateArgType::AnyPseudo);
     }
-    parse_type_name(trimmed)
-        .map(AggregateArgType::Type)
-        .map_err(|_| {
-            ParseError::FeatureNotSupported("named aggregate parameters are not supported".into())
-        })
+    parse_type_name(trimmed).map(AggregateArgType::Type)
+}
+
+fn parse_aggregate_signature_type_only_arg(
+    input: &str,
+) -> Result<AggregateSignatureArg, ParseError> {
+    let arg = parse_aggregate_signature_arg(input)?;
+    if arg.name.is_some() {
+        return Err(ParseError::FeatureNotSupported(
+            "named aggregate parameters are not supported in BASETYPE".into(),
+        ));
+    }
+    Ok(arg)
+}
+
+fn parse_aggregate_signature_type_only(input: &str) -> Result<AggregateSignatureKind, ParseError> {
+    let args = split_top_level_items(input, ',')?
+        .into_iter()
+        .map(|item| parse_aggregate_signature_type_only_arg(&item))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AggregateSignatureKind::Args(AggregateSignature {
+        args,
+        order_by: Vec::new(),
+    }))
 }
 
 fn parse_legacy_aggregate_basetype(input: &str) -> Result<AggregateSignatureKind, ParseError> {
@@ -7105,9 +7283,7 @@ fn parse_legacy_aggregate_basetype(input: &str) -> Result<AggregateSignatureKind
     {
         return Ok(AggregateSignatureKind::Star);
     }
-    Ok(AggregateSignatureKind::Args(vec![
-        parse_aggregate_signature_arg(trimmed)?,
-    ]))
+    parse_aggregate_signature_type_only(trimmed)
 }
 
 fn parse_aggregate_proc_name(input: &str) -> Result<String, ParseError> {
@@ -7189,7 +7365,7 @@ fn parse_aggregate_parallel(input: &str) -> Result<FunctionParallel, ParseError>
         "unsafe" => Ok(FunctionParallel::Unsafe),
         _ => Err(ParseError::UnexpectedToken {
             expected: "SAFE, RESTRICTED, or UNSAFE",
-            actual: value,
+            actual: "parameter \"parallel\" must be SAFE, RESTRICTED, or UNSAFE".into(),
         }),
     }
 }
@@ -9552,13 +9728,9 @@ fn parse_create_function_arg_with_base(
         });
     }
     let lowered = trimmed.to_ascii_lowercase();
-    if lowered.contains(" default ")
-        || lowered.contains(":=")
-        || lowered.starts_with("variadic ")
-        || lowered.contains(" variadic ")
-    {
+    if lowered.contains(" default ") || lowered.contains(":=") {
         return Err(ParseError::FeatureNotSupported(
-            "default arguments and VARIADIC are not supported in CREATE FUNCTION".into(),
+            "default arguments are not supported in CREATE FUNCTION".into(),
         ));
     }
 
@@ -9571,7 +9743,12 @@ fn parse_create_function_arg_with_base(
     } else {
         (FunctionArgMode::In, trimmed)
     };
-    let rest = rest.trim_start();
+    let mut variadic = false;
+    let mut rest = rest.trim_start();
+    if keyword_at_start(rest, "variadic") {
+        variadic = true;
+        rest = consume_keyword(rest, "variadic").trim_start();
+    }
     if !rest.chars().any(char::is_whitespace)
         && let Ok(ty) = parse_type_name(rest)
     {
@@ -9582,13 +9759,18 @@ fn parse_create_function_arg_with_base(
             ty,
             type_position,
             default_expr: None,
-            variadic: false,
+            variadic,
         });
     }
     let (name, type_sql) = match parse_sql_identifier(rest) {
         Ok((name, rest)) if !rest.trim().is_empty() => (Some(name), rest.trim_start()),
         _ => (None, rest),
     };
+    let mut type_sql = type_sql;
+    if keyword_at_start(type_sql, "variadic") {
+        variadic = true;
+        type_sql = consume_keyword(type_sql, "variadic").trim_start();
+    }
     if type_sql.trim().is_empty() {
         return Err(ParseError::UnexpectedToken {
             expected: "argument type name",
@@ -9603,7 +9785,7 @@ fn parse_create_function_arg_with_base(
         ty,
         type_position,
         default_expr: None,
-        variadic: false,
+        variadic,
     })
 }
 

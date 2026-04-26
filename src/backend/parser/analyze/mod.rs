@@ -90,6 +90,7 @@ pub use create_table_inherits::*;
 pub(crate) use expr::bind_expr_with_outer_and_ctes;
 use expr::*;
 use functions::*;
+pub(crate) use functions::{ResolvedFunctionCall, resolve_function_call};
 pub(crate) use generated::{
     bind_generated_expr, expr_references_column, generated_relation_output_exprs,
     scope_for_base_relation_with_generated, scope_for_relation_with_generated,
