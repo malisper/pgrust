@@ -126,6 +126,7 @@ fn build_catalog_index_entry(
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,
+        relhasindex: false,
         relpersistence: table.relpersistence,
         relkind,
         am_oid: options.am_oid,
@@ -264,6 +265,7 @@ pub struct CatalogEntry {
     pub row_type_oid: u32,
     pub array_type_oid: u32,
     pub reltoastrelid: u32,
+    pub relhasindex: bool,
     pub relpersistence: char,
     pub relkind: char,
     pub am_oid: u32,
@@ -656,6 +658,7 @@ impl Catalog {
             row_type_oid,
             array_type_oid,
             reltoastrelid: 0,
+            relhasindex: false,
             relpersistence,
             relkind,
             am_oid: crate::include::catalog::relam_for_relkind(relkind),
@@ -2022,7 +2025,7 @@ impl Catalog {
                 .get(&name)
                 .cloned()
                 .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-            if !matches!(old_entry.relkind, 'r' | 't' | 'i') {
+            if !matches!(old_entry.relkind, 'r' | 'm' | 't' | 'i') {
                 return Err(CatalogError::UnknownTable(relation_oid.to_string()));
             }
 

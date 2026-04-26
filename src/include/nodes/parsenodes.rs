@@ -167,10 +167,12 @@ impl fmt::Display for ParseError {
             ParseError::UnsupportedQualifiedName(name) => {
                 write!(f, "unsupported qualified name: {name}")
             }
-            ParseError::InvalidInsertTargetCount { expected, actual } => write!(
-                f,
-                "INSERT has {actual} values but target list requires {expected}"
-            ),
+            ParseError::InvalidInsertTargetCount { expected, actual } if expected > actual => {
+                write!(f, "INSERT has more target columns than expressions")
+            }
+            ParseError::InvalidInsertTargetCount { .. } => {
+                write!(f, "INSERT has more expressions than target columns")
+            }
             ParseError::TableAlreadyExists(name) => write!(f, "table already exists: {name}"),
             ParseError::TableDoesNotExist(name) => write!(f, "table \"{name}\" does not exist"),
             ParseError::UnsupportedType(name) => write!(f, "type \"{name}\" does not exist"),
@@ -359,6 +361,7 @@ pub enum Statement {
     AlterIndexAttachPartition(AlterIndexAttachPartitionStatement),
     AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
+    AlterTableAddColumns(AlterTableAddColumnsStatement),
     AlterTableMulti(Vec<String>),
     AlterTableAddConstraint(AlterTableAddConstraintStatement),
     AlterTableDropColumn(AlterTableDropColumnStatement),
@@ -381,6 +384,7 @@ pub enum Statement {
     AlterViewOwner(AlterRelationOwnerStatement),
     AlterSchemaOwner(AlterSchemaOwnerStatement),
     AlterTableSet(AlterTableSetStatement),
+    AlterTableReset(AlterTableResetStatement),
     AlterTableReplicaIdentity(AlterTableReplicaIdentityStatement),
     AlterTableSetRowSecurity(AlterTableSetRowSecurityStatement),
     AlterPolicy(AlterPolicyStatement),
@@ -1473,6 +1477,7 @@ pub struct SqlCaseWhen {
 pub enum CteBody {
     Select(Box<SelectStatement>),
     Values(ValuesStatement),
+    Insert(Box<InsertStatement>),
     RecursiveUnion {
         all: bool,
         anchor: Box<CteBody>,
@@ -1750,6 +1755,7 @@ pub struct CreateTableStatement {
     pub persistence: TablePersistence,
     pub on_commit: OnCommitAction,
     pub elements: Vec<CreateTableElement>,
+    pub options: Vec<RelOption>,
     pub inherits: Vec<String>,
     pub partition_spec: Option<RawPartitionSpec>,
     pub partition_of: Option<String>,
@@ -2152,6 +2158,14 @@ pub struct AlterTableSetStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableResetStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub options: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableReplicaIdentityStatement {
     pub if_exists: bool,
     pub only: bool,
@@ -2187,6 +2201,14 @@ pub struct AlterTableAddColumnStatement {
     pub only: bool,
     pub table_name: String,
     pub column: ColumnDef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAddColumnsStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub columns: Vec<ColumnDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2910,6 +2932,7 @@ pub enum GrantObjectPrivilege {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantObjectStatement {
     pub privilege: GrantObjectPrivilege,
+    pub columns: Vec<String>,
     pub object_names: Vec<String>,
     pub grantee_names: Vec<String>,
     pub with_grant_option: bool,
@@ -2918,6 +2941,7 @@ pub struct GrantObjectStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevokeObjectStatement {
     pub privilege: GrantObjectPrivilege,
+    pub columns: Vec<String>,
     pub object_names: Vec<String>,
     pub grantee_names: Vec<String>,
     pub cascade: bool,
@@ -3130,9 +3154,19 @@ pub struct VacuumStatement {
     pub targets: Vec<MaintenanceTarget>,
     pub analyze: bool,
     pub full: bool,
+    pub freeze: bool,
     pub verbose: bool,
     pub skip_locked: bool,
     pub buffer_usage_limit: Option<String>,
+    pub disable_page_skipping: bool,
+    pub index_cleanup: Option<String>,
+    pub truncate: Option<bool>,
+    pub parallel: Option<String>,
+    pub parallel_specified: bool,
+    pub process_main: Option<bool>,
+    pub process_toast: Option<bool>,
+    pub skip_database_stats: bool,
+    pub only_database_stats: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3971,6 +4005,13 @@ pub struct AssignmentTarget {
     pub column: String,
     pub subscripts: Vec<ArraySubscript>,
     pub field_path: Vec<String>,
+    pub indirection: Vec<AssignmentTargetIndirection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignmentTargetIndirection {
+    Subscript(ArraySubscript),
+    Field(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

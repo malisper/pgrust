@@ -197,6 +197,7 @@ fn execute_statement_with_source(
         // :HACK: ALTER INDEX ... SET (...) is accepted narrowly for hash_index.sql and ignored
         // until mutable index reloptions are modeled for real.
         | Statement::AlterIndexSet(_)
+        | Statement::AlterTableReset(_)
         | Statement::AlterTableSetRowSecurity(_)
         | Statement::CreateStatistics(_)
         | Statement::AlterStatistics(_)
@@ -248,10 +249,12 @@ fn execute_statement_with_source(
                 actual: "ALTER TABLE RENAME COLUMN".into(),
             }))
         }
-        Statement::AlterTableAddColumn(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+        Statement::AlterTableAddColumn(_) | Statement::AlterTableAddColumns(_) => {
+            Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ALTER TABLE ADD COLUMN handled by database/session layer",
             actual: "ALTER TABLE ADD COLUMN".into(),
-        })),
+        }))
+        }
         Statement::AlterTableAddConstraint(_)
         | Statement::AlterTableDropConstraint(_)
         | Statement::AlterTableRenameConstraint(_)
@@ -623,11 +626,13 @@ pub fn execute_readonly_statement_with_config(
         | Statement::Set(_)
         | Statement::Reset(_)
         | Statement::AlterTableSet(_)
+        | Statement::AlterTableReset(_)
         | Statement::AlterTableSetSchema(_)
         | Statement::AlterTableRenameColumn(_)
         | Statement::AlterViewRenameColumn(_)
         | Statement::AlterViewSetSchema(_)
         | Statement::AlterTableAddColumn(_)
+        | Statement::AlterTableAddColumns(_)
         | Statement::AlterTableDropColumn(_)
         | Statement::AlterTableAlterColumnType(_)
         | Statement::AlterTableAlterColumnCompression(_)

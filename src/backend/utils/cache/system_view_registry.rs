@@ -14,6 +14,7 @@ pub enum SyntheticSystemViewKind {
     PgStats,
     PgSettings,
     PgStatActivity,
+    PgStatAllTables,
     PgStatUserTables,
     PgStatioUserTables,
     PgStatUserFunctions,
@@ -105,6 +106,8 @@ const PG_RULES_ALIASES: &[&str] = &["pg_rules", "pg_catalog.pg_rules"];
 const PG_STATS_ALIASES: &[&str] = &["pg_stats", "pg_catalog.pg_stats"];
 const PG_SETTINGS_ALIASES: &[&str] = &["pg_settings", "pg_catalog.pg_settings"];
 const PG_STAT_ACTIVITY_ALIASES: &[&str] = &["pg_stat_activity", "pg_catalog.pg_stat_activity"];
+const PG_STAT_ALL_TABLES_ALIASES: &[&str] =
+    &["pg_stat_all_tables", "pg_catalog.pg_stat_all_tables"];
 const PG_STAT_USER_TABLES_ALIASES: &[&str] =
     &["pg_stat_user_tables", "pg_catalog.pg_stat_user_tables"];
 const PG_STATIO_USER_TABLES_ALIASES: &[&str] =
@@ -498,7 +501,7 @@ const INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_COLUMNS: &[SyntheticSystemViewColum
     SyntheticSystemViewColumn::text("dependent_column"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 22] = [
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 23] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgEnum,
         canonical_name: "pg_catalog.pg_enum",
@@ -574,6 +577,13 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 22] = [
         canonical_name: "pg_catalog.pg_stat_activity",
         aliases: PG_STAT_ACTIVITY_ALIASES,
         columns: PG_STAT_ACTIVITY_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgStatAllTables,
+        canonical_name: "pg_catalog.pg_stat_all_tables",
+        aliases: PG_STAT_ALL_TABLES_ALIASES,
+        columns: PG_STAT_USER_TABLES_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {

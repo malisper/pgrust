@@ -46,6 +46,8 @@ struct RelCacheEntryFile {
     row_type_oid: u32,
     array_type_oid: u32,
     reltoastrelid: u32,
+    #[serde(default)]
+    relhasindex: bool,
     relpersistence: char,
     relkind: char,
     #[serde(default = "default_relispopulated")]
@@ -80,6 +82,8 @@ struct ColumnDescFile {
     not_null_constraint_inhcount: i16,
     not_null_constraint_no_inherit: bool,
     not_null_primary_key_owned: bool,
+    #[serde(default)]
+    attacl: Option<Vec<String>>,
     attrdef_oid: Option<u32>,
     default_expr: Option<String>,
     #[serde(default)]
@@ -209,6 +213,7 @@ fn relcache_entry_to_file(entry: &RelCacheEntry) -> RelCacheEntryFile {
         row_type_oid: entry.row_type_oid,
         array_type_oid: entry.array_type_oid,
         reltoastrelid: entry.reltoastrelid,
+        relhasindex: entry.relhasindex,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         relispopulated: entry.relispopulated,
@@ -232,6 +237,7 @@ fn relcache_entry_from_file(entry: RelCacheEntryFile) -> RelCacheEntry {
         row_type_oid: entry.row_type_oid,
         array_type_oid: entry.array_type_oid,
         reltoastrelid: entry.reltoastrelid,
+        relhasindex: entry.relhasindex,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         relispopulated: entry.relispopulated,
@@ -270,6 +276,7 @@ fn column_desc_to_file(column: &ColumnDesc) -> ColumnDescFile {
         not_null_constraint_inhcount: column.not_null_constraint_inhcount,
         not_null_constraint_no_inherit: column.not_null_constraint_no_inherit,
         not_null_primary_key_owned: column.not_null_primary_key_owned,
+        attacl: column.attacl.clone(),
         attrdef_oid: column.attrdef_oid,
         default_expr: column.default_expr.clone(),
         generated: column.generated,
@@ -303,6 +310,7 @@ fn column_desc_from_file(column: ColumnDescFile) -> ColumnDesc {
         not_null_constraint_inhcount: column.not_null_constraint_inhcount,
         not_null_constraint_no_inherit: column.not_null_constraint_no_inherit,
         not_null_primary_key_owned: column.not_null_primary_key_owned,
+        attacl: column.attacl,
         attrdef_oid: column.attrdef_oid,
         default_expr: column.default_expr,
         default_sequence_oid,

@@ -15,25 +15,28 @@ use crate::backend::access::index::indexam;
 use crate::backend::access::table::toast_helper::toast_tuple_values_for_write;
 use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
+use crate::backend::catalog::catalog::column_desc;
 use crate::backend::optimizer::{finalize_expr_subqueries, planner};
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
-    BoundDeleteStatement, BoundDeleteTarget, BoundExclusionConstraint, BoundForeignKeyConstraint,
-    BoundIndexRelation, BoundInsertSource, BoundInsertStatement, BoundMergeAction,
-    BoundMergeStatement, BoundMergeWhenClause, BoundModifyRowSource, BoundOnConflictAction,
-    BoundReferencedByForeignKey, BoundRelation, BoundRelationConstraints, BoundTemporalConstraint,
-    BoundUpdateStatement, BoundUpdateTarget, Catalog, CatalogLookup, DropTableStatement,
-    ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement, OverridingKind,
-    ParseError, SelectStatement, SqlType, SqlTypeKind, Statement, TruncateTableStatement,
-    UpdateStatement, VacuumStatement, bind_create_table, bind_generated_expr,
+    BoundAssignmentTargetIndirection, BoundDeleteStatement, BoundDeleteTarget,
+    BoundExclusionConstraint, BoundForeignKeyConstraint, BoundIndexRelation, BoundInsertSource,
+    BoundInsertStatement, BoundMergeAction, BoundMergeStatement, BoundMergeWhenClause,
+    BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey, BoundRelation,
+    BoundRelationConstraints, BoundTemporalConstraint, BoundUpdateStatement, BoundUpdateTarget,
+    Catalog, CatalogLookup, DropTableStatement, ExplainStatement, ForeignKeyAction,
+    MaintenanceTarget, MergeStatement, OverridingKind, ParseError, SelectStatement, SqlType,
+    SqlTypeKind, Statement, TruncateTableStatement, UpdateStatement, VacuumStatement,
+    bind_create_table, bind_expr_with_outer_and_ctes, bind_generated_expr,
     bind_referenced_by_foreign_keys, bind_relation_constraints, bind_scalar_expr_in_scope,
-    bind_update,
+    bind_update, parse_expr, scope_for_relation,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
 use crate::backend::utils::time::instant::Instant;
+use crate::include::executor::execdesc::CommandType;
 use crate::pgrust::database::TransactionWaiter;
 use crate::pl::plpgsql::TriggerOperation;
 
@@ -70,11 +73,37 @@ use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
-use crate::include::nodes::primnodes::{QueryColumn, TargetEntry};
+use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, expr_sql_type_hint};
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::database::commands::privilege::{
     acl_grants_privilege, effective_acl_grantee_names,
 };
+
+fn finalize_assignment_indirection_subqueries(
+    indirection: Vec<BoundAssignmentTargetIndirection>,
+    catalog: &dyn CatalogLookup,
+    subplans: &mut Vec<crate::include::nodes::plannodes::Plan>,
+) -> Vec<BoundAssignmentTargetIndirection> {
+    indirection
+        .into_iter()
+        .map(|step| match step {
+            BoundAssignmentTargetIndirection::Field(field) => {
+                BoundAssignmentTargetIndirection::Field(field)
+            }
+            BoundAssignmentTargetIndirection::Subscript(subscript) => {
+                BoundAssignmentTargetIndirection::Subscript(BoundArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
+                })
+            }
+        })
+        .collect()
+}
 
 fn finalize_bound_insert(
     mut stmt: BoundInsertStatement,
@@ -96,6 +125,15 @@ fn finalize_bound_insert(
                 })
                 .collect(),
         ),
+        BoundInsertSource::ProjectSetValues(rows) => BoundInsertSource::ProjectSetValues(
+            rows.into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans))
+                        .collect()
+                })
+                .collect(),
+        ),
         BoundInsertSource::DefaultValues(defaults) => BoundInsertSource::DefaultValues(
             defaults
                 .into_iter()
@@ -104,6 +142,31 @@ fn finalize_bound_insert(
         ),
         BoundInsertSource::Select(query) => BoundInsertSource::Select(query),
     };
+    stmt.target_columns = stmt
+        .target_columns
+        .into_iter()
+        .map(|target| BoundAssignmentTarget {
+            subscripts: target
+                .subscripts
+                .into_iter()
+                .map(|subscript| BoundArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans)),
+                })
+                .collect(),
+            indirection: finalize_assignment_indirection_subqueries(
+                target.indirection,
+                catalog,
+                &mut subplans,
+            ),
+            ..target
+        })
+        .collect();
     stmt.on_conflict =
         stmt.on_conflict
             .map(|clause| crate::backend::parser::BoundOnConflictClause {
@@ -125,6 +188,11 @@ fn finalize_bound_insert(
                                     &mut subplans,
                                 ),
                                 field_path: assignment.field_path,
+                                indirection: finalize_assignment_indirection_subqueries(
+                                    assignment.indirection,
+                                    catalog,
+                                    &mut subplans,
+                                ),
                                 target_sql_type: assignment.target_sql_type,
                                 subscripts: assignment
                                     .subscripts
@@ -193,6 +261,11 @@ fn finalize_bound_update(
                     column_index: assignment.column_index,
                     expr: finalize_expr_subqueries(assignment.expr, catalog, &mut subplans),
                     field_path: assignment.field_path,
+                    indirection: finalize_assignment_indirection_subqueries(
+                        assignment.indirection,
+                        catalog,
+                        &mut subplans,
+                    ),
                     target_sql_type: assignment.target_sql_type,
                     subscripts: assignment
                         .subscripts
@@ -1183,11 +1256,12 @@ pub(crate) fn write_insert_heap_row(
         None,
         ctx,
     )?;
-    crate::backend::executor::enforce_outbound_foreign_keys(
+    crate::backend::executor::enforce_outbound_foreign_keys_for_insert(
         relation_name,
+        rel,
         &relation_constraints.foreign_keys,
-        None,
         values,
+        crate::backend::executor::InsertForeignKeyCheckPhase::BeforeHeapInsert,
         ctx,
     )?;
     let (tuple, _toasted) = toast_tuple_for_write(desc, values, toast, toast_index, ctx, xid, cid)?;
@@ -2739,7 +2813,20 @@ pub fn collect_vacuum_stats(
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
+    collect_vacuum_stats_with_options(targets, catalog, ctx, true, true, Some(true), true)
+}
+
+pub fn collect_vacuum_stats_with_options(
+    targets: &[MaintenanceTarget],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    process_main: bool,
+    process_toast: bool,
+    truncate: Option<bool>,
+    default_truncate: bool,
+) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
     let mut relations = Vec::with_capacity(targets.len());
+    let mut seen = BTreeSet::new();
     for target in targets {
         let Some(entry) = catalog
             .lookup_any_relation(&target.table_name)
@@ -2747,15 +2834,81 @@ pub fn collect_vacuum_stats(
         else {
             continue;
         };
-        relations.push(entry);
+        if process_main && seen.insert(entry.relation_oid) {
+            relations.push(entry.clone());
+        }
+        if process_toast
+            && let Some(toast) = entry.toast
+            && seen.insert(toast.relation_oid)
+            && let Some(toast_relation) = catalog.relation_by_oid(toast.relation_oid)
+        {
+            relations.push(toast_relation);
+        }
     }
-    collect_vacuum_stats_for_relations(&relations, catalog, ctx)
+    collect_vacuum_stats_for_relations_with_truncate_policy(
+        &relations,
+        catalog,
+        ctx,
+        truncate,
+        default_truncate,
+    )
 }
 
 pub(crate) fn collect_vacuum_stats_for_relations(
     relations: &[BoundRelation],
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
+) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
+    collect_vacuum_stats_for_relations_with_truncate(relations, catalog, ctx, true)
+}
+
+pub(crate) fn collect_vacuum_stats_for_relations_with_truncate(
+    relations: &[BoundRelation],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    truncate: bool,
+) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
+    collect_vacuum_stats_for_relations_with_truncate_policy(
+        relations,
+        catalog,
+        ctx,
+        Some(truncate),
+        true,
+    )
+}
+
+fn relation_vacuum_truncate(
+    relation_oid: u32,
+    catalog: &dyn CatalogLookup,
+    truncate: Option<bool>,
+    default_truncate: bool,
+) -> bool {
+    if let Some(truncate) = truncate {
+        return truncate;
+    }
+    catalog
+        .class_row_by_oid(relation_oid)
+        .and_then(|row| row.reloptions)
+        .and_then(|options| {
+            options.into_iter().find_map(|option| {
+                let (name, value) = option.split_once('=')?;
+                name.eq_ignore_ascii_case("vacuum_truncate").then(|| {
+                    !matches!(
+                        value.to_ascii_lowercase().as_str(),
+                        "false" | "off" | "no" | "0"
+                    )
+                })
+            })
+        })
+        .unwrap_or(default_truncate)
+}
+
+fn collect_vacuum_stats_for_relations_with_truncate_policy(
+    relations: &[BoundRelation],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    truncate: Option<bool>,
+    default_truncate: bool,
 ) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
     let mut processed = 0u64;
     let mut stats = Vec::with_capacity(relations.len());
@@ -2770,6 +2923,14 @@ pub(crate) fn collect_vacuum_stats_for_relations(
         let indexes = catalog.index_relations_for_heap(entry.relation_oid);
         let dead_items = &scan.dead_tids;
         for index in indexes {
+            let index_blocks = ctx
+                .pool
+                .with_storage_mut(|storage| storage.smgr.nblocks(index.rel, ForkNumber::Main))
+                .map_err(HeapError::Storage)
+                .map_err(ExecError::Heap)?;
+            if index_blocks == 0 {
+                continue;
+            }
             let vacuum_ctx = crate::include::access::amapi::IndexVacuumContext {
                 pool: ctx.pool.clone(),
                 txns: ctx.txns.clone(),
@@ -2815,6 +2976,7 @@ pub(crate) fn collect_vacuum_stats_for_relations(
             &ctx.txns,
             &scan,
             previous_relfrozenxid,
+            relation_vacuum_truncate(entry.relation_oid, catalog, truncate, default_truncate),
         )
         .map_err(ExecError::Heap)?;
         stats.push(relation_stats);
@@ -3065,6 +3227,7 @@ struct PartitionResultRelInfo {
     relation_constraints: BoundRelationConstraints,
     indexes: Vec<BoundIndexRelation>,
     toast_index: Option<BoundIndexRelation>,
+    parent_rows: Vec<Vec<Value>>,
     rows: Vec<Vec<Value>>,
 }
 
@@ -3109,6 +3272,7 @@ impl PartitionResultRelInfo {
             relation_constraints,
             indexes,
             toast_index,
+            parent_rows: Vec::new(),
             rows: Vec::new(),
         })
     }
@@ -3175,7 +3339,11 @@ fn execute_insert_rows_with_routing(
         let leaf = exec_find_partition(catalog, &mut proute, &target_relation, row, ctx)?;
         let leaf_row = remap_partition_row(row, &target_relation.desc, &leaf.desc)?;
         match routed.entry(leaf.relation_oid) {
-            Entry::Occupied(mut entry) => entry.get_mut().rows.push(leaf_row),
+            Entry::Occupied(mut entry) => {
+                let entry = entry.get_mut();
+                entry.parent_rows.push(row.clone());
+                entry.rows.push(leaf_row);
+            }
             Entry::Vacant(entry) => {
                 let mut result_rel_info = PartitionResultRelInfo::new(
                     catalog,
@@ -3186,6 +3354,7 @@ fn execute_insert_rows_with_routing(
                     toast_index,
                     leaf,
                 )?;
+                result_rel_info.parent_rows.push(row.clone());
                 result_rel_info.rows.push(leaf_row);
                 entry.insert(result_rel_info);
             }
@@ -3194,7 +3363,7 @@ fn execute_insert_rows_with_routing(
 
     let mut inserted_rows = Vec::new();
     for (_, result_rel_info) in routed {
-        inserted_rows.extend(execute_insert_rows(
+        let leaf_inserted_rows = execute_insert_rows(
             &result_rel_info.relation_name,
             result_rel_info.relation.relation_oid,
             result_rel_info.relation.rel,
@@ -3205,11 +3374,33 @@ fn execute_insert_rows_with_routing(
             rls_write_checks,
             &result_rel_info.indexes,
             &result_rel_info.rows,
-            returning,
+            None,
             ctx,
             xid,
             cid,
-        )?);
+        )?;
+        if let Some(returning) = returning {
+            for (parent_row, leaf_row) in result_rel_info
+                .parent_rows
+                .iter()
+                .zip(leaf_inserted_rows.iter())
+            {
+                let projected_row =
+                    remap_child_row_to_parent(leaf_row, &result_rel_info.relation.desc, desc)
+                        .unwrap_or_else(|| parent_row.clone());
+                let row = project_returning_row_with_metadata(
+                    returning,
+                    &projected_row,
+                    None,
+                    Some(result_rel_info.relation.relation_oid),
+                    ctx,
+                )?;
+                capture_copy_to_dml_returning_row(row.clone());
+                inserted_rows.push(row);
+            }
+        } else {
+            inserted_rows.extend(leaf_inserted_rows);
+        }
     }
     Ok(inserted_rows)
 }
@@ -3275,6 +3466,29 @@ fn remap_partition_row(
         remapped[child_idx] = row.get(*parent_idx).cloned().unwrap_or(Value::Null);
     }
     Ok(remapped)
+}
+
+fn remap_child_row_to_parent(
+    row: &[Value],
+    child_desc: &RelationDesc,
+    parent_desc: &RelationDesc,
+) -> Option<Vec<Value>> {
+    parent_desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .map(|parent_column| {
+            child_desc
+                .columns
+                .iter()
+                .enumerate()
+                .find(|(_, child_column)| {
+                    !child_column.dropped
+                        && child_column.name.eq_ignore_ascii_case(&parent_column.name)
+                })
+                .and_then(|(index, _)| row.get(index).cloned())
+        })
+        .collect()
 }
 
 fn parse_tid_text(value: &Value) -> Result<Option<ItemPointerData>, ExecError> {
@@ -3596,6 +3810,7 @@ fn execute_merge_update_row(
                 column_index: assignment.column_index,
                 subscripts: assignment.subscripts.clone(),
                 field_path: assignment.field_path.clone(),
+                indirection: assignment.indirection.clone(),
                 target_sql_type: assignment.target_sql_type,
             },
             value,
@@ -3929,6 +4144,87 @@ fn apply_overriding_user_identity_defaults(
     Ok(())
 }
 
+fn domain_constraint_violation(domain_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "value for domain {domain_name} violates check constraint \"{domain_name}_check\""
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "23514",
+    }
+}
+
+fn enforce_domain_constraint_for_value(
+    value: &Value,
+    ty: SqlType,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let Some(domain) = ctx
+        .catalog
+        .as_ref()
+        .and_then(|catalog| catalog.domain_by_type_oid(ty.type_oid))
+    else {
+        return Ok(());
+    };
+    if domain.not_null && matches!(value, Value::Null) {
+        return Err(domain_constraint_violation(&domain.name));
+    }
+    if matches!(value, Value::Null) {
+        return Ok(());
+    }
+    if ty.is_array && !domain.sql_type.is_array {
+        match value {
+            Value::PgArray(array) => {
+                for element in &array.elements {
+                    enforce_domain_constraint_for_value(element, ty.element_type(), ctx)?;
+                }
+            }
+            Value::Array(elements) => {
+                for element in elements {
+                    enforce_domain_constraint_for_value(element, ty.element_type(), ctx)?;
+                }
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+    let Some(check) = domain.check.as_deref() else {
+        return Ok(());
+    };
+    let raw = parse_expr(check).map_err(ExecError::Parse)?;
+    let desc = RelationDesc {
+        columns: vec![column_desc("value", domain.sql_type, true)],
+    };
+    let scope = scope_for_relation(None, &desc);
+    let bound = {
+        let Some(catalog) = ctx.catalog.as_ref() else {
+            return Ok(());
+        };
+        bind_expr_with_outer_and_ctes(&raw, &scope, catalog, &[], None, &[])
+            .map_err(ExecError::Parse)?
+    };
+    let mut slot = TupleSlot::virtual_row(vec![value.clone()]);
+    match eval_expr(&bound, &mut slot, ctx)? {
+        Value::Bool(false) => Err(domain_constraint_violation(&domain.name)),
+        _ => Ok(()),
+    }
+}
+
+fn enforce_insert_domain_constraints(
+    desc: &RelationDesc,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for (column, value) in desc.columns.iter().zip(values.iter()) {
+        if column.dropped {
+            continue;
+        }
+        enforce_domain_constraint_for_value(value, column.sql_type, ctx)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn materialize_insert_rows(
     stmt: &BoundInsertStatement,
     catalog: &dyn CatalogLookup,
@@ -3955,9 +4251,39 @@ pub(crate) fn materialize_insert_rows(
                         ctx,
                     )?;
                 }
+                enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
                 Ok(values)
             })
             .collect::<Result<Vec<_>, ExecError>>(),
+        BoundInsertSource::ProjectSetValues(rows) => {
+            let mut materialized = Vec::new();
+            for row in rows {
+                for (row_values, mut slot) in
+                    execute_insert_project_set_row(row, stmt, catalog, ctx)?
+                {
+                    let (_, mut values) = eval_implicit_insert_defaults(
+                        &stmt.column_defaults,
+                        &stmt.target_columns,
+                        stmt.desc.columns.len(),
+                        ctx,
+                    )?;
+                    for (target, value) in stmt.target_columns.iter().zip(row_values.into_iter()) {
+                        apply_assignment_target(
+                            &stmt.desc,
+                            &mut values,
+                            target,
+                            value,
+                            &mut slot,
+                            ctx,
+                        )?;
+                    }
+                    apply_overriding_user_identity_defaults(stmt, &mut values, ctx)?;
+                    enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
+                    materialized.push(values);
+                }
+            }
+            Ok(materialized)
+        }
         BoundInsertSource::DefaultValues(defaults) => {
             let mut slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
             let mut values = vec![Value::Null; stmt.desc.columns.len()];
@@ -3965,6 +4291,7 @@ pub(crate) fn materialize_insert_rows(
                 let value = eval_expr(expr, &mut slot, ctx)?;
                 apply_assignment_target(&stmt.desc, &mut values, target, value, &mut slot, ctx)?;
             }
+            enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
             Ok(vec![values])
         }
         BoundInsertSource::Select(query) => {
@@ -3992,6 +4319,7 @@ pub(crate) fn materialize_insert_rows(
                         apply_assignment_target(&stmt.desc, &mut values, target, value, slot, ctx)?;
                     }
                     apply_overriding_user_identity_defaults(stmt, &mut values, ctx)?;
+                    enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
                     rows.push(values);
                 }
                 ctx.subplans = saved_subplans;
@@ -4000,6 +4328,60 @@ pub(crate) fn materialize_insert_rows(
             result
         }
     }
+}
+
+fn execute_insert_project_set_row(
+    row: &[Expr],
+    stmt: &BoundInsertStatement,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<(Vec<Value>, TupleSlot)>, ExecError> {
+    let target_list = row
+        .iter()
+        .zip(stmt.target_columns.iter())
+        .enumerate()
+        .map(|(index, (expr, target))| {
+            let column = &stmt.desc.columns[target.column_index];
+            TargetEntry::new(
+                column.name.clone(),
+                expr.clone(),
+                expr_sql_type_hint(expr).unwrap_or(target.target_sql_type),
+                index + 1,
+            )
+        })
+        .collect::<Vec<_>>();
+    let query = crate::include::nodes::parsenodes::Query {
+        command_type: CommandType::Select,
+        depends_on_row_security: false,
+        rtable: Vec::new(),
+        jointree: None,
+        target_list,
+        distinct: false,
+        distinct_on: Vec::new(),
+        where_qual: None,
+        group_by: Vec::new(),
+        accumulators: Vec::new(),
+        window_clauses: Vec::new(),
+        having_qual: None,
+        sort_clause: Vec::new(),
+        limit_count: None,
+        limit_offset: 0,
+        locking_clause: None,
+        row_marks: Vec::new(),
+        has_target_srfs: true,
+        recursive_union: None,
+        set_operation: None,
+    };
+    let query = crate::backend::optimizer::fold_query_constants(query).map_err(ExecError::Parse)?;
+    let planned = planner(query, catalog).map_err(ExecError::Parse)?;
+    let mut state = executor_start(planned.plan_tree);
+    let mut rows = Vec::new();
+    while let Some(slot) = state.exec_proc_node(ctx)? {
+        ctx.check_for_interrupts()?;
+        let row_values = slot.values()?.to_vec();
+        rows.push((row_values, slot.clone()));
+    }
+    Ok(rows)
 }
 
 pub(crate) fn apply_assignment_target(
@@ -4027,36 +4409,88 @@ pub(crate) fn apply_assignment_target(
         coerce_assignment_value_with_config(&value, assignment_type, &ctx.datetime_config)
     }
     .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
-    let resolved = target
-        .subscripts
-        .iter()
-        .map(|subscript| {
-            Ok(ResolvedAssignmentSubscript {
-                is_slice: subscript.is_slice,
-                lower: subscript
-                    .lower
-                    .as_ref()
-                    .map(|expr| eval_expr(expr, slot, ctx))
-                    .transpose()?,
-                upper: subscript
-                    .upper
-                    .as_ref()
-                    .map(|expr| eval_expr(expr, slot, ctx))
-                    .transpose()?,
+    let value = coerce_record_assignment_value(value, assignment_type, ctx)?;
+    let resolved_indirection = if target.indirection.is_empty() {
+        target
+            .subscripts
+            .iter()
+            .map(|subscript| {
+                Ok(ResolvedAssignmentSubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .as_ref()
+                        .map(|expr| eval_expr(expr, slot, ctx))
+                        .transpose()?,
+                    upper: subscript
+                        .upper
+                        .as_ref()
+                        .map(|expr| eval_expr(expr, slot, ctx))
+                        .transpose()?,
+                })
             })
-        })
-        .collect::<Result<Vec<_>, ExecError>>()?;
+            .collect::<Result<Vec<_>, ExecError>>()?
+            .into_iter()
+            .map(ResolvedAssignmentIndirection::Subscript)
+            .chain(
+                target
+                    .field_path
+                    .iter()
+                    .cloned()
+                    .map(ResolvedAssignmentIndirection::Field),
+            )
+            .collect()
+    } else {
+        resolve_assignment_indirection(&target.indirection, slot, ctx)?
+    };
     let current = values[target.column_index].clone();
     let column_type = desc.columns[target.column_index].sql_type;
-    values[target.column_index] = assign_typed_value(
-        current,
-        column_type,
-        &resolved,
-        &target.field_path,
-        value,
-        ctx,
-    )?;
+    values[target.column_index] =
+        assign_typed_value_ordered(current, column_type, &resolved_indirection, value, ctx)?;
     Ok(())
+}
+
+fn coerce_record_assignment_value(
+    value: Value,
+    target_type: SqlType,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    let Value::Record(record) = value else {
+        return Ok(value);
+    };
+    let target_type = assignment_navigation_sql_type(target_type, ctx);
+    if target_type.is_array
+        || !matches!(
+            target_type.kind,
+            SqlTypeKind::Composite | SqlTypeKind::Record
+        )
+    {
+        return Ok(Value::Record(record));
+    }
+    let descriptor = assignment_record_descriptor(target_type, ctx)?;
+    if descriptor.fields.len() != record.fields.len() {
+        return Err(ExecError::DetailedError {
+            message: "cannot cast record to target composite type".into(),
+            detail: Some(format!(
+                "Input has {} columns, target has {} columns.",
+                record.fields.len(),
+                descriptor.fields.len()
+            )),
+            hint: None,
+            sqlstate: "42846",
+        });
+    }
+    let mut fields = Vec::with_capacity(record.fields.len());
+    for (field, value) in descriptor.fields.iter().zip(record.fields.iter()) {
+        fields.push(coerce_assignment_value_with_config(
+            value,
+            field.sql_type,
+            &ctx.datetime_config,
+        )?);
+    }
+    Ok(Value::Record(RecordValue::from_descriptor(
+        descriptor, fields,
+    )))
 }
 
 fn rewrite_subscripted_assignment_error(
@@ -4202,11 +4636,82 @@ fn assignment_target_sql_type(desc: &RelationDesc, target: &BoundAssignmentTarge
     target.target_sql_type
 }
 
+fn assignment_navigation_sql_type(sql_type: SqlType, ctx: &ExecutorContext) -> SqlType {
+    let Some(domain) = ctx
+        .catalog
+        .as_ref()
+        .and_then(|catalog| catalog.domain_by_type_oid(sql_type.type_oid))
+    else {
+        return sql_type;
+    };
+    if sql_type.is_array && !domain.sql_type.is_array {
+        SqlType::array_of(domain.sql_type)
+    } else {
+        domain.sql_type
+    }
+}
+
 #[derive(Clone)]
 struct ResolvedAssignmentSubscript {
     is_slice: bool,
     lower: Option<Value>,
     upper: Option<Value>,
+}
+
+#[derive(Clone)]
+enum ResolvedAssignmentIndirection {
+    Subscript(ResolvedAssignmentSubscript),
+    Field(String),
+}
+
+fn leading_assignment_subscripts(
+    indirection: &[ResolvedAssignmentIndirection],
+) -> (
+    Vec<ResolvedAssignmentSubscript>,
+    &[ResolvedAssignmentIndirection],
+) {
+    let split = indirection
+        .iter()
+        .position(|step| matches!(step, ResolvedAssignmentIndirection::Field(_)))
+        .unwrap_or(indirection.len());
+    let subscripts = indirection[..split]
+        .iter()
+        .filter_map(|step| match step {
+            ResolvedAssignmentIndirection::Subscript(subscript) => Some(subscript.clone()),
+            ResolvedAssignmentIndirection::Field(_) => None,
+        })
+        .collect();
+    (subscripts, &indirection[split..])
+}
+
+fn resolve_assignment_indirection(
+    indirection: &[BoundAssignmentTargetIndirection],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<ResolvedAssignmentIndirection>, ExecError> {
+    indirection
+        .iter()
+        .map(|step| match step {
+            BoundAssignmentTargetIndirection::Field(field) => {
+                Ok(ResolvedAssignmentIndirection::Field(field.clone()))
+            }
+            BoundAssignmentTargetIndirection::Subscript(subscript) => Ok(
+                ResolvedAssignmentIndirection::Subscript(ResolvedAssignmentSubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .as_ref()
+                        .map(|expr| eval_expr(expr, slot, ctx))
+                        .transpose()?,
+                    upper: subscript
+                        .upper
+                        .as_ref()
+                        .map(|expr| eval_expr(expr, slot, ctx))
+                        .transpose()?,
+                }),
+            ),
+        })
+        .collect()
 }
 
 fn assign_point_value(
@@ -4260,6 +4765,138 @@ fn assign_point_value(
         point.y = coordinate;
     }
     Ok(Value::Point(point))
+}
+
+fn assign_typed_value_ordered(
+    current: Value,
+    sql_type: SqlType,
+    indirection: &[ResolvedAssignmentIndirection],
+    replacement: Value,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let Some((first, rest)) = indirection.split_first() else {
+        return Ok(replacement);
+    };
+    let sql_type = assignment_navigation_sql_type(sql_type, ctx);
+    match first {
+        ResolvedAssignmentIndirection::Field(field) => {
+            assign_record_field_ordered(current, sql_type, field, rest, replacement, ctx)
+        }
+        ResolvedAssignmentIndirection::Subscript(subscript) => {
+            let (leading_subscripts, after_subscripts) = leading_assignment_subscripts(indirection);
+            if sql_type.kind == SqlTypeKind::Point && !sql_type.is_array {
+                if !after_subscripts.is_empty() || leading_subscripts.len() != 1 {
+                    return Err(ExecError::DetailedError {
+                        message: "cannot assign through a subscripted point value".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42804",
+                    });
+                }
+                return assign_point_value(current, &leading_subscripts, replacement);
+            }
+            if sql_type.kind == SqlTypeKind::Jsonb && !sql_type.is_array {
+                if !after_subscripts.is_empty() {
+                    return Err(ExecError::DetailedError {
+                        message: "cannot assign through a subscripted jsonb value".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42804",
+                    });
+                }
+                return assign_jsonb_value(current, &leading_subscripts, replacement);
+            }
+            if after_subscripts.is_empty() {
+                return assign_array_value(current, &leading_subscripts, replacement);
+            }
+            assign_array_value_ordered(current, sql_type, subscript, rest, replacement, ctx)
+        }
+    }
+}
+
+fn assign_record_field_ordered(
+    current: Value,
+    sql_type: SqlType,
+    field: &str,
+    rest: &[ResolvedAssignmentIndirection],
+    replacement: Value,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let mut record = assignment_record_value(current, sql_type, ctx)?;
+    let (field_index, field_type) = record
+        .descriptor
+        .fields
+        .iter()
+        .enumerate()
+        .find(|(_, candidate)| candidate.name.eq_ignore_ascii_case(field))
+        .map(|(index, candidate)| (index, candidate.sql_type))
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("record has no field \"{field}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "42703",
+        })?;
+    record.fields[field_index] = assign_typed_value_ordered(
+        record.fields[field_index].clone(),
+        field_type,
+        rest,
+        replacement,
+        ctx,
+    )?;
+    Ok(Value::Record(record))
+}
+
+fn assign_array_value_ordered(
+    current: Value,
+    array_type: SqlType,
+    subscript: &ResolvedAssignmentSubscript,
+    rest: &[ResolvedAssignmentIndirection],
+    replacement: Value,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    if !array_type.is_array {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "cannot subscript type {} because it does not support subscripting",
+                sql_type_display_name(array_type)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+    if rest.is_empty() {
+        return assign_array_value(current, std::slice::from_ref(subscript), replacement);
+    }
+    if subscript.is_slice {
+        return Err(ExecError::DetailedError {
+            message: "sliced assignment into nested fields is not supported".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    let (mut lower_bound, mut items) = assignment_top_level(current)?;
+    let Some(index) = assignment_subscript_index(subscript.lower.as_ref())? else {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<array>".into(),
+            details: "array subscript in assignment must not be null".into(),
+        });
+    };
+    if items.is_empty() {
+        lower_bound = index;
+    }
+    extend_assignment_items(&mut lower_bound, &mut items, index, index)?;
+    let item_index = usize::try_from(i64::from(index) - i64::from(lower_bound))
+        .map_err(|_| array_assignment_limit_error())?;
+    items[item_index] = assign_typed_value_ordered(
+        items[item_index].clone(),
+        array_type.element_type(),
+        rest,
+        replacement,
+        ctx,
+    )?;
+    build_assignment_array_value(lower_bound, items)
 }
 
 fn assign_typed_value(
@@ -4332,6 +4969,7 @@ fn assignment_record_descriptor(
     sql_type: SqlType,
     ctx: &ExecutorContext,
 ) -> Result<RecordDescriptor, ExecError> {
+    let sql_type = assignment_navigation_sql_type(sql_type, ctx);
     if matches!(sql_type.kind, SqlTypeKind::Composite) && sql_type.typrelid != 0 {
         let catalog = ctx
             .catalog
@@ -5152,51 +5790,80 @@ pub(crate) fn execute_insert_rows(
         .map(|triggers| triggers.new_transition_capture());
 
     let mut inserted_rows = Vec::new();
+    let mut inserted_tids = Vec::new();
     let mut returned_rows = Vec::new();
     for values in rows {
-        let Some(mut values) = (match &triggers {
-            Some(triggers) => triggers.before_row_insert(values.clone(), ctx)?,
-            None => Some(values.clone()),
-        }) else {
-            continue;
-        };
-        capture_copy_to_dml_notices();
-        materialize_generated_columns(desc, &mut values, ctx)?;
-        coerce_user_defined_base_assignments(desc, &mut values, ctx)?;
-        enforce_exclusion_constraints_against_values(
-            relation_name,
-            desc,
-            relation_constraints,
-            &values,
-            &inserted_rows,
-        )?;
-        let heap_tid = write_insert_heap_row(
+        let row_result = (|| -> Result<(), ExecError> {
+            let Some(mut values) = (match &triggers {
+                Some(triggers) => triggers.before_row_insert(values.clone(), ctx)?,
+                None => Some(values.clone()),
+            }) else {
+                return Ok(());
+            };
+            capture_copy_to_dml_notices();
+            materialize_generated_columns(desc, &mut values, ctx)?;
+            coerce_user_defined_base_assignments(desc, &mut values, ctx)?;
+            enforce_insert_domain_constraints(desc, &values, ctx)?;
+            enforce_partition_constraint_after_before_insert(relation_oid, &values, ctx)?;
+            enforce_exclusion_constraints_against_values(
+                relation_name,
+                desc,
+                relation_constraints,
+                &values,
+                &inserted_rows,
+            )?;
+            let heap_tid = write_insert_heap_row(
+                relation_name,
+                rel,
+                toast,
+                toast_index,
+                desc,
+                relation_constraints,
+                rls_write_checks,
+                &values,
+                ctx,
+                xid,
+                cid,
+            )?;
+            inserted_tids.push(heap_tid);
+            maintain_indexes_for_row(rel, desc, indexes, &values, heap_tid, ctx)?;
+            inserted_rows.push(values.clone());
+            if let Some(returning) = returning {
+                let row = project_returning_row_with_metadata(
+                    returning,
+                    &values,
+                    Some(heap_tid),
+                    Some(relation_oid),
+                    ctx,
+                )?;
+                capture_copy_to_dml_returning_row(row.clone());
+                returned_rows.push(row);
+            }
+            if let Some(triggers) = &triggers {
+                if let Some(capture) = transition_capture.as_mut() {
+                    triggers.capture_insert_row(capture, &values);
+                }
+                triggers.after_row_insert(&values, ctx)?;
+                capture_copy_to_dml_notices();
+            }
+            Ok(())
+        })();
+        if let Err(err) = row_result {
+            for heap_tid in inserted_tids.iter().rev().copied() {
+                let _ = rollback_inserted_row(rel, toast, desc, heap_tid, ctx, xid);
+            }
+            return Err(err);
+        }
+    }
+    for values in &inserted_rows {
+        crate::backend::executor::enforce_outbound_foreign_keys_for_insert(
             relation_name,
             rel,
-            toast,
-            toast_index,
-            desc,
-            relation_constraints,
-            rls_write_checks,
-            &values,
+            &relation_constraints.foreign_keys,
+            values,
+            crate::backend::executor::InsertForeignKeyCheckPhase::AfterIndexInsert,
             ctx,
-            xid,
-            cid,
         )?;
-        maintain_indexes_for_row(rel, desc, indexes, &values, heap_tid, ctx)?;
-        inserted_rows.push(values.clone());
-        if let Some(returning) = returning {
-            let row = project_returning_row(returning, &values, ctx)?;
-            capture_copy_to_dml_returning_row(row.clone());
-            returned_rows.push(row);
-        }
-        if let Some(triggers) = &triggers {
-            if let Some(capture) = transition_capture.as_mut() {
-                triggers.capture_insert_row(capture, &values);
-            }
-            triggers.after_row_insert(&values, ctx)?;
-            capture_copy_to_dml_notices();
-        }
     }
 
     if let Some(triggers) = &triggers {
@@ -5249,6 +5916,25 @@ fn coerce_user_defined_base_assignments(
             &ctx.datetime_config,
         )?;
     }
+    Ok(())
+}
+
+fn enforce_partition_constraint_after_before_insert(
+    relation_oid: u32,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let Some(catalog) = ctx.catalog.clone() else {
+        return Ok(());
+    };
+    let Some(target) = catalog.relation_by_oid(relation_oid) else {
+        return Ok(());
+    };
+    if !target.relispartition {
+        return Ok(());
+    }
+    let mut proute = exec_setup_partition_tuple_routing(&catalog, &target)?;
+    exec_find_partition(&catalog, &mut proute, &target, values, ctx)?;
     Ok(())
 }
 
@@ -5381,6 +6067,14 @@ pub fn execute_prepared_insert_row(
         heap_tid,
         ctx,
     )?;
+    crate::backend::executor::enforce_outbound_foreign_keys_for_insert(
+        &prepared.relation_name,
+        prepared.rel,
+        &prepared.relation_constraints.foreign_keys,
+        &values,
+        crate::backend::executor::InsertForeignKeyCheckPhase::AfterIndexInsert,
+        ctx,
+    )?;
     ctx.session_stats
         .write()
         .note_relation_insert(prepared.relation_oid);
@@ -5494,6 +6188,7 @@ pub fn execute_update_with_waiter(
                             column_index: assignment.column_index,
                             subscripts: assignment.subscripts.clone(),
                             field_path: assignment.field_path.clone(),
+                            indirection: assignment.indirection.clone(),
                             target_sql_type: assignment.target_sql_type,
                         },
                         value,
@@ -5594,6 +6289,7 @@ pub fn execute_update_with_waiter(
                                         column_index: assignment.column_index,
                                         subscripts: assignment.subscripts.clone(),
                                         field_path: assignment.field_path.clone(),
+                                        indirection: assignment.indirection.clone(),
                                         target_sql_type: assignment.target_sql_type,
                                     },
                                     value,
@@ -5701,6 +6397,7 @@ fn evaluate_update_from_assignments(
                 column_index: assignment.column_index,
                 subscripts: assignment.subscripts.clone(),
                 field_path: assignment.field_path.clone(),
+                indirection: assignment.indirection.clone(),
                 target_sql_type: assignment.target_sql_type,
             },
             value,
@@ -6245,6 +6942,7 @@ pub(crate) fn materialize_update_row_events(
                         column_index: assignment.column_index,
                         subscripts: assignment.subscripts.clone(),
                         field_path: assignment.field_path.clone(),
+                        indirection: assignment.indirection.clone(),
                         target_sql_type: assignment.target_sql_type,
                     },
                     value,
@@ -6482,6 +7180,7 @@ pub(crate) fn apply_base_update_row(
                             column_index: assignment.column_index,
                             subscripts: assignment.subscripts.clone(),
                             field_path: assignment.field_path.clone(),
+                            indirection: assignment.indirection.clone(),
                             target_sql_type: assignment.target_sql_type,
                         },
                         value,

@@ -594,6 +594,25 @@ pub(crate) fn build_pg_stat_user_tables_rows(
     indexes: Vec<PgIndexRow>,
     stats: &DatabaseStatsStore,
 ) -> Vec<Vec<Value>> {
+    build_pg_stat_tables_rows(namespaces, classes, indexes, stats, false)
+}
+
+pub(crate) fn build_pg_stat_all_tables_rows(
+    namespaces: Vec<PgNamespaceRow>,
+    classes: Vec<PgClassRow>,
+    indexes: Vec<PgIndexRow>,
+    stats: &DatabaseStatsStore,
+) -> Vec<Vec<Value>> {
+    build_pg_stat_tables_rows(namespaces, classes, indexes, stats, true)
+}
+
+fn build_pg_stat_tables_rows(
+    namespaces: Vec<PgNamespaceRow>,
+    classes: Vec<PgClassRow>,
+    indexes: Vec<PgIndexRow>,
+    stats: &DatabaseStatsStore,
+    include_system: bool,
+) -> Vec<Vec<Value>> {
     let namespace_names = namespaces
         .into_iter()
         .map(|row| (row.oid, row.nspname))
@@ -611,9 +630,10 @@ pub(crate) fn build_pg_stat_user_tables_rows(
         .filter(|class| matches!(class.relkind, 'r' | 't' | 'm' | 'p'))
         .filter_map(|class| {
             let schemaname = namespace_names.get(&class.relnamespace)?.clone();
-            if schemaname == "pg_catalog"
-                || schemaname == "information_schema"
-                || schemaname.starts_with("pg_toast")
+            if !include_system
+                && (schemaname == "pg_catalog"
+                    || schemaname == "information_schema"
+                    || schemaname.starts_with("pg_toast"))
             {
                 return None;
             }

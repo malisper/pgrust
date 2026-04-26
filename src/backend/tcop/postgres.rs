@@ -339,6 +339,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         {
             return find_last_case_insensitive_token_position(sql, "ON");
         }
+        ExecError::Parse(crate::backend::parser::ParseError::InvalidInsertTargetCount {
+            expected,
+            actual,
+        }) => {
+            return find_insert_arity_error_position(sql, *expected, *actual);
+        }
         ExecError::Parse(crate::backend::parser::ParseError::UngroupedColumn {
             token,
             clause,
@@ -395,6 +401,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message.starts_with("op ANY/ALL (array) requires ") {
                 return find_case_insensitive_token_position(sql, "any")
                     .or_else(|| find_case_insensitive_token_position(sql, "all"));
+            }
+            if let Some(option) = message
+                .strip_prefix("unrecognized ANALYZE option \"")
+                .and_then(|rest| rest.strip_suffix('"'))
+            {
+                return find_case_insensitive_token_position(sql, option);
             }
             if let Some(position) = publication_where_error_position(sql, message, None) {
                 return Some(position);
@@ -454,6 +466,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupportedMessage(
             message,
         )) => {
+            if matches!(
+                message.as_str(),
+                "cannot set an array element to DEFAULT" | "cannot set a subfield to DEFAULT"
+            ) {
+                return find_insert_default_indirection_position(sql);
+            }
             if matches!(
                 message.as_str(),
                 "a column list with SET NULL is only supported for ON DELETE actions"
@@ -519,6 +537,13 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::DetailedError {
             message, detail, ..
         } => {
+            if matches!(
+                message.as_str(),
+                "parallel option requires a value between 0 and 1024"
+                    | "parallel workers for vacuum must be between 0 and 1024"
+            ) {
+                return find_case_insensitive_token_position(sql, "PARALLEL");
+            }
             if message.starts_with("invalid input syntax for type numeric time zone: ") {
                 return None;
             }
@@ -1084,6 +1109,214 @@ fn find_subscripted_assignment_position(sql: &str, target: &str) -> Option<usize
         }
     }
     None
+}
+
+fn find_insert_arity_error_position(sql: &str, expected: usize, actual: usize) -> Option<usize> {
+    if expected > actual {
+        find_insert_target_item_position(sql, actual + 1)
+    } else if actual > expected {
+        find_insert_values_item_position(sql, expected + 1)
+    } else {
+        None
+    }
+}
+
+fn find_insert_default_indirection_position(sql: &str) -> Option<usize> {
+    let ordinal = find_insert_values_default_ordinal(sql)?;
+    find_insert_target_item_position(sql, ordinal)
+}
+
+fn find_insert_target_item_position(sql: &str, ordinal: usize) -> Option<usize> {
+    let source_index = find_ascii_keyword(sql, "values", 0)
+        .or_else(|| find_ascii_keyword(sql, "select", 0))
+        .or_else(|| find_ascii_keyword(sql, "default", 0))?;
+    let open = sql[..source_index].rfind('(')?;
+    let close = find_matching_delimiter(sql, open, b'(', b')')?;
+    if close > source_index {
+        return None;
+    }
+    find_top_level_item_start(sql, open + 1, close, ordinal)
+}
+
+fn find_insert_values_item_position(sql: &str, ordinal: usize) -> Option<usize> {
+    let values_index = find_ascii_keyword(sql, "values", 0)?;
+    let open = sql[values_index..].find('(')? + values_index;
+    let close = find_matching_delimiter(sql, open, b'(', b')')?;
+    find_top_level_item_start(sql, open + 1, close, ordinal)
+}
+
+fn find_insert_values_default_ordinal(sql: &str) -> Option<usize> {
+    let values_index = find_ascii_keyword(sql, "values", 0)?;
+    let open = sql[values_index..].find('(')? + values_index;
+    let close = find_matching_delimiter(sql, open, b'(', b')')?;
+    let mut ordinal = 1;
+    let mut item_start = open + 1;
+    for comma in top_level_commas(sql, open + 1, close) {
+        if sql[item_start..comma]
+            .trim()
+            .eq_ignore_ascii_case("default")
+        {
+            return Some(ordinal);
+        }
+        ordinal += 1;
+        item_start = comma + 1;
+    }
+    sql[item_start..close]
+        .trim()
+        .eq_ignore_ascii_case("default")
+        .then_some(ordinal)
+}
+
+fn find_top_level_item_start(
+    sql: &str,
+    list_start: usize,
+    list_end: usize,
+    ordinal: usize,
+) -> Option<usize> {
+    if ordinal == 0 {
+        return None;
+    }
+    let mut current_ordinal = 1;
+    let mut item_start = list_start;
+    for comma in top_level_commas(sql, list_start, list_end) {
+        if current_ordinal == ordinal {
+            return Some(skip_ascii_whitespace(sql, item_start, comma) + 1);
+        }
+        current_ordinal += 1;
+        item_start = comma + 1;
+    }
+    if current_ordinal == ordinal {
+        return Some(skip_ascii_whitespace(sql, item_start, list_end) + 1);
+    }
+    None
+}
+
+fn top_level_commas(sql: &str, start: usize, end: usize) -> Vec<usize> {
+    let bytes = sql.as_bytes();
+    let mut commas = Vec::new();
+    let mut index = start;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    while index < end {
+        match bytes[index] {
+            b'\'' => index = skip_single_quoted_sql_string(bytes, index, end),
+            b'"' => index = skip_double_quoted_sql_identifier(bytes, index, end),
+            b'(' => {
+                paren_depth += 1;
+                index += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                index += 1;
+            }
+            b'[' => {
+                bracket_depth += 1;
+                index += 1;
+            }
+            b']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                index += 1;
+            }
+            b',' if paren_depth == 0 && bracket_depth == 0 => {
+                commas.push(index);
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    commas
+}
+
+fn find_matching_delimiter(sql: &str, open: usize, open_byte: u8, close_byte: u8) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    if bytes.get(open) != Some(&open_byte) {
+        return None;
+    }
+    let mut depth = 1usize;
+    let mut index = open + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => index = skip_single_quoted_sql_string(bytes, index, bytes.len()),
+            b'"' => index = skip_double_quoted_sql_identifier(bytes, index, bytes.len()),
+            byte if byte == open_byte => {
+                depth += 1;
+                index += 1;
+            }
+            byte if byte == close_byte => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn skip_single_quoted_sql_string(bytes: &[u8], mut index: usize, end: usize) -> usize {
+    index += 1;
+    while index < end {
+        if bytes[index] == b'\'' {
+            index += 1;
+            if index < end && bytes[index] == b'\'' {
+                index += 1;
+                continue;
+            }
+            return index;
+        }
+        index += 1;
+    }
+    end
+}
+
+fn skip_double_quoted_sql_identifier(bytes: &[u8], mut index: usize, end: usize) -> usize {
+    index += 1;
+    while index < end {
+        if bytes[index] == b'"' {
+            index += 1;
+            if index < end && bytes[index] == b'"' {
+                index += 1;
+                continue;
+            }
+            return index;
+        }
+        index += 1;
+    }
+    end
+}
+
+fn find_ascii_keyword(sql: &str, keyword: &str, start: usize) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let keyword = keyword.as_bytes();
+    let mut index = start;
+    while index + keyword.len() <= bytes.len() {
+        if &bytes[index..index + keyword.len()] == keyword
+            && is_ascii_keyword_start_boundary(bytes, index)
+            && is_ascii_keyword_end_boundary(bytes, index + keyword.len())
+        {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_ascii_keyword_start_boundary(bytes: &[u8], index: usize) -> bool {
+    index == 0 || !matches!(bytes[index - 1], b'a'..=b'z' | b'0'..=b'9' | b'_')
+}
+
+fn is_ascii_keyword_end_boundary(bytes: &[u8], index: usize) -> bool {
+    index == bytes.len() || !matches!(bytes[index], b'a'..=b'z' | b'0'..=b'9' | b'_')
+}
+
+fn skip_ascii_whitespace(sql: &str, mut start: usize, end: usize) -> usize {
+    while start < end && sql.as_bytes()[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    start
 }
 
 fn find_subscript_expression_position(sql: &str) -> Option<usize> {
@@ -2485,6 +2718,7 @@ fn execute_query_statement(
     }
     if let Ok(Statement::Select(ref select_stmt)) = parsed
         && !raw_select_contains_pg_notify(select_stmt)
+        && !raw_select_contains_writable_cte(select_stmt)
         && !select_sql_requires_command_end_xid_handling(&sql)
     {
         let max_stack_depth_kb = state.session.datetime_config().max_stack_depth_kb;
@@ -3173,6 +3407,20 @@ fn execute_psql_describe_query(
             psql_describe_inherits_query_rows(db, session, sql, lower.contains("c.relkind")),
         ));
     }
+    if lower.contains("from pg_catalog.pg_class c")
+        && lower.contains("join pg_catalog.pg_inherits i")
+        && lower.contains("pg_get_expr(c.relpartbound")
+    {
+        return Some((
+            vec![
+                QueryColumn::text("regclass"),
+                QueryColumn::text("pg_get_expr"),
+                QueryColumn::text("inhdetachpending"),
+                QueryColumn::text("pg_get_partition_constraintdef"),
+            ],
+            psql_describe_partition_of_query_rows(db, session, sql),
+        ));
+    }
     None
 }
 
@@ -3471,6 +3719,50 @@ fn psql_describe_inherits_query_rows(
             }
         })
         .collect()
+}
+
+fn psql_describe_partition_of_query_rows(
+    db: &Database,
+    session: &Session,
+    sql: &str,
+) -> Vec<Vec<Value>> {
+    let Some(oid) = extract_single_quoted_literal_after(sql, "c.oid =")
+        .and_then(|value| value.parse::<u32>().ok())
+        .or_else(|| extract_quoted_oid(sql))
+    else {
+        return Vec::new();
+    };
+    let txn_ctx = session.catalog_txn_ctx();
+    let search_path = session.configured_search_path();
+    let catalog = session.catalog_lookup(db);
+    let Some(inherits) = catalog.inheritance_parents(oid).into_iter().next() else {
+        return Vec::new();
+    };
+    let parent_name = db
+        .relation_display_name(
+            session.client_id,
+            txn_ctx,
+            search_path.as_deref(),
+            inherits.inhparent,
+        )
+        .unwrap_or_else(|| inherits.inhparent.to_string());
+    let bound = db
+        .describe_relation_by_oid(session.client_id, txn_ctx, oid)
+        .and_then(|relation| relation.relpartbound)
+        .and_then(|text| crate::backend::parser::deserialize_partition_bound(&text).ok())
+        .map(|bound| {
+            crate::backend::commands::partition::render_partition_bound(
+                &bound,
+                &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            )
+        })
+        .unwrap_or_default();
+    vec![vec![
+        Value::Text(parent_name.into()),
+        Value::Text(bound.into()),
+        Value::Bool(inherits.inhdetachpending),
+        Value::Null,
+    ]]
 }
 
 fn psql_describe_statistics_query(
@@ -3844,7 +4136,7 @@ fn psql_describe_tableinfo_query(
             Value::Bool(relhasindex),
             Value::Bool(false),
             Value::Bool(entry.relhastriggers),
-            Value::Bool(false),
+            Value::Bool(entry.relispartition),
             Value::Bool(false),
             Value::Bool(false),
             Value::Bool(false),
@@ -4475,13 +4767,70 @@ fn foreign_key_constraint_def(
         referenced_relation_name,
         referenced_columns.join(", ")
     );
-    if row.confdeltype == 'r' {
-        def.push_str(" ON DELETE RESTRICT");
-    }
-    if row.confupdtype == 'r' {
-        def.push_str(" ON UPDATE RESTRICT");
+    append_foreign_key_match_type(&mut def, row.confmatchtype);
+    append_foreign_key_action(&mut def, "ON UPDATE", row.confupdtype);
+    let appended_delete = append_foreign_key_action(&mut def, "ON DELETE", row.confdeltype);
+    if appended_delete
+        && let Some(set_columns) = row
+            .confdelsetcols
+            .as_ref()
+            .and_then(|attnums| relation_column_names_for_attnums(relation, attnums))
+        && !set_columns.is_empty()
+    {
+        def.push_str(" (");
+        def.push_str(&set_columns.join(", "));
+        def.push(')');
     }
     Some(def)
+}
+
+fn relation_column_names_for_attnums(
+    relation: &crate::backend::utils::cache::relcache::RelCacheEntry,
+    attnums: &[i16],
+) -> Option<Vec<String>> {
+    attnums
+        .iter()
+        .map(|attnum| {
+            (*attnum > 0)
+                .then(|| {
+                    relation
+                        .desc
+                        .columns
+                        .get((*attnum as usize).saturating_sub(1))
+                })
+                .flatten()
+                .map(|column| column.name.clone())
+        })
+        .collect()
+}
+
+fn append_foreign_key_match_type(def: &mut String, match_type: char) {
+    match match_type {
+        'f' => def.push_str(" MATCH FULL"),
+        'p' => def.push_str(" MATCH PARTIAL"),
+        _ => {}
+    }
+}
+
+fn append_foreign_key_action(def: &mut String, clause: &str, action: char) -> bool {
+    let Some(keyword) = foreign_key_action_keyword(action) else {
+        return false;
+    };
+    def.push(' ');
+    def.push_str(clause);
+    def.push(' ');
+    def.push_str(keyword);
+    true
+}
+
+fn foreign_key_action_keyword(action: char) -> Option<&'static str> {
+    match action {
+        'r' => Some("RESTRICT"),
+        'c' => Some("CASCADE"),
+        'n' => Some("SET NULL"),
+        'd' => Some("SET DEFAULT"),
+        _ => None,
+    }
 }
 
 fn psql_describe_indexes_query(
@@ -5849,6 +6198,38 @@ fn raw_cte_contains_pg_notify(cte: &crate::backend::parser::CommonTableExpr) -> 
     raw_cte_body_contains_pg_notify(&cte.body)
 }
 
+fn raw_select_contains_writable_cte(select_stmt: &crate::backend::parser::SelectStatement) -> bool {
+    select_stmt
+        .with
+        .iter()
+        .any(|cte| raw_cte_body_is_writable(&cte.body))
+        || select_stmt
+            .set_operation
+            .as_ref()
+            .is_some_and(|set_operation| {
+                set_operation
+                    .inputs
+                    .iter()
+                    .any(raw_select_contains_writable_cte)
+            })
+}
+
+fn raw_cte_body_is_writable(body: &crate::backend::parser::CteBody) -> bool {
+    match body {
+        crate::backend::parser::CteBody::Insert(_) => true,
+        crate::backend::parser::CteBody::Select(select_stmt) => {
+            raw_select_contains_writable_cte(select_stmt)
+        }
+        crate::backend::parser::CteBody::Values(values_stmt) => values_stmt
+            .with
+            .iter()
+            .any(|cte| raw_cte_body_is_writable(&cte.body)),
+        crate::backend::parser::CteBody::RecursiveUnion {
+            anchor, recursive, ..
+        } => raw_cte_body_is_writable(anchor) || raw_select_contains_writable_cte(recursive),
+    }
+}
+
 fn raw_cte_body_contains_pg_notify(body: &crate::backend::parser::CteBody) -> bool {
     match body {
         crate::backend::parser::CteBody::Select(select_stmt) => {
@@ -5857,10 +6238,54 @@ fn raw_cte_body_contains_pg_notify(body: &crate::backend::parser::CteBody) -> bo
         crate::backend::parser::CteBody::Values(values_stmt) => {
             raw_values_statement_contains_pg_notify(values_stmt)
         }
+        crate::backend::parser::CteBody::Insert(insert_stmt) => {
+            raw_insert_statement_contains_pg_notify(insert_stmt)
+        }
         crate::backend::parser::CteBody::RecursiveUnion {
             anchor, recursive, ..
         } => raw_cte_body_contains_pg_notify(anchor) || raw_select_contains_pg_notify(recursive),
     }
+}
+
+fn raw_insert_statement_contains_pg_notify(
+    insert_stmt: &crate::backend::parser::InsertStatement,
+) -> bool {
+    insert_stmt.with.iter().any(raw_cte_contains_pg_notify)
+        || match &insert_stmt.source {
+            crate::backend::parser::InsertSource::Values(rows) => {
+                rows.iter().flatten().any(raw_expr_contains_pg_notify)
+            }
+            crate::backend::parser::InsertSource::DefaultValues => false,
+            crate::backend::parser::InsertSource::Select(select_stmt) => {
+                raw_select_contains_pg_notify(select_stmt)
+            }
+        }
+        || insert_stmt.on_conflict.as_ref().is_some_and(|on_conflict| {
+            on_conflict
+                .assignments
+                .iter()
+                .any(|assignment| raw_expr_contains_pg_notify(&assignment.expr))
+                || on_conflict
+                    .where_clause
+                    .as_ref()
+                    .is_some_and(raw_expr_contains_pg_notify)
+                || match &on_conflict.target {
+                    Some(crate::backend::parser::OnConflictTarget::Inference(spec)) => {
+                        spec.elements
+                            .iter()
+                            .any(|elem| raw_expr_contains_pg_notify(&elem.expr))
+                            || spec
+                                .predicate
+                                .as_ref()
+                                .is_some_and(raw_expr_contains_pg_notify)
+                    }
+                    Some(crate::backend::parser::OnConflictTarget::Constraint(_)) | None => false,
+                }
+        })
+        || insert_stmt
+            .returning
+            .iter()
+            .any(|item| raw_expr_contains_pg_notify(&item.expr))
 }
 
 fn raw_values_statement_contains_pg_notify(
@@ -9738,6 +10163,50 @@ ORDER BY 1, 2;";
     }
 
     #[test]
+    fn exec_error_position_points_at_insert_arity_mismatch() {
+        let too_few_values = "insert into inserttest (col1, col2, col3) values (DEFAULT, DEFAULT)";
+        let err = ExecError::Parse(
+            crate::backend::parser::ParseError::InvalidInsertTargetCount {
+                expected: 3,
+                actual: 2,
+            },
+        );
+
+        assert_eq!(
+            exec_error_position(too_few_values, &err),
+            too_few_values.find("col3").map(|index| index + 1)
+        );
+
+        let too_many_values = "insert into inserttest (col1) values (1, 2)";
+        let err = ExecError::Parse(
+            crate::backend::parser::ParseError::InvalidInsertTargetCount {
+                expected: 1,
+                actual: 2,
+            },
+        );
+
+        assert_eq!(
+            exec_error_position(too_many_values, &err),
+            too_many_values.rfind('2').map(|index| index + 1)
+        );
+    }
+
+    #[test]
+    fn exec_error_position_points_at_default_indirection_target() {
+        let sql = "insert into inserttest (f3.if1, f3.if2) values (1, default)";
+        let err = ExecError::Parse(
+            crate::backend::parser::ParseError::FeatureNotSupportedMessage(
+                "cannot set a subfield to DEFAULT".into(),
+            ),
+        );
+
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.find("f3.if2").map(|index| index + 1)
+        );
+    }
+
+    #[test]
     fn exec_error_position_points_at_single_quoted_json_literal_start() {
         let sql = "SELECT '\"abc'::jsonb;";
         let err = ExecError::JsonInput {
@@ -9879,6 +10348,49 @@ ORDER BY 1, 2;";
         .unwrap();
 
         assert_eq!(first_error_response_position(&output), Some(22));
+    }
+
+    #[test]
+    fn simple_query_reports_position_for_insert_arity_error() {
+        let db = Database::open(temp_dir("insert_arity_error_position"), 16).unwrap();
+        db.execute(1, "create table inserttest (col1 int, col2 int, col3 int)")
+            .unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+        let sql = "insert into inserttest (col1, col2, col3) values (DEFAULT, DEFAULT)";
+
+        handle_query(&mut output, &db, &mut state, sql).unwrap();
+
+        assert_eq!(
+            first_error_response_position(&output),
+            sql.find("col3").map(|index| index + 1)
+        );
+    }
+
+    #[test]
+    fn simple_query_reports_position_for_default_indirection_error() {
+        let db = Database::open(temp_dir("insert_default_indirection_position"), 16).unwrap();
+        db.execute(1, "create table inserttest (f2 int[])").unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+        let sql = "insert into inserttest (f2[1], f2[2]) values (1, default)";
+
+        handle_query(&mut output, &db, &mut state, sql).unwrap();
+
+        assert_eq!(
+            first_error_response_position(&output),
+            sql.find("f2[2]").map(|index| index + 1)
+        );
     }
 
     #[test]

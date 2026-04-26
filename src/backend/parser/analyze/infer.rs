@@ -21,6 +21,48 @@ fn array_subscript_element_type(array_type: SqlType) -> SqlType {
     }
 }
 
+fn navigation_sql_type(sql_type: SqlType, catalog: &dyn CatalogLookup) -> SqlType {
+    let Some(domain) = catalog.domain_by_type_oid(sql_type.type_oid) else {
+        return sql_type;
+    };
+    if sql_type.is_array && !domain.sql_type.is_array {
+        SqlType::array_of(domain.sql_type)
+    } else {
+        domain.sql_type
+    }
+}
+
+fn field_type_from_sql_type(
+    row_type: SqlType,
+    field: &str,
+    catalog: &dyn CatalogLookup,
+) -> Option<SqlType> {
+    let row_type = navigation_sql_type(row_type, catalog);
+    if matches!(row_type.kind, SqlTypeKind::Composite) && row_type.typrelid != 0 {
+        return catalog
+            .lookup_relation_by_oid(row_type.typrelid)
+            .and_then(|relation| {
+                relation
+                    .desc
+                    .columns
+                    .iter()
+                    .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(field))
+                    .map(|column| column.sql_type)
+            });
+    }
+    if matches!(row_type.kind, SqlTypeKind::Record)
+        && row_type.typmod > 0
+        && let Some(descriptor) = lookup_anonymous_record_descriptor(row_type.typmod)
+    {
+        return descriptor
+            .fields
+            .iter()
+            .find(|candidate| candidate.name.eq_ignore_ascii_case(field))
+            .map(|field| field.sql_type);
+    }
+    None
+}
+
 fn unnest_element_type(arg_type: SqlType) -> Option<SqlType> {
     if arg_type.is_array {
         return Some(arg_type.element_type());
@@ -360,13 +402,16 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::PgArray(_)) => SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
         SqlExpr::Const(Value::Float64(_)) => SqlType::new(SqlTypeKind::Float8),
         SqlExpr::ArraySubscript { array, subscripts } => {
-            let array_type = infer_sql_expr_type_with_ctes(
-                array,
-                scope,
+            let array_type = navigation_sql_type(
+                infer_sql_expr_type_with_ctes(
+                    array,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                ),
                 catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
             );
             let element_type = array_subscript_element_type(array_type);
             if subscripts.iter().any(|subscript| subscript.upper.is_some()) {
@@ -512,6 +557,19 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     .find(|(candidate, _)| candidate.eq_ignore_ascii_case(field))
             {
                 expr_sql_type_hint(field_expr).unwrap_or(SqlType::new(SqlTypeKind::Text))
+            } else if let Some(field_type) = field_type_from_sql_type(
+                infer_sql_expr_type_with_ctes(
+                    expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                ),
+                field,
+                catalog,
+            ) {
+                field_type
             } else {
                 let row_type = infer_sql_expr_type_with_ctes(
                     expr,

@@ -409,6 +409,10 @@ fn pg_relation_size_reports_empty_and_nonempty_toast_relations() {
         query_rows(&db, 1, "select pg_relation_size('docs') > 0"),
         vec![vec![Value::Bool(true)]]
     );
+    assert_eq!(
+        query_rows(&db, 1, "select pg_relation_size('docs', 'main') > 0"),
+        vec![vec![Value::Bool(true)]]
+    );
 
     assert_eq!(
         query_rows(

@@ -86,7 +86,12 @@ pub fn classify_page_for_prune(
                 all_frozen = false;
                 removable_offsets.push(off);
             }
-            PruneTupleState::DeadNotRemovable | PruneTupleState::AbortedInsertGarbage => {
+            PruneTupleState::AbortedInsertGarbage => {
+                all_visible = false;
+                all_frozen = false;
+                removable_offsets.push(off);
+            }
+            PruneTupleState::DeadNotRemovable => {
                 all_visible = false;
                 all_frozen = false;
                 nonremovable_dead_tuples += 1;

@@ -90,6 +90,7 @@ pub(super) fn bind_on_conflict_clause(
                         column_index: target.column_index,
                         subscripts: target.subscripts,
                         field_path: target.field_path,
+                        indirection: target.indirection,
                         target_sql_type: target.target_sql_type,
                         expr,
                     })
