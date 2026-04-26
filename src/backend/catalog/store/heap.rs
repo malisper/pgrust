@@ -8522,6 +8522,20 @@ fn index_rows_for_relation_mvcc(
         .collect())
 }
 
+fn index_row_by_index_oid_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    index_oid: u32,
+) -> Result<Option<crate::include::catalog::PgIndexRow>, CatalogError> {
+    Ok(store
+        .search_sys_cache1(ctx, SysCacheId::IndexRelId, oid_key(index_oid))?
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Index(row) => Some(row),
+            _ => None,
+        }))
+}
+
 fn relhasindex_rows_after_index_drop(
     store: &CatalogStore,
     ctx: &CatalogWriteContext,
@@ -8569,12 +8583,7 @@ fn index_parent_oid_for_entry_mvcc(
     if !matches!(entry.relkind, 'i' | 'I') {
         return Ok(None);
     }
-    Ok(
-        index_rows_for_relation_mvcc(store, ctx, entry.relation_oid)?
-            .into_iter()
-            .next()
-            .map(|row| row.indrelid),
-    )
+    Ok(index_row_by_index_oid_mvcc(store, ctx, entry.relation_oid)?.map(|row| row.indrelid))
 }
 
 fn publication_row_by_oid_mvcc(
