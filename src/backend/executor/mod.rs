@@ -175,6 +175,7 @@ use expr_ops::parse_numeric_text;
 pub(crate) use foreign_keys::{
     enforce_inbound_foreign_key_reference, enforce_inbound_foreign_keys_on_delete,
     enforce_inbound_foreign_keys_on_update, enforce_outbound_foreign_keys,
+    foreign_key_action_trigger_enabled_on_delete, foreign_key_action_trigger_enabled_on_update,
 };
 pub(crate) use permissions::relation_values_visible_for_error_detail;
 

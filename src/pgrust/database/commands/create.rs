@@ -1516,7 +1516,7 @@ impl Database {
                 referenced_relation.owner_oid,
                 referenced_relation.relpersistence,
             );
-            let constraint_effect = self
+            let (constraint_row, constraint_effect) = self
                 .catalog
                 .write()
                 .create_foreign_key_constraint_for_entries_mvcc(
@@ -1540,6 +1540,13 @@ impl Database {
                 .map_err(map_catalog_error)?;
             self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
             catalog_effects.push(constraint_effect);
+            self.create_foreign_key_triggers_in_transaction(
+                client_id,
+                xid,
+                constraint_cid.saturating_add(1),
+                &constraint_row,
+                catalog_effects,
+            )?;
         }
 
         Ok(())

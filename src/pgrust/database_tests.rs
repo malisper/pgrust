@@ -10811,6 +10811,192 @@ fn statement_trigger_return_value_is_ignored() {
 }
 
 #[test]
+fn foreign_key_actions_respect_disabled_internal_triggers() {
+    let dir = temp_dir("fk_actions_disabled_internal_triggers");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 references parents(id) on delete cascade)",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1), (2)")
+        .unwrap();
+    db.execute(1, "insert into children values (1), (2)")
+        .unwrap();
+
+    db.execute(1, "alter table parents disable trigger user")
+        .unwrap();
+    db.execute(1, "delete from parents where id = 2").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id from children order by id"),
+        vec![vec![Value::Int32(1)]]
+    );
+
+    db.execute(1, "alter table parents disable trigger all")
+        .unwrap();
+    db.execute(1, "delete from parents where id = 1").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id from children order by id"),
+        vec![vec![Value::Int32(1)]]
+    );
+}
+
+#[test]
+fn foreign_key_checks_respect_disabled_internal_triggers() {
+    let dir = temp_dir("fk_checks_disabled_internal_triggers");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(1, "create table children (id int4 references parents(id))")
+        .unwrap();
+
+    db.execute(1, "alter table children disable trigger all")
+        .unwrap();
+    db.execute(1, "insert into children values (99)").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id from children"),
+        vec![vec![Value::Int32(99)]]
+    );
+
+    db.execute(1, "alter table children enable trigger all")
+        .unwrap();
+    match db.execute(1, "insert into children values (100)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. })
+            if constraint == "children_id_fkey" => {}
+        other => panic!("expected foreign key violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn partition_trigger_state_propagates_to_clones_unless_only() {
+    let dir = temp_dir("partition_trigger_state_propagates");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parent_part (id int4) partition by range (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table child_part partition of parent_part for values from (0) to (10)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function part_trig_fn() returns trigger language plpgsql as $$ begin return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger part_trig after insert on parent_part for each row execute function part_trig_fn()",
+    )
+    .unwrap();
+
+    db.execute(1, "alter table parent_part disable trigger part_trig")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, t.tgenabled::text \
+             from pg_trigger t join pg_class c on c.oid = t.tgrelid \
+             where t.tgname = 'part_trig' order by c.relname"
+        ),
+        vec![
+            vec![Value::Text("child_part".into()), Value::Text("D".into())],
+            vec![Value::Text("parent_part".into()), Value::Text("D".into())],
+        ]
+    );
+
+    db.execute(
+        1,
+        "alter table only parent_part enable always trigger part_trig",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, t.tgenabled::text \
+             from pg_trigger t join pg_class c on c.oid = t.tgrelid \
+             where t.tgname = 'part_trig' order by c.relname"
+        ),
+        vec![
+            vec![Value::Text("child_part".into()), Value::Text("D".into())],
+            vec![Value::Text("parent_part".into()), Value::Text("A".into())],
+        ]
+    );
+}
+
+#[test]
+fn trigger_relid_regclass_assignment_uses_relation_name() {
+    let dir = temp_dir("trigger_relid_regclass_assignment");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(1, "create table trigger_items (id int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function relid_notice() returns trigger language plpgsql as $$ \
+         declare relid text; \
+         begin \
+           relid := TG_RELID::regclass; \
+           raise notice 'relid %', relid; \
+           return new; \
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger relid_notice before insert on trigger_items for each row execute function relid_notice()",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "insert into trigger_items values (1)")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![String::from("relid trigger_items")]
+    );
+}
+
+#[test]
+fn partition_ancestors_supports_with_ordinality() {
+    let dir = temp_dir("partition_ancestors_with_ordinality");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parent_part (id int4) partition by range (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table child_part partition of parent_part for values from (0) to (10)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relid::regclass::text, ordinality \
+             from pg_partition_ancestors('child_part') with ordinality as a(relid, ordinality)"
+        ),
+        vec![
+            vec![Value::Text("child_part".into()), Value::Int64(1)],
+            vec![Value::Text("parent_part".into()), Value::Int64(2)],
+        ]
+    );
+}
+
+#[test]
 fn transition_table_statement_triggers_can_read_statement_rows() {
     let dir = temp_dir("transition_table_statement_rows");
     let db = Database::open(&dir, 64).unwrap();

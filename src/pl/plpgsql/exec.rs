@@ -6,7 +6,8 @@ use crate::backend::access::transam::xact::{CommandId, INVALID_TRANSACTION_ID, T
 use crate::backend::commands::tablecmds::{execute_delete, execute_insert, execute_update};
 use crate::backend::executor::{
     ArrayDimension, ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult,
-    TupleSlot, Value, cast_value, cast_value_with_config, compare_order_values, eval_expr,
+    TupleSlot, Value, cast_value, cast_value_with_config,
+    cast_value_with_source_type_catalog_and_config, compare_order_values, eval_expr,
     eval_plpgsql_expr, execute_planned_stmt, execute_readonly_statement, render_interval_text,
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
@@ -24,7 +25,7 @@ use crate::include::catalog::{
     ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, TEXT_TYPE_OID,
 };
 use crate::include::nodes::datum::{RecordDescriptor, RecordValue};
-use crate::include::nodes::primnodes::QueryColumn;
+use crate::include::nodes::primnodes::{QueryColumn, expr_sql_type_hint};
 use crate::pgrust::session::ByteaOutputFormat;
 
 use super::ast::{ExceptionCondition, RaiseLevel};
@@ -1077,7 +1078,9 @@ fn exec_function_stmt(
             exec_function_block(block, compiled, expected_record_shape, state, ctx)
         }
         CompiledStmt::Assign { slot, ty, expr } => {
-            state.values[*slot] = cast_value(eval_function_expr(expr, &state.values, ctx)?, *ty)?;
+            let value = eval_function_expr(expr, &state.values, ctx)?;
+            state.values[*slot] =
+                cast_function_value(value, compiled_expr_sql_type_hint(expr), *ty, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::Null => Ok(FunctionControl::Continue),
@@ -2056,7 +2059,12 @@ fn assign_query_row_to_targets(
                 ));
             }
             let value = row.first().cloned().unwrap_or(Value::Null);
-            state.values[*slot] = cast_value(value, *ty)?;
+            state.values[*slot] = cast_function_value(
+                value,
+                columns.first().map(|column| column.sql_type),
+                *ty,
+                ctx,
+            )?;
             Ok(())
         }
         _ => {
@@ -2071,11 +2079,37 @@ fn assign_query_row_to_targets(
                     "42804",
                 ));
             }
-            for (target, value) in targets.iter().zip(row.iter()) {
-                state.values[target.slot] = cast_value(value.clone(), target.ty)?;
+            for (index, (target, value)) in targets.iter().zip(row.iter()).enumerate() {
+                let source_type = columns.get(index).map(|column| column.sql_type);
+                state.values[target.slot] =
+                    cast_function_value(value.clone(), source_type, target.ty, ctx)?;
             }
             Ok(())
         }
+    }
+}
+
+fn cast_function_value(
+    value: Value,
+    source_type: Option<SqlType>,
+    target_type: SqlType,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    cast_value_with_source_type_catalog_and_config(
+        value,
+        source_type,
+        target_type,
+        ctx.catalog
+            .as_ref()
+            .map(|catalog| catalog as &dyn CatalogLookup),
+        &ctx.datetime_config,
+    )
+}
+
+fn compiled_expr_sql_type_hint(expr: &CompiledExpr) -> Option<SqlType> {
+    match expr {
+        CompiledExpr::Scalar { expr, .. } => expr_sql_type_hint(expr),
+        CompiledExpr::QueryCompare { .. } => Some(SqlType::new(SqlTypeKind::Bool)),
     }
 }
 
@@ -2832,6 +2866,7 @@ fn static_sqlstate(sqlstate: &str) -> Option<&'static str> {
         "2F003" => Some("2F003"),
         "P0001" => Some("P0001"),
         "P0004" => Some("P0004"),
+        "U9999" => Some("U9999"),
         "XX001" => Some("XX001"),
         _ => None,
     }
@@ -3029,7 +3064,7 @@ fn seed_trigger_state(
         }
         .into(),
     );
-    state.values[bindings.tg_relid_slot] = Value::Int32(call.relation_oid as i32);
+    state.values[bindings.tg_relid_slot] = Value::Int64(i64::from(call.relation_oid));
     state.values[bindings.tg_nargs_slot] = Value::Int32(call.trigger_args.len() as i32);
     let tg_argv = if call.trigger_args.is_empty() {
         ArrayValue::empty()

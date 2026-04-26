@@ -1766,22 +1766,26 @@ fn lower_set_returning_call(
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionTree {
             func_oid,
             func_variadic,
             relid: lower_expr(ctx, relid, mode),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid: lower_expr(ctx, relid, mode),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PgLockStatus {
             func_oid,
@@ -1982,22 +1986,26 @@ fn fix_set_returning_call_upper_exprs(
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionTree {
             func_oid,
             func_variadic,
             relid: fix_upper_expr_for_input(root, relid, path, input_tlist),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::PartitionAncestors {
             func_oid,
             func_variadic,
             relid: fix_upper_expr_for_input(root, relid, path, input_tlist),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::PgLockStatus {
             func_oid,

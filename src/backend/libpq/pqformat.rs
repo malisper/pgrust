@@ -371,6 +371,16 @@ pub(crate) fn infer_command_tag(sql: &str, affected: usize) -> String {
     }
 }
 
+pub(crate) fn infer_dml_returning_command_tag(sql: &str, affected: usize) -> Option<String> {
+    let first_word = sql
+        .split_ascii_whitespace()
+        .next()
+        .map(|word| word.to_ascii_uppercase())
+        .unwrap_or_default();
+    matches!(first_word.as_str(), "INSERT" | "UPDATE" | "DELETE")
+        .then(|| infer_command_tag(sql, affected))
+}
+
 pub(crate) fn send_query_result(
     stream: &mut impl Write,
     columns: &[QueryColumn],

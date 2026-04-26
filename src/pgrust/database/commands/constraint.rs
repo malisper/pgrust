@@ -1485,7 +1485,7 @@ impl Database {
                     waiter: None,
                     interrupts,
                 };
-                let effect = self
+                let (constraint_row, effect) = self
                     .catalog
                     .write()
                     .create_foreign_key_constraint_mvcc(
@@ -1508,6 +1508,13 @@ impl Database {
                     )
                     .map_err(map_catalog_error)?;
                 catalog_effects.push(effect);
+                self.create_foreign_key_triggers_in_transaction(
+                    client_id,
+                    xid,
+                    cid.saturating_add(1),
+                    &constraint_row,
+                    catalog_effects,
+                )?;
             }
         }
 
@@ -1715,11 +1722,21 @@ impl Database {
 
         match row.contype {
             CONSTRAINT_CHECK | CONSTRAINT_FOREIGN => {
+                if row.contype == CONSTRAINT_FOREIGN {
+                    self.drop_foreign_key_triggers_in_transaction(
+                        client_id,
+                        xid,
+                        cid,
+                        &row,
+                        &catalog,
+                        catalog_effects,
+                    )?;
+                }
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
                     xid,
-                    cid,
+                    cid: cid.saturating_add(catalog_effects.len() as u32),
                     client_id,
                     waiter: None,
                     interrupts,

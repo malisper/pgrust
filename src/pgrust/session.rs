@@ -4392,6 +4392,14 @@ impl Session {
                     column_names,
                     rows,
                 } => {
+                    if let Some(tag) =
+                        crate::backend::libpq::pqformat::infer_dml_returning_command_tag(
+                            &sql,
+                            rows.len(),
+                        )
+                    {
+                        portal.command_tag = tag;
+                    }
                     portal.execution = crate::pgrust::portal::PortalExecution::Materialized {
                         columns,
                         column_names,
