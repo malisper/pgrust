@@ -30,7 +30,9 @@ use super::super::inherit::{
     translate_append_rel_expr,
 };
 use super::super::joininfo;
-use super::super::partition_prune::partition_may_satisfy_filter;
+use super::super::partition_prune::{
+    partition_may_satisfy_filter, relation_may_satisfy_own_partition_bound,
+};
 use super::super::partitionwise;
 use super::super::pathnodes::{
     next_synthetic_slot_id, rte_slot_id, rte_slot_varno, slot_output_target,
@@ -2450,6 +2452,8 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             filter.as_ref(),
             query_order_items.as_deref(),
         );
+        let expand_children = relkind != 'p'
+            || relation_may_satisfy_own_partition_bound(catalog, relation_oid, filter.as_ref());
         let mut children = Vec::new();
         let mut ordered_children = Vec::new();
         let mut ordered_ok = query_order_items.is_some();
@@ -2496,7 +2500,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 }
             }
         }
-        for child_rtindex in child_rtindexes {
+        for child_rtindex in child_rtindexes.into_iter().filter(|_| expand_children) {
             let child_relation_oid = root
                 .parse
                 .rtable

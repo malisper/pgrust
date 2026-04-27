@@ -346,6 +346,7 @@ fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
         Plan::Projection { input, targets, .. } => {
             projection_targets_are_explain_passthrough(input, targets).then_some(input.as_ref())
         }
+        Plan::Append { children, .. } if children.len() == 1 => children.first(),
         _ => None,
     }
 }
@@ -453,7 +454,7 @@ fn push_explain_plan_state_line(
     lines: &mut Vec<String>,
 ) {
     let prefix = explain_node_prefix(indent, is_child);
-    let label = nonverbose_plan_label(plan, ctx).unwrap_or_else(|| state.node_label());
+    let label = nonverbose_plan_label(plan, ctx, is_child).unwrap_or_else(|| state.node_label());
     push_explain_line(
         &format!("{prefix}{label}"),
         state.plan_info(),
@@ -1310,7 +1311,11 @@ fn set_op_plan_label(
     format!("{prefix} {op_name}")
 }
 
-fn nonverbose_plan_label(plan: &Plan, ctx: &VerboseExplainContext) -> Option<String> {
+fn nonverbose_plan_label(
+    plan: &Plan,
+    ctx: &VerboseExplainContext,
+    is_child: bool,
+) -> Option<String> {
     match plan {
         Plan::Projection { input, .. } if matches!(input.as_ref(), Plan::Result { .. }) => {
             Some("Result".into())
@@ -1332,10 +1337,12 @@ fn nonverbose_plan_label(plan: &Plan, ctx: &VerboseExplainContext) -> Option<Str
                 set_returning_call_label(call)
             )
         }),
-        Plan::SeqScan { relation_name, .. } => ctx
-            .relation_scan_alias
-            .as_ref()
-            .map(|alias| format!("Seq Scan on {relation_name} {alias}")),
+        Plan::SeqScan { relation_name, .. } => nonverbose_relation_scan_label(
+            "Seq Scan",
+            relation_name,
+            ctx.relation_scan_alias.as_deref(),
+            is_child,
+        ),
         Plan::IndexOnlyScan {
             relation_name,
             index_name,
@@ -1360,12 +1367,45 @@ fn nonverbose_plan_label(plan: &Plan, ctx: &VerboseExplainContext) -> Option<Str
             };
             format!("{scan_name}{direction} using {index_name} on {relation_name} {alias}")
         }),
-        Plan::BitmapHeapScan { relation_name, .. } => ctx
-            .relation_scan_alias
-            .as_ref()
-            .map(|alias| format!("Bitmap Heap Scan on {relation_name} {alias}")),
+        Plan::BitmapHeapScan { relation_name, .. } => nonverbose_relation_scan_label(
+            "Bitmap Heap Scan",
+            relation_name,
+            ctx.relation_scan_alias.as_deref(),
+            is_child,
+        ),
         _ => None,
     }
+}
+
+fn nonverbose_relation_scan_label(
+    scan_name: &str,
+    relation_name: &str,
+    alias: Option<&str>,
+    is_child: bool,
+) -> Option<String> {
+    if let Some(alias) = alias {
+        return Some(format!("{scan_name} on {relation_name} {alias}"));
+    }
+    if !is_child
+        && let Some((base_name, alias)) = relation_name.rsplit_once(' ')
+        && let Some(root_alias) = inherited_root_alias(alias)
+    {
+        return Some(format!("{scan_name} on {base_name} {root_alias}"));
+    }
+    None
+}
+
+fn inherited_root_alias(alias: &str) -> Option<&str> {
+    let mut root = alias;
+    let mut stripped = false;
+    while let Some((prefix, suffix)) = root.rsplit_once('_') {
+        if suffix.is_empty() || !suffix.chars().all(|ch| ch.is_ascii_digit()) {
+            break;
+        }
+        root = prefix;
+        stripped = true;
+    }
+    stripped.then_some(root)
 }
 
 fn scan_direction_label(direction: crate::include::access::relscan::ScanDirection) -> &'static str {

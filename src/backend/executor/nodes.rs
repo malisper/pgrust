@@ -3306,6 +3306,12 @@ fn render_explain_expr_inner_with_qualifier(
                 render_explain_expr_inner_with_qualifier(inner, qualifier, column_names)
             )
         }
+        Expr::IsDistinctFrom(left, right) => {
+            render_explain_distinctness_expr(left, right, true, qualifier, column_names)
+        }
+        Expr::IsNotDistinctFrom(left, right) => {
+            render_explain_distinctness_expr(left, right, false, qualifier, column_names)
+        }
         Expr::Func(func) => render_explain_func_expr(func, qualifier, column_names),
         Expr::ScalarArrayOp(saop) => render_explain_scalar_array_op(saop, qualifier, column_names),
         Expr::ArrayLiteral {
@@ -3373,6 +3379,42 @@ fn render_explain_func_expr_is_infix(func: &FuncExpr) -> bool {
         )
     );
     !render_as_named_call && builtin_scalar_function_infix_operator(func.implementation).is_some()
+}
+
+fn render_explain_distinctness_expr(
+    left: &Expr,
+    right: &Expr,
+    distinct: bool,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    if let Some((expr, value)) = bool_distinctness_operand(left, right) {
+        let rendered = render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
+        return match (distinct, value) {
+            (false, true) => format!("{rendered} IS TRUE"),
+            (true, true) => format!("{rendered} IS NOT TRUE"),
+            (false, false) => format!("{rendered} IS FALSE"),
+            (true, false) => format!("{rendered} IS NOT FALSE"),
+        };
+    }
+    let operator = if distinct {
+        "IS DISTINCT FROM"
+    } else {
+        "IS NOT DISTINCT FROM"
+    };
+    format!(
+        "{} {operator} {}",
+        render_explain_infix_operand(left, qualifier, column_names),
+        render_explain_infix_operand(right, qualifier, column_names)
+    )
+}
+
+fn bool_distinctness_operand<'a>(left: &'a Expr, right: &'a Expr) -> Option<(&'a Expr, bool)> {
+    match (left, right) {
+        (expr, Expr::Const(Value::Bool(value))) => Some((expr, *value)),
+        (Expr::Const(Value::Bool(value)), expr) => Some((expr, *value)),
+        _ => None,
+    }
 }
 
 fn explain_filter_conjunct_rank(expr: &Expr) -> u8 {
@@ -4024,6 +4066,8 @@ fn builtin_scalar_function_name(func: BuiltinScalarFunction) -> String {
         BuiltinScalarFunction::DatePart => "date_part".into(),
         BuiltinScalarFunction::Extract => "extract".into(),
         BuiltinScalarFunction::TextStartsWith => "starts_with".into(),
+        BuiltinScalarFunction::Abs => "abs".into(),
+        BuiltinScalarFunction::Substring => "substr".into(),
         other => format!("{other:?}"),
     }
 }

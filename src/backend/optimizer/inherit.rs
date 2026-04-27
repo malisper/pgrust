@@ -242,18 +242,33 @@ fn compare_list_bounds(left: &PartitionBoundSpec, right: &PartitionBoundSpec) ->
     left_values
         .iter()
         .zip(right_values.iter())
-        .map(|(left, right)| {
-            compare_order_values(
-                &partition_value_to_value(left),
-                &partition_value_to_value(right),
-                None,
-                Some(true),
-                false,
-            )
-            .unwrap_or(Ordering::Equal)
-        })
+        .map(compare_list_value_for_ordering)
         .find(|ordering| *ordering != Ordering::Equal)
         .unwrap_or_else(|| left_values.len().cmp(&right_values.len()))
+}
+
+fn compare_list_value_for_ordering(
+    left: (
+        &crate::backend::parser::SerializedPartitionValue,
+        &crate::backend::parser::SerializedPartitionValue,
+    ),
+) -> Ordering {
+    match left {
+        (
+            crate::backend::parser::SerializedPartitionValue::Null,
+            crate::backend::parser::SerializedPartitionValue::Null,
+        ) => Ordering::Equal,
+        (crate::backend::parser::SerializedPartitionValue::Null, _) => Ordering::Greater,
+        (_, crate::backend::parser::SerializedPartitionValue::Null) => Ordering::Less,
+        (left, right) => compare_order_values(
+            &partition_value_to_value(left),
+            &partition_value_to_value(right),
+            None,
+            Some(true),
+            false,
+        )
+        .unwrap_or(Ordering::Equal),
+    }
 }
 
 fn compare_range_bounds(left: &PartitionBoundSpec, right: &PartitionBoundSpec) -> Ordering {
