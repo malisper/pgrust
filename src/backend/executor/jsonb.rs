@@ -731,6 +731,10 @@ pub(crate) fn render_jsonb_bytes(bytes: &[u8]) -> Result<String, ExecError> {
     Ok(decode_jsonb(bytes)?.render())
 }
 
+pub(crate) fn render_jsonb_value_text(value: &JsonbValue) -> String {
+    value.render()
+}
+
 pub(crate) fn decode_jsonb(bytes: &[u8]) -> Result<JsonbValue, ExecError> {
     let header = read_u32(bytes, 0)?;
     if header & JB_FARRAY == 0 && header & JB_FOBJECT == 0 {
@@ -865,7 +869,7 @@ pub(crate) fn jsonb_to_text_value(value: &JsonbValue) -> Value {
         | JsonbValue::TimestampTz(_) => Value::Text(CompactString::from_owned(
             render_temporal_jsonb_value(value),
         )),
-        other => Value::Text(CompactString::from_owned(other.render())),
+        other => Value::Text(CompactString::from_owned(render_jsonb_value_text(other))),
     }
 }
 

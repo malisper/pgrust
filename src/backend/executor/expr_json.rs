@@ -9,7 +9,8 @@ use crate::backend::executor::expr_datetime::render_json_datetime_value_text_wit
 use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, encode_jsonb, jsonb_builder_key, jsonb_from_value, jsonb_get,
     jsonb_object_from_pairs, jsonb_path, jsonb_to_text_value, jsonb_to_value,
-    parse_json_text_input, parse_jsonb_text, render_jsonb_bytes, render_temporal_jsonb_value,
+    parse_json_text_input, parse_jsonb_text, render_jsonb_bytes, render_jsonb_value_text,
+    render_temporal_jsonb_value,
 };
 use crate::backend::executor::jsonpath::{
     EvaluationContext as JsonPathEvaluationContext, canonicalize_jsonpath, evaluate_jsonpath,
@@ -726,11 +727,12 @@ pub(crate) fn eval_json_builtin_function(
                 let path = parse_json_path_args(&args[1..])?;
                 Ok(
                     match ParsedJsonValue::from_value(args.first().unwrap_or(&Value::Null))? {
-                        ParsedJsonValue::Json(json) => json_lookup_path(&json, &path)
-                            .map(|value| {
-                                Value::Jsonb(parse_jsonb_text(&value.to_string()).unwrap())
-                            })
-                            .unwrap_or(Value::Null),
+                        ParsedJsonValue::Json(json) => match JsonbValue::from_serde(json) {
+                            Ok(jsonb) => jsonb_path(&jsonb, &path)
+                                .map(jsonb_to_value)
+                                .unwrap_or(Value::Null),
+                            Err(_) => Value::Null,
+                        },
                         ParsedJsonValue::Jsonb(jsonb) => jsonb_path(&jsonb, &path)
                             .map(jsonb_to_value)
                             .unwrap_or(Value::Null),
@@ -746,9 +748,12 @@ pub(crate) fn eval_json_builtin_function(
                 let path = parse_json_path_args(&args[1..])?;
                 Ok(
                     match ParsedJsonValue::from_value(args.first().unwrap_or(&Value::Null))? {
-                        ParsedJsonValue::Json(json) => json_lookup_path(&json, &path)
-                            .map(|value| json_value_to_value(value, true))
-                            .unwrap_or(Value::Null),
+                        ParsedJsonValue::Json(json) => match JsonbValue::from_serde(json) {
+                            Ok(jsonb) => jsonb_path(&jsonb, &path)
+                                .map(jsonb_to_text_value)
+                                .unwrap_or(Value::Null),
+                            Err(_) => Value::Null,
+                        },
                         ParsedJsonValue::Jsonb(jsonb) => jsonb_path(&jsonb, &path)
                             .map(jsonb_to_text_value)
                             .unwrap_or(Value::Null),
@@ -4511,7 +4516,9 @@ fn jsonb_scalar_sql_text(value: &JsonbValue) -> String {
         | JsonbValue::TimeTz(_)
         | JsonbValue::Timestamp(_)
         | JsonbValue::TimestampTz(_) => render_temporal_jsonb_value(value),
-        JsonbValue::Null | JsonbValue::Array(_) | JsonbValue::Object(_) => value.render(),
+        JsonbValue::Null | JsonbValue::Array(_) | JsonbValue::Object(_) => {
+            render_jsonb_value_text(value)
+        }
     }
 }
 
