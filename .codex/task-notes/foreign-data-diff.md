@@ -52,6 +52,8 @@ Runtime behavior:
 - checks FDW handler/validator function signatures when resolving support
   functions, including PostgreSQL-style missing-function messages such as
   `bar(text[], oid)`
+- preserves foreign-data wrapper option order during `ALTER FOREIGN DATA
+  WRAPPER ... OPTIONS`
 
 Tests run:
 - `cargo fmt`
@@ -115,9 +117,13 @@ Tests run:
 - `scripts/cargo_isolated.sh check`
 - `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
 - `scripts/run_regression.sh --skip-build --port 55453 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-fdw-proc-signatures`
+- `scripts/cargo_isolated.sh test --lib --quiet alter_fdw_options_preserves_existing_order`
+- `scripts/cargo_isolated.sh check`
+- `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
+- `scripts/run_regression.sh --skip-build --port 55454 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-fdw-option-order`
 
 Remaining:
-`foreign_data` still fails, but improved to 393/539 matching queries and 1506
+`foreign_data` still fails, but improved to 397/539 matching queries and 1467
 diff lines in the latest run. Biggest
 remaining groups:
 - owner dependency reporting beyond the handled FDW function dependencies
