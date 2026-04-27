@@ -2586,6 +2586,37 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             's',
         ),
+        PgProcRow {
+            prorows: 1000.0,
+            provariadic: TEXT_TYPE_OID,
+            proallargtypes: Some(vec![
+                TEXT_ARRAY_TYPE_OID,
+                OID_TYPE_OID,
+                OID_TYPE_OID,
+                INT2VECTOR_TYPE_OID,
+                PG_NODE_TREE_TYPE_OID,
+            ]),
+            proargmodes: Some(vec![b'v', b'o', b'o', b'o', b'o']),
+            proargnames: Some(vec![
+                "pubname".into(),
+                "pubid".into(),
+                "relid".into(),
+                "attrs".into(),
+                "qual".into(),
+            ]),
+            ..proc_row(
+                6119,
+                "pg_get_publication_tables",
+                RECORD_TYPE_OID,
+                &oid_argtypes(&[TEXT_ARRAY_TYPE_OID]),
+                "pg_get_publication_tables",
+                1,
+                true,
+                false,
+                'f',
+                's',
+            )
+        },
         proc_row(
             6121,
             "pg_relation_is_publishable",

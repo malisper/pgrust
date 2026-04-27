@@ -1632,17 +1632,18 @@ fn publication_relation_not_member_error(
     db: &Database,
     client_id: ClientId,
     txn_ctx: CatalogTxnContext,
-    configured_search_path: Option<&[String]>,
-    publication_name: &str,
+    _configured_search_path: Option<&[String]>,
+    _publication_name: &str,
     relation_oid: u32,
 ) -> ExecError {
     let relation_name = db
-        .relation_display_name(client_id, txn_ctx, configured_search_path, relation_oid)
+        .backend_catcache(client_id, txn_ctx)
+        .ok()
+        .and_then(|catcache| catcache.class_by_oid(relation_oid).cloned())
+        .map(|class| class.relname)
         .unwrap_or_else(|| relation_oid.to_string());
     ExecError::DetailedError {
-        message: format!(
-            "relation \"{relation_name}\" is not member of publication \"{publication_name}\""
-        ),
+        message: format!("relation \"{relation_name}\" is not part of the publication"),
         detail: None,
         hint: None,
         sqlstate: "42704",
@@ -1653,15 +1654,13 @@ fn publication_schema_not_member_error(
     db: &Database,
     client_id: ClientId,
     txn_ctx: CatalogTxnContext,
-    publication_name: &str,
+    _publication_name: &str,
     namespace_oid: u32,
 ) -> ExecError {
     let schema_name = publication_namespace_name(db, client_id, txn_ctx, namespace_oid)
         .unwrap_or_else(|| namespace_oid.to_string());
     ExecError::DetailedError {
-        message: format!(
-            "schema \"{schema_name}\" is not member of publication \"{publication_name}\""
-        ),
+        message: format!("tables from schema \"{schema_name}\" are not part of the publication"),
         detail: None,
         hint: None,
         sqlstate: "42704",
@@ -2206,7 +2205,7 @@ mod tests {
             .unwrap_err();
         let missing_text = format!("{missing:?}");
         assert!(missing_text.contains("gadgets"));
-        assert!(missing_text.contains("is not member of publication"));
+        assert!(missing_text.contains("is not part of the publication"));
     }
 
     #[test]
@@ -2403,6 +2402,110 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].prqual.as_deref(), Some("(id > 0)"));
         assert_eq!(rows[0].prattrs, Some(vec![1]));
+    }
+
+    #[test]
+    fn pg_publication_tables_lists_column_lists_and_filters() {
+        let base = temp_dir("pg_publication_tables_view");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table widgets (id int4, name text)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create publication pub for table only widgets(id) where (id > 0)",
+            )
+            .unwrap();
+
+        let result = session
+            .execute(
+                &db,
+                "select pubname, schemaname, tablename, attnames, rowfilter \
+                 from pg_publication_tables \
+                 where pubname = 'pub'",
+            )
+            .unwrap();
+        let StatementResult::Query { rows, .. } = result else {
+            panic!("expected query result, got {result:?}");
+        };
+        assert_eq!(
+            rows,
+            vec![vec![
+                Value::Text("pub".into()),
+                Value::Text("public".into()),
+                Value::Text("widgets".into()),
+                Value::Array(vec![Value::Text("id".into())]),
+                Value::Text("(id > 0)".into()),
+            ]]
+        );
+    }
+
+    #[test]
+    fn pg_publication_tables_honors_all_tables_except() {
+        let base = temp_dir("pg_publication_tables_except");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table widgets (id int4)")
+            .unwrap();
+        session
+            .execute(&db, "create table gadgets (id int4)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create publication pub for all tables except (table gadgets)",
+            )
+            .unwrap();
+
+        let result = session
+            .execute(
+                &db,
+                "select tablename \
+                 from pg_publication_tables \
+                 where pubname = 'pub' and tablename in ('widgets', 'gadgets') \
+                 order by tablename",
+            )
+            .unwrap();
+        let StatementResult::Query { rows, .. } = result else {
+            panic!("expected query result, got {result:?}");
+        };
+        assert_eq!(rows, vec![vec![Value::Text("widgets".into())]]);
+    }
+
+    #[test]
+    fn pg_get_publication_tables_returns_attrs_and_qual() {
+        let base = temp_dir("pg_get_publication_tables");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table widgets (id int4, name text)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create publication pub for table only widgets(id) where (id > 0)",
+            )
+            .unwrap();
+
+        let result = session
+            .execute(
+                &db,
+                "select attrs, qual from pg_get_publication_tables('pub')",
+            )
+            .unwrap();
+        let StatementResult::Query { rows, .. } = result else {
+            panic!("expected query result, got {result:?}");
+        };
+        assert_eq!(
+            rows,
+            vec![vec![
+                Value::Array(vec![Value::Int16(1)]),
+                Value::Text("(id > 0)".into()),
+            ]]
+        );
     }
 
     #[test]
