@@ -2958,6 +2958,7 @@ fn normalize_plpgsql_expr(expr: SqlExpr, env: &CompileEnv) -> SqlExpr {
             distinct,
             func_variadic,
             filter,
+            null_treatment,
             over,
         } => SqlExpr::FuncCall {
             name,
@@ -2975,6 +2976,7 @@ fn normalize_plpgsql_expr(expr: SqlExpr, env: &CompileEnv) -> SqlExpr {
             distinct,
             func_variadic,
             filter: filter.map(|expr| Box::new(normalize_plpgsql_expr(*expr, env))),
+            null_treatment,
             over: over.map(|spec| normalize_plpgsql_window_spec(spec, env)),
         },
         other => other,

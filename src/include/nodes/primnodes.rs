@@ -1773,6 +1773,7 @@ pub struct WindowFuncExpr {
     pub winno: usize,
     pub args: Vec<Expr>,
     pub result_type: SqlType,
+    pub ignore_nulls: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2303,6 +2304,7 @@ impl Expr {
         winno: usize,
         args: Vec<Expr>,
         result_type: SqlType,
+        ignore_nulls: bool,
     ) -> Self {
         Expr::WindowFunc(Box::new(WindowFuncExpr {
             kind,
@@ -2310,6 +2312,7 @@ impl Expr {
             winno,
             args,
             result_type,
+            ignore_nulls,
         }))
     }
 
@@ -2380,6 +2383,7 @@ impl Expr {
         winno: usize,
         args: Vec<Expr>,
         result_type: SqlType,
+        ignore_nulls: bool,
     ) -> Self {
         let proc_oid = proc_oid_for_builtin_window_function(func).unwrap_or_else(|| {
             panic!(
@@ -2393,6 +2397,7 @@ impl Expr {
             winno,
             args,
             result_type,
+            ignore_nulls,
         )
     }
 

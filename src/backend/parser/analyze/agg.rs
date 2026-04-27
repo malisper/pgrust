@@ -520,6 +520,7 @@ pub(super) fn collect_aggs(
             func_variadic,
             filter,
             over,
+            ..
         } => {
             if aggregate_call_matches_catalog(catalog, name, args, within_group.as_deref()) {
                 if over.is_none() {

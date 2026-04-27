@@ -101,6 +101,7 @@ fn quantified_function_arg(expr: &SqlExpr) -> Option<(bool, &SqlExpr)> {
         func_variadic,
         filter,
         over,
+        ..
     } = expr
     else {
         return None;
@@ -1177,6 +1178,7 @@ fn bind_window_agg_call(
         kind,
         coerced_args,
         aggregate_sql_type(func, arg_types.first().copied()),
+        false,
     ))
 }
 
@@ -1459,6 +1461,7 @@ fn bind_window_func_call(
     name: &str,
     args: &[SqlFunctionArg],
     func_variadic: bool,
+    null_treatment: Option<WindowNullTreatment>,
     over: &RawWindowSpec,
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
@@ -1512,6 +1515,7 @@ fn bind_window_func_call(
         bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
     })?;
     if let Some(window_impl) = resolved.window_impl {
+        let ignore_nulls = window_ignore_nulls_for_builtin(window_impl, null_treatment)?;
         if args.iter().any(|arg| arg.name.is_some()) {
             return Err(ParseError::FeatureNotSupported(
                 "named arguments are not supported for window functions".into(),
@@ -1549,9 +1553,11 @@ fn bind_window_func_call(
             WindowFuncKind::Builtin(window_impl),
             coerced_args,
             resolved.result_type,
+            ignore_nulls,
         ));
     }
     if resolved.prokind == 'a' {
+        reject_aggregate_null_treatment(null_treatment)?;
         if let Some(agg_impl) = resolved.agg_impl {
             return bind_window_agg_call(
                 agg_impl,
@@ -4072,6 +4078,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             distinct,
             func_variadic,
             filter,
+            null_treatment,
             over,
         } => {
             let args_list = args.args();
@@ -4106,6 +4113,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
             if let Some(func) = resolve_builtin_aggregate(name) {
                 reject_explicit_empty_aggregate_call(name, args)?;
+                reject_aggregate_null_treatment(*null_treatment)?;
                 if let Some(raw_over) = over {
                     return bind_window_agg_call(
                         func,
@@ -4170,6 +4178,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     name,
                     args_list,
                     *func_variadic,
+                    *null_treatment,
                     raw_over,
                     scope,
                     catalog,
@@ -4178,6 +4187,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     ctes,
                 );
             }
+            reject_function_null_treatment(name, *null_treatment)?;
             if name.eq_ignore_ascii_case("row_to_json") {
                 return bind_row_to_json_call(
                     name,
@@ -4607,6 +4617,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 func_variadic,
                 filter,
                 over,
+                ..
             } = expr.as_ref()
                 && order_by.is_empty()
                 && within_group.is_none()

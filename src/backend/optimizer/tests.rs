@@ -3130,6 +3130,41 @@ fn explain_hash_distinct_group_key_uses_distinct_expr() {
 }
 
 #[test]
+fn explain_window_over_grouped_subquery_hides_group_projection() {
+    let catalog = catalog_with_distinct_on_limit_tbl();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select first_value(max(x)) over (), y
+         from (select four as x, two + hundred as y from limit_tbl) ss
+         group by y",
+        &catalog,
+        PlannerConfig {
+            enable_sort: false,
+            ..PlannerConfig::default()
+        },
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(
+        lines.iter().any(|line| line.trim() == "WindowAgg"),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.trim() == "->  HashAggregate"),
+        "{lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.trim() == "->  Projection"),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim() == "Group Key: (limit_tbl.two + limit_tbl.hundred)"),
+        "{lines:#?}"
+    );
+}
+
+#[test]
 fn planner_keeps_unique_for_ordered_select_distinct() {
     let catalog = catalog_with_indexed_items();
     let planned = planned_stmt_for_sql_with_catalog(

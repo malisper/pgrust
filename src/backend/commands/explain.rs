@@ -3422,13 +3422,13 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::Projection { input, .. }
-        | Plan::Aggregate { input, .. }
         | Plan::WindowAgg { input, .. }
         | Plan::SubqueryScan { input, .. }
         | Plan::ProjectSet { input, .. }
         | Plan::CteScan {
             cte_plan: input, ..
         } => vec![input.as_ref()],
+        Plan::Aggregate { input, .. } => vec![aggregate_explain_child(input)],
         Plan::Filter { input, .. } => vec![input.as_ref()],
         Plan::NestedLoopJoin { left, right, .. }
         | Plan::HashJoin { left, right, .. }
@@ -3438,6 +3438,17 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
             recursive: right,
             ..
         } => vec![left.as_ref(), right.as_ref()],
+    }
+}
+
+fn aggregate_explain_child(input: &Plan) -> &Plan {
+    match input {
+        Plan::Projection {
+            input: child,
+            targets,
+            ..
+        } if !targets_have_direct_subplans(targets) => child.as_ref(),
+        _ => input,
     }
 }
 
