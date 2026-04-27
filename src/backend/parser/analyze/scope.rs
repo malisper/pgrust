@@ -1,4 +1,4 @@
-use super::expr::bind_resolved_scalar_function_call;
+use super::expr::{bind_legacy_scalar_function_call, bind_resolved_scalar_function_call};
 use super::query::{AnalyzedFrom, JoinAliasInfo, shift_expr_rtindexes};
 use super::*;
 use crate::backend::storage::smgr::RelFileLocator;
@@ -6,7 +6,7 @@ use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::PgPartitionedTableRow;
 use crate::include::nodes::primnodes::{
     AttrNumber, ColumnDesc, JoinType, JsonRecordFunction, SELF_ITEM_POINTER_ATTR_NO,
-    TABLE_OID_ATTR_NO, Var, user_attrno,
+    TABLE_OID_ATTR_NO, Var, expr_sql_type_hint, user_attrno,
 };
 
 #[derive(Debug, Clone)]
@@ -128,8 +128,13 @@ pub(super) fn bind_values_rows(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
+    let empty = empty_scope();
+    let rows = rows
+        .iter()
+        .map(|row| expand_values_row_exprs(row, &empty, outer_scopes))
+        .collect::<Result<Vec<_>, _>>()?;
     let width = rows.first().map(Vec::len).unwrap_or(0);
-    for row in rows {
+    for row in &rows {
         if row.len() != width {
             return Err(ParseError::UnexpectedToken {
                 expected: "VALUES rows with consistent column counts",
@@ -150,36 +155,29 @@ pub(super) fn bind_values_rows(
         });
     }
 
-    let empty = empty_scope();
     let mut column_types = Vec::with_capacity(width);
     for col_idx in 0..width {
         let mut common = None;
         let mut common_expr: Option<&SqlExpr> = None;
-        for row in rows {
-            if matches!(row[col_idx], SqlExpr::Const(Value::Null)) {
+        for row in &rows {
+            if row[col_idx].is_null_const() {
                 continue;
             }
-            let inferred = infer_sql_expr_type_with_ctes(
-                &row[col_idx],
-                &empty,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
+            let inferred =
+                row[col_idx].infer_type(&empty, catalog, outer_scopes, grouped_outer, ctes);
             common = Some(match common {
                 None => {
-                    common_expr = Some(&row[col_idx]);
+                    common_expr = row[col_idx].raw_expr();
                     inferred
                 }
                 Some(existing) => {
-                    let existing = coerce_unknown_string_literal_type(
-                        common_expr.expect("common expr"),
-                        existing,
-                        inferred,
-                    );
-                    let adjusted =
-                        coerce_unknown_string_literal_type(&row[col_idx], inferred, existing);
+                    let existing = common_expr
+                        .map(|expr| coerce_unknown_string_literal_type(expr, existing, inferred))
+                        .unwrap_or(existing);
+                    let adjusted = row[col_idx]
+                        .raw_expr()
+                        .map(|expr| coerce_unknown_string_literal_type(expr, inferred, existing))
+                        .unwrap_or(inferred);
                     let resolved =
                         resolve_common_values_type(existing, adjusted).ok_or_else(|| {
                             ParseError::UnexpectedToken {
@@ -192,7 +190,7 @@ pub(super) fn bind_values_rows(
                                 ),
                             }
                         })?;
-                    common_expr = Some(&row[col_idx]);
+                    common_expr = row[col_idx].raw_expr();
                     resolved
                 }
             });
@@ -205,24 +203,10 @@ pub(super) fn bind_values_rows(
         .map(|row| {
             row.iter()
                 .zip(column_types.iter())
-                .map(|(expr, ty)| {
-                    let from = infer_sql_expr_type_with_ctes(
-                        expr,
-                        &empty,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    );
+                .map(|(cell, ty)| {
+                    let from = cell.infer_type(&empty, catalog, outer_scopes, grouped_outer, ctes);
                     Ok(coerce_bound_expr(
-                        bind_expr_with_outer_and_ctes(
-                            expr,
-                            &empty,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        )?,
+                        cell.bind(&empty, catalog, outer_scopes, grouped_outer, ctes)?,
                         from,
                         *ty,
                     ))
@@ -253,6 +237,89 @@ pub(super) fn bind_values_rows(
         AnalyzedFrom::values(bound_rows, output_columns),
         scope_for_relation(None, &desc),
     ))
+}
+
+#[derive(Debug, Clone)]
+enum ValuesCell<'a> {
+    Raw(&'a SqlExpr),
+    Bound(Expr),
+}
+
+impl<'a> ValuesCell<'a> {
+    fn raw_expr(&self) -> Option<&'a SqlExpr> {
+        match self {
+            ValuesCell::Raw(expr) => Some(expr),
+            ValuesCell::Bound(_) => None,
+        }
+    }
+
+    fn is_null_const(&self) -> bool {
+        matches!(self, ValuesCell::Raw(SqlExpr::Const(Value::Null)))
+    }
+
+    fn infer_type(
+        &self,
+        scope: &BoundScope,
+        catalog: &dyn CatalogLookup,
+        outer_scopes: &[BoundScope],
+        grouped_outer: Option<&GroupedOuterScope>,
+        ctes: &[BoundCte],
+    ) -> SqlType {
+        match self {
+            ValuesCell::Raw(expr) => infer_sql_expr_type_with_ctes(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ),
+            ValuesCell::Bound(expr) => {
+                expr_sql_type_hint(expr).unwrap_or(SqlType::new(SqlTypeKind::Text))
+            }
+        }
+    }
+
+    fn bind(
+        &self,
+        scope: &BoundScope,
+        catalog: &dyn CatalogLookup,
+        outer_scopes: &[BoundScope],
+        grouped_outer: Option<&GroupedOuterScope>,
+        ctes: &[BoundCte],
+    ) -> Result<Expr, ParseError> {
+        match self {
+            ValuesCell::Raw(expr) => bind_expr_with_outer_and_ctes(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ),
+            ValuesCell::Bound(expr) => Ok(expr.clone()),
+        }
+    }
+}
+
+fn expand_values_row_exprs<'a>(
+    row: &'a [SqlExpr],
+    scope: &BoundScope,
+    outer_scopes: &[BoundScope],
+) -> Result<Vec<ValuesCell<'a>>, ParseError> {
+    let mut expanded = Vec::new();
+    for expr in row {
+        if let SqlExpr::Column(name) = expr
+            && let Some(relation_name) = name.strip_suffix(".*")
+        {
+            let fields = resolve_relation_row_expr_with_outer(scope, outer_scopes, relation_name)
+                .ok_or_else(|| ParseError::UnknownColumn(name.clone()))?;
+            expanded.extend(fields.into_iter().map(|(_, expr)| ValuesCell::Bound(expr)));
+            continue;
+        }
+        expanded.push(ValuesCell::Raw(expr));
+    }
+    Ok(expanded)
 }
 
 fn resolve_common_values_type(left: SqlType, right: SqlType) -> Option<SqlType> {
@@ -1533,6 +1600,45 @@ fn bind_function_from_item_with_ctes(
                     scope,
                     alias_single_function_output,
                 ))
+            } else if let Some(kind) = resolve_text_search_table_function(other) {
+                let empty_scope = empty_scope();
+                let bound_args = args
+                    .iter()
+                    .map(|arg| {
+                        bind_expr_with_outer_and_ctes(
+                            arg,
+                            &empty_scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut output_columns = text_search_table_function_columns(kind);
+                let mut desc_columns = output_columns
+                    .iter()
+                    .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                    .collect::<Vec<_>>();
+                maybe_append_function_ordinality(
+                    with_ordinality,
+                    &mut output_columns,
+                    &mut desc_columns,
+                );
+                let desc = RelationDesc {
+                    columns: desc_columns,
+                };
+                let scope = scope_for_relation(Some(name), &desc);
+                Ok((
+                    AnalyzedFrom::function(SetReturningCall::TextSearchTableFunction {
+                        kind,
+                        args: bound_args,
+                        output_columns,
+                        with_ordinality,
+                    }),
+                    scope,
+                    false,
+                ))
             } else if let Some(resolved) = resolved.as_ref() {
                 if resolved.prokind != 'f' {
                     return Err(ParseError::UnknownTable(other.to_string()));
@@ -1771,6 +1877,42 @@ fn bind_function_from_item_with_ctes(
                     scope,
                     alias_single_function_output,
                 ))
+            } else if let Some(typed) = bind_legacy_scalar_function_call(
+                other,
+                &args,
+                func_variadic,
+                &call_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )? {
+                let mut plan = AnalyzedFrom::result().with_projection(vec![TargetEntry::new(
+                    other.to_string(),
+                    typed.expr,
+                    typed.sql_type,
+                    1,
+                )]);
+                let alias_single_function_output = !with_ordinality;
+                if with_ordinality {
+                    let base_expr = plan.output_exprs[0].clone();
+                    let ordinality_type = SqlType::new(SqlTypeKind::Int8);
+                    plan = plan.with_projection(vec![
+                        TargetEntry::new(other.to_string(), base_expr, typed.sql_type, 1),
+                        TargetEntry::new(
+                            "ordinality",
+                            Expr::Const(Value::Int64(1)),
+                            ordinality_type,
+                            2,
+                        ),
+                    ]);
+                }
+                let desc = plan.desc();
+                let scope = scope_with_output_exprs(
+                    scope_for_relation(Some(other), &desc),
+                    &plan.output_exprs,
+                );
+                Ok((plan, scope, alias_single_function_output))
             } else {
                 Err(ParseError::UnknownTable(other.to_string()))
             }

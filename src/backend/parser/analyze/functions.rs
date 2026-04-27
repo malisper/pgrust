@@ -12,7 +12,7 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::primnodes::{
     BuiltinWindowFunction, HashFunctionKind, HypotheticalAggFunc, JsonRecordFunction,
-    RegexTableFunction, StringTableFunction,
+    RegexTableFunction, StringTableFunction, TextSearchTableFunction,
 };
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -43,6 +43,7 @@ pub(super) enum ResolvedSrfImpl {
     JsonTable(JsonTableFunction),
     RegexTable(RegexTableFunction),
     StringTable(StringTableFunction),
+    TextSearchTable(TextSearchTableFunction),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -366,6 +367,55 @@ pub(super) fn resolve_string_table_function(name: &str) -> Option<StringTableFun
     }
 }
 
+pub(super) fn resolve_text_search_table_function(name: &str) -> Option<TextSearchTableFunction> {
+    match normalize_builtin_function_name(name) {
+        "ts_token_type" => Some(TextSearchTableFunction::TokenType),
+        "ts_parse" => Some(TextSearchTableFunction::Parse),
+        "ts_debug" => Some(TextSearchTableFunction::Debug),
+        _ => None,
+    }
+}
+
+pub(super) fn text_search_table_function_columns(
+    kind: TextSearchTableFunction,
+) -> Vec<QueryColumn> {
+    match kind {
+        TextSearchTableFunction::TokenType => vec![
+            QueryColumn {
+                name: "tokid".into(),
+                sql_type: SqlType::new(SqlTypeKind::Int4),
+                wire_type_oid: None,
+            },
+            QueryColumn::text("alias"),
+            QueryColumn::text("description"),
+        ],
+        TextSearchTableFunction::Parse => vec![
+            QueryColumn {
+                name: "tokid".into(),
+                sql_type: SqlType::new(SqlTypeKind::Int4),
+                wire_type_oid: None,
+            },
+            QueryColumn::text("token"),
+        ],
+        TextSearchTableFunction::Debug => vec![
+            QueryColumn::text("alias"),
+            QueryColumn::text("description"),
+            QueryColumn::text("token"),
+            QueryColumn {
+                name: "dictionaries".into(),
+                sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                wire_type_oid: None,
+            },
+            QueryColumn::text("dictionary"),
+            QueryColumn {
+                name: "lexemes".into(),
+                sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                wire_type_oid: None,
+            },
+        ],
+    }
+}
+
 pub(super) fn resolve_json_record_function(name: &str) -> Option<JsonRecordFunction> {
     match normalize_builtin_function_name(name) {
         "json_populate_record" => Some(JsonRecordFunction::PopulateRecord),
@@ -405,7 +455,10 @@ fn builtin_srf_impl_for_proc_row(row: &PgProcRow) -> Option<ResolvedSrfImpl> {
         other => resolve_json_table_function(other)
             .map(ResolvedSrfImpl::JsonTable)
             .or_else(|| resolve_regex_table_function(other).map(ResolvedSrfImpl::RegexTable))
-            .or_else(|| resolve_string_table_function(other).map(ResolvedSrfImpl::StringTable)),
+            .or_else(|| resolve_string_table_function(other).map(ResolvedSrfImpl::StringTable))
+            .or_else(|| {
+                resolve_text_search_table_function(other).map(ResolvedSrfImpl::TextSearchTable)
+            }),
     }
 }
 
@@ -1250,12 +1303,13 @@ pub(super) fn validate_scalar_function_arity(
                     matches!(args.len(), 1 | 2)
                 }
             }
-            BuiltinScalarFunction::Int4Pl => args.len() == 2,
+            BuiltinScalarFunction::Int4Pl | BuiltinScalarFunction::Int4Mi => args.len() == 2,
             BuiltinScalarFunction::Int8Inc => args.len() == 1,
             BuiltinScalarFunction::Int8IncAny => args.len() == 2,
             BuiltinScalarFunction::Int4AvgAccum => args.len() == 2,
             BuiltinScalarFunction::Int8Avg => args.len() == 1,
             BuiltinScalarFunction::TsLexize => args.len() == 2,
+            BuiltinScalarFunction::TsHeadline => matches!(args.len(), 2 | 3 | 4),
             BuiltinScalarFunction::TsQueryNot => args.len() == 1,
             BuiltinScalarFunction::TsQueryNumnode
             | BuiltinScalarFunction::TsVectorIn
@@ -1266,6 +1320,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::TsVectorToArray
             | BuiltinScalarFunction::ArrayToTsVector => args.len() == 1,
             BuiltinScalarFunction::TsQueryPhrase => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::TsRewrite => args.len() == 3,
             BuiltinScalarFunction::TsVectorDelete
             | BuiltinScalarFunction::TsVectorFilter
             | BuiltinScalarFunction::TsRank
@@ -1274,6 +1329,8 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::TsMatch
             | BuiltinScalarFunction::TsQueryAnd
             | BuiltinScalarFunction::TsQueryOr
+            | BuiltinScalarFunction::TsQueryContains
+            | BuiltinScalarFunction::TsQueryContainedBy
             | BuiltinScalarFunction::TsVectorConcat
             | BuiltinScalarFunction::TextCat => args.len() == 2,
             BuiltinScalarFunction::CashLarger | BuiltinScalarFunction::CashSmaller => {
@@ -1941,6 +1998,9 @@ pub(super) fn comparison_operator_exists(
 pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<SqlType> {
     match func {
         BuiltinScalarFunction::TsMatch => return Some(SqlType::new(SqlTypeKind::Bool)),
+        BuiltinScalarFunction::TsQueryContains | BuiltinScalarFunction::TsQueryContainedBy => {
+            return Some(SqlType::new(SqlTypeKind::Bool));
+        }
         BuiltinScalarFunction::ToTsVector | BuiltinScalarFunction::JsonbToTsVector => {
             return Some(SqlType::new(SqlTypeKind::TsVector));
         }
@@ -1953,10 +2013,14 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::TsLexize => {
             return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text)));
         }
+        BuiltinScalarFunction::TsHeadline => {
+            return Some(SqlType::new(SqlTypeKind::Text));
+        }
         BuiltinScalarFunction::TsQueryAnd
         | BuiltinScalarFunction::TsQueryOr
         | BuiltinScalarFunction::TsQueryNot
-        | BuiltinScalarFunction::TsQueryPhrase => {
+        | BuiltinScalarFunction::TsQueryPhrase
+        | BuiltinScalarFunction::TsRewrite => {
             return Some(SqlType::new(SqlTypeKind::TsQuery));
         }
         BuiltinScalarFunction::TsQueryNumnode => {
@@ -3161,6 +3225,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::WebSearchToTsQuery,
         ),
         ("ts_lexize", BuiltinScalarFunction::TsLexize),
+        ("ts_headline", BuiltinScalarFunction::TsHeadline),
         ("tsvectorin", BuiltinScalarFunction::TsVectorIn),
         ("tsvectorout", BuiltinScalarFunction::TsVectorOut),
         ("tsqueryin", BuiltinScalarFunction::TsQueryIn),
@@ -3170,8 +3235,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "tsquery_phrase_distance",
             BuiltinScalarFunction::TsQueryPhrase,
         ),
+        ("ts_rewrite", BuiltinScalarFunction::TsRewrite),
         ("tsquery_numnode", BuiltinScalarFunction::TsQueryNumnode),
         ("numnode", BuiltinScalarFunction::TsQueryNumnode),
+        ("tsq_mcontains", BuiltinScalarFunction::TsQueryContains),
+        ("tsq_mcontained", BuiltinScalarFunction::TsQueryContainedBy),
         ("tsvector_strip", BuiltinScalarFunction::TsVectorStrip),
         ("strip", BuiltinScalarFunction::TsVectorStrip),
         ("tsvector_delete_str", BuiltinScalarFunction::TsVectorDelete),
@@ -3491,6 +3559,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("min_scale", BuiltinScalarFunction::MinScale),
         ("trim_scale", BuiltinScalarFunction::TrimScale),
         ("numeric_inc", BuiltinScalarFunction::NumericInc),
+        ("int4mi", BuiltinScalarFunction::Int4Mi),
         ("int4pl", BuiltinScalarFunction::Int4Pl),
         ("int8inc", BuiltinScalarFunction::Int8Inc),
         ("int8inc_any", BuiltinScalarFunction::Int8IncAny),
@@ -4056,11 +4125,15 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
     matches!(
         func,
         BuiltinScalarFunction::TsMatch
+            | BuiltinScalarFunction::TsQueryContains
+            | BuiltinScalarFunction::TsQueryContainedBy
             | BuiltinScalarFunction::TsQueryAnd
             | BuiltinScalarFunction::TsQueryOr
             | BuiltinScalarFunction::TsQueryNot
             | BuiltinScalarFunction::TsQueryPhrase
             | BuiltinScalarFunction::TsQueryNumnode
+            | BuiltinScalarFunction::TsRewrite
+            | BuiltinScalarFunction::TsHeadline
             | BuiltinScalarFunction::TsVectorIn
             | BuiltinScalarFunction::TsVectorOut
             | BuiltinScalarFunction::TsQueryIn

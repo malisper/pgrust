@@ -525,6 +525,7 @@ fn run_statement(
         | Statement::AlterTextSearchConfiguration(_)
         | Statement::DropTextSearchConfiguration(_)
         | Statement::CommentOnStatistics(_)
+        | Statement::AlterTableCompound(_)
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableAddColumns(_)
         | Statement::AlterTableAddConstraint(_)
@@ -557,6 +558,9 @@ fn run_statement(
         | Statement::CreatePolicy(_)
         | Statement::AlterPolicy(_)
         | Statement::AlterOperator(_)
+        | Statement::AlterConversion(_)
+        | Statement::CreateTextSearch(_)
+        | Statement::AlterTextSearch(_)
         | Statement::RefreshMaterializedView(_)
         | Statement::DropMaterializedView(_)
         | Statement::DropPolicy(_) => Ok(StatementResult::AffectedRows(0)),
@@ -577,6 +581,10 @@ fn run_statement(
         | Statement::CommentOnForeignDataWrapper(_)
         | Statement::CreateForeignDataWrapper(_)
         | Statement::CreateForeignServer(_)
+        | Statement::AlterForeignServerRename(_)
+        | Statement::CreateLanguage(_)
+        | Statement::AlterLanguage(_)
+        | Statement::DropLanguage(_)
         | Statement::CreateForeignTable(_)
         | Statement::AlterForeignDataWrapper(_)
         | Statement::AlterForeignDataWrapperOwner(_)
@@ -1086,6 +1094,10 @@ fn run_statement(
         | Statement::CreateCast(_)
         | Statement::CreateOperator(_)
         | Statement::CreateOperatorClass(_)
+        | Statement::CreateOperatorFamily(_)
+        | Statement::AlterOperatorFamily(_)
+        | Statement::AlterOperatorClass(_)
+        | Statement::DropOperatorFamily(_)
         | Statement::CreateRule(_)
         | Statement::CreateSchema(_)
         | Statement::CreateTablespace(_)
@@ -1163,10 +1175,6 @@ fn run_statement(
         Statement::DropIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP INDEX through Database/session path",
             actual: "DROP INDEX".into(),
-        })),
-        Statement::ReindexIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "REINDEX through Database/session path",
-            actual: "REINDEX".into(),
         })),
         Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP VIEW through Database/session path",

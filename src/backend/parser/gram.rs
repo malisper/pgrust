@@ -87,6 +87,12 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_foreign_data_wrapper_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_language_statement(&sql)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_text_search_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_aggregate_statement(&sql)? {
         return Ok(stmt);
     }
@@ -160,9 +166,6 @@ fn parse_statement_with_options_inner(
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_statistics_statement(&sql)? {
-        return Ok(stmt);
-    }
-    if let Some(stmt) = try_parse_text_search_statement(&sql)? {
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_partition_statement(&sql, options)? {
@@ -655,6 +658,23 @@ fn try_parse_alter_table_multi_action_statement(
             },
         )));
     }
+    if parsed_statements.iter().any(|stmt| {
+        matches!(
+            stmt,
+            Statement::AlterTableDropConstraint(_) | Statement::AlterTableAddConstraint(_)
+        )
+    }) && parsed_statements.iter().all(|stmt| {
+        matches!(
+            stmt,
+            Statement::AlterTableDropConstraint(_) | Statement::AlterTableAddConstraint(_)
+        )
+    }) {
+        return Ok(Some(Statement::AlterTableCompound(
+            AlterTableCompoundStatement {
+                actions: parsed_statements,
+            },
+        )));
+    }
     Ok(Some(Statement::AlterTableMulti(statements)))
 }
 
@@ -1080,8 +1100,12 @@ fn try_parse_aggregate_statement(sql: &str) -> Result<Option<Statement>, ParseEr
             .map(|stmt| Some(Statement::DropAggregate(stmt)));
     }
     if lowered.starts_with("alter aggregate ") {
-        return build_alter_aggregate_rename_statement(trimmed)
-            .map(|stmt| Some(Statement::AlterAggregateRename(stmt)));
+        if lowered.contains(" order by ") {
+            return build_alter_aggregate_rename_statement(trimmed)
+                .map(|stmt| Some(Statement::AlterAggregateRename(stmt)));
+        }
+        return build_alter_routine_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterRoutine(stmt)));
     }
     if lowered.starts_with("comment on aggregate ") {
         return build_comment_on_aggregate_statement(trimmed)
@@ -1116,24 +1140,43 @@ fn try_parse_text_search_statement(sql: &str) -> Result<Option<Statement>, Parse
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
     if lowered.starts_with("create text search dictionary ") {
-        return build_create_text_search_dictionary_statement(trimmed)
-            .map(|stmt| Some(Statement::CreateTextSearchDictionary(stmt)));
+        return match build_create_text_search_statement(trimmed) {
+            Ok(stmt) => Ok(Some(Statement::CreateTextSearch(stmt))),
+            Err(_) => build_create_text_search_dictionary_statement(trimmed)
+                .map(|stmt| Some(Statement::CreateTextSearchDictionary(stmt))),
+        };
     }
     if lowered.starts_with("alter text search dictionary ") {
-        return build_alter_text_search_dictionary_statement(trimmed)
-            .map(|stmt| Some(Statement::AlterTextSearchDictionary(stmt)));
+        if lowered.contains('(') {
+            return build_alter_text_search_dictionary_statement(trimmed)
+                .map(|stmt| Some(Statement::AlterTextSearchDictionary(stmt)));
+        }
+        return build_alter_text_search_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterTextSearch(stmt)));
     }
     if lowered.starts_with("create text search configuration ") {
         return build_create_text_search_configuration_statement(trimmed)
             .map(|stmt| Some(Statement::CreateTextSearchConfiguration(stmt)));
     }
     if lowered.starts_with("alter text search configuration ") {
-        return build_alter_text_search_configuration_statement(trimmed)
-            .map(|stmt| Some(Statement::AlterTextSearchConfiguration(stmt)));
+        if lowered.contains("mapping") {
+            return build_alter_text_search_configuration_statement(trimmed)
+                .map(|stmt| Some(Statement::AlterTextSearchConfiguration(stmt)));
+        }
+        return build_alter_text_search_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterTextSearch(stmt)));
     }
     if lowered.starts_with("drop text search configuration ") {
         return build_drop_text_search_configuration_statement(trimmed)
             .map(|stmt| Some(Statement::DropTextSearchConfiguration(stmt)));
+    }
+    if lowered.starts_with("create text search ") {
+        return build_create_text_search_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateTextSearch(stmt)));
+    }
+    if lowered.starts_with("alter text search ") {
+        return build_alter_text_search_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterTextSearch(stmt)));
     }
     Ok(None)
 }
@@ -2621,6 +2664,26 @@ fn build_alter_statistics_statement(sql: &str) -> Result<AlterStatisticsStatemen
             });
         }
         AlterStatisticsAction::Rename { new_name }
+    } else if keyword_at_start(rest, "owner to") {
+        let rest = consume_keyword(rest, "owner to").trim_start();
+        let (new_owner, trailing) = parse_sql_identifier(rest)?;
+        if !trailing.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER STATISTICS",
+                actual: trailing.trim().into(),
+            });
+        }
+        AlterStatisticsAction::OwnerTo { new_owner }
+    } else if keyword_at_start(rest, "set schema") {
+        let rest = consume_keyword(rest, "set schema").trim_start();
+        let (new_schema, trailing) = parse_sql_identifier(rest)?;
+        if !trailing.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER STATISTICS",
+                actual: trailing.trim().into(),
+            });
+        }
+        AlterStatisticsAction::SetSchema { new_schema }
     } else if keyword_at_start(rest, "set") {
         let rest = consume_keyword(rest, "set").trim_start();
         if !keyword_at_start(rest, "statistics") {
@@ -2657,7 +2720,7 @@ fn build_alter_statistics_statement(sql: &str) -> Result<AlterStatisticsStatemen
         AlterStatisticsAction::SetStatistics { target }
     } else {
         return Err(ParseError::UnexpectedToken {
-            expected: "RENAME TO or SET STATISTICS",
+            expected: "RENAME TO, OWNER TO, SET SCHEMA, or SET STATISTICS",
             actual: rest.into(),
         });
     };
@@ -4202,29 +4265,80 @@ fn try_parse_reindex_statement(sql: &str) -> Result<Option<Statement>, ParseErro
     }
 
     let mut rest = consume_keyword(trimmed, "reindex").trim_start();
-    let concurrently = if keyword_at_start(rest, "concurrently") {
+    let mut verbose = false;
+    let mut concurrently = false;
+    if rest.starts_with('(') {
+        let close = rest.find(')').ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "REINDEX option list",
+            actual: rest.to_string(),
+        })?;
+        let options = &rest[1..close];
+        for option in options.split(',') {
+            let option = option.trim();
+            if option.eq_ignore_ascii_case("verbose") {
+                verbose = true;
+            } else if option.eq_ignore_ascii_case("concurrently") {
+                concurrently = true;
+            } else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "REINDEX option",
+                    actual: option.to_string(),
+                });
+            }
+        }
+        rest = rest[close + 1..].trim_start();
+    }
+    if keyword_at_start(rest, "concurrently") {
         rest = consume_keyword(rest, "concurrently").trim_start();
-        true
+        concurrently = true;
+    }
+    let kind = if keyword_at_start(rest, "index") {
+        rest = consume_keyword(rest, "index").trim_start();
+        ReindexTargetKind::Index
+    } else if keyword_at_start(rest, "table") {
+        rest = consume_keyword(rest, "table").trim_start();
+        ReindexTargetKind::Table
+    } else if keyword_at_start(rest, "schema") {
+        rest = consume_keyword(rest, "schema").trim_start();
+        ReindexTargetKind::Schema
+    } else if keyword_at_start(rest, "database") {
+        rest = consume_keyword(rest, "database").trim_start();
+        ReindexTargetKind::Database
+    } else if keyword_at_start(rest, "system") {
+        rest = consume_keyword(rest, "system").trim_start();
+        ReindexTargetKind::System
     } else {
-        false
-    };
-    if !keyword_at_start(rest, "index") {
         return Err(ParseError::UnexpectedToken {
-            expected: "REINDEX INDEX",
+            expected: "REINDEX target",
             actual: rest.to_string(),
         });
+    };
+    if keyword_at_start(rest, "concurrently") {
+        rest = consume_keyword(rest, "concurrently").trim_start();
+        concurrently = true;
     }
-    rest = consume_keyword(rest, "index").trim_start();
-    let (parts, tail) = parse_qualified_identifier_parts(rest)?;
-    if !tail.trim().is_empty() {
+    let (index_name, tail) = if rest.trim().is_empty()
+        && matches!(
+            kind,
+            ReindexTargetKind::Database | ReindexTargetKind::System
+        ) {
+        (String::new(), "")
+    } else {
+        let (parts, tail) = parse_qualified_identifier_parts(rest)?;
+        (parts.join("."), tail)
+    };
+    let tail = tail.trim();
+    if !tail.is_empty() && !tail.eq_ignore_ascii_case("force") {
         return Err(ParseError::UnexpectedToken {
-            expected: "end of REINDEX INDEX statement",
-            actual: tail.trim().to_string(),
+            expected: "end of REINDEX statement",
+            actual: tail.to_string(),
         });
     }
     Ok(Some(Statement::ReindexIndex(ReindexIndexStatement {
         concurrently,
-        index_name: parts.join("."),
+        verbose,
+        kind,
+        index_name,
     })))
 }
 
@@ -4270,6 +4384,10 @@ fn try_parse_conversion_statement(sql: &str) -> Result<Option<Statement>, ParseE
         return build_drop_conversion_statement(trimmed)
             .map(|stmt| Some(Statement::DropConversion(stmt)));
     }
+    if lowered.starts_with("alter conversion ") {
+        return build_alter_conversion_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterConversion(stmt)));
+    }
     if lowered.starts_with("comment on conversion ") {
         return build_comment_on_conversion_statement(trimmed)
             .map(|stmt| Some(Statement::CommentOnConversion(stmt)));
@@ -4283,6 +4401,10 @@ fn try_parse_foreign_data_wrapper_statement(sql: &str) -> Result<Option<Statemen
     if lowered.starts_with("create server ") {
         return build_create_foreign_server_statement(trimmed)
             .map(|stmt| Some(Statement::CreateForeignServer(stmt)));
+    }
+    if lowered.starts_with("alter server ") {
+        return build_alter_foreign_server_rename_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterForeignServerRename(stmt)));
     }
     if lowered.starts_with("create foreign table ") {
         return build_create_foreign_table_statement(trimmed)
@@ -4304,6 +4426,212 @@ fn try_parse_foreign_data_wrapper_statement(sql: &str) -> Result<Option<Statemen
             .map(|stmt| Some(Statement::CommentOnForeignDataWrapper(stmt)));
     }
     Ok(None)
+}
+
+fn try_parse_language_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create language ") {
+        return build_create_language_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateLanguage(stmt)));
+    }
+    if lowered.starts_with("alter language ") {
+        return build_alter_language_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterLanguage(stmt)));
+    }
+    if lowered.starts_with("drop language ") {
+        return build_drop_language_statement(trimmed)
+            .map(|stmt| Some(Statement::DropLanguage(stmt)));
+    }
+    Ok(None)
+}
+
+fn parse_text_search_kind(input: &str) -> Result<(TextSearchObjectKind, &str), ParseError> {
+    let rest = input.trim_start();
+    if keyword_at_start(rest, "dictionary") {
+        Ok((
+            TextSearchObjectKind::Dictionary,
+            consume_keyword(rest, "dictionary"),
+        ))
+    } else if keyword_at_start(rest, "configuration") {
+        Ok((
+            TextSearchObjectKind::Configuration,
+            consume_keyword(rest, "configuration"),
+        ))
+    } else if keyword_at_start(rest, "template") {
+        Ok((
+            TextSearchObjectKind::Template,
+            consume_keyword(rest, "template"),
+        ))
+    } else if keyword_at_start(rest, "parser") {
+        Ok((
+            TextSearchObjectKind::Parser,
+            consume_keyword(rest, "parser"),
+        ))
+    } else {
+        Err(ParseError::UnexpectedToken {
+            expected: "text search object kind",
+            actual: rest.into(),
+        })
+    }
+}
+
+fn text_search_kind_name(kind: TextSearchObjectKind) -> &'static str {
+    match kind {
+        TextSearchObjectKind::Dictionary => "dictionary",
+        TextSearchObjectKind::Configuration => "configuration",
+        TextSearchObjectKind::Template => "template",
+        TextSearchObjectKind::Parser => "parser",
+    }
+}
+
+fn valid_text_search_parameter(kind: TextSearchObjectKind, name: &str) -> bool {
+    match kind {
+        TextSearchObjectKind::Dictionary => name.eq_ignore_ascii_case("template"),
+        TextSearchObjectKind::Configuration => {
+            name.eq_ignore_ascii_case("copy") || name.eq_ignore_ascii_case("parser")
+        }
+        TextSearchObjectKind::Template => {
+            name.eq_ignore_ascii_case("init") || name.eq_ignore_ascii_case("lexize")
+        }
+        TextSearchObjectKind::Parser => {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "start" | "gettoken" | "end" | "headline" | "lextypes"
+            )
+        }
+    }
+}
+
+fn parse_text_search_parameters(
+    kind: TextSearchObjectKind,
+    input: &str,
+) -> Result<Vec<TextSearchParameter>, ParseError> {
+    let mut parameters = Vec::new();
+    for item in split_top_level_items(input, ',')? {
+        let Some((raw_name, raw_value)) = item.split_once('=') else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "text search parameter assignment",
+                actual: item,
+            });
+        };
+        let raw_name = raw_name.trim();
+        let (name, tail) = parse_sql_identifier(raw_name)?;
+        if (raw_name.starts_with('"') && name != name.to_ascii_lowercase())
+            || !tail.trim().is_empty()
+            || !valid_text_search_parameter(kind, &name)
+        {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "text search {} parameter \"{}\" not recognized",
+                    text_search_kind_name(kind),
+                    name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            });
+        }
+        let value = raw_value.trim();
+        let ((schema_name, object_name), tail) = parse_qualified_sql_name(value)?;
+        if !tail.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "text search parameter value",
+                actual: tail.trim().into(),
+            });
+        }
+        parameters.push(TextSearchParameter {
+            name: name.to_ascii_lowercase(),
+            value: schema_name
+                .map(|schema| format!("{schema}.{object_name}"))
+                .unwrap_or(object_name),
+        });
+    }
+    Ok(parameters)
+}
+
+fn build_create_text_search_statement(sql: &str) -> Result<CreateTextSearchStatement, ParseError> {
+    let rest = sql["create text search ".len()..].trim_start();
+    let (kind, rest) = parse_text_search_kind(rest)?;
+    let ((schema_name, object_name), rest) = parse_qualified_sql_name(rest)?;
+    let (parameters_sql, rest) = take_parenthesized_segment(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of CREATE TEXT SEARCH",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CreateTextSearchStatement {
+        kind,
+        schema_name,
+        object_name,
+        parameters: parse_text_search_parameters(kind, &parameters_sql)?,
+    })
+}
+
+fn parse_alter_text_search_action(
+    kind: TextSearchObjectKind,
+    rest: &str,
+) -> Result<AlterTextSearchAction, ParseError> {
+    let rest = rest.trim_start();
+    if keyword_at_start(rest, "rename to") {
+        let rest = consume_keyword(rest, "rename to").trim_start();
+        let (new_name, rest) = parse_sql_identifier(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER TEXT SEARCH",
+                actual: rest.trim().into(),
+            });
+        }
+        return Ok(AlterTextSearchAction::Rename { new_name });
+    }
+    if keyword_at_start(rest, "owner to") {
+        if !matches!(
+            kind,
+            TextSearchObjectKind::Dictionary | TextSearchObjectKind::Configuration
+        ) {
+            return Err(ParseError::UnexpectedToken {
+                expected: "RENAME TO or SET SCHEMA",
+                actual: rest.into(),
+            });
+        }
+        let rest = consume_keyword(rest, "owner to").trim_start();
+        let (new_owner, rest) = parse_sql_identifier(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER TEXT SEARCH",
+                actual: rest.trim().into(),
+            });
+        }
+        return Ok(AlterTextSearchAction::OwnerTo { new_owner });
+    }
+    if keyword_at_start(rest, "set schema") {
+        let rest = consume_keyword(rest, "set schema").trim_start();
+        let (new_schema, rest) = parse_sql_identifier(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER TEXT SEARCH",
+                actual: rest.trim().into(),
+            });
+        }
+        return Ok(AlterTextSearchAction::SetSchema { new_schema });
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "RENAME TO, OWNER TO, or SET SCHEMA",
+        actual: rest.into(),
+    })
+}
+
+fn build_alter_text_search_statement(sql: &str) -> Result<AlterTextSearchStatement, ParseError> {
+    let rest = sql["alter text search ".len()..].trim_start();
+    let (kind, rest) = parse_text_search_kind(rest)?;
+    let ((schema_name, object_name), rest) = parse_qualified_sql_name(rest)?;
+    Ok(AlterTextSearchStatement {
+        kind,
+        schema_name,
+        object_name,
+        action: parse_alter_text_search_action(kind, rest)?,
+    })
 }
 
 fn build_create_foreign_server_statement(
@@ -4329,6 +4657,122 @@ fn build_create_foreign_server_statement(
     Ok(CreateForeignServerStatement {
         server_name,
         fdw_name,
+    })
+}
+
+fn build_create_language_statement(sql: &str) -> Result<CreateLanguageStatement, ParseError> {
+    let mut rest = sql["create language ".len()..].trim_start();
+    let (language_name, next) = parse_sql_identifier(rest)?;
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "handler") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "HANDLER",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "handler").trim_start();
+    let (handler_name, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of CREATE LANGUAGE",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CreateLanguageStatement {
+        language_name,
+        handler_name,
+    })
+}
+
+fn build_alter_language_statement(sql: &str) -> Result<AlterLanguageStatement, ParseError> {
+    let mut rest = sql["alter language ".len()..].trim_start();
+    let (language_name, next) = parse_sql_identifier(rest)?;
+    rest = next.trim_start();
+    let action = if keyword_at_start(rest, "rename to") {
+        let next = consume_keyword(rest, "rename to").trim_start();
+        let (new_name, tail) = parse_sql_identifier(next)?;
+        if !tail.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER LANGUAGE",
+                actual: tail.trim().into(),
+            });
+        }
+        AlterLanguageAction::Rename { new_name }
+    } else if keyword_at_start(rest, "owner to") {
+        let next = consume_keyword(rest, "owner to").trim_start();
+        let (new_owner, tail) = parse_sql_identifier(next)?;
+        if !tail.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER LANGUAGE",
+                actual: tail.trim().into(),
+            });
+        }
+        AlterLanguageAction::OwnerTo { new_owner }
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "RENAME TO or OWNER TO",
+            actual: rest.into(),
+        });
+    };
+    Ok(AlterLanguageStatement {
+        language_name,
+        action,
+    })
+}
+
+fn build_drop_language_statement(sql: &str) -> Result<DropLanguageStatement, ParseError> {
+    let mut rest = sql["drop language ".len()..].trim_start();
+    let if_exists = keyword_at_start(rest, "if exists");
+    if if_exists {
+        rest = consume_keyword(rest, "if exists").trim_start();
+    }
+    let (language_name, next) = parse_sql_identifier(rest)?;
+    rest = next.trim_start();
+    let cascade = if keyword_at_start(rest, "cascade") {
+        rest = consume_keyword(rest, "cascade").trim_start();
+        true
+    } else if keyword_at_start(rest, "restrict") {
+        rest = consume_keyword(rest, "restrict").trim_start();
+        false
+    } else {
+        false
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of DROP LANGUAGE",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(DropLanguageStatement {
+        if_exists,
+        language_name,
+        cascade,
+    })
+}
+
+fn build_alter_foreign_server_rename_statement(
+    sql: &str,
+) -> Result<AlterForeignServerRenameStatement, ParseError> {
+    let mut rest = sql["alter server ".len()..].trim_start();
+    let (server_name, next) = parse_sql_identifier(rest)?;
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "rename to") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "RENAME TO",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "rename to").trim_start();
+    let (new_name, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(AlterForeignServerRenameStatement {
+        server_name,
+        new_name,
     })
 }
 
@@ -4827,7 +5271,12 @@ fn try_parse_drop_function_statement(sql: &str) -> Result<Option<Statement>, Par
 fn try_parse_alter_routine_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
-    for prefix in ["alter function ", "alter procedure ", "alter routine "] {
+    for prefix in [
+        "alter function ",
+        "alter procedure ",
+        "alter aggregate ",
+        "alter routine ",
+    ] {
         if lowered.starts_with(prefix) {
             return build_alter_routine_statement(trimmed)
                 .map(|stmt| Some(Statement::AlterRoutine(stmt)));
@@ -4921,12 +5370,27 @@ fn try_parse_cast_statement(sql: &str) -> Result<Option<Statement>, ParseError> 
 fn try_parse_create_operator_class_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
-    if !lowered.starts_with("create operator class ") {
-        return Ok(None);
+    if lowered.starts_with("create operator family ") {
+        return build_create_operator_family_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateOperatorFamily(stmt)));
     }
-    Ok(Some(Statement::CreateOperatorClass(
-        build_create_operator_class_statement(trimmed)?,
-    )))
+    if lowered.starts_with("alter operator family ") {
+        return build_alter_operator_family_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterOperatorFamily(stmt)));
+    }
+    if lowered.starts_with("alter operator class ") {
+        return build_alter_operator_class_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterOperatorClass(stmt)));
+    }
+    if lowered.starts_with("drop operator family ") {
+        return build_drop_operator_family_statement(trimmed)
+            .map(|stmt| Some(Statement::DropOperatorFamily(stmt)));
+    }
+    if lowered.starts_with("create operator class ") {
+        return build_create_operator_class_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateOperatorClass(stmt)));
+    }
+    Ok(None)
 }
 
 fn try_parse_operator_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -5042,6 +5506,9 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     let lowered = sql.to_ascii_lowercase();
     if lowered.starts_with("revoke create on database ") {
         return Ok(Statement::RevokeObject(build_revoke_database_create(sql)?));
+    }
+    if lowered.starts_with("revoke all on schema ") {
+        return Ok(Statement::RevokeObject(build_revoke_schema_all(sql)?));
     }
     if lowered.starts_with("revoke usage on schema ") {
         return Ok(Statement::RevokeObject(build_revoke_schema_usage(sql)?));
@@ -5442,6 +5909,23 @@ fn build_revoke_schema_usage(sql: &str) -> Result<RevokeObjectStatement, ParseEr
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnSchema,
+        columns: Vec::new(),
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        cascade,
+    })
+}
+
+fn build_revoke_schema_all(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let prefix = "revoke all on schema ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_names, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege: GrantObjectPrivilege::AllPrivilegesOnSchema,
         columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
@@ -6082,12 +6566,26 @@ fn parse_sequence_owned_by(input: &str) -> Result<(SequenceOwnedByClause, &str),
 fn parse_signed_i64_token(input: &str) -> Result<(i64, &str), ParseError> {
     let input = input.trim_start();
     let mut end = 0usize;
+    let mut previous_was_digit = false;
     for (idx, ch) in input.char_indices() {
         if idx == 0 && matches!(ch, '+' | '-') {
             end = ch.len_utf8();
             continue;
         }
         if ch.is_ascii_digit() {
+            end = idx + ch.len_utf8();
+            previous_was_digit = true;
+            continue;
+        }
+        if ch == '_' && previous_was_digit {
+            let next = input[idx + ch.len_utf8()..].chars().next();
+            if next.is_some_and(|next| next.is_ascii_digit()) {
+                end = idx + ch.len_utf8();
+                previous_was_digit = false;
+                continue;
+            }
+        }
+        if ch == '_' {
             end = idx + ch.len_utf8();
             continue;
         }
@@ -6100,7 +6598,8 @@ fn parse_signed_i64_token(input: &str) -> Result<(i64, &str), ParseError> {
         });
     }
     let token = &input[..end];
-    let value = token
+    let normalized = normalize_numeric_token(token);
+    let value = normalized
         .parse::<i64>()
         .map_err(|_| ParseError::UnexpectedToken {
             expected: "signed integer in i64 range",
@@ -7218,11 +7717,13 @@ fn build_alter_routine_statement(sql: &str) -> Result<AlterRoutineStatement, Par
         (RoutineKind::Function, "alter function")
     } else if lowered.starts_with("alter procedure ") {
         (RoutineKind::Procedure, "alter procedure")
+    } else if lowered.starts_with("alter aggregate ") {
+        (RoutineKind::Aggregate, "alter aggregate")
     } else if lowered.starts_with("alter routine ") {
         (RoutineKind::Routine, "alter routine")
     } else {
         return Err(ParseError::UnexpectedToken {
-            expected: "ALTER FUNCTION, ALTER PROCEDURE, or ALTER ROUTINE",
+            expected: "ALTER FUNCTION, ALTER PROCEDURE, ALTER AGGREGATE, or ALTER ROUTINE",
             actual: sql.into(),
         });
     };
@@ -9470,6 +9971,207 @@ fn build_create_operator_class_statement(
     })
 }
 
+fn build_create_operator_family_statement(
+    sql: &str,
+) -> Result<CreateOperatorFamilyStatement, ParseError> {
+    let rest = sql["create operator family".len()..].trim_start();
+    let ((schema_name, family_name), rest) = parse_qualified_sql_name(rest)?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "using") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "USING access method",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "using").trim_start();
+    let (access_method, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of CREATE OPERATOR FAMILY",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CreateOperatorFamilyStatement {
+        schema_name,
+        family_name,
+        access_method,
+    })
+}
+
+fn parse_operator_family_or_class_head<'a>(
+    rest: &'a str,
+    object_kind: &'static str,
+) -> Result<((Option<String>, String), String, &'a str), ParseError> {
+    let ((schema_name, object_name), rest) = parse_qualified_sql_name(rest)?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "using") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "USING access method",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "using").trim_start();
+    let (access_method, rest) = parse_sql_identifier(rest)?;
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: object_kind,
+            actual: rest.into(),
+        });
+    }
+    Ok(((schema_name, object_name), access_method, rest))
+}
+
+fn parse_alter_operator_family_action(rest: &str) -> Result<AlterOperatorFamilyAction, ParseError> {
+    if keyword_at_start(rest, "add") {
+        return Ok(AlterOperatorFamilyAction::Add {
+            items_sql: consume_keyword(rest, "add").trim().to_string(),
+        });
+    }
+    if keyword_at_start(rest, "drop") {
+        return Ok(AlterOperatorFamilyAction::Drop {
+            items_sql: consume_keyword(rest, "drop").trim().to_string(),
+        });
+    }
+    if keyword_at_start(rest, "rename to") {
+        let rest = consume_keyword(rest, "rename to").trim_start();
+        let (new_name, rest) = parse_sql_identifier(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER OPERATOR FAMILY",
+                actual: rest.trim().into(),
+            });
+        }
+        return Ok(AlterOperatorFamilyAction::Rename { new_name });
+    }
+    if keyword_at_start(rest, "owner to") {
+        let rest = consume_keyword(rest, "owner to").trim_start();
+        let (new_owner, rest) = parse_sql_identifier(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER OPERATOR FAMILY",
+                actual: rest.trim().into(),
+            });
+        }
+        return Ok(AlterOperatorFamilyAction::OwnerTo { new_owner });
+    }
+    if keyword_at_start(rest, "set schema") {
+        let rest = consume_keyword(rest, "set schema").trim_start();
+        let (new_schema, rest) = parse_sql_identifier(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER OPERATOR FAMILY",
+                actual: rest.trim().into(),
+            });
+        }
+        return Ok(AlterOperatorFamilyAction::SetSchema { new_schema });
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "RENAME TO, OWNER TO, or SET SCHEMA",
+        actual: rest.into(),
+    })
+}
+
+fn parse_alter_operator_class_action(rest: &str) -> Result<AlterOperatorClassAction, ParseError> {
+    if keyword_at_start(rest, "rename to") {
+        let rest = consume_keyword(rest, "rename to").trim_start();
+        let (new_name, rest) = parse_sql_identifier(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER OPERATOR CLASS",
+                actual: rest.trim().into(),
+            });
+        }
+        return Ok(AlterOperatorClassAction::Rename { new_name });
+    }
+    if keyword_at_start(rest, "owner to") {
+        let rest = consume_keyword(rest, "owner to").trim_start();
+        let (new_owner, rest) = parse_sql_identifier(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER OPERATOR CLASS",
+                actual: rest.trim().into(),
+            });
+        }
+        return Ok(AlterOperatorClassAction::OwnerTo { new_owner });
+    }
+    if keyword_at_start(rest, "set schema") {
+        let rest = consume_keyword(rest, "set schema").trim_start();
+        let (new_schema, rest) = parse_sql_identifier(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER OPERATOR CLASS",
+                actual: rest.trim().into(),
+            });
+        }
+        return Ok(AlterOperatorClassAction::SetSchema { new_schema });
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "RENAME TO, OWNER TO, or SET SCHEMA",
+        actual: rest.into(),
+    })
+}
+
+fn build_alter_operator_family_statement(
+    sql: &str,
+) -> Result<AlterOperatorFamilyStatement, ParseError> {
+    let rest = sql["alter operator family".len()..].trim_start();
+    let ((schema_name, family_name), access_method, rest) =
+        parse_operator_family_or_class_head(rest, "ALTER OPERATOR FAMILY action")?;
+    Ok(AlterOperatorFamilyStatement {
+        schema_name,
+        family_name,
+        access_method,
+        action: parse_alter_operator_family_action(rest)?,
+    })
+}
+
+fn build_alter_operator_class_statement(
+    sql: &str,
+) -> Result<AlterOperatorClassStatement, ParseError> {
+    let rest = sql["alter operator class".len()..].trim_start();
+    let ((schema_name, opclass_name), access_method, rest) =
+        parse_operator_family_or_class_head(rest, "ALTER OPERATOR CLASS action")?;
+    Ok(AlterOperatorClassStatement {
+        schema_name,
+        opclass_name,
+        access_method,
+        action: parse_alter_operator_class_action(rest)?,
+    })
+}
+
+fn build_drop_operator_family_statement(
+    sql: &str,
+) -> Result<DropOperatorFamilyStatement, ParseError> {
+    let mut rest = sql["drop operator family".len()..].trim_start();
+    let if_exists = keyword_at_start(rest, "if exists");
+    if if_exists {
+        rest = consume_keyword(rest, "if exists").trim_start();
+    }
+    let ((schema_name, family_name), rest) = parse_qualified_sql_name(rest)?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "using") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "USING access method",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "using").trim_start();
+    let (access_method, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of DROP OPERATOR FAMILY",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(DropOperatorFamilyStatement {
+        if_exists,
+        schema_name,
+        family_name,
+        access_method,
+    })
+}
+
 fn build_create_operator_statement(sql: &str) -> Result<CreateOperatorStatement, ParseError> {
     let prefix = "create operator";
     let rest = sql
@@ -9609,6 +10311,29 @@ fn build_alter_operator_statement(sql: &str) -> Result<AlterOperatorStatement, P
     let ((schema_name, operator_name), rest) = parse_operator_name(rest)?;
     let ((left_arg, right_arg), rest) = parse_operator_argtypes(rest.trim_start())?;
     let rest = rest.trim_start();
+    let lower = rest.to_ascii_lowercase();
+    if lower.starts_with("owner to ") {
+        return Ok(AlterOperatorStatement {
+            schema_name,
+            operator_name,
+            left_arg,
+            right_arg,
+            action: AlterOperatorAction::OwnerTo {
+                new_owner: normalize_simple_identifier(rest["owner to ".len()..].trim())?,
+            },
+        });
+    }
+    if lower.starts_with("set schema ") {
+        return Ok(AlterOperatorStatement {
+            schema_name,
+            operator_name,
+            left_arg,
+            right_arg,
+            action: AlterOperatorAction::SetSchema {
+                new_schema: normalize_simple_identifier(rest["set schema ".len()..].trim())?,
+            },
+        });
+    }
     if !keyword_at_start(rest, "set") {
         return Err(ParseError::UnexpectedToken {
             expected: "SET",
@@ -9746,7 +10471,7 @@ fn build_alter_operator_statement(sql: &str) -> Result<AlterOperatorStatement, P
         operator_name,
         left_arg,
         right_arg,
-        options,
+        action: AlterOperatorAction::SetOptions(options),
     })
 }
 
@@ -9857,6 +10582,11 @@ fn parse_create_operator_class_item(input: &str) -> Result<CreateOperatorClassIt
             function_name,
             arg_types,
         });
+    }
+    if keyword_at_start(trimmed, "storage") {
+        let rest = consume_keyword(trimmed, "storage").trim_start();
+        let storage_type = parse_type_name(rest)?;
+        return Ok(CreateOperatorClassItem::Storage { storage_type });
     }
     Err(ParseError::FeatureNotSupported(format!(
         "unsupported CREATE OPERATOR CLASS item: {}",
@@ -11918,6 +12648,43 @@ fn build_drop_conversion_statement(sql: &str) -> Result<DropConversionStatement,
     })
 }
 
+fn build_alter_conversion_statement(sql: &str) -> Result<AlterConversionStatement, ParseError> {
+    let rest = sql
+        .get("alter conversion ".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let ((schema_name, base_name), rest) = parse_schema_qualified_name(rest)?;
+    let conversion_name = schema_name
+        .map(|schema| format!("{schema}.{base_name}"))
+        .unwrap_or(base_name);
+    let rest = rest.trim_start();
+    let lower = rest.to_ascii_lowercase();
+    let action = if keyword_at_start(rest, "rename") {
+        let rest = consume_keyword(rest, "rename").trim_start();
+        let rest = consume_keyword(rest, "to").trim_start();
+        AlterConversionAction::Rename {
+            new_name: normalize_simple_identifier(rest)?,
+        }
+    } else if lower.starts_with("owner to ") {
+        AlterConversionAction::OwnerTo {
+            new_owner: normalize_simple_identifier(rest["owner to ".len()..].trim())?,
+        }
+    } else if lower.starts_with("set schema ") {
+        AlterConversionAction::SetSchema {
+            new_schema: normalize_simple_identifier(rest["set schema ".len()..].trim())?,
+        }
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "RENAME TO, OWNER TO, or SET SCHEMA",
+            actual: rest.into(),
+        });
+    };
+    Ok(AlterConversionStatement {
+        conversion_name,
+        action,
+    })
+}
+
 fn build_comment_on_conversion_statement(
     sql: &str,
 ) -> Result<CommentOnConversionStatement, ParseError> {
@@ -12793,7 +13560,8 @@ fn fetch_count_from_text(text: &str) -> Result<Option<i64>, ParseError> {
 }
 
 fn parse_i64(text: &str) -> Result<i64, ParseError> {
-    text.parse::<i64>()
+    normalize_numeric_token(text)
+        .parse::<i64>()
         .map_err(|_| ParseError::InvalidInteger(text.to_string()))
 }
 
@@ -13179,7 +13947,7 @@ fn build_create_database_option_value(pair: Pair<'_, Rule>) -> Result<String, Pa
         Rule::kw_on_value => Ok("on".into()),
         Rule::kw_off => Ok("off".into()),
         Rule::kw_default => Ok("default".into()),
-        Rule::signed_integer | Rule::integer => Ok(inner.as_str().into()),
+        Rule::signed_integer | Rule::integer => Ok(normalize_numeric_token(inner.as_str()).into()),
         _ => Ok(inner.as_str().into()),
     }
 }
@@ -13899,6 +14667,7 @@ fn build_set_operation_term(pair: Pair<'_, Rule>) -> Result<SelectStatement, Par
             match inner.as_rule() {
                 Rule::parenthesized_set_operation_term => build_set_operation_term(inner),
                 Rule::values_stmt => Ok(wrap_values_as_select(build_values_statement(inner)?)),
+                Rule::table_stmt => build_table_select(inner),
                 _ => build_select(inner),
             }
         }
@@ -13915,6 +14684,7 @@ fn build_set_operation_term(pair: Pair<'_, Rule>) -> Result<SelectStatement, Par
             Ok(wrap_values_as_select(build_values_statement(values)?))
         }
         Rule::values_stmt => Ok(wrap_values_as_select(build_values_statement(pair)?)),
+        Rule::table_stmt => build_table_select(pair),
         Rule::simple_select_core
         | Rule::simple_select_stmt
         | Rule::set_operation_stmt
@@ -15816,7 +16586,8 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
             let nulls_not_distinct = body
                 .clone()
                 .into_inner()
-                .any(|part| part.as_rule() == Rule::unique_nulls_not_distinct_clause);
+                .find(|part| part.as_rule() == Rule::unique_nulls_distinct_clause)
+                .is_some_and(unique_nulls_clause_is_not_distinct);
             let mut attributes = attributes;
             attributes.nulls_not_distinct = nulls_not_distinct;
             let (columns, include_columns, without_overlaps) = build_key_constraint_body(body)?;
@@ -16164,7 +16935,8 @@ fn build_column_constraint(pair: Pair<'_, Rule>) -> Result<ColumnConstraint, Par
             let mut attributes = attributes;
             attributes.nulls_not_distinct = body
                 .into_inner()
-                .any(|part| part.as_rule() == Rule::unique_nulls_not_distinct_clause);
+                .find(|part| part.as_rule() == Rule::unique_nulls_distinct_clause)
+                .is_some_and(unique_nulls_clause_is_not_distinct);
             Ok(ColumnConstraint::Unique { attributes })
         }
         Rule::references_column_constraint => {
@@ -16445,7 +17217,9 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
                     options.push(build_reloption(option)?);
                 }
             }
-            Rule::unique_nulls_not_distinct_clause => nulls_not_distinct = true,
+            Rule::unique_nulls_distinct_clause => {
+                nulls_not_distinct = unique_nulls_clause_is_not_distinct(part)
+            }
             _ => {}
         }
     }
@@ -16475,9 +17249,14 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
     })
 }
 
+fn unique_nulls_clause_is_not_distinct(pair: Pair<'_, Rule>) -> bool {
+    pair.as_str().to_ascii_lowercase().contains("not")
+}
+
 fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, ParseError> {
     let mut name = None;
     let mut expr_sql = None;
+    let mut collation = None;
     let mut opclass = None;
     let mut descending = false;
     let mut nulls_first = None;
@@ -16505,6 +17284,13 @@ fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, Parse
                     part.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
                 ))
             }
+            Rule::collate_suffix if collation.is_none() => {
+                collation = Some(build_collation_name(
+                    part.into_inner()
+                        .find(|part| part.as_rule() == Rule::collation_name)
+                        .ok_or(ParseError::UnexpectedEof)?,
+                )?);
+            }
             Rule::kw_desc => descending = true,
             Rule::nulls_ordering => {
                 let text = part.as_str().to_ascii_lowercase();
@@ -16517,7 +17303,7 @@ fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, Parse
         name: name.unwrap_or_default(),
         expr_sql,
         expr_type: None,
-        collation: None,
+        collation,
         opclass,
         descending,
         nulls_first,
@@ -17205,6 +17991,7 @@ fn build_vacuum(pair: Pair<'_, Rule>) -> Result<VacuumStatement, ParseError> {
     let mut only_database_stats = false;
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::kw_analyze => analyze = true,
             Rule::vacuum_legacy_option => {
                 let opt = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
                 match opt.as_rule() {
@@ -17254,6 +18041,17 @@ fn build_vacuum(pair: Pair<'_, Rule>) -> Result<VacuumStatement, ParseError> {
                         Rule::analyze_buffer_usage_limit_option => {
                             buffer_usage_limit = Some(parse_option_scalar(opt)?)
                         }
+                        _ => {}
+                    }
+                }
+            }
+            Rule::vacuum_bare_option_list => {
+                for opt in part.into_inner() {
+                    let text = opt.as_str().to_ascii_lowercase();
+                    match text.as_str() {
+                        "analyze" => analyze = true,
+                        "full" => full = true,
+                        "verbose" => verbose = true,
                         _ => {}
                     }
                 }
@@ -19435,6 +20233,14 @@ fn parse_i32(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
         .map_err(|_| ParseError::InvalidInteger(pair.as_str().to_string()))
 }
 
+fn normalize_numeric_token(token: &str) -> std::borrow::Cow<'_, str> {
+    if token.as_bytes().contains(&b'_') {
+        std::borrow::Cow::Owned(token.replace('_', ""))
+    } else {
+        std::borrow::Cow::Borrowed(token)
+    }
+}
+
 fn build_collation_name(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
     let parts = pair
         .into_inner()
@@ -19772,6 +20578,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             Rule::kw_not => negated = true,
                             Rule::select_stmt => {
                                 subquery = Some(build_select(part)?);
+                            }
+                            Rule::values_stmt => {
+                                subquery =
+                                    Some(wrap_values_as_select(build_values_statement(part)?));
                             }
                             _ => {}
                         }
@@ -20274,9 +21084,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         ),
         Rule::identifier => Ok(SqlExpr::Column(build_identifier(pair))),
         Rule::kw_default => Ok(SqlExpr::Default),
-        Rule::numeric_literal => Ok(SqlExpr::NumericLiteral(normalize_numeric_literal_text(
-            pair.as_str(),
-        ))),
+        Rule::numeric_literal => Ok(SqlExpr::NumericLiteral(pair.as_str().to_string())),
         Rule::hex_integer => Ok(SqlExpr::IntegerLiteral(parse_prefixed_integer_literal(
             pair.as_str(),
             16,
@@ -20289,9 +21097,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             pair.as_str(),
             2,
         )?)),
-        Rule::integer => Ok(SqlExpr::IntegerLiteral(normalize_numeric_literal_text(
-            pair.as_str(),
-        ))),
+        Rule::integer => Ok(SqlExpr::IntegerLiteral(pair.as_str().to_string())),
         Rule::quoted_string_literal
         | Rule::string_literal
         | Rule::unicode_string_literal
@@ -22357,7 +23163,7 @@ mod tests {
                 operator_name: "===".to_string(),
                 left_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
                 right_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
-                options: vec![
+                action: AlterOperatorAction::SetOptions(vec![
                     AlterOperatorOption::Restrict {
                         option_name: "restrict".to_string(),
                         function: None,
@@ -22377,7 +23183,31 @@ mod tests {
                         option_name: "merges".to_string(),
                         enabled: false,
                     },
-                ],
+                ]),
+            })
+        );
+        assert_eq!(
+            parse_statement("alter operator === (boolean, boolean) owner to app_owner").unwrap(),
+            Statement::AlterOperator(AlterOperatorStatement {
+                schema_name: None,
+                operator_name: "===".to_string(),
+                left_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
+                right_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
+                action: AlterOperatorAction::OwnerTo {
+                    new_owner: "app_owner".to_string(),
+                },
+            })
+        );
+        assert_eq!(
+            parse_statement("alter operator === (boolean, boolean) set schema app_schema").unwrap(),
+            Statement::AlterOperator(AlterOperatorStatement {
+                schema_name: None,
+                operator_name: "===".to_string(),
+                left_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
+                right_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
+                action: AlterOperatorAction::SetSchema {
+                    new_schema: "app_schema".to_string(),
+                },
             })
         );
         assert_eq!(

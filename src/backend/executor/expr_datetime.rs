@@ -2,7 +2,7 @@ use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, Date
 use crate::backend::utils::time::date::{format_date_text, format_time_text, format_timetz_text};
 use crate::backend::utils::time::datetime::{
     current_postgres_timestamp_usecs, format_time_usecs, timestamp_parts_from_usecs,
-    timezone_offset_seconds, timezone_offset_seconds_at_utc, today_pg_days, ymd_from_days,
+    timezone_offset_seconds_at_utc, today_pg_days, ymd_from_days,
 };
 use crate::backend::utils::time::timestamp::{format_timestamp_text, format_timestamptz_text};
 use crate::include::nodes::datetime::{
@@ -109,7 +109,7 @@ pub(crate) fn render_json_datetime_value_text_with_config(
             if v.0 == TIMESTAMP_NOEND || v.0 == TIMESTAMP_NOBEGIN {
                 Some(format_timestamptz_text(*v, &json_config))
             } else {
-                let offset_seconds = timezone_offset_seconds(config);
+                let offset_seconds = timezone_offset_seconds_at_utc(config, v.0);
                 let adjusted = v.0 + i64::from(offset_seconds) * 1_000_000;
                 let (days, time_usecs) = timestamp_parts_from_usecs(adjusted);
                 Some(render_json_timestamp_parts(

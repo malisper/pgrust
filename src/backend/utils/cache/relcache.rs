@@ -853,11 +853,13 @@ mod tests {
     use crate::backend::catalog::catalog::{CatalogIndexBuildOptions, column_desc};
     use crate::backend::executor::RelationDesc;
     use crate::backend::parser::{SqlType, SqlTypeKind};
-    use crate::include::access::gist::GIST_CONSISTENT_PROC;
+    use crate::include::access::gist::{GIST_CONSISTENT_PROC, GIST_DISTANCE_PROC};
     use crate::include::catalog::{
-        BOX_GIST_OPCLASS_OID, BOX_TYPE_OID, GIST_AM_OID, GIST_BOX_CONSISTENT_PROC_OID,
-        INT4_TYPE_OID, INT4RANGE_TYPE_OID, RANGE_GIST_CONSISTENT_PROC_OID, RANGE_GIST_OPCLASS_OID,
-        bootstrap_pg_operator_rows,
+        BOX_GIST_OPCLASS_OID, BOX_TYPE_OID, CIRCLE_GIST_OPCLASS_OID, CIRCLE_TYPE_OID, GIST_AM_OID,
+        GIST_BOX_CONSISTENT_PROC_OID, GIST_CIRCLE_CONSISTENT_PROC_OID,
+        GIST_CIRCLE_DISTANCE_PROC_OID, GIST_POLY_CONSISTENT_PROC_OID, GIST_POLY_DISTANCE_PROC_OID,
+        INT4_TYPE_OID, INT4RANGE_TYPE_OID, POLY_GIST_OPCLASS_OID, POLYGON_TYPE_OID,
+        RANGE_GIST_CONSISTENT_PROC_OID, RANGE_GIST_OPCLASS_OID, bootstrap_pg_operator_rows,
     };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -923,6 +925,7 @@ mod tests {
                     indclass: vec![BOX_GIST_OPCLASS_OID],
                     indcollation: vec![0],
                     indoption: vec![0],
+                    reloptions: None,
                     indnullsnotdistinct: false,
                     indisexclusion: false,
                     indimmediate: true,
@@ -953,6 +956,90 @@ mod tests {
     }
 
     #[test]
+    fn relcache_from_catalog_populates_gist_geometry_support_metadata() {
+        let mut catalog = Catalog::default();
+        let table = catalog
+            .create_table(
+                "shapes",
+                RelationDesc {
+                    columns: vec![
+                        column_desc("poly", SqlType::new(SqlTypeKind::Polygon), true),
+                        column_desc("circ", SqlType::new(SqlTypeKind::Circle), true),
+                    ],
+                },
+            )
+            .unwrap();
+
+        catalog
+            .create_index_for_relation_with_options(
+                "shapes_poly_gist",
+                table.relation_oid,
+                false,
+                &["poly".into()],
+                &CatalogIndexBuildOptions {
+                    am_oid: GIST_AM_OID,
+                    indclass: vec![POLY_GIST_OPCLASS_OID],
+                    indcollation: vec![0],
+                    indoption: vec![0],
+                    reloptions: None,
+                    indnullsnotdistinct: false,
+                    indisexclusion: false,
+                    indimmediate: true,
+                    brin_options: None,
+                    gin_options: None,
+                    hash_options: None,
+                },
+            )
+            .unwrap();
+        catalog
+            .create_index_for_relation_with_options(
+                "shapes_circ_gist",
+                table.relation_oid,
+                false,
+                &["circ".into()],
+                &CatalogIndexBuildOptions {
+                    am_oid: GIST_AM_OID,
+                    indclass: vec![CIRCLE_GIST_OPCLASS_OID],
+                    indcollation: vec![0],
+                    indoption: vec![0],
+                    reloptions: None,
+                    indnullsnotdistinct: false,
+                    indisexclusion: false,
+                    indimmediate: true,
+                    brin_options: None,
+                    gin_options: None,
+                    hash_options: None,
+                },
+            )
+            .unwrap();
+
+        let cache = RelCache::from_catalog(&catalog);
+        let poly_entry = cache.get_by_name("shapes_poly_gist").unwrap();
+        let poly_index = poly_entry.index.as_ref().unwrap();
+        assert_eq!(poly_index.opcintype_oids, vec![POLYGON_TYPE_OID]);
+        assert_eq!(
+            poly_index.amproc_oid(&poly_entry.desc, 0, GIST_CONSISTENT_PROC),
+            Some(GIST_POLY_CONSISTENT_PROC_OID)
+        );
+        assert_eq!(
+            poly_index.amproc_oid(&poly_entry.desc, 0, GIST_DISTANCE_PROC),
+            Some(GIST_POLY_DISTANCE_PROC_OID)
+        );
+
+        let circle_entry = cache.get_by_name("shapes_circ_gist").unwrap();
+        let circle_index = circle_entry.index.as_ref().unwrap();
+        assert_eq!(circle_index.opcintype_oids, vec![CIRCLE_TYPE_OID]);
+        assert_eq!(
+            circle_index.amproc_oid(&circle_entry.desc, 0, GIST_CONSISTENT_PROC),
+            Some(GIST_CIRCLE_CONSISTENT_PROC_OID)
+        );
+        assert_eq!(
+            circle_index.amproc_oid(&circle_entry.desc, 0, GIST_DISTANCE_PROC),
+            Some(GIST_CIRCLE_DISTANCE_PROC_OID)
+        );
+    }
+
+    #[test]
     fn relcache_preserves_nulls_not_distinct_metadata() {
         let mut catalog = Catalog::default();
         let table = catalog
@@ -975,6 +1062,7 @@ mod tests {
                     indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
                     indcollation: vec![0],
                     indoption: vec![0],
+                    reloptions: None,
                     indnullsnotdistinct: true,
                     indisexclusion: false,
                     indimmediate: true,
@@ -1244,8 +1332,10 @@ mod tests {
             rows.procs,
             rows.aggregates,
             rows.casts,
+            rows.conversions,
             rows.collations,
             rows.foreign_data_wrappers,
+            rows.foreign_servers,
             rows.databases,
             rows.tablespaces,
             rows.statistics,

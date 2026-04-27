@@ -355,10 +355,17 @@ pub enum Statement {
     DropTextSearchConfiguration(DropTextSearchConfigurationStatement),
     CreateForeignDataWrapper(CreateForeignDataWrapperStatement),
     CreateForeignServer(CreateForeignServerStatement),
+    AlterForeignServerRename(AlterForeignServerRenameStatement),
     CreateForeignTable(CreateForeignTableStatement),
     CreateIndex(CreateIndexStatement),
     CreateOperator(CreateOperatorStatement),
     CreateOperatorClass(CreateOperatorClassStatement),
+    CreateOperatorFamily(CreateOperatorFamilyStatement),
+    AlterOperatorFamily(AlterOperatorFamilyStatement),
+    AlterOperatorClass(AlterOperatorClassStatement),
+    DropOperatorFamily(DropOperatorFamilyStatement),
+    CreateTextSearch(CreateTextSearchStatement),
+    AlterTextSearch(AlterTextSearchStatement),
     AlterSequence(AlterSequenceStatement),
     AlterSequenceOwner(AlterRelationOwnerStatement),
     AlterSequenceRename(AlterTableRenameStatement),
@@ -368,6 +375,7 @@ pub enum Statement {
     AlterViewRenameColumn(AlterTableRenameColumnStatement),
     AlterIndexAttachPartition(AlterIndexAttachPartitionStatement),
     AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement),
+    AlterTableCompound(AlterTableCompoundStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
     AlterTableAddColumns(AlterTableAddColumnsStatement),
     AlterTableMulti(Vec<String>),
@@ -411,6 +419,10 @@ pub enum Statement {
     AlterPublication(AlterPublicationStatement),
     AlterOperator(AlterOperatorStatement),
     AlterAggregateRename(AlterAggregateRenameStatement),
+    AlterConversion(AlterConversionStatement),
+    CreateLanguage(CreateLanguageStatement),
+    AlterLanguage(AlterLanguageStatement),
+    DropLanguage(DropLanguageStatement),
     AlterTriggerRename(AlterTriggerRenameStatement),
     CommentOnTable(CommentOnTableStatement),
     CommentOnColumn(CommentOnColumnStatement),
@@ -750,6 +762,7 @@ pub struct CreateProcedureStatement {
 pub enum RoutineKind {
     Function,
     Procedure,
+    Aggregate,
     Routine,
 }
 
@@ -2137,6 +2150,8 @@ pub struct AlterStatisticsStatement {
 pub enum AlterStatisticsAction {
     Rename { new_name: String },
     SetStatistics { target: i16 },
+    OwnerTo { new_owner: String },
+    SetSchema { new_schema: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2208,6 +2223,53 @@ pub struct CreateOperatorClassStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateOperatorFamilyStatement {
+    pub schema_name: Option<String>,
+    pub family_name: String,
+    pub access_method: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterOperatorFamilyStatement {
+    pub schema_name: Option<String>,
+    pub family_name: String,
+    pub access_method: String,
+    pub action: AlterOperatorFamilyAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterOperatorFamilyAction {
+    Rename { new_name: String },
+    OwnerTo { new_owner: String },
+    SetSchema { new_schema: String },
+    Add { items_sql: String },
+    Drop { items_sql: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterOperatorClassStatement {
+    pub schema_name: Option<String>,
+    pub opclass_name: String,
+    pub access_method: String,
+    pub action: AlterOperatorClassAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterOperatorClassAction {
+    Rename { new_name: String },
+    OwnerTo { new_owner: String },
+    SetSchema { new_schema: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropOperatorFamilyStatement {
+    pub if_exists: bool,
+    pub schema_name: Option<String>,
+    pub family_name: String,
+    pub access_method: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateOperatorClassItem {
     Operator {
         strategy_number: i16,
@@ -2218,6 +2280,9 @@ pub enum CreateOperatorClassItem {
         schema_name: Option<String>,
         function_name: String,
         arg_types: Vec<RawTypeName>,
+    },
+    Storage {
+        storage_type: RawTypeName,
     },
 }
 
@@ -2345,6 +2410,11 @@ pub struct AlterTableDropConstraintStatement {
     pub only: bool,
     pub table_name: String,
     pub constraint_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableCompoundStatement {
+    pub actions: Vec<Statement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2716,6 +2786,19 @@ pub struct CommentOnConversionStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterConversionStatement {
+    pub conversion_name: String,
+    pub action: AlterConversionAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterConversionAction {
+    Rename { new_name: String },
+    OwnerTo { new_owner: String },
+    SetSchema { new_schema: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicationPublishActions {
     pub insert: bool,
     pub update: bool,
@@ -2802,7 +2885,14 @@ pub struct AlterOperatorStatement {
     pub operator_name: String,
     pub left_arg: Option<RawTypeName>,
     pub right_arg: Option<RawTypeName>,
-    pub options: Vec<AlterOperatorOption>,
+    pub action: AlterOperatorAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterOperatorAction {
+    SetOptions(Vec<AlterOperatorOption>),
+    OwnerTo { new_owner: String },
+    SetSchema { new_schema: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2877,6 +2967,74 @@ pub struct CreateForeignDataWrapperStatement {
 pub struct CreateForeignServerStatement {
     pub server_name: String,
     pub fdw_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateLanguageStatement {
+    pub language_name: String,
+    pub handler_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterLanguageStatement {
+    pub language_name: String,
+    pub action: AlterLanguageAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterLanguageAction {
+    Rename { new_name: String },
+    OwnerTo { new_owner: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextSearchObjectKind {
+    Dictionary,
+    Configuration,
+    Template,
+    Parser,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextSearchParameter {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTextSearchStatement {
+    pub kind: TextSearchObjectKind,
+    pub schema_name: Option<String>,
+    pub object_name: String,
+    pub parameters: Vec<TextSearchParameter>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTextSearchStatement {
+    pub kind: TextSearchObjectKind,
+    pub schema_name: Option<String>,
+    pub object_name: String,
+    pub action: AlterTextSearchAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterTextSearchAction {
+    Rename { new_name: String },
+    OwnerTo { new_owner: String },
+    SetSchema { new_schema: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropLanguageStatement {
+    pub if_exists: bool,
+    pub language_name: String,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterForeignServerRenameStatement {
+    pub server_name: String,
+    pub new_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3169,8 +3327,19 @@ pub struct DropIndexStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReindexTargetKind {
+    Index,
+    Table,
+    Schema,
+    Database,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReindexIndexStatement {
     pub concurrently: bool,
+    pub verbose: bool,
+    pub kind: ReindexTargetKind,
     pub index_name: String,
 }
 

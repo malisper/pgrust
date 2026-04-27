@@ -899,6 +899,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
                 access_method_handler,
                 &build_options,
                 65_536,
+                false,
                 self.catalog_effects,
             )?;
             let (conparentid, conislocal, coninhcount, connoinherit) = if let Some(parent) = parent

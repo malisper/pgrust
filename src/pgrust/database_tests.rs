@@ -991,6 +991,43 @@ fn mutually_recursive_sql_functions_respect_max_stack_depth_setting() {
 }
 
 #[test]
+fn sql_set_returning_function_accepts_values_body() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function sillysrf(int4) returns setof int4 as
+             'values (1),(10),(2),($1)' language sql immutable",
+        )
+        .expect("create values SQL function");
+
+    assert_single_int_column_rows(
+        session
+            .execute(&db, "select sillysrf(42)")
+            .expect("execute values SQL function"),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(10)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(42)],
+        ],
+    );
+    assert_single_int_column_rows(
+        session
+            .execute(&db, "select sillysrf(-1) order by 1")
+            .expect("execute sorted values SQL function"),
+        vec![
+            vec![Value::Int32(-1)],
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(10)],
+        ],
+    );
+}
+
+#[test]
 fn sql_function_from_item_resolves_qualified_utility_function() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -3728,6 +3765,248 @@ fn copy_from_file_loads_tsvector_rows() {
                 crate::include::nodes::tsearch::TsVector::parse("bar:2 foo:1").unwrap()
             ),
         ]]
+    );
+}
+
+#[test]
+fn tsearch_match_operator_is_null_strict() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select null::tsvector @@ to_tsquery('foo'), to_tsvector('foo') @@ null::tsquery"
+        ),
+        vec![vec![Value::Null, Value::Null]]
+    );
+}
+
+#[test]
+fn tsquery_containment_operators_use_lexeme_sets() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select 'new <-> york'::tsquery @> 'new'::tsquery, \
+                    'new'::tsquery <@ 'new <-> york'::tsquery, \
+                    'new'::tsquery @> 'moscow'::tsquery, \
+                    null::tsquery @> 'new'::tsquery"
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Null,
+        ]]
+    );
+}
+
+#[test]
+fn scalar_tsearch_function_can_be_used_in_from() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select query from to_tsquery('english', 'new') as query"
+        ),
+        vec![vec![Value::TsQuery(
+            crate::include::nodes::tsearch::TsQuery::parse("new").unwrap()
+        )]]
+    );
+}
+
+#[test]
+fn text_tsearch_match_operator_accepts_tsquery() {
+    let db = Database::open_ephemeral(64).unwrap();
+    db.execute(1, "create table text_match_docs(txtsample text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into text_match_docs values ('new york'), ('moscow hotel')",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from text_match_docs, to_tsquery('english', 'new') q \
+             where txtsample @@ q"
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+}
+
+#[test]
+fn empty_tsearch_query_builders_emit_postgres_notices() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    clear_backend_notices();
+    assert_eq!(
+        query_rows(&db, 1, "select to_tsquery('english', '')::text"),
+        vec![vec![Value::Text("".into())]]
+    );
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(
+            "text-search query doesn't contain lexemes: \"\""
+        )]
+    );
+
+    clear_backend_notices();
+    assert_eq!(
+        query_rows(&db, 1, "select websearch_to_tsquery('simple', ':')::text"),
+        vec![vec![Value::Text("".into())]]
+    );
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(
+            "text-search query contains only stop words or doesn't contain lexemes, ignored"
+        )]
+    );
+}
+
+#[test]
+fn ts_rewrite_replaces_tsquery_subtrees() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ts_rewrite('foo & bar'::tsquery, 'bar'::tsquery, 'baz'::tsquery)::text"
+        ),
+        vec![vec![Value::Text("'foo' & 'baz'".into())]]
+    );
+    clear_backend_notices();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ts_rewrite(to_tsquery('5 & (6 | 5)'), to_tsquery('5'), to_tsquery(''))::text"
+        ),
+        vec![vec![Value::Text("'6'".into())]]
+    );
+}
+
+#[test]
+fn ts_headline_handles_empty_and_basic_queries() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    clear_backend_notices();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ts_headline('english', 'foo bar', to_tsquery('english', ''))"
+        ),
+        vec![vec![Value::Text("foo bar".into())]]
+    );
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(
+            "text-search query doesn't contain lexemes: \"\""
+        )]
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ts_headline('english', 'painted water', to_tsquery('english', 'paint&water'))"
+        ),
+        vec![vec![Value::Text("<b>painted</b> <b>water</b>".into())]]
+    );
+}
+
+#[test]
+fn one_arg_tsearch_functions_use_default_text_search_config() {
+    let dir = temp_dir("one_arg_tsearch_default_config");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set default_text_search_config=english")
+        .unwrap();
+
+    let StatementResult::Query { rows, .. } = session
+        .execute(
+            &db,
+            "select to_tsvector('SKIES My booKs'), \
+                    plainto_tsquery('SKIES My booKs'), \
+                    to_tsquery('SKIES & My | booKs'), \
+                    to_tsquery('''New York''')",
+        )
+        .unwrap()
+    else {
+        panic!("expected query result");
+    };
+
+    assert_eq!(
+        rows,
+        vec![vec![
+            Value::TsVector(
+                crate::include::nodes::tsearch::TsVector::parse("'book':3 'sky':1").unwrap()
+            ),
+            Value::TsQuery(crate::include::nodes::tsearch::TsQuery::parse("sky & book").unwrap()),
+            Value::TsQuery(crate::include::nodes::tsearch::TsQuery::parse("sky | book").unwrap()),
+            Value::TsQuery(crate::include::nodes::tsearch::TsQuery::parse("new <-> york").unwrap()),
+        ]]
+    );
+}
+
+#[test]
+fn tsearch_parser_table_functions_return_rows() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from ts_token_type('default')"),
+        vec![vec![Value::Int64(23)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select * from ts_parse('default', 'foo 123')"),
+        vec![
+            vec![Value::Int32(1), Value::Text("foo".into())],
+            vec![Value::Int32(12), Value::Text(" ".into())],
+            vec![Value::Int32(22), Value::Text("123".into())],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select alias, token, dictionary, lexemes from ts_debug('english', 'a title')"
+        ),
+        vec![
+            vec![
+                Value::Text("asciiword".into()),
+                Value::Text("a".into()),
+                Value::Text("english_stem".into()),
+                Value::PgArray(
+                    ArrayValue::from_1d(Vec::new()).with_element_type_oid(TEXT_TYPE_OID)
+                ),
+            ],
+            vec![
+                Value::Text("blank".into()),
+                Value::Text(" ".into()),
+                Value::Null,
+                Value::Null,
+            ],
+            vec![
+                Value::Text("asciiword".into()),
+                Value::Text("title".into()),
+                Value::Text("english_stem".into()),
+                Value::PgArray(
+                    ArrayValue::from_1d(vec![Value::Text("titl".into())])
+                        .with_element_type_oid(TEXT_TYPE_OID)
+                ),
+            ],
+        ]
     );
 }
 
@@ -16957,6 +17236,96 @@ fn create_gin_array_index_builds_and_vacuums() {
 }
 
 #[test]
+fn create_gin_array_index_uses_bitmap_scan_and_rechecks() {
+    let base = temp_dir("gin_array_bitmap_scan");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table docs (id int4 not null, tags int4[])")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into docs select i, ARRAY[i % 5, i]::int4[] from generate_series(1, 2000) i",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into docs values (2001, ARRAY[]::int4[])")
+        .unwrap();
+    session
+        .execute(&db, "create index docs_tags_gin on docs using gin (tags)")
+        .unwrap();
+    session.execute(&db, "analyze docs").unwrap();
+    session.execute(&db, "set enable_seqscan = off").unwrap();
+
+    let lines = session_explain_lines(
+        &mut session,
+        &db,
+        "select id from docs where tags @> ARRAY[2]::int4[] order by id",
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Bitmap Heap Scan on docs")),
+        "expected Bitmap Heap Scan in EXPLAIN, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Bitmap Index Scan on docs_tags_gin")),
+        "expected Bitmap Index Scan on docs_tags_gin, got {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Recheck Cond:")
+            && line.contains("tags @> '{2}'::integer[]")),
+        "expected array GIN Recheck Cond in EXPLAIN, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Index Cond:") && line.contains("tags @> '{2}'::integer[]")),
+        "expected array GIN Index Cond in EXPLAIN, got {lines:?}"
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id from docs where tags @> ARRAY[2]::int4[] order by id",
+        ),
+        (2..=1997)
+            .step_by(5)
+            .map(|value| vec![Value::Int32(value)])
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id from docs where tags = ARRAY[]::int4[]",
+        ),
+        vec![vec![Value::Int32(2001)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from docs where tags @> ARRAY[]::int4[]",
+        ),
+        vec![vec![Value::Int64(2001)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id from docs where tags <@ ARRAY[]::int4[]",
+        ),
+        vec![vec![Value::Int32(2001)]]
+    );
+}
+
+#[test]
 fn reopen_brin_index_preserves_pages_per_range_in_catalog() {
     let base = temp_dir("brin_reopen_catalog_options");
 
@@ -20942,6 +21311,112 @@ fn alter_table_add_constraint_using_nonunique_index_matches_postgres_error() {
 }
 
 #[test]
+fn compound_alter_table_drop_add_using_index_promotes_and_renames() {
+    let base = temp_dir("compound_alter_using_index");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(1, "create table cwi_test (a int4, b int4)")
+        .unwrap();
+    db.execute(1, "insert into cwi_test values (1, 10), (2, 20)")
+        .unwrap();
+    db.execute(1, "create unique index cwi_uniq_idx on cwi_test (a, b)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table cwi_test add constraint cwi_uniq_idx unique using index cwi_uniq_idx",
+    )
+    .unwrap();
+    db.execute(1, "create unique index cwi_uniq2_idx on cwi_test (b, a)")
+        .unwrap();
+
+    db.execute(
+        1,
+        "alter table cwi_test drop constraint cwi_uniq_idx, \
+         add constraint cwi_replaced_pkey primary key using index cwi_uniq2_idx",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, i.indisprimary, con.contype \
+             from pg_constraint con \
+             join pg_class c on c.oid = con.conindid \
+             join pg_index i on i.indexrelid = con.conindid \
+             where con.conrelid = 'cwi_test'::regclass \
+             order by con.conname",
+        ),
+        vec![vec![
+            Value::Text("cwi_replaced_pkey".into()),
+            Value::Bool(true),
+            Value::Text("p".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_class where relname = 'cwi_uniq2_idx'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attname, attnotnull from pg_attribute \
+             where attrelid = 'cwi_test'::regclass and attname in ('a', 'b') \
+             order by attname",
+        ),
+        vec![
+            vec![Value::Text("a".into()), Value::Bool(true)],
+            vec![Value::Text("b".into()), Value::Bool(true)],
+        ]
+    );
+    let err = db.execute(1, "drop index cwi_replaced_pkey").unwrap_err();
+    assert!(
+        format!("{err:?}").contains(
+            "cannot drop index cwi_replaced_pkey because constraint cwi_replaced_pkey on table cwi_test requires it"
+        ),
+        "expected constraint-backed index drop rejection, got {err:?}"
+    );
+}
+
+#[test]
+fn alter_table_using_index_rejects_non_default_collation_after_index_build() {
+    let base = temp_dir("alter_using_index_collation");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(1, "create table cwi_collation (b text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create unique index cwi_collation_idx on cwi_collation (b collate \"POSIX\")",
+    )
+    .unwrap();
+
+    let err = db
+        .execute(
+            1,
+            "alter table cwi_collation add unique using index cwi_collation_idx",
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("does not have default sorting behavior"),
+        "expected non-default collation rejection, got {err:?}"
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indcollation[0] <> 0 from pg_index where indexrelid = 'cwi_collation_idx'::regclass",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
 fn create_table_like_including_indexes_copies_deferrable_key_flags() {
     let base = temp_dir("create_table_like_deferrable_keys");
     let db = Database::open(&base, 16).unwrap();
@@ -22786,6 +23261,189 @@ fn create_table_unique_nulls_not_distinct_treats_nulls_as_conflicting() {
         ),
         vec![vec![Value::Bool(true)]]
     );
+}
+
+#[test]
+fn create_unique_index_nulls_distinct_is_default_and_deparse_omits_clause() {
+    let base = temp_dir("unique_nulls_distinct_default");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create unique index items_id_key on items (id) nulls distinct",
+    )
+    .unwrap();
+    db.execute(1, "insert into items values (null, 'a'), (null, 'b')")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indnullsnotdistinct, pg_get_indexdef(indexrelid, 0, true) \
+             from pg_index i join pg_class c on c.oid = i.indexrelid \
+             where c.relname = 'items_id_key'"
+        ),
+        vec![vec![
+            Value::Bool(false),
+            Value::Text("CREATE UNIQUE INDEX items_id_key ON items USING btree (id)".into()),
+        ]]
+    );
+}
+
+#[test]
+fn failed_unique_index_build_does_not_leave_catalog_state() {
+    let base = temp_dir("failed_unique_index_cleanup");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 'a'), (1, 'b')")
+        .unwrap();
+    assert!(
+        db.execute(1, "create unique index items_id_key on items (id)")
+            .is_err()
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_class where relname = 'items_id_key'"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    db.execute(1, "delete from items where note = 'b'").unwrap();
+    db.execute(1, "create unique index items_id_key on items (id)")
+        .unwrap();
+    db.execute(1, "drop index items_id_key").unwrap();
+    db.execute(1, "create unique index items_id_key on items (id)")
+        .unwrap();
+}
+
+#[test]
+fn failed_unique_index_concurrently_leaves_invalid_catalog_state() {
+    let base = temp_dir("failed_unique_index_concurrent_invalid");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 'a'), (1, 'b')")
+        .unwrap();
+    assert!(
+        db.execute(
+            1,
+            "create unique index concurrently items_id_key on items (id)"
+        )
+        .is_err()
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indisready, indisvalid, indislive \
+             from pg_index i join pg_class c on c.oid = i.indexrelid \
+             where c.relname = 'items_id_key'"
+        ),
+        vec![vec![
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Bool(true),
+        ]]
+    );
+
+    db.execute(1, "vacuum full items").unwrap();
+    match db.execute(1, "reindex table items") {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
+            assert_eq!(constraint, "items_id_key");
+        }
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert!(message.contains("items_id_key"));
+        }
+        other => panic!("expected duplicate-key reindex error, got {other:?}"),
+    }
+    db.execute(1, "delete from items where note = 'b'").unwrap();
+    db.execute(1, "reindex table items").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indisready, indisvalid \
+             from pg_index i join pg_class c on c.oid = i.indexrelid \
+             where c.relname = 'items_id_key'"
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
+
+    db.execute(1, "drop index items_id_key").unwrap();
+    db.execute(
+        1,
+        "create unique index concurrently items_id_key on items (id)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn create_index_if_not_exists_emits_relation_notice() {
+    let base = temp_dir("create_index_if_not_exists_notice");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    db.execute(1, "create index items_id_idx on items (id)")
+        .unwrap();
+    clear_backend_notices();
+    db.execute(1, "create index if not exists items_id_idx on items (id)")
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(
+            r#"relation "items_id_idx" already exists, skipping"#
+        )]
+    );
+}
+
+#[test]
+fn expression_index_textcat_and_duplicate_detail_use_expression() {
+    let base = temp_dir("expression_index_textcat_detail");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(1, "create table items (f1 text, f2 text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create unique index items_textcat_key on items (textcat(f1,f2))",
+    )
+    .unwrap();
+    db.execute(1, "insert into items values ('ab', 'cd')")
+        .unwrap();
+
+    match db.execute(1, "insert into items values ('ab', 'cd')") {
+        Err(ExecError::UniqueViolation { constraint, detail }) => {
+            assert_eq!(constraint, "items_textcat_key");
+            assert_eq!(
+                detail.as_deref(),
+                Some("Key (textcat(f1, f2))=(abcd) already exists.")
+            );
+        }
+        other => panic!("expected unique violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn expression_index_rejects_record_pseudo_type() {
+    let base = temp_dir("expression_index_record_reject");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(1, "create table items (f1 int4, f2 int4)")
+        .unwrap();
+    match db.execute(1, "create index items_row_idx on items (row(f1,f2))") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "column \"row\" has pseudo-type record");
+        }
+        other => panic!("expected record pseudo-type error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -25851,7 +26509,7 @@ fn set_local_time_zone_updates_timestamptz_json_output() {
 
     assert_eq!(
         session_query_rows(&mut session, &db, "show timezone"),
-        vec![vec![Value::Text("-10:30".into())]]
+        vec![vec![Value::Text("+10:30".into())]]
     );
     assert_eq!(
         session_query_rows(
@@ -25859,7 +26517,7 @@ fn set_local_time_zone_updates_timestamptz_json_output() {
             &db,
             "select timestamptz '2014-05-28 12:22:35.614298-04'::text",
         ),
-        vec![vec![Value::Text("2014-05-28 05:52:35.614298-10:30".into())]]
+        vec![vec![Value::Text("2014-05-29 02:52:35.614298+10:30".into())]]
     );
     assert_eq!(
         session_query_rows(
@@ -25869,7 +26527,7 @@ fn set_local_time_zone_updates_timestamptz_json_output() {
         ),
         vec![vec![Value::Jsonb(
             crate::backend::executor::jsonb::parse_jsonb_text(
-                "\"2014-05-28T05:52:35.614298-10:30\"",
+                "\"2014-05-29T02:52:35.614298+10:30\"",
             )
             .unwrap()
         )]]
@@ -27262,37 +27920,24 @@ fn partial_unique_index_on_conflict_respects_predicate() {
 }
 
 #[test]
-fn partial_index_with_ctid_predicate_builds_and_persists_catalog_predicate() {
-    let base = temp_dir("partial_index_ctid_predicate");
+fn create_index_rejects_system_columns() {
+    let base = temp_dir("create_index_system_columns");
     let db = Database::open(&base, 16).unwrap();
 
     db.execute(1, "create table items (id int4, note text)")
         .unwrap();
-    db.execute(
-        1,
-        "insert into items values (1, 'alpha'), (2, 'beta'), (3, 'gamma')",
-    )
-    .unwrap();
-    db.execute(
-        1,
-        "create index items_ctid_idx on items (id) where ctid >= '(0,1)'",
-    )
-    .unwrap();
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select indpred \
-             from pg_index \
-             where indexrelid = (select oid from pg_class where relname = 'items_ctid_idx')",
-        ),
-        vec![vec![Value::Text("ctid >= '(0,1)'".into())]]
-    );
-    assert_eq!(
-        psql_index_definition(&db, 1, "items", "items_ctid_idx"),
-        "CREATE INDEX items_ctid_idx ON items USING btree (id) WHERE ctid >= '(0,1)'"
-    );
+    for sql in [
+        "create index on items (ctid)",
+        "create index on items ((ctid >= '(0,1)'))",
+        "create index on items (id) where ctid >= '(0,1)'",
+    ] {
+        match db.execute(1, sql) {
+            Err(ExecError::DetailedError { message, .. }) => {
+                assert_eq!(message, "index creation on system columns is not supported");
+            }
+            other => panic!("expected system column index error for {sql}, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -28439,6 +29084,101 @@ fn temp_namespace_persists_after_last_temp_table_is_dropped() {
 }
 
 #[test]
+fn reindex_owned_temp_schema_concurrently_rewrites_temp_indexes() {
+    let base = temp_dir("reindex_temp_schema_concurrently");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table temp_items (id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into temp_items values (1), (2)")
+        .unwrap();
+    session
+        .execute(&db, "create index temp_items_id_idx on temp_items (id)")
+        .unwrap();
+    session
+        .execute(&db, "create temp table temp_items_2 (id int4)")
+        .unwrap();
+    session
+        .execute(&db, "create index temp_items_2_id_idx on temp_items_2 (id)")
+        .unwrap();
+    session
+        .execute(&db, "reindex table concurrently temp_items")
+        .unwrap();
+    session
+        .execute(&db, "reindex index concurrently temp_items_id_idx")
+        .unwrap();
+    session
+        .execute(&db, "reindex table concurrently temp_items_2")
+        .unwrap();
+    session
+        .execute(&db, "reindex index concurrently temp_items_2_id_idx")
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table temp_items_drop (id int4) on commit drop",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create index temp_items_drop_id_idx on temp_items_drop (id)",
+        )
+        .unwrap();
+    assert!(
+        session
+            .execute(&db, "reindex index concurrently temp_items_drop_id_idx")
+            .is_err()
+    );
+    session.execute(&db, "commit").unwrap();
+    session
+        .execute(
+            &db,
+            "create table temp_index_snapshot as \
+             select oid, relname, relfilenode, relkind \
+             from pg_class \
+             where relname in ('temp_items_id_idx', 'temp_items_2_id_idx')",
+        )
+        .unwrap();
+
+    let relfilenode = |session: &mut Session| -> i64 {
+        match session
+            .execute(
+                &db,
+                "select relfilenode from pg_class where relname = 'temp_items_id_idx'",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => match rows.as_slice() {
+                [row] => int_value(row.first().expect("relfilenode value")),
+                other => panic!("expected one relfilenode row, got {other:?}"),
+            },
+            other => panic!("expected query result, got {other:?}"),
+        }
+    };
+
+    let before = relfilenode(&mut session);
+    session
+        .execute(&db, "reindex schema concurrently pg_temp_1")
+        .unwrap();
+    let after = relfilenode(&mut session);
+    assert_ne!(before, after);
+    match session
+        .execute(&db, "select id from temp_items order by id")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
 fn pg_constraint_lists_not_null_columns_for_permanent_and_temp_tables() {
     let base = temp_dir("pg_constraint_not_null_rows");
     let db = Database::open(&base, 16).unwrap();
@@ -29380,6 +30120,43 @@ fn temp_create_table_as_select_works() {
                     vec![Value::Int32(1), Value::Text("a".into())],
                     vec![Value::Int32(2), Value::Text("b".into())],
                 ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_table_as_select_star_preserves_name_type() {
+    let base = temp_dir("ctas_name_type");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table name_source (n name)")
+        .unwrap();
+    session
+        .execute(&db, "create table name_copy as select * from name_source")
+        .unwrap();
+
+    let catalog = db.catalog.read().catalog_snapshot().unwrap();
+    let relation = catalog.get("name_copy").unwrap();
+    assert_eq!(relation.desc.columns[0].sql_type.kind, SqlTypeKind::Name);
+    let visible = session.catalog_lookup(&db);
+    let relation = visible.lookup_any_relation("name_copy").unwrap();
+    assert_eq!(relation.desc.columns[0].sql_type.kind, SqlTypeKind::Name);
+
+    match session
+        .execute(
+            &db,
+            "explain (costs off) select * from name_copy where n = 'x'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows[1],
+                vec![Value::Text("  Filter: (n = 'x'::name)".into())]
             );
         }
         other => panic!("expected query result, got {:?}", other),
@@ -31932,6 +32709,181 @@ fn vacuum_analyze_is_rejected_inside_transaction_block() {
         other => panic!("expected active transaction error, got {:?}", other),
     }
     session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn create_index_concurrently_is_rejected_inside_transaction_block() {
+    let base = temp_dir("create_index_concurrently_txn_block");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table idx_txn_block (id int4 not null)")
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    match session.execute(
+        &db,
+        "create index concurrently idx_txn_block_id_idx on idx_txn_block(id)",
+    ) {
+        Err(ExecError::Parse(ParseError::ActiveSqlTransaction(stmt))) => {
+            assert_eq!(stmt, "CREATE INDEX CONCURRENTLY");
+        }
+        other => panic!(
+            "expected create index concurrently transaction error, got {:?}",
+            other
+        ),
+    }
+    assert!(session.transaction_failed());
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn drop_index_concurrently_checks_transaction_multi_and_if_exists_notice() {
+    let base = temp_dir("drop_index_concurrently_restrictions");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table drop_concur_items (id int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create index drop_concur_idx1 on drop_concur_items (id)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create index drop_concur_idx2 on drop_concur_items (id)",
+        )
+        .unwrap();
+
+    match session.execute(
+        &db,
+        "drop index concurrently drop_concur_idx1, drop_concur_idx2",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "DROP INDEX CONCURRENTLY does not support dropping multiple objects"
+            );
+            assert_eq!(sqlstate, "0A000");
+        }
+        other => panic!("expected multi-index concurrently error, got {other:?}"),
+    }
+
+    session.execute(&db, "begin").unwrap();
+    match session.execute(&db, "drop index concurrently drop_concur_idx1") {
+        Err(ExecError::Parse(ParseError::ActiveSqlTransaction(stmt))) => {
+            assert_eq!(stmt, "DROP INDEX CONCURRENTLY");
+        }
+        other => panic!("expected active transaction error, got {other:?}"),
+    }
+    session.execute(&db, "rollback").unwrap();
+
+    clear_backend_notices();
+    session
+        .execute(&db, "drop index concurrently if exists drop_concur_missing")
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(
+            "index \"drop_concur_missing\" does not exist, skipping"
+        )]
+    );
+}
+
+#[test]
+fn reindex_table_rebuilds_table_indexes() {
+    let base = temp_dir("reindex_table_rebuilds");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table reindex_items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "create index reindex_items_id_idx on reindex_items (id)")
+        .unwrap();
+    db.execute(1, "insert into reindex_items values (1, 'a'), (2, 'b')")
+        .unwrap();
+    db.execute(1, "reindex table reindex_items").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select note from reindex_items where id = 2"),
+        vec![vec![Value::Text("b".into())]]
+    );
+}
+
+#[test]
+fn reindex_system_concurrently_and_other_database_reject_before_work() {
+    let base = temp_dir("reindex_fast_restrictions");
+    let db = Database::open(&base, 64).unwrap();
+
+    match db.execute(1, "reindex system concurrently postgres") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "cannot reindex system catalogs concurrently");
+        }
+        other => panic!("expected system concurrently rejection, got {other:?}"),
+    }
+    match db.execute(1, "reindex database not_current_database") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "can only reindex the currently open database");
+        }
+        other => panic!("expected other database rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn reindex_schema_rejects_inside_transaction_block() {
+    let base = temp_dir("reindex_schema_in_xact");
+    let db = Database::open(&base, 64).unwrap();
+    db.execute(1, "create schema reindex_schema").unwrap();
+    let mut session = Session::new(1);
+    session.execute(&db, "begin").unwrap();
+    match session.execute(&db, "reindex schema reindex_schema") {
+        Err(ExecError::Parse(ParseError::ActiveSqlTransaction(stmt))) => {
+            assert_eq!(stmt, "REINDEX SCHEMA");
+        }
+        other => panic!("expected active transaction error, got {other:?}"),
+    }
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn index_only_scan_applies_residual_filter() {
+    let base = temp_dir("index_only_residual_filter");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table filter_items (unique1 int4, note text)")
+        .unwrap();
+    for value in 0..50 {
+        db.execute(
+            1,
+            &format!("insert into filter_items values ({value}, 'n{value}')"),
+        )
+        .unwrap();
+    }
+    db.execute(
+        1,
+        "create index filter_items_unique1_idx on filter_items (unique1)",
+    )
+    .unwrap();
+    db.execute(1, "vacuum filter_items").unwrap();
+    db.execute(1, "set enable_seqscan to off").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select unique1 from filter_items where unique1 in (1,42,7) order by unique1"
+        ),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(7)],
+            vec![Value::Int32(42)],
+        ]
+    );
 }
 
 #[test]

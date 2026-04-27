@@ -3,6 +3,9 @@ use std::cmp::Ordering;
 
 use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
+use crate::backend::utils::sql_deparse::{
+    normalize_index_expression_sql, normalize_index_predicate_sql,
+};
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
 use crate::backend::utils::trigger::format_trigger_definition;
@@ -3509,15 +3512,7 @@ fn format_indexdef_for_catalog(
         .find(|row| row.oid == index.index_meta.am_oid)
         .map(|row| row.amname)
         .unwrap_or_else(|| "btree".into());
-    let all_columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)
-        .unwrap_or_else(|| {
-            index
-                .desc
-                .columns
-                .iter()
-                .map(|column| column.name.clone())
-                .collect()
-        });
+    let all_columns = index_definition_columns(relation, index);
     let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or_default();
     let key_columns = all_columns
         .iter()
@@ -3546,17 +3541,118 @@ fn format_indexdef_for_catalog(
         definition.push_str(&include_columns.join(", "));
         definition.push(')');
     }
+    if index.index_meta.indnullsnotdistinct {
+        definition.push_str(" NULLS NOT DISTINCT");
+    }
     if let Some(predicate) = index
         .index_meta
         .indpred
         .as_deref()
         .filter(|pred| !pred.is_empty())
     {
+        let predicate = normalize_index_predicate_sql(predicate, Some(&relation.desc));
         definition.push_str(" WHERE (");
-        definition.push_str(predicate);
+        definition.push_str(&predicate);
         definition.push(')');
     }
     definition
+}
+
+fn index_definition_columns(
+    relation: &crate::backend::parser::BoundRelation,
+    index: &crate::backend::parser::BoundIndexRelation,
+) -> Vec<String> {
+    let expression_sqls = index
+        .index_meta
+        .indexprs
+        .as_deref()
+        .and_then(|sql| serde_json::from_str::<Vec<String>>(sql).ok())
+        .unwrap_or_default();
+    let mut expression_index = 0usize;
+    index
+        .index_meta
+        .indkey
+        .iter()
+        .enumerate()
+        .map(|(index_column, attnum)| {
+            if *attnum > 0 {
+                return relation
+                    .desc
+                    .columns
+                    .get((*attnum as usize).saturating_sub(1))
+                    .map(|column| column.name.clone())
+                    .or_else(|| {
+                        index
+                            .desc
+                            .columns
+                            .get(index_column)
+                            .map(|column| column.name.clone())
+                    })
+                    .unwrap_or_else(|| format!("column{}", index_column + 1));
+            }
+            let rendered = expression_sqls
+                .get(expression_index)
+                .map(|expr| parenthesized_index_expression(&normalize_index_expression_sql(expr)))
+                .or_else(|| {
+                    index
+                        .desc
+                        .columns
+                        .get(index_column)
+                        .map(|column| column.name.clone())
+                })
+                .unwrap_or_else(|| format!("expr{}", expression_index + 1));
+            expression_index += 1;
+            rendered
+        })
+        .collect()
+}
+
+fn parenthesized_index_expression(expr_sql: &str) -> String {
+    let trimmed = expr_sql.trim();
+    if let Some(function_call) = normalized_function_call_expression(trimmed) {
+        return function_call;
+    }
+    if (trimmed.starts_with('(') && trimmed.ends_with(')')) || looks_like_function_call(trimmed) {
+        trimmed.to_string()
+    } else {
+        format!("({trimmed})")
+    }
+}
+
+fn normalized_function_call_expression(expr_sql: &str) -> Option<String> {
+    let trimmed = strip_outer_parens_once(expr_sql.trim());
+    if !looks_like_function_call(trimmed) {
+        return None;
+    }
+    let open = trimmed.find('(')?;
+    let name = trimmed[..open].trim();
+    let args = trimmed[open + 1..trimmed.len().saturating_sub(1)]
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("{name}({args})"))
+}
+
+fn strip_outer_parens_once(input: &str) -> &str {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
+        return trimmed;
+    }
+    let mut depth = 0i32;
+    for (idx, ch) in trimmed.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 && idx + ch.len_utf8() < trimmed.len() {
+                    return trimmed;
+                }
+            }
+            _ => {}
+        }
+    }
+    trimmed[1..trimmed.len().saturating_sub(1)].trim()
 }
 
 fn index_column_names_for_heap(desc: &RelationDesc, attnums: &[i16]) -> Option<Vec<String>> {
@@ -6272,6 +6368,168 @@ fn hash_function_error(message: String, extended: bool) -> ExecError {
     }
 }
 
+fn text_search_parse_error(op: &'static str, message: String) -> ExecError {
+    ExecError::Parse(ParseError::UnexpectedToken {
+        expected: "valid text search input",
+        actual: format!("{op}: {message}"),
+    })
+}
+
+fn eval_ts_match_values(
+    values: &[Value],
+    default_config_name: Option<&str>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [Value::TsVector(vector), Value::TsQuery(query)] => Ok(Value::Bool(
+            crate::backend::executor::eval_tsvector_matches_tsquery(vector, query),
+        )),
+        [Value::TsQuery(query), Value::TsVector(vector)] => Ok(Value::Bool(
+            crate::backend::executor::eval_tsquery_matches_tsvector(query, vector),
+        )),
+        [left, Value::TsQuery(query)] => {
+            let Some(text) = left.as_text() else {
+                return Err(ExecError::TypeMismatch {
+                    op: "@@",
+                    left: left.clone(),
+                    right: Value::TsQuery(query.clone()),
+                });
+            };
+            let vector = crate::backend::tsearch::to_tsvector_with_config_name(
+                default_config_name,
+                text,
+                catalog,
+            )
+            .map_err(|err| text_search_parse_error("@@", err))?;
+            Ok(Value::Bool(
+                crate::backend::executor::eval_tsvector_matches_tsquery(&vector, query),
+            ))
+        }
+        [left, right] if left.as_text().is_some() && right.as_text().is_some() => {
+            let text = left.as_text().unwrap_or_default();
+            let query_text = right.as_text().unwrap_or_default();
+            let vector = crate::backend::tsearch::to_tsvector_with_config_name(
+                default_config_name,
+                text,
+                catalog,
+            )
+            .map_err(|err| text_search_parse_error("@@", err))?;
+            let query = crate::backend::tsearch::plainto_tsquery_with_config_name(
+                default_config_name,
+                query_text,
+                catalog,
+            )
+            .map_err(|err| text_search_parse_error("@@", err))?;
+            Ok(Value::Bool(
+                crate::backend::executor::eval_tsvector_matches_tsquery(&vector, &query),
+            ))
+        }
+        _ => Err(ExecError::TypeMismatch {
+            op: "@@",
+            left: values.first().cloned().unwrap_or(Value::Null),
+            right: values.get(1).cloned().unwrap_or(Value::Null),
+        }),
+    }
+}
+
+fn tsquery_is_empty(query: &crate::include::nodes::tsearch::TsQuery) -> bool {
+    crate::backend::executor::render_tsquery_text(query).is_empty()
+}
+
+fn eval_ts_headline_values(values: &[Value]) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let (document, query) = match values {
+        [document, Value::TsQuery(query)] => (document.as_text(), query),
+        [document, Value::TsQuery(query), _options] => (document.as_text(), query),
+        [_config, document, Value::TsQuery(query)] => (document.as_text(), query),
+        [_config, document, Value::TsQuery(query), _options] => (document.as_text(), query),
+        _ => {
+            return Err(ExecError::TypeMismatch {
+                op: "ts_headline",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            });
+        }
+    };
+    let document = document.ok_or_else(|| ExecError::TypeMismatch {
+        op: "ts_headline",
+        left: values.first().cloned().unwrap_or(Value::Null),
+        right: values.get(1).cloned().unwrap_or(Value::Null),
+    })?;
+    if tsquery_is_empty(query) {
+        return Ok(Value::Text(document.into()));
+    }
+    let lexemes = tsquery_lexemes_for_headline(&query.root);
+    if lexemes.is_empty() {
+        return Ok(Value::Text(document.into()));
+    }
+    Ok(Value::Text(
+        highlight_headline_text(document, &lexemes).into(),
+    ))
+}
+
+fn tsquery_lexemes_for_headline(node: &crate::include::nodes::tsearch::TsQueryNode) -> Vec<String> {
+    use crate::include::nodes::tsearch::TsQueryNode;
+
+    let mut lexemes = Vec::new();
+    fn collect(node: &TsQueryNode, lexemes: &mut Vec<String>) {
+        match node {
+            TsQueryNode::Operand(operand) if !operand.lexeme.as_str().is_empty() => {
+                lexemes.push(operand.lexeme.as_str().to_ascii_lowercase());
+            }
+            TsQueryNode::Operand(_) => {}
+            TsQueryNode::Not(inner) => collect(inner, lexemes),
+            TsQueryNode::And(left, right) | TsQueryNode::Or(left, right) => {
+                collect(left, lexemes);
+                collect(right, lexemes);
+            }
+            TsQueryNode::Phrase { left, right, .. } => {
+                collect(left, lexemes);
+                collect(right, lexemes);
+            }
+        }
+    }
+    collect(node, &mut lexemes);
+    lexemes.sort();
+    lexemes.dedup();
+    lexemes
+}
+
+fn highlight_headline_text(document: &str, lexemes: &[String]) -> String {
+    let mut out = String::with_capacity(document.len());
+    let mut token = String::new();
+    for ch in document.chars() {
+        if ch.is_alphanumeric() || ch == '_' {
+            token.push(ch);
+            continue;
+        }
+        flush_headline_token(&mut out, &mut token, lexemes);
+        out.push(ch);
+    }
+    flush_headline_token(&mut out, &mut token, lexemes);
+    out
+}
+
+fn flush_headline_token(out: &mut String, token: &mut String, lexemes: &[String]) {
+    if token.is_empty() {
+        return;
+    }
+    let lower = token.to_ascii_lowercase();
+    if lexemes.iter().any(|lexeme| {
+        lower == *lexeme || lower.starts_with(lexeme) || lexeme.starts_with(lower.as_str())
+    }) {
+        out.push_str("<b>");
+        out.push_str(token);
+        out.push_str("</b>");
+    } else {
+        out.push_str(token);
+    }
+    token.clear();
+}
+
 fn eval_plpgsql_builtin_function(
     func: BuiltinScalarFunction,
     result_type: Option<SqlType>,
@@ -6354,6 +6612,7 @@ fn eval_plpgsql_builtin_function(
         },
         BuiltinScalarFunction::UnsupportedXmlFeature => Err(unsupported_xml_feature_error()),
         BuiltinScalarFunction::Int4Pl
+        | BuiltinScalarFunction::Int4Mi
         | BuiltinScalarFunction::Int8Inc
         | BuiltinScalarFunction::Int8IncAny
         | BuiltinScalarFunction::Int4AvgAccum
@@ -6653,19 +6912,7 @@ fn eval_plpgsql_builtin_function(
             crate::backend::utils::misc::guc_xml::XmlOptionSetting::Content,
             None,
         ),
-        BuiltinScalarFunction::TsMatch => match values.as_slice() {
-            [Value::TsVector(vector), Value::TsQuery(query)] => Ok(Value::Bool(
-                crate::backend::executor::eval_tsvector_matches_tsquery(vector, query),
-            )),
-            [Value::TsQuery(query), Value::TsVector(vector)] => Ok(Value::Bool(
-                crate::backend::executor::eval_tsquery_matches_tsvector(query, vector),
-            )),
-            _ => Err(ExecError::TypeMismatch {
-                op: "@@",
-                left: values.first().cloned().unwrap_or(Value::Null),
-                right: values.get(1).cloned().unwrap_or(Value::Null),
-            }),
-        },
+        BuiltinScalarFunction::TsMatch => eval_ts_match_values(&values, None, None),
         BuiltinScalarFunction::TsQueryAnd => match values.as_slice() {
             [Value::TsQuery(left), Value::TsQuery(right)] => Ok(Value::TsQuery(
                 crate::backend::executor::tsquery_and(left.clone(), right.clone()),
@@ -6694,6 +6941,28 @@ fn eval_plpgsql_builtin_function(
                 op: "!!",
                 left: values.first().cloned().unwrap_or(Value::Null),
                 right: Value::Null,
+            }),
+        },
+        BuiltinScalarFunction::TsQueryContains => match values.as_slice() {
+            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+            [Value::TsQuery(left), Value::TsQuery(right)] => Ok(Value::Bool(
+                crate::backend::executor::tsquery_contains(left, right),
+            )),
+            _ => Err(ExecError::TypeMismatch {
+                op: "@>",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
+        BuiltinScalarFunction::TsQueryContainedBy => match values.as_slice() {
+            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+            [Value::TsQuery(left), Value::TsQuery(right)] => Ok(Value::Bool(
+                crate::backend::executor::tsquery_contained_by(left, right),
+            )),
+            _ => Err(ExecError::TypeMismatch {
+                op: "<@",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
             }),
         },
         BuiltinScalarFunction::TsVectorConcat => match values.as_slice() {
@@ -6975,8 +7244,11 @@ fn is_text_search_builtin_function(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PhraseToTsQuery
             | BuiltinScalarFunction::WebSearchToTsQuery
             | BuiltinScalarFunction::TsLexize
+            | BuiltinScalarFunction::TsHeadline
+            | BuiltinScalarFunction::TsMatch
             | BuiltinScalarFunction::TsQueryPhrase
             | BuiltinScalarFunction::TsQueryNumnode
+            | BuiltinScalarFunction::TsRewrite
             | BuiltinScalarFunction::TsVectorIn
             | BuiltinScalarFunction::TsVectorOut
             | BuiltinScalarFunction::TsQueryIn
@@ -6995,7 +7267,7 @@ fn is_text_search_builtin_function(func: BuiltinScalarFunction) -> bool {
 fn eval_text_search_builtin_function(
     func: BuiltinScalarFunction,
     values: &[Value],
-    catalog: Option<&dyn CatalogLookup>,
+    ctx: Option<&ExecutorContext>,
 ) -> Result<Value, ExecError> {
     fn arg_text(
         values: &[Value],
@@ -7141,11 +7413,23 @@ fn eval_text_search_builtin_function(
             actual: format!("{op}: {message}"),
         })
     };
+    let default_config_name = || {
+        ctx.and_then(|ctx| {
+            ctx.gucs
+                .get("default_text_search_config")
+                .map(String::as_str)
+        })
+    };
+    let catalog = catalog_lookup(ctx);
 
     match func {
+        BuiltinScalarFunction::TsMatch => {
+            eval_ts_match_values(values, default_config_name(), catalog)
+        }
+        BuiltinScalarFunction::TsHeadline => eval_ts_headline_values(values),
         BuiltinScalarFunction::ToTsVector => {
             if let [Value::Jsonb(_)] = values {
-                return jsonb_to_tsvector_value(None, &values[0], None, catalog);
+                return jsonb_to_tsvector_value(default_config_name(), &values[0], None, catalog);
             }
             if let [_, Value::Jsonb(_)] = values {
                 return jsonb_to_tsvector_value(
@@ -7158,7 +7442,7 @@ fn eval_text_search_builtin_function(
             let result = match values {
                 [Value::Null] | [_, Value::Null] | [Value::Null, _] => return Ok(Value::Null),
                 [_] => crate::backend::tsearch::to_tsvector_with_config_name(
-                    None,
+                    default_config_name(),
                     arg_text(values, 0, "to_tsvector")?
                         .as_deref()
                         .unwrap_or_default(),
@@ -7186,7 +7470,7 @@ fn eval_text_search_builtin_function(
                 return Ok(Value::Null);
             }
             [Value::Jsonb(_), _] => {
-                jsonb_to_tsvector_value(None, &values[0], values.get(1), catalog)
+                jsonb_to_tsvector_value(default_config_name(), &values[0], values.get(1), catalog)
             }
             [_, Value::Jsonb(_), _] => jsonb_to_tsvector_value(
                 arg_text(values, 0, "jsonb_to_tsvector")?.as_deref(),
@@ -7201,96 +7485,115 @@ fn eval_text_search_builtin_function(
             }),
         },
         BuiltinScalarFunction::ToTsQuery => {
-            let result = match values {
+            let (config_name, query_text) = match values {
                 [Value::Null] | [_, Value::Null] | [Value::Null, _] => return Ok(Value::Null),
-                [_] => crate::backend::tsearch::to_tsquery_with_config_name(
-                    None,
-                    arg_text(values, 0, "to_tsquery")?
-                        .as_deref()
-                        .unwrap_or_default(),
-                    catalog,
+                [_] => (
+                    default_config_name().map(str::to_string),
+                    arg_text(values, 0, "to_tsquery")?,
                 ),
-                [_, _] => crate::backend::tsearch::to_tsquery_with_config_name(
-                    arg_text(values, 0, "to_tsquery")?.as_deref(),
-                    arg_text(values, 1, "to_tsquery")?
-                        .as_deref()
-                        .unwrap_or_default(),
-                    catalog,
+                [_, _] => (
+                    arg_text(values, 0, "to_tsquery")?,
+                    arg_text(values, 1, "to_tsquery")?,
                 ),
                 _ => unreachable!(),
             };
-            result
-                .map(Value::TsQuery)
-                .map_err(|e| parse_error("to_tsquery", e))
+            let query_text = query_text.unwrap_or_default();
+            let query = crate::backend::tsearch::to_tsquery_with_config_name(
+                config_name.as_deref(),
+                &query_text,
+                catalog,
+            )
+            .map_err(|e| parse_error("to_tsquery", e))?;
+            if tsquery_is_empty(&query) {
+                if query_text.trim().is_empty() {
+                    crate::backend::utils::misc::notices::push_notice(format!(
+                        "text-search query doesn't contain lexemes: \"{query_text}\""
+                    ));
+                } else {
+                    crate::backend::utils::misc::notices::push_notice(
+                        "text-search query contains only stop words or doesn't contain lexemes, ignored",
+                    );
+                }
+            }
+            Ok(Value::TsQuery(query))
         }
         BuiltinScalarFunction::PlainToTsQuery => {
-            let result = match values {
+            let (config_name, query_text) = match values {
                 [Value::Null] | [_, Value::Null] | [Value::Null, _] => return Ok(Value::Null),
-                [_] => crate::backend::tsearch::plainto_tsquery_with_config_name(
-                    None,
-                    arg_text(values, 0, "plainto_tsquery")?
-                        .as_deref()
-                        .unwrap_or_default(),
-                    catalog,
+                [_] => (
+                    default_config_name().map(str::to_string),
+                    arg_text(values, 0, "plainto_tsquery")?,
                 ),
-                [_, _] => crate::backend::tsearch::plainto_tsquery_with_config_name(
-                    arg_text(values, 0, "plainto_tsquery")?.as_deref(),
-                    arg_text(values, 1, "plainto_tsquery")?
-                        .as_deref()
-                        .unwrap_or_default(),
-                    catalog,
+                [_, _] => (
+                    arg_text(values, 0, "plainto_tsquery")?,
+                    arg_text(values, 1, "plainto_tsquery")?,
                 ),
                 _ => unreachable!(),
             };
-            result
-                .map(Value::TsQuery)
-                .map_err(|e| parse_error("plainto_tsquery", e))
+            let query = crate::backend::tsearch::plainto_tsquery_with_config_name(
+                config_name.as_deref(),
+                query_text.as_deref().unwrap_or_default(),
+                catalog,
+            )
+            .map_err(|e| parse_error("plainto_tsquery", e))?;
+            if tsquery_is_empty(&query) {
+                crate::backend::utils::misc::notices::push_notice(
+                    "text-search query contains only stop words or doesn't contain lexemes, ignored",
+                );
+            }
+            Ok(Value::TsQuery(query))
         }
         BuiltinScalarFunction::PhraseToTsQuery => {
-            let result = match values {
+            let (config_name, query_text) = match values {
                 [Value::Null] | [_, Value::Null] | [Value::Null, _] => return Ok(Value::Null),
-                [_] => crate::backend::tsearch::phraseto_tsquery_with_config_name(
-                    None,
-                    arg_text(values, 0, "phraseto_tsquery")?
-                        .as_deref()
-                        .unwrap_or_default(),
-                    catalog,
+                [_] => (
+                    default_config_name().map(str::to_string),
+                    arg_text(values, 0, "phraseto_tsquery")?,
                 ),
-                [_, _] => crate::backend::tsearch::phraseto_tsquery_with_config_name(
-                    arg_text(values, 0, "phraseto_tsquery")?.as_deref(),
-                    arg_text(values, 1, "phraseto_tsquery")?
-                        .as_deref()
-                        .unwrap_or_default(),
-                    catalog,
+                [_, _] => (
+                    arg_text(values, 0, "phraseto_tsquery")?,
+                    arg_text(values, 1, "phraseto_tsquery")?,
                 ),
                 _ => unreachable!(),
             };
-            result
-                .map(Value::TsQuery)
-                .map_err(|e| parse_error("phraseto_tsquery", e))
+            let query = crate::backend::tsearch::phraseto_tsquery_with_config_name(
+                config_name.as_deref(),
+                query_text.as_deref().unwrap_or_default(),
+                catalog,
+            )
+            .map_err(|e| parse_error("phraseto_tsquery", e))?;
+            if tsquery_is_empty(&query) {
+                crate::backend::utils::misc::notices::push_notice(
+                    "text-search query contains only stop words or doesn't contain lexemes, ignored",
+                );
+            }
+            Ok(Value::TsQuery(query))
         }
         BuiltinScalarFunction::WebSearchToTsQuery => {
-            let result = match values {
+            let (config_name, query_text) = match values {
                 [Value::Null] | [_, Value::Null] | [Value::Null, _] => return Ok(Value::Null),
-                [_] => crate::backend::tsearch::websearch_to_tsquery_with_config_name(
-                    None,
-                    arg_text(values, 0, "websearch_to_tsquery")?
-                        .as_deref()
-                        .unwrap_or_default(),
-                    catalog,
+                [_] => (
+                    default_config_name().map(str::to_string),
+                    arg_text(values, 0, "websearch_to_tsquery")?,
                 ),
-                [_, _] => crate::backend::tsearch::websearch_to_tsquery_with_config_name(
-                    arg_text(values, 0, "websearch_to_tsquery")?.as_deref(),
-                    arg_text(values, 1, "websearch_to_tsquery")?
-                        .as_deref()
-                        .unwrap_or_default(),
-                    catalog,
+                [_, _] => (
+                    arg_text(values, 0, "websearch_to_tsquery")?,
+                    arg_text(values, 1, "websearch_to_tsquery")?,
                 ),
                 _ => unreachable!(),
             };
-            result
-                .map(Value::TsQuery)
-                .map_err(|e| parse_error("websearch_to_tsquery", e))
+            let query = crate::backend::tsearch::websearch_to_tsquery_with_config_name(
+                config_name.as_deref(),
+                query_text.as_deref().unwrap_or_default(),
+                catalog,
+            )
+            .map_err(|e| parse_error("websearch_to_tsquery", e))?;
+            if tsquery_is_empty(&query) {
+                crate::backend::utils::misc::notices::push_notice(
+                    "text-search query contains only stop words or doesn't contain lexemes, ignored",
+                );
+            }
+            Ok(Value::TsQuery(query))
         }
         BuiltinScalarFunction::TsVectorIn => match values {
             [Value::Null] => Ok(Value::Null),
@@ -7350,6 +7653,16 @@ fn eval_text_search_builtin_function(
             }
             Ok(Value::Int32(crate::backend::executor::numnode(
                 arg_tsquery(values, 0, "numnode")?,
+            )))
+        }
+        BuiltinScalarFunction::TsRewrite => {
+            if values.iter().any(|value| matches!(value, Value::Null)) {
+                return Ok(Value::Null);
+            }
+            Ok(Value::TsQuery(crate::backend::executor::tsquery_rewrite(
+                arg_tsquery(values, 0, "ts_rewrite")?.clone(),
+                arg_tsquery(values, 1, "ts_rewrite")?.clone(),
+                arg_tsquery(values, 2, "ts_rewrite")?.clone(),
             )))
         }
         BuiltinScalarFunction::TsVectorStrip => {
@@ -8015,13 +8328,7 @@ pub(crate) fn eval_builtin_function(
         return result;
     }
     if is_text_search_builtin_function(func) {
-        return eval_text_search_builtin_function(
-            func,
-            &values,
-            ctx.catalog
-                .as_ref()
-                .map(|catalog| catalog as &dyn CatalogLookup),
-        );
+        return eval_text_search_builtin_function(func, &values, Some(ctx));
     }
     if matches!(
         func,
@@ -8036,13 +8343,9 @@ pub(crate) fn eval_builtin_function(
         | BuiltinScalarFunction::PlainToTsQuery
         | BuiltinScalarFunction::PhraseToTsQuery
         | BuiltinScalarFunction::WebSearchToTsQuery
-        | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(
-            func,
-            &values,
-            ctx.catalog
-                .as_ref()
-                .map(|catalog| catalog as &dyn CatalogLookup),
-        ),
+        | BuiltinScalarFunction::TsLexize => {
+            eval_text_search_builtin_function(func, &values, Some(ctx))
+        }
         BuiltinScalarFunction::Random => eval_random_function(&values, ctx),
         BuiltinScalarFunction::RandomNormal => eval_random_normal_function(&values, ctx),
         BuiltinScalarFunction::SetSeed => eval_setseed_function(&values, ctx),
@@ -8145,6 +8448,7 @@ pub(crate) fn eval_builtin_function(
             }),
         },
         BuiltinScalarFunction::Int4Pl
+        | BuiltinScalarFunction::Int4Mi
         | BuiltinScalarFunction::Int8Inc
         | BuiltinScalarFunction::Int8IncAny
         | BuiltinScalarFunction::Int4AvgAccum
@@ -8627,19 +8931,13 @@ pub(crate) fn eval_builtin_function(
             crate::backend::utils::misc::guc_xml::XmlOptionSetting::Content,
             Some(ctx),
         ),
-        BuiltinScalarFunction::TsMatch => match values.as_slice() {
-            [Value::TsVector(vector), Value::TsQuery(query)] => Ok(Value::Bool(
-                crate::backend::executor::eval_tsvector_matches_tsquery(vector, query),
-            )),
-            [Value::TsQuery(query), Value::TsVector(vector)] => Ok(Value::Bool(
-                crate::backend::executor::eval_tsquery_matches_tsvector(query, vector),
-            )),
-            _ => Err(ExecError::TypeMismatch {
-                op: "@@",
-                left: values.first().cloned().unwrap_or(Value::Null),
-                right: values.get(1).cloned().unwrap_or(Value::Null),
-            }),
-        },
+        BuiltinScalarFunction::TsMatch => eval_ts_match_values(
+            &values,
+            ctx.gucs
+                .get("default_text_search_config")
+                .map(String::as_str),
+            catalog_lookup(Some(ctx)),
+        ),
         BuiltinScalarFunction::TsQueryAnd => match values.as_slice() {
             [Value::TsQuery(left), Value::TsQuery(right)] => Ok(Value::TsQuery(
                 crate::backend::executor::tsquery_and(left.clone(), right.clone()),
@@ -8668,6 +8966,28 @@ pub(crate) fn eval_builtin_function(
                 op: "!!",
                 left: values.first().cloned().unwrap_or(Value::Null),
                 right: Value::Null,
+            }),
+        },
+        BuiltinScalarFunction::TsQueryContains => match values.as_slice() {
+            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+            [Value::TsQuery(left), Value::TsQuery(right)] => Ok(Value::Bool(
+                crate::backend::executor::tsquery_contains(left, right),
+            )),
+            _ => Err(ExecError::TypeMismatch {
+                op: "@>",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
+        BuiltinScalarFunction::TsQueryContainedBy => match values.as_slice() {
+            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+            [Value::TsQuery(left), Value::TsQuery(right)] => Ok(Value::Bool(
+                crate::backend::executor::tsquery_contained_by(left, right),
+            )),
+            _ => Err(ExecError::TypeMismatch {
+                op: "<@",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
             }),
         },
         BuiltinScalarFunction::TsVectorConcat => match values.as_slice() {

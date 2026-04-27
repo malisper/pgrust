@@ -690,6 +690,7 @@ fn int4_btree_options(num_keys: usize, indnullsnotdistinct: bool) -> CatalogInde
         indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID; num_keys],
         indcollation: vec![0; num_keys],
         indoption: vec![0; num_keys],
+        reloptions: None,
         indnullsnotdistinct,
         indisexclusion: false,
         indimmediate: true,
@@ -705,6 +706,7 @@ fn box_spgist_options(num_keys: usize) -> CatalogIndexBuildOptions {
         indclass: vec![crate::include::catalog::BOX_SPGIST_OPCLASS_OID; num_keys],
         indcollation: vec![0; num_keys],
         indoption: vec![0; num_keys],
+        reloptions: None,
         indnullsnotdistinct: false,
         indisexclusion: false,
         indimmediate: true,
@@ -720,6 +722,7 @@ fn polygon_spgist_options(num_keys: usize) -> CatalogIndexBuildOptions {
         indclass: vec![crate::include::catalog::POLY_SPGIST_OPCLASS_OID; num_keys],
         indcollation: vec![0; num_keys],
         indoption: vec![0; num_keys],
+        reloptions: None,
         indnullsnotdistinct: false,
         indisexclusion: false,
         indimmediate: true,
@@ -993,7 +996,7 @@ fn catalog_with_inherited_indexed_items()
             if column.descending {
                 option |= 0x0001;
             }
-            if column.nulls_first.unwrap_or(false) {
+            if column.nulls_first.unwrap_or(column.descending) {
                 option |= 0x0002;
             }
             indoption.push(option);
@@ -1003,6 +1006,7 @@ fn catalog_with_inherited_indexed_items()
             indclass,
             indcollation,
             indoption,
+            reloptions: None,
             indnullsnotdistinct: false,
             indisexclusion: false,
             indimmediate: true,
@@ -1277,6 +1281,7 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
             Some(children)
         }
         Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => children.iter().find_map(append_with_join_children),
         Plan::Hash { input, .. }
@@ -1334,6 +1339,7 @@ fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
                 .to_string(),
         ),
         Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => {
             for child in children {
@@ -1611,6 +1617,7 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. } => false,
         Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => {
             children.iter().any(|child| plan_contains(child, predicate))
@@ -1728,6 +1735,7 @@ fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
     match plan {
         Plan::Aggregate { .. } => Some(plan),
         Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => children.iter().find_map(find_aggregate_plan),
         Plan::Hash { input, .. }
@@ -2032,6 +2040,7 @@ fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
             bitmapqual: input, ..
         } => find_seq_scan(input),
         Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => children.iter().find_map(find_seq_scan),
         Plan::NestedLoopJoin { left, right, .. }
@@ -2063,6 +2072,7 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. } => 0,
         Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => children
             .iter()
@@ -3414,14 +3424,12 @@ fn planner_uses_runtime_index_key_for_correlated_limit_subplan() {
     assert!(planned.subplans.iter().any(|subplan| {
         plan_contains(subplan, |plan| matches!(plan, Plan::Limit { .. }))
             && plan_contains(subplan, |plan| match plan {
-                Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => {
-                    keys.iter().any(|key| {
-                        matches!(
-                            &key.argument,
-                            IndexScanKeyArgument::Runtime(expr) if contains_exec_param(expr)
-                        )
-                    })
-                }
+                Plan::IndexOnlyScan { keys, .. } => keys.iter().any(|key| {
+                    matches!(
+                        &key.argument,
+                        IndexScanKeyArgument::Runtime(expr) if contains_exec_param(expr)
+                    )
+                }),
                 _ => false,
             })
     }));
@@ -3508,6 +3516,7 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
                 bitmapqual: input, ..
             } => find_project_set(input),
             Plan::Append { children, .. }
+            | Plan::BitmapOr { children, .. }
             | Plan::MergeAppend { children, .. }
             | Plan::SetOp { children, .. } => children.iter().find_map(find_project_set),
             Plan::NestedLoopJoin { left, right, .. }

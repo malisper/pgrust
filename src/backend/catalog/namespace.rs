@@ -62,7 +62,7 @@ pub fn resolve_unqualified_create_persistence(
     }
 
     let Some(search_path) = configured_search_path else {
-        return Ok(TablePersistence::Permanent);
+        return Ok(persistence);
     };
 
     for schema in search_path {

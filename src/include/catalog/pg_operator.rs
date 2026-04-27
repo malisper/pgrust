@@ -1813,6 +1813,28 @@ fn catalog_sanity_operator_rows() -> Vec<PgOperatorRow> {
             false,
             false,
         ),
+        operator_row(
+            3693,
+            "@>",
+            TSQUERY_TYPE_OID,
+            TSQUERY_TYPE_OID,
+            3694,
+            0,
+            3691,
+            false,
+            false,
+        ),
+        operator_row(
+            3694,
+            "<@",
+            TSQUERY_TYPE_OID,
+            TSQUERY_TYPE_OID,
+            3693,
+            0,
+            3692,
+            false,
+            false,
+        ),
     ]
 }
 

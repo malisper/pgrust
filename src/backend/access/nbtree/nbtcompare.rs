@@ -7,6 +7,9 @@ use crate::backend::executor::{
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::nodes::datum::{NumericValue, Value};
 
+pub const BT_DESC_FLAG: i16 = 0x0001;
+pub const BT_NULLS_FIRST_FLAG: i16 = 0x0002;
+
 pub fn compare_bt_values(left: &Value, right: &Value) -> Ordering {
     match (left, right) {
         (Value::Null, Value::Null) => Ordering::Equal,
@@ -59,6 +62,33 @@ pub fn compare_bt_values(left: &Value, right: &Value) -> Ordering {
     }
 }
 
+pub fn compare_bt_values_with_options(left: &Value, right: &Value, option: i16) -> Ordering {
+    let nulls_first = option & BT_NULLS_FIRST_FLAG != 0;
+    let ord = match (left, right) {
+        (Value::Null, Value::Null) => return Ordering::Equal,
+        (Value::Null, _) => {
+            return if nulls_first {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
+        }
+        (_, Value::Null) => {
+            return if nulls_first {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            };
+        }
+        _ => compare_bt_values(left, right),
+    };
+    if option & BT_DESC_FLAG != 0 {
+        ord.reverse()
+    } else {
+        ord
+    }
+}
+
 fn numeric_key_value(value: &Value) -> Option<NumericValue> {
     match value {
         Value::Int16(value) => Some(NumericValue::from_i64(i64::from(*value))),
@@ -82,8 +112,19 @@ pub fn compare_bt_keyspace(
     right_keys: &[Value],
     right_tid: &ItemPointerData,
 ) -> Ordering {
-    for (left, right) in left_keys.iter().zip(right_keys) {
-        let ord = compare_bt_values(left, right);
+    compare_bt_keyspace_with_options(left_keys, left_tid, right_keys, right_tid, &[])
+}
+
+pub fn compare_bt_keyspace_with_options(
+    left_keys: &[Value],
+    left_tid: &ItemPointerData,
+    right_keys: &[Value],
+    right_tid: &ItemPointerData,
+    indoption: &[i16],
+) -> Ordering {
+    for (index, (left, right)) in left_keys.iter().zip(right_keys).enumerate() {
+        let option = indoption.get(index).copied().unwrap_or_default();
+        let ord = compare_bt_values_with_options(left, right, option);
         if ord != Ordering::Equal {
             return ord;
         }
@@ -110,6 +151,48 @@ mod tests {
         };
         assert_eq!(
             compare_bt_keyspace(&[Value::Int32(10)], &a, &[Value::Int32(10)], &b),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn bt_keyspace_honors_desc_and_nulls_first_options() {
+        let a = ItemPointerData {
+            block_number: 1,
+            offset_number: 1,
+        };
+        let b = ItemPointerData {
+            block_number: 1,
+            offset_number: 2,
+        };
+        assert_eq!(
+            compare_bt_keyspace_with_options(
+                &[Value::Int32(10)],
+                &a,
+                &[Value::Int32(5)],
+                &b,
+                &[BT_DESC_FLAG],
+            ),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_bt_keyspace_with_options(
+                &[Value::Null],
+                &a,
+                &[Value::Int32(5)],
+                &b,
+                &[BT_NULLS_FIRST_FLAG],
+            ),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_bt_keyspace_with_options(
+                &[Value::Null],
+                &a,
+                &[Value::Int32(5)],
+                &b,
+                &[BT_DESC_FLAG | BT_NULLS_FIRST_FLAG],
+            ),
             Ordering::Less
         );
     }

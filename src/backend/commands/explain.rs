@@ -1,4 +1,3 @@
-use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::backend::executor::{
@@ -18,17 +17,13 @@ use crate::include::nodes::primnodes::{
 };
 use crate::include::storage::buf_internals::BufferUsageStats;
 
-thread_local! {
-    static EXPLAIN_TIMING_ENABLED: Cell<bool> = const { Cell::new(true) };
-}
-
 pub(crate) fn format_explain_lines(
     state: &dyn PlanNode,
     indent: usize,
     analyze: bool,
     lines: &mut Vec<String>,
 ) {
-    format_explain_lines_with_costs(state, indent, analyze, true, lines);
+    format_explain_lines_with_costs(state, indent, analyze, true, true, lines);
 }
 
 pub(crate) fn format_explain_lines_with_costs(
@@ -36,9 +31,9 @@ pub(crate) fn format_explain_lines_with_costs(
     indent: usize,
     analyze: bool,
     show_costs: bool,
+    show_timing: bool,
     lines: &mut Vec<String>,
 ) {
-    let show_timing = EXPLAIN_TIMING_ENABLED.with(Cell::get);
     format_explain_lines_with_options(state, indent, analyze, show_costs, show_timing, lines);
 }
 
@@ -50,18 +45,7 @@ pub(crate) fn format_explain_lines_with_options(
     show_timing: bool,
     lines: &mut Vec<String>,
 ) {
-    EXPLAIN_TIMING_ENABLED.with(|enabled| {
-        let previous = enabled.replace(show_timing);
-        format_explain_lines_with_options_inner(
-            state,
-            indent,
-            analyze,
-            show_costs,
-            show_timing,
-            lines,
-        );
-        enabled.set(previous);
-    });
+    format_explain_lines_with_options_inner(state, indent, analyze, show_costs, show_timing, lines);
 }
 
 fn format_explain_lines_with_options_inner(
@@ -85,7 +69,7 @@ fn format_explain_lines_with_options_inner(
     }
     push_explain_state_line(state, indent, analyze, show_costs, show_timing, lines);
     state.explain_details(indent, analyze, show_costs, lines);
-    state.explain_children(indent, analyze, show_costs, lines);
+    state.explain_children(indent, analyze, show_costs, show_timing, lines);
 }
 
 pub(crate) fn push_explain_line(
@@ -232,6 +216,7 @@ fn push_direct_plan_subplans(
         };
         lines.push(label);
         if let Some(child) = subplans.get(subplan.plan_id) {
+            let child_ctx = subplan_explain_context(plan, subplan, ctx);
             format_explain_plan_with_subplans_inner(
                 child,
                 subplans,
@@ -240,11 +225,36 @@ fn push_direct_plan_subplans(
                 verbose,
                 true,
                 false,
-                ctx,
+                &child_ctx,
                 lines,
             );
         }
     }
+}
+
+fn subplan_explain_context(
+    parent: &Plan,
+    subplan: &SubPlan,
+    ctx: &VerboseExplainContext,
+) -> VerboseExplainContext {
+    if subplan.par_param.is_empty() || subplan.args.is_empty() {
+        return ctx.clone();
+    }
+    let mut child_ctx = ctx.clone();
+    let column_names = plan_join_output_exprs(parent, ctx, true);
+    child_ctx.exec_params.extend(
+        subplan
+            .par_param
+            .iter()
+            .copied()
+            .zip(subplan.args.iter().cloned())
+            .map(|(paramid, expr)| VerboseExecParam {
+                paramid,
+                expr,
+                column_names: column_names.clone(),
+            }),
+    );
+    child_ctx
 }
 
 fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
@@ -530,11 +540,6 @@ fn push_nonverbose_plan_details(
             }
             true
         }
-        Plan::WindowAgg { input, clause, .. } => {
-            let rendered = render_window_clause_for_explain(input, clause, ctx);
-            lines.push(format!("{prefix}Window: w1 AS ({rendered})"));
-            true
-        }
         Plan::IndexOnlyScan {
             keys,
             order_by_keys,
@@ -549,18 +554,52 @@ fn push_nonverbose_plan_details(
             index_meta,
             ..
         } => {
+            let key_column_names = desc
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            let render_runtime = |expr: &Expr| render_verbose_expr(expr, &key_column_names, ctx);
             if let Some(detail) = render_index_scan_condition_with_key_names_and_runtime_renderer(
                 keys,
                 desc,
                 index_meta,
-                None,
-                Some(&|expr| render_verbose_expr(expr, &[], ctx)),
+                Some(&key_column_names),
+                Some(&render_runtime),
             ) {
                 lines.push(format!("{prefix}Index Cond: ({detail})"));
             }
             if let Some(detail) = render_index_order_by(order_by_keys, desc, index_meta) {
                 lines.push(format!("{prefix}Order By: ({detail})"));
             }
+            true
+        }
+        Plan::BitmapIndexScan {
+            keys,
+            desc,
+            index_meta,
+            ..
+        } => {
+            let key_column_names = desc
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            let render_runtime = |expr: &Expr| render_verbose_expr(expr, &key_column_names, ctx);
+            if let Some(detail) = render_index_scan_condition_with_key_names_and_runtime_renderer(
+                keys,
+                desc,
+                index_meta,
+                Some(&key_column_names),
+                Some(&render_runtime),
+            ) {
+                lines.push(format!("{prefix}Index Cond: ({detail})"));
+            }
+            true
+        }
+        Plan::WindowAgg { input, clause, .. } => {
+            let rendered = render_window_clause_for_explain(input, clause, ctx);
+            lines.push(format!("{prefix}Window: w1 AS ({rendered})"));
             true
         }
         _ => false,
@@ -2085,7 +2124,7 @@ fn plan_join_output_exprs(
             desc,
             ..
         } => qualified_scan_output_exprs_with_context(relation_name, desc, ctx),
-        Plan::BitmapIndexScan { .. } => Vec::new(),
+        Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => Vec::new(),
         Plan::Hash { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
@@ -2294,7 +2333,7 @@ fn verbose_plan_output_exprs(
             desc,
             ..
         } => qualified_base_scan_output_exprs(relation_name, desc),
-        Plan::BitmapIndexScan { .. } => Vec::new(),
+        Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => Vec::new(),
         Plan::Hash { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
@@ -2743,6 +2782,9 @@ fn verbose_op_text(
         crate::include::nodes::primnodes::OpExprKind::Gt => Some(">"),
         crate::include::nodes::primnodes::OpExprKind::GtEq => Some(">="),
         crate::include::nodes::primnodes::OpExprKind::Concat => Some("||"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayOverlap => Some("&&"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayContains => Some("@>"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayContained => Some("<@"),
         _ => None,
     }
 }
@@ -2805,6 +2847,7 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. }
         | Plan::Values { .. } => Vec::new(),
+        Plan::BitmapOr { children, .. } => children.iter().collect(),
         Plan::BitmapHeapScan { bitmapqual, .. } => vec![bitmapqual.as_ref()],
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
@@ -2852,8 +2895,32 @@ fn const_false_filter_result_plan(plan: &Plan) -> Option<PlanEstimate> {
             plan_info,
             input,
             predicate: Expr::Const(Value::Bool(false)),
-        } if matches!(input.as_ref(), Plan::SeqScan { .. }) => Some(*plan_info),
+        } if const_false_filter_input_can_render_as_result(input) => Some(*plan_info),
+        Plan::Append {
+            plan_info,
+            children,
+            ..
+        } if !children.is_empty()
+            && children
+                .iter()
+                .all(|child| const_false_filter_result_plan(child).is_some()) =>
+        {
+            Some(*plan_info)
+        }
+        Plan::Projection { input, targets, .. }
+            if projection_targets_are_explain_passthrough(input, targets) =>
+        {
+            const_false_filter_result_plan(input)
+        }
         _ => None,
+    }
+}
+
+fn const_false_filter_input_can_render_as_result(input: &Plan) -> bool {
+    match input {
+        Plan::SeqScan { .. } | Plan::Result { .. } => true,
+        Plan::Append { children, .. } => children.is_empty(),
+        _ => false,
     }
 }
 
@@ -2867,6 +2934,7 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
+        | Plan::BitmapOr { .. }
         | Plan::BitmapHeapScan { .. }
         | Plan::Limit { .. }
         | Plan::LockRows { .. }

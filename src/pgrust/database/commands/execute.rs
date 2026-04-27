@@ -753,6 +753,21 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableCompound(ref compound_stmt) => {
+                for action in &compound_stmt.actions {
+                    self.execute_statement_with_search_path_inner(
+                        client_id,
+                        action.clone(),
+                        statement_lock_scope_id,
+                        configured_search_path,
+                        datetime_config,
+                        gucs,
+                        planner_config,
+                        std::sync::Arc::clone(&random_state),
+                    )?;
+                }
+                Ok(StatementResult::AffectedRows(0))
+            }
             Statement::AlterViewOwner(ref alter_stmt) => self
                 .execute_alter_view_owner_stmt_with_search_path(
                     client_id,
@@ -1070,6 +1085,42 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateOperatorFamily(ref create_stmt) => self
+                .execute_create_operator_family_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterOperatorFamily(ref alter_stmt) => self
+                .execute_alter_operator_family_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterOperatorClass(ref alter_stmt) => self
+                .execute_alter_operator_class_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::DropOperatorFamily(ref drop_stmt) => self
+                .execute_drop_operator_family_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
+            Statement::CreateTextSearch(ref create_stmt) => self
+                .execute_create_text_search_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTextSearch(ref alter_stmt) => self
+                .execute_alter_text_search_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateSchema(ref create_stmt) => self
                 .execute_create_schema_stmt_with_search_path(
                     client_id,
@@ -1093,6 +1144,12 @@ impl Database {
                 ),
             Statement::AlterOperator(ref alter_stmt) => self
                 .execute_alter_operator_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterConversion(ref alter_stmt) => self
+                .execute_alter_conversion_stmt_with_search_path(
                     client_id,
                     alter_stmt,
                     configured_search_path,
@@ -1292,6 +1349,18 @@ impl Database {
                 ),
             Statement::CreateForeignServer(ref create_stmt) => {
                 self.execute_create_foreign_server_stmt(client_id, create_stmt)
+            }
+            Statement::AlterForeignServerRename(ref alter_stmt) => {
+                self.execute_alter_foreign_server_rename_stmt(client_id, alter_stmt)
+            }
+            Statement::CreateLanguage(ref create_stmt) => {
+                self.execute_create_language_stmt(client_id, create_stmt)
+            }
+            Statement::AlterLanguage(ref alter_stmt) => {
+                self.execute_alter_language_stmt(client_id, alter_stmt)
+            }
+            Statement::DropLanguage(ref drop_stmt) => {
+                self.execute_drop_language_stmt(client_id, drop_stmt)
             }
             Statement::CreateForeignTable(ref create_stmt) => {
                 let xid = self.txns.write().begin();
@@ -2216,6 +2285,7 @@ impl Database {
                     drop_stmt,
                     xid,
                     0,
+                    configured_search_path,
                     &mut catalog_effects,
                 );
                 let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);

@@ -135,6 +135,65 @@ use std::rc::Rc;
 use system_views::*;
 use window::*;
 
+pub(crate) fn is_system_column_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "tableoid" | "ctid" | "xmin" | "xmax" | "cmin" | "cmax"
+    )
+}
+
+pub(crate) fn sql_expr_mentions_system_column(sql: &str) -> bool {
+    let mut chars = sql.char_indices().peekable();
+    while let Some((_, ch)) = chars.next() {
+        match ch {
+            '\'' => {
+                while let Some((_, inner)) = chars.next() {
+                    if inner == '\'' {
+                        if chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                            let _ = chars.next();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            }
+            '"' => {
+                let mut ident = String::new();
+                while let Some((_, inner)) = chars.next() {
+                    if inner == '"' {
+                        if chars.peek().is_some_and(|(_, next)| *next == '"') {
+                            ident.push('"');
+                            let _ = chars.next();
+                            continue;
+                        }
+                        break;
+                    }
+                    ident.push(inner);
+                }
+                if is_system_column_name(&ident) {
+                    return true;
+                }
+            }
+            ch if ch == '_' || ch.is_ascii_alphabetic() => {
+                let mut ident = String::from(ch);
+                while let Some((_, next)) = chars.peek().copied() {
+                    if next == '_' || next == '$' || next.is_ascii_alphanumeric() {
+                        ident.push(next);
+                        let _ = chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if is_system_column_name(&ident) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundIndexRelation {
     pub name: String,
@@ -1494,7 +1553,7 @@ pub(crate) fn bound_index_relation_from_relcache_entry(
     bound_index_relation_from_relcache_entry_with_heap(name, entry, catalog, None)
 }
 
-fn bound_index_relation_from_relcache_entry_with_heap(
+pub(crate) fn bound_index_relation_from_relcache_entry_with_heap(
     name: String,
     entry: &crate::backend::utils::cache::relcache::RelCacheEntry,
     catalog: &dyn CatalogLookup,

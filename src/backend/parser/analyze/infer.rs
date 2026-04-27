@@ -910,7 +910,12 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 return sql_type;
             }
             match resolved {
-                Some(BuiltinScalarFunction::TsMatch) => SqlType::new(SqlTypeKind::Bool),
+                Some(
+                    BuiltinScalarFunction::TsMatch
+                    | BuiltinScalarFunction::TsQueryContains
+                    | BuiltinScalarFunction::TsQueryContainedBy,
+                ) => SqlType::new(SqlTypeKind::Bool),
+                Some(BuiltinScalarFunction::TsRewrite) => SqlType::new(SqlTypeKind::TsQuery),
                 Some(BuiltinScalarFunction::ToTsVector) => SqlType::new(SqlTypeKind::TsVector),
                 Some(
                     BuiltinScalarFunction::ToTsQuery
@@ -921,6 +926,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 Some(BuiltinScalarFunction::TsLexize) => {
                     SqlType::array_of(SqlType::new(SqlTypeKind::Text))
                 }
+                Some(BuiltinScalarFunction::TsHeadline) => SqlType::new(SqlTypeKind::Text),
                 Some(
                     BuiltinScalarFunction::TsQueryAnd
                     | BuiltinScalarFunction::TsQueryOr

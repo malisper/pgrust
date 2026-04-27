@@ -460,6 +460,7 @@ fn make_window_rel(
             .iter()
             .any(|path| bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys))
         && let [rtindex] = input_rel.relids.as_slice()
+        && !rtindex_has_inheritance_children(root, catalog, *rtindex)
     {
         let ordered_paths =
             relation_ordered_index_paths(root, *rtindex, &required_pathkeys, catalog);
@@ -534,6 +535,35 @@ fn make_window_rel(
     bestpath::set_cheapest(&mut rel);
     root.upper_rels[upper_rel_index].rel = rel.clone();
     rel
+}
+
+fn rtindex_has_inheritance_children(
+    root: &PlannerInfo,
+    catalog: &dyn CatalogLookup,
+    rtindex: usize,
+) -> bool {
+    let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1)) else {
+        return false;
+    };
+    if !rte.inh {
+        return false;
+    }
+    let RangeTblEntryKind::Relation {
+        relation_oid,
+        relkind,
+        ..
+    } = rte.kind
+    else {
+        return false;
+    };
+    match relkind {
+        'p' => !catalog.inheritance_children(relation_oid).is_empty(),
+        'r' => catalog
+            .find_all_inheritors(relation_oid)
+            .into_iter()
+            .any(|oid| oid != relation_oid),
+        _ => false,
+    }
 }
 
 fn make_project_set_rel(
@@ -960,6 +990,7 @@ fn make_ordered_rel(
     let mut extra_presorted_paths = Vec::new();
     if (root.parse.limit_count.is_some() || root.parse.limit_offset != 0)
         && let [rtindex] = input_rel.relids.as_slice()
+        && !rtindex_has_inheritance_children(root, catalog, *rtindex)
     {
         extra_presorted_paths =
             relation_ordered_index_paths(root, *rtindex, &required_pathkeys, catalog);
@@ -1498,9 +1529,9 @@ fn project_path_to_distinct_target(
 fn path_uses_seqscan(path: &Path) -> bool {
     match path {
         Path::SeqScan { .. } => true,
-        Path::Append { children, .. } | Path::MergeAppend { children, .. } => {
-            children.iter().any(path_uses_seqscan)
-        }
+        Path::Append { children, .. }
+        | Path::MergeAppend { children, .. }
+        | Path::BitmapOr { children, .. } => children.iter().any(path_uses_seqscan),
         Path::Unique { input, .. }
         | Path::Filter { input, .. }
         | Path::Projection { input, .. }
@@ -1538,9 +1569,9 @@ fn path_uses_seqscan(path: &Path) -> bool {
 fn path_uses_indexscan(path: &Path) -> bool {
     match path {
         Path::IndexOnlyScan { .. } | Path::IndexScan { .. } | Path::BitmapIndexScan { .. } => true,
-        Path::Append { children, .. } | Path::MergeAppend { children, .. } => {
-            children.iter().any(path_uses_indexscan)
-        }
+        Path::Append { children, .. }
+        | Path::MergeAppend { children, .. }
+        | Path::BitmapOr { children, .. } => children.iter().any(path_uses_indexscan),
         Path::Unique { input, .. }
         | Path::Filter { input, .. }
         | Path::Projection { input, .. }

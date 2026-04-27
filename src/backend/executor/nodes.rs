@@ -42,13 +42,13 @@ use crate::include::catalog::{
 use crate::include::nodes::datetime::{DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimestampTzADT};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
-    AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, CteScanState,
-    FilterState, FunctionScanState, IncrementalSortState, IndexOnlyScanState, IndexScanState,
-    LimitState, LockRowsState, MaterializedRow, MergeAppendState, NestedLoopJoinState,
-    NodeExecStats, OrderByState, PlanNode, PlanState, ProjectSetState, ProjectionState,
-    RecursiveUnionState, ResultState, SeqScanState, SetOpState, SlotKind, SubqueryScanState,
-    SystemVarBinding, ToastRelationRef, TupleSlot, UniqueState, ValuesState, WindowAggState,
-    WorkTableScanState,
+    AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, BitmapOrState,
+    BitmapQualState, CteScanState, FilterState, FunctionScanState, IncrementalSortState,
+    IndexOnlyScanState, IndexScanState, LimitState, LockRowsState, MaterializedRow,
+    MergeAppendState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState,
+    ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState,
+    SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, UniqueState,
+    ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument};
 use crate::include::nodes::primnodes::{
@@ -728,6 +728,7 @@ impl PlanNode for ResultState {
         _indent: usize,
         _analyze: bool,
         _show_costs: bool,
+        _timing: bool,
         _lines: &mut Vec<String>,
     ) {
     }
@@ -799,10 +800,18 @@ impl PlanNode for AppendState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
         for child in &self.children {
-            format_explain_lines_with_costs(child.as_ref(), indent + 1, analyze, show_costs, lines);
+            format_explain_lines_with_costs(
+                child.as_ref(),
+                indent + 1,
+                analyze,
+                show_costs,
+                timing,
+                lines,
+            );
         }
     }
 }
@@ -935,10 +944,18 @@ impl PlanNode for MergeAppendState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
         for child in &self.children {
-            format_explain_lines_with_costs(child.as_ref(), indent + 1, analyze, show_costs, lines);
+            format_explain_lines_with_costs(
+                child.as_ref(),
+                indent + 1,
+                analyze,
+                show_costs,
+                timing,
+                lines,
+            );
         }
     }
 }
@@ -1021,9 +1038,17 @@ impl PlanNode for UniqueState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
-        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
     }
 }
 
@@ -1342,6 +1367,7 @@ impl PlanNode for SeqScanState {
         _indent: usize,
         _analyze: bool,
         _show_costs: bool,
+        _timing: bool,
         _lines: &mut Vec<String>,
     ) {
     }
@@ -1399,6 +1425,7 @@ impl PlanNode for IndexOnlyScanState {
                 finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
             };
+            self.stats.index_searches = self.stats.index_searches.saturating_add(1);
             let order_by_data =
                 eval_index_scan_keys(&self.order_by_keys, ctx, false)?.unwrap_or_default();
             let begin = crate::include::access::amapi::IndexBeginScanContext {
@@ -1633,6 +1660,12 @@ impl PlanNode for IndexOnlyScanState {
                 self.stats.rows_removed_by_filter
             ));
         }
+        if analyze && self.stats.index_searches > 0 {
+            lines.push(format!(
+                "{prefix}Index Searches: {}",
+                self.stats.index_searches
+            ));
+        }
     }
 
     fn explain_children(
@@ -1640,6 +1673,7 @@ impl PlanNode for IndexOnlyScanState {
         _indent: usize,
         _analyze: bool,
         _show_costs: bool,
+        _timing: bool,
         _lines: &mut Vec<String>,
     ) {
     }
@@ -1666,6 +1700,7 @@ impl PlanNode for IndexScanState {
                 finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
             };
+            self.stats.index_searches = self.stats.index_searches.saturating_add(1);
             let order_by_data =
                 eval_index_scan_keys(&self.order_by_keys, ctx, false)?.unwrap_or_default();
             let begin = crate::include::access::amapi::IndexBeginScanContext {
@@ -1789,6 +1824,18 @@ impl PlanNode for IndexScanState {
                         tid: Some(tid),
                     }];
                     set_active_system_bindings(ctx, &self.current_bindings);
+
+                    if let Some(qual) = &self.qual {
+                        let outer_values = materialize_slot_values(&mut self.slot)?;
+                        let current_bindings = self.current_bindings.clone();
+                        set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                        clear_inner_expr_bindings(ctx);
+                        if !qual(&mut self.slot, ctx)? {
+                            note_filtered_row(&mut self.stats);
+                            continue;
+                        }
+                    }
+
                     finish_row(&mut self.stats, start);
                     return Ok(Some(&mut self.slot));
                 }
@@ -1905,12 +1952,19 @@ impl PlanNode for IndexScanState {
                 self.stats.rows_removed_by_filter
             ));
         }
+        if analyze && self.stats.index_searches > 0 {
+            lines.push(format!(
+                "{prefix}Index Searches: {}",
+                self.stats.index_searches
+            ));
+        }
     }
     fn explain_children(
         &self,
         _indent: usize,
         _analyze: bool,
         _show_costs: bool,
+        _timing: bool,
         _lines: &mut Vec<String>,
     ) {
     }
@@ -2077,6 +2131,7 @@ fn lookup_index_scan_operator_name(
                 || (entry.righttype == crate::include::catalog::ANYMULTIRANGEOID
                     && crate::include::catalog::builtin_range_spec_by_multirange_oid(actual)
                         .is_some())
+                || entry.righttype == crate::include::catalog::ANYARRAYOID
                 || entry.righttype == crate::include::catalog::ANYELEMENTOID
         })
         .max_by_key(|entry| {
@@ -2087,6 +2142,7 @@ fn lookup_index_scan_operator_name(
             {
                 2
             } else if entry.righttype == crate::include::catalog::ANYOID
+                || entry.righttype == crate::include::catalog::ANYARRAYOID
                 || entry.righttype == crate::include::catalog::ANYELEMENTOID
             {
                 1
@@ -2280,6 +2336,88 @@ impl BitmapIndexScanState {
     }
 }
 
+impl BitmapQualState {
+    fn fill_bitmap(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        match self {
+            BitmapQualState::Index(state) => state.fill_bitmap(ctx),
+            BitmapQualState::Or(state) => state.fill_bitmap(ctx),
+        }
+    }
+
+    fn bitmap(&self) -> &crate::include::access::tidbitmap::TidBitmap {
+        match self {
+            BitmapQualState::Index(state) => &state.bitmap,
+            BitmapQualState::Or(state) => &state.bitmap,
+        }
+    }
+
+    fn rows(&self) -> u64 {
+        match self {
+            BitmapQualState::Index(state) => state.stats.rows,
+            BitmapQualState::Or(state) => state.stats.rows,
+        }
+    }
+
+    fn explain(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        timing: bool,
+        lines: &mut Vec<String>,
+    ) {
+        match self {
+            BitmapQualState::Index(state) => {
+                format_explain_lines_with_costs(
+                    state.as_ref(),
+                    indent,
+                    analyze,
+                    show_costs,
+                    timing,
+                    lines,
+                );
+            }
+            BitmapQualState::Or(state) => {
+                format_explain_lines_with_costs(
+                    state.as_ref(),
+                    indent,
+                    analyze,
+                    show_costs,
+                    timing,
+                    lines,
+                );
+            }
+        }
+    }
+}
+
+impl BitmapOrState {
+    fn fill_bitmap(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        if self.executed {
+            return Ok(());
+        }
+
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx)?;
+
+        let mut rows = 0;
+        for child in &mut self.children {
+            child.fill_bitmap(ctx)?;
+            rows += child.rows();
+            self.bitmap.union_with(child.bitmap());
+        }
+
+        self.executed = true;
+        self.stats.rows = rows;
+        finish_eof(&mut self.stats, start, ctx);
+        Ok(())
+    }
+}
+
 impl PlanNode for BitmapIndexScanState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -2355,8 +2493,61 @@ impl PlanNode for BitmapIndexScanState {
         _indent: usize,
         _analyze: bool,
         _show_costs: bool,
+        _timing: bool,
         _lines: &mut Vec<String>,
     ) {
+    }
+}
+
+impl PlanNode for BitmapOrState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        _ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        Err(internal_exec_error(
+            "bitmap or cannot produce tuples directly",
+        ))
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        None
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &EMPTY_SYSTEM_BINDINGS
+    }
+
+    fn column_names(&self) -> &[String] {
+        &[]
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        "BitmapOr".into()
+    }
+
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        timing: bool,
+        lines: &mut Vec<String>,
+    ) {
+        for child in &self.children {
+            child.explain(indent + 1, analyze, show_costs, timing, lines);
+        }
     }
 }
 
@@ -2385,7 +2576,7 @@ impl BitmapHeapScanState {
             })?;
             let mut offsets = collect_visible_page_offsets(&guard, &ctx.snapshot, &ctx.txns)?;
             drop(guard);
-            if let Some(exact_offsets) = self.bitmap_index.bitmap.exact_offsets(block) {
+            if let Some(exact_offsets) = self.bitmapqual.bitmap().exact_offsets(block) {
                 offsets.retain(|offset| exact_offsets.contains(offset));
             }
 
@@ -2421,8 +2612,8 @@ impl PlanNode for BitmapHeapScanState {
         begin_node(&mut self.stats, ctx)?;
 
         if self.bitmap_pages.is_empty() && self.current_page_index == 0 {
-            self.bitmap_index.fill_bitmap(ctx)?;
-            self.bitmap_pages = self.bitmap_index.bitmap.iter().collect();
+            self.bitmapqual.fill_bitmap(ctx)?;
+            self.bitmap_pages = self.bitmapqual.bitmap().iter().collect();
         }
 
         loop {
@@ -2582,15 +2773,11 @@ impl PlanNode for BitmapHeapScanState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
-        format_explain_lines_with_costs(
-            self.bitmap_index.as_ref(),
-            indent + 1,
-            analyze,
-            show_costs,
-            lines,
-        );
+        self.bitmapqual
+            .explain(indent + 1, analyze, show_costs, timing, lines);
     }
 }
 
@@ -2738,7 +2925,10 @@ fn render_explain_expr_inner_with_qualifier(
             | crate::include::nodes::primnodes::OpExprKind::LtEq
             | crate::include::nodes::primnodes::OpExprKind::Gt
             | crate::include::nodes::primnodes::OpExprKind::GtEq
-            | crate::include::nodes::primnodes::OpExprKind::RegexMatch => {
+            | crate::include::nodes::primnodes::OpExprKind::RegexMatch
+            | crate::include::nodes::primnodes::OpExprKind::ArrayOverlap
+            | crate::include::nodes::primnodes::OpExprKind::ArrayContains
+            | crate::include::nodes::primnodes::OpExprKind::ArrayContained => {
                 let [left, right] = op.args.as_slice() else {
                     return format!("{expr:?}");
                 };
@@ -3557,6 +3747,8 @@ fn builtin_scalar_function_infix_operator(
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::NetworkSupernet) => Some(">>"),
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::NetworkSupernetEq) => Some(">>="),
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::NetworkOverlap) => Some("&&"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TsQueryContains) => Some("@>"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TsQueryContainedBy) => Some("<@"),
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TextStartsWith) => Some("^@"),
         _ => None,
     }
@@ -3592,6 +3784,9 @@ fn infix_operator_text(
         crate::include::nodes::primnodes::OpExprKind::Gt => Some(">"),
         crate::include::nodes::primnodes::OpExprKind::GtEq => Some(">="),
         crate::include::nodes::primnodes::OpExprKind::RegexMatch => Some("~"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayOverlap => Some("&&"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayContains => Some("@>"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayContained => Some("<@"),
         _ => None,
     }
 }
@@ -3989,6 +4184,17 @@ fn render_explain_const(value: &Value) -> String {
             ),
             None => render_explain_literal(value),
         },
+        Value::PgArray(array) => match value.sql_type_hint() {
+            Some(sql_type) => format!(
+                "'{}'::{}",
+                crate::backend::executor::format_array_value_text(array),
+                render_explain_sql_type_name(sql_type)
+            ),
+            None => format!(
+                "'{}'",
+                crate::backend::executor::format_array_value_text(array)
+            ),
+        },
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
@@ -4120,6 +4326,12 @@ fn render_explain_literal(value: &Value) -> String {
         }
         Value::Inet(value) => format!("'{}'", value.render_inet()),
         Value::Cidr(value) => format!("'{}'", value.render_cidr()),
+        Value::PgArray(array) => {
+            format!(
+                "'{}'",
+                crate::backend::executor::format_array_value_text(array)
+            )
+        }
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
@@ -4332,9 +4544,17 @@ impl PlanNode for FilterState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
-        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
     }
 }
 
@@ -4543,10 +4763,25 @@ impl PlanNode for NestedLoopJoinState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
-        format_explain_lines_with_costs(&*self.left, indent + 1, analyze, show_costs, lines);
-        format_explain_lines_with_costs(&*self.right, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(
+            &*self.left,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
+        format_explain_lines_with_costs(
+            &*self.right,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
     }
 }
 
@@ -4879,9 +5114,17 @@ impl PlanNode for OrderByState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
-        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
     }
 }
 
@@ -5087,9 +5330,17 @@ impl PlanNode for IncrementalSortState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
-        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
     }
 }
 
@@ -5196,9 +5447,17 @@ impl PlanNode for LimitState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
-        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
     }
 }
 
@@ -5258,9 +5517,17 @@ impl PlanNode for LockRowsState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
-        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
     }
 }
 
@@ -5326,9 +5593,17 @@ impl PlanNode for ProjectionState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
-        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
     }
 }
 
@@ -5646,9 +5921,17 @@ impl PlanNode for AggregateState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
-        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
     }
 }
 
@@ -5792,9 +6075,17 @@ impl PlanNode for WindowAggState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
-        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
     }
 }
 
@@ -5865,6 +6156,7 @@ impl PlanNode for FunctionScanState {
         _indent: usize,
         _analyze: bool,
         _show_costs: bool,
+        _timing: bool,
         _lines: &mut Vec<String>,
     ) {
     }
@@ -5922,9 +6214,17 @@ impl PlanNode for SubqueryScanState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
-        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
     }
 }
 
@@ -5998,6 +6298,7 @@ impl PlanNode for ValuesState {
         _indent: usize,
         _analyze: bool,
         _show_costs: bool,
+        _timing: bool,
         _lines: &mut Vec<String>,
     ) {
     }
@@ -6060,6 +6361,7 @@ impl PlanNode for WorkTableScanState {
         _indent: usize,
         _analyze: bool,
         _show_costs: bool,
+        _timing: bool,
         _lines: &mut Vec<String>,
     ) {
     }
@@ -6136,6 +6438,7 @@ impl PlanNode for CteScanState {
         _indent: usize,
         _analyze: bool,
         _show_costs: bool,
+        _timing: bool,
         _lines: &mut Vec<String>,
     ) {
     }
@@ -6246,15 +6549,24 @@ impl PlanNode for RecursiveUnionState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
-        format_explain_lines_with_costs(&*self.anchor, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(
+            &*self.anchor,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
         if let Some(recursive_state) = &self.recursive_state {
             format_explain_lines_with_costs(
                 &**recursive_state,
                 indent + 1,
                 analyze,
                 show_costs,
+                timing,
                 lines,
             );
         } else {
@@ -6264,6 +6576,7 @@ impl PlanNode for RecursiveUnionState {
                 indent + 1,
                 analyze,
                 show_costs,
+                timing,
                 lines,
             );
         }
@@ -6348,10 +6661,18 @@ impl PlanNode for SetOpState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
         for child in &self.children {
-            format_explain_lines_with_costs(child.as_ref(), indent, analyze, show_costs, lines);
+            format_explain_lines_with_costs(
+                child.as_ref(),
+                indent,
+                analyze,
+                show_costs,
+                timing,
+                lines,
+            );
         }
     }
 }
@@ -6493,9 +6814,17 @@ impl PlanNode for ProjectSetState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
-        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
     }
 }
 
