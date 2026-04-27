@@ -1062,6 +1062,7 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
 
 fn quote_identifier(identifier: &str) -> String {
     if !identifier.is_empty()
+        && !matches!(identifier, "user")
         && identifier.chars().enumerate().all(|(idx, ch)| {
             if idx == 0 {
                 ch == '_' || ch.is_ascii_lowercase()

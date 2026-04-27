@@ -56,6 +56,8 @@ Runtime behavior:
   WRAPPER ... OPTIONS`
 - matches PostgreSQL's `CREATE USER MAPPING` error priority by resolving an
   explicit role before checking the server
+- quotes `user` as a keyword through `quote_ident`, fixing psql FDW option
+  rendering for user mappings
 
 Tests run:
 - `cargo fmt`
@@ -127,9 +129,13 @@ Tests run:
 - `scripts/cargo_isolated.sh check`
 - `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
 - `scripts/run_regression.sh --skip-build --port 55455 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-user-mapping-error-order`
+- `scripts/cargo_isolated.sh test --lib --quiet concat_right_and_quote_functions_are_available_to_sql`
+- `scripts/cargo_isolated.sh check`
+- `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
+- `scripts/run_regression.sh --skip-build --port 55456 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-quote-user-option`
 
 Remaining:
-`foreign_data` still fails, but improved to 398/539 matching queries and 1458
+`foreign_data` still fails, but improved to 399/539 matching queries and 1436
 diff lines in the latest run. Biggest
 remaining groups:
 - owner dependency reporting beyond the handled FDW function dependencies

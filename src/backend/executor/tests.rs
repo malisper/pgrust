@@ -20909,7 +20909,7 @@ fn concat_right_and_quote_functions_are_available_to_sql() {
         &base,
         &txns,
         INVALID_TRANSACTION_ID,
-        "select concat('one', 2, true), concat_ws('#', 'one', 2, null, false), right('ahoj', 2), quote_literal(E'\\\\'), quote_ident('needs space'), quote_ident('plain_name')",
+        "select concat('one', 2, true), concat_ws('#', 'one', 2, null, false), right('ahoj', 2), quote_literal(E'\\\\'), quote_ident('needs space'), quote_ident('plain_name'), quote_ident('user')",
     )
     .unwrap()
     {
@@ -20923,6 +20923,7 @@ fn concat_right_and_quote_functions_are_available_to_sql() {
                     Value::Text("E'\\\\'".into()),
                     Value::Text("\"needs space\"".into()),
                     Value::Text("plain_name".into()),
+                    Value::Text("\"user\"".into()),
                 ]]
             );
         }
