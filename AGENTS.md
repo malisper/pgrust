@@ -23,7 +23,7 @@ docs, not here.
 
 | Task | Start Here | Usually Also Touches |
 | --- | --- | --- |
-| SQL syntax or new statement shape | `src/backend/parser/gram.pest`, `src/backend/parser/gram.rs`, `src/include/nodes/parsenodes.rs` | `src/backend/parser/analyze/*`; skill: `pgrust-sql-language` |
+| SQL syntax or new statement shape | `crates/pgrust_sql_grammar/src/gram.pest`, `src/backend/parser/gram.rs`, `src/include/nodes/parsenodes.rs` | `src/backend/parser/analyze/*`; skill: `pgrust-sql-language` |
 | Name/type binding, SELECT planning | `src/backend/parser/analyze/mod.rs`, `scope.rs`, `expr.rs`, `infer.rs`, `coerce.rs` | `src/include/nodes/plannodes.rs` |
 | Builtin functions/operators | `src/backend/parser/analyze/functions.rs`, `expr.rs`, `infer.rs` | `src/backend/executor/exec_expr.rs`, `expr_ops.rs`, `expr_casts.rs` |
 | Aggregates or grouping | `src/backend/parser/analyze/agg*.rs` | `src/backend/executor/agg.rs`, `src/backend/executor/nodes.rs` |

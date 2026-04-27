@@ -156,7 +156,8 @@ num-integer = "0.1.46"
 num-traits = "0.2.19"
 parking_lot = "0.12"
 pest = "2.7"
-pest_derive = "2.7"
+pgrust_plpgsql_grammar = { path = "crates/pgrust_plpgsql_grammar" }
+pgrust_sql_grammar = { path = "crates/pgrust_sql_grammar" }
 rand = "0.8"
 regex = "1"
 rustc-hash = "2.1.2"

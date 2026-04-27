@@ -1,7 +1,6 @@
 use num_bigint::BigUint;
-use pest::Parser as _;
 use pest::iterators::Pair;
-use pest_derive::Parser;
+pub(crate) use pgrust_sql_grammar::Rule;
 use std::collections::BTreeSet;
 
 use super::comments::{
@@ -15,10 +14,6 @@ use crate::backend::utils::misc::stack_depth::{
 };
 use crate::include::catalog::PolicyCommand;
 use crate::include::nodes::datum::BitString;
-
-#[derive(Parser)]
-#[grammar = "backend/parser/gram.pest"]
-struct SqlParser;
 
 pub(crate) const SQL_JSON_FUNC: &str = "__pgrust_sql_json";
 pub(crate) const SQL_JSON_SCALAR_FUNC: &str = "__pgrust_sql_json_scalar";
@@ -227,7 +222,7 @@ fn parse_statement_with_options_inner(
             return Ok(stmt);
         }
     }
-    match SqlParser::parse(Rule::statement, &sql) {
+    match pgrust_sql_grammar::parse_rule(Rule::statement, &sql) {
         Ok(mut pairs) => build_statement(pairs.next().ok_or(ParseError::UnexpectedEof)?),
         Err(err) => {
             if is_select_with_trailing_operator(&sql) {
@@ -762,7 +757,7 @@ fn strip_column_fdw_options(
 }
 
 fn parse_column_def_sql(column_sql: &str) -> Result<ColumnDef, ParseError> {
-    let mut pairs = SqlParser::parse(Rule::column_def, column_sql)
+    let mut pairs = pgrust_sql_grammar::parse_rule(Rule::column_def, column_sql)
         .map_err(|err| map_pest_error("column definition", column_sql, err))?;
     build_column_def(pairs.next().ok_or(ParseError::UnexpectedEof)?)
 }
@@ -1946,7 +1941,7 @@ fn parse_partition_of_table_storage_clause(
     input: &str,
 ) -> Result<&str, PartitionStatementParseError> {
     let trimmed = input.trim_start();
-    let mut pairs = SqlParser::parse(Rule::table_storage_clause, trimmed)
+    let mut pairs = pgrust_sql_grammar::parse_rule(Rule::table_storage_clause, trimmed)
         .map_err(|_| PartitionStatementParseError::Unsupported)?;
     let pair = pairs
         .next()
@@ -3565,7 +3560,7 @@ pub fn parse_expr(sql: &str) -> Result<SqlExpr, ParseError> {
         move || {
             let sql = strip_sql_comments_preserving_layout(&sql);
             validate_numeric_lexemes(&sql)?;
-            SqlParser::parse(Rule::expr, &sql)
+            pgrust_sql_grammar::parse_rule(Rule::expr, &sql)
                 .map_err(|e| map_pest_error("expression", &sql, e))
                 .and_then(|mut pairs| {
                     let pair = pairs.next().ok_or(ParseError::UnexpectedEof)?;
@@ -3694,7 +3689,7 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "pg_lsn" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::PgLsn))),
         _ => {}
     }
-    SqlParser::parse(Rule::type_name, &sql)
+    pgrust_sql_grammar::parse_rule(Rule::type_name, &sql)
         .map_err(|e| map_pest_error("type name", &sql, e))
         .and_then(|mut pairs| {
             let pair = pairs.next().ok_or(ParseError::UnexpectedEof)?;
@@ -8998,7 +8993,7 @@ fn parse_sql_call_args(input: &str) -> Result<SqlCallArgs, ParseError> {
     if input.trim().is_empty() {
         return Ok(SqlCallArgs::Args(Vec::new()));
     }
-    let pair = SqlParser::parse(Rule::function_arg_list, input)
+    let pair = pgrust_sql_grammar::parse_rule(Rule::function_arg_list, input)
         .map_err(|err| map_pest_error("function argument list", input, err))?
         .next()
         .ok_or(ParseError::UnexpectedEof)?;
@@ -13734,8 +13729,8 @@ fn build_comment_on_conversion_statement(
 
 #[cfg(test)]
 pub(crate) fn pest_parse_keyword(rule: Rule, input: &str) -> Result<String, ParseError> {
-    let mut pairs =
-        SqlParser::parse(rule, input).map_err(|e| map_pest_error("keyword", input, e))?;
+    let mut pairs = pgrust_sql_grammar::parse_rule(rule, input)
+        .map_err(|e| map_pest_error("keyword", input, e))?;
     Ok(pairs
         .next()
         .ok_or(ParseError::UnexpectedEof)?
@@ -25024,7 +25019,7 @@ mod tests {
 
     #[test]
     fn pest_parses_named_window_clause_statement() {
-        SqlParser::parse(
+        pgrust_sql_grammar::parse_rule(
             Rule::statement,
             "select row_number() over w from people window w as ()",
         )
@@ -25033,7 +25028,7 @@ mod tests {
 
     #[test]
     fn pest_parses_window_frame_statement() {
-        SqlParser::parse(
+        pgrust_sql_grammar::parse_rule(
             Rule::statement,
             "select sum(id) over (w rows between 1 preceding and current row) from people window w as (partition by name order by id)",
         )
@@ -25042,7 +25037,7 @@ mod tests {
 
     #[test]
     fn pest_parses_window_frame_exclusion_statement() {
-        SqlParser::parse(
+        pgrust_sql_grammar::parse_rule(
             Rule::statement,
             "select sum(id) over (rows between unbounded preceding and current row exclude ties) from people",
         )

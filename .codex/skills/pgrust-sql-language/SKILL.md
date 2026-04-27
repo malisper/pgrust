@@ -10,7 +10,7 @@ Use this when a change touches the SQL pipeline rather than just executor math o
 ## Workflow
 
 1. Find the narrowest layer that is actually missing behavior.
-- Syntax only: `src/backend/parser/gram.pest`, `src/backend/parser/gram.rs`, `src/include/nodes/parsenodes.rs`
+- Syntax only: `crates/pgrust_sql_grammar/src/gram.pest`, `src/backend/parser/gram.rs`, `src/include/nodes/parsenodes.rs`
 - Binding/planning: `src/backend/parser/analyze/*`
 - Runtime semantics: `src/backend/executor/*`
 - SQL-visible errors or protocol output: `src/backend/tcop/postgres.rs`, `src/backend/libpq/pqformat.rs`
@@ -36,7 +36,7 @@ Use this when a change touches the SQL pipeline rather than just executor math o
 ## Usual Touch Points
 
 ### Grammar and AST
-- `src/backend/parser/gram.pest`
+- `crates/pgrust_sql_grammar/src/gram.pest`
 - `src/backend/parser/gram.rs`
 - `src/include/nodes/parsenodes.rs`
 
