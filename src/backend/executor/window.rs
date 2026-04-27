@@ -11,7 +11,7 @@ use crate::include::nodes::datetime::{
 };
 use crate::include::nodes::datum::{IntervalValue, NumericValue, Value};
 use crate::include::nodes::execnodes::{MaterializedRow, SystemVarBinding, TupleSlot};
-use crate::include::nodes::parsenodes::WindowFrameMode;
+use crate::include::nodes::parsenodes::{WindowFrameExclusion, WindowFrameMode};
 use crate::include::nodes::primnodes::{
     BuiltinWindowFunction, OrderByEntry, WindowClause, WindowFrameBound, WindowFuncExpr,
     WindowFuncKind,
@@ -876,6 +876,83 @@ fn evaluate_window_frame(
     })
 }
 
+fn row_is_included_by_frame_exclusion(
+    clause: &WindowClause,
+    partition_rows: &[PreparedWindowRow],
+    row_index: usize,
+    candidate_index: usize,
+) -> Result<bool, ExecError> {
+    match clause.spec.frame.exclusion {
+        WindowFrameExclusion::NoOthers => Ok(true),
+        WindowFrameExclusion::CurrentRow => Ok(candidate_index != row_index),
+        WindowFrameExclusion::Group => Ok(!same_peer(
+            &clause.spec.order_by,
+            &partition_rows[row_index],
+            &partition_rows[candidate_index],
+        )?),
+        WindowFrameExclusion::Ties => {
+            if candidate_index == row_index {
+                return Ok(true);
+            }
+            Ok(!same_peer(
+                &clause.spec.order_by,
+                &partition_rows[row_index],
+                &partition_rows[candidate_index],
+            )?)
+        }
+    }
+}
+
+fn first_included_frame_row_index(
+    clause: &WindowClause,
+    partition_rows: &[PreparedWindowRow],
+    row_index: usize,
+    frame_start: usize,
+    frame_end: usize,
+) -> Result<Option<usize>, ExecError> {
+    for candidate in frame_start..frame_end {
+        if row_is_included_by_frame_exclusion(clause, partition_rows, row_index, candidate)? {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+fn last_included_frame_row_index(
+    clause: &WindowClause,
+    partition_rows: &[PreparedWindowRow],
+    row_index: usize,
+    frame_start: usize,
+    frame_end: usize,
+) -> Result<Option<usize>, ExecError> {
+    for candidate in (frame_start..frame_end).rev() {
+        if row_is_included_by_frame_exclusion(clause, partition_rows, row_index, candidate)? {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+fn nth_included_frame_row_index(
+    clause: &WindowClause,
+    partition_rows: &[PreparedWindowRow],
+    row_index: usize,
+    frame_start: usize,
+    frame_end: usize,
+    nth: usize,
+) -> Result<Option<usize>, ExecError> {
+    let mut seen = 0usize;
+    for candidate in frame_start..frame_end {
+        if row_is_included_by_frame_exclusion(clause, partition_rows, row_index, candidate)? {
+            seen += 1;
+            if seen == nth {
+                return Ok(Some(candidate));
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn advance_window_aggregate(
     ctx: &mut ExecutorContext,
     state: &mut AccumState,
@@ -1185,8 +1262,20 @@ fn evaluate_value_window(
         let (frame_start, frame_end) =
             evaluate_window_frame(ctx, clause, partition_rows, row_index)?;
         let frame_row_index = match builtin {
-            BuiltinWindowFunction::FirstValue => (frame_start < frame_end).then_some(frame_start),
-            BuiltinWindowFunction::LastValue => (frame_start < frame_end).then(|| frame_end - 1),
+            BuiltinWindowFunction::FirstValue => first_included_frame_row_index(
+                clause,
+                partition_rows,
+                row_index,
+                frame_start,
+                frame_end,
+            )?,
+            BuiltinWindowFunction::LastValue => last_included_frame_row_index(
+                clause,
+                partition_rows,
+                row_index,
+                frame_start,
+                frame_end,
+            )?,
             BuiltinWindowFunction::NthValue => {
                 let Some(offset) =
                     evaluate_nth_value_offset(ctx, func, &mut partition_rows[row_index])?
@@ -1194,8 +1283,14 @@ fn evaluate_value_window(
                     values.push(Value::Null);
                     continue;
                 };
-                let target = frame_start + offset - 1;
-                (target < frame_end).then_some(target)
+                nth_included_frame_row_index(
+                    clause,
+                    partition_rows,
+                    row_index,
+                    frame_start,
+                    frame_end,
+                    offset,
+                )?
             }
             _ => panic!("non-value window function routed to value path"),
         };
@@ -1249,7 +1344,10 @@ fn evaluate_aggregate_window(
         )
     });
     let mut state = AccumState::new(func, aggref.aggdistinct, aggref.aggtype);
-    if !has_order_by && matches!(clause.spec.frame.mode, WindowFrameMode::Range) {
+    if !has_order_by
+        && matches!(clause.spec.frame.mode, WindowFrameMode::Range)
+        && clause.spec.frame.exclusion == WindowFrameExclusion::NoOthers
+    {
         for row in partition_rows.iter_mut() {
             advance_window_aggregate(ctx, &mut state, &mut row.row, aggref)?;
         }
@@ -1284,8 +1382,14 @@ fn evaluate_aggregate_window(
         let (frame_start, frame_end) =
             evaluate_window_frame(ctx, clause, partition_rows, row_index)?;
         let mut state = AccumState::new(func, aggref.aggdistinct, aggref.aggtype);
-        for row in partition_rows[frame_start..frame_end].iter_mut() {
-            advance_window_aggregate(ctx, &mut state, &mut row.row, aggref)?;
+        let included_indexes = (frame_start..frame_end)
+            .map(|candidate| {
+                row_is_included_by_frame_exclusion(clause, partition_rows, row_index, candidate)
+                    .map(|included| included.then_some(candidate))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for row_index in included_indexes.into_iter().flatten() {
+            advance_window_aggregate(ctx, &mut state, &mut partition_rows[row_index].row, aggref)?;
         }
         values.push(state.finalize());
     }
@@ -1299,6 +1403,9 @@ fn frame_uses_prefix_accumulation(
     _aggref: &crate::include::nodes::primnodes::Aggref,
 ) -> Result<bool, ExecError> {
     let frame = &clause.spec.frame;
+    if frame.exclusion != WindowFrameExclusion::NoOthers {
+        return Ok(false);
+    }
     if !matches!(frame.start_bound, WindowFrameBound::UnboundedPreceding) {
         return Ok(false);
     }

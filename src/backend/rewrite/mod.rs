@@ -372,6 +372,7 @@ fn rewrite_window_clause(
                     expanded_views,
                     active_policy_relations,
                 )?,
+                exclusion: clause.spec.frame.exclusion,
             },
         },
         functions: clause

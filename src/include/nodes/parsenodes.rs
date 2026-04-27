@@ -1719,6 +1719,14 @@ pub enum WindowFrameMode {
     Groups,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowFrameExclusion {
+    NoOthers,
+    CurrentRow,
+    Group,
+    Ties,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawWindowFrameBound {
     UnboundedPreceding,
@@ -1733,6 +1741,7 @@ pub struct RawWindowFrame {
     pub mode: WindowFrameMode,
     pub start_bound: RawWindowFrameBound,
     pub end_bound: RawWindowFrameBound,
+    pub exclusion: WindowFrameExclusion,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

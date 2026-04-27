@@ -348,6 +348,7 @@ fn expand_window_clause(root: &PlannerInfo, clause: &WindowClause) -> WindowClau
                 mode: clause.spec.frame.mode,
                 start_bound: expand_frame_bound(clause.spec.frame.start_bound.clone()),
                 end_bound: expand_frame_bound(clause.spec.frame.end_bound.clone()),
+                exclusion: clause.spec.frame.exclusion,
             },
         },
         functions: clause

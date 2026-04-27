@@ -3840,12 +3840,35 @@ impl Database {
         } else {
             create_stmt.persistence
         };
+        let temp_lookup_name = view_name
+            .strip_prefix("pg_temp.")
+            .unwrap_or(&view_name)
+            .to_ascii_lowercase();
         let existing_relation = if effective_persistence == TablePersistence::Permanent {
             catalog
                 .lookup_any_relation(&view_name)
                 .filter(|relation| relation.namespace_oid == namespace_oid)
         } else {
-            None
+            self.owned_temp_namespace(client_id).and_then(|namespace| {
+                namespace.tables.get(&temp_lookup_name).map(|entry| {
+                    let entry = &entry.entry;
+                    crate::backend::parser::BoundRelation {
+                        rel: entry.rel,
+                        relation_oid: entry.relation_oid,
+                        toast: None,
+                        namespace_oid: entry.namespace_oid,
+                        owner_oid: entry.owner_oid,
+                        of_type_oid: entry.of_type_oid,
+                        relpersistence: entry.relpersistence,
+                        relkind: entry.relkind,
+                        relispopulated: entry.relispopulated,
+                        relispartition: entry.relispartition,
+                        relpartbound: entry.relpartbound.clone(),
+                        desc: entry.desc.clone(),
+                        partitioned_table: entry.partitioned_table.clone(),
+                    }
+                })
+            })
         };
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -3873,11 +3896,14 @@ impl Database {
                 .write()
                 .alter_view_relation_desc_mvcc(
                     existing_relation.relation_oid,
-                    desc,
+                    desc.clone(),
                     reloptions.clone(),
                     &ctx,
                 )
                 .map_err(map_catalog_error)?;
+            if existing_relation.relpersistence == 't' {
+                self.replace_temp_entry_desc(client_id, existing_relation.relation_oid, desc)?;
+            }
             catalog_effects.push(replace_effect);
             existing_relation.relation_oid
         } else {
@@ -3949,10 +3975,8 @@ impl Database {
             cid: cid.saturating_add(2),
             ..rule_drop_ctx
         };
-        let rule_effect = self
-            .catalog
-            .write()
-            .create_rule_mvcc_with_owner_dependency(
+        let rule_result = {
+            self.catalog.write().create_rule_mvcc_with_owner_dependency(
                 relation_oid,
                 "_RETURN",
                 '1',
@@ -3963,7 +3987,24 @@ impl Database {
                 crate::backend::catalog::store::RuleOwnerDependency::Internal,
                 &rule_ctx,
             )
-            .map_err(map_catalog_error)?;
+        };
+        let rule_effect = match rule_result {
+            Ok(effect) => effect,
+            Err(err) => {
+                let exec_err = map_catalog_error(err);
+                if is_new_relation && effective_persistence == TablePersistence::Temporary {
+                    let _ = self.drop_temp_relation_in_transaction(
+                        client_id,
+                        &temp_lookup_name,
+                        xid,
+                        cid.saturating_add(3),
+                        catalog_effects,
+                        temp_effects,
+                    );
+                }
+                return Err(exec_err);
+            }
+        };
         catalog_effects.push(rule_effect);
         if is_new_relation {
             // :HACK: CREATE VIEW reserves an intermediate command id between creating
