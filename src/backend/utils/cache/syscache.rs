@@ -1922,6 +1922,32 @@ fn search_sys_cache_list_db(
     Ok(tuples)
 }
 
+fn load_backend_catcache(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Result<CatCache, CatalogError> {
+    let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
+        .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
+    let mut cache = {
+        let txns = db.txns.read();
+        let shared = db
+            .shared_catalog
+            .read()
+            .catcache_with_snapshot(&db.pool, &txns, &snapshot, client_id)?;
+        let local = db
+            .catalog
+            .read()
+            .catcache_with_snapshot(&db.pool, &txns, &snapshot, client_id)?;
+        merge_catcaches(shared, local)
+    };
+    let search_path = db.effective_search_path(client_id, None);
+    cache.extend_type_rows(db.domain_type_rows_for_search_path(&search_path));
+    cache.extend_type_rows(db.enum_type_rows_for_search_path(&search_path));
+    cache.extend_type_rows(db.range_type_rows_for_search_path(&search_path));
+    Ok(cache)
+}
+
 pub fn backend_catcache(
     db: &Database,
     client_id: ClientId,
@@ -1942,30 +1968,44 @@ pub fn backend_catcache(
         return Ok(cache);
     }
 
-    let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
-        .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
-    let mut cache = {
-        let txns = db.txns.read();
-        let shared = db
-            .shared_catalog
-            .read()
-            .catcache_with_snapshot(&db.pool, &txns, &snapshot, client_id)?;
-        let local = db
-            .catalog
-            .read()
-            .catcache_with_snapshot(&db.pool, &txns, &snapshot, client_id)?;
-        merge_catcaches(shared, local)
-    };
-    let search_path = db.effective_search_path(client_id, None);
-    cache.extend_type_rows(db.domain_type_rows_for_search_path(&search_path));
-    cache.extend_type_rows(db.enum_type_rows_for_search_path(&search_path));
-    cache.extend_type_rows(db.range_type_rows_for_search_path(&search_path));
+    let cache = load_backend_catcache(db, client_id, txn_ctx)?;
 
     let mut states = db.backend_cache_states.write();
     let state = states.entry(client_id).or_default();
     state.catcache_ctx = Some(cache_ctx);
     state.catcache = Some(cache.clone());
     Ok(cache)
+}
+
+pub(crate) fn with_backend_catcache<T>(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    f: impl FnOnce(&CatCache) -> T,
+) -> Result<T, CatalogError> {
+    if txn_ctx.is_none() {
+        db.accept_invalidation_messages(client_id);
+    }
+
+    let cache_ctx = BackendCacheContext::from(txn_ctx);
+    {
+        let states = db.backend_cache_states.read();
+        if let Some(cache) = states
+            .get(&client_id)
+            .filter(|state| state.catcache_ctx == Some(cache_ctx))
+            .and_then(|state| state.catcache.as_ref())
+        {
+            return Ok(f(cache));
+        }
+    }
+
+    let cache = load_backend_catcache(db, client_id, txn_ctx)?;
+    let result = f(&cache);
+    let mut states = db.backend_cache_states.write();
+    let state = states.entry(client_id).or_default();
+    state.catcache_ctx = Some(cache_ctx);
+    state.catcache = Some(cache);
+    Ok(result)
 }
 
 pub fn drain_pending_invalidations(db: &Database, client_id: ClientId) -> Vec<CatalogInvalidation> {

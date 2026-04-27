@@ -11017,6 +11017,22 @@ fn gist_leaf_tuple_count(db: &Database, client_id: u32, rel: crate::RelFileLocat
     count
 }
 
+fn btree_leaf_tuple_count(db: &Database, client_id: u32, rel: crate::RelFileLocator) -> usize {
+    let nblocks = relation_fork_nblocks(db, rel, crate::backend::storage::smgr::ForkNumber::Main);
+    let mut count = 0usize;
+    for block in 0..nblocks {
+        let page = read_buffered_relation_block(db, client_id, rel, block);
+        let opaque = crate::include::access::nbtree::bt_page_get_opaque(&page).unwrap();
+        if opaque.is_leaf() && opaque.btpo_flags & crate::include::access::nbtree::BTP_DELETED == 0
+        {
+            count += crate::include::access::nbtree::bt_page_data_items(&page)
+                .unwrap()
+                .len();
+        }
+    }
+    count
+}
+
 fn assert_explain_uses_index(db: &Database, client_id: u32, sql: &str, index_name: &str) {
     let relfilenode = relfilenode_for(db, client_id, index_name);
     let lines = explain_lines(db, client_id, sql);
@@ -26058,6 +26074,71 @@ fn indexed_truncate_reinitializes_indexes() {
     assert_eq!(
         query_rows(&db, 1, "select name from items where id = 3"),
         vec![vec![Value::Text("gamma".into())]]
+    );
+}
+
+#[test]
+fn btree_prunes_aborted_leaf_entries_when_page_is_full() {
+    let base = temp_dir("btree_prunes_aborted_leaf_entries");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4 not null, note text)")
+        .unwrap();
+    session
+        .execute(&db, "create index items_id_idx on items (id)")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, &insert_items_sql(0..1800, "aborted"))
+        .unwrap();
+    session.execute(&db, "rollback").unwrap();
+
+    let index_rel = relation_locator_for(&db, 1, "items_id_idx");
+    let aborted_blocks = relation_fork_nblocks(
+        &db,
+        index_rel,
+        crate::backend::storage::smgr::ForkNumber::Main,
+    );
+    let aborted_tuples = btree_leaf_tuple_count(&db, 1, index_rel);
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from items"),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert!(
+        aborted_tuples >= 1800,
+        "expected rollback to leave aborted index entries, got {aborted_tuples}"
+    );
+
+    session
+        .execute(&db, &insert_items_sql(0..1800, "live"))
+        .unwrap();
+
+    let live_blocks = relation_fork_nblocks(
+        &db,
+        index_rel,
+        crate::backend::storage::smgr::ForkNumber::Main,
+    );
+    let live_tuples = btree_leaf_tuple_count(&db, 1, index_rel);
+    assert!(
+        live_blocks <= aborted_blocks + 2,
+        "expected page-pressure pruning to avoid index growth, blocks {aborted_blocks} -> {live_blocks}"
+    );
+    assert!(
+        live_tuples < aborted_tuples + 1800,
+        "expected pruning to remove at least some aborted entries, tuples {aborted_tuples} -> {live_tuples}"
+    );
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select note from items where id = 42",
+        "items_id_idx",
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where id = 42"),
+        vec![vec![Value::Text("live42".into())]]
     );
 }
 

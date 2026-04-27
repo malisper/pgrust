@@ -8620,6 +8620,48 @@ fn build_plan_in_list_common_type_includes_left_operand() {
 }
 
 #[test]
+fn build_plan_binds_stats_ext_any_and_function_predicates() {
+    let plan = build_plan(
+        &parse_select(
+            "select (id * 2) < any (array[2, 102]), upper(name) > '1', \
+             (id * 2) < any (array[2, 102]) and upper(name) > '1' from people",
+        )
+        .unwrap(),
+        &catalog(),
+    )
+    .unwrap();
+    let Plan::Projection { targets, .. } = plan else {
+        panic!("expected projection plan");
+    };
+
+    assert_eq!(targets.len(), 3);
+    assert!(matches!(
+        &targets[0].expr,
+        Expr::ScalarArrayOp(saop)
+            if saop.op == SubqueryComparisonOp::Lt
+                && saop.use_or
+                && matches!(saop.right.as_ref(), Expr::ArrayLiteral { array_type, .. }
+                    if *array_type == SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
+    ));
+    assert!(matches!(
+        &targets[1].expr,
+        Expr::Op(op)
+            if op.op == crate::include::nodes::primnodes::OpExprKind::Gt
+                && matches!(op.args.as_slice(), [Expr::Func(func), _]
+                    if func.implementation
+                        == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+                            crate::include::nodes::primnodes::BuiltinScalarFunction::Upper
+                        ))
+    ));
+    assert!(matches!(
+        &targets[2].expr,
+        Expr::Bool(bool_expr)
+            if bool_expr.boolop == crate::include::nodes::primnodes::BoolExprType::And
+                && bool_expr.args.len() == 2
+    ));
+}
+
+#[test]
 fn analyze_timestamptz_typed_string_literal_keeps_timestamp_tz_type() {
     let stmt = parse_select("select timestamptz '2024-01-02 03:04:05+00'").unwrap();
     let (query, _) =

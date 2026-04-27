@@ -322,50 +322,38 @@ pub(super) fn bind_user_defined_scalar_function_call(
     let bound_args_with_types = args
         .iter()
         .map(|arg| {
-            let bound = bind_expr_with_outer_and_ctes(
+            bind_typed_expr_with_outer_and_ctes(
                 &arg.value,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            )?;
-            let sql_type = expr_sql_type_hint(&bound).unwrap_or_else(|| {
-                infer_sql_expr_type_with_ctes(
-                    &arg.value,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                )
-            });
-            Ok((bound, sql_type))
+            )
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
-    let arg_types = bound_args_with_types
-        .iter()
-        .map(|(_, sql_type)| *sql_type)
-        .collect::<Vec<_>>();
-    let bound_args = bound_args_with_types
-        .into_iter()
-        .map(|(bound, _)| bound)
-        .collect::<Vec<_>>();
-    let coerced_args = bound_args
-        .into_iter()
-        .zip(arg_types)
-        .zip(declared_arg_types.iter().copied())
-        .map(|((arg, actual_type), declared_type)| {
-            coerce_bound_expr(arg, actual_type, declared_type)
-        })
-        .collect();
-    Ok(Expr::user_defined_func(
+    Ok(bind_user_defined_scalar_function_call_from_typed_args(
         proc_oid,
         funcname,
-        Some(result_type),
-        false,
-        coerced_args,
+        result_type,
+        declared_arg_types,
+        bound_args_with_types,
     ))
+}
+
+pub(super) fn bind_user_defined_scalar_function_call_from_typed_args(
+    proc_oid: u32,
+    funcname: Option<String>,
+    result_type: SqlType,
+    declared_arg_types: &[SqlType],
+    bound_args_with_types: Vec<TypedExpr>,
+) -> Expr {
+    let coerced_args = bound_args_with_types
+        .into_iter()
+        .zip(declared_arg_types.iter().copied())
+        .map(|(arg, declared_type)| coerce_bound_expr(arg.expr, arg.sql_type, declared_type))
+        .collect();
+    Expr::user_defined_func(proc_oid, funcname, Some(result_type), false, coerced_args)
 }
 
 pub(super) fn bind_resolved_scalar_function_call(
@@ -451,28 +439,90 @@ pub(super) fn bind_scalar_function_call(
     } else {
         args.iter()
             .map(|arg| {
-                let bound = bind_expr_with_outer_and_ctes(
+                bind_typed_expr_with_outer_and_ctes(
                     arg,
                     scope,
                     catalog,
                     outer_scopes,
                     grouped_outer,
                     ctes,
-                )?;
-                let sql_type = expr_sql_type_hint(&bound).unwrap_or_else(|| {
-                    infer_sql_expr_type_with_ctes(
-                        arg,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )
-                });
-                Ok((bound, sql_type))
+                )
+                .map(|typed| (typed.expr, typed.sql_type))
             })
             .collect::<Result<Vec<_>, ParseError>>()?
     };
+    bind_scalar_function_call_from_bound_args(
+        func,
+        func_oid,
+        result_type,
+        func_variadic,
+        nvargs,
+        vatype_oid,
+        declared_arg_types,
+        args,
+        bound_args_with_types,
+        catalog,
+        scope,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )
+}
+
+pub(super) fn bind_scalar_function_call_from_typed_args(
+    func: BuiltinScalarFunction,
+    func_oid: u32,
+    result_type: Option<SqlType>,
+    func_variadic: bool,
+    nvargs: usize,
+    vatype_oid: u32,
+    declared_arg_types: &[SqlType],
+    args: &[SqlExpr],
+    bound_args_with_types: Vec<TypedExpr>,
+    catalog: &dyn CatalogLookup,
+    scope: &BoundScope,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let bound_args_with_types = bound_args_with_types
+        .into_iter()
+        .map(|typed| (typed.expr, typed.sql_type))
+        .collect();
+    bind_scalar_function_call_from_bound_args(
+        func,
+        func_oid,
+        result_type,
+        func_variadic,
+        nvargs,
+        vatype_oid,
+        declared_arg_types,
+        args,
+        bound_args_with_types,
+        catalog,
+        scope,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )
+}
+
+fn bind_scalar_function_call_from_bound_args(
+    func: BuiltinScalarFunction,
+    func_oid: u32,
+    result_type: Option<SqlType>,
+    func_variadic: bool,
+    nvargs: usize,
+    vatype_oid: u32,
+    declared_arg_types: &[SqlType],
+    args: &[SqlExpr],
+    bound_args_with_types: Vec<(Expr, SqlType)>,
+    catalog: &dyn CatalogLookup,
+    scope: &BoundScope,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
     let arg_types = bound_args_with_types
         .iter()
         .map(|(_, sql_type)| *sql_type)

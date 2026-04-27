@@ -28,7 +28,8 @@ mod subquery;
 mod targets;
 
 use self::func::{
-    bind_row_to_json_call, bind_scalar_function_call, bind_user_defined_scalar_function_call,
+    bind_row_to_json_call, bind_scalar_function_call, bind_scalar_function_call_from_typed_args,
+    bind_user_defined_scalar_function_call, bind_user_defined_scalar_function_call_from_typed_args,
 };
 use self::json::{
     bind_json_binary_expr, bind_jsonb_contained_expr, bind_jsonb_contains_expr,
@@ -129,6 +130,16 @@ fn quantified_function_arg(expr: &SqlExpr) -> Option<(bool, &SqlExpr)> {
         return None;
     }
     Some((is_all, &arg.value))
+}
+
+fn scalar_function_needs_raw_arg_binding(func: BuiltinScalarFunction) -> bool {
+    matches!(
+        func,
+        BuiltinScalarFunction::JsonBuildArray
+            | BuiltinScalarFunction::JsonBuildObject
+            | BuiltinScalarFunction::JsonbBuildArray
+            | BuiltinScalarFunction::JsonbBuildObject
+    )
 }
 
 fn set_returning_not_allowed_error(context: &'static str) -> ParseError {
@@ -4232,15 +4243,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 && args_list.len() == 1
                 && args_list.iter().all(|arg| arg.name.is_none())
             {
-                let arg_type = infer_sql_expr_type_with_ctes(
-                    &args_list[0].value,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
-                let bound_arg = bind_expr_with_outer_and_ctes(
+                let bound_arg = bind_typed_expr_with_outer_and_ctes(
                     &args_list[0].value,
                     scope,
                     catalog,
@@ -4248,30 +4251,57 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     grouped_outer,
                     ctes,
                 )?;
-                if catalog_backed_explicit_cast_allowed(arg_type, target_type, catalog) {
+                if catalog_backed_explicit_cast_allowed(bound_arg.sql_type, target_type, catalog) {
                     return Ok(Expr::Cast(
-                        Box::new(bound_arg),
-                        if arg_type == target_type {
-                            arg_type
+                        Box::new(bound_arg.expr),
+                        if bound_arg.sql_type == target_type {
+                            bound_arg.sql_type
                         } else {
                             target_type
                         },
                     ));
                 }
             }
-            let actual_types = args_list
-                .iter()
-                .map(|arg| {
-                    infer_sql_expr_type_with_ctes(
-                        &arg.value,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )
-                })
-                .collect::<Vec<_>>();
+            let positional_function_args = args_list.iter().all(|arg| arg.name.is_none());
+            let mut typed_args = if positional_function_args {
+                Some(
+                    args_list
+                        .iter()
+                        .map(|arg| {
+                            bind_typed_expr_with_outer_and_ctes(
+                                &arg.value,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, ParseError>>()?,
+                )
+            } else {
+                None
+            };
+            let actual_types = if let Some(typed_args) = typed_args.as_ref() {
+                typed_args
+                    .iter()
+                    .map(|arg| arg.sql_type)
+                    .collect::<Vec<_>>()
+            } else {
+                args_list
+                    .iter()
+                    .map(|arg| {
+                        infer_sql_expr_type_with_ctes(
+                            &arg.value,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
             let mut resolution_types = actual_types.clone();
             if matches!(args_list.len(), 3)
                 && !*func_variadic
@@ -4321,6 +4351,27 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                         }
                         if let Some(func) = resolved.scalar_impl {
                             let lowered_args = lower_named_scalar_function_args(func, args_list)?;
+                            if positional_function_args
+                                && !scalar_function_needs_raw_arg_binding(func)
+                                && let Some(bound_args) = typed_args.take()
+                            {
+                                return bind_scalar_function_call_from_typed_args(
+                                    func,
+                                    resolved.proc_oid,
+                                    Some(resolved.result_type),
+                                    resolved.func_variadic,
+                                    resolved.nvargs,
+                                    resolved.vatype_oid,
+                                    &resolved.declared_arg_types,
+                                    &lowered_args,
+                                    bound_args,
+                                    catalog,
+                                    scope,
+                                    outer_scopes,
+                                    grouped_outer,
+                                    ctes,
+                                );
+                            }
                             return bind_scalar_function_call(
                                 func,
                                 resolved.proc_oid,
@@ -4336,6 +4387,15 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                                 grouped_outer,
                                 ctes,
                             );
+                        }
+                        if positional_function_args && let Some(bound_args) = typed_args.take() {
+                            return Ok(bind_user_defined_scalar_function_call_from_typed_args(
+                                resolved.proc_oid,
+                                Some(resolved.proname.clone()),
+                                resolved.result_type,
+                                &resolved.declared_arg_types,
+                                bound_args,
+                            ));
                         }
                         return bind_user_defined_scalar_function_call(
                             resolved.proc_oid,

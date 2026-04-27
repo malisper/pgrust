@@ -39,10 +39,10 @@ use crate::include::access::htup::{AttributeCompression, AttributeStorage, Tuple
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::itup::IndexTupleData;
 use crate::include::access::nbtree::{
-    BTP_DELETED, BTP_INCOMPLETE_SPLIT, BTP_LEAF, BTP_ROOT, BTREE_DEFAULT_FILLFACTOR,
-    BTREE_METAPAGE, BTREE_NONLEAF_FILLFACTOR, BTREE_VERSION, P_NONE, bt_init_meta_page,
-    bt_max_item_size, bt_page_append_tuple, bt_page_data_items, bt_page_get_meta,
-    bt_page_get_opaque, bt_page_high_key, bt_page_init, bt_page_is_recyclable,
+    BTP_DELETED, BTP_INCOMPLETE_SPLIT, BTP_LEAF, BTP_ROOT, BTPageOpaqueData,
+    BTREE_DEFAULT_FILLFACTOR, BTREE_METAPAGE, BTREE_NONLEAF_FILLFACTOR, BTREE_VERSION, P_NONE,
+    bt_init_meta_page, bt_max_item_size, bt_page_append_tuple, bt_page_data_items,
+    bt_page_get_meta, bt_page_get_opaque, bt_page_high_key, bt_page_init, bt_page_is_recyclable,
     bt_page_set_high_key, bt_page_set_opaque,
 };
 use crate::include::access::relscan::{
@@ -2345,9 +2345,6 @@ fn insert_tuple_into_locked_page(
         .map_err(|err| CatalogError::Io(format!("btree high-key read failed: {err:?}")))?;
     let mut items = bt_page_data_items(&page)
         .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
-    if is_leaf {
-        prune_aborted_leaf_items(ctx, &mut items);
-    }
     let key_count = btree_key_count(&ctx.index_meta);
     let insert_at = if is_leaf {
         items.partition_point(|item| {
@@ -2377,50 +2374,54 @@ fn insert_tuple_into_locked_page(
     };
     items.insert(insert_at, new_tuple);
 
-    let mut rebuilt = [0u8; crate::backend::storage::smgr::BLCKSZ];
-    bt_page_init(
-        &mut rebuilt,
-        if is_leaf { BTP_LEAF } else { 0 },
-        old_opaque.btpo_level,
-    )
-    .map_err(|err| CatalogError::Io(format!("btree page init failed: {err:?}")))?;
-    let mut rebuilt_opaque = bt_page_get_opaque(&rebuilt)
-        .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
-    rebuilt_opaque.btpo_prev = old_opaque.btpo_prev;
-    rebuilt_opaque.btpo_next = old_opaque.btpo_next;
-    let append_result = if let Some(high_key) = existing_high_key.as_ref() {
-        bt_page_set_high_key(&mut rebuilt, high_key, items.clone(), rebuilt_opaque)
-    } else {
-        if let Err(err) = bt_page_set_opaque(&mut rebuilt, rebuilt_opaque) {
-            Err(err)
-        } else {
-            let mut result = Ok(());
-            for tuple in &items {
-                if let Err(err) = bt_page_append_tuple(&mut rebuilt, tuple) {
-                    result = Err(err);
-                    break;
+    let rebuilt =
+        match build_insert_page_image(old_opaque, existing_high_key.as_ref(), &items, is_leaf) {
+            Ok(rebuilt) => rebuilt,
+            Err(_) if is_leaf && prune_aborted_leaf_items(ctx, &mut items) > 0 => {
+                match build_insert_page_image(
+                    old_opaque,
+                    existing_high_key.as_ref(),
+                    &items,
+                    is_leaf,
+                ) {
+                    Ok(rebuilt) => rebuilt,
+                    Err(_) => {
+                        let split = choose_split_index(&items, None);
+                        let right_items = items.split_off(split);
+                        let left_items = items;
+                        return write_split_pages_locked(
+                            ctx,
+                            block,
+                            pin,
+                            guard,
+                            existing_high_key.clone(),
+                            &left_items,
+                            &right_items,
+                            old_opaque,
+                            is_leaf,
+                        )
+                        .map(Some);
+                    }
                 }
             }
-            result
-        }
-    };
-    if append_result.is_err() {
-        let split = choose_split_index(&items, None);
-        let right_items = items.split_off(split);
-        let left_items = items;
-        return write_split_pages_locked(
-            ctx,
-            block,
-            pin,
-            guard,
-            existing_high_key.clone(),
-            &left_items,
-            &right_items,
-            old_opaque,
-            is_leaf,
-        )
-        .map(Some);
-    }
+            Err(_) => {
+                let split = choose_split_index(&items, None);
+                let right_items = items.split_off(split);
+                let left_items = items;
+                return write_split_pages_locked(
+                    ctx,
+                    block,
+                    pin,
+                    guard,
+                    existing_high_key.clone(),
+                    &left_items,
+                    &right_items,
+                    old_opaque,
+                    is_leaf,
+                )
+                .map(Some);
+            }
+        };
     let wal_info = if is_leaf {
         XLOG_BTREE_INSERT_LEAF
     } else {
@@ -2454,7 +2455,34 @@ fn insert_tuple_into_locked_page(
     Ok(None)
 }
 
-fn prune_aborted_leaf_items(ctx: &IndexInsertContext, items: &mut Vec<IndexTupleData>) {
+fn build_insert_page_image(
+    old_opaque: BTPageOpaqueData,
+    existing_high_key: Option<&IndexTupleData>,
+    items: &[IndexTupleData],
+    is_leaf: bool,
+) -> Result<Page, crate::include::access::nbtree::BtPageError> {
+    let mut rebuilt = [0u8; crate::backend::storage::smgr::BLCKSZ];
+    bt_page_init(
+        &mut rebuilt,
+        if is_leaf { BTP_LEAF } else { 0 },
+        old_opaque.btpo_level,
+    )?;
+    let mut rebuilt_opaque = bt_page_get_opaque(&rebuilt)?;
+    rebuilt_opaque.btpo_prev = old_opaque.btpo_prev;
+    rebuilt_opaque.btpo_next = old_opaque.btpo_next;
+    if let Some(high_key) = existing_high_key {
+        bt_page_set_high_key(&mut rebuilt, high_key, items.to_vec(), rebuilt_opaque)?;
+    } else {
+        bt_page_set_opaque(&mut rebuilt, rebuilt_opaque)?;
+        for tuple in items {
+            bt_page_append_tuple(&mut rebuilt, tuple)?;
+        }
+    }
+    Ok(rebuilt)
+}
+
+fn prune_aborted_leaf_items(ctx: &IndexInsertContext, items: &mut Vec<IndexTupleData>) -> usize {
+    let before = items.len();
     let txns = ctx.txns.read();
     items.retain(|item| {
         let Ok(tuple) = heap_fetch(&ctx.pool, ctx.client_id, ctx.heap_relation, item.t_tid) else {
@@ -2465,6 +2493,7 @@ fn prune_aborted_leaf_items(ctx: &IndexInsertContext, items: &mut Vec<IndexTuple
             Some(TransactionStatus::Aborted)
         )
     });
+    before.saturating_sub(items.len())
 }
 
 fn insert_tuple_into_page(

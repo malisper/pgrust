@@ -444,10 +444,11 @@ fn type_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<PgTypeRow> {
-    super::syscache::backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .type_by_oid(oid)
-        .cloned()
+    super::syscache::with_backend_catcache(db, client_id, txn_ctx, |catcache| {
+        catcache.type_by_oid(oid).cloned()
+    })
+    .ok()
+    .flatten()
 }
 
 fn type_row_by_name_namespace(
@@ -457,15 +458,14 @@ fn type_row_by_name_namespace(
     name: &str,
     namespace_oid: u32,
 ) -> Option<PgTypeRow> {
-    super::syscache::backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .type_rows()
-        .into_iter()
-        .find(|row| {
-            row.typnamespace == namespace_oid
-                && row.typname.eq_ignore_ascii_case(name)
-                && !db.other_session_temp_namespace_oid(client_id, row.typnamespace)
-        })
+    super::syscache::with_backend_catcache(db, client_id, txn_ctx, |catcache| {
+        catcache
+            .type_by_name_namespace(name, namespace_oid)
+            .cloned()
+    })
+    .ok()
+    .flatten()
+    .filter(|row| !db.other_session_temp_namespace_oid(client_id, row.typnamespace))
 }
 
 pub(crate) fn dynamic_type_rows_for_search_path(
@@ -1663,10 +1663,13 @@ impl CatalogLookup for LazyCatalogLookup {
         source_type_oid: u32,
         target_type_oid: u32,
     ) -> Option<PgCastRow> {
-        backend_catcache(&self.db, self.client_id, self.txn_ctx)
-            .ok()?
-            .cast_by_source_target(source_type_oid, target_type_oid)
-            .cloned()
+        super::syscache::with_backend_catcache(&self.db, self.client_id, self.txn_ctx, |catcache| {
+            catcache
+                .cast_by_source_target(source_type_oid, target_type_oid)
+                .cloned()
+        })
+        .ok()
+        .flatten()
     }
 
     fn cast_rows(&self) -> Vec<PgCastRow> {
