@@ -220,7 +220,7 @@ impl VisibleCatalog {
     pub fn class_rows(&self) -> Vec<PgClassRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::class_rows)
+            .map(|catcache| catcache.class_rows())
             .unwrap_or_default()
     }
 
@@ -266,28 +266,28 @@ impl VisibleCatalog {
     pub fn foreign_data_wrapper_rows(&self) -> Vec<PgForeignDataWrapperRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::foreign_data_wrapper_rows)
+            .map(|catcache| catcache.foreign_data_wrapper_rows())
             .unwrap_or_default()
     }
 
     pub fn foreign_server_rows(&self) -> Vec<crate::include::catalog::PgForeignServerRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::foreign_server_rows)
+            .map(|catcache| catcache.foreign_server_rows())
             .unwrap_or_default()
     }
 
     pub fn foreign_table_rows(&self) -> Vec<crate::include::catalog::PgForeignTableRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::foreign_table_rows)
+            .map(|catcache| catcache.foreign_table_rows())
             .unwrap_or_default()
     }
 
     pub fn user_mapping_rows(&self) -> Vec<crate::include::catalog::PgUserMappingRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::user_mapping_rows)
+            .map(|catcache| catcache.user_mapping_rows())
             .unwrap_or_default()
     }
 

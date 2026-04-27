@@ -274,6 +274,7 @@ impl Database {
         let action = match alter_stmt.action {
             crate::backend::parser::AlterColumnOptionsAction::Set(_) => "ALTER COLUMN ... SET",
             crate::backend::parser::AlterColumnOptionsAction::Reset(_) => "ALTER COLUMN ... RESET",
+            crate::backend::parser::AlterColumnOptionsAction::Fdw(_) => "ALTER COLUMN ... OPTIONS",
         };
         let detail = if relation.relkind == 'I' {
             "This operation is not supported for partitioned indexes."

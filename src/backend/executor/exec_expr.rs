@@ -5018,54 +5018,6 @@ fn eval_pg_partition_root(values: &[Value], ctx: &ExecutorContext) -> Result<Val
     }
 }
 
-fn eval_pg_get_partkeydef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
-    match values {
-        [Value::Null] => Ok(Value::Null),
-        [value] => {
-            let relation_oid = oid_arg_to_u32(value, "pg_get_partkeydef")?;
-            let catalog = executor_catalog(ctx)?;
-            let Some(relation) = catalog.lookup_relation_by_oid(relation_oid) else {
-                return Ok(Value::Null);
-            };
-            if relation.partitioned_table.is_none() {
-                return Ok(Value::Null);
-            }
-            let spec = relation_partition_spec(&relation).map_err(ExecError::Parse)?;
-            let strategy = match spec.strategy {
-                PartitionStrategy::List => "LIST",
-                PartitionStrategy::Range => "RANGE",
-                PartitionStrategy::Hash => "HASH",
-            };
-            let keys = spec
-                .partattrs
-                .iter()
-                .enumerate()
-                .map(|(index, attnum)| {
-                    if *attnum == 0 {
-                        return spec
-                            .key_sqls
-                            .get(index)
-                            .cloned()
-                            .unwrap_or_else(|| format!("partition key {}", index + 1));
-                    }
-                    relation
-                        .desc
-                        .columns
-                        .get(attnum.saturating_sub(1) as usize)
-                        .map(|column| quote_identifier(&column.name))
-                        .unwrap_or_else(|| format!("partition key {}", index + 1))
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            Ok(Value::Text(format!("{strategy} ({keys})").into()))
-        }
-        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "pg_get_partkeydef(oid)",
-            actual: format!("PgGetPartKeyDef({} args)", values.len()),
-        })),
-    }
-}
-
 fn eval_pg_table_is_visible(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
     match values {
         [Value::Null] => Ok(Value::Null),
@@ -7257,7 +7209,6 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::PgGetFunctionDef
         | BuiltinScalarFunction::PgGetFunctionResult
         | BuiltinScalarFunction::PgGetExpr
-        | BuiltinScalarFunction::PgGetPartKeyDef
         | BuiltinScalarFunction::PgGetPartitionConstraintDef
         | BuiltinScalarFunction::PgGetStatisticsObjDef
         | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
@@ -9116,7 +9067,6 @@ pub(crate) fn eval_builtin_function(
         }
         BuiltinScalarFunction::PgGetIndexDef => eval_pg_get_indexdef(&values, ctx),
         BuiltinScalarFunction::PgGetRuleDef => eval_pg_get_ruledef(&values, ctx),
-        BuiltinScalarFunction::PgGetPartKeyDef => eval_pg_get_partkeydef(&values, ctx),
         BuiltinScalarFunction::PgGetViewDef => eval_pg_get_viewdef(&values, ctx),
         BuiltinScalarFunction::PgGetTriggerDef => eval_pg_get_triggerdef(&values, ctx),
         BuiltinScalarFunction::PgTriggerDepth => Ok(Value::Int32(ctx.trigger_depth as i32)),

@@ -6623,6 +6623,7 @@ fn build_grant_foreign_data_wrapper_usage(sql: &str) -> Result<GrantObjectStatem
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         with_grant_option,
@@ -6635,6 +6636,7 @@ fn build_grant_foreign_server_usage(sql: &str) -> Result<GrantObjectStatement, P
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         with_grant_option,
@@ -6811,6 +6813,7 @@ fn build_revoke_foreign_data_wrapper_usage(sql: &str) -> Result<RevokeObjectStat
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade,
@@ -6823,6 +6826,7 @@ fn build_revoke_foreign_server_usage(sql: &str) -> Result<RevokeObjectStatement,
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade,

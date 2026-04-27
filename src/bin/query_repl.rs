@@ -585,7 +585,6 @@ fn run_statement(
         | Statement::CommentOnForeignServer(_)
         | Statement::CreateForeignDataWrapper(_)
         | Statement::CreateForeignServer(_)
-        | Statement::AlterForeignServerRename(_)
         | Statement::CreateLanguage(_)
         | Statement::AlterLanguage(_)
         | Statement::DropLanguage(_)

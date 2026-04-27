@@ -355,7 +355,6 @@ pub enum Statement {
     DropTextSearchConfiguration(DropTextSearchConfigurationStatement),
     CreateForeignDataWrapper(CreateForeignDataWrapperStatement),
     CreateForeignServer(CreateForeignServerStatement),
-    AlterForeignServerRename(AlterForeignServerRenameStatement),
     CreateForeignTable(CreateForeignTableStatement),
     ImportForeignSchema(ImportForeignSchemaStatement),
     CreateUserMapping(CreateUserMappingStatement),
@@ -3187,12 +3186,6 @@ pub struct DropLanguageStatement {
     pub if_exists: bool,
     pub language_name: String,
     pub cascade: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AlterForeignServerRenameStatement {
-    pub server_name: String,
-    pub new_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

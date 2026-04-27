@@ -800,9 +800,11 @@ impl Database {
                         client_id,
                         &AlterTableAddColumnStatement {
                             if_exists: alter_stmt.if_exists,
+                            missing_ok: false,
                             only: alter_stmt.only,
                             table_name: alter_stmt.table_name.clone(),
                             column: column.clone(),
+                            fdw_options: None,
                         },
                         configured_search_path,
                     );

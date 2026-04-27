@@ -43,11 +43,10 @@ use crate::include::access::nbtree::BtreeOptions;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
     BootstrapCatalogKind, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
-    CONSTRAINT_UNIQUE, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_AM_RELATION_OID,
-    PG_AMOP_RELATION_OID, PG_AMPROC_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_AUTHID_RELATION_OID,
-    PG_CAST_RELATION_OID, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
-    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_FOREIGN_SERVER_RELATION_OID,
-    PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
+    CONSTRAINT_UNIQUE, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_AMOP_RELATION_OID,
+    PG_AMPROC_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_AUTHID_RELATION_OID, PG_CAST_RELATION_OID,
+    PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
+    PG_FOREIGN_SERVER_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_OPERATOR_RELATION_OID,
     PG_OPFAMILY_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
     PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
     PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_RELATION_OID,
@@ -1692,51 +1691,6 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         self.comment_shared_object_mvcc(server_oid, PG_FOREIGN_SERVER_RELATION_OID, comment, ctx)
-    }
-
-    pub fn create_foreign_server_mvcc(
-        &mut self,
-        mut row: PgForeignServerRow,
-        ctx: &CatalogWriteContext,
-    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
-        row.oid = self.allocate_next_oid(row.oid)?;
-        let kinds = [BootstrapCatalogKind::PgForeignServer];
-        let rows = PhysicalCatalogRows {
-            foreign_servers: vec![row.clone()],
-            ..PhysicalCatalogRows::default()
-        };
-        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
-
-        let mut effect = CatalogMutationEffect::default();
-        effect_record_catalog_kinds(&mut effect, &kinds);
-        effect_record_oid(&mut effect.relation_oids, row.oid);
-        Ok((row.oid, effect))
-    }
-
-    pub fn replace_foreign_server_mvcc(
-        &mut self,
-        old_row: &PgForeignServerRow,
-        mut row: PgForeignServerRow,
-        ctx: &CatalogWriteContext,
-    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
-        let kinds = [BootstrapCatalogKind::PgForeignServer];
-        let old_rows = PhysicalCatalogRows {
-            foreign_servers: vec![old_row.clone()],
-            ..PhysicalCatalogRows::default()
-        };
-        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
-
-        row.oid = old_row.oid;
-        let new_rows = PhysicalCatalogRows {
-            foreign_servers: vec![row.clone()],
-            ..PhysicalCatalogRows::default()
-        };
-        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
-
-        let mut effect = CatalogMutationEffect::default();
-        effect_record_catalog_kinds(&mut effect, &kinds);
-        effect_record_oid(&mut effect.relation_oids, row.oid);
-        Ok((row.oid, effect))
     }
 
     pub fn drop_foreign_server_mvcc(

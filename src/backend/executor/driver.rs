@@ -359,7 +359,6 @@ fn execute_statement_with_source(
         | Statement::CommentOnForeignServer(_)
         | Statement::CreateForeignDataWrapper(_)
         | Statement::CreateForeignServer(_)
-        | Statement::AlterForeignServerRename(_)
         | Statement::CreateLanguage(_)
         | Statement::AlterLanguage(_)
         | Statement::DropLanguage(_)

@@ -3543,9 +3543,11 @@ impl Session {
                 for column in &alter_stmt.columns {
                     let single_stmt = AlterTableAddColumnStatement {
                         if_exists: alter_stmt.if_exists,
+                        missing_ok: false,
                         only: alter_stmt.only,
                         table_name: alter_stmt.table_name.clone(),
                         column: column.clone(),
+                        fdw_options: None,
                     };
                     result = if self.active_txn.is_some() {
                         self.execute_in_transaction(
@@ -6321,9 +6323,11 @@ impl Session {
                         db,
                         Statement::AlterTableAddColumn(AlterTableAddColumnStatement {
                             if_exists: alter_stmt.if_exists,
+                            missing_ok: false,
                             only: alter_stmt.only,
                             table_name: alter_stmt.table_name.clone(),
                             column: column.clone(),
+                            fdw_options: None,
                         }),
                         _statement_lock_scope_id,
                     );

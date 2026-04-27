@@ -1503,7 +1503,6 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgGetFunctionResult
             | BuiltinScalarFunction::PgFunctionIsVisible => args.len() == 1,
             BuiltinScalarFunction::PgGetExpr => matches!(args.len(), 2 | 3),
-            BuiltinScalarFunction::PgGetPartKeyDef => args.len() == 1,
             BuiltinScalarFunction::PgGetConstraintDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgGetPartitionConstraintDef => args.len() == 1,
             BuiltinScalarFunction::PgGetIndexDef => matches!(args.len(), 1 | 3),
@@ -4298,7 +4297,6 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgGetFunctionDef
             | BuiltinScalarFunction::PgGetFunctionResult
             | BuiltinScalarFunction::PgGetExpr
-            | BuiltinScalarFunction::PgGetPartKeyDef
             | BuiltinScalarFunction::PgGetConstraintDef
             | BuiltinScalarFunction::PgGetPartitionConstraintDef
             | BuiltinScalarFunction::PgGetIndexDef
