@@ -16598,6 +16598,10 @@ fn build_table_storage_options(pair: Pair<'_, Rule>) -> Result<Vec<RelOption>, P
     }
 }
 
+fn validate_table_storage_clause(pair: Pair<'_, Rule>) -> Result<(), ParseError> {
+    build_table_storage_options(pair).map(|_| ())
+}
+
 fn build_relation_name(pair: Pair<'_, Rule>) -> (Option<String>, String) {
     let name = build_identifier(pair);
     if let Some((schema, rel)) = name.split_once('.') {

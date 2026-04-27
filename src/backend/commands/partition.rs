@@ -6,7 +6,6 @@ use crate::backend::executor::value_io::format_failing_row_detail;
 use crate::backend::executor::{
     ExecError, ExecutorContext, TupleSlot, compare_order_values, eval_expr,
     execute_scalar_function_value_call, render_datetime_value_text_with_config,
-    render_explain_expr,
 };
 use crate::backend::parser::{
     BoundRelation, CatalogLookup, LoweredPartitionSpec, PartitionBoundSpec,
