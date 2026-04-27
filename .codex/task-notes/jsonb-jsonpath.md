@@ -28,6 +28,8 @@ scripts/cargo_isolated.sh check
 CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm scripts/cargo_isolated.sh test --lib --quiet jsonpath_datetime
 CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm scripts/run_regression.sh --test jsonb_jsonpath --timeout 60 --jobs 1 --results-dir /tmp/pgrust_jsonb_jsonpath_results
 CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm scripts/run_regression.sh --test jsonb_jsonpath --timeout 60 --jobs 1 --port 56548 --results-dir /tmp/pgrust_jsonb_jsonpath_results
+CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm scripts/cargo_isolated.sh test --lib jsonpath_exists -- --nocapture
+CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm scripts/cargo_isolated.sh test --lib --quiet jsonpath
 
 Remaining:
-Focused jsonb_jsonpath regression now passes 830/830. The task note remains untracked.
+Focused jsonb_jsonpath regression now passes 830/830. CI unit-test fallout was stale jsonb_path_exists expectations: silent JSONPath errors now return NULL, and the non-silent member accessor error text changed.
