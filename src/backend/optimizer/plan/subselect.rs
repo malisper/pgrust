@@ -1069,6 +1069,7 @@ fn rebase_window_clause_subplan_ids(
                     base,
                 ),
                 end_bound: rebase_window_frame_bound_subplan_ids(clause.spec.frame.end_bound, base),
+                exclusion: clause.spec.frame.exclusion,
             },
         },
         functions: clause
@@ -1915,6 +1916,7 @@ pub(super) fn finalize_plan_subqueries(
                                     catalog,
                                     subplans,
                                 ),
+                                exclusion: clause.spec.frame.exclusion,
                             },
                         },
                         functions:

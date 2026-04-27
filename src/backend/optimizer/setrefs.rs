@@ -4585,6 +4585,7 @@ fn lower_window_clause_for_input(
                     }
                     other => other,
                 },
+                exclusion: clause.spec.frame.exclusion,
             },
         },
         functions: clause

@@ -355,6 +355,7 @@ fn prepare_window_frame_for_locking(
         mode: frame.mode,
         start_bound: prepare_bound(frame.start_bound)?,
         end_bound: prepare_bound(frame.end_bound)?,
+        exclusion: frame.exclusion,
     })
 }
 

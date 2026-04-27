@@ -7554,6 +7554,7 @@ impl Session {
                     cid,
                     search_path.as_deref(),
                     &mut txn.catalog_effects,
+                    &mut txn.temp_effects,
                 )
             }
             Statement::DropMaterializedView(ref drop_stmt) => {

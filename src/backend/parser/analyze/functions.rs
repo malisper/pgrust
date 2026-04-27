@@ -1868,6 +1868,23 @@ pub(super) fn aggregate_args_are_named(args: &[SqlFunctionArg]) -> bool {
     args.iter().any(|arg| arg.name.is_some())
 }
 
+pub(super) fn reject_explicit_empty_aggregate_call(
+    name: &str,
+    args: &SqlCallArgs,
+) -> Result<(), ParseError> {
+    if name.eq_ignore_ascii_case("count")
+        && matches!(args, SqlCallArgs::Args(args) if args.is_empty())
+    {
+        return Err(ParseError::DetailedError {
+            message: "count(*) must be used to call a parameterless aggregate function".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Result<(), ParseError> {
     let valid = aggregate_arity_overrides()
         .iter()

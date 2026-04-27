@@ -173,11 +173,15 @@ pub(super) fn bind_values_rows(
                     inferred
                 }
                 Some(existing) => {
-                    let existing = coerce_unknown_string_literal_type(
-                        common_expr.expect("common expr"),
-                        existing,
-                        inferred,
-                    );
+                    let existing = if is_text_like_type(existing) {
+                        coerce_unknown_string_literal_type(
+                            common_expr.expect("common expr"),
+                            existing,
+                            inferred,
+                        )
+                    } else {
+                        existing
+                    };
                     let adjusted =
                         coerce_unknown_string_literal_type(&row[col_idx], inferred, existing);
                     let resolved =
@@ -904,7 +908,7 @@ fn bind_function_from_item_with_ctes(
                 grouped_outer,
                 ctes,
             );
-            let step_type = if args.len() >= 3 {
+            let raw_step_type = if args.len() >= 3 {
                 Some(infer_sql_expr_type_with_ctes(
                     &args[2],
                     &call_scope,
@@ -916,6 +920,24 @@ fn bind_function_from_item_with_ctes(
             } else {
                 None
             };
+            let step_type = raw_step_type.map(|inferred| {
+                let has_timestamp_bound = matches!(
+                    start_type.kind,
+                    SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+                ) || matches!(
+                    stop_type.kind,
+                    SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+                );
+                if has_timestamp_bound {
+                    coerce_unknown_string_literal_type(
+                        &args[2],
+                        inferred,
+                        SqlType::new(SqlTypeKind::Interval),
+                    )
+                } else {
+                    inferred
+                }
+            });
             let timezone_type = if args.len() == 4 {
                 Some(infer_sql_expr_type_with_ctes(
                     &args[3],
@@ -944,7 +966,7 @@ fn bind_function_from_item_with_ctes(
                     grouped_outer,
                     ctes,
                 )?;
-                let step_type = step_type.expect("generate_series step type");
+                let step_type = raw_step_type.expect("generate_series step type");
                 let step_target = if matches!(
                     common.kind,
                     SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz

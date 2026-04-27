@@ -75,6 +75,7 @@ pub(crate) use expr_agg_support::execute_scalar_function_value_call;
 pub(crate) use expr_bit::render_bit_text;
 pub(crate) use expr_casts::cast_value_with_source_type_catalog_and_config;
 pub(crate) use expr_casts::parse_bytea_text;
+pub(crate) use expr_casts::parse_interval_text_value;
 pub(crate) use expr_casts::parse_text_array_literal_with_catalog_and_op;
 pub(crate) use expr_casts::parse_text_array_literal_with_op;
 pub use expr_casts::render_internal_char_text;

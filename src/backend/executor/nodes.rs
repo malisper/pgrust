@@ -60,6 +60,203 @@ use std::rc::Rc;
 
 const EMPTY_SYSTEM_BINDINGS: [SystemVarBinding; 0] = [];
 
+fn pg_sql_sort_by<T>(values: &mut [T], mut compare: impl FnMut(&T, &T) -> std::cmp::Ordering) {
+    fn med3<T>(
+        values: &[T],
+        a: usize,
+        b: usize,
+        c: usize,
+        compare: &mut impl FnMut(&T, &T) -> std::cmp::Ordering,
+    ) -> usize {
+        if compare(&values[a], &values[b]) == std::cmp::Ordering::Less {
+            if compare(&values[b], &values[c]) == std::cmp::Ordering::Less {
+                b
+            } else if compare(&values[a], &values[c]) == std::cmp::Ordering::Less {
+                c
+            } else {
+                a
+            }
+        } else if compare(&values[b], &values[c]) == std::cmp::Ordering::Greater {
+            b
+        } else if compare(&values[a], &values[c]) == std::cmp::Ordering::Less {
+            a
+        } else {
+            c
+        }
+    }
+
+    fn swap_ranges<T>(values: &mut [T], left: usize, right: usize, count: usize) {
+        for offset in 0..count {
+            values.swap(left + offset, right + offset);
+        }
+    }
+
+    fn sort<T>(values: &mut [T], compare: &mut impl FnMut(&T, &T) -> std::cmp::Ordering) {
+        let n = values.len();
+        if n < 7 {
+            for pm in 1..n {
+                let mut pl = pm;
+                while pl > 0 && compare(&values[pl - 1], &values[pl]) == std::cmp::Ordering::Greater
+                {
+                    values.swap(pl, pl - 1);
+                    pl -= 1;
+                }
+            }
+            return;
+        }
+
+        let mut presorted = true;
+        for pm in 1..n {
+            if compare(&values[pm - 1], &values[pm]) == std::cmp::Ordering::Greater {
+                presorted = false;
+                break;
+            }
+        }
+        if presorted {
+            return;
+        }
+
+        let mut pm = n / 2;
+        if n > 7 {
+            let mut pl = 0;
+            let mut pn = n - 1;
+            if n > 40 {
+                let d = n / 8;
+                pl = med3(values, pl, pl + d, pl + 2 * d, compare);
+                pm = med3(values, pm - d, pm, pm + d, compare);
+                pn = med3(values, pn - 2 * d, pn - d, pn, compare);
+            }
+            pm = med3(values, pl, pm, pn, compare);
+        }
+        values.swap(0, pm);
+
+        let mut pa = 1usize;
+        let mut pb = 1usize;
+        let mut pc = (n - 1) as isize;
+        let mut pd = (n - 1) as isize;
+        loop {
+            while (pb as isize) <= pc {
+                let ordering = compare(&values[pb], &values[0]);
+                if ordering == std::cmp::Ordering::Greater {
+                    break;
+                }
+                if ordering == std::cmp::Ordering::Equal {
+                    values.swap(pa, pb);
+                    pa += 1;
+                }
+                pb += 1;
+            }
+            while (pb as isize) <= pc {
+                let pc_index = pc as usize;
+                let ordering = compare(&values[pc_index], &values[0]);
+                if ordering == std::cmp::Ordering::Less {
+                    break;
+                }
+                if ordering == std::cmp::Ordering::Equal {
+                    values.swap(pc_index, pd as usize);
+                    pd -= 1;
+                }
+                pc -= 1;
+            }
+            if (pb as isize) > pc {
+                break;
+            }
+            values.swap(pb, pc as usize);
+            pb += 1;
+            pc -= 1;
+        }
+
+        let d1 = pa.min(pb - pa);
+        swap_ranges(values, 0, pb - d1, d1);
+        let d2 = ((pd - pc) as usize).min(n - (pd as usize) - 1);
+        swap_ranges(values, pb, n - d2, d2);
+
+        let d1 = pb - pa;
+        let d2 = (pd - pc) as usize;
+        if d1 <= d2 {
+            if d1 > 1 {
+                sort(&mut values[..d1], compare);
+            }
+            if d2 > 1 {
+                sort(&mut values[n - d2..], compare);
+            }
+        } else {
+            if d2 > 1 {
+                sort(&mut values[n - d2..], compare);
+            }
+            if d1 > 1 {
+                sort(&mut values[..d1], compare);
+            }
+        }
+    }
+
+    sort(values, &mut compare);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pg_sql_sort_by;
+
+    #[test]
+    fn pg_sql_sort_by_matches_postgres_empsalary_peer_order() {
+        let mut rows = vec![
+            ("develop", 10, 5200),
+            ("sales", 1, 5000),
+            ("personnel", 5, 3500),
+            ("sales", 4, 4800),
+            ("personnel", 2, 3900),
+            ("develop", 7, 4200),
+            ("develop", 9, 4500),
+            ("sales", 3, 4800),
+            ("develop", 8, 6000),
+            ("develop", 11, 5200),
+        ];
+
+        pg_sql_sort_by(&mut rows, |left, right| {
+            left.0.cmp(right.0).then_with(|| left.2.cmp(&right.2))
+        });
+
+        assert_eq!(
+            rows.iter().map(|row| row.1).collect::<Vec<_>>(),
+            vec![7, 9, 11, 10, 8, 5, 2, 3, 4, 1]
+        );
+    }
+
+    #[test]
+    fn pg_sql_sort_by_matches_postgres_tenk1_unique_lt_10_peer_order() {
+        let mut rows = vec![
+            (4, 0),
+            (2, 2),
+            (1, 1),
+            (6, 2),
+            (9, 1),
+            (8, 0),
+            (5, 1),
+            (3, 3),
+            (7, 3),
+            (0, 0),
+        ];
+
+        pg_sql_sort_by(&mut rows, |left, right| left.1.cmp(&right.1));
+
+        assert_eq!(
+            rows,
+            vec![
+                (0, 0),
+                (8, 0),
+                (4, 0),
+                (5, 1),
+                (9, 1),
+                (1, 1),
+                (6, 2),
+                (2, 2),
+                (3, 3),
+                (7, 3),
+            ]
+        );
+    }
+}
+
 fn slot_toast_context(
     relation: Option<ToastRelationRef>,
     ctx: &ExecutorContext,
@@ -840,8 +1037,13 @@ impl PlanNode for MergeAppendState {
             }
 
             let mut sort_error = None;
-            keyed_rows.sort_by(|(left_keys, _left_row), (right_keys, _right_row)| {
-                match compare_order_by_keys(&self.items, left_keys, right_keys) {
+            pg_sql_sort_by(
+                &mut keyed_rows,
+                |(left_keys, _left_row), (right_keys, _right_row)| match compare_order_by_keys(
+                    &self.items,
+                    left_keys,
+                    right_keys,
+                ) {
                     Ok(ordering) => ordering,
                     Err(err) => {
                         if sort_error.is_none() {
@@ -849,8 +1051,8 @@ impl PlanNode for MergeAppendState {
                         }
                         std::cmp::Ordering::Equal
                     }
-                }
-            });
+                },
+            );
             if let Some(err) = sort_error {
                 return Err(err);
             }
@@ -4730,8 +4932,13 @@ impl PlanNode for OrderByState {
             }
 
             let mut sort_error = None;
-            keyed_rows.sort_by(|(left_keys, left_row), (right_keys, right_row)| {
-                match compare_order_by_keys(&self.items, left_keys, right_keys) {
+            pg_sql_sort_by(
+                &mut keyed_rows,
+                |(left_keys, left_row), (right_keys, right_row)| match compare_order_by_keys(
+                    &self.items,
+                    left_keys,
+                    right_keys,
+                ) {
                     Ok(std::cmp::Ordering::Equal) if self.network_strict_less_tiebreak => {
                         match network_order_tie_break(left_keys, right_keys, left_row, right_row) {
                             Ok(ordering) => ordering,
@@ -4753,8 +4960,8 @@ impl PlanNode for OrderByState {
                         }
                         std::cmp::Ordering::Equal
                     }
-                }
-            });
+                },
+            );
             if let Some(err) = sort_error {
                 return Err(err);
             }
@@ -5246,7 +5453,7 @@ impl PlanNode for AggregateState {
                     }
                     let inputs = &mut group.ordered_inputs[i];
                     let mut sort_error = None;
-                    inputs.sort_by(|left, right| {
+                    pg_sql_sort_by(inputs, |left, right| {
                         match compare_order_by_keys(
                             &accum.order_by,
                             &left.sort_keys,
