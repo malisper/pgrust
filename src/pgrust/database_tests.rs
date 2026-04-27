@@ -31848,7 +31848,7 @@ fn foreign_data_catalogs_track_servers_mappings_and_tables() {
 
     db.execute(
         1,
-        "create foreign table fdw_ft (a int4 options (column_name 'remote_a')) server fdw_srv options (table_name 'remote_table')",
+        "create foreign table fdw_ft (a int4 options (column_name 'remote_a') not null check (a > 0)) server fdw_srv options (table_name 'remote_table')",
     )
     .unwrap();
     assert_eq!(
@@ -31876,6 +31876,15 @@ fn foreign_data_catalogs_track_servers_mappings_and_tables() {
             crate::include::catalog::TEXT_TYPE_OID,
         )]]
     );
+    let catalog = db.lazy_catalog_lookup(1, None, None);
+    let relation = catalog.lookup_any_relation("fdw_ft").unwrap();
+    let mut constraint_types = catalog
+        .constraint_rows_for_relation(relation.relation_oid)
+        .into_iter()
+        .map(|row| row.contype)
+        .collect::<Vec<_>>();
+    constraint_types.sort_unstable();
+    assert_eq!(constraint_types, vec!['c', 'n']);
 
     db.execute(
         1,

@@ -11,18 +11,18 @@ use crate::backend::utils::cache::system_views::{
     build_pg_views_rows,
 };
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
-    PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgEnumRow,
-    PgForeignDataWrapperRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTsConfigMapRow,
-    PgTsConfigRow, PgTsDictRow, PgTsTemplateRow, PgTypeRow, bootstrap_pg_aggregate_rows,
-    bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
-    bootstrap_pg_database_rows, bootstrap_pg_enum_rows, bootstrap_pg_language_rows,
-    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_proc_rows, bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows,
-    bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_template_rows, builtin_range_rows,
-    builtin_type_rows, synthetic_range_proc_rows_by_name,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PgAggregateRow, PgAmprocRow, PgAuthIdRow,
+    PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow,
+    PgDependRow, PgEnumRow, PgForeignDataWrapperRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgRangeRow,
+    PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow,
+    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsTemplateRow, PgTypeRow,
+    bootstrap_pg_aggregate_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
+    bootstrap_pg_collation_rows, bootstrap_pg_database_rows, bootstrap_pg_enum_rows,
+    bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, bootstrap_pg_ts_config_map_rows,
+    bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_template_rows,
+    builtin_range_rows, builtin_type_rows, synthetic_range_proc_rows_by_name,
 };
 use crate::pgrust::database::DatabaseStatsStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -99,18 +99,33 @@ impl VisibleCatalog {
     }
 
     pub fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {
-        if let Some(catcache) = &self.catcache {
-            return catcache.constraint_rows_for_relation(relation_oid);
-        }
+        let mut rows = self
+            .catcache
+            .as_ref()
+            .map(|catcache| catcache.constraint_rows_for_relation(relation_oid))
+            .unwrap_or_default();
         let Some((name, entry)) = self
             .relcache
             .entries()
             .find(|(_, entry)| entry.relation_oid == relation_oid)
         else {
-            return Vec::new();
+            return rows;
         };
         let relname = name.rsplit('.').next().unwrap_or(name);
-        derived_pg_constraint_rows(relation_oid, relname, entry.namespace_oid, &entry.desc)
+        for derived in
+            derived_pg_constraint_rows(relation_oid, relname, entry.namespace_oid, &entry.desc)
+        {
+            if rows.iter().any(|row| {
+                row.oid == derived.oid
+                    || (row.contype == CONSTRAINT_NOTNULL
+                        && row.conrelid == derived.conrelid
+                        && row.conkey == derived.conkey)
+            }) {
+                continue;
+            }
+            rows.push(derived);
+        }
+        rows
     }
 
     pub fn constraint_rows(&self) -> Vec<PgConstraintRow> {

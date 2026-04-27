@@ -26,11 +26,12 @@ use crate::include::access::brin_page::{
     BRIN_PAGE_CONTENT_OFFSET, BrinMetaPageData, brin_is_meta_page,
 };
 use crate::include::catalog::{
-    CONSTRAINT_FOREIGN, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PgAggregateRow, PgAmRow,
-    PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgEnumRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticExtDataRow,
-    PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
+    CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
+    PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
+    PgClassRow, PgCollationRow, PgConstraintRow, PgEnumRow, PgIndexRow, PgInheritsRow,
+    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow,
+    PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow,
+    PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::SqlType;
@@ -1561,22 +1562,41 @@ pub fn constraint_rows_for_relation(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Vec<PgConstraintRow> {
-    let rows = constraint_rows_for_relation_syscache(db, client_id, txn_ctx, relation_oid);
-    if !rows.is_empty() {
-        return rows;
-    }
+    let mut rows = constraint_rows_for_relation_syscache(db, client_id, txn_ctx, relation_oid);
     let Some(entry) = relation_entry_by_oid(db, client_id, txn_ctx, relation_oid) else {
-        return Vec::new();
+        return rows;
     };
     let Some(class) = class_row_by_oid(db, client_id, txn_ctx, relation_oid) else {
-        return Vec::new();
+        return rows;
     };
-    derived_pg_constraint_rows(
+    append_missing_derived_not_null_constraints(
+        &mut rows,
         relation_oid,
         &class.relname,
         entry.namespace_oid,
         &entry.desc,
-    )
+    );
+    rows
+}
+
+fn append_missing_derived_not_null_constraints(
+    rows: &mut Vec<PgConstraintRow>,
+    relation_oid: u32,
+    relation_name: &str,
+    namespace_oid: u32,
+    desc: &crate::include::nodes::primnodes::RelationDesc,
+) {
+    for derived in derived_pg_constraint_rows(relation_oid, relation_name, namespace_oid, desc) {
+        if rows.iter().any(|row| {
+            row.oid == derived.oid
+                || (row.contype == CONSTRAINT_NOTNULL
+                    && row.conrelid == derived.conrelid
+                    && row.conkey == derived.conkey)
+        }) {
+            continue;
+        }
+        rows.push(derived);
+    }
 }
 
 impl CatalogLookup for LazyCatalogLookup<'_> {

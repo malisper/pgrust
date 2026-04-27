@@ -67,6 +67,11 @@ Runtime behavior:
   drops
 - rejects empty `ALTER FOREIGN DATA WRAPPER name` and `ALTER SERVER name`
   statements at parse time with PostgreSQL-style semicolon syntax errors
+- installs check constraints for `CREATE FOREIGN TABLE`, merges derived
+  not-null constraints with stored `pg_constraint` rows in catalog lookup
+  helpers, reports `relchecks` to psql tableinfo, handles psql's same-table
+  constraint and verbose not-null describe query shapes, and suppresses the
+  implicit heap access method footer for foreign tables
 
 Tests run:
 - `cargo fmt`
@@ -158,13 +163,22 @@ Tests run:
 - `scripts/cargo_isolated.sh check`
 - `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
 - `scripts/run_regression.sh --skip-build --port 55474 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-empty-alter-syntax`
+- `scripts/cargo_isolated.sh test --lib --quiet psql_describe_not_null_constraints_query_matches_verbose_shape`
+- `scripts/cargo_isolated.sh test --lib --quiet psql_describe_constraint_query_returns_same_table_shape`
+- `scripts/cargo_isolated.sh test --lib --quiet psql_describe_constraint_query_returns_check_rows`
+- `scripts/cargo_isolated.sh test --lib --quiet psql_describe_tableinfo_query_hides_default_heap_access_method`
+- `scripts/cargo_isolated.sh test --lib --quiet foreign_data_catalogs_track_servers_mappings_and_tables`
+- `scripts/cargo_isolated.sh check`
+- `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
+- `scripts/run_regression.sh --skip-build --port 55477 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-foreign-describe-constraints-v5`
 
 Remaining:
-`foreign_data` still fails, but improved to 410/539 matching queries and 1372
+`foreign_data` still fails, but remains at 410/539 matching queries and 1372
 diff lines in the latest run. Biggest
 remaining groups:
 - owner dependency reporting beyond the handled FDW function dependencies
 - full `IMPORT FOREIGN SCHEMA` callback behavior beyond missing-handler errors
 - foreign table DDL/partition forms and partition catalog state
-- psql describe output compatibility beyond the helper-function lookups
+- psql describe output compatibility, especially exact constraint deparse text
+  and remaining not-null footer cases
 - Notices and exact PostgreSQL error/caret wording
