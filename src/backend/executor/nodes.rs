@@ -1824,6 +1824,18 @@ impl PlanNode for IndexScanState {
                         tid: Some(tid),
                     }];
                     set_active_system_bindings(ctx, &self.current_bindings);
+
+                    if let Some(qual) = &self.qual {
+                        let outer_values = materialize_slot_values(&mut self.slot)?;
+                        let current_bindings = self.current_bindings.clone();
+                        set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                        clear_inner_expr_bindings(ctx);
+                        if !qual(&mut self.slot, ctx)? {
+                            note_filtered_row(&mut self.stats);
+                            continue;
+                        }
+                    }
+
                     finish_row(&mut self.stats, start);
                     return Ok(Some(&mut self.slot));
                 }
@@ -2119,6 +2131,7 @@ fn lookup_index_scan_operator_name(
                 || (entry.righttype == crate::include::catalog::ANYMULTIRANGEOID
                     && crate::include::catalog::builtin_range_spec_by_multirange_oid(actual)
                         .is_some())
+                || entry.righttype == crate::include::catalog::ANYARRAYOID
                 || entry.righttype == crate::include::catalog::ANYELEMENTOID
         })
         .max_by_key(|entry| {
@@ -2129,6 +2142,7 @@ fn lookup_index_scan_operator_name(
             {
                 2
             } else if entry.righttype == crate::include::catalog::ANYOID
+                || entry.righttype == crate::include::catalog::ANYARRAYOID
                 || entry.righttype == crate::include::catalog::ANYELEMENTOID
             {
                 1
@@ -2911,7 +2925,10 @@ fn render_explain_expr_inner_with_qualifier(
             | crate::include::nodes::primnodes::OpExprKind::LtEq
             | crate::include::nodes::primnodes::OpExprKind::Gt
             | crate::include::nodes::primnodes::OpExprKind::GtEq
-            | crate::include::nodes::primnodes::OpExprKind::RegexMatch => {
+            | crate::include::nodes::primnodes::OpExprKind::RegexMatch
+            | crate::include::nodes::primnodes::OpExprKind::ArrayOverlap
+            | crate::include::nodes::primnodes::OpExprKind::ArrayContains
+            | crate::include::nodes::primnodes::OpExprKind::ArrayContained => {
                 let [left, right] = op.args.as_slice() else {
                     return format!("{expr:?}");
                 };
@@ -3771,6 +3788,9 @@ fn infix_operator_text(
         crate::include::nodes::primnodes::OpExprKind::Gt => Some(">"),
         crate::include::nodes::primnodes::OpExprKind::GtEq => Some(">="),
         crate::include::nodes::primnodes::OpExprKind::RegexMatch => Some("~"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayOverlap => Some("&&"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayContains => Some("@>"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayContained => Some("<@"),
         _ => None,
     }
 }
@@ -4168,6 +4188,17 @@ fn render_explain_const(value: &Value) -> String {
             ),
             None => render_explain_literal(value),
         },
+        Value::PgArray(array) => match value.sql_type_hint() {
+            Some(sql_type) => format!(
+                "'{}'::{}",
+                crate::backend::executor::format_array_value_text(array),
+                render_explain_sql_type_name(sql_type)
+            ),
+            None => format!(
+                "'{}'",
+                crate::backend::executor::format_array_value_text(array)
+            ),
+        },
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
@@ -4299,6 +4330,12 @@ fn render_explain_literal(value: &Value) -> String {
         }
         Value::Inet(value) => format!("'{}'", value.render_inet()),
         Value::Cidr(value) => format!("'{}'", value.render_cidr()),
+        Value::PgArray(array) => {
+            format!(
+                "'{}'",
+                crate::backend::executor::format_array_value_text(array)
+            )
+        }
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),

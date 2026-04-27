@@ -6,6 +6,7 @@ use crate::backend::parser::{
     BoundCheckConstraint, BoundExclusionConstraint, BoundForeignKeyConstraint,
     BoundTemporalConstraint, ForeignKeyConstraintAction,
 };
+use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::{
     CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
     CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, PG_CATALOG_NAMESPACE_OID, PgConstraintRow,
@@ -1237,10 +1238,65 @@ impl Database {
                         relation.owner_oid,
                         relation.relpersistence,
                     );
+                    if !existing_index.name.eq_ignore_ascii_case(&constraint_name) {
+                        push_notice(format!(
+                            "ALTER TABLE / ADD CONSTRAINT USING INDEX will rename index \"{}\" to \"{}\"",
+                            existing_index.name, constraint_name
+                        ));
+                        let rename_ctx = CatalogWriteContext {
+                            pool: self.pool.clone(),
+                            txns: self.txns.clone(),
+                            xid,
+                            cid: cid
+                                .saturating_add(1)
+                                .saturating_add(catalog_effects.len() as u32),
+                            client_id,
+                            waiter: None,
+                            interrupts: std::sync::Arc::clone(&interrupts),
+                        };
+                        let visible_type_rows = catalog.type_rows();
+                        let rename_effect = self
+                            .catalog
+                            .write()
+                            .rename_relation_mvcc(
+                                existing_index.relation_oid,
+                                &constraint_name,
+                                &visible_type_rows,
+                                &rename_ctx,
+                            )
+                            .map_err(map_catalog_error)?;
+                        self.apply_catalog_mutation_effect_immediate(&rename_effect)?;
+                        catalog_effects.push(rename_effect);
+                    }
+                    let old_index_entry = index_entry.clone();
                     if let Some(index_meta) = index_entry.index_meta.as_mut() {
                         index_meta.indisprimary = action.primary;
+                        index_meta.indisunique = true;
                     }
                     let table_entry = super::index::catalog_entry_from_bound_relation(&relation);
+                    let index_flags_ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid: cid
+                            .saturating_add(1)
+                            .saturating_add(catalog_effects.len() as u32),
+                        client_id,
+                        waiter: None,
+                        interrupts: std::sync::Arc::clone(&interrupts),
+                    };
+                    let index_flags_effect = self
+                        .catalog
+                        .write()
+                        .set_index_entry_constraint_flags_mvcc(
+                            &old_index_entry,
+                            action.primary,
+                            true,
+                            &index_flags_ctx,
+                        )
+                        .map_err(map_catalog_error)?;
+                    self.apply_catalog_mutation_effect_immediate(&index_flags_effect)?;
+                    catalog_effects.push(index_flags_effect);
                     let constraint_ctx = CatalogWriteContext {
                         pool: self.pool.clone(),
                         txns: self.txns.clone(),
@@ -1397,6 +1453,7 @@ impl Database {
                     access_method_handler,
                     &build_options,
                     65_536,
+                    false,
                     catalog_effects,
                 )?;
                 let constraint_ctx = CatalogWriteContext {

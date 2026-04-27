@@ -890,7 +890,7 @@ impl AccumState {
                     Value::Jsonb(encode_jsonb(&JsonbValue::Array(items)))
                 } else {
                     Value::Json(crate::pgrust::compact_string::CompactString::from_owned(
-                        render_json_array(values),
+                        render_json_agg_array(values),
                     ))
                 }
             }
@@ -915,7 +915,7 @@ impl AccumState {
                     Value::Jsonb(encode_jsonb(&built))
                 } else {
                     Value::Json(crate::pgrust::compact_string::CompactString::from_owned(
-                        render_json_object(pairs),
+                        render_json_object_agg(pairs),
                     ))
                 }
             }
@@ -1367,6 +1367,39 @@ fn render_json_array(values: &[Value]) -> String {
         out.push_str(&value_to_json_text(value));
     }
     out.push(']');
+    out
+}
+
+fn render_json_agg_array(values: &[Value]) -> String {
+    let mut out = String::from("[");
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+            if matches!(
+                value,
+                Value::Array(_) | Value::PgArray(_) | Value::Record(_)
+            ) {
+                out.push_str("\n ");
+            }
+        }
+        out.push_str(&value_to_json_text(value));
+    }
+    out.push(']');
+    out
+}
+
+fn render_json_object_agg(pairs: &[(Value, Value)]) -> String {
+    let mut out = String::from("{ ");
+    for (idx, (key, value)) in pairs.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        let key_text = json_object_agg_key(key);
+        out.push_str(&serde_json::to_string(&key_text).unwrap());
+        out.push_str(" : ");
+        out.push_str(&value_to_json_text(value));
+    }
+    out.push_str(" }");
     out
 }
 

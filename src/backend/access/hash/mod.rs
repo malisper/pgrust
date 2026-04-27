@@ -968,7 +968,7 @@ fn hashgetbitmap(scan: &mut IndexScanDesc, bitmap: &mut TidBitmap) -> Result<i64
     let mut count = 0_i64;
     while hashgettuple(scan)? {
         if let Some(tid) = scan.xs_heaptid {
-            bitmap.add_page(tid.block_number);
+            bitmap.add_tid(tid);
             count += 1;
         }
     }

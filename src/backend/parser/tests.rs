@@ -2591,6 +2591,21 @@ fn parse_create_index_with_if_not_exists_and_opclass() {
 }
 
 #[test]
+fn parse_create_index_column_collation() {
+    let stmt =
+        parse_statement("create unique index cwi_uniq4_idx on cwi_test (b collate \"POSIX\")")
+            .unwrap();
+    match stmt {
+        Statement::CreateIndex(CreateIndexStatement { columns, .. }) => {
+            assert_eq!(columns.len(), 1);
+            assert_eq!(columns[0].name, "b");
+            assert_eq!(columns[0].collation.as_deref(), Some("POSIX"));
+        }
+        other => panic!("expected create index statement, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_create_index_without_name() {
     let stmt = parse_statement("create index on tenk1 (thousand, tenthous)").unwrap();
     assert_eq!(
@@ -7804,13 +7819,15 @@ fn parse_prefixed_and_underscored_numeric_literals() {
     assert!(
         matches!(&stmt.targets[2].expr, SqlExpr::IntegerLiteral(value) if value == "518979583")
     );
-    assert!(matches!(&stmt.targets[3].expr, SqlExpr::IntegerLiteral(value) if value == "1000000"));
     assert!(
-        matches!(&stmt.targets[4].expr, SqlExpr::NumericLiteral(value) if value == "1000.000005")
+        matches!(&stmt.targets[3].expr, SqlExpr::IntegerLiteral(value) if value == "1_000_000")
     );
-    assert!(matches!(&stmt.targets[5].expr, SqlExpr::NumericLiteral(value) if value == ".000005"));
     assert!(
-        matches!(&stmt.targets[6].expr, SqlExpr::NumericLiteral(value) if value == "1000.5e01")
+        matches!(&stmt.targets[4].expr, SqlExpr::NumericLiteral(value) if value == "1_000.000_005")
+    );
+    assert!(matches!(&stmt.targets[5].expr, SqlExpr::NumericLiteral(value) if value == ".000_005"));
+    assert!(
+        matches!(&stmt.targets[6].expr, SqlExpr::NumericLiteral(value) if value == "1_000.5e0_1")
     );
 }
 
@@ -9383,6 +9400,9 @@ fn parse_insert_update_delete() {
     );
     assert!(
         matches!(parse_statement("create temp table tempy ()").unwrap(), Statement::CreateTable(ct) if ct.persistence == TablePersistence::Temporary && ct.table_name == "tempy" && ct.columns().count() == 0)
+    );
+    assert!(
+        matches!(parse_statement("create unlogged table unlogged_hash_table (id int4)").unwrap(), Statement::CreateTable(ct) if ct.persistence == TablePersistence::Unlogged && ct.table_name == "unlogged_hash_table" && ct.columns().count() == 1)
     );
     assert!(
         matches!(parse_statement("create temp table withoutoid() without oids").unwrap(), Statement::CreateTable(ct) if ct.persistence == TablePersistence::Temporary && ct.table_name == "withoutoid" && ct.columns().count() == 0)
@@ -15683,6 +15703,16 @@ fn parse_insert_select_default_values_and_table_stmt() {
         }) if table_name == "people"
     ));
 
+    let stmt = parse_statement("insert into people (select 1, 'alice')").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::Insert(InsertStatement {
+            table_name,
+            source: InsertSource::Select(_),
+            ..
+        }) if table_name == "people"
+    ));
+
     let stmt = parse_statement("insert into people default values").unwrap();
     assert!(matches!(
         stmt,
@@ -16484,5 +16514,96 @@ fn analyze_simple_case_uses_case_test_expr() {
             );
         }
         other => panic!("expected CASE expression, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_numeric_literals_with_underscores() {
+    let stmt = parse_select("select 2_147_483_647, 1_000.5, 1_0e+2").unwrap();
+    assert!(matches!(
+        stmt.targets[0].expr,
+        SqlExpr::IntegerLiteral(ref value) if value == "2_147_483_647"
+    ));
+    assert!(matches!(
+        stmt.targets[1].expr,
+        SqlExpr::NumericLiteral(ref value) if value == "1_000.5"
+    ));
+    assert!(matches!(
+        stmt.targets[2].expr,
+        SqlExpr::NumericLiteral(ref value) if value == "1_0e+2"
+    ));
+}
+
+#[test]
+fn parse_create_unique_index_nulls_distinct() {
+    let stmt =
+        parse_statement("create unique index idx_items_id on items (id) nulls distinct").unwrap();
+    match stmt {
+        Statement::CreateIndex(stmt) => {
+            assert!(stmt.unique);
+            assert!(!stmt.nulls_not_distinct);
+        }
+        other => panic!("expected create index, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_vacuum_full_bare_option() {
+    let stmt = parse_statement("vacuum full items").unwrap();
+    match stmt {
+        Statement::Vacuum(stmt) => {
+            assert!(stmt.full);
+            assert_eq!(stmt.targets.len(), 1);
+            assert_eq!(stmt.targets[0].table_name, "items");
+        }
+        other => panic!("expected vacuum, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_reindex_table_concurrently_verbose() {
+    let stmt = parse_statement("reindex (verbose, concurrently) table items").unwrap();
+    match stmt {
+        Statement::ReindexIndex(stmt) => {
+            assert_eq!(stmt.kind, ReindexTargetKind::Table);
+            assert!(stmt.verbose);
+            assert!(stmt.concurrently);
+            assert_eq!(stmt.index_name, "items");
+        }
+        other => panic!("expected reindex, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_set_session_role() {
+    let stmt = parse_statement("set session role regress_reindexuser").unwrap();
+    match stmt {
+        Statement::SetRole(stmt) => {
+            assert_eq!(stmt.role_name.as_deref(), Some("regress_reindexuser"));
+        }
+        other => panic!("expected set role, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_compound_alter_table_drop_add_using_index() {
+    let stmt = parse_statement(
+        "alter table cwi_test drop constraint cwi_uniq_idx, \
+         add constraint cwi_replaced_pkey primary key using index cwi_uniq2_idx",
+    )
+    .unwrap();
+    match stmt {
+        Statement::AlterTableCompound(stmt) => {
+            assert_eq!(stmt.actions.len(), 2);
+            assert!(matches!(
+                stmt.actions[0],
+                Statement::AlterTableDropConstraint(_)
+            ));
+            assert!(matches!(
+                stmt.actions[1],
+                Statement::AlterTableAddConstraint(_)
+            ));
+        }
+        other => panic!("expected compound alter table, got {other:?}"),
     }
 }

@@ -2797,22 +2797,29 @@ fn scan_catalog_relation(
     rel: RelFileLocator,
     desc: &RelationDesc,
 ) -> Result<Vec<Vec<Value>>, CatalogError> {
-    let mut scan = heap_scan_begin(pool, rel).map_err(|e| CatalogError::Io(format!("{e:?}")))?;
+    let rel_context = catalog_scan_context(rel, desc);
+    let mut scan = heap_scan_begin(pool, rel)
+        .map_err(|e| CatalogError::Io(format!("{rel_context}: heap scan begin failed: {e:?}")))?;
     let attr_descs = desc.attribute_descs();
     let mut rows = Vec::new();
     while let Some((_tid, tuple)) = heap_scan_next(pool, INVALID_TRANSACTION_ID, &mut scan)
-        .map_err(|e| CatalogError::Io(format!("{e:?}")))?
+        .map_err(|e| CatalogError::Io(format!("{rel_context}: heap scan failed: {e:?}")))?
     {
         let raw = tuple
             .deform(&attr_descs)
-            .map_err(|e| CatalogError::Io(format!("{e:?}")))?;
+            .map_err(|e| CatalogError::Io(format!("{rel_context}: heap deform failed: {e:?}")))?;
         let row = desc
             .columns
             .iter()
             .enumerate()
             .map(|(index, column)| {
                 if let Some(datum) = raw.get(index) {
-                    decode_value(column, *datum).map_err(|e| CatalogError::Io(format!("{e:?}")))
+                    decode_value(column, *datum).map_err(|e| {
+                        CatalogError::Io(format!(
+                            "{rel_context}: decode column {} failed: {e:?}",
+                            column.name
+                        ))
+                    })
                 } else {
                     Ok(missing_column_value(column))
                 }
@@ -2831,25 +2838,32 @@ fn scan_catalog_relation_visible(
     rel: RelFileLocator,
     desc: &RelationDesc,
 ) -> Result<Vec<Vec<Value>>, CatalogError> {
-    let mut scan = heap_scan_begin(pool, rel).map_err(|e| CatalogError::Io(format!("{e:?}")))?;
+    let rel_context = catalog_scan_context(rel, desc);
+    let mut scan = heap_scan_begin(pool, rel)
+        .map_err(|e| CatalogError::Io(format!("{rel_context}: heap scan begin failed: {e:?}")))?;
     let attr_descs = desc.attribute_descs();
     let mut rows = Vec::new();
     while let Some((_tid, tuple)) = heap_scan_next(pool, client_id, &mut scan)
-        .map_err(|e| CatalogError::Io(format!("{e:?}")))?
+        .map_err(|e| CatalogError::Io(format!("{rel_context}: heap scan failed: {e:?}")))?
     {
         if !snapshot.tuple_visible(txns, &tuple) {
             continue;
         }
         let raw = tuple
             .deform(&attr_descs)
-            .map_err(|e| CatalogError::Io(format!("{e:?}")))?;
+            .map_err(|e| CatalogError::Io(format!("{rel_context}: heap deform failed: {e:?}")))?;
         let row = desc
             .columns
             .iter()
             .enumerate()
             .map(|(index, column)| {
                 if let Some(datum) = raw.get(index) {
-                    decode_value(column, *datum).map_err(|e| CatalogError::Io(format!("{e:?}")))
+                    decode_value(column, *datum).map_err(|e| {
+                        CatalogError::Io(format!(
+                            "{rel_context}: decode column {} failed: {e:?}",
+                            column.name
+                        ))
+                    })
                 } else {
                     Ok(missing_column_value(column))
                 }
@@ -2858,4 +2872,14 @@ fn scan_catalog_relation_visible(
         rows.push(row);
     }
     Ok(rows)
+}
+
+fn catalog_scan_context(rel: RelFileLocator, desc: &RelationDesc) -> String {
+    format!(
+        "catalog rel {} db {} spc {} ({} columns)",
+        rel.rel_number,
+        rel.db_oid,
+        rel.spc_oid,
+        desc.columns.len()
+    )
 }

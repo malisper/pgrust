@@ -218,7 +218,9 @@ fn point_coordinate_subscript(
         return None;
     }
     match subscript.lower.as_deref()? {
-        SqlExpr::IntegerLiteral(value) => value.parse::<i32>().ok(),
+        SqlExpr::IntegerLiteral(value) => {
+            normalize_numeric_literal_token(value).parse::<i32>().ok()
+        }
         SqlExpr::Const(Value::Int16(value)) => Some(i32::from(*value)),
         SqlExpr::Const(Value::Int32(value)) => Some(*value),
         _ => None,
@@ -5463,7 +5465,7 @@ fn parse_domain_upper_less_than_check(check: &str) -> Option<i32> {
         .collect::<String>()
         .to_ascii_lowercase();
     let limit = normalized.strip_prefix("upper(value)<")?;
-    limit.parse::<i32>().ok()
+    normalize_numeric_literal_token(limit).parse::<i32>().ok()
 }
 
 fn function_call_signature_text(

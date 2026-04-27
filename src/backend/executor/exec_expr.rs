@@ -3,6 +3,9 @@ use std::cmp::Ordering;
 
 use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
+use crate::backend::utils::sql_deparse::{
+    normalize_index_expression_sql, normalize_index_predicate_sql,
+};
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
 use crate::backend::utils::trigger::format_trigger_definition;
@@ -3509,15 +3512,7 @@ fn format_indexdef_for_catalog(
         .find(|row| row.oid == index.index_meta.am_oid)
         .map(|row| row.amname)
         .unwrap_or_else(|| "btree".into());
-    let all_columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)
-        .unwrap_or_else(|| {
-            index
-                .desc
-                .columns
-                .iter()
-                .map(|column| column.name.clone())
-                .collect()
-        });
+    let all_columns = index_definition_columns(relation, index);
     let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or_default();
     let key_columns = all_columns
         .iter()
@@ -3546,17 +3541,118 @@ fn format_indexdef_for_catalog(
         definition.push_str(&include_columns.join(", "));
         definition.push(')');
     }
+    if index.index_meta.indnullsnotdistinct {
+        definition.push_str(" NULLS NOT DISTINCT");
+    }
     if let Some(predicate) = index
         .index_meta
         .indpred
         .as_deref()
         .filter(|pred| !pred.is_empty())
     {
+        let predicate = normalize_index_predicate_sql(predicate, Some(&relation.desc));
         definition.push_str(" WHERE (");
-        definition.push_str(predicate);
+        definition.push_str(&predicate);
         definition.push(')');
     }
     definition
+}
+
+fn index_definition_columns(
+    relation: &crate::backend::parser::BoundRelation,
+    index: &crate::backend::parser::BoundIndexRelation,
+) -> Vec<String> {
+    let expression_sqls = index
+        .index_meta
+        .indexprs
+        .as_deref()
+        .and_then(|sql| serde_json::from_str::<Vec<String>>(sql).ok())
+        .unwrap_or_default();
+    let mut expression_index = 0usize;
+    index
+        .index_meta
+        .indkey
+        .iter()
+        .enumerate()
+        .map(|(index_column, attnum)| {
+            if *attnum > 0 {
+                return relation
+                    .desc
+                    .columns
+                    .get((*attnum as usize).saturating_sub(1))
+                    .map(|column| column.name.clone())
+                    .or_else(|| {
+                        index
+                            .desc
+                            .columns
+                            .get(index_column)
+                            .map(|column| column.name.clone())
+                    })
+                    .unwrap_or_else(|| format!("column{}", index_column + 1));
+            }
+            let rendered = expression_sqls
+                .get(expression_index)
+                .map(|expr| parenthesized_index_expression(&normalize_index_expression_sql(expr)))
+                .or_else(|| {
+                    index
+                        .desc
+                        .columns
+                        .get(index_column)
+                        .map(|column| column.name.clone())
+                })
+                .unwrap_or_else(|| format!("expr{}", expression_index + 1));
+            expression_index += 1;
+            rendered
+        })
+        .collect()
+}
+
+fn parenthesized_index_expression(expr_sql: &str) -> String {
+    let trimmed = expr_sql.trim();
+    if let Some(function_call) = normalized_function_call_expression(trimmed) {
+        return function_call;
+    }
+    if (trimmed.starts_with('(') && trimmed.ends_with(')')) || looks_like_function_call(trimmed) {
+        trimmed.to_string()
+    } else {
+        format!("({trimmed})")
+    }
+}
+
+fn normalized_function_call_expression(expr_sql: &str) -> Option<String> {
+    let trimmed = strip_outer_parens_once(expr_sql.trim());
+    if !looks_like_function_call(trimmed) {
+        return None;
+    }
+    let open = trimmed.find('(')?;
+    let name = trimmed[..open].trim();
+    let args = trimmed[open + 1..trimmed.len().saturating_sub(1)]
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("{name}({args})"))
+}
+
+fn strip_outer_parens_once(input: &str) -> &str {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
+        return trimmed;
+    }
+    let mut depth = 0i32;
+    for (idx, ch) in trimmed.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 && idx + ch.len_utf8() < trimmed.len() {
+                    return trimmed;
+                }
+            }
+            _ => {}
+        }
+    }
+    trimmed[1..trimmed.len().saturating_sub(1)].trim()
 }
 
 fn index_column_names_for_heap(desc: &RelationDesc, attnums: &[i16]) -> Option<Vec<String>> {

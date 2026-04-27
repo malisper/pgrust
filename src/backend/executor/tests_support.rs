@@ -121,6 +121,10 @@ impl SeededSqlHarness {
         self.catalog = catalog;
         result
     }
+
+    pub(crate) fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
 }
 
 fn temp_dir(label: &str) -> PathBuf {

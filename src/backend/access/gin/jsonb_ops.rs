@@ -13,6 +13,7 @@ const JGINFLAG_BOOL: u8 = 0x03;
 const JGINFLAG_NUM: u8 = 0x04;
 const JGINFLAG_STR: u8 = 0x05;
 const JGINFLAG_HASHED: u8 = 0x10;
+const A_GIN_ELEM: u8 = 0x20;
 const JGIN_MAXLENGTH: usize = 125;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,9 +46,8 @@ pub(crate) fn extract_value(attnum: u16, value: &Value) -> Result<Vec<GinEntryKe
             entries.dedup();
             Ok(entries)
         }
-        _ => Err(CatalogError::Io(
-            "GIN jsonb_ops can only index jsonb values".into(),
-        )),
+        Value::Array(_) | Value::PgArray(_) => array_entries(attnum, value, true),
+        _ => Err(CatalogError::Io("unsupported GIN indexed value".into())),
     }
 }
 
@@ -56,6 +56,9 @@ pub(crate) fn extract_query(
     strategy: u16,
     argument: &Value,
 ) -> Result<GinJsonbQuery, CatalogError> {
+    if argument.as_array_value().is_some() && matches!(strategy, 1..=4) {
+        return extract_array_query(attnum, strategy, argument);
+    }
     match strategy {
         7 => {
             let Value::Jsonb(bytes) = argument else {
@@ -108,7 +111,83 @@ pub(crate) fn query_search_mode(query: &GinJsonbQuery) -> u8 {
 }
 
 pub(crate) fn strategy_requires_all(strategy: u16) -> bool {
-    matches!(strategy, 7 | 11)
+    matches!(strategy, 2 | 4 | 7 | 11)
+}
+
+fn extract_array_query(
+    attnum: u16,
+    strategy: u16,
+    argument: &Value,
+) -> Result<GinJsonbQuery, CatalogError> {
+    let entries = array_entries(attnum, argument, false)?;
+    match strategy {
+        // overlap
+        1 => {
+            if entries.is_empty() {
+                Ok(GinJsonbQuery::None)
+            } else {
+                Ok(GinJsonbQuery::Any(entries))
+            }
+        }
+        // contains
+        2 => {
+            if entries.is_empty() {
+                Ok(GinJsonbQuery::All)
+            } else {
+                Ok(GinJsonbQuery::Any(entries))
+            }
+        }
+        // contained-by: use the index only as a broad prefilter. Empty indexed
+        // arrays have no element key, so scan all rows and let the heap recheck
+        // decide the exact SQL result.
+        3 => Ok(GinJsonbQuery::All),
+        // equals
+        4 => {
+            if entries.is_empty() {
+                Ok(GinJsonbQuery::All)
+            } else {
+                Ok(GinJsonbQuery::Any(entries))
+            }
+        }
+        _ => Err(CatalogError::Io(format!(
+            "unsupported GIN array_ops strategy {strategy}"
+        ))),
+    }
+}
+
+fn array_entries(
+    attnum: u16,
+    value: &Value,
+    include_empty_item: bool,
+) -> Result<Vec<GinEntryKey>, CatalogError> {
+    let array = value
+        .as_array_value()
+        .ok_or_else(|| CatalogError::Io("GIN array_ops expects array argument".into()))?;
+    let mut entries = Vec::new();
+    for item in array.elements {
+        match item {
+            Value::Null => entries.push(GinEntryKey {
+                attnum,
+                category: GinNullCategory::NullItem,
+                bytes: Vec::new(),
+            }),
+            other => entries.push(array_element_key(attnum, &other.to_owned_value())),
+        }
+    }
+    if entries.is_empty() && include_empty_item {
+        entries.push(GinEntryKey {
+            attnum,
+            category: GinNullCategory::EmptyItem,
+            bytes: Vec::new(),
+        });
+    }
+    entries.sort();
+    entries.dedup();
+    Ok(entries)
+}
+
+fn array_element_key(attnum: u16, value: &Value) -> GinEntryKey {
+    scalar_key(attnum, A_GIN_ELEM, &format!("{value:?}"))
 }
 
 fn extract_jsonb_entries(attnum: u16, value: &JsonbValue, out: &mut Vec<GinEntryKey>) {
