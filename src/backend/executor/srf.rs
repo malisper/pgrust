@@ -7,20 +7,22 @@ use super::expr_txid::eval_txid_snapshot_xip_values;
 use super::pg_regex::{eval_regexp_matches_rows, eval_regexp_split_to_table_rows};
 use super::sqlfunc::execute_user_defined_sql_set_returning_function;
 use super::{ExecError, ExecutorContext, Expr, SetReturningCall, TupleSlot, Value, eval_expr};
+use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
+use crate::backend::access::index::buildkeys::materialize_heap_row_values;
 use crate::backend::commands::partition::{partition_ancestor_oids, partition_tree_entries};
-use crate::backend::parser::CatalogLookup;
-use crate::backend::parser::SqlTypeKind;
+use crate::backend::parser::{CatalogLookup, SqlTypeKind};
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::utils::time::datetime::{
     current_timezone_name, days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
 };
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
-use crate::include::catalog::{TEXT_TYPE_OID, builtin_scalar_function_for_proc_oid};
+use crate::include::catalog::builtin_scalar_function_for_proc_oid;
 use crate::include::nodes::datetime::{
     TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
 };
-use crate::include::nodes::datum::{ArrayValue, IntervalValue, NumericValue, RecordValue};
+use crate::include::nodes::datum::{IntervalValue, NumericValue, RecordValue};
 use crate::include::nodes::primnodes::{TextSearchTableFunction, expr_sql_type_hint};
+use crate::include::nodes::tsearch::TsWeight;
 use crate::pl::plpgsql::execute_user_defined_set_returning_function;
 
 const MAX_UNBOUNDED_TIMESTAMP_SERIES_ROWS: usize = 10_000;
@@ -395,141 +397,10 @@ fn text_search_table_function_for_proc_src(prosrc: &str) -> Option<TextSearchTab
     match prosrc {
         "ts_token_type_byid" | "ts_token_type_byname" => Some(TextSearchTableFunction::TokenType),
         "ts_parse_byid" | "ts_parse_byname" => Some(TextSearchTableFunction::Parse),
+        "ts_debug" => Some(TextSearchTableFunction::Debug),
+        "ts_stat1" | "ts_stat2" => Some(TextSearchTableFunction::Stat),
         _ => None,
     }
-}
-
-fn eval_text_search_table_function(
-    kind: TextSearchTableFunction,
-    args: &[Expr],
-    slot: &mut TupleSlot,
-    ctx: &mut ExecutorContext,
-) -> Result<Vec<TupleSlot>, ExecError> {
-    let values = args
-        .iter()
-        .map(|arg| eval_expr(arg, slot, ctx))
-        .collect::<Result<Vec<_>, _>>()?;
-    if values.iter().any(|value| matches!(value, Value::Null)) {
-        return Ok(Vec::new());
-    }
-    let catalog = ctx
-        .catalog
-        .as_ref()
-        .map(|catalog| catalog as &dyn CatalogLookup);
-    match kind {
-        TextSearchTableFunction::TokenType => Ok(
-            crate::backend::tsearch::default_text_search_parser_token_types()
-                .into_iter()
-                .map(|token| {
-                    TupleSlot::virtual_row(vec![
-                        Value::Int32(token.tokid),
-                        Value::Text(token.alias),
-                        Value::Text(token.description),
-                    ])
-                })
-                .collect(),
-        ),
-        TextSearchTableFunction::Parse => {
-            let text =
-                values
-                    .last()
-                    .and_then(Value::as_text)
-                    .ok_or_else(|| ExecError::TypeMismatch {
-                        op: "ts_parse",
-                        left: values.last().cloned().unwrap_or(Value::Null),
-                        right: Value::Null,
-                    })?;
-            Ok(
-                crate::backend::tsearch::parse_default_text_search_tokens(text)
-                    .into_iter()
-                    .map(|(tokid, token)| {
-                        TupleSlot::virtual_row(vec![Value::Int32(tokid), Value::Text(token.into())])
-                    })
-                    .collect(),
-            )
-        }
-        TextSearchTableFunction::Debug => {
-            let (config_name, text) = match values.as_slice() {
-                [value] => (None, value.as_text()),
-                [config, value] => (config.as_text(), value.as_text()),
-                _ => (None, None),
-            };
-            let text = text.ok_or_else(|| ExecError::TypeMismatch {
-                op: "ts_debug",
-                left: values.last().cloned().unwrap_or(Value::Null),
-                right: Value::Null,
-            })?;
-            Ok(
-                crate::backend::tsearch::parse_default_text_search_tokens(text)
-                    .into_iter()
-                    .map(|(tokid, token)| {
-                        let token_type =
-                            crate::backend::tsearch::default_text_search_parser_token_type(tokid);
-                        let alias = token_type
-                            .as_ref()
-                            .map(|token| token.alias.clone())
-                            .unwrap_or_else(|| "".into());
-                        let description = token_type
-                            .as_ref()
-                            .map(|token| token.description.clone())
-                            .unwrap_or_else(|| "".into());
-                        let dictionary = text_search_debug_dictionary(config_name, tokid);
-                        let lexemes = dictionary
-                            .map(|dictionary| {
-                                crate::backend::tsearch::ts_lexize_with_dictionary_name(
-                                    dictionary, &token, catalog,
-                                )
-                                .unwrap_or_default()
-                                .unwrap_or_default()
-                            })
-                            .unwrap_or_default();
-                        TupleSlot::virtual_row(vec![
-                            Value::Text(alias),
-                            Value::Text(description),
-                            Value::Text(token.into()),
-                            text_array_value(
-                                dictionary
-                                    .map(|dictionary| vec![dictionary.to_string()])
-                                    .unwrap_or_default(),
-                            ),
-                            dictionary
-                                .map(|dictionary| Value::Text(dictionary.into()))
-                                .unwrap_or(Value::Null),
-                            dictionary
-                                .map(|_| text_array_value(lexemes))
-                                .unwrap_or(Value::Null),
-                        ])
-                    })
-                    .collect(),
-            )
-        }
-    }
-}
-
-fn text_search_debug_dictionary(config_name: Option<&str>, tokid: i32) -> Option<&'static str> {
-    if !matches!(tokid, 1..=11 | 15..=22) {
-        return None;
-    }
-    if matches!(tokid, 4..=8 | 18..=22) {
-        return Some("simple");
-    }
-    if matches!(config_name, Some(name) if name.eq_ignore_ascii_case("english")) {
-        Some("english_stem")
-    } else {
-        Some("simple")
-    }
-}
-
-fn text_array_value(values: Vec<String>) -> Value {
-    Value::PgArray(
-        ArrayValue::from_1d(
-            values
-                .into_iter()
-                .map(|value| Value::Text(value.into()))
-                .collect(),
-        )
-        .with_element_type_oid(TEXT_TYPE_OID),
-    )
 }
 
 fn eval_pg_show_all_settings(
@@ -645,6 +516,7 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &str {
             crate::include::nodes::primnodes::TextSearchTableFunction::TokenType => "ts_token_type",
             crate::include::nodes::primnodes::TextSearchTableFunction::Parse => "ts_parse",
             crate::include::nodes::primnodes::TextSearchTableFunction::Debug => "ts_debug",
+            crate::include::nodes::primnodes::TextSearchTableFunction::Stat => "ts_stat",
         },
         SetReturningCall::UserDefined { function_name, .. } => function_name.as_str(),
     }
@@ -720,6 +592,385 @@ fn eval_generate_subscripts(
     Ok(range
         .map(|subscript| TupleSlot::virtual_row(vec![Value::Int32(subscript)]))
         .collect())
+}
+
+fn eval_text_search_table_function(
+    kind: crate::include::nodes::primnodes::TextSearchTableFunction,
+    args: &[Expr],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    match kind {
+        crate::include::nodes::primnodes::TextSearchTableFunction::TokenType => {
+            Ok(crate::backend::tsearch::token_kinds()
+                .iter()
+                .map(|kind| {
+                    TupleSlot::virtual_row(vec![
+                        Value::Int32(kind.tokid),
+                        Value::Text(kind.alias.into()),
+                        Value::Text(kind.description.into()),
+                    ])
+                })
+                .collect())
+        }
+        crate::include::nodes::primnodes::TextSearchTableFunction::Parse => {
+            let values = eval_args(args, slot, ctx)?;
+            let Some(document) = values.last().and_then(Value::as_text) else {
+                return Ok(Vec::new());
+            };
+            Ok(crate::backend::tsearch::parse_default(document)
+                .into_iter()
+                .map(|token| {
+                    TupleSlot::virtual_row(vec![
+                        Value::Int32(token.tokid),
+                        Value::Text(token.token.into()),
+                    ])
+                })
+                .collect())
+        }
+        crate::include::nodes::primnodes::TextSearchTableFunction::Debug => {
+            eval_ts_debug_rows(args, slot, ctx)
+        }
+        crate::include::nodes::primnodes::TextSearchTableFunction::Stat => {
+            eval_ts_stat_rows(args, slot, ctx)
+        }
+    }
+}
+
+fn eval_ts_stat_rows(
+    args: &[Expr],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let values = eval_args(args, slot, ctx)?;
+    let Some(query) = values.first().and_then(Value::as_text) else {
+        return Ok(Vec::new());
+    };
+    let weights = values
+        .get(1)
+        .and_then(Value::as_text)
+        .map(parse_ts_stat_weights)
+        .unwrap_or_default();
+    let (column_name, table_name) = parse_ts_stat_select(query)?;
+    let catalog = ctx
+        .catalog
+        .as_ref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "ts_stat requires executor catalog context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })?;
+    let relation =
+        catalog
+            .relcache()
+            .get_by_name(table_name)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("relation \"{table_name}\" does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P01",
+            })?;
+    let column_index = relation
+        .desc
+        .columns
+        .iter()
+        .position(|column| column.name.eq_ignore_ascii_case(column_name) && !column.dropped)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("column \"{column_name}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42703",
+        })?;
+    let attr_descs = relation.desc.attribute_descs();
+    let mut stats = std::collections::BTreeMap::<String, (i32, i32)>::new();
+    let mut scan =
+        heap_scan_begin_visible(&ctx.pool, ctx.client_id, relation.rel, ctx.snapshot.clone())
+            .map_err(|err| ExecError::DetailedError {
+                message: "ts_stat heap scan failed".into(),
+                detail: Some(format!("{err:?}")),
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+    loop {
+        ctx.check_for_interrupts()?;
+        let next = {
+            let txns = ctx.txns.read();
+            heap_scan_next_visible(&ctx.pool, ctx.client_id, &txns, &mut scan)
+        }
+        .map_err(|err| ExecError::DetailedError {
+            message: "ts_stat heap scan failed".into(),
+            detail: Some(format!("{err:?}")),
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+        let Some((_tid, tuple)) = next else {
+            break;
+        };
+        let row = materialize_heap_row_values(
+            &relation.desc,
+            &tuple
+                .deform(&attr_descs)
+                .map_err(|err| ExecError::DetailedError {
+                    message: "ts_stat heap tuple deform failed".into(),
+                    detail: Some(format!("{err:?}")),
+                    hint: None,
+                    sqlstate: "XX000",
+                })?,
+        )
+        .map_err(|err| ExecError::DetailedError {
+            message: "ts_stat heap tuple materialize failed".into(),
+            detail: Some(format!("{err:?}")),
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+        let Some(Value::TsVector(vector)) = row.get(column_index) else {
+            continue;
+        };
+        for lexeme in &vector.lexemes {
+            let nentry = if weights.is_empty() {
+                if lexeme.positions.is_empty() {
+                    1
+                } else {
+                    lexeme.positions.len() as i32
+                }
+            } else {
+                lexeme
+                    .positions
+                    .iter()
+                    .filter(|position| weights.contains(&position.weight.unwrap_or(TsWeight::D)))
+                    .count() as i32
+            };
+            if nentry == 0 {
+                continue;
+            }
+            let entry = stats.entry(lexeme.text.to_string()).or_default();
+            entry.0 += 1;
+            entry.1 += nentry;
+        }
+    }
+    Ok(stats
+        .into_iter()
+        .map(|(word, (ndoc, nentry))| {
+            TupleSlot::virtual_row(vec![
+                Value::Text(word.into()),
+                Value::Int32(ndoc),
+                Value::Int32(nentry),
+            ])
+        })
+        .collect())
+}
+
+fn parse_ts_stat_weights(value: &str) -> Vec<TsWeight> {
+    value.chars().filter_map(TsWeight::from_char).collect()
+}
+
+fn parse_ts_stat_select(query: &str) -> Result<(&str, &str), ExecError> {
+    let trimmed = query.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("select ") else {
+        return Err(ExecError::DetailedError {
+            message: "ts_stat query is not supported".into(),
+            detail: Some("expected SELECT column FROM table".into()),
+            hint: None,
+            sqlstate: "0A000",
+        });
+    };
+    let Some(from_pos) = rest.find(" from ") else {
+        return Err(ExecError::DetailedError {
+            message: "ts_stat query is not supported".into(),
+            detail: Some("expected SELECT column FROM table".into()),
+            hint: None,
+            sqlstate: "0A000",
+        });
+    };
+    let column_start = "select ".len();
+    let column_end = column_start + from_pos;
+    let table_start = column_end + " from ".len();
+    let column = trimmed[column_start..column_end].trim();
+    let table = trimmed[table_start..]
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if column.is_empty() || table.is_empty() || column.contains(',') {
+        return Err(ExecError::DetailedError {
+            message: "ts_stat query is not supported".into(),
+            detail: Some("expected SELECT column FROM table".into()),
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    Ok((column.trim_matches('"'), table.trim_matches('"')))
+}
+
+fn eval_ts_debug_rows(
+    args: &[Expr],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let values = eval_args(args, slot, ctx)?;
+    let Some(document) = values.last().and_then(Value::as_text) else {
+        return Ok(Vec::new());
+    };
+    let config = if values.len() > 1 {
+        ts_debug_config_from_value(&values[0], ctx)?
+    } else {
+        let config_name = ctx
+            .gucs
+            .get("default_text_search_config")
+            .map(String::as_str);
+        crate::backend::tsearch::resolve_config_with_gucs(config_name, Some(&ctx.gucs)).map_err(
+            |message| {
+                ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                    expected: "valid text search configuration",
+                    actual: message,
+                })
+            },
+        )?
+    };
+
+    let catalog = ctx
+        .catalog
+        .as_ref()
+        .map(|catalog| catalog as &dyn CatalogLookup);
+    let mut rows = Vec::new();
+    for token in crate::backend::tsearch::parse_default(document) {
+        let Some(kind) = crate::backend::tsearch::token_kind(token.tokid) else {
+            continue;
+        };
+        let dictionary = ts_debug_dictionary_name(&config, token.tokid);
+        let (dictionaries, dictionary_value, lexemes) = if let Some(dictionary) = dictionary {
+            let lexemes = crate::backend::tsearch::ts_lexize_with_dictionary_name(
+                dictionary,
+                token.token.as_str(),
+                catalog,
+            )
+            .map_err(|message| {
+                ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                    expected: "valid text search lexeme",
+                    actual: message,
+                })
+            })?;
+            (
+                Value::Array(vec![Value::Text(dictionary.into())]),
+                Value::Text(dictionary.into()),
+                Value::Array(
+                    lexemes
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|lexeme| Value::Text(lexeme.into()))
+                        .collect(),
+                ),
+            )
+        } else {
+            (Value::Array(Vec::new()), Value::Null, Value::Null)
+        };
+        rows.push(TupleSlot::virtual_row(vec![
+            Value::Text(kind.alias.into()),
+            Value::Text(kind.description.into()),
+            Value::Text(token.token.into()),
+            dictionaries,
+            dictionary_value,
+            lexemes,
+        ]));
+    }
+    Ok(rows)
+}
+
+fn ts_debug_config_from_value(
+    value: &Value,
+    ctx: &ExecutorContext,
+) -> Result<crate::backend::tsearch::cache::TextSearchConfig, ExecError> {
+    if let Some(name) = value.as_text() {
+        return crate::backend::tsearch::resolve_config_with_gucs(Some(name), Some(&ctx.gucs))
+            .map_err(|message| {
+                ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                    expected: "valid text search configuration",
+                    actual: message,
+                })
+            });
+    }
+    let oid = match value {
+        Value::Int64(oid) if *oid >= 0 => Some(*oid as u32),
+        Value::Int32(oid) if *oid >= 0 => Some(*oid as u32),
+        _ => None,
+    };
+    let Some(oid) = oid else {
+        return crate::backend::tsearch::resolve_config_with_gucs(None, Some(&ctx.gucs)).map_err(
+            |message| {
+                ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                    expected: "valid text search configuration",
+                    actual: message,
+                })
+            },
+        );
+    };
+    if oid == crate::include::catalog::SIMPLE_TS_CONFIG_OID {
+        return Ok(crate::backend::tsearch::cache::TextSearchConfig::Simple);
+    }
+    if oid == crate::include::catalog::ENGLISH_TS_CONFIG_OID {
+        return Ok(crate::backend::tsearch::cache::TextSearchConfig::English);
+    }
+    let Some(row) = ctx.catalog.as_ref().and_then(|catalog| {
+        catalog
+            .ts_config_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+    }) else {
+        return Err(ExecError::DetailedError {
+            message: format!("text search configuration with OID {oid} does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42704",
+        });
+    };
+    crate::backend::tsearch::resolve_config_with_gucs(Some(&row.cfgname), Some(&ctx.gucs)).map_err(
+        |message| {
+            ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                expected: "valid text search configuration",
+                actual: message,
+            })
+        },
+    )
+}
+
+fn ts_debug_dictionary_name(
+    config: &crate::backend::tsearch::cache::TextSearchConfig,
+    tokid: i32,
+) -> Option<&'static str> {
+    if !crate::backend::tsearch::parser::token_has_dictionary(tokid) {
+        return None;
+    }
+    match config {
+        crate::backend::tsearch::cache::TextSearchConfig::Simple => Some("simple"),
+        crate::backend::tsearch::cache::TextSearchConfig::English
+            if matches!(
+                tokid,
+                crate::backend::tsearch::parser::EMAIL
+                    | crate::backend::tsearch::parser::URL_T
+                    | crate::backend::tsearch::parser::HOST
+                    | crate::backend::tsearch::parser::SCIENTIFIC
+                    | crate::backend::tsearch::parser::URLPATH
+                    | crate::backend::tsearch::parser::FILEPATH
+                    | crate::backend::tsearch::parser::DECIMAL_T
+                    | crate::backend::tsearch::parser::SIGNEDINT
+                    | crate::backend::tsearch::parser::UNSIGNEDINT
+            ) =>
+        {
+            Some("simple")
+        }
+        crate::backend::tsearch::cache::TextSearchConfig::English => Some("english_stem"),
+        crate::backend::tsearch::cache::TextSearchConfig::Custom { .. } => Some("simple"),
+    }
+}
+
+fn eval_args(
+    args: &[Expr],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    args.iter().map(|arg| eval_expr(arg, slot, ctx)).collect()
 }
 
 fn eval_pg_lock_status(ctx: &ExecutorContext) -> Result<Vec<TupleSlot>, ExecError> {

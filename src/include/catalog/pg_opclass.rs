@@ -45,6 +45,7 @@ pub const VARCHAR_PATTERN_BTREE_OPCLASS_OID: u32 = 4218;
 pub const BPCHAR_PATTERN_BTREE_OPCLASS_OID: u32 = 4219;
 pub const TSVECTOR_GIST_OPCLASS_OID: u32 = 10043;
 pub const TSVECTOR_GIN_OPCLASS_OID: u32 = 10044;
+pub const TSQUERY_GIST_OPCLASS_OID: u32 = 10065;
 pub const RANGE_SPGIST_OPCLASS_OID: u32 = 10045;
 pub const TEXT_SPGIST_OPCLASS_OID: u32 = 10046;
 pub const INET_BRIN_INCLUSION_OPCLASS_OID: u32 = 10047;
@@ -464,12 +465,30 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             GIST_RANGE_FAMILY_OID,
             ANYRANGEOID,
         ),
-        gist_row(
-            TSVECTOR_GIST_OPCLASS_OID,
-            "tsvector_ops",
-            GIST_TSVECTOR_FAMILY_OID,
-            TSVECTOR_TYPE_OID,
-        ),
+        PgOpclassRow {
+            oid: TSVECTOR_GIST_OPCLASS_OID,
+            opcmethod: GIST_AM_OID,
+            opcname: "tsvector_ops".into(),
+            opcnamespace: PG_CATALOG_NAMESPACE_OID,
+            opcowner: BOOTSTRAP_SUPERUSER_OID,
+            opcfamily: GIST_TSVECTOR_FAMILY_OID,
+            opcintype: TSVECTOR_TYPE_OID,
+            opcdefault: true,
+            opckeytype: GTSVECTOR_TYPE_OID,
+        },
+        PgOpclassRow {
+            oid: TSQUERY_GIST_OPCLASS_OID,
+            opcmethod: GIST_AM_OID,
+            opcname: "tsquery_ops".into(),
+            opcnamespace: PG_CATALOG_NAMESPACE_OID,
+            opcowner: BOOTSTRAP_SUPERUSER_OID,
+            opcfamily: GIST_TSQUERY_FAMILY_OID,
+            opcintype: TSQUERY_TYPE_OID,
+            opcdefault: false,
+            // :HACK: pgrust GiST tuple storage is not opckeytype-aware yet, so
+            // store original tsquery keys and rely on lossy heap recheck.
+            opckeytype: 0,
+        },
         gist_row(
             INET_GIST_OPCLASS_OID,
             "inet_ops",

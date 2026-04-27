@@ -4104,11 +4104,18 @@ fn text_search_catalogs_are_bootstrapped() {
             1,
             "select dictname, dicttemplate, dictinitoption from pg_ts_dict order by oid",
         ),
-        vec![vec![
-            Value::Text("simple".into()),
-            Value::Int64(3727),
-            Value::Null,
-        ]]
+        vec![
+            vec![
+                Value::Text("simple".into()),
+                Value::Int64(3727),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("english_stem".into()),
+                Value::Int64(3727),
+                Value::Null,
+            ],
+        ]
     );
     assert_eq!(
         query_rows(
@@ -4145,11 +4152,14 @@ fn text_search_catalogs_are_bootstrapped() {
             1,
             "select cfgname, cfgparser from pg_ts_config order by oid",
         ),
-        vec![vec![Value::Text("simple".into()), Value::Int64(3722)]]
+        vec![
+            vec![Value::Text("simple".into()), Value::Int64(3722)],
+            vec![Value::Text("english".into()), Value::Int64(3722)],
+        ]
     );
     assert_eq!(
         query_rows(&db, 1, "select count(*) from pg_ts_config_map"),
-        vec![vec![Value::Int64(19)]]
+        vec![vec![Value::Int64(38)]]
     );
 }
 

@@ -4707,6 +4707,7 @@ fn commuted_builtin_function(func: BuiltinScalarFunction) -> Option<BuiltinScala
         BuiltinScalarFunction::NetworkSupernet => BuiltinScalarFunction::NetworkSubnet,
         BuiltinScalarFunction::NetworkSupernetEq => BuiltinScalarFunction::NetworkSubnetEq,
         BuiltinScalarFunction::NetworkOverlap => BuiltinScalarFunction::NetworkOverlap,
+        BuiltinScalarFunction::TsMatch => BuiltinScalarFunction::TsMatch,
         _ => return None,
     })
 }

@@ -36,8 +36,9 @@ use crate::include::access::scankey::ScanKeyData;
 use crate::include::access::visibilitymap::visibilitymap_get_status;
 use crate::include::access::visibilitymapdefs::VISIBILITYMAP_ALL_VISIBLE;
 use crate::include::catalog::{
-    BTREE_AM_OID, DATE_TYPE_OID, GIST_AM_OID, HASH_AM_OID, PG_LARGEOBJECT_METADATA_RELATION_OID,
-    PG_NAMESPACE_RELATION_OID, SPGIST_AM_OID, TEXT_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
+    BTREE_AM_OID, DATE_TYPE_OID, GIST_AM_OID, GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID,
+    PG_LARGEOBJECT_METADATA_RELATION_OID, PG_NAMESPACE_RELATION_OID, SPGIST_AM_OID, TEXT_TYPE_OID,
+    TIMESTAMPTZ_TYPE_OID,
 };
 use crate::include::nodes::datetime::{DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimestampTzADT};
 use crate::include::nodes::datum::Value;
@@ -757,6 +758,51 @@ fn eval_index_scan_key_argument(
         IndexScanKeyArgument::Runtime(expr) => eval_expr(expr, slot, ctx)?,
     };
     Ok(value.to_owned_value())
+}
+
+fn recheck_lossy_index_scan_tuple(
+    state: &mut IndexScanState,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    for key in state.keys.clone() {
+        let Some(index_pos) = key
+            .attribute_number
+            .checked_sub(1)
+            .and_then(|pos| usize::try_from(pos).ok())
+        else {
+            continue;
+        };
+        if state.index_meta.opfamily_oids.get(index_pos).copied() != Some(GIST_TSVECTOR_FAMILY_OID)
+        {
+            continue;
+        }
+        let Some(heap_attno) = state.index_meta.indkey.get(index_pos).copied() else {
+            return Err(internal_exec_error(
+                "GiST tsvector recheck key missing indkey",
+            ));
+        };
+        if heap_attno <= 0 {
+            continue;
+        }
+        let query = match eval_index_scan_key_argument(&key.argument, &mut state.slot, ctx)? {
+            Value::TsQuery(query) => query,
+            Value::Null => return Ok(false),
+            _ => continue,
+        };
+        let vector = state.slot.get_attr(heap_attno as usize - 1)?.clone();
+        match vector {
+            Value::TsVector(vector) => {
+                if !crate::backend::executor::tsearch::eval_tsvector_matches_tsquery(
+                    &vector, &query,
+                ) {
+                    return Ok(false);
+                }
+            }
+            Value::Null => return Ok(false),
+            _ => continue,
+        }
+    }
+    Ok(true)
 }
 
 fn eval_index_scan_keys(
@@ -2094,6 +2140,12 @@ impl PlanNode for IndexScanState {
                 tid: Some(tid),
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
+
+            let needs_index_recheck = self.scan.as_ref().is_some_and(|scan| scan.xs_recheck);
+            if needs_index_recheck && !recheck_lossy_index_scan_tuple(self, ctx)? {
+                note_filtered_row(&mut self.stats);
+                continue;
+            }
 
             if let Some(qual) = &self.qual {
                 let outer_values = materialize_slot_values(&mut self.slot)?;
@@ -4001,6 +4053,7 @@ fn builtin_scalar_function_infix_operator(
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TsQueryContains) => Some("@>"),
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TsQueryContainedBy) => Some("<@"),
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TextStartsWith) => Some("^@"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TsMatch) => Some("@@"),
         _ => None,
     }
 }
@@ -4076,7 +4129,6 @@ fn explain_bool_arg_is_bare(expr: &Expr) -> bool {
         Expr::Var(_)
             | Expr::Param(_)
             | Expr::Const(_)
-            | Expr::Func(_)
             | Expr::SubPlan(_)
             | Expr::CurrentCatalog
             | Expr::CurrentSchema
@@ -4085,7 +4137,7 @@ fn explain_bool_arg_is_bare(expr: &Expr) -> bool {
             | Expr::CurrentRole
             | Expr::SessionUser
             | Expr::Random
-    )
+    ) || matches!(expr, Expr::Func(func) if !render_explain_func_expr_is_infix(func))
 }
 
 fn explain_detail_prefix(indent: usize) -> String {
@@ -4446,6 +4498,14 @@ fn render_explain_const(value: &Value) -> String {
                 crate::backend::executor::format_array_value_text(array)
             ),
         },
+        Value::TsQuery(_) | Value::TsVector(_) => match value.sql_type_hint() {
+            Some(sql_type) => format!(
+                "{}::{}",
+                render_explain_literal(value),
+                render_explain_sql_type_name(sql_type)
+            ),
+            None => render_explain_literal(value),
+        },
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
@@ -4578,6 +4638,14 @@ fn render_explain_literal(value: &Value) -> String {
                 .unwrap_or_else(|| format!("{value:?}"));
             format!("'{rendered}'")
         }
+        Value::TsQuery(query) => {
+            let rendered = crate::backend::executor::render_tsquery_text(query);
+            format!("'{}'", rendered.replace('\'', "''"))
+        }
+        Value::TsVector(vector) => {
+            let rendered = crate::backend::executor::render_tsvector_text(vector);
+            format!("'{}'", rendered.replace('\'', "''"))
+        }
         Value::PgArray(array) => {
             let rendered = crate::backend::executor::value_io::format_array_value_text(array);
             format!("'{}'", rendered.replace('\'', "''"))
@@ -4690,6 +4758,8 @@ fn render_explain_sql_type_name(ty: SqlType) -> String {
             .unwrap_or_else(|| "character varying".into()),
         SqlTypeKind::Json => "json".into(),
         SqlTypeKind::Jsonb => "jsonb".into(),
+        SqlTypeKind::TsQuery => "tsquery".into(),
+        SqlTypeKind::TsVector => "tsvector".into(),
         SqlTypeKind::Line => "line".into(),
         SqlTypeKind::Lseg => "lseg".into(),
         SqlTypeKind::Path => "path".into(),

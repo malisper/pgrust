@@ -1789,6 +1789,12 @@ pub(super) fn bind_overloaded_binary_expr(
         } else if matches!(right_type.kind, SqlTypeKind::TsQuery) && left_is_string_literal {
             left_type = SqlType::new(SqlTypeKind::TsQuery);
         }
+    } else if matches!(op, "@>" | "<@") {
+        if matches!(left_type.kind, SqlTypeKind::TsQuery) && right_is_string_literal {
+            right_type = SqlType::new(SqlTypeKind::TsQuery);
+        } else if matches!(right_type.kind, SqlTypeKind::TsQuery) && left_is_string_literal {
+            left_type = SqlType::new(SqlTypeKind::TsQuery);
+        }
     }
 
     let left_bound =
@@ -1811,6 +1817,44 @@ pub(super) fn bind_overloaded_binary_expr(
                             right_bound,
                             raw_right_type,
                             SqlType::new(SqlTypeKind::JsonPath),
+                        ),
+                    ],
+                ));
+            }
+            if is_text_like_type(left_type) && matches!(right_type.kind, SqlTypeKind::TsQuery) {
+                return Ok(Expr::builtin_func(
+                    BuiltinScalarFunction::TsMatch,
+                    Some(SqlType::new(SqlTypeKind::Bool)),
+                    false,
+                    vec![
+                        coerce_bound_expr(
+                            left_bound,
+                            raw_left_type,
+                            SqlType::new(SqlTypeKind::Text),
+                        ),
+                        coerce_bound_expr(
+                            right_bound,
+                            raw_right_type,
+                            SqlType::new(SqlTypeKind::TsQuery),
+                        ),
+                    ],
+                ));
+            }
+            if matches!(left_type.kind, SqlTypeKind::TsQuery) && is_text_like_type(right_type) {
+                return Ok(Expr::builtin_func(
+                    BuiltinScalarFunction::TsMatch,
+                    Some(SqlType::new(SqlTypeKind::Bool)),
+                    false,
+                    vec![
+                        coerce_bound_expr(
+                            left_bound,
+                            raw_left_type,
+                            SqlType::new(SqlTypeKind::TsQuery),
+                        ),
+                        coerce_bound_expr(
+                            right_bound,
+                            raw_right_type,
+                            SqlType::new(SqlTypeKind::Text),
                         ),
                     ],
                 ));
@@ -1952,6 +1996,30 @@ pub(super) fn bind_overloaded_binary_expr(
                             raw_right_type,
                             SqlType::new(SqlTypeKind::TsQuery),
                         ),
+                    ],
+                ));
+            }
+        }
+        "@>" | "<@" => {
+            if matches!(left_type.kind, SqlTypeKind::TsQuery)
+                && matches!(right_type.kind, SqlTypeKind::TsQuery)
+            {
+                return Ok(Expr::builtin_func(
+                    BuiltinScalarFunction::TsQueryContains,
+                    Some(SqlType::new(SqlTypeKind::Bool)),
+                    false,
+                    vec![
+                        coerce_bound_expr(
+                            left_bound,
+                            raw_left_type,
+                            SqlType::new(SqlTypeKind::TsQuery),
+                        ),
+                        coerce_bound_expr(
+                            right_bound,
+                            raw_right_type,
+                            SqlType::new(SqlTypeKind::TsQuery),
+                        ),
+                        Expr::Const(Value::Bool(op == "@>")),
                     ],
                 ));
             }

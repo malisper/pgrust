@@ -1761,6 +1761,47 @@ fn bind_function_from_item_with_ctes(
                         alias_single_function_output,
                     ));
                 }
+                if let Some(ResolvedSrfImpl::TextSearch(kind)) = resolved.srf_impl {
+                    let bound_args = bind_user_defined_table_function_args(
+                        &args,
+                        &call_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        &resolved.declared_arg_types,
+                    )?;
+                    let mut output_columns = resolved_row_columns.clone().unwrap_or_else(|| {
+                        vec![QueryColumn {
+                            name: other.to_string(),
+                            sql_type: resolved.result_type,
+                            wire_type_oid: None,
+                        }]
+                    });
+                    let mut desc_columns = output_columns
+                        .iter()
+                        .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                        .collect::<Vec<_>>();
+                    maybe_append_function_ordinality(
+                        with_ordinality,
+                        &mut output_columns,
+                        &mut desc_columns,
+                    );
+                    let desc = RelationDesc {
+                        columns: desc_columns,
+                    };
+                    let scope = scope_for_relation(Some(name), &desc);
+                    let alias_single_function_output = output_columns.len() == 1;
+                    return Ok((
+                        AnalyzedFrom::function(SetReturningCall::TextSearchTableFunction {
+                            kind,
+                            args: bound_args,
+                            output_columns,
+                            with_ordinality,
+                        }),
+                        scope,
+                        alias_single_function_output,
+                    ));
+                }
                 if let Some(
                     srf_impl @ (ResolvedSrfImpl::PartitionTree
                     | ResolvedSrfImpl::PartitionAncestors),

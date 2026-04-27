@@ -63,6 +63,8 @@ pub struct IndexRelCacheEntry {
     pub am_handler_oid: Option<u32>,
     pub indkey: Vec<i16>,
     pub indclass: Vec<u32>,
+    #[serde(default)]
+    pub indclass_options: Vec<Vec<(String, String)>>,
     pub indcollation: Vec<u32>,
     pub indoption: Vec<i16>,
     pub opfamily_oids: Vec<u32>,
@@ -604,6 +606,7 @@ impl RelCache {
                             am_handler_oid: support_lookup.am_handler_oid(class.relam),
                             indkey: Vec::new(),
                             indclass: Vec::new(),
+                            indclass_options: Vec::new(),
                             indcollation: Vec::new(),
                             indoption: Vec::new(),
                             opfamily_oids: Vec::new(),
@@ -643,6 +646,10 @@ impl RelCache {
                         am_handler_oid: support_lookup.am_handler_oid(class.relam),
                         indkey: index.indkey.clone(),
                         indclass,
+                        indclass_options:
+                            crate::backend::catalog::index_opclass_options_from_reloptions(
+                                class.reloptions.as_deref(),
+                            ),
                         indcollation: index.indcollation.clone(),
                         indoption: index.indoption.clone(),
                         opfamily_oids: support.opfamily_oids,
@@ -831,6 +838,7 @@ fn from_catalog_entry(entry: &CatalogEntry, support_lookup: &IndexSupportLookup)
                 am_handler_oid: support_lookup.am_handler_oid(entry.am_oid),
                 indkey: index.indkey.clone(),
                 indclass: index.indclass.clone(),
+                indclass_options: index.indclass_options.clone(),
                 indcollation: index.indcollation.clone(),
                 indoption: index.indoption.clone(),
                 opfamily_oids: support.opfamily_oids,
@@ -928,6 +936,7 @@ mod tests {
                 &CatalogIndexBuildOptions {
                     am_oid: GIST_AM_OID,
                     indclass: vec![BOX_GIST_OPCLASS_OID],
+                    indclass_options: vec![Vec::new()],
                     indcollation: vec![0],
                     indoption: vec![0],
                     reloptions: None,
@@ -985,6 +994,7 @@ mod tests {
                 &CatalogIndexBuildOptions {
                     am_oid: GIST_AM_OID,
                     indclass: vec![POLY_GIST_OPCLASS_OID],
+                    indclass_options: vec![Vec::new()],
                     indcollation: vec![0],
                     indoption: vec![0],
                     reloptions: None,
@@ -1007,6 +1017,7 @@ mod tests {
                 &CatalogIndexBuildOptions {
                     am_oid: GIST_AM_OID,
                     indclass: vec![CIRCLE_GIST_OPCLASS_OID],
+                    indclass_options: vec![Vec::new()],
                     indcollation: vec![0],
                     indoption: vec![0],
                     reloptions: None,
@@ -1068,6 +1079,7 @@ mod tests {
                 &CatalogIndexBuildOptions {
                     am_oid: crate::include::catalog::BTREE_AM_OID,
                     indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
+                    indclass_options: vec![Vec::new()],
                     indcollation: vec![0],
                     indoption: vec![0],
                     reloptions: None,
@@ -1123,6 +1135,7 @@ mod tests {
             am_handler_oid: support_lookup.am_handler_oid(GIST_AM_OID),
             indkey: vec![1],
             indclass: vec![RANGE_GIST_OPCLASS_OID],
+            indclass_options: vec![Vec::new()],
             indcollation: vec![0],
             indoption: vec![0],
             opfamily_oids: support.opfamily_oids,
@@ -1191,6 +1204,7 @@ mod tests {
             am_handler_oid: support_lookup.am_handler_oid(GIST_AM_OID),
             indkey: vec![1],
             indclass: vec![BOX_GIST_OPCLASS_OID],
+            indclass_options: vec![Vec::new()],
             indcollation: vec![0],
             indoption: vec![0],
             opfamily_oids: support.opfamily_oids,

@@ -78,6 +78,20 @@ pub(crate) fn resolve_config(
     }
 }
 
+pub(crate) fn resolve_config_with_gucs(
+    config_name: Option<&str>,
+    gucs: Option<&std::collections::HashMap<String, String>>,
+) -> Result<TextSearchConfig, String> {
+    let config_name = config_name.or_else(|| {
+        gucs.and_then(|gucs| {
+            gucs.get("default_text_search_config")
+                .map(String::as_str)
+                .or_else(|| gucs.get("default-text-search-config").map(String::as_str))
+        })
+    });
+    resolve_config(config_name, None)
+}
+
 pub(crate) fn resolve_dictionary(
     name: &str,
     catalog: Option<&dyn CatalogLookup>,

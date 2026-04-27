@@ -35,7 +35,7 @@ pub fn gist_am_handler() -> IndexAmRoutine {
         ambeginscan: Some(scan::gistbeginscan),
         amrescan: Some(scan::gistrescan),
         amgettuple: Some(scan::gistgettuple),
-        amgetbitmap: None,
+        amgetbitmap: Some(scan::gistgetbitmap),
         amendscan: Some(scan::gistendscan),
         ambulkdelete: Some(vacuum::gistbulkdelete),
         amvacuumcleanup: Some(vacuum::gistvacuumcleanup),

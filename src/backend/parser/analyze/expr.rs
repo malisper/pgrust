@@ -3849,6 +3849,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 ctes,
             ) {
                 result?
+            } else if let Some(result) = bind_maybe_tsquery_contains(
+                "@>",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
             } else {
                 bind_jsonb_contains_expr(
                     left,
@@ -3897,6 +3908,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 result?
             } else if let Some(result) = bind_maybe_array_membership_expr(
                 OpExprKind::ArrayContained,
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_tsquery_contains(
+                "<@",
                 left,
                 right,
                 scope,

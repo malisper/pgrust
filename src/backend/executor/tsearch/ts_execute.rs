@@ -116,6 +116,31 @@ fn eval_match_with_max(vector: &TsVector, node: &TsQueryNode, max_pos: u16) -> M
             right,
             distance,
         } => {
+            if let (Some(left_inner), Some(right_inner)) =
+                (not_inner(left.as_ref()), not_inner(right.as_ref()))
+            {
+                let left = eval_match_with_max(vector, left_inner, max_pos);
+                let right = eval_match_with_max(vector, right_inner, max_pos);
+                let mut positions = left
+                    .extents
+                    .iter()
+                    .filter_map(|extent| extent.end.checked_add(*distance))
+                    .chain(right.extents.iter().map(|extent| extent.end))
+                    .collect::<BTreeSet<_>>();
+                positions.retain(|position| *position > 0);
+                let extents = positions
+                    .iter()
+                    .map(|position| Extent {
+                        start: *position,
+                        end: *position,
+                    })
+                    .collect::<Vec<_>>();
+                return MatchResult {
+                    matched: !(left.matched || right.matched) || !positions.is_empty(),
+                    positions,
+                    extents,
+                };
+            }
             let right_negative = right_is_negative(right.as_ref());
             let left = eval_match_with_max(vector, left, max_pos);
             let right = eval_match_with_max(vector, right, max_pos);
@@ -149,4 +174,32 @@ fn eval_match_with_max(vector: &TsVector, node: &TsQueryNode, max_pos: u16) -> M
 
 fn right_is_negative(node: &TsQueryNode) -> bool {
     matches!(node, TsQueryNode::Not(_))
+}
+
+fn not_inner(node: &TsQueryNode) -> Option<&TsQueryNode> {
+    match node {
+        TsQueryNode::Not(inner) => Some(inner),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::include::nodes::tsearch::{TsQuery, TsVector};
+
+    fn matches(vector: &str, query: &str) -> bool {
+        let vector = TsVector::parse(vector).unwrap();
+        let query = TsQuery::parse(query).unwrap();
+        eval_tsvector_matches_tsquery(&vector, &query)
+    }
+
+    #[test]
+    fn phrase_with_two_negative_operands_follows_postgres_position_semantics() {
+        assert!(matches("'pl':1 'xx':2", "!pl <-> !yh"));
+        assert!(matches("'xx':1 'yh':2", "!pl <-> !yh"));
+        assert!(matches("'xx':1", "!pl <-> !yh"));
+        assert!(matches("", "!pl <-> !yh"));
+        assert!(!matches("'pl' 'xx'", "!pl <-> !yh"));
+    }
 }

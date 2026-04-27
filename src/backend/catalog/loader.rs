@@ -458,6 +458,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                         indisready: index.indisready,
                         indislive: index.indislive,
                         indclass: index.indclass.clone(),
+                        indclass_options: Vec::new(),
                         indcollation: index.indcollation.clone(),
                         indoption: index.indoption.clone(),
                         indexprs: index.indexprs.clone(),

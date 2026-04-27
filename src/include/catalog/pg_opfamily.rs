@@ -44,6 +44,7 @@ pub const GIST_NETWORK_FAMILY_OID: u32 = 3550;
 pub const GIST_RANGE_FAMILY_OID: u32 = 3919;
 pub const GIST_MULTIRANGE_FAMILY_OID: u32 = 6158;
 pub const GIST_TSVECTOR_FAMILY_OID: u32 = 3655;
+pub const GIST_TSQUERY_FAMILY_OID: u32 = 3702;
 pub const GIN_ARRAY_FAMILY_OID: u32 = 2745;
 pub const GIN_TSVECTOR_FAMILY_OID: u32 = 3659;
 pub const GIN_JSONB_FAMILY_OID: u32 = 4036;
@@ -318,6 +319,13 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             oid: GIST_TSVECTOR_FAMILY_OID,
             opfmethod: GIST_AM_OID,
             opfname: "tsvector_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: GIST_TSQUERY_FAMILY_OID,
+            opfmethod: GIST_AM_OID,
+            opfname: "tsquery_ops".into(),
             opfnamespace: PG_CATALOG_NAMESPACE_OID,
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },

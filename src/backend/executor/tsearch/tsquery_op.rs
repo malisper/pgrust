@@ -210,6 +210,13 @@ pub(crate) fn numnode(query: &TsQuery) -> i32 {
     count(&query.root)
 }
 
+pub(crate) fn tsquery_operands(query: &TsQuery) -> Vec<String> {
+    query_lexemes(&query.root)
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
 fn query_lexemes(node: &TsQueryNode) -> BTreeSet<&str> {
     let mut values = BTreeSet::new();
     collect_query_lexemes(node, &mut values);

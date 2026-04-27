@@ -135,8 +135,8 @@ pub(crate) use tsearch::{
     parse_ts_weight, parse_tsquery_text, parse_tsvector_text, render_tsquery_text,
     render_tsvector_text, setweight_tsvector, strip_tsvector, text_array_items, ts_rank,
     ts_rank_cd, tsquery_and, tsquery_contained_by, tsquery_contains, tsquery_input_error,
-    tsquery_not, tsquery_or, tsquery_phrase, tsquery_rewrite, tsvector_input_error,
-    tsvector_to_array, unnest_tsvector,
+    tsquery_not, tsquery_operands, tsquery_or, tsquery_phrase, tsquery_rewrite,
+    tsvector_input_error, tsvector_to_array, unnest_tsvector,
 };
 pub use value_io::{format_array_value_text, render_uuid_text};
 

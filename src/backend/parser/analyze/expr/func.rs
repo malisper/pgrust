@@ -1106,26 +1106,32 @@ pub(super) fn bind_scalar_function_call(
                 ],
             ))
         }
-        BuiltinScalarFunction::TsRewrite => Ok(build_func(
-            false,
-            vec![
-                coerce_bound_expr(
-                    bound_args[0].clone(),
-                    arg_types[0],
-                    SqlType::new(SqlTypeKind::TsQuery),
-                ),
-                coerce_bound_expr(
+        BuiltinScalarFunction::TsRewrite => {
+            let mut coerced = vec![coerce_bound_expr(
+                bound_args[0].clone(),
+                arg_types[0],
+                SqlType::new(SqlTypeKind::TsQuery),
+            )];
+            if bound_args.len() == 3 {
+                coerced.push(coerce_bound_expr(
                     bound_args[1].clone(),
                     arg_types[1],
                     SqlType::new(SqlTypeKind::TsQuery),
-                ),
-                coerce_bound_expr(
+                ));
+                coerced.push(coerce_bound_expr(
                     bound_args[2].clone(),
                     arg_types[2],
                     SqlType::new(SqlTypeKind::TsQuery),
-                ),
-            ],
-        )),
+                ));
+            } else {
+                coerced.push(coerce_bound_expr(
+                    bound_args[1].clone(),
+                    arg_types[1],
+                    SqlType::new(SqlTypeKind::Text),
+                ));
+            }
+            Ok(build_func(false, coerced))
+        }
         BuiltinScalarFunction::TsVectorStrip | BuiltinScalarFunction::TsVectorToArray => {
             Ok(build_func(
                 false,

@@ -683,6 +683,9 @@ fn index_relcache_entry_from_index_row(
         am_handler_oid,
         indkey: index.indkey,
         indclass: index.indclass,
+        indclass_options: crate::backend::catalog::index_opclass_options_from_reloptions(
+            class_row.reloptions.as_deref(),
+        ),
         indcollation: index.indcollation,
         indoption: index.indoption,
         opfamily_oids: support.opfamily_oids,

@@ -1013,6 +1013,7 @@ pub enum TextSearchTableFunction {
     TokenType,
     Parse,
     Debug,
+    Stat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -39,6 +39,26 @@ use crate::include::catalog::{
 const DEFAULT_SPC_OID: u32 = 0;
 const DEFAULT_DB_OID: u32 = 1;
 
+pub const INDEX_OPCLASS_OPTIONS_RELOPTION_PREFIX: &str = "pgrust_indclass_options=";
+
+pub fn index_opclass_options_reloption(options: &[Vec<(String, String)>]) -> Option<String> {
+    options.iter().any(|column| !column.is_empty()).then(|| {
+        let encoded = serde_json::to_string(options).unwrap_or_else(|_| "[]".into());
+        format!("{INDEX_OPCLASS_OPTIONS_RELOPTION_PREFIX}{encoded}")
+    })
+}
+
+pub fn index_opclass_options_from_reloptions(
+    reloptions: Option<&[String]>,
+) -> Vec<Vec<(String, String)>> {
+    reloptions
+        .into_iter()
+        .flat_map(|options| options.iter())
+        .find_map(|option| option.strip_prefix(INDEX_OPCLASS_OPTIONS_RELOPTION_PREFIX))
+        .and_then(|encoded| serde_json::from_str(encoded).ok())
+        .unwrap_or_default()
+}
+
 fn dropped_column_name(attnum: usize) -> String {
     format!("........pg.dropped.{attnum}........")
 }
@@ -116,9 +136,21 @@ fn build_catalog_index_entry(
     if key_count > columns.len()
         || resolved_options.indcollation.len() != key_count
         || resolved_options.indoption.len() != key_count
+        || (!resolved_options.indclass_options.is_empty()
+            && resolved_options.indclass_options.len() != key_count)
     {
         return Err(CatalogError::Corrupt("index build options length mismatch"));
     }
+
+    let mut reloptions = resolved_options
+        .reloptions
+        .clone()
+        .or_else(|| btree_reloptions(resolved_options.btree_options))
+        .unwrap_or_default();
+    if let Some(option) = index_opclass_options_reloption(&resolved_options.indclass_options) {
+        reloptions.push(option);
+    }
+    let reloptions = (!reloptions.is_empty()).then_some(reloptions);
 
     Ok(CatalogEntry {
         rel: RelFileLocator {
@@ -130,11 +162,8 @@ fn build_catalog_index_entry(
         namespace_oid: table.namespace_oid,
         owner_oid: table.owner_oid,
         relacl: None,
+        reloptions,
         of_type_oid: 0,
-        reloptions: resolved_options
-            .reloptions
-            .clone()
-            .or_else(|| btree_reloptions(resolved_options.btree_options)),
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,
@@ -174,6 +203,7 @@ fn build_catalog_index_entry(
             indisready,
             indislive: true,
             indclass: resolved_options.indclass,
+            indclass_options: resolved_options.indclass_options,
             indcollation: resolved_options.indcollation,
             indoption: resolved_options.indoption,
             indexprs: (!expr_sqls.is_empty())
@@ -306,6 +336,7 @@ fn default_index_build_options_for_entry(
     Ok(CatalogIndexBuildOptions {
         am_oid,
         indclass,
+        indclass_options: vec![Vec::new(); indcollation.len()],
         indcollation,
         indoption,
         reloptions: None,
@@ -359,6 +390,7 @@ pub struct CatalogIndexMeta {
     pub indisready: bool,
     pub indislive: bool,
     pub indclass: Vec<u32>,
+    pub indclass_options: Vec<Vec<(String, String)>>,
     pub indcollation: Vec<u32>,
     pub indoption: Vec<i16>,
     pub indexprs: Option<String>,
@@ -373,6 +405,7 @@ pub struct CatalogIndexMeta {
 pub struct CatalogIndexBuildOptions {
     pub am_oid: u32,
     pub indclass: Vec<u32>,
+    pub indclass_options: Vec<Vec<(String, String)>>,
     pub indcollation: Vec<u32>,
     pub indoption: Vec<i16>,
     pub reloptions: Option<Vec<String>>,
@@ -1698,9 +1731,11 @@ impl Catalog {
             }
             indoption.push(option);
         }
+        let indclass_options = vec![Vec::new(); indclass.len()];
         Ok(CatalogIndexBuildOptions {
             am_oid: crate::include::catalog::BTREE_AM_OID,
             indclass,
+            indclass_options,
             indcollation,
             indoption,
             reloptions: None,

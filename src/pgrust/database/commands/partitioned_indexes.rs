@@ -662,6 +662,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
                         .map(|column| column.sql_type),
                     collation: None,
                     opclass: None,
+                    opclass_options: Vec::new(),
                     descending: indoption & 0x0001 != 0,
                     nulls_first: (indoption & 0x0002 != 0).then_some(true),
                 });
@@ -684,6 +685,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
                 expr_type: None,
                 collation: None,
                 opclass: None,
+                opclass_options: Vec::new(),
                 descending: indoption & 0x0001 != 0,
                 nulls_first: (indoption & 0x0002 != 0).then_some(true),
             });
@@ -717,6 +719,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
             build_options: CatalogIndexBuildOptions {
                 am_oid: access_method_oid,
                 indclass: index.index_meta.indclass.clone(),
+                indclass_options: index.index_meta.indclass_options.clone(),
                 indcollation: index.index_meta.indcollation.clone(),
                 indoption: index.index_meta.indoption.clone(),
                 reloptions: None,

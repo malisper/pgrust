@@ -4,12 +4,14 @@ mod multirange_ops;
 mod network_ops;
 mod point_ops;
 mod range_ops;
+mod tsquery_ops;
+mod tsvector_ops;
 
 // :HACK: The generic GiST core is wired for opclass dispatch, but this module
 // intentionally exposes only the merge-bar families for now: box_ops exact+KNN,
-// point/network exact search, range_ops exact search, and multirange_ops exact
-// search. Additional families and range KNN stay deferred until their support
-// procs/operators are implemented end to end.
+// point/network exact search, range_ops exact search, multirange_ops exact
+// search, and lossy tsvector search. Additional families and range KNN stay
+// deferred until their support procs/operators are implemented end to end.
 
 use std::cmp::Ordering;
 
@@ -25,6 +27,10 @@ use crate::include::catalog::{
     GIST_POINT_SAME_PROC_OID, GIST_POINT_UNION_PROC_OID, GIST_POLY_CONSISTENT_PROC_OID,
     GIST_POLY_DISTANCE_PROC_OID, GIST_POLY_PENALTY_PROC_OID, GIST_POLY_PICKSPLIT_PROC_OID,
     GIST_POLY_SAME_PROC_OID, GIST_POLY_UNION_PROC_OID, GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID,
+    GIST_TSQUERY_CONSISTENT_PROC_OID, GIST_TSQUERY_PENALTY_PROC_OID,
+    GIST_TSQUERY_PICKSPLIT_PROC_OID, GIST_TSQUERY_SAME_PROC_OID, GIST_TSQUERY_UNION_PROC_OID,
+    GIST_TSVECTOR_CONSISTENT_PROC_OID, GIST_TSVECTOR_PENALTY_PROC_OID,
+    GIST_TSVECTOR_PICKSPLIT_PROC_OID, GIST_TSVECTOR_SAME_PROC_OID, GIST_TSVECTOR_UNION_PROC_OID,
     MULTIRANGE_GIST_CONSISTENT_PROC_OID, MULTIRANGE_GIST_PENALTY_PROC_OID,
     MULTIRANGE_GIST_PICKSPLIT_PROC_OID, MULTIRANGE_GIST_SAME_PROC_OID,
     MULTIRANGE_GIST_UNION_PROC_OID, MULTIRANGE_SORTSUPPORT_PROC_OID,
@@ -87,6 +93,10 @@ pub(crate) fn consistent(
         ),
         RANGE_GIST_CONSISTENT_PROC_OID => range_ops::consistent(strategy, key, query, is_leaf),
         GIST_NETWORK_CONSISTENT_PROC_OID => network_ops::consistent(strategy, key, query, is_leaf),
+        GIST_TSVECTOR_CONSISTENT_PROC_OID => {
+            tsvector_ops::consistent(strategy, key, query, is_leaf)
+        }
+        GIST_TSQUERY_CONSISTENT_PROC_OID => tsquery_ops::consistent(strategy, key, query, is_leaf),
         MULTIRANGE_GIST_CONSISTENT_PROC_OID => {
             multirange_ops::consistent(strategy, key, query, is_leaf)
         }
@@ -113,6 +123,8 @@ pub(crate) fn union(proc_oid: u32, values: &[Value]) -> Result<Value, CatalogErr
         }
         RANGE_GIST_UNION_PROC_OID => range_ops::union(values),
         GIST_NETWORK_UNION_PROC_OID => network_ops::union(values),
+        GIST_TSVECTOR_UNION_PROC_OID => tsvector_ops::union(values),
+        GIST_TSQUERY_UNION_PROC_OID => tsquery_ops::union(values),
         MULTIRANGE_GIST_UNION_PROC_OID => multirange_ops::union(values),
         _ => Err(CatalogError::Io(format!(
             "unsupported GiST union proc {proc_oid}"
@@ -139,6 +151,8 @@ pub(crate) fn penalty(
         }
         RANGE_GIST_PENALTY_PROC_OID => range_ops::penalty(original, candidate),
         GIST_NETWORK_PENALTY_PROC_OID => network_ops::penalty(original, candidate),
+        GIST_TSVECTOR_PENALTY_PROC_OID => tsvector_ops::penalty(original, candidate),
+        GIST_TSQUERY_PENALTY_PROC_OID => tsquery_ops::penalty(original, candidate),
         MULTIRANGE_GIST_PENALTY_PROC_OID => multirange_ops::penalty(original, candidate),
         _ => Err(CatalogError::Io(format!(
             "unsupported GiST penalty proc {proc_oid}"
@@ -164,6 +178,8 @@ pub(crate) fn picksplit(
         }
         RANGE_GIST_PICKSPLIT_PROC_OID => range_ops::picksplit(values),
         GIST_NETWORK_PICKSPLIT_PROC_OID => network_ops::picksplit(values),
+        GIST_TSVECTOR_PICKSPLIT_PROC_OID => tsvector_ops::picksplit(values),
+        GIST_TSQUERY_PICKSPLIT_PROC_OID => tsquery_ops::picksplit(values),
         MULTIRANGE_GIST_PICKSPLIT_PROC_OID => multirange_ops::picksplit(values),
         _ => Err(CatalogError::Io(format!(
             "unsupported GiST picksplit proc {proc_oid}"
@@ -183,6 +199,8 @@ pub(crate) fn same(proc_oid: u32, left: &Value, right: &Value) -> Result<bool, C
         GIST_POLY_SAME_PROC_OID | GIST_CIRCLE_SAME_PROC_OID => geometry_ops::same(left, right),
         RANGE_GIST_SAME_PROC_OID => range_ops::same(left, right),
         GIST_NETWORK_SAME_PROC_OID => network_ops::same(left, right),
+        GIST_TSVECTOR_SAME_PROC_OID => tsvector_ops::same(left, right),
+        GIST_TSQUERY_SAME_PROC_OID => tsquery_ops::same(left, right),
         MULTIRANGE_GIST_SAME_PROC_OID => multirange_ops::same(left, right),
         _ => Err(CatalogError::Io(format!(
             "unsupported GiST same proc {proc_oid}"

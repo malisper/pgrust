@@ -17,8 +17,8 @@ use crate::include::access::hash::HashOptions;
 use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::{
     ANYMULTIRANGEOID, ANYRANGEOID, BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID,
-    GIST_RANGE_FAMILY_OID, HASH_AM_OID, SPGIST_AM_OID, builtin_range_rows,
-    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    GIST_RANGE_FAMILY_OID, GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, SPGIST_AM_OID,
+    builtin_range_rows, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::parsenodes::RelOption;
 use std::collections::BTreeSet;
@@ -339,6 +339,7 @@ pub(super) fn catalog_entry_from_bound_index_relation(
             indisready: index.index_meta.indisready,
             indislive: index.index_meta.indislive,
             indclass: index.index_meta.indclass.clone(),
+            indclass_options: index.index_meta.indclass_options.clone(),
             indcollation: index.index_meta.indcollation.clone(),
             indoption: index.index_meta.indoption.clone(),
             indexprs: index.index_meta.indexprs.clone(),
@@ -489,6 +490,7 @@ impl Database {
             am_handler_oid: Some(am_handler_oid),
             indkey: meta.indkey.clone(),
             indclass: meta.indclass.clone(),
+            indclass_options: meta.indclass_options.clone(),
             indcollation: meta.indcollation.clone(),
             indoption: meta.indoption.clone(),
             opfamily_oids: support.opfamily_oids,
@@ -664,6 +666,64 @@ impl Database {
         )
     }
 
+    fn validate_index_opclass_options(
+        access_method_oid: u32,
+        opfamily_oid: u32,
+        column: &crate::backend::parser::IndexColumnDef,
+    ) -> Result<(), ExecError> {
+        if column.opclass_options.is_empty() {
+            return Ok(());
+        }
+        if access_method_oid != GIST_AM_OID || opfamily_oid != GIST_TSVECTOR_FAMILY_OID {
+            let option = &column.opclass_options[0];
+            return Err(ExecError::DetailedError {
+                message: format!("unrecognized parameter \"{}\"", option.name),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            });
+        }
+
+        let mut seen_siglen = false;
+        for option in &column.opclass_options {
+            if !option.name.eq_ignore_ascii_case("siglen") {
+                return Err(ExecError::DetailedError {
+                    message: format!("unrecognized parameter \"{}\"", option.name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22023",
+                });
+            }
+            if seen_siglen {
+                return Err(ExecError::DetailedError {
+                    message: "parameter \"siglen\" specified more than once".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22023",
+                });
+            }
+            seen_siglen = true;
+            let siglen = option
+                .value
+                .parse::<i32>()
+                .map_err(|_| ExecError::DetailedError {
+                    message: format!("invalid value for option \"siglen\": \"{}\"", option.value),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22023",
+                })?;
+            if !(1..=2024).contains(&siglen) {
+                return Err(ExecError::DetailedError {
+                    message: format!("value {siglen} out of bounds for option \"siglen\""),
+                    detail: Some("Valid values are between \"1\" and \"2024\".".into()),
+                    hint: None,
+                    sqlstate: "22023",
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn resolve_index_support_metadata(
         &self,
         client_id: ClientId,
@@ -830,6 +890,7 @@ impl Database {
         let opclass_rows =
             crate::backend::utils::cache::syscache::ensure_opclass_rows(self, client_id, txn_ctx);
         let mut indclass = Vec::with_capacity(columns.len());
+        let mut indclass_options = Vec::with_capacity(columns.len());
         let mut indcollation = Vec::with_capacity(columns.len());
         let mut indoption = Vec::with_capacity(columns.len());
         for column in columns {
@@ -958,6 +1019,14 @@ impl Database {
                     type_name: type_name.clone(),
                 })
             })?;
+            Self::validate_index_opclass_options(access_method.oid, opclass.opcfamily, column)?;
+            indclass_options.push(
+                column
+                    .opclass_options
+                    .iter()
+                    .map(|option| (option.name.clone(), option.value.clone()))
+                    .collect(),
+            );
             indclass.push(opclass.oid);
             indcollation.push(
                 column
@@ -1001,6 +1070,7 @@ impl Database {
             CatalogIndexBuildOptions {
                 am_oid: access_method.oid,
                 indclass,
+                indclass_options,
                 indcollation,
                 indoption,
                 reloptions: index_reloptions(options),
@@ -1066,6 +1136,7 @@ impl Database {
             CatalogIndexBuildOptions {
                 am_oid: access_method.oid,
                 indclass,
+                indclass_options: vec![Vec::new(); indcollation.len()],
                 indcollation,
                 indoption,
                 reloptions: None,

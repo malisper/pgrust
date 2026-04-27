@@ -1,7 +1,10 @@
-use crate::backend::tsearch::cache::dictionaries_for_asciiword;
 use crate::backend::tsearch::cache::{TextSearchConfig, TextSearchDictionary};
 use crate::backend::tsearch::dict_english::lexize_english;
 use crate::backend::tsearch::dict_simple::lexize_simple;
+use crate::backend::tsearch::parser::{
+    ASCIIWORD, DECIMAL_T, EMAIL, FILEPATH, HOST, SCIENTIFIC, SIGNEDINT, UNSIGNEDINT, URL_T,
+    URLPATH, normalized_query_node_from_text,
+};
 use crate::include::nodes::tsearch::{TextSearchParserToken, TsQuery, TsQueryNode, TsQueryOperand};
 
 const DEFAULT_PARSER_TOKEN_TYPES: &[(i32, &str, &str)] = &[
@@ -274,8 +277,15 @@ pub(crate) enum LexizeOutcome {
 }
 
 pub(crate) fn lexize_token_for_config(config: &TextSearchConfig, token: &str) -> Option<String> {
-    let dictionaries = dictionaries_for_asciiword(config);
-    lexize_token_with_dictionaries(&dictionaries, token)
+    lexize_token_for_config_and_type(config, ASCIIWORD, token)
+}
+
+pub(crate) fn lexize_token_for_config_and_type(
+    config: &TextSearchConfig,
+    tokid: i32,
+    token: &str,
+) -> Option<String> {
+    lexize_token_with_config_and_type(config, tokid, token)
         .flat_lexemes()
         .into_iter()
         .next()
@@ -306,8 +316,37 @@ impl LexizeOutcome {
 }
 
 pub(crate) fn lexize_token_with_config(config: &TextSearchConfig, token: &str) -> LexizeOutcome {
-    let dictionaries = dictionaries_for_asciiword(config);
+    lexize_token_with_config_and_type(config, ASCIIWORD, token)
+}
+
+pub(crate) fn lexize_token_with_config_and_type(
+    config: &TextSearchConfig,
+    tokid: i32,
+    token: &str,
+) -> LexizeOutcome {
+    let dictionaries = dictionaries_for_token_type(config, tokid);
     lexize_token_with_dictionaries(&dictionaries, token)
+}
+
+fn dictionaries_for_token_type(config: &TextSearchConfig, tokid: i32) -> Vec<TextSearchDictionary> {
+    let simple_token = matches!(
+        tokid,
+        EMAIL
+            | URL_T
+            | HOST
+            | SCIENTIFIC
+            | URLPATH
+            | FILEPATH
+            | DECIMAL_T
+            | SIGNEDINT
+            | UNSIGNEDINT
+    );
+    match config {
+        TextSearchConfig::Simple => vec![TextSearchDictionary::Simple],
+        TextSearchConfig::English if simple_token => vec![TextSearchDictionary::Simple],
+        TextSearchConfig::English => vec![TextSearchDictionary::EnglishStem],
+        TextSearchConfig::Custom { mappings } => mappings.get(&tokid).cloned().unwrap_or_default(),
+    }
 }
 
 pub(crate) fn lexize_token_with_dictionaries(
@@ -424,26 +463,10 @@ fn lexize_thesaurus_token(token: &str) -> LexizeOutcome {
 }
 
 pub(crate) fn tokenize_document(text: &str) -> Vec<(String, u16)> {
-    let mut tokens = Vec::new();
-    let mut buf = String::new();
-    let mut position = 1u16;
-
-    let flush = |buf: &mut String, tokens: &mut Vec<(String, u16)>, position: &mut u16| {
-        if !buf.is_empty() {
-            tokens.push((std::mem::take(buf), *position));
-            *position = position.saturating_add(1);
-        }
-    };
-
-    for ch in text.chars() {
-        if ch.is_alphanumeric() || ch == '_' {
-            buf.push(ch);
-        } else {
-            flush(&mut buf, &mut tokens, &mut position);
-        }
-    }
-    flush(&mut buf, &mut tokens, &mut position);
-    tokens
+    crate::backend::tsearch::parser::document_tokens(text)
+        .into_iter()
+        .map(|token| (token.token, token.position))
+        .collect()
 }
 
 pub(crate) fn normalize_tsquery(query: TsQuery, config: &TextSearchConfig) -> TsQuery {
@@ -544,42 +567,9 @@ fn normalize_query_operand(
     operand: TsQueryOperand,
     config: &TextSearchConfig,
 ) -> NormalizedQueryNode {
-    let tokens = tokenize_document(operand.lexeme.as_str());
-    if tokens.len() <= 1 {
-        let Some(normalized) = lexize_token_for_config(config, operand.lexeme.as_str()) else {
-            return NormalizedQueryNode::stop_word();
-        };
-        return NormalizedQueryNode::operand(TsQueryNode::Operand(TsQueryOperand {
-            lexeme: normalized.into(),
-            weights: operand.weights,
-            prefix: operand.prefix,
-        }));
-    }
-
-    let mut terms = tokens.into_iter().filter_map(|(token, position)| {
-        lexize_token_for_config(config, &token).map(|lexeme| {
-            (
-                position,
-                TsQueryNode::Operand(TsQueryOperand {
-                    lexeme: lexeme.into(),
-                    weights: operand.weights.clone(),
-                    prefix: operand.prefix,
-                }),
-            )
-        })
-    });
-    let Some((mut previous_position, mut root)) = terms.next() else {
-        return NormalizedQueryNode::stop_word();
-    };
-    for (position, term) in terms {
-        root = TsQueryNode::Phrase {
-            left: Box::new(root),
-            right: Box::new(term),
-            distance: position.saturating_sub(previous_position).max(1),
-        };
-        previous_position = position;
-    }
-    NormalizedQueryNode::operand(root)
+    normalized_query_node_from_text(config, operand.lexeme.as_str(), &operand)
+        .map(NormalizedQueryNode::operand)
+        .unwrap_or_else(NormalizedQueryNode::stop_word)
 }
 
 fn normalize_phrase_node(

@@ -551,6 +551,7 @@ impl CatalogStore {
         let options = CatalogIndexBuildOptions {
             am_oid: crate::include::catalog::BTREE_AM_OID,
             indclass: Vec::new(),
+            indclass_options: Vec::new(),
             indcollation: Vec::new(),
             indoption: Vec::new(),
             reloptions: None,
@@ -4096,6 +4097,7 @@ impl CatalogStore {
         let options = CatalogIndexBuildOptions {
             am_oid: crate::include::catalog::BTREE_AM_OID,
             indclass: Vec::new(),
+            indclass_options: Vec::new(),
             indcollation: Vec::new(),
             indoption: Vec::new(),
             reloptions: None,
@@ -7948,9 +7950,23 @@ fn build_index_entry_with_relkind(
     if key_count > columns.len()
         || resolved_options.indcollation.len() != key_count
         || resolved_options.indoption.len() != key_count
+        || (!resolved_options.indclass_options.is_empty()
+            && resolved_options.indclass_options.len() != key_count)
     {
         return Err(CatalogError::Corrupt("index build options length mismatch"));
     }
+
+    let mut reloptions = resolved_options
+        .reloptions
+        .clone()
+        .or_else(|| btree_reloptions(resolved_options.btree_options))
+        .unwrap_or_default();
+    if let Some(option) =
+        crate::backend::catalog::index_opclass_options_reloption(&resolved_options.indclass_options)
+    {
+        reloptions.push(option);
+    }
+    let reloptions = (!reloptions.is_empty()).then_some(reloptions);
 
     let entry = CatalogEntry {
         rel: crate::backend::storage::smgr::RelFileLocator {
@@ -7966,11 +7982,8 @@ fn build_index_entry_with_relkind(
         namespace_oid: table.namespace_oid,
         owner_oid: table.owner_oid,
         relacl: None,
+        reloptions,
         of_type_oid: 0,
-        reloptions: resolved_options
-            .reloptions
-            .clone()
-            .or_else(|| btree_reloptions(resolved_options.btree_options)),
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,
@@ -8006,6 +8019,7 @@ fn build_index_entry_with_relkind(
             indisready,
             indislive: true,
             indclass: resolved_options.indclass,
+            indclass_options: resolved_options.indclass_options,
             indcollation: resolved_options.indcollation,
             indoption: resolved_options.indoption,
             indexprs: (!expr_sqls.is_empty())
@@ -8113,6 +8127,7 @@ fn build_toast_catalog_changes(
                 crate::include::catalog::OID_BTREE_OPCLASS_OID,
                 crate::include::catalog::INT4_BTREE_OPCLASS_OID,
             ],
+            indclass_options: vec![Vec::new(), Vec::new()],
             indcollation: vec![0, 0],
             indoption: vec![0, 0],
             reloptions: None,
@@ -8200,9 +8215,11 @@ fn default_index_build_options_for_relation(
         }
         indoption.push(option);
     }
+    let indclass_options = vec![Vec::new(); indclass.len()];
     Ok(CatalogIndexBuildOptions {
         am_oid,
         indclass,
+        indclass_options,
         indcollation,
         indoption,
         reloptions: None,
@@ -9800,6 +9817,7 @@ fn catalog_entry_from_relation_row(
             indisready: index.indisready,
             indislive: index.indislive,
             indclass: index.indclass.clone(),
+            indclass_options: index.indclass_options.clone(),
             indcollation: index.indcollation.clone(),
             indoption: index.indoption.clone(),
             indexprs: index.indexprs.clone(),
@@ -10181,6 +10199,7 @@ fn catalog_entry_from_visible_relation(
             indisready: index.indisready,
             indislive: index.indislive,
             indclass: index.indclass.clone(),
+            indclass_options: index.indclass_options.clone(),
             indcollation: index.indcollation.clone(),
             indoption: index.indoption.clone(),
             indexprs: index.indexprs.clone(),
@@ -10239,6 +10258,7 @@ fn catalog_entry_from_relation(relation: &RelCacheEntry) -> CatalogEntry {
             indisready: index.indisready,
             indislive: index.indislive,
             indclass: index.indclass.clone(),
+            indclass_options: index.indclass_options.clone(),
             indcollation: index.indcollation.clone(),
             indoption: index.indoption.clone(),
             indexprs: index.indexprs.clone(),
