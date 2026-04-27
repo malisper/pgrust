@@ -1086,6 +1086,7 @@ fn is_merge_action_returning_call(expr: &SqlExpr) -> bool {
             distinct,
             func_variadic,
             filter,
+            null_treatment,
             over,
         } => {
             name.eq_ignore_ascii_case("merge_action")
@@ -1095,6 +1096,7 @@ fn is_merge_action_returning_call(expr: &SqlExpr) -> bool {
                 && !distinct
                 && !func_variadic
                 && filter.is_none()
+                && null_treatment.is_none()
                 && over.is_none()
         }
         _ => false,
