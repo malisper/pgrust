@@ -3672,6 +3672,45 @@ fn delete_returning_target_lists() {
 }
 
 #[test]
+fn dml_returning_old_new_pseudo_rows() {
+    let dir = temp_dir("dml_returning_old_new_pseudo_rows");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create temp table returning_old_new_tbl (id int4, name text)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into returning_old_new_tbl values (1, 'alice') returning old.id, new.id",
+        ),
+        vec![vec![Value::Null, Value::Int32(1)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "update returning_old_new_tbl set name = 'bob' returning old.name, new.name",
+        ),
+        vec![vec![Value::Text("alice".into()), Value::Text("bob".into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "delete from returning_old_new_tbl returning old.id, new.id",
+        ),
+        vec![vec![Value::Int32(1), Value::Null]]
+    );
+}
+
+#[test]
 fn insert_on_conflict_returning_rows() {
     std::thread::Builder::new()
         .name("db-test-insert-on-conflict-returning".into())
@@ -14902,7 +14941,7 @@ fn non_simple_views_reject_auto_dml() {
 }
 
 #[test]
-fn insert_on_conflict_is_rejected_for_auto_updatable_views() {
+fn insert_on_conflict_works_for_auto_updatable_views() {
     let base = temp_dir("auto_view_on_conflict");
     let db = Database::open(&base, 16).unwrap();
 
@@ -14911,12 +14950,20 @@ fn insert_on_conflict_is_rejected_for_auto_updatable_views() {
     db.execute(1, "create view item_view as select id from items")
         .unwrap();
 
-    match db.execute(1, "insert into item_view values (1) on conflict do nothing") {
-        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature))) => {
-            assert!(feature.contains("automatically updatable views"));
-        }
-        other => panic!("expected ON CONFLICT feature rejection, got {other:?}"),
-    }
+    assert_eq!(
+        db.execute(1, "insert into item_view values (1) on conflict do nothing")
+            .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    assert_eq!(
+        db.execute(1, "insert into item_view values (1) on conflict do nothing")
+            .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id from items"),
+        vec![vec![Value::Int32(1)]]
+    );
 }
 
 #[test]

@@ -29,7 +29,9 @@ use crate::include::nodes::parsenodes::{
     SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
     TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
 };
-use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
+use crate::include::nodes::primnodes::{
+    AttrNumber, INNER_VAR, JoinType, OUTER_VAR, Var, is_system_attr,
+};
 
 fn desc() -> RelationDesc {
     RelationDesc {
@@ -10813,6 +10815,115 @@ fn bind_update_from_uses_source_columns_in_set_where_and_returning() {
     assert_eq!(bound.target_ctid_index, 5);
     assert_eq!(bound.target_tableoid_index, 6);
     assert_eq!(bound.returning.len(), 2);
+}
+
+fn assert_returning_var(expr: &Expr, varno: usize, attno: AttrNumber) {
+    match expr {
+        Expr::Var(Var {
+            varno: actual_varno,
+            varattno,
+            varlevelsup: 0,
+            ..
+        }) if *actual_varno == varno && *varattno == attno => {}
+        other => panic!("expected Var(varno={varno}, attno={attno}), got {other:?}"),
+    }
+}
+
+fn assert_returning_row(expr: &Expr, varno: usize, attnos: &[AttrNumber]) {
+    let Expr::Row { fields, .. } = expr else {
+        panic!("expected row expression, got {expr:?}");
+    };
+    assert_eq!(fields.len(), attnos.len());
+    for ((_, field), attno) in fields.iter().zip(attnos.iter().copied()) {
+        assert_returning_var(field, varno, attno);
+    }
+}
+
+struct ReturningTestCatalog {
+    relation: BoundRelation,
+}
+
+impl CatalogLookup for ReturningTestCatalog {
+    fn lookup_any_relation(&self, _name: &str) -> Option<BoundRelation> {
+        Some(self.relation.clone())
+    }
+
+    fn lookup_relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        (relation_oid == self.relation.relation_oid).then(|| self.relation.clone())
+    }
+
+    fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        self.lookup_relation_by_oid(relation_oid)
+    }
+}
+
+fn returning_test_catalog() -> ReturningTestCatalog {
+    ReturningTestCatalog {
+        relation: BoundRelation {
+            rel: crate::RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 15000,
+            },
+            relation_oid: 50000,
+            toast: None,
+            namespace_oid: 11,
+            owner_oid: BOOTSTRAP_SUPERUSER_OID,
+            of_type_oid: 0,
+            relpersistence: 'p',
+            relkind: 'r',
+            relispopulated: true,
+            relispartition: false,
+            relpartbound: None,
+            desc: desc(),
+            partitioned_table: None,
+        },
+    }
+}
+
+#[test]
+fn bind_insert_returning_exposes_old_and_new_pseudo_rows() {
+    let catalog = returning_test_catalog();
+    let stmt = match parse_statement(
+        "insert into people (id, name) values (1, 'alice') returning old, new, old.*, new.*",
+    )
+    .unwrap()
+    {
+        Statement::Insert(stmt) => stmt,
+        other => panic!("expected insert statement, got {other:?}"),
+    };
+    let bound = bind_insert(&stmt, &catalog).unwrap();
+    assert_eq!(bound.returning.len(), 8);
+    assert_returning_row(&bound.returning[0].expr, OUTER_VAR, &[1, 2, 3]);
+    assert_returning_row(&bound.returning[1].expr, INNER_VAR, &[1, 2, 3]);
+    for (target, attno) in bound.returning[2..5].iter().zip(1..) {
+        assert_returning_var(&target.expr, OUTER_VAR, attno);
+    }
+    for (target, attno) in bound.returning[5..8].iter().zip(1..) {
+        assert_returning_var(&target.expr, INNER_VAR, attno);
+    }
+}
+
+#[test]
+fn bind_update_and_delete_returning_expose_old_and_new_pseudo_rows() {
+    let catalog = returning_test_catalog();
+    let update = match parse_statement("update people set name = 'bob' returning old.id, new.name")
+        .unwrap()
+    {
+        Statement::Update(stmt) => stmt,
+        other => panic!("expected update statement, got {other:?}"),
+    };
+    let bound_update = bind_update(&update, &catalog).unwrap();
+    assert_returning_var(&bound_update.returning[0].expr, OUTER_VAR, 1);
+    assert_returning_var(&bound_update.returning[1].expr, INNER_VAR, 2);
+
+    let delete = match parse_statement("delete from people returning old.id, new.id").unwrap() {
+        Statement::Delete(stmt) => stmt,
+        other => panic!("expected delete statement, got {other:?}"),
+    };
+    let bound_delete = bind_delete(&delete, &catalog).unwrap();
+    assert_returning_var(&bound_delete.returning[0].expr, OUTER_VAR, 1);
+    assert_returning_var(&bound_delete.returning[1].expr, INNER_VAR, 1);
 }
 
 #[test]

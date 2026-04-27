@@ -4922,11 +4922,13 @@ fn execute_insert_rows_with_routing(
                 let projected_row =
                     remap_child_row_to_parent(leaf_row, &result_rel_info.relation.desc, desc)
                         .unwrap_or_else(|| parent_row.clone());
-                let row = project_returning_row_with_metadata(
+                let row = project_returning_row_with_old_new(
                     returning,
                     &projected_row,
                     None,
                     Some(result_rel_info.relation.relation_oid),
+                    None,
+                    Some(&projected_row),
                     ctx,
                 )?;
                 capture_copy_to_dml_returning_row(row.clone());
@@ -7503,7 +7505,7 @@ fn project_returning_row(
     row: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
-    project_returning_row_with_metadata(targets, row, None, None, ctx)
+    project_returning_row_with_old_new(targets, row, None, None, None, None, ctx)
 }
 
 fn project_returning_row_with_metadata(
@@ -7513,13 +7515,46 @@ fn project_returning_row_with_metadata(
     table_oid: Option<u32>,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
+    project_returning_row_with_old_new(targets, row, tid, table_oid, None, None, ctx)
+}
+
+pub(crate) fn project_returning_row_with_old_new(
+    targets: &[TargetEntry],
+    row: &[Value],
+    tid: Option<ItemPointerData>,
+    table_oid: Option<u32>,
+    old_row: Option<&[Value]>,
+    new_row: Option<&[Value]>,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let saved_bindings = ctx.expr_bindings.clone();
+    let pseudo_width = old_row
+        .map(<[Value]>::len)
+        .or_else(|| new_row.map(<[Value]>::len))
+        .unwrap_or(row.len());
+    ctx.expr_bindings.outer_tuple = Some(
+        old_row
+            .map(<[Value]>::to_vec)
+            .unwrap_or_else(|| vec![Value::Null; pseudo_width]),
+    );
+    ctx.expr_bindings.inner_tuple = Some(
+        new_row
+            .map(<[Value]>::to_vec)
+            .unwrap_or_else(|| vec![Value::Null; pseudo_width]),
+    );
+    ctx.expr_bindings.outer_system_bindings.clear();
+    ctx.expr_bindings.inner_system_bindings.clear();
     let mut slot = TupleSlot::virtual_row_with_metadata(row.to_vec(), tid, table_oid);
-    let mut values = targets
+    let result = targets
         .iter()
         .map(|target| eval_expr(&target.expr, &mut slot, ctx).map(|value| value.to_owned_value()))
-        .collect::<Result<Vec<_>, _>>()?;
-    Value::materialize_all(&mut values);
-    Ok(values)
+        .collect::<Result<Vec<_>, _>>();
+    let result = result.map(|mut values| {
+        Value::materialize_all(&mut values);
+        values
+    });
+    ctx.expr_bindings = saved_bindings;
+    result
 }
 
 fn build_returning_result(columns: Vec<QueryColumn>, rows: Vec<Vec<Value>>) -> StatementResult {
@@ -7614,11 +7649,13 @@ pub(crate) fn execute_insert_rows(
             maintain_indexes_for_row(rel, desc, indexes, &values, heap_tid, ctx)?;
             inserted_rows.push(values.clone());
             if let Some(returning) = returning {
-                let row = project_returning_row_with_metadata(
+                let row = project_returning_row_with_old_new(
                     returning,
                     &values,
                     Some(heap_tid),
                     Some(relation_oid),
+                    None,
+                    Some(&values),
                     ctx,
                 )?;
                 capture_copy_to_dml_returning_row(row.clone());
@@ -8071,8 +8108,15 @@ pub fn execute_update_with_waiter(
                                 .write()
                                 .note_relation_update(target.relation_oid);
                             if !stmt.returning.is_empty() {
-                                let row =
-                                    project_returning_row(&stmt.returning, &triggered_values, ctx)?;
+                                let row = project_returning_row_with_old_new(
+                                    &stmt.returning,
+                                    &triggered_values,
+                                    None,
+                                    None,
+                                    Some(&current_old_values),
+                                    Some(&triggered_values),
+                                    ctx,
+                                )?;
                                 capture_copy_to_dml_returning_row(row.clone());
                                 returned_rows.push(row);
                             }
@@ -8265,6 +8309,7 @@ fn update_from_predicate_matches(
 fn project_update_from_returning_row(
     stmt: &BoundUpdateStatement,
     target: &BoundUpdateTarget,
+    old_values: &[Value],
     new_values: &[Value],
     source_values: &[Value],
     tid: ItemPointerData,
@@ -8272,11 +8317,13 @@ fn project_update_from_returning_row(
 ) -> Result<Vec<Value>, ExecError> {
     let mut visible_values = project_update_target_visible_values(target, new_values, tid, ctx)?;
     visible_values.extend(source_values.iter().cloned());
-    project_returning_row_with_metadata(
+    project_returning_row_with_old_new(
         &stmt.returning,
         &visible_values,
         Some(tid),
         Some(target.relation_oid),
+        Some(old_values),
+        Some(new_values),
         ctx,
     )
 }
@@ -8455,6 +8502,7 @@ fn execute_update_from_joined_input(
                             let row = project_update_from_returning_row(
                                 stmt,
                                 target,
+                                &current_old_values,
                                 &triggered_values,
                                 &source_values,
                                 new_tid,
@@ -8730,8 +8778,15 @@ pub fn execute_delete_with_waiter(
                                 .write()
                                 .note_relation_delete(target.relation_oid);
                             if !stmt.returning.is_empty() {
-                                let row =
-                                    project_returning_row(&stmt.returning, &current_values, ctx)?;
+                                let row = project_returning_row_with_old_new(
+                                    &stmt.returning,
+                                    &current_values,
+                                    None,
+                                    None,
+                                    Some(&current_values),
+                                    None,
+                                    ctx,
+                                )?;
                                 capture_copy_to_dml_returning_row(row.clone());
                                 returned_rows.push(row);
                             }

@@ -1229,7 +1229,7 @@ fn expand_star_targets(
         .iter()
         .enumerate()
         .filter(|(_, column)| {
-            !column.hidden
+            (!column.hidden || (relation.is_some() && column.qualified_only))
                 && relation.is_none_or(|relation_name| {
                     column
                         .relation_names
