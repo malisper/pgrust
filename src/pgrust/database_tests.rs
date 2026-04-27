@@ -31625,6 +31625,26 @@ fn temp_namespace_creation_does_not_poison_global_next_oid() {
 }
 
 #[test]
+fn empty_temp_table_supports_default_insert_and_analyze() {
+    let base = temp_dir("empty_temp_table_default_insert");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create temp table onerow()").unwrap();
+    session
+        .execute(&db, "insert into onerow default values")
+        .unwrap();
+    session.execute(&db, "analyze onerow").unwrap();
+
+    match session.execute(&db, "select count(*) from onerow").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(1)]]);
+        }
+        other => panic!("expected count result, got {other:?}"),
+    }
+}
+
+#[test]
 fn copy_from_rows_parses_extended_numeric_types() {
     let base = temp_dir("copy_from_rows_extended_numeric");
     let db = Database::open(&base, 16).unwrap();
