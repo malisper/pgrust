@@ -17307,10 +17307,10 @@ fn json_builders_and_object_agg_work() {
                 assert_eq!(
                     rows,
                     vec![vec![
-                        Value::Json("[\"a\",1,true]".into()),
-                        Value::Json("{\"a\":1,\"b\":true}".into()),
-                        Value::Json("{\"a\":\"1\",\"b\":\"2\"}".into()),
-                        Value::Json("{\"alice\":\"x\",\"bob\":\"y\"}".into()),
+                        Value::Json("[\"a\", 1, true]".into()),
+                        Value::Json("{\"a\" : 1, \"b\" : true}".into()),
+                        Value::Json("{\"a\" : \"1\", \"b\" : \"2\"}".into()),
+                        Value::Json("{ \"alice\" : \"x\", \"bob\" : \"y\" }".into()),
                     ]]
                 );
             }
@@ -17339,15 +17339,141 @@ fn json_variadic_calls_match_supported_postgres_cases() {
                 rows,
                 vec![vec![
                     Value::Null,
-                    Value::Json("[1,4,2,5,3,6]".into()),
+                    Value::Json("[1, 4, 2, 5, 3, 6]".into()),
                     Value::Json("{}".into()),
-                    Value::Json("{\"1\":4,\"2\":5,\"3\":6}".into()),
+                    Value::Json("{\"1\" : 4, \"2\" : 5, \"3\" : 6}".into()),
                     Value::Json("2".into()),
                 ]]
             );
         }
         other => panic!("expected query result, got {other:?}"),
     }
+}
+
+#[test]
+fn json_text_formatting_and_errors_match_postgres_cases() {
+    let base = temp_dir("json_text_formatting_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select array_to_json(array_agg(q), true) \
+             from (values (1, 2), (2, 4)) as q(b, c)",
+        )
+        .unwrap(),
+        vec![vec![Value::Json(
+            "[{\"b\":1,\"c\":2},\n {\"b\":2,\"c\":4}]".into(),
+        )]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select row_to_json(q, true) \
+             from (select 1 as x, 'txt1'::text as y) q",
+        )
+        .unwrap(),
+        vec![vec![Value::Json("{\"x\":1,\n \"y\":\"txt1\"}".into())]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select row_to_json(q) \
+             from (select 'NaN'::float8 as f, 'Infinity'::float8 as p, '-Infinity'::float8 as n) q",
+        )
+        .unwrap(),
+        vec![vec![Value::Json(
+            "{\"f\":\"NaN\",\"p\":\"Infinity\",\"n\":\"-Infinity\"}".into(),
+        )]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select json_object('{a,1,b,2,3,NULL,\"d e f\",\"a b c\"}'), \
+                    json_object('{{a,1},{b,2}}'), \
+                    json_object('{a,b}','{1,2}')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Json(
+                "{\"a\" : \"1\", \"b\" : \"2\", \"3\" : null, \"d e f\" : \"a b c\"}".into(),
+            ),
+            Value::Json("{\"a\" : \"1\", \"b\" : \"2\"}".into()),
+            Value::Json("{\"a\" : \"1\", \"b\" : \"2\"}".into()),
+        ]],
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select json_object('{a,b,c}')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { details, .. }
+            if details == "array must have even number of elements"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select json_object('{{a},{b}}')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { details, .. } if details == "array must have two columns"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select json_object('{a,b,NULL,\"d e f\"}','{1,2,3,\"a b c\"}')",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "null value not allowed for object key"
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select json_array_length('{\"f1\":1,\"f2\":[5,6]}'::json)",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "cannot get array length of a non-array"
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select json_object_keys('\"a scalar\"'::json)",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "cannot call json_object_keys on a scalar"
+    );
 }
 
 #[test]
@@ -17393,7 +17519,7 @@ fn json_table_functions_and_json_agg_work() {
     .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Json("[1,2]".into())]]);
+            assert_eq!(rows, vec![vec![Value::Json("[1, 2]".into())]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }

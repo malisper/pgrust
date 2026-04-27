@@ -25215,7 +25215,7 @@ fn set_local_time_zone_updates_timestamptz_json_output() {
 
     assert_eq!(
         session_query_rows(&mut session, &db, "show timezone"),
-        vec![vec![Value::Text("-10:30".into())]]
+        vec![vec![Value::Text("+10:30".into())]]
     );
     assert_eq!(
         session_query_rows(
@@ -25223,7 +25223,7 @@ fn set_local_time_zone_updates_timestamptz_json_output() {
             &db,
             "select timestamptz '2014-05-28 12:22:35.614298-04'::text",
         ),
-        vec![vec![Value::Text("2014-05-28 05:52:35.614298-10:30".into())]]
+        vec![vec![Value::Text("2014-05-29 02:52:35.614298+10:30".into())]]
     );
     assert_eq!(
         session_query_rows(
@@ -25233,7 +25233,7 @@ fn set_local_time_zone_updates_timestamptz_json_output() {
         ),
         vec![vec![Value::Jsonb(
             crate::backend::executor::jsonb::parse_jsonb_text(
-                "\"2014-05-28T05:52:35.614298-10:30\"",
+                "\"2014-05-29T02:52:35.614298+10:30\"",
             )
             .unwrap()
         )]]

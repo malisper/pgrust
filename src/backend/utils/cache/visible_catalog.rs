@@ -25,11 +25,12 @@ use crate::include::catalog::{
 };
 use crate::pgrust::database::DatabaseStatsStore;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct VisibleCatalog {
-    relcache: RelCache,
-    catcache: Option<CatCache>,
+    relcache: Arc<RelCache>,
+    catcache: Option<Arc<CatCache>>,
     search_path: Vec<String>,
     enum_rows: Vec<PgEnumRow>,
     uncommitted_enum_label_oids: BTreeSet<u32>,
@@ -50,8 +51,8 @@ impl VisibleCatalog {
         search_path: Vec<String>,
     ) -> Self {
         Self {
-            relcache,
-            catcache,
+            relcache: Arc::new(relcache),
+            catcache: catcache.map(Arc::new),
             search_path,
             enum_rows: Vec::new(),
             uncommitted_enum_label_oids: BTreeSet::new(),
@@ -147,7 +148,7 @@ impl VisibleCatalog {
     pub fn depend_rows(&self) -> Vec<PgDependRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::depend_rows)
+            .map(|catcache| catcache.depend_rows())
             .unwrap_or_default()
     }
 
@@ -210,7 +211,7 @@ impl VisibleCatalog {
     pub fn amproc_rows(&self) -> Vec<PgAmprocRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::amproc_rows)
+            .map(|catcache| catcache.amproc_rows())
             .unwrap_or_else(bootstrap_pg_amproc_rows)
     }
 
@@ -432,14 +433,14 @@ impl CatalogLookup for VisibleCatalog {
     fn opclass_rows(&self) -> Vec<PgOpclassRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::opclass_rows)
+            .map(|catcache| catcache.opclass_rows())
             .unwrap_or_else(bootstrap_pg_opclass_rows)
     }
 
     fn collation_rows(&self) -> Vec<PgCollationRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::collation_rows)
+            .map(|catcache| catcache.collation_rows())
             .unwrap_or_else(|| bootstrap_pg_collation_rows().to_vec())
     }
 
@@ -492,35 +493,35 @@ impl CatalogLookup for VisibleCatalog {
     fn operator_rows(&self) -> Vec<PgOperatorRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::operator_rows)
+            .map(|catcache| catcache.operator_rows())
             .unwrap_or_else(bootstrap_pg_operator_rows)
     }
 
     fn ts_config_rows(&self) -> Vec<PgTsConfigRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::ts_config_rows)
+            .map(|catcache| catcache.ts_config_rows())
             .unwrap_or_else(|| bootstrap_pg_ts_config_rows().to_vec())
     }
 
     fn ts_dict_rows(&self) -> Vec<PgTsDictRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::ts_dict_rows)
+            .map(|catcache| catcache.ts_dict_rows())
             .unwrap_or_else(|| bootstrap_pg_ts_dict_rows().to_vec())
     }
 
     fn ts_template_rows(&self) -> Vec<PgTsTemplateRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::ts_template_rows)
+            .map(|catcache| catcache.ts_template_rows())
             .unwrap_or_else(|| bootstrap_pg_ts_template_rows().to_vec())
     }
 
     fn ts_config_map_rows(&self) -> Vec<PgTsConfigMapRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::ts_config_map_rows)
+            .map(|catcache| catcache.ts_config_map_rows())
             .unwrap_or_else(bootstrap_pg_ts_config_map_rows)
     }
 
@@ -542,7 +543,7 @@ impl CatalogLookup for VisibleCatalog {
     fn cast_rows(&self) -> Vec<PgCastRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::cast_rows)
+            .map(|catcache| catcache.cast_rows())
             .unwrap_or_else(bootstrap_pg_cast_rows)
     }
 
@@ -550,7 +551,7 @@ impl CatalogLookup for VisibleCatalog {
         let mut rows = self
             .catcache
             .as_ref()
-            .map(CatCache::type_rows)
+            .map(|catcache| catcache.type_rows())
             .unwrap_or_else(builtin_type_rows);
         for composite in composite_type_rows_from_relcache(&self.relcache) {
             if rows.iter().all(|existing| existing.oid != composite.oid) {
@@ -628,7 +629,7 @@ impl CatalogLookup for VisibleCatalog {
     fn language_rows(&self) -> Vec<PgLanguageRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::language_rows)
+            .map(|catcache| catcache.language_rows())
             .unwrap_or_else(|| bootstrap_pg_language_rows().to_vec())
     }
 
@@ -653,7 +654,7 @@ impl CatalogLookup for VisibleCatalog {
     fn rewrite_rows(&self) -> Vec<PgRewriteRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::rewrite_rows)
+            .map(|catcache| catcache.rewrite_rows())
             .unwrap_or_default()
     }
 
@@ -694,7 +695,7 @@ impl CatalogLookup for VisibleCatalog {
     fn partitioned_table_rows(&self) -> Vec<PgPartitionedTableRow> {
         self.catcache
             .as_ref()
-            .map(CatCache::partitioned_table_rows)
+            .map(|catcache| catcache.partitioned_table_rows())
             .unwrap_or_default()
     }
 

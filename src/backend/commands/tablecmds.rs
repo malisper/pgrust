@@ -5888,7 +5888,7 @@ fn coerce_user_defined_base_assignments(
     values: &mut [Value],
     ctx: &ExecutorContext,
 ) -> Result<(), ExecError> {
-    let Some(catalog) = ctx.catalog.clone() else {
+    let Some(catalog) = ctx.catalog.as_ref() else {
         return Ok(());
     };
     for (column, value) in desc.columns.iter().zip(values.iter_mut()) {
@@ -5913,7 +5913,7 @@ fn coerce_user_defined_base_assignments(
             value.clone(),
             Some(SqlType::new(SqlTypeKind::Text)),
             target,
-            Some(&catalog),
+            Some(catalog),
             &ctx.datetime_config,
         )?;
     }
@@ -5925,6 +5925,14 @@ fn enforce_partition_constraint_after_before_insert(
     values: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
+    let Some(true) = ctx
+        .catalog
+        .as_ref()
+        .and_then(|catalog| catalog.relation_by_oid(relation_oid))
+        .map(|target| target.relispartition)
+    else {
+        return Ok(());
+    };
     let Some(catalog) = ctx.catalog.clone() else {
         return Ok(());
     };

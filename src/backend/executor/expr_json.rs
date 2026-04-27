@@ -1,5 +1,7 @@
 use super::exec_expr::eval_expr;
-use super::expr_casts::{cast_text_value_with_config, cast_value_with_config};
+use super::expr_casts::{
+    cast_text_value_with_config, cast_value_with_config, parse_text_array_literal_with_op,
+};
 use super::node_types::*;
 use super::{ExecError, ExecutorContext};
 use crate::backend::executor::expr_datetime::render_json_datetime_value_text_with_config;
@@ -342,6 +344,19 @@ fn json_array_length_error(value: ParsedJsonValue) -> ExecError {
     }
 }
 
+fn json_object_keys_non_object_error(func_name: &'static str, value: &SerdeJsonValue) -> ExecError {
+    let target = match value {
+        SerdeJsonValue::Array(_) => "an array",
+        _ => "a scalar",
+    };
+    ExecError::DetailedError {
+        message: format!("cannot call {func_name} on {target}"),
+        detail: None,
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
 fn jsonb_non_object_error(func_name: &'static str) -> ExecError {
     ExecError::DetailedError {
         message: format!("cannot call {func_name} on a non-object"),
@@ -624,16 +639,7 @@ pub(crate) fn eval_json_builtin_function(
                     ParsedJsonValue::Jsonb(JsonbValue::Array(items)) => {
                         Ok(Value::Int32(items.len() as i32))
                     }
-                    ParsedJsonValue::Json(other) => Err(ExecError::TypeMismatch {
-                        op: "json_array_length",
-                        left: json_value_to_value(&other, false),
-                        right: Value::Null,
-                    }),
-                    ParsedJsonValue::Jsonb(other) => Err(ExecError::TypeMismatch {
-                        op: "json_array_length",
-                        left: jsonb_to_value(&other),
-                        right: Value::Null,
-                    }),
+                    other => Err(json_array_length_error(other)),
                 }
             }
             BuiltinScalarFunction::JsonbArrayLength => {
@@ -1571,7 +1577,7 @@ fn render_json_builder_array(values: &[Value]) -> String {
     let mut out = String::from("[");
     for (idx, value) in values.iter().enumerate() {
         if idx > 0 {
-            out.push(',');
+            out.push_str(", ");
         }
         out.push_str(&value_to_json_text(
             value,
@@ -1592,27 +1598,27 @@ fn render_json_builder_object(values: &[Value]) -> Result<String, ExecError> {
 fn render_json_object_function(values: &[Value]) -> Result<String, ExecError> {
     match values {
         [single] => {
-            let items = array_values_for_json_object(single, "json_object")?;
+            let items = json_object_one_arg_items(single)?;
             if items.len() % 2 != 0 {
                 return Err(ExecError::InvalidStorageValue {
                     column: "json".into(),
-                    details: "argument list must have even number of elements".into(),
+                    details: "array must have even number of elements".into(),
                 });
             }
             let pairs = items
                 .chunks(2)
                 .map(|chunk| {
                     Ok((
-                        json_object_key_text(&chunk[0], "json_object")?,
+                        json_object_function_key(&chunk[0], "json")?,
                         chunk.get(1).cloned().unwrap_or(Value::Null),
                     ))
                 })
                 .collect::<Result<Vec<_>, ExecError>>()?;
-            Ok(render_json_string_pairs(&pairs))
+            Ok(render_json_text_pairs(&pairs)?)
         }
         [keys, vals] => {
-            let keys = array_values_for_json_object(keys, "json_object")?;
-            let vals = array_values_for_json_object(vals, "json_object")?;
+            let keys = json_object_two_arg_items(keys)?;
+            let vals = json_object_two_arg_items(vals)?;
             if keys.len() != vals.len() {
                 return Err(ExecError::InvalidStorageValue {
                     column: "json".into(),
@@ -1622,14 +1628,111 @@ fn render_json_object_function(values: &[Value]) -> Result<String, ExecError> {
             let pairs = keys
                 .into_iter()
                 .zip(vals)
-                .map(|(k, v)| Ok((json_object_key_text(&k, "json_object")?, v)))
+                .map(|(k, v)| Ok((json_object_function_key(&k, "json")?, v)))
                 .collect::<Result<Vec<_>, ExecError>>()?;
-            Ok(render_json_string_pairs(&pairs))
+            Ok(render_json_text_pairs(&pairs)?)
         }
         _ => Err(ExecError::InvalidStorageValue {
             column: "json".into(),
             details: "json_object expects one or two array arguments".into(),
         }),
+    }
+}
+
+fn json_object_one_arg_items(value: &Value) -> Result<Vec<Value>, ExecError> {
+    match parse_json_object_array_arg(value)? {
+        Value::PgArray(array) => match array.ndim() {
+            0 => Ok(Vec::new()),
+            1 => Ok(array.elements.clone()),
+            2 => {
+                if array.dimensions[1].length != 2 {
+                    return Err(ExecError::InvalidStorageValue {
+                        column: "json".into(),
+                        details: "array must have two columns".into(),
+                    });
+                }
+                Ok(array.elements.clone())
+            }
+            _ => Err(ExecError::InvalidStorageValue {
+                column: "json".into(),
+                details: "wrong number of array subscripts".into(),
+            }),
+        },
+        Value::Array(items) => json_object_one_arg_array_items(items),
+        other => Err(ExecError::TypeMismatch {
+            op: "json_object",
+            left: other,
+            right: Value::Null,
+        }),
+    }
+}
+
+fn json_object_one_arg_array_items(items: Vec<Value>) -> Result<Vec<Value>, ExecError> {
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !items.iter().all(|item| matches!(item, Value::Array(_))) {
+        return Ok(items);
+    }
+
+    let mut out = Vec::with_capacity(items.len() * 2);
+    for item in items {
+        let Value::Array(parts) = item else {
+            unreachable!();
+        };
+        if parts.iter().any(|part| matches!(part, Value::Array(_))) {
+            return Err(ExecError::InvalidStorageValue {
+                column: "json".into(),
+                details: "wrong number of array subscripts".into(),
+            });
+        }
+        if parts.len() != 2 {
+            return Err(ExecError::InvalidStorageValue {
+                column: "json".into(),
+                details: "array must have two columns".into(),
+            });
+        }
+        out.extend(parts);
+    }
+    Ok(out)
+}
+
+fn json_object_two_arg_items(value: &Value) -> Result<Vec<Value>, ExecError> {
+    match parse_json_object_array_arg(value)? {
+        Value::PgArray(array) if array.ndim() == 0 => Ok(Vec::new()),
+        Value::PgArray(array) if array.ndim() == 1 => Ok(array.elements.clone()),
+        Value::PgArray(_) => Err(ExecError::InvalidStorageValue {
+            column: "json".into(),
+            details: "wrong number of array subscripts".into(),
+        }),
+        Value::Array(items) if items.iter().any(|item| matches!(item, Value::Array(_))) => {
+            Err(ExecError::InvalidStorageValue {
+                column: "json".into(),
+                details: "wrong number of array subscripts".into(),
+            })
+        }
+        Value::Array(items) => Ok(items),
+        other => Err(ExecError::TypeMismatch {
+            op: "json_object",
+            left: other,
+            right: Value::Null,
+        }),
+    }
+}
+
+fn parse_json_object_array_arg(value: &Value) -> Result<Value, ExecError> {
+    match value {
+        Value::Text(text) => parse_text_array_literal_with_op(
+            text.as_str(),
+            SqlType::new(SqlTypeKind::Text),
+            "json_object",
+        ),
+        Value::TextRef(_, _) => parse_text_array_literal_with_op(
+            value.as_text().unwrap(),
+            SqlType::new(SqlTypeKind::Text),
+            "json_object",
+        ),
+        _ => Ok(value.clone()),
     }
 }
 
@@ -1767,10 +1870,10 @@ fn render_json_pairs(pairs: &[(String, Value)]) -> String {
     let mut out = String::from("{");
     for (idx, (key, value)) in pairs.iter().enumerate() {
         if idx > 0 {
-            out.push(',');
+            out.push_str(", ");
         }
         out.push_str(&serde_json::to_string(key).unwrap());
-        out.push(':');
+        out.push_str(" : ");
         out.push_str(&value_to_json_text(
             value,
             false,
@@ -1782,8 +1885,21 @@ fn render_json_pairs(pairs: &[(String, Value)]) -> String {
     out
 }
 
-fn render_json_string_pairs(pairs: &[(String, Value)]) -> String {
-    render_json_pairs(pairs)
+fn render_json_text_pairs(pairs: &[(String, Value)]) -> Result<String, ExecError> {
+    let mut out = String::from("{");
+    for (idx, (key, value)) in pairs.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&serde_json::to_string(key).unwrap());
+        out.push_str(" : ");
+        match json_object_text_value(value, "json_object")? {
+            Some(text) => out.push_str(&serde_json::to_string(&text).unwrap()),
+            None => out.push_str("null"),
+        }
+    }
+    out.push('}');
+    Ok(out)
 }
 
 fn array_values_for_json_object(value: &Value, op: &'static str) -> Result<Vec<Value>, ExecError> {
@@ -1799,56 +1915,68 @@ fn array_values_for_json_object(value: &Value, op: &'static str) -> Result<Vec<V
 }
 
 fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecError> {
+    json_object_text_value(value, op)?.ok_or_else(|| ExecError::DetailedError {
+        message: "null value not allowed for object key".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22004",
+    })
+}
+
+fn json_object_text_value(value: &Value, op: &'static str) -> Result<Option<String>, ExecError> {
     match value {
-        Value::Null => Ok("".into()),
-        Value::Text(_) | Value::TextRef(_, _) => Ok(value.as_text().unwrap().to_string()),
-        Value::Bit(v) => Ok(render_bit_text(v)),
-        Value::Bytea(v) => Ok(format_bytea_text(v, ByteaOutputFormat::Hex)),
-        Value::Inet(v) => Ok(v.render_inet()),
-        Value::Cidr(v) => Ok(v.render_cidr()),
-        Value::MacAddr(v) => Ok(render_macaddr_text(v)),
-        Value::MacAddr8(v) => Ok(render_macaddr8_text(v)),
-        Value::InternalChar(v) => Ok(crate::backend::executor::render_internal_char_text(*v)),
-        Value::EnumOid(v) => Ok(v.to_string()),
-        Value::Int16(v) => Ok(v.to_string()),
-        Value::Int32(v) => Ok(v.to_string()),
-        Value::Int64(v) => Ok(v.to_string()),
-        Value::Xid8(v) => Ok(v.to_string()),
-        Value::PgLsn(v) => Ok(crate::backend::executor::render_pg_lsn_text(*v)),
-        Value::Money(v) => Ok(crate::backend::executor::money_format_text(*v)),
-        Value::Float64(v) => Ok(v.to_string()),
-        Value::Numeric(v) => Ok(v.render()),
-        Value::Interval(v) => Ok(render_interval_text(*v)),
-        Value::Uuid(v) => Ok(crate::backend::executor::value_io::render_uuid_text(v)),
-        Value::Bool(v) => Ok(if *v { "true".into() } else { "false".into() }),
-        Value::JsonPath(v) => Ok(v.to_string()),
-        Value::Xml(v) => Ok(v.to_string()),
-        Value::Json(v) => Ok(v.to_string()),
-        Value::Jsonb(v) => render_jsonb_bytes(v),
+        Value::Null => Ok(None),
+        Value::Text(_) | Value::TextRef(_, _) => Ok(Some(value.as_text().unwrap().to_string())),
+        Value::Bit(v) => Ok(Some(render_bit_text(v))),
+        Value::Bytea(v) => Ok(Some(format_bytea_text(v, ByteaOutputFormat::Hex))),
+        Value::Inet(v) => Ok(Some(v.render_inet())),
+        Value::Cidr(v) => Ok(Some(v.render_cidr())),
+        Value::MacAddr(v) => Ok(Some(render_macaddr_text(v))),
+        Value::MacAddr8(v) => Ok(Some(render_macaddr8_text(v))),
+        Value::InternalChar(v) => Ok(Some(crate::backend::executor::render_internal_char_text(
+            *v,
+        ))),
+        Value::EnumOid(v) => Ok(Some(v.to_string())),
+        Value::Int16(v) => Ok(Some(v.to_string())),
+        Value::Int32(v) => Ok(Some(v.to_string())),
+        Value::Int64(v) => Ok(Some(v.to_string())),
+        Value::Xid8(v) => Ok(Some(v.to_string())),
+        Value::PgLsn(v) => Ok(Some(crate::backend::executor::render_pg_lsn_text(*v))),
+        Value::Money(v) => Ok(Some(crate::backend::executor::money_format_text(*v))),
+        Value::Float64(v) => Ok(Some(float_json_scalar_text(*v))),
+        Value::Numeric(v) => Ok(Some(v.render())),
+        Value::Interval(v) => Ok(Some(render_interval_text(*v))),
+        Value::Uuid(v) => Ok(Some(crate::backend::executor::value_io::render_uuid_text(
+            v,
+        ))),
+        Value::Bool(v) => Ok(Some(if *v { "true".into() } else { "false".into() })),
+        Value::JsonPath(v) => Ok(Some(v.to_string())),
+        Value::Xml(v) => Ok(Some(v.to_string())),
+        Value::Json(v) => Ok(Some(v.to_string())),
+        Value::Jsonb(v) => render_jsonb_bytes(v).map(Some),
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)
         | Value::Timestamp(_)
-        | Value::TimestampTz(_) => {
-            Ok(render_datetime_value_text(value).expect("datetime values render"))
-        }
+        | Value::TimestampTz(_) => Ok(Some(
+            render_datetime_value_text(value).expect("datetime values render"),
+        )),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)
         | Value::Line(_)
         | Value::Box(_)
         | Value::Polygon(_)
-        | Value::Circle(_) => Ok(crate::backend::executor::render_geometry_text(
-            value,
-            Default::default(),
-        )
-        .unwrap_or_default()),
-        Value::Range(_) => Ok(render_range_text(value).unwrap_or_default()),
-        Value::Multirange(_) => {
-            Ok(crate::backend::executor::render_multirange_text(value).unwrap_or_default())
-        }
-        Value::TsVector(v) => Ok(crate::backend::executor::render_tsvector_text(v)),
-        Value::TsQuery(v) => Ok(crate::backend::executor::render_tsquery_text(v)),
+        | Value::Circle(_) => Ok(Some(
+            crate::backend::executor::render_geometry_text(value, Default::default())
+                .unwrap_or_default(),
+        )),
+        Value::Range(_) => Ok(Some(render_range_text(value).unwrap_or_default())),
+        Value::Multirange(_) => Ok(Some(
+            crate::backend::executor::render_multirange_text(value).unwrap_or_default(),
+        )),
+        Value::TsVector(v) => Ok(Some(crate::backend::executor::render_tsvector_text(v))),
+        Value::TsQuery(v) => Ok(Some(crate::backend::executor::render_tsquery_text(v))),
         Value::Array(_) | Value::PgArray(_) => Err(ExecError::TypeMismatch {
             op,
             left: value.clone(),
@@ -3105,6 +3233,33 @@ fn render_serde_json_value_text(value: &SerdeJsonValue) -> String {
     }
 }
 
+fn float_json_scalar_text(value: f64) -> String {
+    if value.is_finite() {
+        return value.to_string();
+    }
+    if value.is_nan() {
+        "NaN".into()
+    } else if value.is_sign_positive() {
+        "Infinity".into()
+    } else {
+        "-Infinity".into()
+    }
+}
+
+fn render_float_json_text(value: f64) -> String {
+    if value.is_finite() {
+        value.to_string()
+    } else {
+        serde_json::to_string(&float_json_scalar_text(value)).unwrap()
+    }
+}
+
+fn float_json_serde_value(value: f64) -> SerdeJsonValue {
+    serde_json::Number::from_f64(value)
+        .map(SerdeJsonValue::Number)
+        .unwrap_or_else(|| SerdeJsonValue::String(float_json_scalar_text(value)))
+}
+
 fn value_to_json_serde_with_config(
     value: &Value,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
@@ -3117,9 +3272,7 @@ fn value_to_json_serde_with_config(
         Value::Xid8(v) => SerdeJsonValue::from(*v),
         Value::PgLsn(v) => SerdeJsonValue::String(crate::backend::executor::render_pg_lsn_text(*v)),
         Value::Money(v) => SerdeJsonValue::String(crate::backend::executor::money_format_text(*v)),
-        Value::Float64(v) => serde_json::Number::from_f64(*v)
-            .map(SerdeJsonValue::Number)
-            .unwrap_or(SerdeJsonValue::Null),
+        Value::Float64(v) => float_json_serde_value(*v),
         Value::Numeric(v) => parse_json_text(&v.render()).unwrap_or(SerdeJsonValue::Null),
         Value::Interval(v) => SerdeJsonValue::String(render_interval_text(*v)),
         Value::Uuid(v) => {
@@ -3214,11 +3367,24 @@ fn value_to_json_text(
     catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
 ) -> String {
     if pretty {
-        let rendered = render_json_value_text_with_config(value, datetime_config, catalog);
-        let json = parse_json_text(&rendered).unwrap_or(SerdeJsonValue::Null);
-        serde_json::to_string_pretty(&json).unwrap()
+        render_json_value_text_pretty(value, datetime_config, catalog)
     } else {
         render_json_value_text_with_config(value, datetime_config, catalog)
+    }
+}
+
+fn render_json_value_text_pretty(
+    value: &Value,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+) -> String {
+    match value {
+        Value::Array(items) => render_json_array_values(items, true, datetime_config, catalog),
+        Value::PgArray(array) => {
+            render_json_array_values(&array.to_nested_values(), true, datetime_config, catalog)
+        }
+        Value::Record(record) => render_json_record_value(record, true, datetime_config, catalog),
+        _ => render_json_value_text_with_config(value, datetime_config, catalog),
     }
 }
 
@@ -3237,7 +3403,7 @@ fn render_json_value_text_with_config(
             serde_json::to_string(&crate::backend::executor::render_pg_lsn_text(*v)).unwrap()
         }
         Value::Money(v) => crate::backend::executor::money_format_text(*v),
-        Value::Float64(v) => v.to_string(),
+        Value::Float64(v) => render_float_json_text(*v),
         Value::Numeric(v) => v.render(),
         Value::Interval(v) => {
             serde_json::to_string(&render_interval_text_with_config(*v, datetime_config)).unwrap()
@@ -3303,55 +3469,59 @@ fn render_json_value_text_with_config(
         Value::TsQuery(v) => {
             serde_json::to_string(&crate::backend::executor::render_tsquery_text(v)).unwrap()
         }
-        Value::Array(items) => {
-            let mut out = String::from("[");
-            for (idx, item) in items.iter().enumerate() {
-                if idx > 0 {
-                    out.push(',');
-                }
-                out.push_str(&render_json_value_text_with_config(
-                    item,
-                    datetime_config,
-                    catalog,
-                ));
-            }
-            out.push(']');
-            out
-        }
-        Value::Record(record) => {
-            let mut out = String::from("{");
-            for (idx, (field, item)) in record.iter().enumerate() {
-                if idx > 0 {
-                    out.push(',');
-                }
-                out.push_str(&serde_json::to_string(&field.name).unwrap());
-                out.push(':');
-                out.push_str(&render_json_field_value_text(
-                    item,
-                    field.sql_type,
-                    datetime_config,
-                    catalog,
-                ));
-            }
-            out.push('}');
-            out
-        }
+        Value::Array(items) => render_json_array_values(items, false, datetime_config, catalog),
+        Value::Record(record) => render_json_record_value(record, false, datetime_config, catalog),
         Value::PgArray(array) => {
-            let mut out = String::from("[");
-            for (idx, item) in array.to_nested_values().iter().enumerate() {
-                if idx > 0 {
-                    out.push(',');
-                }
-                out.push_str(&render_json_value_text_with_config(
-                    item,
-                    datetime_config,
-                    catalog,
-                ));
-            }
-            out.push(']');
-            out
+            render_json_array_values(&array.to_nested_values(), false, datetime_config, catalog)
         }
     }
+}
+
+fn render_json_array_values(
+    items: &[Value],
+    use_line_feeds: bool,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+) -> String {
+    let mut out = String::from("[");
+    let sep = if use_line_feeds { ",\n " } else { "," };
+    for (idx, item) in items.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(sep);
+        }
+        out.push_str(&render_json_value_text_with_config(
+            item,
+            datetime_config,
+            catalog,
+        ));
+    }
+    out.push(']');
+    out
+}
+
+fn render_json_record_value(
+    record: &RecordValue,
+    use_line_feeds: bool,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+) -> String {
+    let mut out = String::from("{");
+    let sep = if use_line_feeds { ",\n " } else { "," };
+    for (idx, (field, item)) in record.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(sep);
+        }
+        out.push_str(&serde_json::to_string(&field.name).unwrap());
+        out.push(':');
+        out.push_str(&render_json_field_value_text(
+            item,
+            field.sql_type,
+            datetime_config,
+            catalog,
+        ));
+    }
+    out.push('}');
+    out
 }
 
 fn render_json_field_value_text(
@@ -3429,11 +3599,10 @@ pub(crate) fn eval_json_table_function(
             let map = match json {
                 SerdeJsonValue::Object(map) => map,
                 other => {
-                    return Err(ExecError::TypeMismatch {
-                        op: "json_object_keys",
-                        left: json_value_to_value(&other, false),
-                        right: Value::Null,
-                    });
+                    return Err(json_object_keys_non_object_error(
+                        "json_object_keys",
+                        &other,
+                    ));
                 }
             };
             for (key, _) in map {
