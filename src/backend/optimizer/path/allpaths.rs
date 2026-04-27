@@ -8,6 +8,7 @@ use crate::backend::parser::{
     PartitionStrategy, SerializedPartitionValue, deserialize_partition_bound,
     partition_value_to_value, relation_partition_spec,
 };
+use crate::include::catalog::BTREE_AM_OID;
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
@@ -1046,6 +1047,92 @@ pub(super) fn relation_ordered_index_paths(
         }
         _ => Vec::new(),
     }
+}
+
+pub(super) fn relation_index_only_full_scan_paths(
+    root: &PlannerInfo,
+    rtindex: usize,
+    catalog: &dyn CatalogLookup,
+) -> Vec<Path> {
+    if !root.config.enable_indexonlyscan
+        || relation_uses_virtual_scan(relation_oid_for_rtindex(root, rtindex).unwrap_or(0))
+    {
+        return Vec::new();
+    }
+    let Some(rte) = root.parse.rtable.get(rtindex - 1) else {
+        return Vec::new();
+    };
+    let RangeTblEntryKind::Relation {
+        rel: heap_rel,
+        relation_oid,
+        relkind,
+        toast,
+        ..
+    } = &rte.kind
+    else {
+        return Vec::new();
+    };
+    if *relkind != 'r' {
+        return Vec::new();
+    }
+    let stats = relation_stats(catalog, *relation_oid, &rte.desc);
+    let relation_name = relation_display_name(catalog, rte, *relation_oid, *heap_rel);
+    let mut paths = Vec::new();
+    for index in catalog
+        .index_relations_for_heap(*relation_oid)
+        .iter()
+        .filter(|index| {
+            index.index_meta.indisvalid
+                && index.index_meta.indisready
+                && !index.index_meta.indkey.is_empty()
+                && index.index_meta.am_oid == BTREE_AM_OID
+        })
+    {
+        let rows = stats.reltuples.max(1.0);
+        let first_key_distinct = index
+            .index_meta
+            .indkey
+            .first()
+            .copied()
+            .and_then(|attnum| stats.stats_by_attnum.get(&attnum))
+            .map(|row| {
+                if row.stadistinct > 0.0 {
+                    row.stadistinct
+                } else if row.stadistinct < 0.0 {
+                    -row.stadistinct * rows
+                } else {
+                    rows
+                }
+            })
+            .unwrap_or(rows);
+        let total_cost = rows * 0.0001
+            + first_key_distinct * 0.00001
+            + if index.index_meta.indisunique {
+                1.0
+            } else {
+                0.0
+            };
+        paths.push(Path::IndexOnlyScan {
+            plan_info: PlanEstimate::new(0.0025, total_cost, rows, stats.width),
+            pathtarget: slot_output_target(rtindex, &rte.desc.columns, |column| column.sql_type),
+            source_id: rtindex,
+            rel: *heap_rel,
+            relation_name: relation_name.clone(),
+            relation_oid: *relation_oid,
+            index_rel: index.rel,
+            index_name: index.name.clone(),
+            am_oid: index.index_meta.am_oid,
+            toast: *toast,
+            desc: rte.desc.clone(),
+            index_desc: index.desc.clone(),
+            index_meta: index.index_meta.clone(),
+            keys: Vec::new(),
+            order_by_keys: Vec::new(),
+            direction: crate::include::access::relscan::ScanDirection::Forward,
+            pathkeys: Vec::new(),
+        });
+    }
+    paths
 }
 
 fn cheapest_relation_access_path(
@@ -3422,6 +3509,7 @@ fn cross_join_left_relid_count(path: &Path) -> Option<usize> {
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => cross_join_left_relid_count(input),
         _ => None,

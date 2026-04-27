@@ -244,3 +244,11 @@ pub(super) fn relation_ordered_index_paths(
 ) -> Vec<Path> {
     allpaths::relation_ordered_index_paths(root, rtindex, pathkeys, catalog)
 }
+
+pub(super) fn relation_index_only_full_scan_paths(
+    root: &PlannerInfo,
+    rtindex: usize,
+    catalog: &dyn CatalogLookup,
+) -> Vec<Path> {
+    allpaths::relation_index_only_full_scan_paths(root, rtindex, catalog)
+}

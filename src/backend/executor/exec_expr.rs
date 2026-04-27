@@ -6304,7 +6304,7 @@ fn eval_plpgsql_builtin_function(
         return result;
     }
     if is_text_search_builtin_function(func) {
-        return eval_text_search_builtin_function(func, &values);
+        return eval_text_search_builtin_function(func, &values, None);
     }
     match func {
         BuiltinScalarFunction::ToTsVector
@@ -6313,7 +6313,7 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::PlainToTsQuery
         | BuiltinScalarFunction::PhraseToTsQuery
         | BuiltinScalarFunction::WebSearchToTsQuery
-        | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(func, &values),
+        | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(func, &values, None),
         BuiltinScalarFunction::Length => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
@@ -6995,6 +6995,7 @@ fn is_text_search_builtin_function(func: BuiltinScalarFunction) -> bool {
 fn eval_text_search_builtin_function(
     func: BuiltinScalarFunction,
     values: &[Value],
+    catalog: Option<&dyn CatalogLookup>,
 ) -> Result<Value, ExecError> {
     fn arg_text(
         values: &[Value],
@@ -7144,13 +7145,14 @@ fn eval_text_search_builtin_function(
     match func {
         BuiltinScalarFunction::ToTsVector => {
             if let [Value::Jsonb(_)] = values {
-                return jsonb_to_tsvector_value(None, &values[0], None);
+                return jsonb_to_tsvector_value(None, &values[0], None, catalog);
             }
             if let [_, Value::Jsonb(_)] = values {
                 return jsonb_to_tsvector_value(
                     arg_text(values, 0, "to_tsvector")?.as_deref(),
                     &values[1],
                     None,
+                    catalog,
                 );
             }
             let result = match values {
@@ -7160,12 +7162,14 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "to_tsvector")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 [_, _] => crate::backend::tsearch::to_tsvector_with_config_name(
                     arg_text(values, 0, "to_tsvector")?.as_deref(),
                     arg_text(values, 1, "to_tsvector")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 _ => unreachable!(),
             };
@@ -7181,11 +7185,14 @@ fn eval_text_search_builtin_function(
             | [_, _, Value::Null] => {
                 return Ok(Value::Null);
             }
-            [Value::Jsonb(_), _] => jsonb_to_tsvector_value(None, &values[0], values.get(1)),
+            [Value::Jsonb(_), _] => {
+                jsonb_to_tsvector_value(None, &values[0], values.get(1), catalog)
+            }
             [_, Value::Jsonb(_), _] => jsonb_to_tsvector_value(
                 arg_text(values, 0, "jsonb_to_tsvector")?.as_deref(),
                 &values[1],
                 values.get(2),
+                catalog,
             ),
             _ => Err(ExecError::TypeMismatch {
                 op: "jsonb_to_tsvector",
@@ -7201,12 +7208,14 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "to_tsquery")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 [_, _] => crate::backend::tsearch::to_tsquery_with_config_name(
                     arg_text(values, 0, "to_tsquery")?.as_deref(),
                     arg_text(values, 1, "to_tsquery")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 _ => unreachable!(),
             };
@@ -7222,12 +7231,14 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "plainto_tsquery")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 [_, _] => crate::backend::tsearch::plainto_tsquery_with_config_name(
                     arg_text(values, 0, "plainto_tsquery")?.as_deref(),
                     arg_text(values, 1, "plainto_tsquery")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 _ => unreachable!(),
             };
@@ -7243,12 +7254,14 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "phraseto_tsquery")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 [_, _] => crate::backend::tsearch::phraseto_tsquery_with_config_name(
                     arg_text(values, 0, "phraseto_tsquery")?.as_deref(),
                     arg_text(values, 1, "phraseto_tsquery")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 _ => unreachable!(),
             };
@@ -7264,12 +7277,14 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "websearch_to_tsquery")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 [_, _] => crate::backend::tsearch::websearch_to_tsquery_with_config_name(
                     arg_text(values, 0, "websearch_to_tsquery")?.as_deref(),
                     arg_text(values, 1, "websearch_to_tsquery")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 _ => unreachable!(),
             };
@@ -7436,14 +7451,19 @@ fn eval_text_search_builtin_function(
                 arg_text(values, 1, "ts_lexize")?
                     .as_deref()
                     .unwrap_or_default(),
+                catalog,
             )
             .map(|lexemes| {
-                Value::Array(
-                    lexemes
-                        .into_iter()
-                        .map(|lexeme| Value::Text(lexeme.into()))
-                        .collect(),
-                )
+                lexemes
+                    .map(|lexemes| {
+                        Value::Array(
+                            lexemes
+                                .into_iter()
+                                .map(|lexeme| Value::Text(lexeme.into()))
+                                .collect(),
+                        )
+                    })
+                    .unwrap_or(Value::Null)
             })
             .map_err(|e| parse_error("ts_lexize", e)),
             _ => unreachable!(),
@@ -7995,7 +8015,13 @@ pub(crate) fn eval_builtin_function(
         return result;
     }
     if is_text_search_builtin_function(func) {
-        return eval_text_search_builtin_function(func, &values);
+        return eval_text_search_builtin_function(
+            func,
+            &values,
+            ctx.catalog
+                .as_ref()
+                .map(|catalog| catalog as &dyn CatalogLookup),
+        );
     }
     if matches!(
         func,
@@ -8010,7 +8036,13 @@ pub(crate) fn eval_builtin_function(
         | BuiltinScalarFunction::PlainToTsQuery
         | BuiltinScalarFunction::PhraseToTsQuery
         | BuiltinScalarFunction::WebSearchToTsQuery
-        | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(func, &values),
+        | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(
+            func,
+            &values,
+            ctx.catalog
+                .as_ref()
+                .map(|catalog| catalog as &dyn CatalogLookup),
+        ),
         BuiltinScalarFunction::Random => eval_random_function(&values, ctx),
         BuiltinScalarFunction::RandomNormal => eval_random_normal_function(&values, ctx),
         BuiltinScalarFunction::SetSeed => eval_setseed_function(&values, ctx),

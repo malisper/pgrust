@@ -50,8 +50,8 @@ use crate::include::catalog::{
     PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow,
     PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
     PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTypeRow,
-    relkind_has_storage,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTsConfigMapRow,
+    PgTsConfigRow, PgTsDictRow, PgTypeRow, relkind_has_storage,
 };
 use crate::include::nodes::datum::Value;
 
@@ -2060,6 +2060,139 @@ impl CatalogStore {
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_oid(&mut effect.relation_oids, row.stxrelid);
         Ok((row.oid, effect))
+    }
+
+    pub fn create_ts_dict_mvcc(
+        &mut self,
+        mut row: PgTsDictRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let mut control = self.control_state()?;
+        if row.oid == 0 {
+            row.oid = control.next_oid;
+        }
+        control.next_oid = control.next_oid.max(row.oid.saturating_add(1));
+        self.persist_control_values_without_relcache_invalidation(
+            control.next_oid,
+            control.next_rel_number,
+        )?;
+        self.control = control;
+
+        let rows = PhysicalCatalogRows {
+            ts_dicts: vec![row.clone()],
+            ..PhysicalCatalogRows::default()
+        };
+        let kinds = [BootstrapCatalogKind::PgTsDict];
+        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok((row.oid, effect))
+    }
+
+    pub fn replace_ts_dict_mvcc(
+        &mut self,
+        old_row: PgTsDictRow,
+        row: PgTsDictRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let kinds = [BootstrapCatalogKind::PgTsDict];
+        let old_rows = PhysicalCatalogRows {
+            ts_dicts: vec![old_row],
+            ..PhysicalCatalogRows::default()
+        };
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+        let new_rows = PhysicalCatalogRows {
+            ts_dicts: vec![row],
+            ..PhysicalCatalogRows::default()
+        };
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok(effect)
+    }
+
+    pub fn create_ts_config_mvcc(
+        &mut self,
+        mut row: PgTsConfigRow,
+        mut map_rows: Vec<PgTsConfigMapRow>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let mut control = self.control_state()?;
+        if row.oid == 0 {
+            row.oid = control.next_oid;
+        }
+        control.next_oid = control.next_oid.max(row.oid.saturating_add(1));
+        self.persist_control_values_without_relcache_invalidation(
+            control.next_oid,
+            control.next_rel_number,
+        )?;
+        self.control = control;
+
+        for map_row in &mut map_rows {
+            map_row.mapcfg = row.oid;
+        }
+        let rows = PhysicalCatalogRows {
+            ts_configs: vec![row.clone()],
+            ts_config_maps: map_rows,
+            ..PhysicalCatalogRows::default()
+        };
+        let kinds = [
+            BootstrapCatalogKind::PgTsConfig,
+            BootstrapCatalogKind::PgTsConfigMap,
+        ];
+        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok((row.oid, effect))
+    }
+
+    pub fn replace_ts_config_maps_mvcc(
+        &mut self,
+        old_rows: Vec<PgTsConfigMapRow>,
+        new_rows: Vec<PgTsConfigMapRow>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let kinds = [BootstrapCatalogKind::PgTsConfigMap];
+        if !old_rows.is_empty() {
+            let rows = PhysicalCatalogRows {
+                ts_config_maps: old_rows,
+                ..PhysicalCatalogRows::default()
+            };
+            delete_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+        }
+        if !new_rows.is_empty() {
+            let rows = PhysicalCatalogRows {
+                ts_config_maps: new_rows,
+                ..PhysicalCatalogRows::default()
+            };
+            insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+        }
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok(effect)
+    }
+
+    pub fn drop_ts_config_mvcc(
+        &mut self,
+        row: PgTsConfigRow,
+        map_rows: Vec<PgTsConfigMapRow>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let rows = PhysicalCatalogRows {
+            ts_configs: vec![row],
+            ts_config_maps: map_rows,
+            ..PhysicalCatalogRows::default()
+        };
+        let kinds = [
+            BootstrapCatalogKind::PgTsConfig,
+            BootstrapCatalogKind::PgTsConfigMap,
+        ];
+        delete_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok(effect)
     }
 
     pub fn create_policy_mvcc(

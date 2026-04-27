@@ -100,3 +100,19 @@ PGRUST_TARGET_SLOT=4 scripts/cargo_isolated.sh test --lib --quiet explain_analyz
 PGRUST_TARGET_SLOT=5 scripts/cargo_isolated.sh test --lib --quiet bind_insert_rejects_partial_index_when_inference_predicate_is_missing_or_weaker
 PGRUST_TARGET_SLOT=6 scripts/cargo_isolated.sh test --lib --quiet bind_delete_ignores_partial_index_when_filter_does_not_imply_predicate
 PGRUST_TARGET_SLOT=4 scripts/cargo_isolated.sh test --lib --quiet sql_set_returning_function_accepts_values_body
+
+Second merge queue bump:
+Merged origin/perf-optimization again after regress-104032 advanced the base
+while the first bump was green. Resolved conflicts by combining BitmapOr imports
+and verbose output handling with the new IncrementalSort executor/planner paths.
+Added BitmapOr coverage to new path-use helpers and threaded EXPLAIN timing
+through IncrementalSort child formatting.
+
+Second merge queue bump tests run:
+PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh check
+PGRUST_TARGET_SLOT=5 scripts/cargo_isolated.sh test --lib --quiet explain_analyze_timing_off_still_reports_nonzero_actual_rows
+PGRUST_TARGET_SLOT=6 scripts/cargo_isolated.sh test --lib --quiet inherited_minmax_explain_uses_desc_and_partial_child_indexes
+PGRUST_TARGET_SLOT=5 scripts/cargo_isolated.sh test --lib --quiet index_predicates
+PGRUST_TARGET_SLOT=6 scripts/cargo_isolated.sh test --lib --quiet bind_insert_rejects_partial_index_when_inference_predicate_is_missing_or_weaker
+PGRUST_TARGET_SLOT=4 scripts/cargo_isolated.sh test --lib --quiet bind_delete_ignores_partial_index_when_filter_does_not_imply_predicate
+PGRUST_TARGET_SLOT=3 scripts/cargo_isolated.sh test --lib --quiet sql_set_returning_function_accepts_values_body

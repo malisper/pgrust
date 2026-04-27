@@ -293,6 +293,14 @@ pub enum Plan {
         items: Vec<OrderByEntry>,
         display_items: Vec<String>,
     },
+    IncrementalSort {
+        plan_info: PlanEstimate,
+        input: Box<Plan>,
+        items: Vec<OrderByEntry>,
+        presorted_count: usize,
+        display_items: Vec<String>,
+        presorted_display_items: Vec<String>,
+    },
     Limit {
         plan_info: PlanEstimate,
         input: Box<Plan>,
@@ -334,6 +342,7 @@ pub enum Plan {
     SubqueryScan {
         plan_info: PlanEstimate,
         input: Box<Plan>,
+        scan_name: Option<String>,
         output_columns: Vec<QueryColumn>,
     },
     CteScan {
@@ -394,6 +403,7 @@ impl Plan {
             | Plan::MergeJoin { plan_info, .. }
             | Plan::Filter { plan_info, .. }
             | Plan::OrderBy { plan_info, .. }
+            | Plan::IncrementalSort { plan_info, .. }
             | Plan::Limit { plan_info, .. }
             | Plan::LockRows { plan_info, .. }
             | Plan::Projection { plan_info, .. }
@@ -428,6 +438,7 @@ impl Plan {
             | Plan::MergeJoin { plan_info, .. }
             | Plan::Filter { plan_info, .. }
             | Plan::OrderBy { plan_info, .. }
+            | Plan::IncrementalSort { plan_info, .. }
             | Plan::Limit { plan_info, .. }
             | Plan::LockRows { plan_info, .. }
             | Plan::Projection { plan_info, .. }
@@ -488,6 +499,7 @@ impl Plan {
             Plan::Hash { input, .. } => input.columns(),
             Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
+            | Plan::IncrementalSort { input, .. }
             | Plan::Limit { input, .. }
             | Plan::LockRows { input, .. } => input.columns(),
             Plan::Projection { targets, .. } => targets

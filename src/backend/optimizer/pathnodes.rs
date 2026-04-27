@@ -66,6 +66,7 @@ impl Path {
             | Self::MergeJoin { plan_info, .. }
             | Self::Projection { plan_info, .. }
             | Self::OrderBy { plan_info, .. }
+            | Self::IncrementalSort { plan_info, .. }
             | Self::Limit { plan_info, .. }
             | Self::LockRows { plan_info, .. }
             | Self::Aggregate { plan_info, .. }
@@ -117,6 +118,7 @@ impl Path {
                 .collect(),
             Self::Filter { input, .. }
             | Self::OrderBy { input, .. }
+            | Self::IncrementalSort { input, .. }
             | Self::Limit { input, .. }
             | Self::LockRows { input, .. } => input.columns(),
             Self::Projection { targets, .. } => targets
@@ -182,6 +184,7 @@ impl Path {
             Self::BitmapIndexScan { .. } | Self::BitmapOr { .. } => Vec::new(),
             Self::Filter { input, .. }
             | Self::OrderBy { input, .. }
+            | Self::IncrementalSort { input, .. }
             | Self::Limit { input, .. }
             | Self::LockRows { input, .. } => input.output_vars(),
             Self::Projection {
@@ -279,6 +282,7 @@ impl Path {
             Self::Unique { input, .. }
             | Self::Filter { input, .. }
             | Self::OrderBy { input, .. }
+            | Self::IncrementalSort { input, .. }
             | Self::Limit { input, .. }
             | Self::LockRows { input, .. } => input.output_target(),
             Self::Projection {
@@ -330,6 +334,7 @@ impl Path {
             | Self::Projection { pathtarget, .. }
             | Self::OrderBy { pathtarget, .. }
             | Self::Limit { pathtarget, .. }
+            | Self::IncrementalSort { pathtarget, .. }
             | Self::LockRows { pathtarget, .. }
             | Self::Aggregate { pathtarget, .. }
             | Self::WindowAgg { pathtarget, .. }
@@ -389,6 +394,16 @@ impl Path {
             } => project_pathkeys(*slot_id, input, targets, &input.pathkeys()),
             Self::WindowAgg { input, .. } => input.pathkeys(),
             Self::OrderBy { items, .. } => items
+                .iter()
+                .map(|item| PathKey {
+                    expr: item.expr.clone(),
+                    ressortgroupref: item.ressortgroupref,
+                    descending: item.descending,
+                    nulls_first: item.nulls_first,
+                    collation_oid: item.collation_oid,
+                })
+                .collect(),
+            Self::IncrementalSort { items, .. } => items
                 .iter()
                 .map(|item| PathKey {
                     expr: item.expr.clone(),
