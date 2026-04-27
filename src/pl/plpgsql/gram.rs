@@ -1,6 +1,5 @@
-use pest::Parser as _;
 use pest::iterators::Pair;
-use pest_derive::Parser;
+use pgrust_plpgsql_grammar::Rule;
 
 use crate::backend::executor::Value;
 use crate::backend::parser::{
@@ -13,12 +12,8 @@ use super::ast::{
     ExceptionHandler, ForQuerySource, ForTarget, RaiseLevel, ReturnQueryKind, Stmt, VarDecl,
 };
 
-#[derive(Parser)]
-#[grammar = "pl/plpgsql/gram.pest"]
-struct PlpgsqlParser;
-
 pub fn parse_block(sql: &str) -> Result<Block, ParseError> {
-    PlpgsqlParser::parse(Rule::pl_block, sql)
+    pgrust_plpgsql_grammar::parse_rule(Rule::pl_block, sql)
         .map_err(|e| map_pest_error("plpgsql block", e))
         .and_then(|mut pairs| build_pl_block(pairs.next().ok_or(ParseError::UnexpectedEof)?))
 }

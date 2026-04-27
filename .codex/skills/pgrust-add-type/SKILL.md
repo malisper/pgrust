@@ -61,7 +61,7 @@ Usually required for a first-class type:
 
 ### 2. Parser and type names
 
-- [src/backend/parser/gram.pest](/src/backend/parser/gram.pest)
+- [crates/pgrust_sql_grammar/src/gram.pest](/crates/pgrust_sql_grammar/src/gram.pest)
   Add keywords or exact type-name syntax.
 
 - [src/backend/parser/gram.rs](/src/backend/parser/gram.rs)

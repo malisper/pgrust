@@ -474,7 +474,8 @@ dependencies = [
  "num-traits",
  "parking_lot",
  "pest",
- "pest_derive",
+ "pgrust_plpgsql_grammar",
+ "pgrust_sql_grammar",
  "quick-xml",
  "rand",
  "regex",
@@ -489,6 +490,22 @@ dependencies = [
  "unicode-normalization",
  "wasm-bindgen",
  "web-time",
+]
+
+[[package]]
+name = "pgrust_plpgsql_grammar"
+version = "0.1.0"
+dependencies = [
+ "pest",
+ "pest_derive",
+]
+
+[[package]]
+name = "pgrust_sql_grammar"
+version = "0.1.0"
+dependencies = [
+ "pest",
+ "pest_derive",
 ]
 
 [[package]]

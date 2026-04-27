@@ -39,7 +39,7 @@ FAILURES=0
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 header "Build"
-if ! (cd "$ROOT_DIR" && cargo build --bin wal_syscall_check 2>&1); then
+if ! (cd "$ROOT_DIR" && cargo build --features tools --bin wal_syscall_check 2>&1); then
     echo "Build failed" >&2; exit 1
 fi
 pass "binary built: $BINARY"

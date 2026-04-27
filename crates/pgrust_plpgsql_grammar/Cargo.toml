@@ -1,0 +1,12 @@
+[package]
+name = "pgrust_plpgsql_grammar"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+pest = "2.7"
+pest_derive = "2.7"

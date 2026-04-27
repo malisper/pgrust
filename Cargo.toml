@@ -6,6 +6,7 @@ license = "AGPL-3.0-only"
 description = "Multi-threaded PostgreSQL, rewritten from scratch in Rust."
 repository = "https://github.com/malisper/pgrust"
 readme = "README.md"
+autobins = false
 
 [lib]
 name = "pgrust"
@@ -16,6 +17,131 @@ crate-type = ["rlib"]
 default = []
 deadlock_detection = ["parking_lot/deadlock_detection"]
 lz4 = ["dep:lz4_flex"]
+tools = []
+
+[[bin]]
+name = "pgrust_server"
+path = "src/bin/pgrust_server.rs"
+
+[[bin]]
+name = "array_subscript_bench"
+path = "src/bin/array_subscript_bench.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "bench_insert"
+path = "src/bin/bench_insert.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "bufmgr_e2e"
+path = "src/bin/bufmgr_e2e.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "comment_on_table_bench"
+path = "src/bin/comment_on_table_bench.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "deferred_parent_delete_bench"
+path = "src/bin/deferred_parent_delete_bench.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "full_scan_bench"
+path = "src/bin/full_scan_bench.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "gist_include_build_profile"
+path = "src/bin/gist_include_build_profile.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "heap_scan_demo"
+path = "src/bin/heap_scan_demo.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "inproc_query_bench"
+path = "src/bin/inproc_query_bench.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "load_test"
+path = "src/bin/load_test.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "mvcc_disk_demo"
+path = "src/bin/mvcc_disk_demo.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "pgbench_accounts_test_repro"
+path = "src/bin/pgbench_accounts_test_repro.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "pgbench_like"
+path = "src/bin/pgbench_like.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "query_exec_demo"
+path = "src/bin/query_exec_demo.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "query_loop_psql"
+path = "src/bin/query_loop_psql.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "query_loop_tcp"
+path = "src/bin/query_loop_tcp.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "query_repl"
+path = "src/bin/query_repl.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "query_sql_demo"
+path = "src/bin/query_sql_demo.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "regression_profile"
+path = "src/bin/regression_profile.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "smgr_demo"
+path = "src/bin/smgr_demo.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "smgr_inspect"
+path = "src/bin/smgr_inspect.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "triggers_regression_profile"
+path = "src/bin/triggers_regression_profile.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "tuple_disk_demo"
+path = "src/bin/tuple_disk_demo.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "wal_syscall_check"
+path = "src/bin/wal_syscall_check.rs"
+required-features = ["tools"]
 [dependencies]
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
@@ -30,7 +156,8 @@ num-integer = "0.1.46"
 num-traits = "0.2.19"
 parking_lot = "0.12"
 pest = "2.7"
-pest_derive = "2.7"
+pgrust_plpgsql_grammar = { path = "crates/pgrust_plpgsql_grammar" }
+pgrust_sql_grammar = { path = "crates/pgrust_sql_grammar" }
 rand = "0.8"
 regex = "1"
 rustc-hash = "2.1.2"
@@ -56,6 +183,7 @@ wasm-bindgen = "0.2"
 web-time = "1"
 
 [profile.dev]
+debug = "line-tables-only"
 split-debuginfo = "unpacked"
 
 [profile.test]
