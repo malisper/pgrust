@@ -39,6 +39,15 @@ PGBENCH_WORKLOADS = {
 }
 TOUCHED_INDEX_WORKLOADS = {"activity-count", "top-touched"}
 EVENT_INDEX_WORKLOADS = {"event-join"}
+SYSBENCH_WORKLOADS = {
+    "point-select": "oltp_point_select",
+    "read-only": "oltp_read_only",
+    "read-write": "oltp_read_write",
+    "write-only": "oltp_write_only",
+    "insert": "oltp_insert",
+    "update-index": "oltp_update_index",
+    "update-non-index": "oltp_update_non_index",
+}
 
 
 def default_cargo_target_dir() -> Path:
@@ -90,7 +99,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--suite",
         action="append",
-        choices=["all", "select-wire", "pgbench", "pgbench-scan", "pgbench-like"],
+        choices=[
+            "all",
+            "select-wire",
+            "pgbench",
+            "pgbench-scan",
+            "pgbench-like",
+            "sysbench",
+        ],
         help="Benchmark suite to run. Repeatable. Default: all.",
     )
     parser.add_argument(
@@ -98,6 +114,12 @@ def parse_args() -> argparse.Namespace:
         action="append",
         choices=["all", *PGBENCH_WORKLOADS.keys()],
         help="pgbench workload to run. Repeatable. Default: all.",
+    )
+    parser.add_argument(
+        "--sysbench-workload",
+        action="append",
+        choices=["all", *SYSBENCH_WORKLOADS.keys()],
+        help="sysbench OLTP workload to run. Repeatable. Default: point-select.",
     )
     parser.add_argument(
         "--engines",
@@ -274,6 +296,36 @@ def parse_args() -> argparse.Namespace:
         help="Client threads for pgbench_like. Default: 10.",
     )
     parser.add_argument(
+        "--sysbench-tables",
+        type=int,
+        default=1,
+        help="Table count for sysbench OLTP workloads. Default: 1.",
+    )
+    parser.add_argument(
+        "--sysbench-table-size",
+        type=int,
+        default=1000,
+        help="Rows per sysbench table. Default: 1000.",
+    )
+    parser.add_argument(
+        "--sysbench-events",
+        type=int,
+        default=100,
+        help="Total sysbench events. Default: 100. Use 0 to rely on --sysbench-time.",
+    )
+    parser.add_argument(
+        "--sysbench-time",
+        type=int,
+        default=10,
+        help="Maximum sysbench run time in seconds. Default: 10.",
+    )
+    parser.add_argument(
+        "--sysbench-option",
+        action="append",
+        default=[],
+        help="Extra raw sysbench Lua option. Repeatable. Example: --sysbench-option=--distinct_ranges=0.",
+    )
+    parser.add_argument(
         "--pool-size",
         type=int,
         default=16384,
@@ -315,6 +367,8 @@ class BenchmarkRunner:
         suites = self.resolve_suites()
         if self.requires_binary("pgbench") and shutil.which("pgbench") is None:
             raise SystemExit("pgbench not found on PATH")
+        if self.requires_binary("sysbench") and shutil.which("sysbench") is None:
+            raise SystemExit("sysbench not found on PATH")
         if shutil.which("psql") is None:
             raise SystemExit("psql not found on PATH")
         if self.requires_managed_postgres(suites) and shutil.which("initdb") is None:
@@ -350,6 +404,8 @@ class BenchmarkRunner:
                 summary["results"].extend(self.run_pgbench_suite())
             if "pgbench-like" in suites:
                 summary["results"].append(self.run_pgbench_like_suite())
+            if "sysbench" in suites:
+                summary["results"].extend(self.run_sysbench_suite())
             summary["comparisons"] = build_comparisons(summary["results"])
 
             history_path = None
@@ -388,11 +444,18 @@ class BenchmarkRunner:
             return list(PGBENCH_WORKLOADS.keys())
         return list(dict.fromkeys(selected))
 
+    def resolve_sysbench_workloads(self) -> list[str]:
+        selected = self.args.sysbench_workload or ["point-select"]
+        if "all" in selected:
+            return list(SYSBENCH_WORKLOADS.keys())
+        return list(dict.fromkeys(selected))
+
     def build_config(self, suites: list[str]) -> dict[str, Any]:
         return {
             "suites": suites,
             "engines": self.args.engines,
             "pgbench_workloads": self.resolve_pgbench_workloads(),
+            "sysbench_workloads": self.resolve_sysbench_workloads(),
             "host": self.args.host,
             "user": self.args.user,
             "database": self.args.database,
@@ -409,6 +472,11 @@ class BenchmarkRunner:
             "pgbench_like_time": self.args.pgbench_like_time,
             "pgbench_like_scale": self.args.pgbench_like_scale,
             "pgbench_like_clients": self.args.pgbench_like_clients,
+            "sysbench_tables": self.args.sysbench_tables,
+            "sysbench_table_size": self.args.sysbench_table_size,
+            "sysbench_events": self.args.sysbench_events,
+            "sysbench_time": self.args.sysbench_time,
+            "sysbench_options": self.args.sysbench_option,
             "pool_size": self.args.pool_size,
         }
 
@@ -422,6 +490,7 @@ class BenchmarkRunner:
                 "cargo": command_version(["cargo", "-V"]),
                 "rustc": command_version(["rustc", "-V"]),
                 "pgbench": command_version(["pgbench", "--version"]),
+                "sysbench": command_version(["sysbench", "--version"]),
                 "psql": command_version(["psql", "--version"]),
                 "initdb": command_version(["initdb", "--version"]),
                 "pg_ctl": command_version(["pg_ctl", "--version"]),
@@ -439,11 +508,14 @@ class BenchmarkRunner:
 
     def build_fairness_notes(self, suites: list[str]) -> dict[str, Any]:
         return {
-            "comparison_scope": "same host, same pgbench client, same SQL scripts, same row counts, same concurrency knobs",
+            "comparison_scope": "same host, same benchmark client, same workload definitions, same row counts, same concurrency knobs",
             "postgres_mode": "external" if self.args.external_postgres else "temporary local cluster",
             "pgrust_server_mode": "external" if self.args.skip_pgrust_server else "temporary local server",
             "pgrust_build_profile": "release" if not self.args.skip_build else "prebuilt/unchanged",
             "pgbench_protocol": "simple",
+            "sysbench_prepared_statements": "disabled"
+            if "sysbench" in suites
+            else None,
             "pgbench_warmup_transactions": self.args.pgbench_warmup_transactions
             if "pgbench" in suites
             else None,
@@ -458,21 +530,23 @@ class BenchmarkRunner:
 
     def requires_binary(self, name: str) -> bool:
         return any(
-            name == "pgbench" and suite in {"pgbench"} for suite in self.resolve_suites()
+            name == "pgbench" and suite in {"pgbench"}
+            or name == "sysbench" and suite in {"sysbench"}
+            for suite in self.resolve_suites()
         )
 
     def requires_wire_suites(self, suites: list[str]) -> bool:
-        return any(suite in {"select-wire", "pgbench"} for suite in suites)
+        return any(suite in {"select-wire", "pgbench", "sysbench"} for suite in suites)
 
     def requires_pgrust_server(self, suites: list[str]) -> bool:
         if self.args.engines == "postgres":
             return False
-        return any(suite in {"select-wire", "pgbench"} for suite in suites)
+        return any(suite in {"select-wire", "pgbench", "sysbench"} for suite in suites)
 
     def requires_postgres_server(self, suites: list[str]) -> bool:
         if self.args.engines == "pgrust":
             return False
-        return any(suite in {"select-wire", "pgbench"} for suite in suites)
+        return any(suite in {"select-wire", "pgbench", "sysbench"} for suite in suites)
 
     def requires_managed_postgres(self, suites: list[str]) -> bool:
         return self.requires_postgres_server(suites) and not self.args.external_postgres
@@ -910,6 +984,114 @@ class BenchmarkRunner:
             "artifact_stderr": f"artifacts/{artifact}.stderr.txt",
         }
 
+    def run_sysbench_suite(self) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for workload in self.resolve_sysbench_workloads():
+            script = SYSBENCH_WORKLOADS[workload]
+            for engine in self.engine_list():
+                port = self.args.pgrust_port if engine == "pgrust" else self.args.postgres_port
+                artifact = f"sysbench_{workload.replace('-', '_')}_{engine}"
+
+                self.run_sysbench_command(
+                    script=script,
+                    port=port,
+                    command="cleanup",
+                    artifact_stem=f"{artifact}_precleanup",
+                    check=False,
+                )
+                prepare = self.run_sysbench_command(
+                    script=script,
+                    port=port,
+                    command="prepare",
+                    artifact_stem=f"{artifact}_prepare",
+                    check=False,
+                )
+                if prepare.returncode != 0:
+                    results.append(
+                        {
+                            "suite": "sysbench",
+                            "workload": workload,
+                            "engine": engine,
+                            "status": "error",
+                            "phase": "prepare",
+                            "command": prepare.argv,
+                            "elapsed_ms": round(prepare.elapsed_ms, 3),
+                            "metrics": {},
+                            "prepare_status": "error",
+                            "prepare_artifact_stdout": f"artifacts/{artifact}_prepare.stdout.txt",
+                            "prepare_artifact_stderr": f"artifacts/{artifact}_prepare.stderr.txt",
+                        }
+                    )
+                    continue
+
+                run = self.run_sysbench_command(
+                    script=script,
+                    port=port,
+                    command="run",
+                    artifact_stem=artifact,
+                    check=False,
+                )
+                cleanup = self.run_sysbench_command(
+                    script=script,
+                    port=port,
+                    command="cleanup",
+                    artifact_stem=f"{artifact}_cleanup",
+                    check=False,
+                )
+                results.append(
+                    {
+                        "suite": "sysbench",
+                        "workload": workload,
+                        "engine": engine,
+                        "status": "ok" if run.returncode == 0 else "error",
+                        "phase": "run" if run.returncode != 0 else None,
+                        "command": run.argv,
+                        "elapsed_ms": round(run.elapsed_ms, 3),
+                        "metrics": parse_sysbench_output(run.stdout),
+                        "artifact_stdout": f"artifacts/{artifact}.stdout.txt",
+                        "artifact_stderr": f"artifacts/{artifact}.stderr.txt",
+                        "prepare_status": "ok",
+                        "prepare_command": prepare.argv,
+                        "prepare_artifact_stdout": f"artifacts/{artifact}_prepare.stdout.txt",
+                        "prepare_artifact_stderr": f"artifacts/{artifact}_prepare.stderr.txt",
+                        "cleanup_status": "ok" if cleanup.returncode == 0 else "error",
+                        "cleanup_command": cleanup.argv,
+                        "cleanup_artifact_stdout": f"artifacts/{artifact}_cleanup.stdout.txt",
+                        "cleanup_artifact_stderr": f"artifacts/{artifact}_cleanup.stderr.txt",
+                    }
+                )
+        return results
+
+    def run_sysbench_command(
+        self,
+        *,
+        script: str,
+        port: int,
+        command: str,
+        artifact_stem: str,
+        check: bool,
+    ) -> CommandResult:
+        cmd = [
+            "sysbench",
+            "--db-driver=pgsql",
+            "--db-ps-mode=disable",
+            f"--pgsql-host={self.args.host}",
+            f"--pgsql-port={port}",
+            f"--pgsql-user={self.args.user}",
+            f"--pgsql-password={self.args.password}",
+            f"--pgsql-db={self.args.database}",
+            f"--threads={self.args.clients}",
+            f"--events={self.args.sysbench_events}",
+            f"--time={self.args.sysbench_time}",
+            f"--tables={self.args.sysbench_tables}",
+            f"--table_size={self.args.sysbench_table_size}",
+            "--auto_inc=off",
+            *self.args.sysbench_option,
+            script,
+            command,
+        ]
+        return self.run_command(cmd, artifact_stem=artifact_stem, check=check)
+
 
 def parse_key_value_metrics(text: str) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
@@ -968,6 +1150,35 @@ def parse_pgbench_output(text: str) -> dict[str, Any]:
     return metrics
 
 
+def parse_sysbench_output(text: str) -> dict[str, Any]:
+    metrics: dict[str, Any] = {}
+    patterns = {
+        "transactions": r"transactions:\s+(\d+)\s+\(([\d.]+) per sec\.\)",
+        "queries": r"queries:\s+(\d+)\s+\(([\d.]+) per sec\.\)",
+        "ignored_errors": r"ignored errors:\s+(\d+)\s+\(([\d.]+) per sec\.\)",
+        "reconnects": r"reconnects:\s+(\d+)\s+\(([\d.]+) per sec\.\)",
+        "total_time_s": r"total time:\s+([\d.]+)s",
+        "total_events": r"total number of events:\s+(\d+)",
+        "latency_min_ms": r"min:\s+([\d.]+)",
+        "latency_avg_ms": r"avg:\s+([\d.]+)",
+        "latency_max_ms": r"max:\s+([\d.]+)",
+        "latency_95th_percentile_ms": r"95th percentile:\s+([\d.]+)",
+        "latency_sum_ms": r"sum:\s+([\d.]+)",
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        if key in {"transactions", "queries", "ignored_errors", "reconnects"}:
+            metrics[key] = int(match.group(1))
+            metrics[f"{key}_per_sec"] = float(match.group(2))
+        elif key == "total_events":
+            metrics[key] = int(match.group(1))
+        else:
+            metrics[key] = float(match.group(1))
+    return metrics
+
+
 def command_version(argv: list[str]) -> str | None:
     try:
         result = subprocess.run(argv, capture_output=True, text=True, check=False)
@@ -1018,7 +1229,12 @@ def build_comparisons(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
         throughput_metric = first_metric(
             pgrust_metrics,
             postgres_metrics,
-            ["tps_excluding_connections", "queries_per_sec", "rows_per_sec"],
+            [
+                "tps_excluding_connections",
+                "transactions_per_sec",
+                "queries_per_sec",
+                "rows_per_sec",
+            ],
         )
         if throughput_metric is not None:
             pgrust_value = pgrust_metrics[throughput_metric]
@@ -1037,7 +1253,7 @@ def build_comparisons(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
         latency_metric = first_metric(
             pgrust_metrics,
             postgres_metrics,
-            ["latency_average_ms", "avg_ms_per_query", "avg_latency_ms"],
+            ["latency_average_ms", "latency_avg_ms", "avg_ms_per_query", "avg_latency_ms"],
         )
         if latency_metric is not None:
             pgrust_value = pgrust_metrics[latency_metric]
@@ -1809,6 +2025,7 @@ def print_standalone_table(results: list[dict[str, Any]]) -> None:
                 ),
                 format_number(
                     metrics.get("avg_latency_ms")
+                    or metrics.get("latency_avg_ms")
                     or metrics.get("latency_average_ms")
                     or metrics.get("avg_ms_per_query")
                 ),
