@@ -10048,6 +10048,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "json_extract_path_text",
             BuiltinScalarFunction::JsonExtractPathText,
         ),
+        // :HACK: Keep synthetic OID mapping for plain SQL/JSON query function
+        // spellings while they are lowered through legacy scalar builtins.
+        ("json_exists", BuiltinScalarFunction::JsonExists),
+        ("json_value", BuiltinScalarFunction::JsonValue),
+        ("json_query", BuiltinScalarFunction::JsonQuery),
         ("jsonb_typeof", BuiltinScalarFunction::JsonbTypeof),
         (
             "jsonb_array_length",

@@ -1741,6 +1741,9 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::JsonbPathMatch
             | BuiltinScalarFunction::JsonbPathQueryArray
             | BuiltinScalarFunction::JsonbPathQueryFirst => matches!(args.len(), 2..=4),
+            BuiltinScalarFunction::JsonExists
+            | BuiltinScalarFunction::JsonValue
+            | BuiltinScalarFunction::JsonQuery => args.len() == 2,
             BuiltinScalarFunction::GeoPoint => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::GeoBox => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::GeoLine => matches!(args.len(), 1 | 2),
@@ -1964,6 +1967,15 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         }
         BuiltinScalarFunction::TsQueryIn => {
             return Some(SqlType::new(SqlTypeKind::TsQuery));
+        }
+        BuiltinScalarFunction::JsonExists => {
+            return Some(SqlType::new(SqlTypeKind::Bool));
+        }
+        BuiltinScalarFunction::JsonValue => {
+            return Some(SqlType::new(SqlTypeKind::Text));
+        }
+        BuiltinScalarFunction::JsonQuery => {
+            return Some(SqlType::new(SqlTypeKind::Jsonb));
         }
         BuiltinScalarFunction::TsVectorConcat => {
             return Some(SqlType::new(SqlTypeKind::TsVector));
@@ -3195,6 +3207,12 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "json_extract_path_text",
             BuiltinScalarFunction::JsonExtractPathText,
         ),
+        // :HACK: PostgreSQL parses these as SQL/JSON expression nodes. Accept
+        // the plain two-argument spelling as scalar builtins until pgrust has
+        // dedicated JsonExpr parser/analyzer nodes.
+        ("json_exists", BuiltinScalarFunction::JsonExists),
+        ("json_value", BuiltinScalarFunction::JsonValue),
+        ("json_query", BuiltinScalarFunction::JsonQuery),
         ("jsonb_typeof", BuiltinScalarFunction::JsonbTypeof),
         (
             "jsonb_array_length",
