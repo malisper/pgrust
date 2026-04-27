@@ -411,6 +411,7 @@ fn bind_sql_json_query_function_behavior(
                 grouped_outer,
                 ctes,
             );
+            reject_sql_json_behavior_default_cast(raw_type, target_type, catalog)?;
             let bound = bind_expr_with_outer_and_ctes(
                 expr,
                 scope,
@@ -419,9 +420,35 @@ fn bind_sql_json_query_function_behavior(
                 grouped_outer,
                 ctes,
             )?;
-            SqlJsonTableBehavior::Default(coerce_bound_expr(bound, raw_type, target_type))
+            SqlJsonTableBehavior::Default(bound)
         }
     })
+}
+
+fn reject_sql_json_behavior_default_cast(
+    source_type: SqlType,
+    target_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    if !target_type.is_array
+        && matches!(target_type.kind, SqlTypeKind::Bit | SqlTypeKind::VarBit)
+        && is_integer_family(source_type)
+    {
+        let target_name = catalog_sql_type_name(target_type, catalog);
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "cannot cast behavior expression of type {} to {}",
+                sql_type_name(source_type),
+                target_name
+            ),
+            detail: None,
+            hint: Some(format!(
+                "You will need to explicitly cast the expression to type {target_name}."
+            )),
+            sqlstate: "42846",
+        });
+    }
+    Ok(())
 }
 
 fn validate_sql_json_query_function_default_expr(

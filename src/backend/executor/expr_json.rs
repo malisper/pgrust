@@ -1,7 +1,8 @@
 use super::exec_expr::eval_expr;
 use super::expr_casts::{
-    cast_text_value_with_config, cast_value_with_source_type_catalog_and_config,
-    enforce_domain_constraints_for_value, parse_text_array_literal_with_op,
+    cast_text_value_with_catalog_and_config, cast_text_value_with_config,
+    cast_value_with_source_type_catalog_and_config, enforce_domain_constraints_for_value,
+    parse_text_array_literal_with_op,
 };
 use super::node_types::*;
 use super::{ExecError, ExecutorContext};
@@ -18,6 +19,7 @@ use crate::backend::executor::jsonpath::{
 };
 use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
+use crate::backend::executor::render_datetime_value_text_with_config;
 use crate::backend::executor::render_interval_text;
 use crate::backend::executor::render_interval_text_with_config;
 use crate::backend::executor::render_macaddr_text;
@@ -2861,10 +2863,48 @@ fn eval_sql_json_passing_vars(
         let value = eval_expr(&arg.expr, slot, ctx)?;
         pairs.push((
             arg.name.clone(),
-            jsonb_from_value(&value, &ctx.datetime_config)?,
+            sql_json_passing_value_from_value(&value, &ctx.datetime_config)?,
         ));
     }
     Ok(Some(JsonbValue::Object(pairs)))
+}
+
+fn sql_json_passing_value_from_value(
+    value: &Value,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+) -> Result<JsonbValue, ExecError> {
+    Ok(match value {
+        Value::Date(v) => JsonbValue::Date(*v),
+        Value::Time(v) => JsonbValue::Time(*v),
+        Value::TimeTz(v) => JsonbValue::TimeTz(*v),
+        Value::Timestamp(v) => JsonbValue::Timestamp(*v),
+        Value::TimestampTz(v) => JsonbValue::TimestampTz(*v),
+        Value::Record(record) => JsonbValue::Object(
+            record
+                .iter()
+                .map(|(field, value)| {
+                    Ok((
+                        field.name.clone(),
+                        sql_json_passing_value_from_value(value, datetime_config)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, ExecError>>()?,
+        ),
+        Value::Array(items) => JsonbValue::Array(
+            items
+                .iter()
+                .map(|value| sql_json_passing_value_from_value(value, datetime_config))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        Value::PgArray(array) => JsonbValue::Array(
+            array
+                .to_nested_values()
+                .iter()
+                .map(|value| sql_json_passing_value_from_value(value, datetime_config))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        other => jsonb_from_value(other, datetime_config)?,
+    })
 }
 
 fn eval_sql_json_exists_expr(
@@ -2935,7 +2975,7 @@ fn eval_sql_json_value_expr(
         ) {
         value.render()
     } else {
-        jsonb_scalar_sql_text_for_type(value, func.result_type)
+        jsonb_scalar_sql_text_for_type(value, func.result_type, &ctx.datetime_config)
     };
     cast_sql_json_text_value(&text, func.result_type, ctx).or_else(|err| {
         eval_sql_json_value_error_behavior(&func.on_error, func.result_type, err, slot, ctx)
@@ -3008,13 +3048,21 @@ fn eval_sql_json_query_expr(
                 func.result_type,
                 err,
                 "ERROR",
+                func.quotes,
                 slot,
                 ctx,
             );
         }
     };
     if values.is_empty() {
-        return eval_sql_json_query_behavior(&func.on_empty, func.result_type, "EMPTY", slot, ctx);
+        return eval_sql_json_query_behavior(
+            &func.on_empty,
+            func.result_type,
+            "EMPTY",
+            func.quotes,
+            slot,
+            ctx,
+        );
     }
     let value = match func.wrapper {
         SqlJsonTableWrapper::Unconditional => JsonbValue::Array(values),
@@ -3029,6 +3077,7 @@ fn eval_sql_json_query_expr(
                 func.result_type,
                 sql_json_query_single_item_error(),
                 "ERROR",
+                func.quotes,
                 slot,
                 ctx,
             );
@@ -3040,6 +3089,7 @@ fn eval_sql_json_query_expr(
             func.result_type,
             err,
             "ERROR",
+            func.quotes,
             slot,
             ctx,
         )
@@ -3051,13 +3101,14 @@ fn eval_sql_json_query_error_behavior(
     target_type: SqlType,
     err: ExecError,
     target: &'static str,
+    quotes: SqlJsonTableQuotes,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     if matches!(behavior, SqlJsonTableBehavior::Error) {
         Err(err)
     } else {
-        eval_sql_json_query_behavior(behavior, target_type, target, slot, ctx)
+        eval_sql_json_query_behavior(behavior, target_type, target, quotes, slot, ctx)
     }
 }
 
@@ -3065,26 +3116,66 @@ fn eval_sql_json_query_behavior(
     behavior: &SqlJsonTableBehavior,
     target_type: SqlType,
     target: &'static str,
+    quotes: SqlJsonTableQuotes,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     match behavior {
         SqlJsonTableBehavior::Empty | SqlJsonTableBehavior::EmptyArray => {
+            let behavior_name = if matches!(behavior, SqlJsonTableBehavior::Empty) {
+                "EMPTY"
+            } else {
+                "EMPTY ARRAY"
+            };
             cast_sql_json_query_formatted_value(
                 &JsonbValue::Array(Vec::new()),
                 target_type,
                 SqlJsonTableQuotes::Unspecified,
                 ctx,
             )
+            .map_err(|err| sql_json_behavior_coercion_error(target, behavior_name, err))
         }
         SqlJsonTableBehavior::EmptyObject => cast_sql_json_query_formatted_value(
             &JsonbValue::Object(Vec::new()),
             target_type,
             SqlJsonTableQuotes::Unspecified,
             ctx,
-        ),
+        )
+        .map_err(|err| sql_json_behavior_coercion_error(target, "EMPTY OBJECT", err)),
+        SqlJsonTableBehavior::Default(expr) => {
+            eval_sql_json_query_default_behavior(expr, target_type, target, quotes, slot, ctx)
+        }
         SqlJsonTableBehavior::Error if target == "EMPTY" => Err(sql_json_no_item_error()),
         _ => eval_sql_json_behavior(behavior, target_type, target, slot, ctx),
+    }
+}
+
+fn eval_sql_json_query_default_behavior(
+    expr: &Expr,
+    target_type: SqlType,
+    target: &'static str,
+    quotes: SqlJsonTableQuotes,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let source_type = expr_sql_type_hint(expr);
+    let result = eval_expr(expr, slot, ctx).and_then(|value| {
+        if !source_type.is_some_and(|ty| {
+            !ty.is_array && matches!(ty.kind, SqlTypeKind::Json | SqlTypeKind::Jsonb)
+        }) {
+            return cast_sql_json_default_value(value, source_type, target_type, ctx);
+        }
+        let parsed = ParsedJsonValue::from_value(&value)?;
+        let jsonb = match parsed {
+            ParsedJsonValue::Json(value) => JsonbValue::from_serde(value)?,
+            ParsedJsonValue::Jsonb(value) => value,
+        };
+        cast_sql_json_query_formatted_value(&jsonb, target_type, quotes, ctx)
+    });
+    match result {
+        Ok(value) => Ok(value),
+        Err(err) if sql_json_default_error_is_direct(&err) => Err(err),
+        Err(err) => Err(sql_json_behavior_coercion_error(target, "DEFAULT", err)),
     }
 }
 
@@ -3117,6 +3208,9 @@ fn cast_sql_json_query_formatted_value(
     {
         return cast_sql_json_text_value(text, target_type, ctx);
     }
+    if let Some(value) = cast_sql_json_query_structured_value(value, target_type, quotes, ctx) {
+        return value;
+    }
     match target_type.kind {
         SqlTypeKind::Json if !target_type.is_array => {
             Ok(Value::Json(CompactString::from_owned(value.render())))
@@ -3126,6 +3220,65 @@ fn cast_sql_json_query_formatted_value(
             let text = value.render();
             cast_sql_json_text_value(&text, target_type, ctx)
         }
+    }
+}
+
+fn cast_sql_json_query_structured_value(
+    value: &JsonbValue,
+    target_type: SqlType,
+    quotes: SqlJsonTableQuotes,
+    ctx: &ExecutorContext,
+) -> Option<Result<Value, ExecError>> {
+    if target_type.is_array {
+        if !matches!(value, JsonbValue::Array(_)) {
+            return Some(Err(expected_json_array_error(
+                &JsonRecordPath::default(),
+                None,
+            )));
+        }
+        let json = value.to_serde();
+        return Some(json_record_field_to_value(
+            &json,
+            target_type,
+            None,
+            &JsonRecordPath::default(),
+            true,
+            ctx,
+        ));
+    }
+
+    if matches!(
+        target_type.kind,
+        SqlTypeKind::Composite | SqlTypeKind::Record
+    ) && record_descriptor_from_sql_type(target_type, ctx)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        match value {
+            JsonbValue::Object(_) => {
+                let json = value.to_serde();
+                Some(json_record_field_to_value(
+                    &json,
+                    target_type,
+                    None,
+                    &JsonRecordPath::default(),
+                    true,
+                    ctx,
+                ))
+            }
+            JsonbValue::String(_) if !matches!(quotes, SqlJsonTableQuotes::Omit) => {
+                Some(Err(ExecError::DetailedError {
+                    message: "cannot call populate_composite on a scalar".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22023",
+                }))
+            }
+            _ => None,
+        }
+    } else {
+        None
     }
 }
 
@@ -4748,7 +4901,7 @@ fn eval_sql_json_table_vars(
         let value = eval_expr(&arg.expr, slot, ctx)?;
         pairs.push((
             arg.name.clone(),
-            jsonb_from_value(&value, &ctx.datetime_config)?,
+            sql_json_passing_value_from_value(&value, &ctx.datetime_config)?,
         ));
     }
     Ok(Some(JsonbValue::Object(pairs)))
@@ -4917,7 +5070,7 @@ fn eval_sql_json_table_scalar_column(
     if matches!(value, JsonbValue::Null) {
         return Ok(Value::Null);
     }
-    let text = jsonb_scalar_sql_text_for_type(value, target_type);
+    let text = jsonb_scalar_sql_text_for_type(value, target_type, &ctx.datetime_config);
     cast_sql_json_text_value(&text, target_type, ctx)
         .or_else(|_| eval_sql_json_behavior(on_error, target_type, "ERROR", slot, ctx))
 }
@@ -5070,18 +5223,14 @@ fn eval_sql_json_behavior(
             sqlstate: "22023",
         }),
         SqlJsonTableBehavior::Default(expr) => {
-            let value = eval_expr(expr, slot, ctx)
-                .and_then(|value| {
-                    cast_value_with_source_type_catalog_and_config(
-                        value,
-                        None,
-                        target_type,
-                        executor_catalog(ctx),
-                        &ctx.datetime_config,
-                    )
-                })
-                .map_err(|err| sql_json_behavior_coercion_error(target, "DEFAULT", err))?;
-            Ok(value)
+            let source_type = expr_sql_type_hint(expr);
+            match eval_expr(expr, slot, ctx)
+                .and_then(|value| cast_sql_json_default_value(value, source_type, target_type, ctx))
+            {
+                Ok(value) => Ok(value),
+                Err(err) if sql_json_default_error_is_direct(&err) => Err(err),
+                Err(err) => Err(sql_json_behavior_coercion_error(target, "DEFAULT", err)),
+            }
         }
         SqlJsonTableBehavior::True => cast_value_with_source_type_catalog_and_config(
             Value::Bool(true),
@@ -5097,6 +5246,50 @@ fn eval_sql_json_behavior(
             executor_catalog(ctx),
             &ctx.datetime_config,
         ),
+    }
+}
+
+fn cast_sql_json_default_value(
+    value: Value,
+    source_type: Option<SqlType>,
+    target_type: SqlType,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    if let Some(text) = value.as_text()
+        && is_sql_json_bit_string_target(target_type)
+    {
+        return cast_text_value_with_catalog_and_config(
+            text,
+            target_type,
+            false,
+            executor_catalog(ctx),
+            &ctx.datetime_config,
+        );
+    }
+    cast_value_with_source_type_catalog_and_config(
+        value,
+        source_type,
+        target_type,
+        executor_catalog(ctx),
+        &ctx.datetime_config,
+    )
+}
+
+fn sql_json_default_error_is_direct(err: &ExecError) -> bool {
+    match err {
+        ExecError::WithContext { source, .. } => sql_json_default_error_is_direct(source),
+        ExecError::BitStringLengthMismatch { .. }
+        | ExecError::BitStringTooLong { .. }
+        | ExecError::StringDataRightTruncation { .. } => true,
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } if *sqlstate == "23502"
+            && message.starts_with("domain ")
+            && message.ends_with(" does not allow null values") =>
+        {
+            true
+        }
+        _ => false,
     }
 }
 
@@ -5146,6 +5339,12 @@ fn sql_json_error_message(err: &ExecError) -> String {
         ExecError::XmlInput { message, .. } => message.clone(),
         ExecError::ArrayInput { message, .. } => message.clone(),
         ExecError::StringDataRightTruncation { ty } => format!("value too long for type {ty}"),
+        ExecError::BitStringLengthMismatch { actual, expected } => {
+            format!("bit string length {actual} does not match type bit({expected})")
+        }
+        ExecError::BitStringTooLong { limit, .. } => {
+            format!("bit string too long for type bit varying({limit})")
+        }
         ExecError::InvalidIntegerInput { ty, value } => {
             format!("invalid input syntax for type {ty}: \"{value}\"")
         }
@@ -5163,24 +5362,46 @@ fn executor_catalog(ctx: &ExecutorContext) -> Option<&dyn CatalogLookup> {
     ctx.catalog.as_deref()
 }
 
-fn jsonb_scalar_sql_text(value: &JsonbValue) -> String {
+fn jsonb_scalar_sql_text(
+    value: &JsonbValue,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+) -> String {
     match value {
         JsonbValue::String(text) => text.clone(),
         JsonbValue::Bool(true) => "true".into(),
         JsonbValue::Bool(false) => "false".into(),
         JsonbValue::Numeric(value) => value.render(),
-        JsonbValue::Date(_)
-        | JsonbValue::Time(_)
-        | JsonbValue::TimeTz(_)
-        | JsonbValue::Timestamp(_)
-        | JsonbValue::TimestampTz(_) => render_temporal_jsonb_value(value),
+        JsonbValue::Date(v) => {
+            render_datetime_value_text_with_config(&Value::Date(*v), datetime_config)
+                .expect("datetime values render")
+        }
+        JsonbValue::Time(v) => {
+            render_datetime_value_text_with_config(&Value::Time(*v), datetime_config)
+                .expect("datetime values render")
+        }
+        JsonbValue::TimeTz(v) => {
+            render_datetime_value_text_with_config(&Value::TimeTz(*v), datetime_config)
+                .expect("datetime values render")
+        }
+        JsonbValue::Timestamp(v) => {
+            render_datetime_value_text_with_config(&Value::Timestamp(*v), datetime_config)
+                .expect("datetime values render")
+        }
+        JsonbValue::TimestampTz(v) => {
+            render_datetime_value_text_with_config(&Value::TimestampTz(*v), datetime_config)
+                .expect("datetime values render")
+        }
         JsonbValue::Null | JsonbValue::Array(_) | JsonbValue::Object(_) => {
             render_jsonb_value_text(value)
         }
     }
 }
 
-fn jsonb_scalar_sql_text_for_type(value: &JsonbValue, target_type: SqlType) -> String {
+fn jsonb_scalar_sql_text_for_type(
+    value: &JsonbValue,
+    target_type: SqlType,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+) -> String {
     if target_type.type_oid == 0
         && !target_type.is_array
         && matches!(
@@ -5194,7 +5415,7 @@ fn jsonb_scalar_sql_text_for_type(value: &JsonbValue, target_type: SqlType) -> S
             _ => {}
         }
     }
-    jsonb_scalar_sql_text(value)
+    jsonb_scalar_sql_text(value, datetime_config)
 }
 
 fn cast_sql_json_formatted_value(
@@ -5230,6 +5451,15 @@ fn cast_sql_json_text_value(
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
     reject_sql_json_overlength_text(text, target_type)?;
+    if is_sql_json_bit_string_target(target_type) {
+        return cast_text_value_with_catalog_and_config(
+            text,
+            target_type,
+            false,
+            executor_catalog(ctx),
+            &ctx.datetime_config,
+        );
+    }
     if !target_type.is_array
         && matches!(
             target_type.kind,
@@ -5246,6 +5476,10 @@ fn cast_sql_json_text_value(
         executor_catalog(ctx),
         &ctx.datetime_config,
     )
+}
+
+fn is_sql_json_bit_string_target(target_type: SqlType) -> bool {
+    !target_type.is_array && matches!(target_type.kind, SqlTypeKind::Bit | SqlTypeKind::VarBit)
 }
 
 fn eval_jsonb_path_query_rows(values: &[Value]) -> Result<Vec<TupleSlot>, ExecError> {

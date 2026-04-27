@@ -202,6 +202,210 @@ pub(crate) fn parse_jsonpath(text: &str) -> Result<JsonPath, ExecError> {
     Parser::new(text).parse()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonPathDatatypeStatus {
+    NonDateTime,
+    DateTimeNonZoned,
+    DateTimeZoned,
+    UnknownDateTime,
+}
+
+pub(crate) fn jsonpath_is_mutable(
+    text: &str,
+    passing_types: &[(String, SqlType)],
+) -> Result<bool, ExecError> {
+    let path = parse_jsonpath(text)?;
+    let mut ctx = JsonPathMutableContext {
+        passing_types,
+        current: JsonPathDatatypeStatus::NonDateTime,
+        lax: path.mode == PathMode::Lax,
+        mutable: false,
+    };
+    jsonpath_expr_datatype_status(&path.expr, &mut ctx);
+    Ok(ctx.mutable)
+}
+
+struct JsonPathMutableContext<'a> {
+    passing_types: &'a [(String, SqlType)],
+    current: JsonPathDatatypeStatus,
+    lax: bool,
+    mutable: bool,
+}
+
+fn jsonpath_expr_datatype_status(
+    expr: &Expr,
+    ctx: &mut JsonPathMutableContext<'_>,
+) -> JsonPathDatatypeStatus {
+    if ctx.mutable {
+        return JsonPathDatatypeStatus::NonDateTime;
+    }
+
+    match expr {
+        Expr::Path { base, steps } => {
+            let mut status = match base {
+                Base::Root => JsonPathDatatypeStatus::NonDateTime,
+                Base::Current => ctx.current,
+                Base::Var(name) => jsonpath_passing_datatype_status(ctx.passing_types, name),
+            };
+            for step in steps {
+                status = jsonpath_step_datatype_status(step, status, ctx);
+                if ctx.mutable {
+                    break;
+                }
+            }
+            status
+        }
+        Expr::Compare { left, right, .. } => {
+            let left_status = jsonpath_expr_datatype_status(left, ctx);
+            let right_status = jsonpath_expr_datatype_status(right, ctx);
+            if left_status != JsonPathDatatypeStatus::NonDateTime
+                && right_status != JsonPathDatatypeStatus::NonDateTime
+                && (left_status == JsonPathDatatypeStatus::UnknownDateTime
+                    || right_status == JsonPathDatatypeStatus::UnknownDateTime
+                    || left_status != right_status)
+            {
+                ctx.mutable = true;
+            }
+            JsonPathDatatypeStatus::NonDateTime
+        }
+        Expr::StartsWith { left, right } | Expr::Arithmetic { left, right, .. } => {
+            jsonpath_expr_datatype_status(left, ctx);
+            jsonpath_expr_datatype_status(right, ctx);
+            JsonPathDatatypeStatus::NonDateTime
+        }
+        Expr::LikeRegex { expr, .. }
+        | Expr::Unary { inner: expr, .. }
+        | Expr::Exists(expr)
+        | Expr::Not(expr)
+        | Expr::IsUnknown(expr) => {
+            jsonpath_expr_datatype_status(expr, ctx);
+            JsonPathDatatypeStatus::NonDateTime
+        }
+        Expr::MethodCall { inner, method } => {
+            jsonpath_expr_datatype_status(inner, ctx);
+            jsonpath_method_datatype_status(method, ctx)
+        }
+        Expr::And(left, right) | Expr::Or(left, right) => {
+            jsonpath_expr_datatype_status(left, ctx);
+            jsonpath_expr_datatype_status(right, ctx);
+            JsonPathDatatypeStatus::NonDateTime
+        }
+        Expr::Literal(_) | Expr::Last => JsonPathDatatypeStatus::NonDateTime,
+    }
+}
+
+fn jsonpath_step_datatype_status(
+    step: &Step,
+    current_status: JsonPathDatatypeStatus,
+    ctx: &mut JsonPathMutableContext<'_>,
+) -> JsonPathDatatypeStatus {
+    match step {
+        Step::Filter(predicate) => {
+            let previous_current = ctx.current;
+            ctx.current = current_status;
+            jsonpath_expr_datatype_status(predicate, ctx);
+            ctx.current = previous_current;
+            current_status
+        }
+        Step::Subscripts(selections) => {
+            for selection in selections {
+                match selection {
+                    SubscriptSelection::Index(SubscriptExpr::Expr(expr)) => {
+                        jsonpath_expr_datatype_status(expr, ctx);
+                    }
+                    SubscriptSelection::Index(SubscriptExpr::Filter { expr, predicate }) => {
+                        jsonpath_expr_datatype_status(expr, ctx);
+                        jsonpath_expr_datatype_status(predicate, ctx);
+                    }
+                    SubscriptSelection::Range(from, to) => {
+                        jsonpath_expr_datatype_status(to, ctx);
+                        jsonpath_expr_datatype_status(from, ctx);
+                    }
+                }
+            }
+            if ctx.lax {
+                current_status
+            } else {
+                JsonPathDatatypeStatus::NonDateTime
+            }
+        }
+        Step::IndexWildcard => {
+            if ctx.lax {
+                current_status
+            } else {
+                JsonPathDatatypeStatus::NonDateTime
+            }
+        }
+        Step::Recursive { min_depth, .. } => match min_depth {
+            RecursiveBound::Int(value) if *value <= 0 => current_status,
+            RecursiveBound::Int(_) | RecursiveBound::Last => JsonPathDatatypeStatus::NonDateTime,
+        },
+        Step::Method(method) => jsonpath_method_datatype_status(method, ctx),
+        Step::Member(_) | Step::MemberWildcard => JsonPathDatatypeStatus::NonDateTime,
+    }
+}
+
+fn jsonpath_method_datatype_status(
+    method: &Method,
+    ctx: &mut JsonPathMutableContext<'_>,
+) -> JsonPathDatatypeStatus {
+    match method.kind {
+        MethodKind::Datetime => {
+            if let Some(MethodArg::String(template)) = method.args.first() {
+                if datetime_template_has_timezone(template) {
+                    JsonPathDatatypeStatus::DateTimeZoned
+                } else {
+                    JsonPathDatatypeStatus::DateTimeNonZoned
+                }
+            } else {
+                JsonPathDatatypeStatus::UnknownDateTime
+            }
+        }
+        MethodKind::Date | MethodKind::Time | MethodKind::Timestamp => {
+            ctx.mutable = true;
+            JsonPathDatatypeStatus::DateTimeNonZoned
+        }
+        MethodKind::TimeTz | MethodKind::TimestampTz => {
+            ctx.mutable = true;
+            JsonPathDatatypeStatus::DateTimeZoned
+        }
+        MethodKind::Abs
+        | MethodKind::BigInt
+        | MethodKind::Boolean
+        | MethodKind::Ceiling
+        | MethodKind::Decimal
+        | MethodKind::Double
+        | MethodKind::Floor
+        | MethodKind::Integer
+        | MethodKind::Number
+        | MethodKind::Size
+        | MethodKind::String
+        | MethodKind::Type => JsonPathDatatypeStatus::NonDateTime,
+    }
+}
+
+fn jsonpath_passing_datatype_status(
+    passing_types: &[(String, SqlType)],
+    name: &str,
+) -> JsonPathDatatypeStatus {
+    passing_types
+        .iter()
+        .find(|(candidate, _)| candidate == name)
+        .map(|(_, sql_type)| match sql_type.kind {
+            SqlTypeKind::Date | SqlTypeKind::Time | SqlTypeKind::Timestamp => {
+                JsonPathDatatypeStatus::DateTimeNonZoned
+            }
+            SqlTypeKind::TimeTz | SqlTypeKind::TimestampTz => JsonPathDatatypeStatus::DateTimeZoned,
+            _ => JsonPathDatatypeStatus::NonDateTime,
+        })
+        .unwrap_or(JsonPathDatatypeStatus::NonDateTime)
+}
+
+fn datetime_template_has_timezone(template: &str) -> bool {
+    let upper = template.to_ascii_uppercase();
+    upper.contains("TZH") || upper.contains("TZM")
+}
+
 pub(crate) fn evaluate_jsonpath(
     path: &JsonPath,
     ctx: &EvaluationContext<'_>,

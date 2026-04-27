@@ -319,6 +319,15 @@ pub fn parse_date_text(text: &str, config: &DateTimeConfig) -> Result<DateADT, D
     }
 
     let trimmed = text.trim();
+    if let Some((date_part, rest)) = trimmed.split_once(char::is_whitespace)
+        && date_part.contains('-')
+        && rest
+            .split_whitespace()
+            .next()
+            .is_some_and(|token| token.contains(':'))
+    {
+        return parse_date_text(date_part, config);
+    }
     let iso_parts = trimmed.split('-').collect::<Vec<_>>();
     if iso_parts.len() == 3
         && iso_parts[0].len() >= 4

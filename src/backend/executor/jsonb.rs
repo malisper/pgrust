@@ -143,25 +143,17 @@ impl JsonbValue {
 }
 
 pub(crate) fn render_temporal_jsonb_value(value: &JsonbValue) -> String {
-    match value {
-        JsonbValue::Date(v) => render_datetime_value_text(&Value::Date(*v)),
-        JsonbValue::Time(v) => render_datetime_value_text(&Value::Time(*v)),
-        JsonbValue::TimeTz(v) => render_datetime_value_text(&Value::TimeTz(*v)),
-        JsonbValue::Timestamp(v) => render_jsonpath_timestamp_text(
-            render_datetime_value_text(&Value::Timestamp(*v)).expect("datetime values render"),
-        ),
-        JsonbValue::TimestampTz(v) => render_jsonpath_timestamp_text(
-            render_datetime_value_text(&Value::TimestampTz(*v)).expect("datetime values render"),
-        ),
+    let mut config = DateTimeConfig::default();
+    config.time_zone = "UTC".into();
+    let value = match value {
+        JsonbValue::Date(v) => Value::Date(*v),
+        JsonbValue::Time(v) => Value::Time(*v),
+        JsonbValue::TimeTz(v) => Value::TimeTz(*v),
+        JsonbValue::Timestamp(v) => Value::Timestamp(*v),
+        JsonbValue::TimestampTz(v) => Value::TimestampTz(*v),
         _ => unreachable!("temporal renderer only accepts temporal jsonb values"),
-    }
-    .expect("datetime values render")
-}
-
-fn render_jsonpath_timestamp_text(mut text: String) -> Option<String> {
-    let separator = text.find(' ')?;
-    text.replace_range(separator..=separator, "T");
-    Some(text)
+    };
+    render_json_datetime_value_text_with_config(&value, &config).expect("datetime values render")
 }
 
 pub(crate) fn parse_jsonb_text(text: &str) -> Result<Vec<u8>, ExecError> {
