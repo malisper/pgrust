@@ -3133,6 +3133,248 @@ fn copy_from_file_loads_tsvector_rows() {
 }
 
 #[test]
+fn tsearch_match_operator_is_null_strict() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select null::tsvector @@ to_tsquery('foo'), to_tsvector('foo') @@ null::tsquery"
+        ),
+        vec![vec![Value::Null, Value::Null]]
+    );
+}
+
+#[test]
+fn tsquery_containment_operators_use_lexeme_sets() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select 'new <-> york'::tsquery @> 'new'::tsquery, \
+                    'new'::tsquery <@ 'new <-> york'::tsquery, \
+                    'new'::tsquery @> 'moscow'::tsquery, \
+                    null::tsquery @> 'new'::tsquery"
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Null,
+        ]]
+    );
+}
+
+#[test]
+fn scalar_tsearch_function_can_be_used_in_from() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select query from to_tsquery('english', 'new') as query"
+        ),
+        vec![vec![Value::TsQuery(
+            crate::include::nodes::tsearch::TsQuery::parse("new").unwrap()
+        )]]
+    );
+}
+
+#[test]
+fn text_tsearch_match_operator_accepts_tsquery() {
+    let db = Database::open_ephemeral(64).unwrap();
+    db.execute(1, "create table text_match_docs(txtsample text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into text_match_docs values ('new york'), ('moscow hotel')",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from text_match_docs, to_tsquery('english', 'new') q \
+             where txtsample @@ q"
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+}
+
+#[test]
+fn empty_tsearch_query_builders_emit_postgres_notices() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    clear_backend_notices();
+    assert_eq!(
+        query_rows(&db, 1, "select to_tsquery('english', '')::text"),
+        vec![vec![Value::Text("".into())]]
+    );
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(
+            "text-search query doesn't contain lexemes: \"\""
+        )]
+    );
+
+    clear_backend_notices();
+    assert_eq!(
+        query_rows(&db, 1, "select websearch_to_tsquery('simple', ':')::text"),
+        vec![vec![Value::Text("".into())]]
+    );
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(
+            "text-search query contains only stop words or doesn't contain lexemes, ignored"
+        )]
+    );
+}
+
+#[test]
+fn ts_rewrite_replaces_tsquery_subtrees() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ts_rewrite('foo & bar'::tsquery, 'bar'::tsquery, 'baz'::tsquery)::text"
+        ),
+        vec![vec![Value::Text("'foo' & 'baz'".into())]]
+    );
+    clear_backend_notices();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ts_rewrite(to_tsquery('5 & (6 | 5)'), to_tsquery('5'), to_tsquery(''))::text"
+        ),
+        vec![vec![Value::Text("'6'".into())]]
+    );
+}
+
+#[test]
+fn ts_headline_handles_empty_and_basic_queries() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    clear_backend_notices();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ts_headline('english', 'foo bar', to_tsquery('english', ''))"
+        ),
+        vec![vec![Value::Text("foo bar".into())]]
+    );
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(
+            "text-search query doesn't contain lexemes: \"\""
+        )]
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ts_headline('english', 'painted water', to_tsquery('english', 'paint&water'))"
+        ),
+        vec![vec![Value::Text("<b>painted</b> <b>water</b>".into())]]
+    );
+}
+
+#[test]
+fn one_arg_tsearch_functions_use_default_text_search_config() {
+    let dir = temp_dir("one_arg_tsearch_default_config");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set default_text_search_config=english")
+        .unwrap();
+
+    let StatementResult::Query { rows, .. } = session
+        .execute(
+            &db,
+            "select to_tsvector('SKIES My booKs'), \
+                    plainto_tsquery('SKIES My booKs'), \
+                    to_tsquery('SKIES & My | booKs'), \
+                    to_tsquery('''New York''')",
+        )
+        .unwrap()
+    else {
+        panic!("expected query result");
+    };
+
+    assert_eq!(
+        rows,
+        vec![vec![
+            Value::TsVector(
+                crate::include::nodes::tsearch::TsVector::parse("'book':3 'sky':1").unwrap()
+            ),
+            Value::TsQuery(crate::include::nodes::tsearch::TsQuery::parse("sky & book").unwrap()),
+            Value::TsQuery(crate::include::nodes::tsearch::TsQuery::parse("sky | book").unwrap()),
+            Value::TsQuery(crate::include::nodes::tsearch::TsQuery::parse("new <-> york").unwrap()),
+        ]]
+    );
+}
+
+#[test]
+fn tsearch_parser_table_functions_return_rows() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from ts_token_type('default')"),
+        vec![vec![Value::Int64(23)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select * from ts_parse('default', 'foo 123')"),
+        vec![
+            vec![Value::Int32(1), Value::Text("foo".into())],
+            vec![Value::Int32(12), Value::Text(" ".into())],
+            vec![Value::Int32(22), Value::Text("123".into())],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select alias, token, dictionary, lexemes from ts_debug('english', 'a title')"
+        ),
+        vec![
+            vec![
+                Value::Text("asciiword".into()),
+                Value::Text("a".into()),
+                Value::Text("english_stem".into()),
+                Value::PgArray(
+                    ArrayValue::from_1d(Vec::new()).with_element_type_oid(TEXT_TYPE_OID)
+                ),
+            ],
+            vec![
+                Value::Text("blank".into()),
+                Value::Text(" ".into()),
+                Value::Null,
+                Value::Null,
+            ],
+            vec![
+                Value::Text("asciiword".into()),
+                Value::Text("title".into()),
+                Value::Text("english_stem".into()),
+                Value::PgArray(
+                    ArrayValue::from_1d(vec![Value::Text("titl".into())])
+                        .with_element_type_oid(TEXT_TYPE_OID)
+                ),
+            ],
+        ]
+    );
+}
+
+#[test]
 fn copy_to_file_writes_selected_rows() {
     let dir = temp_dir("copy_to_file");
     let db = Database::open(&dir, 128).unwrap();

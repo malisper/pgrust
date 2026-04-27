@@ -857,6 +857,26 @@ fn bind_select_list_srf_call(
                         output_columns,
                         with_ordinality: false,
                     })
+                } else if let Some(kind) = resolve_text_search_table_function(other) {
+                    let bound_args = args
+                        .iter()
+                        .map(|arg| {
+                            bind_expr_with_outer_and_ctes(
+                                arg,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(SetReturningCall::TextSearchTableFunction {
+                        kind,
+                        args: bound_args,
+                        output_columns: text_search_table_function_columns(kind),
+                        with_ordinality: false,
+                    })
                 } else if let Some(resolved) = resolved.as_ref() {
                     if matches!(resolved.srf_impl, Some(ResolvedSrfImpl::PgLockStatus)) {
                         if !args.is_empty() {

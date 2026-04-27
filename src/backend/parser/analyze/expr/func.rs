@@ -997,6 +997,47 @@ pub(super) fn bind_scalar_function_call(
                 })
                 .collect(),
         )),
+        BuiltinScalarFunction::TsHeadline => {
+            let targets = match bound_args.len() {
+                2 => vec![
+                    SqlType::new(SqlTypeKind::Text),
+                    SqlType::new(SqlTypeKind::TsQuery),
+                ],
+                3 if matches!(
+                    arg_types.get(1).map(|ty| ty.kind),
+                    Some(SqlTypeKind::TsQuery)
+                ) =>
+                {
+                    vec![
+                        SqlType::new(SqlTypeKind::Text),
+                        SqlType::new(SqlTypeKind::TsQuery),
+                        SqlType::new(SqlTypeKind::Text),
+                    ]
+                }
+                3 => vec![
+                    SqlType::new(SqlTypeKind::Text),
+                    SqlType::new(SqlTypeKind::Text),
+                    SqlType::new(SqlTypeKind::TsQuery),
+                ],
+                4 => vec![
+                    SqlType::new(SqlTypeKind::Text),
+                    SqlType::new(SqlTypeKind::Text),
+                    SqlType::new(SqlTypeKind::TsQuery),
+                    SqlType::new(SqlTypeKind::Text),
+                ],
+                _ => unreachable!("ts_headline arity validated earlier"),
+            };
+            Ok(build_func(
+                false,
+                bound_args
+                    .iter()
+                    .cloned()
+                    .zip(arg_types)
+                    .zip(targets)
+                    .map(|((arg, actual), target)| coerce_bound_expr(arg, actual, target))
+                    .collect(),
+            ))
+        }
         BuiltinScalarFunction::TsVectorIn | BuiltinScalarFunction::TsQueryIn => {
             // :HACK: pgrust uses text values for SQL cstring input shims.
             Ok(build_func(
@@ -1048,6 +1089,43 @@ pub(super) fn bind_scalar_function_call(
             }
             Ok(build_func(false, coerced))
         }
+        BuiltinScalarFunction::TsQueryContains | BuiltinScalarFunction::TsQueryContainedBy => {
+            Ok(build_func(
+                false,
+                vec![
+                    coerce_bound_expr(
+                        bound_args[0].clone(),
+                        arg_types[0],
+                        SqlType::new(SqlTypeKind::TsQuery),
+                    ),
+                    coerce_bound_expr(
+                        bound_args[1].clone(),
+                        arg_types[1],
+                        SqlType::new(SqlTypeKind::TsQuery),
+                    ),
+                ],
+            ))
+        }
+        BuiltinScalarFunction::TsRewrite => Ok(build_func(
+            false,
+            vec![
+                coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_types[0],
+                    SqlType::new(SqlTypeKind::TsQuery),
+                ),
+                coerce_bound_expr(
+                    bound_args[1].clone(),
+                    arg_types[1],
+                    SqlType::new(SqlTypeKind::TsQuery),
+                ),
+                coerce_bound_expr(
+                    bound_args[2].clone(),
+                    arg_types[2],
+                    SqlType::new(SqlTypeKind::TsQuery),
+                ),
+            ],
+        )),
         BuiltinScalarFunction::TsVectorStrip | BuiltinScalarFunction::TsVectorToArray => {
             Ok(build_func(
                 false,

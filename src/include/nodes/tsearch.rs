@@ -685,6 +685,9 @@ fn render_tsquery_node(node: &TsQueryNode, parent_precedence: u8) -> String {
 }
 
 fn render_tsquery_operand(operand: &TsQueryOperand) -> String {
+    if operand.lexeme.as_str().is_empty() && !operand.prefix && operand.weights.is_empty() {
+        return String::new();
+    }
     let mut out = quote_ts_text(operand.lexeme.as_str());
     if operand.prefix || !operand.weights.is_empty() {
         out.push(':');

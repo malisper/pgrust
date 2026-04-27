@@ -15,12 +15,12 @@ use crate::backend::utils::time::datetime::{
     current_timezone_name, days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
 };
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
-use crate::include::catalog::builtin_scalar_function_for_proc_oid;
+use crate::include::catalog::{TEXT_TYPE_OID, builtin_scalar_function_for_proc_oid};
 use crate::include::nodes::datetime::{
     TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
 };
-use crate::include::nodes::datum::{IntervalValue, NumericValue, RecordValue};
-use crate::include::nodes::primnodes::expr_sql_type_hint;
+use crate::include::nodes::datum::{ArrayValue, IntervalValue, NumericValue, RecordValue};
+use crate::include::nodes::primnodes::{TextSearchTableFunction, expr_sql_type_hint};
 use crate::pl::plpgsql::execute_user_defined_set_returning_function;
 
 const MAX_UNBOUNDED_TIMESTAMP_SERIES_ROWS: usize = 10_000;
@@ -83,12 +83,9 @@ pub(crate) fn eval_set_returning_call(
         }
         SetReturningCall::PgLockStatus { .. } => eval_pg_lock_status(ctx),
         SetReturningCall::TxidSnapshotXip { arg, .. } => eval_txid_snapshot_xip(arg, slot, ctx),
-        SetReturningCall::TextSearchTableFunction { .. } => Err(ExecError::Parse(
-            crate::backend::parser::ParseError::UnexpectedToken {
-                expected: "implemented text search table function",
-                actual: "text search table function".into(),
-            },
-        )),
+        SetReturningCall::TextSearchTableFunction { kind, args, .. } => {
+            eval_text_search_table_function(*kind, args, slot, ctx)
+        }
         SetReturningCall::UserDefined {
             proc_oid,
             args,
@@ -139,6 +136,8 @@ fn execute_user_defined_set_returning_function_by_language(
     }
     if row.prolang == crate::include::catalog::PG_LANGUAGE_SQL_OID {
         execute_user_defined_sql_set_returning_function(&row, args, output_columns, slot, ctx)
+    } else if let Some(kind) = text_search_table_function_for_proc_src(&row.prosrc) {
+        eval_text_search_table_function(kind, args, slot, ctx)
     } else {
         execute_user_defined_set_returning_function(proc_oid, args, output_columns, slot, ctx)
     }
@@ -387,6 +386,147 @@ fn eval_pg_tablespace_databases(values: &[Value]) -> Vec<TupleSlot> {
     vec![TupleSlot::virtual_row(vec![Value::Int64(i64::from(
         crate::include::catalog::CURRENT_DATABASE_OID,
     ))])]
+}
+
+fn text_search_table_function_for_proc_src(prosrc: &str) -> Option<TextSearchTableFunction> {
+    match prosrc {
+        "ts_token_type_byid" | "ts_token_type_byname" => Some(TextSearchTableFunction::TokenType),
+        "ts_parse_byid" | "ts_parse_byname" => Some(TextSearchTableFunction::Parse),
+        _ => None,
+    }
+}
+
+fn eval_text_search_table_function(
+    kind: TextSearchTableFunction,
+    args: &[Expr],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let values = args
+        .iter()
+        .map(|arg| eval_expr(arg, slot, ctx))
+        .collect::<Result<Vec<_>, _>>()?;
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Vec::new());
+    }
+    let catalog = ctx
+        .catalog
+        .as_ref()
+        .map(|catalog| catalog as &dyn CatalogLookup);
+    match kind {
+        TextSearchTableFunction::TokenType => Ok(
+            crate::backend::tsearch::default_text_search_parser_token_types()
+                .into_iter()
+                .map(|token| {
+                    TupleSlot::virtual_row(vec![
+                        Value::Int32(token.tokid),
+                        Value::Text(token.alias),
+                        Value::Text(token.description),
+                    ])
+                })
+                .collect(),
+        ),
+        TextSearchTableFunction::Parse => {
+            let text =
+                values
+                    .last()
+                    .and_then(Value::as_text)
+                    .ok_or_else(|| ExecError::TypeMismatch {
+                        op: "ts_parse",
+                        left: values.last().cloned().unwrap_or(Value::Null),
+                        right: Value::Null,
+                    })?;
+            Ok(
+                crate::backend::tsearch::parse_default_text_search_tokens(text)
+                    .into_iter()
+                    .map(|(tokid, token)| {
+                        TupleSlot::virtual_row(vec![Value::Int32(tokid), Value::Text(token.into())])
+                    })
+                    .collect(),
+            )
+        }
+        TextSearchTableFunction::Debug => {
+            let (config_name, text) = match values.as_slice() {
+                [value] => (None, value.as_text()),
+                [config, value] => (config.as_text(), value.as_text()),
+                _ => (None, None),
+            };
+            let text = text.ok_or_else(|| ExecError::TypeMismatch {
+                op: "ts_debug",
+                left: values.last().cloned().unwrap_or(Value::Null),
+                right: Value::Null,
+            })?;
+            Ok(
+                crate::backend::tsearch::parse_default_text_search_tokens(text)
+                    .into_iter()
+                    .map(|(tokid, token)| {
+                        let token_type =
+                            crate::backend::tsearch::default_text_search_parser_token_type(tokid);
+                        let alias = token_type
+                            .as_ref()
+                            .map(|token| token.alias.clone())
+                            .unwrap_or_else(|| "".into());
+                        let description = token_type
+                            .as_ref()
+                            .map(|token| token.description.clone())
+                            .unwrap_or_else(|| "".into());
+                        let dictionary = text_search_debug_dictionary(config_name, tokid);
+                        let lexemes = dictionary
+                            .map(|dictionary| {
+                                crate::backend::tsearch::ts_lexize_with_dictionary_name(
+                                    dictionary, &token, catalog,
+                                )
+                                .unwrap_or_default()
+                                .unwrap_or_default()
+                            })
+                            .unwrap_or_default();
+                        TupleSlot::virtual_row(vec![
+                            Value::Text(alias),
+                            Value::Text(description),
+                            Value::Text(token.into()),
+                            text_array_value(
+                                dictionary
+                                    .map(|dictionary| vec![dictionary.to_string()])
+                                    .unwrap_or_default(),
+                            ),
+                            dictionary
+                                .map(|dictionary| Value::Text(dictionary.into()))
+                                .unwrap_or(Value::Null),
+                            dictionary
+                                .map(|_| text_array_value(lexemes))
+                                .unwrap_or(Value::Null),
+                        ])
+                    })
+                    .collect(),
+            )
+        }
+    }
+}
+
+fn text_search_debug_dictionary(config_name: Option<&str>, tokid: i32) -> Option<&'static str> {
+    if !matches!(tokid, 1..=11 | 15..=22) {
+        return None;
+    }
+    if matches!(tokid, 4..=8 | 18..=22) {
+        return Some("simple");
+    }
+    if matches!(config_name, Some(name) if name.eq_ignore_ascii_case("english")) {
+        Some("english_stem")
+    } else {
+        Some("simple")
+    }
+}
+
+fn text_array_value(values: Vec<String>) -> Value {
+    Value::PgArray(
+        ArrayValue::from_1d(
+            values
+                .into_iter()
+                .map(|value| Value::Text(value.into()))
+                .collect(),
+        )
+        .with_element_type_oid(TEXT_TYPE_OID),
+    )
 }
 
 pub(crate) fn eval_project_set_returning_call(
