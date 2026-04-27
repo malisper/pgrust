@@ -3371,6 +3371,12 @@ pub struct CommentOnOperatorStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantTableColumnPrivilege {
+    pub privilege: GrantObjectPrivilege,
+    pub columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrantObjectPrivilege {
     CreateOnDatabase,
     AllPrivilegesOnTable,
@@ -3383,9 +3389,12 @@ pub enum GrantObjectPrivilege {
     TriggerOnTable,
     MaintainOnTable,
     TablePrivileges(String),
+    TableColumnPrivileges(Vec<GrantTableColumnPrivilege>),
     AllPrivilegesOnSchema,
     UsageOnSchema,
     UsageOnType,
+    UsageOnLanguage,
+    AllPrivilegesOnLanguage,
     ExecuteOnFunction,
     ExecuteOnProcedure,
     ExecuteOnRoutine,

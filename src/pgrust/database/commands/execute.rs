@@ -553,7 +553,10 @@ impl Database {
         random_state: std::sync::Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
     ) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
-        use crate::backend::commands::tablecmds::execute_truncate_table;
+        use crate::backend::commands::tablecmds::{
+            check_planned_stmt_select_for_update_privileges, check_planned_stmt_select_privileges,
+            execute_truncate_table,
+        };
         let interrupts = self.interrupt_state(client_id);
         let session_replication_role = self.session_replication_role(client_id);
 
@@ -1450,9 +1453,10 @@ impl Database {
                         _ => {}
                     }
                 }
-                let (stmt, planned_select, rels) = {
+                let (stmt, planned_select, planned_select_for_update, rels) = {
                     let mut rels = std::collections::BTreeSet::new();
                     let mut planned_select = None;
+                    let mut planned_select_for_update = false;
                     match &stmt {
                         Statement::Select(select) => {
                             let planned_stmt = crate::backend::parser::pg_plan_query_with_config(
@@ -1461,6 +1465,7 @@ impl Database {
                                 planner_config,
                             )?;
                             collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
+                            planned_select_for_update = select.locking_clause.is_some();
                             planned_select = Some(planned_stmt);
                         }
                         Statement::Values(_) => {}
@@ -1477,7 +1482,12 @@ impl Database {
                         }
                         _ => unreachable!(),
                     }
-                    (stmt, planned_select, rels.into_iter().collect::<Vec<_>>())
+                    (
+                        stmt,
+                        planned_select,
+                        planned_select_for_update,
+                        rels.into_iter().collect::<Vec<_>>(),
+                    )
                 };
 
                 lock_relations_interruptible(
@@ -1554,7 +1564,14 @@ impl Database {
                     trigger_depth: 0,
                 };
                 let result = match planned_select {
-                    Some(planned_stmt) => execute_planned_stmt(planned_stmt, &mut ctx),
+                    Some(planned_stmt) => {
+                        if planned_select_for_update {
+                            check_planned_stmt_select_for_update_privileges(&planned_stmt, &ctx)?;
+                        } else {
+                            check_planned_stmt_select_privileges(&planned_stmt, &ctx)?;
+                        }
+                        execute_planned_stmt(planned_stmt, &mut ctx)
+                    }
                     None => execute_readonly_statement_with_config(
                         stmt,
                         &visible_catalog,
@@ -2597,9 +2614,7 @@ impl Database {
             collect_rels_from_planned_stmt(&query_desc.planned_stmt, &mut rels);
             (query_desc, rels.into_iter().collect::<Vec<_>>())
         };
-
-        let interrupts = self.interrupt_state(client_id);
-        lock_relations_interruptible(&self.table_locks, client_id, &rels, interrupts.as_ref())?;
+        let privilege_planned_stmt = query_desc.planned_stmt.clone();
 
         let (snapshot, command_id) = match (snapshot_override, txn_ctx) {
             (Some(snapshot), Some((_xid, cid))) => (snapshot, cid),
@@ -2613,6 +2628,7 @@ impl Database {
         let columns = query_desc.columns();
         let column_names = query_desc.column_names();
         let state = executor_start(query_desc.planned_stmt.plan_tree);
+        let interrupts = self.interrupt_state(client_id);
         let session_replication_role = self.session_replication_role(client_id);
         let ctx = ExecutorContext {
             pool: std::sync::Arc::clone(&self.pool),
@@ -2668,6 +2684,18 @@ impl Database {
             deferred_foreign_keys: None,
             trigger_depth: 0,
         };
+        if select_stmt.locking_clause.is_some() {
+            crate::backend::commands::tablecmds::check_planned_stmt_select_for_update_privileges(
+                &privilege_planned_stmt,
+                &ctx,
+            )?;
+        } else {
+            crate::backend::commands::tablecmds::check_planned_stmt_select_privileges(
+                &privilege_planned_stmt,
+                &ctx,
+            )?;
+        }
+        lock_relations_interruptible(&self.table_locks, client_id, &rels, ctx.interrupts.as_ref())?;
 
         Ok(SelectGuard {
             state,

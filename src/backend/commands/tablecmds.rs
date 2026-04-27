@@ -3985,6 +3985,7 @@ pub fn execute_truncate_table(
             vec![entry]
         };
         for target in truncate_targets {
+            check_relation_privilege(ctx, target.relation_oid, 'D')?;
             let indexes = catalog.index_relations_for_heap(target.relation_oid);
             let _ = ctx.pool.invalidate_relation(target.rel);
             ctx.pool
@@ -4028,6 +4029,15 @@ pub fn execute_insert(
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_insert(stmt, catalog);
+    check_relation_column_privileges(
+        ctx,
+        stmt.relation_oid,
+        'a',
+        stmt.target_columns.iter().map(|target| target.column_index),
+    )?;
+    for subplan in &stmt.subplans {
+        check_plan_relation_privileges(subplan, ctx, 'r')?;
+    }
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
         let values = materialize_insert_rows(&stmt, catalog, ctx)?;
@@ -4478,7 +4488,7 @@ fn auth_state_from_executor(ctx: &ExecutorContext) -> AuthState {
     auth
 }
 
-fn relation_acl_allows(
+pub(crate) fn relation_acl_allows(
     ctx: &ExecutorContext,
     relation_oid: u32,
     privilege: char,
@@ -4510,14 +4520,88 @@ fn relation_acl_allows(
     {
         return Ok(true);
     }
-    let Some(acl) = class_row.relacl else {
-        return Ok(false);
-    };
     let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
-    Ok(acl_grants_privilege(&acl, &effective_names, privilege))
+    if class_row
+        .relacl
+        .as_ref()
+        .is_some_and(|acl| acl_grants_privilege(acl, &effective_names, privilege))
+    {
+        return Ok(true);
+    }
+    if matches!(privilege, 'r' | 'a' | 'w' | 'x') {
+        let grants_column_privilege = catalog
+            .attribute_rows_for_relation(relation_oid)
+            .into_iter()
+            .filter(|attr| attr.attnum > 0 && !attr.attisdropped)
+            .filter_map(|attr| attr.attacl)
+            .any(|acl| acl_grants_privilege(&acl, &effective_names, privilege));
+        if grants_column_privilege {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
-fn relation_permission_denied(ctx: &ExecutorContext, relation_oid: u32) -> ExecError {
+pub(crate) fn relation_or_all_column_acls_allow(
+    ctx: &ExecutorContext,
+    relation_oid: u32,
+    privilege: char,
+    column_indices: impl IntoIterator<Item = usize>,
+) -> Result<bool, ExecError> {
+    let catalog = ctx
+        .catalog
+        .as_ref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "catalog is not available for privilege check".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    let class_row =
+        catalog
+            .class_row_by_oid(relation_oid)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("relation with OID {relation_oid} does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+    let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
+    let auth = auth_state_from_executor(ctx);
+    if auth.has_effective_membership(class_row.relowner, &auth_catalog)
+        || auth_catalog
+            .role_by_oid(ctx.current_user_oid)
+            .is_some_and(|role| role.rolsuper)
+    {
+        return Ok(true);
+    }
+    let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
+    if class_row
+        .relacl
+        .as_ref()
+        .is_some_and(|acl| acl_grants_privilege(acl, &effective_names, privilege))
+    {
+        return Ok(true);
+    }
+
+    let attribute_acls = catalog
+        .attribute_rows_for_relation(relation_oid)
+        .into_iter()
+        .filter(|attr| attr.attnum > 0 && !attr.attisdropped)
+        .map(|attr| (attr.attnum as usize - 1, attr.attacl))
+        .collect::<BTreeMap<_, _>>();
+    for column_index in column_indices {
+        let Some(Some(acl)) = attribute_acls.get(&column_index) else {
+            return Ok(false);
+        };
+        if !acl_grants_privilege(acl, &effective_names, privilege) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+pub(crate) fn relation_permission_denied(ctx: &ExecutorContext, relation_oid: u32) -> ExecError {
     let relation_name = ctx
         .catalog
         .as_deref()
@@ -4568,10 +4652,10 @@ fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
             collect_plan_relation_oids(left, oids);
             collect_plan_relation_oids(right, oids);
         }
+        Plan::CteScan { cte_plan, .. } => collect_plan_relation_oids(cte_plan, oids),
         Plan::Result { .. }
         | Plan::Values { .. }
         | Plan::FunctionScan { .. }
-        | Plan::CteScan { .. }
         | Plan::WorkTableScan { .. } => {}
         Plan::RecursiveUnion {
             anchor, recursive, ..
@@ -4585,6 +4669,138 @@ fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
             }
         }
     }
+}
+
+fn collect_planned_stmt_relation_oids(planned_stmt: &PlannedStmt, oids: &mut BTreeSet<u32>) {
+    collect_plan_relation_oids(&planned_stmt.plan_tree, oids);
+    for subplan in &planned_stmt.subplans {
+        collect_plan_relation_oids(subplan, oids);
+    }
+}
+
+fn plan_contains_lock_rows(plan: &Plan) -> bool {
+    match plan {
+        Plan::LockRows { .. } => true,
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. } => children.iter().any(plan_contains_lock_rows),
+        Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. } => plan_contains_lock_rows(input),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            plan_contains_lock_rows(left) || plan_contains_lock_rows(right)
+        }
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => plan_contains_lock_rows(anchor) || plan_contains_lock_rows(recursive),
+        Plan::SetOp { children, .. } => children.iter().any(plan_contains_lock_rows),
+        Plan::CteScan { cte_plan, .. } => plan_contains_lock_rows(cte_plan),
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::BitmapHeapScan { .. }
+        | Plan::Values { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. } => false,
+    }
+}
+
+pub(crate) fn check_relation_privilege(
+    ctx: &ExecutorContext,
+    relation_oid: u32,
+    privilege: char,
+) -> Result<(), ExecError> {
+    if relation_acl_allows(ctx, relation_oid, privilege)? {
+        Ok(())
+    } else {
+        Err(relation_permission_denied(ctx, relation_oid))
+    }
+}
+
+pub(crate) fn check_relation_column_privileges(
+    ctx: &ExecutorContext,
+    relation_oid: u32,
+    privilege: char,
+    column_indices: impl IntoIterator<Item = usize>,
+) -> Result<(), ExecError> {
+    if relation_or_all_column_acls_allow(ctx, relation_oid, privilege, column_indices)? {
+        Ok(())
+    } else {
+        Err(relation_permission_denied(ctx, relation_oid))
+    }
+}
+
+pub(crate) fn check_plan_relation_privileges(
+    plan: &Plan,
+    ctx: &ExecutorContext,
+    privilege: char,
+) -> Result<(), ExecError> {
+    let mut relation_oids = BTreeSet::new();
+    collect_plan_relation_oids(plan, &mut relation_oids);
+    for relation_oid in relation_oids {
+        check_relation_privilege(ctx, relation_oid, privilege)?;
+    }
+    Ok(())
+}
+
+fn check_planned_stmt_relation_privileges_except(
+    planned_stmt: &PlannedStmt,
+    ctx: &ExecutorContext,
+    privilege: char,
+    excluded_oids: &BTreeSet<u32>,
+) -> Result<(), ExecError> {
+    let mut relation_oids = BTreeSet::new();
+    collect_planned_stmt_relation_oids(planned_stmt, &mut relation_oids);
+    for relation_oid in relation_oids {
+        if !excluded_oids.contains(&relation_oid) {
+            check_relation_privilege(ctx, relation_oid, privilege)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn check_planned_stmt_select_privileges(
+    planned_stmt: &PlannedStmt,
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    check_planned_stmt_select_privileges_inner(planned_stmt, ctx, false)
+}
+
+pub(crate) fn check_planned_stmt_select_for_update_privileges(
+    planned_stmt: &PlannedStmt,
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    check_planned_stmt_select_privileges_inner(planned_stmt, ctx, true)
+}
+
+fn check_planned_stmt_select_privileges_inner(
+    planned_stmt: &PlannedStmt,
+    ctx: &ExecutorContext,
+    require_update: bool,
+) -> Result<(), ExecError> {
+    let mut relation_oids = BTreeSet::new();
+    collect_planned_stmt_relation_oids(planned_stmt, &mut relation_oids);
+    for relation_oid in &relation_oids {
+        check_relation_privilege(ctx, *relation_oid, 'r')?;
+    }
+    if require_update || plan_contains_lock_rows(&planned_stmt.plan_tree) {
+        for relation_oid in relation_oids {
+            check_relation_privilege(ctx, relation_oid, 'w')?;
+        }
+    }
+    Ok(())
 }
 
 fn check_merge_privileges(
@@ -5174,6 +5390,7 @@ pub(crate) fn materialize_insert_rows(
             let query =
                 crate::backend::optimizer::fold_query_constants(query).map_err(ExecError::Parse)?;
             let planned = planner(query, catalog).map_err(ExecError::Parse)?;
+            check_planned_stmt_select_privileges(&planned, ctx)?;
             let result: Result<Vec<Vec<Value>>, ExecError> = (|| {
                 let saved_subplans = std::mem::replace(&mut ctx.subplans, planned.subplans.clone());
                 let mut state = executor_start(planned.plan_tree.clone());
@@ -7003,6 +7220,28 @@ pub fn execute_update_with_waiter(
     )>,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_update(stmt, catalog);
+    let target_oids = stmt
+        .targets
+        .iter()
+        .map(|target| target.relation_oid)
+        .collect::<BTreeSet<_>>();
+    for target in &stmt.targets {
+        check_relation_column_privileges(
+            ctx,
+            target.relation_oid,
+            'w',
+            target
+                .assignments
+                .iter()
+                .map(|assignment| assignment.column_index),
+        )?;
+    }
+    for subplan in &stmt.subplans {
+        check_plan_relation_privileges(subplan, ctx, 'r')?;
+    }
+    if let Some(input_plan) = &stmt.input_plan {
+        check_planned_stmt_relation_privileges_except(input_plan, ctx, 'r', &target_oids)?;
+    }
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
         if stmt.input_plan.is_some() {
@@ -7587,6 +7826,17 @@ pub fn execute_delete_with_waiter(
     )>,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_delete(stmt, catalog);
+    let target_oids = stmt
+        .targets
+        .iter()
+        .map(|target| target.relation_oid)
+        .collect::<BTreeSet<_>>();
+    for relation_oid in &target_oids {
+        check_relation_privilege(ctx, *relation_oid, 'd')?;
+    }
+    for subplan in &stmt.subplans {
+        check_plan_relation_privileges(subplan, ctx, 'r')?;
+    }
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
         let mut affected_rows = 0;

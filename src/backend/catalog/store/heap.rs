@@ -7082,16 +7082,40 @@ impl CatalogStore {
         attacl: Option<Vec<String>>,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.alter_attribute_acls_mvcc(relation_oid, vec![(attnum, attacl)], ctx)
+    }
+
+    pub fn alter_attribute_acls_mvcc(
+        &mut self,
+        relation_oid: u32,
+        attacls: Vec<(i16, Option<Vec<String>>)>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let current_attributes = relation_attributes_mvcc(self, ctx, relation_oid)?;
         let (_old_entry, _new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                let Some(column) = entry
-                    .desc
-                    .columns
-                    .get_mut(attnum.saturating_sub(1) as usize)
-                else {
-                    return Err(CatalogError::Corrupt("unknown attribute"));
-                };
-                column.attacl = attacl;
+                for attr in &current_attributes {
+                    if attr.attnum <= 0 {
+                        continue;
+                    }
+                    if let Some(column) = entry
+                        .desc
+                        .columns
+                        .get_mut(attr.attnum.saturating_sub(1) as usize)
+                    {
+                        column.attacl = attr.attacl.clone();
+                    }
+                }
+                for (attnum, attacl) in attacls {
+                    let Some(column) = entry
+                        .desc
+                        .columns
+                        .get_mut(attnum.saturating_sub(1) as usize)
+                    else {
+                        return Err(CatalogError::Corrupt("unknown attribute"));
+                    };
+                    column.attacl = attacl;
+                }
                 Ok(((), vec![BootstrapCatalogKind::PgAttribute]))
             })?;
 

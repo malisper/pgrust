@@ -5932,6 +5932,7 @@ fn split_comma_separated_sql(input: &str) -> Result<Vec<&str>, ParseError> {
     let mut start = 0usize;
     let bytes = input.as_bytes();
     let mut index = 0usize;
+    let mut paren_depth = 0usize;
     while index < bytes.len() {
         if bytes[index] == b'\'' {
             let literal_len =
@@ -5939,7 +5940,12 @@ fn split_comma_separated_sql(input: &str) -> Result<Vec<&str>, ParseError> {
             index += literal_len;
             continue;
         }
-        if bytes[index] == b',' {
+        match bytes[index] {
+            b'(' => paren_depth = paren_depth.saturating_add(1),
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            _ => {}
+        }
+        if bytes[index] == b',' && paren_depth == 0 {
             parts.push(input[start..index].trim());
             start = index + 1;
         }
@@ -6185,8 +6191,14 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("grant usage on schema ") {
         return Ok(Statement::GrantObject(build_grant_schema_usage(sql)?));
     }
-    if lowered.starts_with("grant usage on type ") {
+    if is_type_usage_grant(&lowered) {
         return Ok(Statement::GrantObject(build_grant_type_usage(sql)?));
+    }
+    if lowered.starts_with("grant usage on language ")
+        || lowered.starts_with("grant all on language ")
+        || lowered.starts_with("grant all privileges on language ")
+    {
+        return Ok(Statement::GrantObject(build_grant_language_usage(sql)?));
     }
     if lowered.starts_with("grant usage on foreign data wrapper ")
         || lowered.starts_with("grant all on foreign data wrapper ")
@@ -6204,19 +6216,14 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
             sql,
         )?));
     }
-    if lowered.starts_with("grant execute on function ") {
+    if is_function_execute_grant(&lowered, "function") {
         return Ok(Statement::GrantObject(build_grant_function_execute(sql)?));
     }
-    if lowered.starts_with("grant execute on procedure ") {
+    if is_function_execute_grant(&lowered, "procedure") {
         return Ok(Statement::GrantObject(build_grant_procedure_execute(sql)?));
     }
-    if lowered.starts_with("grant execute on routine ") {
+    if is_function_execute_grant(&lowered, "routine") {
         return Ok(Statement::GrantObject(build_grant_routine_execute(sql)?));
-    }
-    if lowered.starts_with("grant select (") {
-        return Ok(Statement::GrantObject(build_grant_table_column_select(
-            sql,
-        )?));
     }
     if let Some(stmt) = try_build_grant_table_acl_statement(sql)? {
         return Ok(Statement::GrantObject(stmt));
@@ -6237,8 +6244,14 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("revoke usage on schema ") {
         return Ok(Statement::RevokeObject(build_revoke_schema_usage(sql)?));
     }
-    if lowered.starts_with("revoke usage on type ") {
+    if is_type_usage_revoke(&lowered) {
         return Ok(Statement::RevokeObject(build_revoke_type_usage(sql)?));
+    }
+    if lowered.starts_with("revoke usage on language ")
+        || lowered.starts_with("revoke all on language ")
+        || lowered.starts_with("revoke all privileges on language ")
+    {
+        return Ok(Statement::RevokeObject(build_revoke_language_usage(sql)?));
     }
     if lowered.starts_with("revoke usage on foreign data wrapper ")
         || lowered.starts_with("revoke all on foreign data wrapper ")
@@ -6256,21 +6269,16 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
             sql,
         )?));
     }
-    if lowered.starts_with("revoke execute on function ") {
+    if is_function_execute_revoke(&lowered, "function") {
         return Ok(Statement::RevokeObject(build_revoke_function_execute(sql)?));
     }
-    if lowered.starts_with("revoke execute on procedure ") {
+    if is_function_execute_revoke(&lowered, "procedure") {
         return Ok(Statement::RevokeObject(build_revoke_procedure_execute(
             sql,
         )?));
     }
-    if lowered.starts_with("revoke execute on routine ") {
+    if is_function_execute_revoke(&lowered, "routine") {
         return Ok(Statement::RevokeObject(build_revoke_routine_execute(sql)?));
-    }
-    if lowered.starts_with("revoke select (") {
-        return Ok(Statement::RevokeObject(build_revoke_table_column_select(
-            sql,
-        )?));
     }
     if let Some(stmt) = try_build_revoke_table_acl_statement(sql)? {
         return Ok(Statement::RevokeObject(stmt));
@@ -6290,7 +6298,7 @@ fn try_build_grant_table_acl_statement(
     let Some((privileges, after_on)) = split_optional_keyword(rest, "on") else {
         return Ok(None);
     };
-    let Some(privilege) = parse_table_privilege_spec(privileges)? else {
+    let Some((privilege, columns)) = parse_table_privilege_spec(privileges)? else {
         return Ok(None);
     };
     let after_on = strip_optional_table_keyword(after_on.ok_or(ParseError::UnexpectedEof)?);
@@ -6298,7 +6306,7 @@ fn try_build_grant_table_acl_statement(
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(Some(GrantObjectStatement {
         privilege,
-        columns: Vec::new(),
+        columns,
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         with_grant_option,
@@ -6316,7 +6324,7 @@ fn try_build_revoke_table_acl_statement(
     let Some((privileges, after_on)) = split_optional_keyword(rest, "on") else {
         return Ok(None);
     };
-    let Some(privilege) = parse_table_privilege_spec(privileges)? else {
+    let Some((privilege, columns)) = parse_table_privilege_spec(privileges)? else {
         return Ok(None);
     };
     let after_on = strip_optional_table_keyword(after_on.ok_or(ParseError::UnexpectedEof)?);
@@ -6324,7 +6332,7 @@ fn try_build_revoke_table_acl_statement(
     let (grantee_names, grantee_cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(Some(RevokeObjectStatement {
         privilege,
-        columns: Vec::new(),
+        columns,
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade: cascade || grantee_cascade,
@@ -6340,49 +6348,130 @@ fn strip_optional_table_keyword(input: &str) -> &str {
     }
 }
 
-fn parse_table_privilege_spec(input: &str) -> Result<Option<GrantObjectPrivilege>, ParseError> {
-    if input.contains('(') {
-        return Ok(None);
-    }
-
+fn parse_table_privilege_spec(
+    input: &str,
+) -> Result<Option<(GrantObjectPrivilege, Vec<String>)>, ParseError> {
     let mut chars = String::new();
-    let mut saw_table_privilege = false;
+    let mut table_items = Vec::new();
+    let mut column_items = Vec::new();
     for item in split_comma_separated_sql(input)? {
-        let item = item.trim();
-        if item.is_empty() {
+        let Some((privilege, columns)) = parse_table_privilege_item(item)? else {
+            if table_items.is_empty() && column_items.is_empty() {
+                return Ok(None);
+            }
+            return Err(ParseError::UnexpectedToken {
+                expected: "table privilege",
+                actual: item.trim().into(),
+            });
+        };
+        if columns.is_empty() {
+            table_items.push(privilege.clone());
+            chars.push_str(table_privilege_chars_for_parser(&privilege).ok_or_else(|| {
+                ParseError::UnexpectedToken {
+                    expected: "table privilege",
+                    actual: item.trim().into(),
+                }
+            })?);
             continue;
         }
-        let privilege_chars = match item.to_ascii_lowercase().as_str() {
-            "all" | "all privileges" => TABLE_ALL_PRIVILEGE_CHARS,
-            "select" => "r",
-            "insert" => "a",
-            "update" => "w",
-            "delete" => "d",
-            "truncate" => "D",
-            "references" => "x",
-            "trigger" => "t",
-            "maintain" => "m",
-            _ if saw_table_privilege => {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "table privilege",
-                    actual: item.into(),
-                });
-            }
-            _ => return Ok(None),
-        };
-        saw_table_privilege = true;
-        chars.push_str(privilege_chars);
+
+        column_items.push(GrantTableColumnPrivilege { privilege, columns });
     }
 
-    if !saw_table_privilege {
+    if table_items.is_empty() && column_items.is_empty() {
         return Ok(None);
     }
-    Ok(Some(table_privilege_from_chars(
-        canonicalize_table_privilege_chars(&chars),
+    if !table_items.is_empty() && !column_items.is_empty() {
+        return Err(ParseError::FeatureNotSupported(
+            "mixed relation and column privilege lists".into(),
+        ));
+    }
+    if column_items.is_empty() {
+        return Ok(Some((
+            table_privilege_from_chars(canonicalize_table_privilege_chars(&chars)),
+            Vec::new(),
+        )));
+    }
+    if column_items.len() == 1 {
+        let spec = column_items.remove(0);
+        return Ok(Some((spec.privilege, spec.columns)));
+    }
+    Ok(Some((
+        GrantObjectPrivilege::TableColumnPrivileges(column_items),
+        Vec::new(),
     )))
 }
 
 const TABLE_ALL_PRIVILEGE_CHARS: &str = "arwdDxtm";
+const COLUMN_ALL_PRIVILEGE_CHARS: &str = "arwx";
+
+fn parse_table_privilege_item(
+    input: &str,
+) -> Result<Option<(GrantObjectPrivilege, Vec<String>)>, ParseError> {
+    let item = input.trim();
+    if item.is_empty() {
+        return Ok(None);
+    }
+    let (privilege_name, columns) = if let Some(open) = item.find('(') {
+        let close = item.rfind(')').ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "column privilege list",
+            actual: item.into(),
+        })?;
+        if close < open || !item[close + 1..].trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "column privilege list",
+                actual: item.into(),
+            });
+        }
+        (
+            item[..open].trim(),
+            parse_identifier_list(&item[open + 1..close])?,
+        )
+    } else {
+        (item, Vec::new())
+    };
+
+    let privilege = match privilege_name.to_ascii_lowercase().as_str() {
+        "all" | "all privileges" if columns.is_empty() => {
+            GrantObjectPrivilege::AllPrivilegesOnTable
+        }
+        "all" | "all privileges" => {
+            GrantObjectPrivilege::TablePrivileges(COLUMN_ALL_PRIVILEGE_CHARS.into())
+        }
+        "select" => GrantObjectPrivilege::SelectOnTable,
+        "insert" => GrantObjectPrivilege::InsertOnTable,
+        "update" => GrantObjectPrivilege::UpdateOnTable,
+        "delete" if columns.is_empty() => GrantObjectPrivilege::DeleteOnTable,
+        "truncate" if columns.is_empty() => GrantObjectPrivilege::TruncateOnTable,
+        "references" => GrantObjectPrivilege::ReferencesOnTable,
+        "trigger" if columns.is_empty() => GrantObjectPrivilege::TriggerOnTable,
+        "maintain" if columns.is_empty() => GrantObjectPrivilege::MaintainOnTable,
+        _ if columns.is_empty() => return Ok(None),
+        _ => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "column privilege",
+                actual: privilege_name.into(),
+            });
+        }
+    };
+    Ok(Some((privilege, columns)))
+}
+
+fn table_privilege_chars_for_parser(privilege: &GrantObjectPrivilege) -> Option<&str> {
+    match privilege {
+        GrantObjectPrivilege::AllPrivilegesOnTable => Some(TABLE_ALL_PRIVILEGE_CHARS),
+        GrantObjectPrivilege::SelectOnTable => Some("r"),
+        GrantObjectPrivilege::InsertOnTable => Some("a"),
+        GrantObjectPrivilege::UpdateOnTable => Some("w"),
+        GrantObjectPrivilege::DeleteOnTable => Some("d"),
+        GrantObjectPrivilege::TruncateOnTable => Some("D"),
+        GrantObjectPrivilege::ReferencesOnTable => Some("x"),
+        GrantObjectPrivilege::TriggerOnTable => Some("t"),
+        GrantObjectPrivilege::MaintainOnTable => Some("m"),
+        GrantObjectPrivilege::TablePrivileges(chars) => Some(chars.as_str()),
+        _ => None,
+    }
+}
 
 fn canonicalize_table_privilege_chars(chars: &str) -> String {
     TABLE_ALL_PRIVILEGE_CHARS
@@ -6404,68 +6493,6 @@ fn table_privilege_from_chars(chars: String) -> GrantObjectPrivilege {
         "m" => GrantObjectPrivilege::MaintainOnTable,
         _ => GrantObjectPrivilege::TablePrivileges(chars),
     }
-}
-
-fn build_grant_table_column_select(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let after_privilege = sql
-        .get("grant select".len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let close = after_privilege
-        .find(')')
-        .ok_or_else(|| ParseError::UnexpectedToken {
-            expected: "column privilege list",
-            actual: after_privilege.into(),
-        })?;
-    let columns = parse_identifier_list(&after_privilege[1..close])?;
-    let rest = after_privilege[close + 1..].trim_start();
-    if !keyword_at_start(rest, "on") {
-        return Err(ParseError::UnexpectedToken {
-            expected: "ON",
-            actual: rest.into(),
-        });
-    }
-    let rest = consume_keyword(rest, "on").trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "to")?;
-    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
-    Ok(GrantObjectStatement {
-        privilege: GrantObjectPrivilege::SelectOnTable,
-        columns,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        with_grant_option,
-    })
-}
-
-fn build_revoke_table_column_select(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
-    let after_privilege = sql
-        .get("revoke select".len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let close = after_privilege
-        .find(')')
-        .ok_or_else(|| ParseError::UnexpectedToken {
-            expected: "column privilege list",
-            actual: after_privilege.into(),
-        })?;
-    let columns = parse_identifier_list(&after_privilege[1..close])?;
-    let rest = after_privilege[close + 1..].trim_start();
-    if !keyword_at_start(rest, "on") {
-        return Err(ParseError::UnexpectedToken {
-            expected: "ON",
-            actual: rest.into(),
-        });
-    }
-    let rest = consume_keyword(rest, "on").trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "from")?;
-    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
-    Ok(RevokeObjectStatement {
-        privilege: GrantObjectPrivilege::SelectOnTable,
-        columns,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        cascade,
-    })
 }
 
 fn build_alter_type_owner_statement(sql: &str) -> Result<AlterTypeOwnerStatement, ParseError> {
@@ -6556,15 +6583,57 @@ fn build_grant_schema_usage(sql: &str) -> Result<GrantObjectStatement, ParseErro
 }
 
 fn build_grant_type_usage(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let prefix = "grant usage on type ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
+    let rest = type_usage_prefix(sql, "grant")?;
     let (object_names, rest) = split_once_keyword(rest, "to")?;
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnType,
+        columns: Vec::new(),
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
+fn is_type_usage_grant(lowered: &str) -> bool {
+    type_usage_prefix_len(lowered, "grant").is_some()
+}
+
+fn is_type_usage_revoke(lowered: &str) -> bool {
+    type_usage_prefix_len(lowered, "revoke").is_some()
+}
+
+fn type_usage_prefix<'a>(sql: &'a str, command: &'static str) -> Result<&'a str, ParseError> {
+    let lower = sql.to_ascii_lowercase();
+    let prefix_len =
+        type_usage_prefix_len(&lower, command).ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "type privilege",
+            actual: sql.into(),
+        })?;
+    Ok(sql
+        .get(prefix_len..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start())
+}
+
+fn type_usage_prefix_len(lowered: &str, command: &'static str) -> Option<usize> {
+    for object in ["type", "domain"] {
+        for privilege in ["usage", "all", "all privileges"] {
+            let prefix = format!("{command} {privilege} on {object} ");
+            if lowered.starts_with(&prefix) {
+                return Some(prefix.len());
+            }
+        }
+    }
+    None
+}
+
+fn build_grant_language_usage(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let (rest, privilege) = language_usage_prefix(sql, "grant")?;
+    let (object_names, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege,
         columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
@@ -6645,11 +6714,7 @@ fn build_grant_foreign_server_usage(sql: &str) -> Result<GrantObjectStatement, P
 }
 
 fn build_grant_function_execute(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let prefix = "grant execute on function ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
+    let rest = function_execute_prefix(sql, "grant", "function")?;
     let (object_name, rest) = split_once_keyword(rest, "to")?;
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
@@ -6662,27 +6727,23 @@ fn build_grant_function_execute(sql: &str) -> Result<GrantObjectStatement, Parse
 }
 
 fn build_grant_procedure_execute(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    build_grant_routine_execute_with_prefix(
+    build_grant_routine_execute_with_object(
         sql,
-        "grant execute on procedure ",
+        "procedure",
         GrantObjectPrivilege::ExecuteOnProcedure,
     )
 }
 
 fn build_grant_routine_execute(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    build_grant_routine_execute_with_prefix(
-        sql,
-        "grant execute on routine ",
-        GrantObjectPrivilege::ExecuteOnRoutine,
-    )
+    build_grant_routine_execute_with_object(sql, "routine", GrantObjectPrivilege::ExecuteOnRoutine)
 }
 
-fn build_grant_routine_execute_with_prefix(
+fn build_grant_routine_execute_with_object(
     sql: &str,
-    prefix: &str,
+    object: &'static str,
     privilege: GrantObjectPrivilege,
 ) -> Result<GrantObjectStatement, ParseError> {
-    let rest = sql.get(prefix.len()..).ok_or(ParseError::UnexpectedEof)?;
+    let rest = function_execute_prefix(sql, "grant", object)?;
     let (object_name, rest) = split_once_keyword(rest.trim_start(), "to")?;
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
@@ -6692,6 +6753,46 @@ fn build_grant_routine_execute_with_prefix(
         grantee_names,
         with_grant_option,
     })
+}
+
+fn is_function_execute_grant(lowered: &str, object: &'static str) -> bool {
+    function_execute_prefix_len(lowered, "grant", object).is_some()
+}
+
+fn is_function_execute_revoke(lowered: &str, object: &'static str) -> bool {
+    function_execute_prefix_len(lowered, "revoke", object).is_some()
+}
+
+fn function_execute_prefix<'a>(
+    sql: &'a str,
+    command: &'static str,
+    object: &'static str,
+) -> Result<&'a str, ParseError> {
+    let lower = sql.to_ascii_lowercase();
+    let prefix_len = function_execute_prefix_len(&lower, command, object).ok_or_else(|| {
+        ParseError::UnexpectedToken {
+            expected: "routine privilege",
+            actual: sql.into(),
+        }
+    })?;
+    Ok(sql
+        .get(prefix_len..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start())
+}
+
+fn function_execute_prefix_len(
+    lowered: &str,
+    command: &'static str,
+    object: &'static str,
+) -> Option<usize> {
+    for privilege in ["execute", "all", "all privileges"] {
+        let prefix = format!("{command} {privilege} on {object} ");
+        if lowered.starts_with(&prefix) {
+            return Some(prefix.len());
+        }
+    }
+    None
 }
 
 fn build_revoke_database_create(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
@@ -6746,11 +6847,7 @@ fn build_revoke_schema_all(sql: &str) -> Result<RevokeObjectStatement, ParseErro
 }
 
 fn build_revoke_type_usage(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
-    let prefix = "revoke usage on type ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
+    let rest = type_usage_prefix(sql, "revoke")?;
     let (object_names, rest) = split_once_keyword(rest, "from")?;
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
@@ -6759,6 +6856,53 @@ fn build_revoke_type_usage(sql: &str) -> Result<RevokeObjectStatement, ParseErro
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade,
+    })
+}
+
+fn build_revoke_language_usage(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let (rest, privilege) = language_usage_prefix(sql, "revoke")?;
+    let (object_names, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege,
+        columns: Vec::new(),
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        cascade,
+    })
+}
+
+fn language_usage_prefix<'a>(
+    sql: &'a str,
+    command: &'static str,
+) -> Result<(&'a str, GrantObjectPrivilege), ParseError> {
+    let lower = sql.to_ascii_lowercase();
+    for (prefix, privilege) in [
+        (
+            format!("{command} usage on language "),
+            GrantObjectPrivilege::UsageOnLanguage,
+        ),
+        (
+            format!("{command} all on language "),
+            GrantObjectPrivilege::AllPrivilegesOnLanguage,
+        ),
+        (
+            format!("{command} all privileges on language "),
+            GrantObjectPrivilege::AllPrivilegesOnLanguage,
+        ),
+    ] {
+        if lower.starts_with(&prefix) {
+            return Ok((
+                sql.get(prefix.len()..)
+                    .ok_or(ParseError::UnexpectedEof)?
+                    .trim_start(),
+                privilege,
+            ));
+        }
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "language privilege",
+        actual: sql.into(),
     })
 }
 
@@ -6835,11 +6979,7 @@ fn build_revoke_foreign_server_usage(sql: &str) -> Result<RevokeObjectStatement,
 }
 
 fn build_revoke_function_execute(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
-    let prefix = "revoke execute on function ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
+    let rest = function_execute_prefix(sql, "revoke", "function")?;
     let (object_name, rest) = split_once_keyword(rest, "from")?;
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
@@ -6852,27 +6992,23 @@ fn build_revoke_function_execute(sql: &str) -> Result<RevokeObjectStatement, Par
 }
 
 fn build_revoke_procedure_execute(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
-    build_revoke_routine_execute_with_prefix(
+    build_revoke_routine_execute_with_object(
         sql,
-        "revoke execute on procedure ",
+        "procedure",
         GrantObjectPrivilege::ExecuteOnProcedure,
     )
 }
 
 fn build_revoke_routine_execute(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
-    build_revoke_routine_execute_with_prefix(
-        sql,
-        "revoke execute on routine ",
-        GrantObjectPrivilege::ExecuteOnRoutine,
-    )
+    build_revoke_routine_execute_with_object(sql, "routine", GrantObjectPrivilege::ExecuteOnRoutine)
 }
 
-fn build_revoke_routine_execute_with_prefix(
+fn build_revoke_routine_execute_with_object(
     sql: &str,
-    prefix: &str,
+    object: &'static str,
     privilege: GrantObjectPrivilege,
 ) -> Result<RevokeObjectStatement, ParseError> {
-    let rest = sql.get(prefix.len()..).ok_or(ParseError::UnexpectedEof)?;
+    let rest = function_execute_prefix(sql, "revoke", object)?;
     let (object_name, rest) = split_once_keyword(rest.trim_start(), "from")?;
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
@@ -7055,7 +7191,7 @@ fn parse_grantees_with_optional_grant(input: &str) -> Result<(Vec<String>, bool)
             actual: suffix.into(),
         });
     };
-    Ok((parse_identifier_list(grantees)?, with_grant_option))
+    Ok((parse_grantee_identifier_list(grantees)?, with_grant_option))
 }
 
 fn parse_revokee_list_with_optional_cascade(
@@ -7066,7 +7202,7 @@ fn parse_revokee_list_with_optional_cascade(
     // selection is not represented yet, so only keep the revokee list.
     let (input, _granted_by_clause) =
         split_optional_keyword(input, "granted by").unwrap_or((input.trim(), None));
-    Ok((parse_identifier_list(input)?, cascade))
+    Ok((parse_grantee_identifier_list(input)?, cascade))
 }
 
 fn parse_identifier_list(input: &str) -> Result<Vec<String>, ParseError> {
@@ -7074,6 +7210,22 @@ fn parse_identifier_list(input: &str) -> Result<Vec<String>, ParseError> {
         .split(',')
         .map(normalize_simple_identifier)
         .collect::<Result<Vec<_>, _>>()
+}
+
+fn parse_grantee_identifier_list(input: &str) -> Result<Vec<String>, ParseError> {
+    input
+        .split(',')
+        .map(normalize_grantee_identifier)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn normalize_grantee_identifier(input: &str) -> Result<String, ParseError> {
+    let trimmed = input.trim();
+    if keyword_at_start(trimmed, "group") {
+        normalize_simple_identifier(consume_keyword(trimmed, "group"))
+    } else {
+        normalize_simple_identifier(trimmed)
+    }
 }
 
 fn normalize_simple_identifier(input: &str) -> Result<String, ParseError> {
