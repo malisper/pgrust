@@ -828,6 +828,14 @@ pub(super) fn register_window_expr(
             state.clauses.len()
         }
     };
+    if let Some(existing) = state.clauses[winref - 1].functions.iter().find(|func| {
+        func.kind == kind
+            && func.args == args
+            && func.result_type == result_type
+            && func.ignore_nulls == ignore_nulls
+    }) {
+        return Expr::WindowFunc(Box::new(existing.clone()));
+    }
     let winno = state.next_winno;
     state.next_winno += 1;
     let expr = WindowFuncExpr {

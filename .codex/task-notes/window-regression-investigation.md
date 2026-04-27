@@ -7,6 +7,7 @@ Remaining pasted diff groups include unsupported window frame exclusion, unsuppo
 Current branch already had working window frame exclusion execution after rebase. Added parser/analyzer/executor support for RESPECT/IGNORE NULLS on lag, lead, first_value, last_value, and nth_value; other window functions reject it. Aggregates reject RESPECT/IGNORE NULLS whether used as plain aggregates or window aggregates.
 Adjusted non-verbose EXPLAIN traversal so a planner-only Projection directly below HashAggregate is hidden when it has no direct subplans. The requested regression block now renders WindowAgg -> HashAggregate -> Seq Scan with Group Key: (tenk1.ten + tenk1.four).
 View deparsing now preserves IGNORE NULLS in pg_get_viewdef and omits explicit RESPECT NULLS as the default.
+Follow-up after rebasing: fixed the first remaining timeout in the opexpr-with-different-windows query by deduplicating identical window registrations and adding a peer-prefix aggregate fast path for RANGE/GROUPS UNBOUNDED PRECEDING ... CURRENT ROW frames. Plain count(*) on that frame is computed from peer-group lengths.
 Files touched:
 crates/pgrust_sql_grammar/src/gram.pest
 src/include/nodes/parsenodes.rs
@@ -35,5 +36,7 @@ CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm scripts/cargo_isolated.sh test --lib --qu
 CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm scripts/cargo_isolated.sh test --lib --quiet explain_window_over_grouped_subquery_hides_group_projection (pass)
 CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm scripts/cargo_isolated.sh test --lib --quiet psql_get_viewdef_renders_window_ignore_nulls (pass)
 CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm scripts/run_regression.sh --test window --jobs 1 --timeout 120 --port 5545 --results-dir /tmp/pgrust-window-regression --skip-build (overall fail: 249/388 queries matched, 2512 diff lines; requested EXPLAIN block matches and no window frame exclusion unsupported error remains)
+CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm scripts/cargo_isolated.sh test --lib --quiet ordered_aggregate_windows_reuse_peer_prefixes (pass; targeted 10k-row shape finishes under the 5s regression statement timeout)
+CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm scripts/run_regression.sh --test window --jobs 1 --timeout 120 --port 5545 --results-dir /tmp/pgrust-window-regression (overall fail: 250/388 queries matched, 2500 diff lines; the previous statement timeout hunk now matches)
 Remaining:
-The full upstream window regression still fails for unrelated pre-existing gaps: statement timeout in one early query, SQL-language CREATE FUNCTION bodies, custom window aggregate execution, row-order/frame semantic differences, and broader EXPLAIN formatting/planning differences. Full diff copied to /tmp/diffs/window.diff.
+The full upstream window regression still fails for unrelated pre-existing gaps: row-order/frame semantic differences, SQL-language CREATE FUNCTION bodies, custom window aggregate execution, and broader EXPLAIN formatting/planning differences. Full diff copied to /tmp/diffs/window.diff.

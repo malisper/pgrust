@@ -16922,6 +16922,32 @@ fn window_functions_support_respect_and_ignore_nulls() {
 }
 
 #[test]
+fn ordered_aggregate_windows_reuse_peer_prefixes() {
+    let base = temp_dir("window_peer_prefix_aggregate");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select total, fourcount, twosum
+         from (
+             select count(*) over (partition by x % 4 order by x % 10)
+                        + sum(x % 100) over (partition by x % 2 order by x % 10) as total,
+                    count(*) over (partition by x % 4 order by x % 10) as fourcount,
+                    sum(x % 100) over (partition by x % 2 order by x % 10) as twosum
+             from generate_series(0, 9999) g(x)
+         ) sub
+         where total <> fourcount + twosum",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => assert!(rows.is_empty(), "{rows:?}"),
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn window_nth_value_rejects_nonpositive_offset() {
     let base = temp_dir("window_nth_value_invalid_offset");
     let mut txns = TransactionManager::new_durable(&base).unwrap();

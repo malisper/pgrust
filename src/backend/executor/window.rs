@@ -13,7 +13,7 @@ use crate::include::nodes::datum::{IntervalValue, NumericValue, Value};
 use crate::include::nodes::execnodes::{MaterializedRow, SystemVarBinding, TupleSlot};
 use crate::include::nodes::parsenodes::{WindowFrameExclusion, WindowFrameMode};
 use crate::include::nodes::primnodes::{
-    BuiltinWindowFunction, OrderByEntry, WindowClause, WindowFrameBound, WindowFuncExpr,
+    AggFunc, BuiltinWindowFunction, OrderByEntry, WindowClause, WindowFrameBound, WindowFuncExpr,
     WindowFuncKind,
 };
 use std::cmp::Ordering;
@@ -1521,6 +1521,12 @@ fn evaluate_aggregate_window(
         return Ok(vec![state.finalize(); partition_rows.len()]);
     }
 
+    if let Some(values) =
+        evaluate_peer_prefix_aggregate_window(ctx, clause, aggref, partition_rows, func)?
+    {
+        return Ok(values);
+    }
+
     // PostgreSQL advances aggregate state incrementally for nonshrinking frames.
     // Match that behavior for prefix-style frames so running totals do not
     // devolve into per-row full-frame rescans.
@@ -1561,6 +1567,57 @@ fn evaluate_aggregate_window(
         values.push(state.finalize());
     }
     Ok(values)
+}
+
+fn evaluate_peer_prefix_aggregate_window(
+    ctx: &mut ExecutorContext,
+    clause: &WindowClause,
+    aggref: &crate::include::nodes::primnodes::Aggref,
+    partition_rows: &mut [PreparedWindowRow],
+    func: AggFunc,
+) -> Result<Option<Vec<Value>>, ExecError> {
+    let frame = &clause.spec.frame;
+    if !matches!(frame.mode, WindowFrameMode::Range | WindowFrameMode::Groups)
+        || !matches!(frame.start_bound, WindowFrameBound::UnboundedPreceding)
+        || !matches!(frame.end_bound, WindowFrameBound::CurrentRow)
+        || frame.exclusion != WindowFrameExclusion::NoOthers
+        || clause.spec.order_by.is_empty()
+    {
+        return Ok(None);
+    }
+
+    if func == AggFunc::Count
+        && !aggref.aggdistinct
+        && aggref.args.is_empty()
+        && aggref.aggfilter.is_none()
+    {
+        let mut values = Vec::with_capacity(partition_rows.len());
+        let mut group_start = 0usize;
+        while group_start < partition_rows.len() {
+            let group_end =
+                peer_group_end_for_index(partition_rows, &clause.spec.order_by, group_start)?;
+            let value = Value::Int64(group_end as i64);
+            values.extend(std::iter::repeat_n(value, group_end - group_start));
+            group_start = group_end;
+        }
+        return Ok(Some(values));
+    }
+
+    let mut state = AccumState::new(func, aggref.aggdistinct, aggref.aggtype);
+    let mut values = Vec::with_capacity(partition_rows.len());
+    let mut group_start = 0usize;
+    while group_start < partition_rows.len() {
+        let group_end =
+            peer_group_end_for_index(partition_rows, &clause.spec.order_by, group_start)?;
+        for row in partition_rows.iter_mut().take(group_end).skip(group_start) {
+            advance_window_aggregate(ctx, &mut state, &mut row.row, aggref)?;
+        }
+        let value = state.finalize();
+        values.extend(std::iter::repeat_n(value, group_end - group_start));
+        group_start = group_end;
+    }
+
+    Ok(Some(values))
 }
 
 fn frame_uses_prefix_accumulation(
