@@ -420,6 +420,7 @@ pub(super) fn compare_subquery_values(
         SubqueryComparisonOp::Gt => order_values(">", left, right, collation_oid),
         SubqueryComparisonOp::GtEq => order_values(">=", left, right, collation_oid),
         SubqueryComparisonOp::Match => match (&left, &right) {
+            (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
             (Value::TsVector(vector), Value::TsQuery(query)) => Ok(Value::Bool(
                 crate::backend::executor::eval_tsvector_matches_tsquery(vector, query),
             )),

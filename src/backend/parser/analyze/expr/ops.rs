@@ -1857,6 +1857,44 @@ pub(super) fn bind_overloaded_binary_expr(
                     ],
                 ));
             }
+            if is_text_like_type(left_type) && matches!(right_type.kind, SqlTypeKind::TsQuery) {
+                return Ok(Expr::builtin_func(
+                    BuiltinScalarFunction::TsMatch,
+                    Some(SqlType::new(SqlTypeKind::Bool)),
+                    false,
+                    vec![
+                        coerce_bound_expr(
+                            left_bound,
+                            raw_left_type,
+                            SqlType::new(SqlTypeKind::Text),
+                        ),
+                        coerce_bound_expr(
+                            right_bound,
+                            raw_right_type,
+                            SqlType::new(SqlTypeKind::TsQuery),
+                        ),
+                    ],
+                ));
+            }
+            if is_text_like_type(left_type) && is_text_like_type(right_type) {
+                return Ok(Expr::builtin_func(
+                    BuiltinScalarFunction::TsMatch,
+                    Some(SqlType::new(SqlTypeKind::Bool)),
+                    false,
+                    vec![
+                        coerce_bound_expr(
+                            left_bound,
+                            raw_left_type,
+                            SqlType::new(SqlTypeKind::Text),
+                        ),
+                        coerce_bound_expr(
+                            right_bound,
+                            raw_right_type,
+                            SqlType::new(SqlTypeKind::Text),
+                        ),
+                    ],
+                ));
+            }
         }
         "&&" => {
             if let Some(result) = bind_maybe_geometry_comparison(
@@ -1987,14 +2025,94 @@ pub(super) fn bind_catalog_binary_operator_expr(
 fn builtin_impl_for_catalog_proc(
     row: &crate::include::catalog::PgProcRow,
 ) -> Option<crate::include::nodes::primnodes::BuiltinScalarFunction> {
-    [row.prosrc.as_str(), row.proname.as_str()]
-        .into_iter()
-        .any(|name| {
-            ["pt_in_widget", "pg_rust_test_pt_in_widget"]
-                .into_iter()
-                .any(|candidate| name.eq_ignore_ascii_case(candidate))
-        })
-        .then_some(crate::include::nodes::primnodes::BuiltinScalarFunction::PgRustTestPtInWidget)
+    crate::include::catalog::builtin_scalar_function_for_proc_row(row).or_else(|| {
+        [row.prosrc.as_str(), row.proname.as_str()]
+            .into_iter()
+            .any(|name| {
+                ["pt_in_widget", "pg_rust_test_pt_in_widget"]
+                    .into_iter()
+                    .any(|candidate| name.eq_ignore_ascii_case(candidate))
+            })
+            .then_some(
+                crate::include::nodes::primnodes::BuiltinScalarFunction::PgRustTestPtInWidget,
+            )
+    })
+}
+
+pub(super) fn bind_maybe_tsquery_contains(
+    op: &'static str,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Option<Result<Expr, ParseError>> {
+    if !matches!(op, "@>" | "<@") {
+        return None;
+    }
+
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let mut left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let mut right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    let left_is_string_literal = matches!(
+        left,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    );
+    let right_is_string_literal = matches!(
+        right,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    );
+
+    if matches!(left_type.kind, SqlTypeKind::TsQuery) && right_is_string_literal {
+        right_type = SqlType::new(SqlTypeKind::TsQuery);
+    } else if matches!(right_type.kind, SqlTypeKind::TsQuery) && left_is_string_literal {
+        left_type = SqlType::new(SqlTypeKind::TsQuery);
+    }
+
+    if !matches!(left_type.kind, SqlTypeKind::TsQuery)
+        || !matches!(right_type.kind, SqlTypeKind::TsQuery)
+    {
+        return None;
+    }
+
+    Some((|| {
+        let left_bound =
+            bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+        let right_bound = bind_expr_with_outer_and_ctes(
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?;
+        Ok(Expr::builtin_func(
+            if op == "@>" {
+                BuiltinScalarFunction::TsQueryContains
+            } else {
+                BuiltinScalarFunction::TsQueryContainedBy
+            },
+            Some(SqlType::new(SqlTypeKind::Bool)),
+            false,
+            vec![
+                coerce_bound_expr(
+                    left_bound,
+                    raw_left_type,
+                    SqlType::new(SqlTypeKind::TsQuery),
+                ),
+                coerce_bound_expr(
+                    right_bound,
+                    raw_right_type,
+                    SqlType::new(SqlTypeKind::TsQuery),
+                ),
+            ],
+        ))
+    })())
 }
 
 pub(super) fn bind_prefix_operator_expr(
