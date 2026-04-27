@@ -25773,6 +25773,219 @@ fn reciprocal_bpchar_after_triggers_keep_one_visible_row() {
 }
 
 #[test]
+fn plpgsql_select_into_record_preserves_field_types() {
+    let base = temp_dir("plpgsql_record_field_types");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table plpgsql_hub(name char(14), comment text, nslots integer)",
+    )
+    .unwrap();
+    db.execute(1, "insert into plpgsql_hub values ('base.hub1', 'hub', 16)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_hub_over_limit(hname char(14), slotno integer)
+         returns boolean language plpgsql as $$
+         declare
+           hubrec record;
+         begin
+           select into hubrec * from plpgsql_hub where name = hname;
+           return slotno > hubrec.nslots;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_hub_over_limit('base.hub1', 17)"),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn plpgsql_labeled_record_reference_uses_outer_slot_when_shadowed() {
+    let base = temp_dir("plpgsql_labeled_record_shadow");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table plpgsql_label_pslot(slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table plpgsql_label_pline(slotname char(20), comment text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into plpgsql_label_pslot values ('PS.base.a1', 'PL.one')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into plpgsql_label_pline values ('PL.one', 'line')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_label_shadow_lookup() returns text language plpgsql as $$
+         <<outer>>
+         declare
+           rec record;
+         begin
+           select into rec * from plpgsql_label_pslot where slotname = 'PS.base.a1';
+           declare
+             rec record;
+           begin
+             select into rec * from plpgsql_label_pline
+               where slotname = \"outer\".rec.backlink;
+             return trim(\"outer\".rec.backlink) || ':' || rec.comment;
+           end;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_label_shadow_lookup()"),
+        vec![vec![Value::Text("PL.one:line".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_assignment_query_expr_from_clause_uses_sql_scope() {
+    let base = temp_dir("plpgsql_assignment_query_expr_from");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table plpgsql_assignment_hub(name char(14), comment text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table plpgsql_assignment_hslot(slotname char(20), hubname char(14), slotno integer)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into plpgsql_assignment_hub values ('base.hub1', 'hub')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into plpgsql_assignment_hslot values ('HS.base.hub1.1', 'base.hub1', 1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_assignment_hslot_view(sname char(20))
+         returns text language plpgsql as $$
+         declare
+           retval text;
+         begin
+           retval := comment from plpgsql_assignment_hub h, plpgsql_assignment_hslot hs
+             where hs.slotname = sname and h.name = hs.hubname;
+           retval := retval || ' slot ';
+           retval := retval || slotno::text from plpgsql_assignment_hslot
+             where slotname = sname;
+           return retval;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select plpgsql_assignment_hslot_view('HS.base.hub1.1')"
+        ),
+        vec![vec![Value::Text("hub slot 1".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_after_trigger_update_keeps_new_row_and_reciprocal_update() {
+    let base = temp_dir("plpgsql_trigger_backlink_update");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table plpgsql_pslot(slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table plpgsql_wslot(slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(1, "insert into plpgsql_pslot values ('PS.base.a1', '')")
+        .unwrap();
+    db.execute(1, "insert into plpgsql_wslot values ('WS.001.1a', '')")
+        .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_set_wslot(myname char(20), blname char(20))
+         returns integer language plpgsql as $$
+         declare
+           rec record;
+         begin
+           select into rec * from plpgsql_wslot where slotname = myname;
+           if rec.backlink != blname then
+             update plpgsql_wslot set backlink = blname where slotname = myname;
+           end if;
+           return 0;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_pslot_backlink_a() returns trigger language plpgsql as $$
+         declare
+           dummy integer;
+         begin
+           if new.backlink != '' then
+             dummy := plpgsql_set_wslot(new.backlink, new.slotname);
+           end if;
+           return new;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger plpgsql_pslot_backlink_a
+         after update on plpgsql_pslot
+         for each row execute function plpgsql_pslot_backlink_a()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "update plpgsql_pslot set backlink = 'WS.001.1a' where slotname = 'PS.base.a1'",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select trim(p.backlink), trim(w.backlink)
+             from plpgsql_pslot p, plpgsql_wslot w
+             where p.slotname = 'PS.base.a1' and w.slotname = 'WS.001.1a'",
+        ),
+        vec![vec![
+            Value::Text("WS.001.1a".into()),
+            Value::Text("PS.base.a1".into())
+        ]]
+    );
+}
+
+#[test]
 fn bpchar_before_update_trigger_does_not_treat_unchanged_key_as_renamed() {
     let base = temp_dir("bpchar_before_update_same_key_not_renamed");
     let db = Database::open(&base, 16).unwrap();
