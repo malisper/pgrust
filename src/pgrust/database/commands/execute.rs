@@ -2681,6 +2681,8 @@ impl Database {
             row_locks: std::sync::Arc::clone(&self.row_locks),
             statement_lock_scope_id,
             interrupt_guard: None,
+            catalog_effect_start: 0,
+            base_command_id: command_id,
         })
     }
 }

@@ -777,12 +777,18 @@ fn execute_matview_select_rows(
     xid: TransactionId,
     cid: CommandId,
     interrupts: Arc<InterruptState>,
-    catalog: &dyn CatalogLookup,
+    catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup,
     stmt: Statement,
     allow_side_effects: bool,
 ) -> Result<MatviewSelectResult, ExecError> {
-    let mut ctx =
-        db.matview_executor_context(client_id, xid, cid, interrupts, None, allow_side_effects)?;
+    let mut ctx = db.matview_executor_context(
+        client_id,
+        xid,
+        cid,
+        interrupts,
+        Some(crate::backend::executor::executor_catalog(catalog.clone())),
+        allow_side_effects,
+    )?;
     let StatementResult::Query { rows, .. } = execute_readonly_statement(stmt, catalog, &mut ctx)?
     else {
         unreachable!("materialized view query should return rows");

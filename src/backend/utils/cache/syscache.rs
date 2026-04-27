@@ -38,7 +38,7 @@ use crate::include::catalog::{
     bootstrap_composite_type_rows, builtin_type_rows, system_catalog_index_by_oid,
 };
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::parsenodes::SqlType;
+use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
 use crate::pgrust::database::Database;
 
 const PG_ATTRIBUTE_RELID_ATTNAM_INDEX_OID: u32 = 2658;
@@ -767,6 +767,15 @@ impl From<Option<(TransactionId, CommandId)>> for BackendCacheContext {
     }
 }
 
+fn relation_cache_context(cache_ctx: BackendCacheContext) -> BackendCacheContext {
+    match cache_ctx {
+        BackendCacheContext::Autocommit => BackendCacheContext::Autocommit,
+        BackendCacheContext::Transaction { xid, .. } => {
+            BackendCacheContext::Transaction { xid, cid: 0 }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum SysCacheKeyPart {
     Int16(i16),
@@ -935,6 +944,7 @@ pub struct BackendCacheState {
     pub catcache: Option<CatCache>,
     pub catcache_ctx: Option<BackendCacheContext>,
     pub relation_cache: HashMap<u32, RelCacheEntry>,
+    pub relation_cache_ctx: Option<BackendCacheContext>,
     pub(crate) syscache: BackendSysCache,
     pub pending_invalidations: Vec<CatalogInvalidation>,
 }
@@ -1343,6 +1353,8 @@ pub(crate) fn relation_id_get_relation_db(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Result<Option<RelCacheEntry>, CatalogError> {
+    let cache_ctx = BackendCacheContext::from(txn_ctx);
+    let relation_cache_ctx = relation_cache_context(cache_ctx);
     if txn_ctx.is_none() {
         db.accept_invalidation_messages(client_id);
     }
@@ -1350,6 +1362,7 @@ pub(crate) fn relation_id_get_relation_db(
         .backend_cache_states
         .read()
         .get(&client_id)
+        .filter(|state| state.relation_cache_ctx == Some(relation_cache_ctx))
         .and_then(|state| state.relation_cache.get(&relation_oid).cloned())
     {
         return Ok(Some(entry));
@@ -1460,7 +1473,7 @@ pub(crate) fn relation_id_get_relation_db(
     let mut columns = Vec::with_capacity(attributes.len());
     for attr in attributes {
         let fdw_options = attr.attfdwoptions.clone();
-        let sql_type = search_sys_cache1_db(
+        let type_row = search_sys_cache1_db(
             db,
             client_id,
             txn_ctx,
@@ -1469,11 +1482,40 @@ pub(crate) fn relation_id_get_relation_db(
         )?
         .into_iter()
         .find_map(|tuple| match tuple {
-            SysCacheTuple::Type(row) => Some(row.sql_type),
+            SysCacheTuple::Type(row) => Some(row),
             _ => None,
-        })
-        .or_else(|| dynamic_types_by_oid.get(&attr.atttypid).copied())
-        .ok_or(CatalogError::Corrupt("unknown atttypid"))?;
+        });
+        let sql_type = if let Some(type_row) = type_row {
+            let mut sql_type = type_row.sql_type;
+            if sql_type.is_array
+                && matches!(sql_type.kind, SqlTypeKind::Record)
+                && type_row.typelem != 0
+                && let Some(element_type) = search_sys_cache1_db(
+                    db,
+                    client_id,
+                    txn_ctx,
+                    SysCacheId::TypeOid,
+                    oid_key(type_row.typelem),
+                )?
+                .into_iter()
+                .find_map(|tuple| match tuple {
+                    SysCacheTuple::Type(row)
+                        if matches!(row.sql_type.kind, SqlTypeKind::Composite) =>
+                    {
+                        Some(row.sql_type)
+                    }
+                    _ => None,
+                })
+            {
+                sql_type = SqlType::array_of(element_type);
+            }
+            sql_type
+        } else {
+            dynamic_types_by_oid
+                .get(&attr.atttypid)
+                .copied()
+                .ok_or(CatalogError::Corrupt("unknown atttypid"))?
+        };
         let mut desc = column_desc(
             attr.attname,
             SqlType {
@@ -1489,7 +1531,12 @@ pub(crate) fn relation_id_get_relation_db(
         desc.attstattarget = attr.attstattarget;
         desc.attinhcount = attr.attinhcount;
         desc.attislocal = attr.attislocal;
+        desc.attacl = attr.attacl.clone();
+        desc.collation_oid = attr.attcollation;
         desc.fdw_options = fdw_options;
+        desc.identity = crate::include::nodes::parsenodes::ColumnIdentityKind::from_catalog_char(
+            attr.attidentity,
+        );
         desc.generated = crate::include::nodes::parsenodes::ColumnGeneratedKind::from_catalog_char(
             attr.attgenerated,
         );
@@ -1671,12 +1718,13 @@ pub(crate) fn relation_id_get_relation_db(
         index,
     };
 
-    db.backend_cache_states
-        .write()
-        .entry(client_id)
-        .or_default()
-        .relation_cache
-        .insert(relation_oid, entry.clone());
+    let mut states = db.backend_cache_states.write();
+    let state = states.entry(client_id).or_default();
+    if state.relation_cache_ctx != Some(relation_cache_ctx) {
+        state.relation_cache.clear();
+        state.relation_cache_ctx = Some(relation_cache_ctx);
+    }
+    state.relation_cache.insert(relation_oid, entry.clone());
 
     Ok(Some(entry))
 }

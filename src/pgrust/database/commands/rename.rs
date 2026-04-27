@@ -205,6 +205,7 @@ impl Database {
             .write()
             .rename_relation_mvcc(relation.relation_oid, &new_name, &visible_type_rows, &ctx)
             .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
         rewrite_dependent_views(
             self,
@@ -399,6 +400,7 @@ impl Database {
                     &ctx,
                 )
                 .map_err(map_relation_rename_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
             catalog_effects.push(effect);
             rewrite_dependent_views(
                 self,
@@ -535,6 +537,7 @@ impl Database {
                     &ctx,
                 )
                 .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
             catalog_effects.push(effect);
         }
         rewrite_dependent_views(
@@ -655,6 +658,7 @@ impl Database {
             .write()
             .alter_view_relation_desc_mvcc(relation.relation_oid, new_desc, reloptions, &ctx)
             .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
         rewrite_dependent_views(
             self,
@@ -886,6 +890,7 @@ impl Database {
                 &ctx,
             )
             .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
         rewrite_dependent_views(
             self,

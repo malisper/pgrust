@@ -79,6 +79,7 @@ pub fn set_transaction_snapshot_override(
     state.catcache = None;
     state.catcache_ctx = None;
     state.relation_cache.clear();
+    state.relation_cache_ctx = None;
 }
 
 pub fn clear_transaction_snapshot_override(db: &Database, client_id: ClientId) {
@@ -89,6 +90,7 @@ pub fn clear_transaction_snapshot_override(db: &Database, client_id: ClientId) {
         state.catcache = None;
         state.catcache_ctx = None;
         state.relation_cache.clear();
+        state.relation_cache_ctx = None;
     }
 }
 

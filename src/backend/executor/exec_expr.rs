@@ -5040,10 +5040,20 @@ fn sequence_runtime(
 
 fn sequence_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> Option<String> {
     let class = catalog.class_row_by_oid(relation_oid)?;
+    if catalog
+        .lookup_any_relation(&class.relname)
+        .is_some_and(|relation| relation.relation_oid == relation_oid)
+    {
+        return Some(quote_identifier_if_needed(&class.relname));
+    }
     let namespace = catalog
         .namespace_row_by_oid(class.relnamespace)
         .map(|row| row.nspname)?;
-    Some(format!("{namespace}.{}", class.relname))
+    Some(format!(
+        "{}.{}",
+        quote_identifier_if_needed(&namespace),
+        quote_identifier_if_needed(&class.relname)
+    ))
 }
 
 fn large_object_runtime(

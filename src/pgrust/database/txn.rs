@@ -80,6 +80,22 @@ impl Database {
                     ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(e))
                 })?;
         }
+        let invalidation = catalog_invalidation_from_effect(effect);
+        if !invalidation.is_empty() {
+            let client_ids = self
+                .backend_cache_states
+                .read()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            for client_id in client_ids {
+                crate::backend::utils::cache::inval::apply_backend_cache_invalidation(
+                    self,
+                    client_id,
+                    &invalidation,
+                );
+            }
+        }
         Ok(())
     }
 

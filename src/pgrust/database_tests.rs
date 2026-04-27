@@ -2420,7 +2420,7 @@ fn materialized_view_with_no_data_refreshes_and_rejects_writes() {
         .unwrap_err();
     assert!(matches!(
         unpopulated_err,
-        ExecError::DetailedError { message, .. }
+        ExecError::DetailedError { ref message, .. }
             if message == "materialized view \"plpgsql_void_mv2\" has not been populated"
     ));
     session.execute(&db, "rollback").unwrap();
@@ -2452,11 +2452,14 @@ fn materialized_view_with_no_data_refreshes_and_rejects_writes() {
     let portal_unpopulated_err = session
         .execute(&db, "select * from plpgsql_portal_mv2")
         .unwrap_err();
-    assert!(matches!(
-        portal_unpopulated_err,
-        ExecError::DetailedError { message, .. }
-            if message == "materialized view \"plpgsql_portal_mv2\" has not been populated"
-    ));
+    assert!(
+        matches!(
+            portal_unpopulated_err,
+            ExecError::DetailedError { ref message, .. }
+                if message == "materialized view \"plpgsql_portal_mv2\" has not been populated"
+        ),
+        "unexpected portal matview error: {portal_unpopulated_err:?}"
+    );
     session.execute(&db, "rollback").unwrap();
 }
 
@@ -11399,10 +11402,12 @@ fn relation_descriptor_cache_survives_command_id_changes_and_invalidates() {
 
     db.execute(1, "create table relcache_lifetime (id int4 not null)")
         .unwrap();
+    let xid = db.txns.write().begin();
+    let cid = 1;
     db.backend_cache_states.write().remove(&1);
 
     let relation = db
-        .lazy_catalog_lookup(1, None, None)
+        .lazy_catalog_lookup(1, Some((xid, cid)), None)
         .lookup_any_relation("relcache_lifetime")
         .unwrap();
     let relation_oid = relation.relation_oid;
@@ -11416,10 +11421,11 @@ fn relation_descriptor_cache_survives_command_id_changes_and_invalidates() {
     );
 
     let cached_with_later_cid = db
-        .lazy_catalog_lookup(1, Some((999_999, 42)), None)
+        .lazy_catalog_lookup(1, Some((xid, cid.saturating_add(1))), None)
         .relation_by_oid(relation_oid)
         .unwrap();
     assert_eq!(cached_with_later_cid.relation_oid, relation_oid);
+    db.txns.write().abort(xid).unwrap();
 
     let mut invalidation = crate::backend::utils::cache::inval::CatalogInvalidation::default();
     invalidation

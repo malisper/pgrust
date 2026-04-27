@@ -25,6 +25,52 @@ query_repl.rs still has the existing unreachable-pattern warning during check.
 ---
 
 Goal:
+Fix cargo-test CI failures from the targeted relcache/fmgr PR.
+
+Key decisions:
+Carry full pg_attribute metadata in targeted relation descriptors, including identity, ACL, and collation.
+Scope relation descriptor cache by backend cache context while reusing it across command IDs in the same transaction.
+Apply local catalog invalidations when immediate catalog effects are applied so multi-step DDL sees its own changes.
+Give materialized-view SELECT execution an executor catalog for user-defined scalar calls.
+Run command-end catalog bookkeeping when streaming SELECT portals complete.
+Use search-path-visible sequence names for pg_get_serial_sequence.
+Repair dynamic composite array type metadata during targeted relation descriptor construction.
+
+Files touched:
+src/backend/executor/exec_expr.rs
+src/backend/tcop/postgres.rs
+src/backend/utils/cache/inval.rs
+src/backend/utils/cache/syscache.rs
+src/backend/utils/time/snapmgr.rs
+src/pgrust/database/commands/execute.rs
+src/pgrust/database/commands/matview.rs
+src/pgrust/database/commands/rename.rs
+src/pgrust/database/txn.rs
+src/pgrust/session.rs
+src/pgrust/database_tests.rs
+
+Tests run:
+cargo fmt
+scripts/cargo_isolated.sh check
+scripts/cargo_isolated.sh test --lib --quiet alter_identity_and_overriding_enforce_generated_always
+scripts/cargo_isolated.sh test --lib --quiet create_table_like_copies_identity_only_when_requested
+scripts/cargo_isolated.sh test --lib --quiet create_index_on_partitioned_table_builds_index_tree
+scripts/cargo_isolated.sh test --lib --quiet create_index_on_partitioned_table_reuses_only_child_without_recursing
+scripts/cargo_isolated.sh test --lib --quiet create_table_serial_creates_sequence_defaults_and_persists_state
+scripts/cargo_isolated.sh test --lib --quiet alter_table_add_column_serial_backfills_existing_rows_and_keeps_sequence_advancing
+scripts/cargo_isolated.sh test --lib --quiet dependent_views_track_relation_rename_and_set_schema
+scripts/cargo_isolated.sh test --lib --quiet materialized_view_with_no_data_refreshes_and_rejects_writes
+scripts/cargo_isolated.sh test --lib --quiet materialized_view_set_schema_refresh_concurrently_and_drop_cascade
+scripts/cargo_isolated.sh test --lib --quiet vacuum_full_rewrites_storage_and_preserves_rows
+scripts/cargo_isolated.sh test --lib --quiet failed_unique_index_concurrently_leaves_invalid_catalog_state
+scripts/cargo_isolated.sh test --lib --quiet pg_get_ruledef_formats_insert_rule_actions_with_casts
+
+Remaining:
+No local failures in the attached CI repro set.
+
+---
+
+Goal:
 Fix cargo-test CI failures from the tsrf/subquery planning PR.
 
 Key decisions:

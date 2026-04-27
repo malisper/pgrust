@@ -61,6 +61,7 @@ pub fn apply_backend_cache_invalidation(
     state.catcache_ctx = None;
     if invalidation.relation_oids.is_empty() {
         state.relation_cache.clear();
+        state.relation_cache_ctx = None;
     } else {
         for relation_oid in &invalidation.relation_oids {
             state.relation_cache.remove(relation_oid);
