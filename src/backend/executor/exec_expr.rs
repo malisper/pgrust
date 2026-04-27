@@ -104,7 +104,10 @@ use super::expr_string::{
     eval_upper_function,
 };
 use super::expr_txid::eval_txid_builtin_function;
-use super::expr_xml::{eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function};
+use super::expr_xml::{
+    eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function,
+    unsupported_xml_feature_error,
+};
 use super::node_types::*;
 use super::pg_regex::{
     eval_regex_match_operator, eval_regexp_count, eval_regexp_instr, eval_regexp_like,
@@ -132,6 +135,7 @@ use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::backend::utils::misc::guc::plpgsql_guc_default_value;
 use crate::backend::utils::time::datetime::current_postgres_timestamp_usecs;
 use crate::include::access::toast_compression::ToastCompressionId;
+use crate::include::catalog::pg_proc::bootstrap_proc_execute_acl_has_grantee;
 use crate::include::catalog::{
     ANYOID, BOX_SPGIST_OPCLASS_OID, BPCHAR_HASH_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID,
     BYTEA_TYPE_OID, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
@@ -3078,6 +3082,743 @@ fn eval_pg_column_compression_values(values: &[Value]) -> Result<Value, ExecErro
     }
 }
 
+fn eval_pg_column_toast_chunk_id_raw(raw: &[u8]) -> Result<Value, ExecError> {
+    if !crate::include::varatt::is_ondisk_toast_pointer(raw) {
+        return Ok(Value::Null);
+    }
+    let pointer = crate::include::varatt::decode_ondisk_toast_pointer(raw).ok_or_else(|| {
+        ExecError::DetailedError {
+            message: "invalid on-disk toast pointer".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        }
+    })?;
+    Ok(Value::Int64(i64::from(pointer.va_valueid)))
+}
+
+fn eval_pg_column_toast_chunk_id_values(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [_] => Ok(Value::Null),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_column_toast_chunk_id(any)",
+            actual: format!("PgColumnToastChunkId({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_num_nulls(values: &[Value], func_variadic: bool, count_nulls: bool) -> Value {
+    if func_variadic {
+        let Some(value) = values.first() else {
+            return Value::Int32(0);
+        };
+        if matches!(value, Value::Null) {
+            return Value::Null;
+        }
+        let Some(array) = crate::include::nodes::datum::array_value_from_value(value) else {
+            return Value::Int32(if matches!(value, Value::Null) == count_nulls {
+                1
+            } else {
+                0
+            });
+        };
+        let count = array
+            .elements
+            .iter()
+            .filter(|value| matches!(value, Value::Null) == count_nulls)
+            .count();
+        return Value::Int32(count as i32);
+    }
+    Value::Int32(
+        values
+            .iter()
+            .filter(|value| matches!(value, Value::Null) == count_nulls)
+            .count() as i32,
+    )
+}
+
+fn data_dir_path(ctx: &ExecutorContext) -> Result<std::path::PathBuf, ExecError> {
+    ctx.data_dir
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "data directory is not available".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })
+}
+
+fn resolve_data_file(
+    ctx: &ExecutorContext,
+    filename: &str,
+) -> Result<std::path::PathBuf, ExecError> {
+    let path = std::path::Path::new(filename);
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(data_dir_path(ctx)?.join(path))
+}
+
+fn file_timestamp_value(time: std::io::Result<std::time::SystemTime>) -> Value {
+    const UNIX_EPOCH_TO_POSTGRES_EPOCH_DAYS: i64 = 10_957;
+    match time
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+    {
+        Some(duration) => {
+            let usecs =
+                duration.as_secs() as i64 * USECS_PER_SEC + i64::from(duration.subsec_micros());
+            Value::TimestampTz(TimestampTzADT(
+                usecs
+                    - UNIX_EPOCH_TO_POSTGRES_EPOCH_DAYS
+                        * crate::include::nodes::datetime::USECS_PER_DAY,
+            ))
+        }
+        None => Value::Null,
+    }
+}
+
+fn read_file_args(values: &[Value]) -> Result<(String, Option<i64>, Option<i64>, bool), ExecError> {
+    let filename = values
+        .first()
+        .and_then(Value::as_text)
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "pg_read_file",
+            left: values.first().cloned().unwrap_or(Value::Null),
+            right: Value::Text("".into()),
+        })?
+        .to_string();
+    let (offset, length, missing_ok) = match values {
+        [_] => (None, None, false),
+        [_, Value::Bool(missing_ok)] => (None, None, *missing_ok),
+        [_, offset, length] => (
+            Some(int64_arg(offset, "pg_read_file offset")?),
+            Some(int64_arg(length, "pg_read_file length")?),
+            false,
+        ),
+        [_, offset, length, Value::Bool(missing_ok)] => (
+            Some(int64_arg(offset, "pg_read_file offset")?),
+            Some(int64_arg(length, "pg_read_file length")?),
+            *missing_ok,
+        ),
+        _ => return Err(malformed_expr_error("pg_read_file")),
+    };
+    if length.is_some_and(|length| length < 0) {
+        return Err(ExecError::DetailedError {
+            message: "requested length cannot be negative".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    Ok((filename, offset, length, missing_ok))
+}
+
+fn int64_arg(value: &Value, op: &'static str) -> Result<i64, ExecError> {
+    match value {
+        Value::Int16(v) => Ok(i64::from(*v)),
+        Value::Int32(v) => Ok(i64::from(*v)),
+        Value::Int64(v) => Ok(*v),
+        _ => Err(ExecError::TypeMismatch {
+            op,
+            left: value.clone(),
+            right: Value::Int64(0),
+        }),
+    }
+}
+
+fn pg_io_error_message(err: &std::io::Error) -> String {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => "No such file or directory".into(),
+        _ => err.to_string(),
+    }
+}
+
+fn synthetic_postmaster_pid_bytes() -> Vec<u8> {
+    b"1\n/var/run/pgrust\n0\n0\n0\n0\n".to_vec()
+}
+
+fn eval_pg_read_file(
+    values: &[Value],
+    ctx: &ExecutorContext,
+    binary: bool,
+) -> Result<Value, ExecError> {
+    let (filename, offset, length, missing_ok) = read_file_args(values)?;
+    let path = resolve_data_file(ctx, &filename)?;
+    let mut bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if missing_ok && err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Value::Null);
+        }
+        // :HACK: pgrust test/server clusters do not maintain PostgreSQL's postmaster.pid yet,
+        // but SQL-visible admin functions expect the data-directory sentinel to be readable.
+        Err(err) if filename == "postmaster.pid" && err.kind() == std::io::ErrorKind::NotFound => {
+            synthetic_postmaster_pid_bytes()
+        }
+        Err(err) => {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "could not open file \"{filename}\" for reading: {}",
+                    pg_io_error_message(&err)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "58P01",
+            });
+        }
+    };
+    if let Some(offset) = offset {
+        let start = offset.max(0) as usize;
+        if start >= bytes.len() {
+            bytes.clear();
+        } else {
+            bytes = bytes[start..].to_vec();
+        }
+    }
+    if let Some(length) = length {
+        bytes.truncate(length as usize);
+    }
+    if binary {
+        Ok(Value::Bytea(bytes))
+    } else {
+        Ok(Value::Text(
+            String::from_utf8_lossy(&bytes).into_owned().into(),
+        ))
+    }
+}
+
+fn eval_pg_stat_file(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let filename =
+        values
+            .first()
+            .and_then(Value::as_text)
+            .ok_or_else(|| ExecError::TypeMismatch {
+                op: "pg_stat_file",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: Value::Text("".into()),
+            })?;
+    let missing_ok = values
+        .get(1)
+        .map(|value| matches!(value, Value::Bool(true)))
+        .unwrap_or(false);
+    let path = resolve_data_file(ctx, filename)?;
+    let metadata = match std::fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(err) if missing_ok && err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Value::Null);
+        }
+        // :HACK: mirror the synthetic postmaster.pid read path until cluster startup writes it.
+        Err(err) if filename == "postmaster.pid" && err.kind() == std::io::ErrorKind::NotFound => {
+            let now = Value::TimestampTz(TimestampTzADT(ctx.statement_timestamp_usecs));
+            return Ok(Value::Record(
+                crate::include::nodes::datum::RecordValue::anonymous(vec![
+                    (
+                        "size".into(),
+                        Value::Int64(synthetic_postmaster_pid_bytes().len() as i64),
+                    ),
+                    ("access".into(), now.clone()),
+                    ("modification".into(), now.clone()),
+                    ("change".into(), now.clone()),
+                    ("creation".into(), now),
+                    ("isdir".into(), Value::Bool(false)),
+                ]),
+            ));
+        }
+        Err(err) => {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "could not stat file \"{filename}\": {}",
+                    pg_io_error_message(&err)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "58P01",
+            });
+        }
+    };
+    Ok(Value::Record(
+        crate::include::nodes::datum::RecordValue::anonymous(vec![
+            ("size".into(), Value::Int64(metadata.len() as i64)),
+            ("access".into(), file_timestamp_value(metadata.accessed())),
+            (
+                "modification".into(),
+                file_timestamp_value(metadata.modified()),
+            ),
+            ("change".into(), file_timestamp_value(metadata.modified())),
+            ("creation".into(), file_timestamp_value(metadata.created())),
+            ("isdir".into(), Value::Bool(metadata.is_dir())),
+        ]),
+    ))
+}
+
+fn wal_segment_file_name(segno: u64) -> String {
+    let segs_per_logid =
+        0x1_0000_0000u64 / crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES as u64;
+    let log = segno / segs_per_logid;
+    let seg = segno % segs_per_logid;
+    format!("{:08X}{log:08X}{seg:08X}", 1u32)
+}
+
+fn wal_segment_no(lsn: u64) -> u64 {
+    lsn / crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES as u64
+}
+
+fn wal_segment_offset(lsn: u64) -> u64 {
+    lsn % crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES as u64
+}
+
+fn parse_wal_file_name(name: &str) -> Option<(u32, u64)> {
+    if name.len() != 24 || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let timeline = u32::from_str_radix(&name[0..8], 16).ok()?;
+    let log = u32::from_str_radix(&name[8..16], 16).ok()? as u64;
+    let seg = u32::from_str_radix(&name[16..24], 16).ok()? as u64;
+    let segs_per_logid =
+        0x1_0000_0000u64 / crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES as u64;
+    Some((timeline, log * segs_per_logid + seg))
+}
+
+fn eval_pg_walfile_name(values: &[Value]) -> Result<Value, ExecError> {
+    let [Value::PgLsn(lsn)] = values else {
+        return Ok(Value::Null);
+    };
+    Ok(Value::Text(
+        wal_segment_file_name(wal_segment_no(*lsn)).into(),
+    ))
+}
+
+fn eval_pg_walfile_name_offset(values: &[Value]) -> Result<Value, ExecError> {
+    let [Value::PgLsn(lsn)] = values else {
+        return Ok(Value::Record(
+            crate::include::nodes::datum::RecordValue::anonymous(vec![
+                ("file_name".into(), Value::Null),
+                ("file_offset".into(), Value::Null),
+            ]),
+        ));
+    };
+    Ok(Value::Record(
+        crate::include::nodes::datum::RecordValue::anonymous(vec![
+            (
+                "file_name".into(),
+                Value::Text(wal_segment_file_name(wal_segment_no(*lsn)).into()),
+            ),
+            (
+                "file_offset".into(),
+                Value::Int32(wal_segment_offset(*lsn) as i32),
+            ),
+        ]),
+    ))
+}
+
+fn eval_pg_split_walfile_name(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(name) = values.first().and_then(Value::as_text) else {
+        return Ok(Value::Record(
+            crate::include::nodes::datum::RecordValue::anonymous(vec![
+                ("segment_number".into(), Value::Null),
+                ("timeline_id".into(), Value::Null),
+            ]),
+        ));
+    };
+    let Some((timeline, segno)) = parse_wal_file_name(name) else {
+        return Err(ExecError::DetailedError {
+            message: format!("invalid WAL file name \"{name}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    };
+    Ok(Value::Record(
+        crate::include::nodes::datum::RecordValue::anonymous(vec![
+            (
+                "segment_number".into(),
+                Value::Numeric(NumericValue::from_i64(segno as i64)),
+            ),
+            ("timeline_id".into(), Value::Int64(i64::from(timeline))),
+        ]),
+    ))
+}
+
+fn eval_pg_control_record(func: BuiltinScalarFunction, ctx: &ExecutorContext) -> Value {
+    let now = ctx.statement_timestamp_usecs;
+    let wal_seg_size = crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES as i32;
+    let fields = match func {
+        BuiltinScalarFunction::PgControlSystem => vec![
+            ("pg_control_version".into(), Value::Int32(1300)),
+            ("catalog_version_no".into(), Value::Int32(0)),
+            ("system_identifier".into(), Value::Int64(0)),
+            (
+                "pg_control_last_modified".into(),
+                Value::TimestampTz(TimestampTzADT(now)),
+            ),
+        ],
+        BuiltinScalarFunction::PgControlCheckpoint => vec![
+            ("checkpoint_lsn".into(), Value::PgLsn(0)),
+            ("redo_lsn".into(), Value::PgLsn(0)),
+            (
+                "redo_wal_file".into(),
+                Value::Text(wal_segment_file_name(0).into()),
+            ),
+            ("timeline_id".into(), Value::Int32(1)),
+            ("prev_timeline_id".into(), Value::Int32(1)),
+            ("full_page_writes".into(), Value::Bool(true)),
+            ("next_xid".into(), Value::Text("0:1".into())),
+            ("next_oid".into(), Value::Int64(1)),
+            ("next_multixact_id".into(), Value::Int32(1)),
+            ("next_multi_offset".into(), Value::Int32(0)),
+            ("oldest_xid".into(), Value::Int32(1)),
+            ("oldest_xid_dbid".into(), Value::Int64(1)),
+            ("oldest_active_xid".into(), Value::Int32(1)),
+            ("oldest_multi_xid".into(), Value::Int32(1)),
+            ("oldest_multi_dbid".into(), Value::Int64(1)),
+            ("oldest_commit_ts_xid".into(), Value::Int32(0)),
+            ("newest_commit_ts_xid".into(), Value::Int32(0)),
+            (
+                "checkpoint_time".into(),
+                Value::TimestampTz(TimestampTzADT(now)),
+            ),
+        ],
+        BuiltinScalarFunction::PgControlRecovery => vec![
+            ("min_recovery_end_lsn".into(), Value::PgLsn(0)),
+            ("min_recovery_end_timeline".into(), Value::Int32(0)),
+            ("backup_start_lsn".into(), Value::PgLsn(0)),
+            ("backup_end_lsn".into(), Value::PgLsn(0)),
+            ("end_of_backup_record_required".into(), Value::Bool(false)),
+        ],
+        BuiltinScalarFunction::PgControlInit => vec![
+            ("max_data_alignment".into(), Value::Int32(8)),
+            ("database_block_size".into(), Value::Int32(8192)),
+            ("blocks_per_segment".into(), Value::Int32(131072)),
+            ("wal_block_size".into(), Value::Int32(8192)),
+            ("bytes_per_wal_segment".into(), Value::Int32(wal_seg_size)),
+            ("max_identifier_length".into(), Value::Int32(64)),
+            ("max_index_columns".into(), Value::Int32(32)),
+            ("max_toast_chunk_size".into(), Value::Int32(1996)),
+            ("large_object_chunk_size".into(), Value::Int32(2048)),
+            ("float8_pass_by_value".into(), Value::Bool(true)),
+            ("data_page_checksum_version".into(), Value::Int32(0)),
+            ("default_char_signedness".into(), Value::Bool(true)),
+        ],
+        _ => unreachable!("non-control builtin"),
+    };
+    // :HACK: This surfaces a stable pgrust control snapshot through the SQL API
+    // until pg_control fields are threaded directly from ControlFileStore.
+    Value::Record(crate::include::nodes::datum::RecordValue::anonymous(fields))
+}
+
+fn canonicalize_path_text(path: &str) -> String {
+    let absolute = path.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            if parts.last().is_some_and(|last| *last != "..") {
+                parts.pop();
+            } else if !absolute {
+                parts.push(part);
+            }
+        } else {
+            parts.push(part);
+        }
+    }
+    if absolute {
+        if parts.is_empty() {
+            "/".into()
+        } else {
+            format!("/{}", parts.join("/"))
+        }
+    } else if parts.is_empty() {
+        ".".into()
+    } else {
+        parts.join("/")
+    }
+}
+
+fn eval_test_canonicalize_path(values: &[Value]) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(malformed_expr_error("test_canonicalize_path"));
+    };
+    Ok(value
+        .as_text()
+        .map(canonicalize_path_text)
+        .map(Into::into)
+        .map(Value::Text)
+        .unwrap_or(Value::Null))
+}
+
+fn eval_gist_translate_cmptype_common(values: &[Value]) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(malformed_expr_error("gist_translate_cmptype_common"));
+    };
+    let strategy = int32_arg(value, "gist_translate_cmptype_common")?;
+    Ok(Value::Int16(match strategy {
+        3 => 18,
+        7 => 3,
+        other => other as i16,
+    }))
+}
+
+fn eval_pg_log_backend_memory_contexts(values: &[Value]) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(malformed_expr_error("pg_log_backend_memory_contexts"));
+    };
+    let _pid = int32_arg(value, "pg_log_backend_memory_contexts")?;
+    Ok(Value::Bool(true))
+}
+
+fn eval_pg_current_logfile(values: &[Value]) -> Result<Value, ExecError> {
+    if values.len() > 1 {
+        return Err(malformed_expr_error("pg_current_logfile"));
+    }
+    Ok(Value::Null)
+}
+
+fn acl_item_parts(item: &str) -> Option<(&str, &str, &str)> {
+    let (grantee, rest) = item.split_once('=')?;
+    let (privileges, grantor) = rest.split_once('/')?;
+    Some((grantee, privileges, grantor))
+}
+
+fn effective_role_names_for_oid(
+    catalog: &dyn CatalogLookup,
+    role_oid: u32,
+) -> std::collections::BTreeSet<String> {
+    let roles = catalog.authid_rows();
+    let memberships = catalog.auth_members_rows();
+    let mut names = std::collections::BTreeSet::from([String::new()]);
+    let mut pending = vec![role_oid];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(oid) = pending.pop() {
+        if !seen.insert(oid) {
+            continue;
+        }
+        if let Some(role) = roles.iter().find(|role| role.oid == oid) {
+            names.insert(role.rolname.clone());
+        }
+        pending.extend(
+            memberships
+                .iter()
+                .filter(|member| member.member == oid)
+                .map(|member| member.roleid),
+        );
+    }
+    names
+}
+
+fn role_oid_from_value(value: &Value, ctx: &ExecutorContext) -> Result<u32, ExecError> {
+    let catalog = ctx
+        .catalog
+        .as_ref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "has_function_privilege requires catalog context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })?;
+    if let Ok(oid) = oid_arg_to_u32(value, "has_function_privilege user") {
+        return Ok(oid);
+    }
+    let Some(name) = value.as_text() else {
+        return Err(ExecError::TypeMismatch {
+            op: "has_function_privilege user",
+            left: value.clone(),
+            right: Value::Text("".into()),
+        });
+    };
+    catalog
+        .authid_rows()
+        .into_iter()
+        .find(|row| row.rolname.eq_ignore_ascii_case(name))
+        .map(|row| row.oid)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("role \"{name}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42704",
+        })
+}
+
+fn function_oid_from_signature(
+    signature: &str,
+    catalog: &dyn CatalogLookup,
+) -> Result<u32, ExecError> {
+    let trimmed = signature.trim();
+    let Some(open) = trimmed.find('(') else {
+        return catalog
+            .proc_rows_by_name(trimmed)
+            .into_iter()
+            .find(|row| row.prokind == 'f')
+            .map(|row| row.oid)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("function {trimmed} does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "42883",
+            });
+    };
+    let close = trimmed.rfind(')').ok_or_else(|| ExecError::DetailedError {
+        message: format!("invalid function signature \"{signature}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "42601",
+    })?;
+    let name = trimmed[..open].trim();
+    let arg_sql = trimmed[open + 1..close].trim();
+    let arg_oids = if arg_sql.is_empty() {
+        Vec::new()
+    } else {
+        arg_sql
+            .split(',')
+            .map(str::trim)
+            .map(|arg| {
+                let raw = crate::backend::parser::parse_type_name(arg).map_err(ExecError::Parse)?;
+                let ty = crate::backend::parser::resolve_raw_type_name(&raw, catalog)
+                    .map_err(ExecError::Parse)?;
+                catalog
+                    .type_oid_for_sql_type(ty)
+                    .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(arg.into())))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let (schema_name, base_name) = name
+        .rsplit_once('.')
+        .map(|(schema, proc_name)| (Some(schema), proc_name))
+        .unwrap_or((None, name));
+    let namespace_oid = schema_name.and_then(|schema_name| {
+        catalog
+            .namespace_rows()
+            .into_iter()
+            .find(|row| row.nspname.eq_ignore_ascii_case(schema_name))
+            .map(|row| row.oid)
+    });
+    catalog
+        .proc_rows_by_name(base_name)
+        .into_iter()
+        .find(|row| {
+            row.prokind == 'f'
+                && namespace_oid
+                    .map(|oid| row.pronamespace == oid)
+                    .unwrap_or(true)
+                && row
+                    .proargtypes
+                    .split_whitespace()
+                    .filter_map(|part| part.parse::<u32>().ok())
+                    .collect::<Vec<_>>()
+                    == arg_oids
+        })
+        .map(|row| row.oid)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("function {signature} does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
+        })
+}
+
+fn function_oid_from_value(value: &Value, catalog: &dyn CatalogLookup) -> Result<u32, ExecError> {
+    if let Ok(oid) = oid_arg_to_u32(value, "has_function_privilege function") {
+        return Ok(oid);
+    }
+    let Some(signature) = value.as_text() else {
+        return Err(ExecError::TypeMismatch {
+            op: "has_function_privilege function",
+            left: value.clone(),
+            right: Value::Text("".into()),
+        });
+    };
+    function_oid_from_signature(signature, catalog)
+}
+
+fn eval_has_function_privilege(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    let catalog = ctx
+        .catalog
+        .as_ref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "has_function_privilege requires catalog context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })?;
+    let (role_oid, function_value, privilege_value) = match values {
+        [function_value, privilege_value] => {
+            (ctx.current_user_oid, function_value, privilege_value)
+        }
+        [role_value, function_value, privilege_value] => (
+            role_oid_from_value(role_value, ctx)?,
+            function_value,
+            privilege_value,
+        ),
+        _ => return Err(malformed_expr_error("has_function_privilege")),
+    };
+    let Some(privilege) = privilege_value.as_text() else {
+        return Err(ExecError::TypeMismatch {
+            op: "has_function_privilege privilege",
+            left: privilege_value.clone(),
+            right: Value::Text("".into()),
+        });
+    };
+    if !privilege.eq_ignore_ascii_case("execute") {
+        return Ok(Value::Bool(false));
+    }
+    let function_oid = function_oid_from_value(function_value, catalog)?;
+    let row = catalog
+        .proc_row_by_oid(function_oid)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("function with OID {function_oid} does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
+        })?;
+    let owner_name = catalog
+        .authid_rows()
+        .into_iter()
+        .find(|role| role.oid == row.proowner)
+        .map(|role| role.rolname)
+        .unwrap_or_else(|| "postgres".into());
+    let acl = row.proacl.unwrap_or_else(|| {
+        vec![
+            format!("{owner_name}=X/{owner_name}"),
+            format!("=X/{owner_name}"),
+        ]
+    });
+    let effective_names = effective_role_names_for_oid(catalog, role_oid);
+    if effective_names
+        .iter()
+        .any(|name| bootstrap_proc_execute_acl_has_grantee(function_oid, name))
+    {
+        return Ok(Value::Bool(true));
+    }
+    Ok(Value::Bool(acl.iter().any(|item| {
+        acl_item_parts(item).is_some_and(|(grantee, privileges, _)| {
+            effective_names.contains(grantee) && privileges.contains('X')
+        })
+    })))
+}
+
+fn eval_pg_replication_origin_create(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(name) = values.first().and_then(Value::as_text) else {
+        return Ok(Value::Null);
+    };
+    if name.len() > 512 {
+        return Err(ExecError::DetailedError {
+            message: "replication origin name is too long".into(),
+            detail: Some("Replication origin names must be no longer than 512 bytes.".into()),
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    // :HACK: The durable pg_replication_origin catalog is present, but origin
+    // creation is not wired through a transactionally allocated local_id yet.
+    Ok(Value::Int64(1))
+}
+
 fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
     let [value] = values else {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -4886,6 +5627,7 @@ fn eval_plpgsql_builtin_function(
                 right: Value::Null,
             }),
         },
+        BuiltinScalarFunction::UnsupportedXmlFeature => Err(unsupported_xml_feature_error()),
         BuiltinScalarFunction::Int4Pl
         | BuiltinScalarFunction::Int8Inc
         | BuiltinScalarFunction::Int8IncAny
@@ -4895,7 +5637,17 @@ fn eval_plpgsql_builtin_function(
         }
         BuiltinScalarFunction::CurrentSetting => eval_current_setting_without_context(&values),
         BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_values(&values),
+        BuiltinScalarFunction::PgColumnToastChunkId => {
+            eval_pg_column_toast_chunk_id_values(&values)
+        }
         BuiltinScalarFunction::PgColumnSize => eval_pg_column_size_values(&values),
+        BuiltinScalarFunction::NumNulls => Ok(eval_num_nulls(&values, func_variadic, true)),
+        BuiltinScalarFunction::NumNonNulls => Ok(eval_num_nulls(&values, func_variadic, false)),
+        BuiltinScalarFunction::GistTranslateCmpTypeCommon => {
+            eval_gist_translate_cmptype_common(&values)
+        }
+        BuiltinScalarFunction::TestCanonicalizePath => eval_test_canonicalize_path(&values),
+        BuiltinScalarFunction::TestRelpath => Ok(Value::Null),
         BuiltinScalarFunction::PgSizePretty => eval_pg_size_pretty_function(&values),
         BuiltinScalarFunction::PgSizeBytes => eval_pg_size_bytes_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
@@ -6310,6 +7062,43 @@ fn eval_domain_check_upper_less_than(values: &[Value]) -> Result<Value, ExecErro
     })
 }
 
+pub(crate) fn eval_native_builtin_scalar_value_call(
+    func: BuiltinScalarFunction,
+    values: &[Value],
+    func_variadic: bool,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    match func {
+        BuiltinScalarFunction::PgColumnToastChunkId => eval_pg_column_toast_chunk_id_values(values),
+        BuiltinScalarFunction::NumNulls => Ok(eval_num_nulls(values, func_variadic, true)),
+        BuiltinScalarFunction::NumNonNulls => Ok(eval_num_nulls(values, func_variadic, false)),
+        BuiltinScalarFunction::PgLogBackendMemoryContexts => {
+            eval_pg_log_backend_memory_contexts(values)
+        }
+        BuiltinScalarFunction::HasFunctionPrivilege => eval_has_function_privilege(values, ctx),
+        BuiltinScalarFunction::PgCurrentLogfile => eval_pg_current_logfile(values),
+        BuiltinScalarFunction::PgReadFile => eval_pg_read_file(values, ctx, false),
+        BuiltinScalarFunction::PgReadBinaryFile => eval_pg_read_file(values, ctx, true),
+        BuiltinScalarFunction::PgStatFile => eval_pg_stat_file(values, ctx),
+        BuiltinScalarFunction::PgWalfileName => eval_pg_walfile_name(values),
+        BuiltinScalarFunction::PgWalfileNameOffset => eval_pg_walfile_name_offset(values),
+        BuiltinScalarFunction::PgSplitWalfileName => eval_pg_split_walfile_name(values),
+        BuiltinScalarFunction::PgControlSystem
+        | BuiltinScalarFunction::PgControlCheckpoint
+        | BuiltinScalarFunction::PgControlRecovery
+        | BuiltinScalarFunction::PgControlInit => Ok(eval_pg_control_record(func, ctx)),
+        BuiltinScalarFunction::PgReplicationOriginCreate => {
+            eval_pg_replication_origin_create(values)
+        }
+        BuiltinScalarFunction::GistTranslateCmpTypeCommon => {
+            eval_gist_translate_cmptype_common(values)
+        }
+        BuiltinScalarFunction::TestCanonicalizePath => eval_test_canonicalize_path(values),
+        BuiltinScalarFunction::TestRelpath => Ok(Value::Bool(false)),
+        _ => execute_builtin_scalar_function_value_call(func, values),
+    }
+}
+
 pub(crate) fn eval_builtin_function(
     func: BuiltinScalarFunction,
     result_type: Option<SqlType>,
@@ -6385,15 +7174,21 @@ pub(crate) fn eval_builtin_function(
             _ => unreachable!(),
         };
     }
-    if matches!(func, BuiltinScalarFunction::PgColumnCompression)
-        && let [Expr::Var(var)] = args
+    if matches!(
+        func,
+        BuiltinScalarFunction::PgColumnCompression | BuiltinScalarFunction::PgColumnToastChunkId
+    ) && let [Expr::Var(var)] = args
         && var.varlevelsup == 0
         && (var.varno == OUTER_VAR || !is_executor_special_varno(var.varno))
         && var.varattno > 0
         && let Some(index) = attrno_index(var.varattno)
         && let Some(raw) = current_slot_raw_attr_bytes(slot, index)?
     {
-        return eval_pg_column_compression_raw(raw);
+        return match func {
+            BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_raw(raw),
+            BuiltinScalarFunction::PgColumnToastChunkId => eval_pg_column_toast_chunk_id_raw(raw),
+            _ => unreachable!(),
+        };
     }
     if matches!(func, BuiltinScalarFunction::PgTypeof) {
         let ty = args
@@ -6939,8 +7734,36 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::Version => Ok(Value::Text(pg_version_text().into())),
         BuiltinScalarFunction::PgBackendPid => Ok(Value::Int32(ctx.client_id as i32)),
         BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_values(&values),
+        BuiltinScalarFunction::PgColumnToastChunkId => {
+            eval_pg_column_toast_chunk_id_values(&values)
+        }
         BuiltinScalarFunction::PgColumnSize => eval_pg_column_size_values(&values),
         BuiltinScalarFunction::PgRelationSize => eval_pg_relation_size(&values, ctx),
+        BuiltinScalarFunction::NumNulls => Ok(eval_num_nulls(&values, func_variadic, true)),
+        BuiltinScalarFunction::NumNonNulls => Ok(eval_num_nulls(&values, func_variadic, false)),
+        BuiltinScalarFunction::PgLogBackendMemoryContexts => {
+            eval_pg_log_backend_memory_contexts(&values)
+        }
+        BuiltinScalarFunction::HasFunctionPrivilege => eval_has_function_privilege(&values, ctx),
+        BuiltinScalarFunction::PgCurrentLogfile => eval_pg_current_logfile(&values),
+        BuiltinScalarFunction::PgReadFile => eval_pg_read_file(&values, ctx, false),
+        BuiltinScalarFunction::PgReadBinaryFile => eval_pg_read_file(&values, ctx, true),
+        BuiltinScalarFunction::PgStatFile => eval_pg_stat_file(&values, ctx),
+        BuiltinScalarFunction::PgWalfileName => eval_pg_walfile_name(&values),
+        BuiltinScalarFunction::PgWalfileNameOffset => eval_pg_walfile_name_offset(&values),
+        BuiltinScalarFunction::PgSplitWalfileName => eval_pg_split_walfile_name(&values),
+        BuiltinScalarFunction::PgControlSystem
+        | BuiltinScalarFunction::PgControlCheckpoint
+        | BuiltinScalarFunction::PgControlRecovery
+        | BuiltinScalarFunction::PgControlInit => Ok(eval_pg_control_record(func, ctx)),
+        BuiltinScalarFunction::PgReplicationOriginCreate => {
+            eval_pg_replication_origin_create(&values)
+        }
+        BuiltinScalarFunction::GistTranslateCmpTypeCommon => {
+            eval_gist_translate_cmptype_common(&values)
+        }
+        BuiltinScalarFunction::TestCanonicalizePath => eval_test_canonicalize_path(&values),
+        BuiltinScalarFunction::TestRelpath => Ok(Value::Null),
         BuiltinScalarFunction::PgPartitionRoot => eval_pg_partition_root(&values, ctx),
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
         BuiltinScalarFunction::PgDescribeObject => eval_pg_describe_object(&values, ctx),
@@ -7026,6 +7849,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::BoolNe => eval_boolne(&values),
         BuiltinScalarFunction::BoolAndStateFunc => eval_booland_statefunc(&values),
         BuiltinScalarFunction::BoolOrStateFunc => eval_boolor_statefunc(&values),
+        BuiltinScalarFunction::UnsupportedXmlFeature => Err(unsupported_xml_feature_error()),
         BuiltinScalarFunction::XmlComment => eval_xml_comment_function(&values, Some(ctx)),
         BuiltinScalarFunction::XmlIsWellFormed => {
             eval_xml_is_well_formed_function(&values, ctx.datetime_config.xml.option, Some(ctx))

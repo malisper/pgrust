@@ -159,6 +159,7 @@ fn ensure_child_join_rel(
     let child_clauses = translate_restrict_clauses(root, parent_clauses, left_member, right_member);
     let mut candidate_paths = collect_child_join_paths(
         root,
+        catalog,
         &left_rel,
         &right_rel,
         kind,
@@ -264,6 +265,7 @@ fn child_join_output_columns(
 
 fn collect_child_join_paths(
     root: &PlannerInfo,
+    catalog: &dyn CatalogLookup,
     left_rel: &RelOptInfo,
     right_rel: &RelOptInfo,
     kind: JoinType,
@@ -276,6 +278,7 @@ fn collect_child_join_paths(
         for right_path in &right_rel.pathlist {
             paths.extend(build_join_paths_with_root(
                 root,
+                catalog,
                 left_path.clone(),
                 right_path.clone(),
                 &left_rel.relids,

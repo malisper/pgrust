@@ -51,6 +51,7 @@ impl SeededSqlHarness {
             let txns_arc = Arc::new(parking_lot::RwLock::new(txns.clone()));
             let mut ctx = ExecutorContext {
                 pool,
+                data_dir: Some(base.clone()),
                 txns: txns_arc,
                 txn_waiter: None,
                 lock_status_provider: None,

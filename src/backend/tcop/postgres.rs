@@ -633,7 +633,14 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             return find_json_literal_position(sql, raw_input)
                 .or_else(|| sql.find(raw_input).map(|index| index + 1));
         }
-        ExecError::XmlInput { raw_input, .. } => raw_input.as_str(),
+        ExecError::XmlInput {
+            raw_input, message, ..
+        } => {
+            if message == "unsupported XML feature" {
+                return None;
+            }
+            raw_input.as_str()
+        }
         _ => return None,
     };
     find_error_value_position(sql, value)
@@ -10295,6 +10302,22 @@ ORDER BY 1, 2;";
             detail: None,
             hint: None,
             sqlstate: "22P02",
+        };
+
+        assert_eq!(exec_error_position(sql, &err), None);
+    }
+
+    #[test]
+    fn exec_error_position_omits_unsupported_xml_feature() {
+        let sql = "SELECT table_to_xml('testxmlschema.test1', false, false, '');";
+        let err = ExecError::XmlInput {
+            raw_input: String::new(),
+            message: "unsupported XML feature".into(),
+            detail: Some(
+                "This functionality requires the server to be built with libxml support.".into(),
+            ),
+            context: None,
+            sqlstate: "0A000",
         };
 
         assert_eq!(exec_error_position(sql, &err), None);

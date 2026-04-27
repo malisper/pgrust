@@ -390,7 +390,7 @@ alias_column_def = { identifier ~ type_name }
 bare_relation_alias = { !kw_as ~ !kw_join ~ !kw_on ~ !kw_where ~ !kw_group ~ !kw_having ~ !kw_window ~ !kw_order ~ !kw_limit ~ !kw_offset ~ !kw_for ~ !kw_share ~ !kw_update ~ !kw_returning ~ !kw_cross ~ !kw_inner ~ !kw_left ~ !kw_right ~ !kw_full ~ !kw_outer ~ !kw_natural ~ !kw_using ~ !kw_union ~ !kw_intersect ~ !kw_except ~ !kw_with ~ identifier }
 
 column_def = { !kw_constraint ~ identifier ~ type_name ~ column_modifier* }
-column_modifier = { column_collation | column_default | column_identity | column_generated | column_compression | nullable | named_column_constraint | not_null_column_constraint | check_column_constraint | primary_key_column_constraint | unique_column_constraint | references_column_constraint }
+column_modifier = { column_collation | column_default | column_identity | column_generated | column_compression | column_storage | nullable | named_column_constraint | not_null_column_constraint | check_column_constraint | primary_key_column_constraint | unique_column_constraint | references_column_constraint }
 column_collation = { kw_collate ~ collation_name }
 column_default = { kw_default ~ b_expr }
 column_generated = { kw_generated ~ generated_when ~ kw_as ~ "(" ~ expr ~ ")" ~ generated_storage? }
@@ -399,6 +399,7 @@ column_identity_options = @{ "(" ~ (!")" ~ ANY)* ~ ")" }
 generated_when = { kw_always | kw_by ~ kw_default }
 generated_storage = { kw_virtual | kw_stored }
 column_compression = { kw_compression ~ (kw_default | identifier) }
+column_storage = { kw_storage ~ identifier }
 named_column_constraint = { kw_constraint ~ identifier ~ (not_null_column_constraint | check_column_constraint | primary_key_column_constraint | unique_column_constraint | references_column_constraint | column_identity | column_generated) }
 primary_key_column_constraint = { primary_key_column_constraint_body ~ constraint_attribute* }
 unique_column_constraint = { unique_column_constraint_body ~ constraint_attribute* }

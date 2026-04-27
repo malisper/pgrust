@@ -1500,6 +1500,11 @@ fn compile_exec_sql_stmt(
             stmt: bind_delete_with_outer_scopes(&stmt, catalog, &[outer_scope])?,
         }),
         Statement::CreateTableAs(stmt) => Ok(CompiledStmt::CreateTableAs { stmt }),
+        Statement::Set(stmt) if stmt.name.eq_ignore_ascii_case("jit") => {
+            // :HACK: pgrust has no JIT subsystem; PL/pgSQL regression helpers
+            // use SET LOCAL jit=0 only to stabilize EXPLAIN.
+            Ok(CompiledStmt::Null)
+        }
         other => Err(ParseError::UnexpectedToken {
             expected: "PL/pgSQL SQL statement",
             actual: format!("{other:?}"),

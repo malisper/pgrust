@@ -199,6 +199,37 @@ fn infer_relation_row_expr_type(
     })
 }
 
+fn infer_record_field_type(
+    row_type: SqlType,
+    field: &str,
+    catalog: &dyn CatalogLookup,
+) -> Option<SqlType> {
+    if matches!(row_type.kind, SqlTypeKind::Composite)
+        && row_type.typrelid != 0
+        && let Some(relation) = catalog.lookup_relation_by_oid(row_type.typrelid)
+    {
+        return relation
+            .desc
+            .columns
+            .iter()
+            .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(field))
+            .map(|column| column.sql_type);
+    }
+
+    if matches!(row_type.kind, SqlTypeKind::Record)
+        && row_type.typmod > 0
+        && let Some(descriptor) = lookup_anonymous_record_descriptor(row_type.typmod)
+    {
+        return descriptor
+            .fields
+            .iter()
+            .find(|candidate| candidate.name.eq_ignore_ascii_case(field))
+            .map(|candidate| candidate.sql_type);
+    }
+
+    None
+}
+
 fn infer_visible_outer_aggregate_type(
     name: &str,
     direct_args: &[SqlFunctionArg],
@@ -540,7 +571,16 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             ) {
                 field_type
             } else {
-                SqlType::new(SqlTypeKind::Text)
+                let row_type = infer_sql_expr_type_with_ctes(
+                    expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                infer_record_field_type(row_type, field, catalog)
+                    .unwrap_or(SqlType::new(SqlTypeKind::Text))
             }
         }
         SqlExpr::Eq(_, _)

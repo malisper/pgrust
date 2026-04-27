@@ -42,8 +42,9 @@ use crate::pl::plpgsql::TriggerOperation;
 
 use super::copyto::{capture_copy_to_dml_notices, capture_copy_to_dml_returning_row};
 use super::explain::{
-    format_buffer_usage, format_explain_lines_with_costs, format_explain_plan_with_subplans,
-    format_verbose_explain_plan_with_subplans, push_explain_line,
+    format_buffer_usage, format_explain_lines_with_costs, format_explain_lines_with_options,
+    format_explain_plan_with_subplans, format_verbose_explain_plan_with_subplans,
+    push_explain_line,
 };
 use super::partition::{exec_find_partition, exec_setup_partition_tuple_routing};
 use super::trigger::RuntimeTriggers;
@@ -522,14 +523,7 @@ pub(crate) fn execute_explain(
         ctx.timed = false;
         let execution_buffer_stats = ctx.pool.usage_stats();
         let (state, row_count, elapsed) = exec_result?;
-        crate::backend::commands::explain::format_explain_lines_with_costs_and_timing(
-            state.as_ref(),
-            0,
-            true,
-            costs,
-            timing,
-            &mut lines,
-        );
+        format_explain_lines_with_options(state.as_ref(), 0, true, costs, timing, &mut lines);
         if buffers {
             lines.push("Planning:".into());
             lines.push(format!("  {}", format_buffer_usage(planning_buffer_stats)));

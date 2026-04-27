@@ -233,6 +233,7 @@ fn build_constraint_validation_context(
     let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
     Ok(ExecutorContext {
         pool: db.pool.clone(),
+        data_dir: None,
         txns: db.txns.clone(),
         txn_waiter: Some(db.txn_waiter.clone()),
         lock_status_provider: Some(Arc::new(db.clone())),

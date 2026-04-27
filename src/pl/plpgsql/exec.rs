@@ -2023,6 +2023,7 @@ fn execute_dynamic_statement(
         // SQL literals here until that lower layer exists.
         substitute_dynamic_query_params(sql_text, &using_values, ctx)?
     };
+    let sql = sql.trim().trim_end_matches(';').trim_end().to_string();
 
     let catalog = ctx.catalog.clone().ok_or_else(|| {
         function_runtime_error(
@@ -2092,6 +2093,13 @@ fn execute_dynamic_statement(
             }
             crate::backend::parser::Statement::DropIndex(stmt) => {
                 exec_function_drop_index(&stmt, ctx)
+            }
+            crate::backend::parser::Statement::Set(stmt)
+                if stmt.name.eq_ignore_ascii_case("jit") =>
+            {
+                // :HACK: pgrust has no JIT subsystem; PL/pgSQL regression
+                // helpers use SET LOCAL jit=0 only to stabilize EXPLAIN.
+                Ok(crate::backend::executor::StatementResult::AffectedRows(0))
             }
             other => execute_readonly_statement(other, &catalog, ctx),
         }

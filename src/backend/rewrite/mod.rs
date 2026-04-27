@@ -711,12 +711,14 @@ fn rewrite_set_returning_call(
         },
         SetReturningCall::UserDefined {
             proc_oid,
+            function_name,
             func_variadic,
             args,
             output_columns,
             with_ordinality,
         } => SetReturningCall::UserDefined {
             proc_oid,
+            function_name,
             func_variadic,
             args: args
                 .into_iter()

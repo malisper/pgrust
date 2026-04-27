@@ -6,6 +6,7 @@ use crate::backend::parser::{
     ParseError, RevokeObjectStatement, RevokeRoleMembershipStatement, RoleGrantorSpec, RoutineKind,
     parse_type_name, resolve_raw_type_name,
 };
+use crate::include::catalog::pg_proc::{is_bootstrap_proc_oid, set_bootstrap_proc_execute_acl};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_NAME, CURRENT_DATABASE_OID, PgAuthIdRow,
 };
@@ -1643,6 +1644,7 @@ impl Database {
                 .proacl
                 .clone()
                 .unwrap_or_else(|| function_owner_default_acl(&owner_name));
+            let mut resolved_grantees = Vec::new();
             for grantee_name in grantee_names {
                 let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
                     String::new()
@@ -1657,6 +1659,7 @@ impl Database {
                             )))
                         })?
                 };
+                resolved_grantees.push(grantee_acl_name.clone());
                 if revoke {
                     revoke_acl_entry(
                         &mut acl,
@@ -1675,6 +1678,14 @@ impl Database {
                 }
             }
             let new_acl = collapse_acl_defaults(acl, &function_owner_default_acl(&owner_name));
+            if is_bootstrap_proc_oid(row.oid) {
+                // :HACK: bootstrap pg_proc rows are not physically replaceable
+                // yet; keep EXECUTE ACL deltas in a process-local overlay.
+                for grantee in resolved_grantees {
+                    set_bootstrap_proc_execute_acl(row.oid, &grantee, !revoke);
+                }
+                continue;
+            }
             let effect = self
                 .catalog
                 .write()

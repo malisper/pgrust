@@ -1000,12 +1000,6 @@ fn bind_select_list_srf_call(
                             actual: other.to_string(),
                         });
                     }
-                    if !matches!(resolved.row_shape, ResolvedFunctionRowShape::None) {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "scalar-output set-returning function in select list",
-                            actual: other.to_string(),
-                        });
-                    }
                     let bound_args = bind_user_defined_srf_args(
                         &args,
                         scope,
@@ -1015,13 +1009,21 @@ fn bind_select_list_srf_call(
                         ctes,
                         &resolved.declared_arg_types,
                     )?;
-                    let output_columns = vec![QueryColumn {
-                        name: other.to_string(),
-                        sql_type: resolved.result_type,
-                        wire_type_oid: None,
-                    }];
+                    let output_columns = match &resolved.row_shape {
+                        ResolvedFunctionRowShape::OutParameters(columns)
+                        | ResolvedFunctionRowShape::NamedComposite { columns, .. } => {
+                            columns.clone()
+                        }
+                        ResolvedFunctionRowShape::AnonymousRecord
+                        | ResolvedFunctionRowShape::None => vec![QueryColumn {
+                            name: other.to_string(),
+                            sql_type: resolved.result_type,
+                            wire_type_oid: None,
+                        }],
+                    };
                     Ok(SetReturningCall::UserDefined {
                         proc_oid: resolved.proc_oid,
+                        function_name: other.to_string(),
                         func_variadic: resolved.func_variadic,
                         args: bound_args,
                         output_columns,

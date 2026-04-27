@@ -210,6 +210,7 @@ fn main() -> Result<(), ExecError> {
     ));
     let mut ctx = ExecutorContext {
         pool: std::sync::Arc::clone(&pool),
+        data_dir: None,
         txns: txns.clone(),
         txn_waiter: None,
         lock_status_provider: None,

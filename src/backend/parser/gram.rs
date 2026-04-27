@@ -6346,6 +6346,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     let mut body = None;
     let mut link_symbol = None;
     let mut cost = None;
+    let mut support = None;
     let mut strict = false;
     let mut leakproof = false;
     let mut volatility = crate::backend::parser::FunctionVolatility::Volatile;
@@ -6386,6 +6387,18 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
             }
             let (parsed, next_rest) = parse_create_function_cost(rest)?;
             cost = Some(parsed);
+            rest = next_rest;
+            continue;
+        }
+        if keyword_at_start(rest, "support") {
+            if support.is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "single SUPPORT clause",
+                    actual: rest.into(),
+                });
+            }
+            let (parsed, next_rest) = parse_create_function_support(rest)?;
+            support = Some(parsed);
             rest = next_rest;
             continue;
         }
@@ -6479,6 +6492,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         function_name,
         replace_existing,
         cost,
+        support,
         args,
         return_spec,
         strict,
@@ -6489,6 +6503,27 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         body: body.ok_or(ParseError::UnexpectedEof)?,
         link_symbol,
     })
+}
+
+fn parse_support_routine_signature(input: &str) -> Result<RoutineSignature, ParseError> {
+    let ((schema_name, routine_name), rest) = parse_qualified_sql_name(input.trim())?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "support function name",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(RoutineSignature {
+        schema_name,
+        routine_name,
+        arg_types: Vec::new(),
+    })
+}
+
+fn parse_create_function_support(input: &str) -> Result<(RoutineSignature, &str), ParseError> {
+    let rest = consume_keyword(input, "support").trim_start();
+    let (value, rest) = take_next_word(rest)?;
+    Ok((parse_support_routine_signature(&value)?, rest))
 }
 
 fn build_drop_function_statement(sql: &str) -> Result<DropFunctionStatement, ParseError> {
@@ -7011,7 +7046,9 @@ fn parse_alter_routine_options(mut input: &str) -> Result<Vec<AlterRoutineOption
         } else if keyword_at_start(input, "support") {
             let rest = consume_keyword(input, "support").trim_start();
             let (value, rest) = take_next_word(rest)?;
-            options.push(AlterRoutineOption::Support(value));
+            options.push(AlterRoutineOption::Support(
+                parse_support_routine_signature(&value)?,
+            ));
             input = rest;
         } else if keyword_at_start(input, "set") {
             let rest = consume_keyword(input, "set").trim_start();
@@ -13248,7 +13285,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
                     Some(Rule::kw_summary) => summary = bool_val,
                     Some(Rule::kw_timing) => timing = bool_val,
                     Some(Rule::kw_verbose) => verbose = bool_val,
-                    _ => {} // FORMAT is parsed but ignored
+                    _ => {} // FORMAT: parsed but ignored
                 }
             }
             Rule::select_stmt => statement = Some(Statement::Select(build_select(part)?)),
@@ -15119,7 +15156,7 @@ fn build_typed_column_options(pair: Pair<'_, Rule>) -> Result<TypedColumnOptions
     let mut collation = None;
     let mut generated = None;
     let mut identity = None;
-    let storage = None;
+    let mut storage = None;
     let mut compression = None;
     let mut constraints = Vec::new();
     for flag in inner {
@@ -15152,6 +15189,9 @@ fn build_typed_column_options(pair: Pair<'_, Rule>) -> Result<TypedColumnOptions
             }
             Rule::column_compression => {
                 compression = Some(build_column_compression(flag)?);
+            }
+            Rule::column_storage => {
+                storage = Some(build_column_storage(flag)?);
             }
             Rule::nullable => {}
             Rule::named_column_constraint => {
@@ -17335,7 +17375,7 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
     let mut collation = None;
     let mut generated = None;
     let mut identity = None;
-    let storage = None;
+    let mut storage = None;
     let mut compression = None;
     let mut constraints = Vec::new();
     for flag in inner {
@@ -17367,6 +17407,9 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
             }
             Rule::column_compression => {
                 compression = Some(build_column_compression(flag)?);
+            }
+            Rule::column_storage => {
+                storage = Some(build_column_storage(flag)?);
             }
             Rule::nullable => {}
             Rule::named_column_constraint => {
@@ -17508,6 +17551,28 @@ fn build_column_compression(
     }
     Err(ParseError::UnexpectedToken {
         expected: "compression method",
+        actual: pair.as_str().into(),
+    })
+}
+
+fn build_column_storage(
+    pair: Pair<'_, Rule>,
+) -> Result<crate::include::access::tupdesc::AttributeStorage, ParseError> {
+    let raw = pair.as_str().trim().to_ascii_lowercase();
+    if raw.ends_with("plain") {
+        return Ok(crate::include::access::tupdesc::AttributeStorage::Plain);
+    }
+    if raw.ends_with("external") {
+        return Ok(crate::include::access::tupdesc::AttributeStorage::External);
+    }
+    if raw.ends_with("extended") {
+        return Ok(crate::include::access::tupdesc::AttributeStorage::Extended);
+    }
+    if raw.ends_with("main") {
+        return Ok(crate::include::access::tupdesc::AttributeStorage::Main);
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "storage method",
         actual: pair.as_str().into(),
     })
 }
