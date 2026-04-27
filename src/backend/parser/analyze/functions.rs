@@ -3259,16 +3259,38 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("to_json", BuiltinScalarFunction::ToJson),
         ("to_jsonb", BuiltinScalarFunction::ToJsonb),
         ("to_tsvector", BuiltinScalarFunction::ToTsVector),
+        ("to_tsvector_byid", BuiltinScalarFunction::ToTsVector),
+        (
+            "jsonb_string_to_tsvector",
+            BuiltinScalarFunction::ToTsVector,
+        ),
+        (
+            "jsonb_string_to_tsvector_byid",
+            BuiltinScalarFunction::ToTsVector,
+        ),
         ("jsonb_to_tsvector", BuiltinScalarFunction::JsonbToTsVector),
         (
             "jsonb_to_tsvector_byid",
             BuiltinScalarFunction::JsonbToTsVector,
         ),
         ("to_tsquery", BuiltinScalarFunction::ToTsQuery),
+        ("to_tsquery_byid", BuiltinScalarFunction::ToTsQuery),
         ("plainto_tsquery", BuiltinScalarFunction::PlainToTsQuery),
+        (
+            "plainto_tsquery_byid",
+            BuiltinScalarFunction::PlainToTsQuery,
+        ),
         ("phraseto_tsquery", BuiltinScalarFunction::PhraseToTsQuery),
         (
+            "phraseto_tsquery_byid",
+            BuiltinScalarFunction::PhraseToTsQuery,
+        ),
+        (
             "websearch_to_tsquery",
+            BuiltinScalarFunction::WebSearchToTsQuery,
+        ),
+        (
+            "websearch_to_tsquery_byid",
             BuiltinScalarFunction::WebSearchToTsQuery,
         ),
         ("ts_lexize", BuiltinScalarFunction::TsLexize),
