@@ -13766,6 +13766,16 @@ fn jsonb_record_expansion_functions_work() {
             &base,
             &txns,
             INVALID_TRANSACTION_ID,
+            "select * from jsonb_populate_record(null::record, '{\"x\":776}') as (x int, y int)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(776), Value::Null]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
             "select * from jsonb_to_record('{\"a\":1,\"b\":\"foo\"}') as x(a int, b text)",
         )
         .unwrap(),
@@ -13802,6 +13812,33 @@ fn jsonb_record_expansion_functions_work() {
                 ("f2".into(), Value::Int32(3)),
             ]))],
         ],
+    );
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_populate_recordset(null::record, '[{\"x\":0,\"y\":1}]')",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "42804");
+            assert_eq!(
+                message,
+                "could not determine row type for result of jsonb_populate_recordset"
+            );
+        }
+        other => panic!("expected row type error, got {other:?}"),
+    }
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from jsonb_populate_recordset(null::record, '[]') as (x int, y int)",
+        )
+        .unwrap(),
+        Vec::<Vec<Value>>::new(),
     );
 }
 
@@ -13885,7 +13922,7 @@ fn jsonb_to_record_allows_json_array_elements_inside_json_array_column() {
             Value::Json("\"2\"".into()),
             Value::Null,
             Value::Json("[3]".into()),
-            Value::Json("{\"k\":\"v\"}".into()),
+            Value::Json("{\"k\": \"v\"}".into()),
         ]))]],
     );
 }

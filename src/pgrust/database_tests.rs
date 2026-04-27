@@ -39473,6 +39473,11 @@ fn jsonb_populate_record_enforces_domain_constraints() {
         }
         other => panic!("expected composite domain check violation, got {other:?}"),
     }
+
+    db.execute(1, "drop type jsb_i_not_null_rec, jsb_i_gt_1_rec")
+        .unwrap();
+    db.execute(1, "drop domain jsb_i_not_null, jsb_i_gt_1")
+        .unwrap();
 }
 
 #[test]
@@ -39552,6 +39557,49 @@ fn jsonb_populate_record_coerces_text_jsonb_and_reports_array_errors() {
         }
         other => panic!("expected array domain check violation, got {other:?}"),
     }
+}
+
+#[test]
+fn jsonb_populate_record_reuses_temp_table_type_info() {
+    let dir = temp_dir("jsonb_populate_record_temp_type_cache");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create type jbpop as (a text, b int, c timestamp)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create type jsbrec as (jsa json[], rec jbpop, reca jbpop[])",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create temp table jsbpoptest (js jsonb)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into jsbpoptest
+             select '{
+               \"jsa\": [1, \"2\", null, 4],
+               \"rec\": {\"a\": \"abc\", \"c\": \"01.02.2003\", \"x\": 43.2},
+               \"reca\": [{\"a\": \"abc\", \"b\": 456}, null, {\"c\": \"01.02.2003\", \"x\": 43.2}]
+             }'::jsonb
+             from generate_series(1, 3)",
+        )
+        .unwrap();
+
+    let result = session
+        .execute(
+            &db,
+            "select (jsonb_populate_record(NULL::jsbrec, js)).* from jsbpoptest",
+        )
+        .expect("jsonb_populate_record temp table type cache query");
+    let StatementResult::Query { rows, .. } = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(rows.len(), 3);
 }
 
 #[test]

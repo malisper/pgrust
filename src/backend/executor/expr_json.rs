@@ -481,6 +481,7 @@ pub(crate) fn eval_json_record_set_returning_function(
         }
         JsonRecordFunction::JsonbToRecord | JsonRecordFunction::JsonbToRecordSet => (false, false),
     };
+    let render_jsonb_style = !expect_json;
 
     let base_value = if populate {
         values.first().cloned().unwrap_or(Value::Null)
@@ -501,6 +502,7 @@ pub(crate) fn eval_json_record_set_returning_function(
             output_columns.iter().map(|_| Value::Null).collect(),
         )]);
     }
+    ensure_json_record_runtime_row_type(func_name, &base_value, output_columns, record_type, ctx)?;
 
     let parsed = parsed_json_record_input(json_value, expect_json)?;
     let rows = if kind.is_set_returning() {
@@ -514,6 +516,7 @@ pub(crate) fn eval_json_record_set_returning_function(
                         &base_value,
                         output_columns,
                         record_type,
+                        render_jsonb_style,
                         ctx,
                     )
                 })
@@ -527,6 +530,7 @@ pub(crate) fn eval_json_record_set_returning_function(
             &base_value,
             output_columns,
             record_type,
+            render_jsonb_style,
             ctx,
         )?]
     };
@@ -694,7 +698,7 @@ pub(crate) fn eval_json_builtin_function(
                 Ok(
                     match ParsedJsonValue::from_value(args.first().unwrap_or(&Value::Null))? {
                         ParsedJsonValue::Json(json) => json_lookup_path(&json, &path)
-                            .map(|value| json_value_to_value(value, false))
+                            .map(|value| json_value_to_value(value, false, false))
                             .unwrap_or(Value::Null),
                         ParsedJsonValue::Jsonb(jsonb) => jsonb_path(&jsonb, &path)
                             .map(jsonb_to_value)
@@ -711,7 +715,7 @@ pub(crate) fn eval_json_builtin_function(
                 Ok(
                     match ParsedJsonValue::from_value(args.first().unwrap_or(&Value::Null))? {
                         ParsedJsonValue::Json(json) => json_lookup_path(&json, &path)
-                            .map(|value| json_value_to_value(value, true))
+                            .map(|value| json_value_to_value(value, true, false))
                             .unwrap_or(Value::Null),
                         ParsedJsonValue::Jsonb(jsonb) => jsonb_path(&jsonb, &path)
                             .map(jsonb_to_text_value)
@@ -1067,6 +1071,7 @@ fn eval_json_record_scalar_function(
         &parsed,
         &base_value,
         &record_columns_from_descriptor(&descriptor),
+        !expect_json,
         ctx,
     )?;
     let record = Value::Record(RecordValue::from_descriptor(descriptor, row));
@@ -1111,6 +1116,7 @@ fn eval_json_record_valid_function(
             &parsed,
             &base_value,
             &record_columns_from_descriptor(&descriptor),
+            !expect_json,
             ctx,
         )
         .is_ok(),
@@ -1161,6 +1167,7 @@ fn json_record_row_for_output(
     base_value: &Value,
     output_columns: &[QueryColumn],
     record_type: Option<SqlType>,
+    render_jsonb_style: bool,
     ctx: &ExecutorContext,
 ) -> Result<TupleSlot, ExecError> {
     if let Some(record_type) = record_type {
@@ -1172,6 +1179,8 @@ fn json_record_row_for_output(
             record.descriptor.clone()
         } else if let Some(descriptor) = record_descriptor_from_sql_type(record_type, ctx)? {
             descriptor
+        } else if return_as_record {
+            return Err(json_record_row_type_error(func_name));
         } else {
             record_descriptor_from_query_columns(output_columns)
         };
@@ -1180,6 +1189,7 @@ fn json_record_row_for_output(
             value,
             base_value,
             &record_columns_from_descriptor(&descriptor),
+            render_jsonb_style,
             ctx,
         )?;
         let record = json_record_enforce_domain(
@@ -1197,9 +1207,39 @@ fn json_record_row_for_output(
             Ok(TupleSlot::virtual_row(record.fields))
         }
     } else {
-        let row = json_record_row_from_value(func_name, value, base_value, output_columns, ctx)?;
+        let row = json_record_row_from_value(
+            func_name,
+            value,
+            base_value,
+            output_columns,
+            render_jsonb_style,
+            ctx,
+        )?;
         Ok(TupleSlot::virtual_row(row))
     }
+}
+
+fn ensure_json_record_runtime_row_type(
+    func_name: &'static str,
+    base_value: &Value,
+    output_columns: &[QueryColumn],
+    record_type: Option<SqlType>,
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    let Some(record_type) = record_type else {
+        return Ok(());
+    };
+    let return_as_record = output_columns.len() == 1
+        && output_columns[0].sql_type.kind == record_type.kind
+        && output_columns[0].sql_type.type_oid == record_type.type_oid
+        && output_columns[0].sql_type.typrelid == record_type.typrelid;
+    if !return_as_record || matches!(base_value, Value::Record(_)) {
+        return Ok(());
+    }
+    if record_descriptor_from_sql_type(record_type, ctx)?.is_some() {
+        return Ok(());
+    }
+    Err(json_record_row_type_error(func_name))
 }
 
 fn json_record_row_from_value(
@@ -1207,6 +1247,7 @@ fn json_record_row_from_value(
     value: &SerdeJsonValue,
     base_value: &Value,
     output_columns: &[QueryColumn],
+    render_jsonb_style: bool,
     ctx: &ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
     let object = match value {
@@ -1244,6 +1285,7 @@ fn json_record_row_from_value(
                     column.sql_type,
                     base_fields.and_then(|fields| fields.get(index)),
                     &JsonRecordPath::default().with_key(&column.name),
+                    render_jsonb_style,
                     ctx,
                 )
             } else {
@@ -1265,18 +1307,22 @@ fn json_record_field_to_value(
     ty: SqlType,
     base_value: Option<&Value>,
     path: &JsonRecordPath,
+    render_jsonb_style: bool,
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
     if matches!(value, SerdeJsonValue::Null) {
         return json_record_null_to_value(ty, path, ctx);
     }
     if ty.is_array {
-        return json_record_array_to_value(value, ty, path, ctx);
+        return json_record_array_to_value(value, ty, path, render_jsonb_style, ctx);
     }
     match ty.kind {
-        SqlTypeKind::Json => {
-            json_record_enforce_domain(json_value_to_value(value, false), ty, path, ctx)
-        }
+        SqlTypeKind::Json => json_record_enforce_domain(
+            json_value_to_value(value, false, render_jsonb_style),
+            ty,
+            path,
+            ctx,
+        ),
         SqlTypeKind::Jsonb => json_record_enforce_domain(
             Value::Jsonb(encode_jsonb(&JsonbValue::from_serde(value.clone())?)),
             ty,
@@ -1302,6 +1348,7 @@ fn json_record_field_to_value(
                         value,
                         &nested_base,
                         &record_columns_from_descriptor(&descriptor),
+                        render_jsonb_style,
                         ctx,
                     )?;
                     json_record_enforce_domain(
@@ -1317,15 +1364,10 @@ fn json_record_field_to_value(
                     path,
                     ctx,
                 ),
-                _ => Err(ExecError::DetailedError {
-                    message: "expected JSON object".into(),
-                    detail: None,
-                    hint: path.hint(),
-                    sqlstate: "22023",
-                }),
+                _ => Err(populate_composite_type_error(value)),
             }
         }
-        _ => cast_json_scalar_value(value, ty, path, ctx),
+        _ => cast_json_scalar_value(value, ty, path, render_jsonb_style, ctx),
     }
 }
 
@@ -1359,9 +1401,10 @@ fn cast_json_scalar_value(
     value: &SerdeJsonValue,
     ty: SqlType,
     path: &JsonRecordPath,
+    render_jsonb_style: bool,
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let text = json_record_scalar_text(value)?;
+    let text = json_record_scalar_text(value, render_jsonb_style)?;
     json_record_cast_value(Value::Text(CompactString::from_owned(text)), ty, path, ctx)
 }
 
@@ -1369,15 +1412,22 @@ fn json_record_array_to_value(
     value: &SerdeJsonValue,
     ty: SqlType,
     path: &JsonRecordPath,
+    render_jsonb_style: bool,
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
     match value {
-        SerdeJsonValue::String(text) => json_record_cast_value(
-            Value::Text(CompactString::from_owned(text.clone())),
-            ty,
-            path,
-            ctx,
-        ),
+        SerdeJsonValue::String(text) => {
+            if let Some(value) = json_record_composite_array_literal_to_value(text, ty, path, ctx)?
+            {
+                return Ok(value);
+            }
+            json_record_cast_value(
+                Value::Text(CompactString::from_owned(text.clone())),
+                ty,
+                path,
+                ctx,
+            )
+        }
         SerdeJsonValue::Array(items) => {
             let mut saw_array = false;
             let mut saw_scalar = false;
@@ -1396,6 +1446,7 @@ fn json_record_array_to_value(
                             element_type,
                             None,
                             &next_path,
+                            render_jsonb_style,
                             ctx,
                         );
                     }
@@ -1409,13 +1460,19 @@ fn json_record_array_to_value(
                     } else {
                         saw_scalar = true;
                     }
-                    json_record_array_nested_value(item, element_type, &next_path, ctx)
+                    json_record_array_nested_value(
+                        item,
+                        element_type,
+                        &next_path,
+                        render_jsonb_style,
+                        ctx,
+                    )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let array = ArrayValue::from_nested_values(nested, vec![1]).map_err(|details| {
                 ExecError::DetailedError {
                     message: "malformed JSON array".into(),
-                    detail: Some(details),
+                    detail: Some(json_record_array_shape_detail(&details)),
                     hint: None,
                     sqlstate: "22P02",
                 }
@@ -1461,21 +1518,135 @@ fn json_record_array_element_type(ty: SqlType, ctx: &ExecutorContext) -> SqlType
     ty.element_type()
 }
 
+fn json_record_composite_array_literal_to_value(
+    text: &str,
+    ty: SqlType,
+    path: &JsonRecordPath,
+    ctx: &ExecutorContext,
+) -> Result<Option<Value>, ExecError> {
+    let element_type = json_record_array_element_type(ty, ctx);
+    if !matches!(
+        element_type.kind,
+        SqlTypeKind::Composite | SqlTypeKind::Record
+    ) {
+        return Ok(None);
+    }
+    let Some(descriptor) = record_descriptor_from_sql_type(element_type, ctx)? else {
+        return Ok(None);
+    };
+    let elements = parse_record_array_literal_elements(text)
+        .map_err(|err| json_record_error_with_hint(err, path.hint()))?;
+    let values = elements
+        .into_iter()
+        .map(|element| match element {
+            None => json_record_null_to_value(element_type, path, ctx),
+            Some(raw) => json_record_enforce_domain(
+                parse_record_literal_to_value(&raw, descriptor.clone(), ctx)?,
+                element_type,
+                path,
+                ctx,
+            ),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut array = ArrayValue::from_1d(values);
+    if element_type.type_oid != 0 {
+        array = array.with_element_type_oid(element_type.type_oid);
+    }
+    json_record_enforce_domain(Value::PgArray(array), ty, path, ctx).map(Some)
+}
+
+fn parse_record_array_literal_elements(text: &str) -> Result<Vec<Option<String>>, ExecError> {
+    let body = text
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .ok_or_else(|| ExecError::ArrayInput {
+            message: format!("malformed array literal: \"{text}\""),
+            value: text.into(),
+            detail: Some("Array value must start with \"{\" or dimension information.".into()),
+            sqlstate: "22P02",
+        })?;
+    if body.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut elements = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut token_was_quoted = false;
+    for ch in body.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if quoted => escaped = true,
+            '"' => {
+                quoted = !quoted;
+                token_was_quoted = true;
+            }
+            ',' if !quoted => {
+                elements.push(record_array_literal_element(&current, token_was_quoted));
+                current.clear();
+                token_was_quoted = false;
+            }
+            _ => current.push(ch),
+        }
+    }
+    if quoted {
+        return Err(ExecError::ArrayInput {
+            message: format!("malformed array literal: \"{text}\""),
+            value: text.into(),
+            detail: Some("Unexpected end of input.".into()),
+            sqlstate: "22P02",
+        });
+    }
+    elements.push(record_array_literal_element(&current, token_was_quoted));
+    Ok(elements)
+}
+
+fn record_array_literal_element(text: &str, quoted: bool) -> Option<String> {
+    if !quoted && text.trim().eq_ignore_ascii_case("NULL") {
+        None
+    } else {
+        Some(text.trim().to_string())
+    }
+}
+
+fn json_record_array_shape_detail(details: &str) -> String {
+    if details == "multidimensional arrays must have matching extents" {
+        "Multidimensional arrays must have sub-arrays with matching dimensions.".into()
+    } else {
+        details.into()
+    }
+}
+
 fn json_record_array_nested_value(
     value: &SerdeJsonValue,
     element_type: SqlType,
     path: &JsonRecordPath,
+    render_jsonb_style: bool,
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
     if matches!(value, SerdeJsonValue::Array(_)) {
-        return json_record_array_to_value(value, SqlType::array_of(element_type), path, ctx);
+        return json_record_array_to_value(
+            value,
+            SqlType::array_of(element_type),
+            path,
+            render_jsonb_style,
+            ctx,
+        );
     }
-    json_record_field_to_value(value, element_type, None, path, ctx)
+    json_record_field_to_value(value, element_type, None, path, render_jsonb_style, ctx)
 }
 
-fn json_record_scalar_text(value: &SerdeJsonValue) -> Result<String, ExecError> {
+fn json_record_scalar_text(
+    value: &SerdeJsonValue,
+    render_jsonb_style: bool,
+) -> Result<String, ExecError> {
     match value {
         SerdeJsonValue::String(text) => Ok(text.clone()),
+        _ if render_jsonb_style => Ok(render_serde_json_value_text_with_jsonb_spacing(value)),
         _ => Ok(render_serde_json_value_text(value)),
     }
 }
@@ -1640,6 +1811,20 @@ fn expected_json_array_error(path: &JsonRecordPath, hint: Option<String>) -> Exe
         message: "expected JSON array".into(),
         detail: None,
         hint,
+        sqlstate: "22023",
+    }
+}
+
+fn populate_composite_type_error(value: &SerdeJsonValue) -> ExecError {
+    let message = if matches!(value, SerdeJsonValue::Array(_)) {
+        "cannot call populate_composite on an array"
+    } else {
+        "cannot call populate_composite on a scalar"
+    };
+    ExecError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
         sqlstate: "22023",
     }
 }
@@ -2455,7 +2640,7 @@ pub(crate) fn eval_json_get(
                 }
             };
             Ok(selected
-                .map(|value| json_value_to_value(value, as_text))
+                .map(|value| json_value_to_value(value, as_text, false))
                 .unwrap_or(Value::Null))
         }
         ParsedJsonValue::Jsonb(parsed) => Ok(jsonb_get(&parsed, &key)?
@@ -2489,7 +2674,7 @@ pub(crate) fn eval_json_path(
     )?;
     Ok(match ParsedJsonValue::from_value(&json_value)? {
         ParsedJsonValue::Json(parsed) => json_lookup_path(&parsed, &path)
-            .map(|value| json_value_to_value(value, as_text))
+            .map(|value| json_value_to_value(value, as_text, false))
             .unwrap_or(Value::Null),
         ParsedJsonValue::Jsonb(parsed) => jsonb_path(&parsed, &path)
             .map(|value| {
@@ -3575,15 +3760,49 @@ fn json_value_to_text(value: &SerdeJsonValue) -> Option<String> {
     }
 }
 
-fn json_value_to_value(value: &SerdeJsonValue, as_text: bool) -> Value {
+fn json_value_to_value(value: &SerdeJsonValue, as_text: bool, render_jsonb_style: bool) -> Value {
     if as_text {
         json_value_to_text(value)
             .map(|text| Value::Text(CompactString::from_owned(text)))
             .unwrap_or(Value::Null)
+    } else if render_jsonb_style {
+        Value::Json(CompactString::from_owned(
+            render_serde_json_value_text_with_jsonb_spacing(value),
+        ))
     } else {
         Value::Json(CompactString::from_owned(render_serde_json_value_text(
             value,
         )))
+    }
+}
+
+fn render_serde_json_value_text_with_jsonb_spacing(value: &SerdeJsonValue) -> String {
+    match value {
+        SerdeJsonValue::Array(items) => {
+            let mut out = String::from("[");
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&render_serde_json_value_text_with_jsonb_spacing(item));
+            }
+            out.push(']');
+            out
+        }
+        SerdeJsonValue::Object(map) => {
+            let mut out = String::from("{");
+            for (idx, (key, value)) in map.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&serde_json::to_string(key).unwrap());
+                out.push_str(": ");
+                out.push_str(&render_serde_json_value_text_with_jsonb_spacing(value));
+            }
+            out.push('}');
+            out
+        }
+        _ => render_serde_json_value_text(value),
     }
 }
 
@@ -4019,7 +4238,7 @@ pub(crate) fn eval_json_table_function(
                 other => {
                     return Err(ExecError::TypeMismatch {
                         op: "json_each",
-                        left: json_value_to_value(&other, false),
+                        left: json_value_to_value(&other, false, false),
                         right: Value::Null,
                     });
                 }
@@ -4027,7 +4246,7 @@ pub(crate) fn eval_json_table_function(
             for (key, value) in map {
                 rows.push(TupleSlot::virtual_row(vec![
                     Value::Text(CompactString::from_owned(key)),
-                    json_value_to_value(&value, false),
+                    json_value_to_value(&value, false, false),
                 ]));
             }
         }
@@ -4052,7 +4271,7 @@ pub(crate) fn eval_json_table_function(
                 other => {
                     return Err(ExecError::TypeMismatch {
                         op: "json_each_text",
-                        left: json_value_to_value(&other, false),
+                        left: json_value_to_value(&other, false, false),
                         right: Value::Null,
                     });
                 }
@@ -4060,7 +4279,7 @@ pub(crate) fn eval_json_table_function(
             for (key, value) in map {
                 rows.push(TupleSlot::virtual_row(vec![
                     Value::Text(CompactString::from_owned(key)),
-                    json_value_to_value(&value, true),
+                    json_value_to_value(&value, true, false),
                 ]));
             }
         }
@@ -4085,14 +4304,14 @@ pub(crate) fn eval_json_table_function(
                 other => {
                     return Err(ExecError::TypeMismatch {
                         op: "json_array_elements",
-                        left: json_value_to_value(&other, false),
+                        left: json_value_to_value(&other, false, false),
                         right: Value::Null,
                     });
                 }
             };
             for value in items {
                 rows.push(TupleSlot::virtual_row(vec![json_value_to_value(
-                    &value, false,
+                    &value, false, false,
                 )]));
             }
         }
@@ -4117,14 +4336,14 @@ pub(crate) fn eval_json_table_function(
                 other => {
                     return Err(ExecError::TypeMismatch {
                         op: "json_array_elements_text",
-                        left: json_value_to_value(&other, false),
+                        left: json_value_to_value(&other, false, false),
                         right: Value::Null,
                     });
                 }
             };
             for value in items {
                 rows.push(TupleSlot::virtual_row(vec![json_value_to_value(
-                    &value, true,
+                    &value, true, false,
                 )]));
             }
         }
@@ -4177,7 +4396,7 @@ pub(crate) fn eval_json_table_function(
                     JsonTableFunction::JsonbArrayElements => "jsonb_array_elements",
                     JsonTableFunction::JsonbArrayElementsText => "jsonb_array_elements_text",
                 },
-                left: json_value_to_value(&json, false),
+                left: json_value_to_value(&json, false, false),
                 right: Value::Null,
             });
         }
