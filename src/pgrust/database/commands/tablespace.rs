@@ -133,6 +133,15 @@ fn create_tablespace_directories(
     tablespace_oid: u32,
     allow_in_place_tablespaces: bool,
 ) -> Result<(), ExecError> {
+    if cfg!(target_arch = "wasm32") {
+        return Err(ExecError::DetailedError {
+            message: "CREATE TABLESPACE is not supported in browser wasm builds".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+
     let pg_tblspc_dir = base_dir.join("pg_tblspc");
     fs::create_dir_all(&pg_tblspc_dir).map_err(exec_error_for_io)?;
 
@@ -205,6 +214,7 @@ fn ensure_fresh_directory(path: &Path) -> Result<(), ExecError> {
     Ok(())
 }
 
+#[cfg(any(unix, windows))]
 fn create_symlink_if_missing(target: &Path, link: &Path) -> Result<(), ExecError> {
     match fs::symlink_metadata(link) {
         Ok(_) => {
@@ -223,6 +233,16 @@ fn create_symlink_if_missing(target: &Path, link: &Path) -> Result<(), ExecError
     }
 
     symlink(target, link).map_err(exec_error_for_io)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_symlink_if_missing(_target: &Path, _link: &Path) -> Result<(), ExecError> {
+    Err(ExecError::DetailedError {
+        message: "tablespace symlinks are not supported on this platform".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    })
 }
 
 fn exec_error_for_io(err: std::io::Error) -> ExecError {

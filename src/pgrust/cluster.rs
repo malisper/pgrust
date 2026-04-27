@@ -397,6 +397,7 @@ impl Cluster {
                 sequences: Arc::new(SequenceRuntime::new_ephemeral()),
                 advisory_locks: Arc::new(AdvisoryLockManager::new()),
                 row_locks: Arc::new(RowLockManager::new()),
+                async_notify_runtime: Arc::new(AsyncNotifyRuntime::new()),
                 next_statement_lock_scope_id: AtomicU64::new(1),
                 stats: Arc::new(RwLock::new(DatabaseStatsStore::with_default_io_rows())),
                 large_objects: Arc::new(LargeObjectRuntime::new_ephemeral()),
