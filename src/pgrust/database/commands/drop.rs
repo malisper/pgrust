@@ -1818,6 +1818,15 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
+        if drop_stmt.concurrently && drop_stmt.index_names.len() > 1 {
+            return Err(ExecError::DetailedError {
+                message: "DROP INDEX CONCURRENTLY does not support dropping multiple objects"
+                    .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let catcache = self
             .backend_catcache(client_id, Some((xid, cid)))
@@ -1827,6 +1836,7 @@ impl Database {
         for index_name in &drop_stmt.index_names {
             let Some(entry) = catalog.lookup_any_relation(index_name) else {
                 if drop_stmt.if_exists {
+                    push_notice(format!("index \"{index_name}\" does not exist, skipping"));
                     continue;
                 }
                 return Err(ExecError::DetailedError {
@@ -1905,6 +1915,28 @@ impl Database {
                     .any(|parent_oid| requested_oids.contains(parent_oid))
                 {
                     continue;
+                }
+                if let Some(constraint) = catalog
+                    .constraint_rows_for_index(entry.relation_oid)
+                    .into_iter()
+                    .next()
+                {
+                    let table_name = catalog
+                        .class_row_by_oid(constraint.conrelid)
+                        .map(|row| row.relname)
+                        .unwrap_or_else(|| constraint.conrelid.to_string());
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "cannot drop index {} because constraint {} on table {} requires it",
+                            index_name, constraint.conname, table_name
+                        ),
+                        detail: None,
+                        hint: Some(format!(
+                            "You can drop constraint {} on table {} instead.",
+                            constraint.conname, table_name
+                        )),
+                        sqlstate: "2BP01",
+                    });
                 }
                 Self::collect_index_drop_oids(
                     &catalog,

@@ -2226,17 +2226,54 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         &self,
         relation_oid: u32,
     ) -> Vec<crate::backend::parser::BoundIndexRelation> {
-        relation_get_index_list(self.db, self.client_id, self.txn_ctx, relation_oid)
+        let Ok(mut relcache) = backend_relcache(self.db, self.client_id, self.txn_ctx) else {
+            return relation_get_index_list(self.db, self.client_id, self.txn_ctx, relation_oid)
+                .into_iter()
+                .filter_map(|index_oid| {
+                    let entry =
+                        relation_entry_by_oid(self.db, self.client_id, self.txn_ctx, index_oid)?;
+                    let class = class_row_by_oid(
+                        self.db,
+                        self.client_id,
+                        self.txn_ctx,
+                        entry.relation_oid,
+                    )?;
+                    crate::backend::parser::bound_index_relation_from_relcache_entry(
+                        class.relname,
+                        &entry,
+                        self,
+                    )
+                })
+                .collect();
+        };
+
+        if let Some(temp_namespace) = owned_temp_namespace(self.db, self.client_id) {
+            for (name, entry) in temp_namespace.tables {
+                relcache.insert(name.clone(), entry.entry.clone());
+                relcache.insert(format!("{}.{}", temp_namespace.name, name), entry.entry);
+            }
+        }
+
+        let heap_relation = self.relation_by_oid(relation_oid);
+        relcache
+            .relation_get_index_list(relation_oid)
             .into_iter()
             .filter_map(|index_oid| {
-                let entry =
-                    relation_entry_by_oid(self.db, self.client_id, self.txn_ctx, index_oid)?;
-                let class =
-                    class_row_by_oid(self.db, self.client_id, self.txn_ctx, entry.relation_oid)?;
-                crate::backend::parser::bound_index_relation_from_relcache_entry(
-                    class.relname,
-                    &entry,
+                let entry = relcache.get_by_oid(index_oid)?;
+                if self
+                    .db
+                    .other_session_temp_namespace_oid(self.client_id, entry.namespace_oid)
+                {
+                    return None;
+                }
+                let name = relcache
+                    .relation_name_by_oid(index_oid)
+                    .unwrap_or_else(|| index_oid.to_string());
+                crate::backend::parser::bound_index_relation_from_relcache_entry_with_heap(
+                    name,
+                    entry,
                     self,
+                    heap_relation.as_ref(),
                 )
             })
             .collect()

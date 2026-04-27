@@ -187,6 +187,7 @@ fn push_direct_plan_subplans(
         };
         lines.push(label);
         if let Some(child) = subplans.get(subplan.plan_id) {
+            let child_ctx = subplan_explain_context(plan, subplan, ctx);
             format_explain_plan_with_subplans_inner(
                 child,
                 subplans,
@@ -194,11 +195,36 @@ fn push_direct_plan_subplans(
                 show_costs,
                 verbose,
                 true,
-                ctx,
+                &child_ctx,
                 lines,
             );
         }
     }
+}
+
+fn subplan_explain_context(
+    parent: &Plan,
+    subplan: &SubPlan,
+    ctx: &VerboseExplainContext,
+) -> VerboseExplainContext {
+    if subplan.par_param.is_empty() || subplan.args.is_empty() {
+        return ctx.clone();
+    }
+    let mut child_ctx = ctx.clone();
+    let column_names = plan_join_output_exprs(parent, ctx, true);
+    child_ctx.exec_params.extend(
+        subplan
+            .par_param
+            .iter()
+            .copied()
+            .zip(subplan.args.iter().cloned())
+            .map(|(paramid, expr)| VerboseExecParam {
+                paramid,
+                expr,
+                column_names: column_names.clone(),
+            }),
+    );
+    child_ctx
 }
 
 fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
@@ -499,11 +525,6 @@ fn push_nonverbose_plan_details(
             }
             true
         }
-        Plan::WindowAgg { input, clause, .. } => {
-            let rendered = render_window_clause_for_explain(input, clause, ctx);
-            lines.push(format!("{prefix}Window: w1 AS ({rendered})"));
-            true
-        }
         Plan::IndexOnlyScan {
             keys,
             order_by_keys,
@@ -518,12 +539,18 @@ fn push_nonverbose_plan_details(
             index_meta,
             ..
         } => {
+            let key_column_names = desc
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            let render_runtime = |expr: &Expr| render_verbose_expr(expr, &key_column_names, ctx);
             if let Some(detail) = render_index_scan_condition_with_key_names_and_runtime_renderer(
                 keys,
                 desc,
                 index_meta,
-                None,
-                Some(&|expr| render_verbose_expr(expr, &[], ctx)),
+                Some(&key_column_names),
+                Some(&render_runtime),
             ) {
                 lines.push(format!("{prefix}Index Cond: ({detail})"));
             }
@@ -539,25 +566,31 @@ fn push_nonverbose_plan_details(
             index_quals,
             ..
         } => {
+            let key_column_names = desc
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            let render_runtime = |expr: &Expr| render_verbose_expr(expr, &key_column_names, ctx);
             if let Some(detail) = render_index_scan_condition_with_key_names_and_runtime_renderer(
                 keys,
                 desc,
                 index_meta,
-                None,
-                Some(&|expr| render_verbose_expr(expr, &[], ctx)),
+                Some(&key_column_names),
+                Some(&render_runtime),
             ) {
                 lines.push(format!("{prefix}Index Cond: ({detail})"));
             } else if let Some(qual) = index_quals.iter().cloned().reduce(Expr::and) {
-                let column_names = desc
-                    .columns
-                    .iter()
-                    .map(|column| column.name.clone())
-                    .collect::<Vec<_>>();
                 lines.push(format!(
                     "{prefix}Index Cond: {}",
-                    render_explain_expr(&qual, &column_names)
+                    render_explain_expr(&qual, &key_column_names)
                 ));
             }
+            true
+        }
+        Plan::WindowAgg { input, clause, .. } => {
+            let rendered = render_window_clause_for_explain(input, clause, ctx);
+            lines.push(format!("{prefix}Window: w1 AS ({rendered})"));
             true
         }
         _ => false,
@@ -2660,6 +2693,9 @@ fn verbose_op_text(
         crate::include::nodes::primnodes::OpExprKind::Gt => Some(">"),
         crate::include::nodes::primnodes::OpExprKind::GtEq => Some(">="),
         crate::include::nodes::primnodes::OpExprKind::Concat => Some("||"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayOverlap => Some("&&"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayContains => Some("@>"),
+        crate::include::nodes::primnodes::OpExprKind::ArrayContained => Some("<@"),
         _ => None,
     }
 }

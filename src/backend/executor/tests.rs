@@ -9858,6 +9858,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
                 indcollation: vec![0],
                 indoption: vec![0],
+                reloptions: None,
                 indnullsnotdistinct: false,
                 indisexclusion: false,
                 indimmediate: true,
@@ -9881,6 +9882,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indclass: vec![crate::include::catalog::BOX_GIST_OPCLASS_OID],
                 indcollation: vec![0],
                 indoption: vec![0],
+                reloptions: None,
                 indnullsnotdistinct: false,
                 indisexclusion: false,
                 indimmediate: true,
@@ -9904,6 +9906,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indclass: vec![crate::include::catalog::BOX_SPGIST_OPCLASS_OID],
                 indcollation: vec![0],
                 indoption: vec![0],
+                reloptions: None,
                 indnullsnotdistinct: false,
                 indisexclusion: false,
                 indimmediate: true,
@@ -10113,6 +10116,122 @@ fn select_list_unnest_accepts_catalog_vector_columns() {
         .unwrap(),
         vec![vec![Value::Int64(1)]],
     );
+}
+
+#[test]
+fn create_index_executor_accepts_methods_features_and_geometry_opclasses() {
+    let mut catalog = Catalog::default();
+    let int4 = crate::backend::parser::SqlType::new(SqlTypeKind::Int4);
+    let text = crate::backend::parser::SqlType::new(SqlTypeKind::Text);
+    catalog.insert(
+        "idx_features",
+        test_catalog_entry(
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 14130,
+            },
+            RelationDesc {
+                columns: vec![
+                    crate::backend::catalog::catalog::column_desc("id", int4, false),
+                    crate::backend::catalog::catalog::column_desc(
+                        "poly",
+                        crate::backend::parser::SqlType::new(SqlTypeKind::Polygon),
+                        true,
+                    ),
+                    crate::backend::catalog::catalog::column_desc(
+                        "circ",
+                        crate::backend::parser::SqlType::new(SqlTypeKind::Circle),
+                        true,
+                    ),
+                    crate::backend::catalog::catalog::column_desc(
+                        "tags",
+                        crate::backend::parser::SqlType::array_of(int4),
+                        true,
+                    ),
+                    crate::backend::catalog::catalog::column_desc("note", text, true),
+                ],
+            },
+        ),
+    );
+    let mut harness =
+        SeededSqlHarness::new("create_index_executor_accepts_methods_features", catalog);
+
+    for sql in [
+        "create index idx_features_poly_gist on idx_features using gist(poly)",
+        "create index idx_features_circ_gist on idx_features using gist(circ)",
+        "create index idx_features_tags_gin on idx_features using gin(tags) with (fastupdate=off, gin_pending_list_limit=128)",
+        "create index idx_features_hash on idx_features using hash(id) with (fillfactor=80)",
+        "create index idx_features_partial_include on idx_features using btree(id) include(note) where id > 0",
+        "create index idx_features_expr_btree on idx_features using btree((id + 1))",
+        "create index concurrently idx_features_concurrent on idx_features(id)",
+    ] {
+        harness.execute(INVALID_TRANSACTION_ID, sql).unwrap();
+    }
+
+    let catalog = harness.catalog();
+    let index_meta = |name: &str| {
+        let entry = catalog.get(name).expect("created index");
+        (entry.am_oid, entry.index_meta.as_ref().unwrap())
+    };
+    assert_eq!(
+        index_meta("idx_features_poly_gist").0,
+        crate::include::catalog::GIST_AM_OID
+    );
+    assert_eq!(
+        index_meta("idx_features_poly_gist").1.indclass,
+        vec![crate::include::catalog::POLY_GIST_OPCLASS_OID]
+    );
+    assert_eq!(
+        index_meta("idx_features_circ_gist").1.indclass,
+        vec![crate::include::catalog::CIRCLE_GIST_OPCLASS_OID]
+    );
+    assert_eq!(
+        index_meta("idx_features_tags_gin").1.indclass,
+        vec![crate::include::catalog::ARRAY_GIN_OPCLASS_OID]
+    );
+    assert_eq!(
+        index_meta("idx_features_tags_gin")
+            .1
+            .gin_options
+            .as_ref()
+            .unwrap()
+            .pending_list_limit_kb,
+        128
+    );
+    assert!(
+        !index_meta("idx_features_tags_gin")
+            .1
+            .gin_options
+            .as_ref()
+            .unwrap()
+            .fastupdate
+    );
+    assert_eq!(
+        index_meta("idx_features_hash").1.indclass,
+        vec![crate::include::catalog::INT4_HASH_OPCLASS_OID]
+    );
+    assert_eq!(
+        index_meta("idx_features_hash")
+            .1
+            .hash_options
+            .unwrap()
+            .fillfactor,
+        80
+    );
+
+    let partial = index_meta("idx_features_partial_include").1;
+    assert_eq!(
+        partial.indclass,
+        vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID]
+    );
+    assert_eq!(partial.indkey, vec![1, 5]);
+    assert!(partial.indpred.is_some());
+
+    let expr = index_meta("idx_features_expr_btree").1;
+    assert_eq!(expr.indkey, vec![0]);
+    assert!(expr.indexprs.is_some());
+    assert!(catalog.get("idx_features_concurrent").is_some());
 }
 
 #[test]
@@ -10976,6 +11095,12 @@ fn insert_select_default_values_and_table_stmt_work() {
             "insert into bit_defaults select B'1111', B'1'",
         )
         .unwrap();
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "insert into bit_defaults (select B'0000', B'0')",
+        )
+        .unwrap();
     assert_query_rows(
         harness
             .execute(INVALID_TRANSACTION_ID, "table bit_defaults")
@@ -11019,6 +11144,16 @@ fn insert_select_default_values_and_table_stmt_work() {
                 Value::Bit(crate::include::nodes::datum::BitString::new(
                     1,
                     vec![0b1000_0000],
+                )),
+            ],
+            vec![
+                Value::Bit(crate::include::nodes::datum::BitString::new(
+                    4,
+                    vec![0b0000_0000],
+                )),
+                Value::Bit(crate::include::nodes::datum::BitString::new(
+                    1,
+                    vec![0b0000_0000],
                 )),
             ],
         ],

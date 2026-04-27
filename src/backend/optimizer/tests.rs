@@ -691,6 +691,7 @@ fn int4_btree_options(num_keys: usize, indnullsnotdistinct: bool) -> CatalogInde
         indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID; num_keys],
         indcollation: vec![0; num_keys],
         indoption: vec![0; num_keys],
+        reloptions: None,
         indnullsnotdistinct,
         indisexclusion: false,
         indimmediate: true,
@@ -707,6 +708,7 @@ fn box_spgist_options(num_keys: usize) -> CatalogIndexBuildOptions {
         indclass: vec![crate::include::catalog::BOX_SPGIST_OPCLASS_OID; num_keys],
         indcollation: vec![0; num_keys],
         indoption: vec![0; num_keys],
+        reloptions: None,
         indnullsnotdistinct: false,
         indisexclusion: false,
         indimmediate: true,
@@ -723,6 +725,7 @@ fn polygon_spgist_options(num_keys: usize) -> CatalogIndexBuildOptions {
         indclass: vec![crate::include::catalog::POLY_SPGIST_OPCLASS_OID; num_keys],
         indcollation: vec![0; num_keys],
         indoption: vec![0; num_keys],
+        reloptions: None,
         indnullsnotdistinct: false,
         indisexclusion: false,
         indimmediate: true,
@@ -1035,6 +1038,7 @@ fn catalog_with_inherited_indexed_items()
             indclass,
             indcollation,
             indoption,
+            reloptions: None,
             indnullsnotdistinct: false,
             indisexclusion: false,
             indimmediate: true,
@@ -3492,14 +3496,12 @@ fn planner_uses_runtime_index_key_for_correlated_limit_subplan() {
     assert!(planned.subplans.iter().any(|subplan| {
         plan_contains(subplan, |plan| matches!(plan, Plan::Limit { .. }))
             && plan_contains(subplan, |plan| match plan {
-                Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => {
-                    keys.iter().any(|key| {
-                        matches!(
-                            &key.argument,
-                            IndexScanKeyArgument::Runtime(expr) if contains_exec_param(expr)
-                        )
-                    })
-                }
+                Plan::IndexOnlyScan { keys, .. } => keys.iter().any(|key| {
+                    matches!(
+                        &key.argument,
+                        IndexScanKeyArgument::Runtime(expr) if contains_exec_param(expr)
+                    )
+                }),
                 _ => false,
             })
     }));

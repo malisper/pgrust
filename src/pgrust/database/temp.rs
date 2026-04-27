@@ -163,6 +163,64 @@ impl Database {
         Ok(())
     }
 
+    pub(super) fn replace_temp_entry_rel(
+        &self,
+        client_id: ClientId,
+        relation_oid: u32,
+        rel: crate::backend::storage::smgr::RelFileLocator,
+    ) -> Result<(), ExecError> {
+        let temp_backend_id = self.temp_backend_id(client_id);
+        let mut namespaces = self.temp_relations.write();
+        let namespace = namespaces.get_mut(&temp_backend_id).ok_or_else(|| {
+            ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string()))
+        })?;
+        let entry = namespace
+            .tables
+            .values_mut()
+            .find(|entry| entry.entry.relation_oid == relation_oid)
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string()))
+            })?;
+        entry.entry.rel = rel;
+        namespace.generation = namespace.generation.saturating_add(1);
+        drop(namespaces);
+        self.invalidate_backend_cache_state(client_id);
+        Ok(())
+    }
+
+    pub(super) fn replace_temp_entry_index_readiness(
+        &self,
+        client_id: ClientId,
+        relation_oid: u32,
+        indisready: bool,
+        indisvalid: bool,
+    ) -> Result<(), ExecError> {
+        let temp_backend_id = self.temp_backend_id(client_id);
+        let mut namespaces = self.temp_relations.write();
+        let namespace = namespaces.get_mut(&temp_backend_id).ok_or_else(|| {
+            ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string()))
+        })?;
+        let entry = namespace
+            .tables
+            .values_mut()
+            .find(|entry| entry.entry.relation_oid == relation_oid)
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string()))
+            })?;
+        let index = entry.entry.index.as_mut().ok_or_else(|| {
+            ExecError::Parse(ParseError::WrongObjectType {
+                name: relation_oid.to_string(),
+                expected: "index",
+            })
+        })?;
+        index.indisready = indisready;
+        index.indisvalid = indisvalid;
+        namespace.generation = namespace.generation.saturating_add(1);
+        drop(namespaces);
+        self.invalidate_backend_cache_state(client_id);
+        Ok(())
+    }
+
     pub(super) fn temp_relation_name_for_oid(
         &self,
         client_id: ClientId,
@@ -704,6 +762,15 @@ impl Database {
         }
 
         for name in to_drop {
+            let normalized = normalize_temp_lookup_name(&name);
+            let still_tracked = self
+                .temp_relations
+                .read()
+                .get(&self.temp_backend_id(client_id))
+                .is_some_and(|namespace| namespace.tables.contains_key(&normalized));
+            if !still_tracked {
+                continue;
+            }
             let xid = self.txns.write().begin();
             let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
             let mut catalog_effects = Vec::new();
@@ -725,7 +792,11 @@ impl Database {
                 &[],
             );
             guard.disarm();
-            let _ = result?;
+            match result {
+                Ok(_) => {}
+                Err(ExecError::Parse(ParseError::TableDoesNotExist(_))) => {}
+                Err(err) => return Err(err),
+            }
         }
         Ok(())
     }

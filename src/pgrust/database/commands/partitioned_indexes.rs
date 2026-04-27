@@ -499,6 +499,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
             spec.access_method_handler,
             &spec.build_options,
             self.maintenance_work_mem_kb,
+            false,
             self.catalog_effects,
         )
     }
@@ -718,6 +719,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
                 indclass: index.index_meta.indclass.clone(),
                 indcollation: index.index_meta.indcollation.clone(),
                 indoption: index.index_meta.indoption.clone(),
+                reloptions: None,
                 indnullsnotdistinct: index.index_meta.indnullsnotdistinct,
                 indisexclusion: index.index_meta.indisexclusion,
                 indimmediate: index.index_meta.indimmediate,

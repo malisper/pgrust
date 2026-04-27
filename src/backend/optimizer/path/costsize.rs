@@ -16,13 +16,13 @@ use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
 use crate::include::access::spgist::SPGIST_CONFIG_PROC;
 use crate::include::catalog::{
     ANYARRAYOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, BPCHAR_BTREE_OPCLASS_OID, BRIN_AM_OID,
-    BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GIST_CIRCLE_FAMILY_OID, GIST_MULTIRANGE_FAMILY_OID,
-    GIST_POLY_FAMILY_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID, PG_LARGEOBJECT_METADATA_RELATION_OID,
-    PgStatisticRow, SPG_BOX_QUAD_CONFIG_PROC_OID, SPG_KD_CONFIG_PROC_OID,
-    SPG_NETWORK_CONFIG_PROC_OID, SPG_QUAD_CONFIG_PROC_OID, SPG_RANGE_CONFIG_PROC_OID,
-    SPG_TEXT_CONFIG_PROC_OID, SPGIST_AM_OID, SPGIST_TEXT_FAMILY_OID, bootstrap_pg_operator_rows,
-    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
-    range_type_ref_for_sql_type, relkind_has_storage,
+    BTREE_AM_OID, GIN_AM_OID, GIN_ARRAY_FAMILY_OID, GIST_AM_OID, GIST_CIRCLE_FAMILY_OID,
+    GIST_MULTIRANGE_FAMILY_OID, GIST_POLY_FAMILY_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID,
+    PG_LARGEOBJECT_METADATA_RELATION_OID, PgStatisticRow, SPG_BOX_QUAD_CONFIG_PROC_OID,
+    SPG_KD_CONFIG_PROC_OID, SPG_NETWORK_CONFIG_PROC_OID, SPG_QUAD_CONFIG_PROC_OID,
+    SPG_RANGE_CONFIG_PROC_OID, SPG_TEXT_CONFIG_PROC_OID, SPGIST_AM_OID, SPGIST_TEXT_FAMILY_OID,
+    bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
+    proc_oid_for_builtin_scalar_function, range_type_ref_for_sql_type, relkind_has_storage,
 };
 use crate::include::nodes::datetime::{TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND};
 use crate::include::nodes::datum::{
@@ -1189,7 +1189,7 @@ fn try_optimize_access_subtree(
     let order_display_items = order_display_items;
 
     let stats = relation_stats(catalog, relation_oid, &desc);
-    let mut best = estimate_seqscan_candidate(
+    let seq_candidate = estimate_seqscan_candidate(
         source_id,
         rel,
         relation_name.clone(),
@@ -1205,8 +1205,9 @@ fn try_optimize_access_subtree(
         catalog,
         disabled,
     );
+    let mut best = config.enable_seqscan.then_some(seq_candidate.clone());
     if relkind != 'r' || !config.enable_indexscan || relation_uses_virtual_scan(relation_oid) {
-        return Ok(best.plan);
+        return Ok(best.unwrap_or(seq_candidate).plan);
     }
     let indexes = catalog.index_relations_for_heap(relation_oid);
     for index in indexes.iter().filter(|index| {
@@ -1238,11 +1239,14 @@ fn try_optimize_access_subtree(
             config,
             catalog,
         );
-        if candidate.total_cost < best.total_cost {
-            best = candidate;
+        if best
+            .as_ref()
+            .is_none_or(|best| candidate.total_cost < best.total_cost)
+        {
+            best = Some(candidate);
         }
     }
-    Ok(best.plan)
+    Ok(best.unwrap_or(seq_candidate).plan)
 }
 
 fn relation_uses_virtual_scan(relation_oid: u32) -> bool {
@@ -4885,6 +4889,33 @@ fn gist_operator_builtin_strategy(
     }
 }
 
+fn gin_array_builtin_strategy(
+    index: &BoundIndexRelation,
+    index_pos: usize,
+    kind: OpExprKind,
+) -> Option<u16> {
+    if index.index_meta.am_oid != GIN_AM_OID {
+        return None;
+    }
+    let array_opfamily =
+        index.index_meta.opfamily_oids.get(index_pos).copied() == Some(GIN_ARRAY_FAMILY_OID);
+    let array_column = index
+        .desc
+        .columns
+        .get(index_pos)
+        .is_some_and(|column| column.sql_type.is_array);
+    if !array_opfamily && !array_column {
+        return None;
+    }
+    Some(match kind {
+        OpExprKind::ArrayOverlap => 1,
+        OpExprKind::ArrayContains => 2,
+        OpExprKind::ArrayContained => 3,
+        OpExprKind::Eq => 4,
+        _ => return None,
+    })
+}
+
 fn qual_strategy(
     index: &BoundIndexRelation,
     index_pos: usize,
@@ -4928,6 +4959,7 @@ fn qual_strategy(
                             (index.index_meta.am_oid == HASH_AM_OID && kind == OpExprKind::Eq)
                                 .then_some(1)
                         })
+                        .or_else(|| gin_array_builtin_strategy(index, index_pos, kind))
                         .or_else(|| gist_operator_builtin_strategy(index, index_pos, kind))
                 })
         }

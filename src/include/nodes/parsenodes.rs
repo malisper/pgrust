@@ -376,6 +376,7 @@ pub enum Statement {
     AlterIndexAttachPartition(AlterIndexAttachPartitionStatement),
     AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement),
     AlterIndexAlterColumnOptions(AlterIndexAlterColumnOptionsStatement),
+    AlterTableCompound(AlterTableCompoundStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
     AlterTableAddColumns(AlterTableAddColumnsStatement),
     AlterTableMulti(Vec<String>),
@@ -2412,6 +2413,11 @@ pub struct AlterTableDropConstraintStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableCompoundStatement {
+    pub actions: Vec<Statement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableAlterConstraintStatement {
     pub if_exists: bool,
     pub only: bool,
@@ -3329,8 +3335,19 @@ pub struct DropIndexStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReindexTargetKind {
+    Index,
+    Table,
+    Schema,
+    Database,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReindexIndexStatement {
     pub concurrently: bool,
+    pub verbose: bool,
+    pub kind: ReindexTargetKind,
     pub index_name: String,
 }
 
