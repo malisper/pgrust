@@ -8303,6 +8303,7 @@ pub(crate) fn eval_builtin_function(
     if let Some(result) = eval_json_builtin_function(
         func,
         &values,
+        result_type,
         func_variadic,
         &ctx.datetime_config,
         ctx.catalog.as_ref(),

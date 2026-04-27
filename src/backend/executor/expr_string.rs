@@ -1044,6 +1044,7 @@ fn value_output_text_with_config(
         Value::Record(record) => crate::backend::executor::expr_json::eval_json_builtin_function(
             crate::include::nodes::primnodes::BuiltinScalarFunction::RowToJson,
             &[Value::Record(record.clone())],
+            None,
             false,
             &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             None,
