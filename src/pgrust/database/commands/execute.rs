@@ -754,6 +754,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterIndexAlterColumnOptions(ref alter_stmt) => self
+                .execute_alter_index_alter_column_options_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableCompound(ref compound_stmt) => {
                 for action in &compound_stmt.actions {
                     self.execute_statement_with_search_path_inner(
@@ -2424,8 +2430,8 @@ impl Database {
             | Statement::Fetch(_)
             | Statement::Move(_)
             | Statement::ClosePortal(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "portal command handled by session layer",
-                actual: "portal command".into(),
+                expected: "session command handled by session layer",
+                actual: "session command".into(),
             })),
         }
     }

@@ -3,11 +3,11 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{Expr, Plan, RelationDesc, Value};
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID,
-    PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgPolicyRow, PgProcRow, PgRangeRow,
-    PgRewriteRow, PgTypeRow, PolicyCommand, RECORD_TYPE_OID, bootstrap_pg_proc_rows,
-    sort_pg_rewrite_rows,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, JSON_TYPE_OID,
+    PUBLIC_NAMESPACE_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
+    PgCollationRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgPolicyRow,
+    PgProcRow, PgRangeRow, PgRewriteRow, PgTypeRow, PolicyCommand, RECORD_TYPE_OID,
+    bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
@@ -804,6 +804,7 @@ fn catalog_with_people_id_index() -> Catalog {
                 indoption: vec![0],
                 indexprs: None,
                 indpred: None,
+                btree_options: None,
                 brin_options: None,
                 gin_options: None,
                 hash_options: None,
@@ -872,6 +873,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
                 indoption: vec![0],
                 indexprs: None,
                 indpred: None,
+                btree_options: None,
                 brin_options: None,
                 gin_options: None,
                 hash_options: None,
@@ -910,6 +912,126 @@ fn catalog_with_people_id_name_unique_index() -> Catalog {
         false,
         &[IndexColumnDef::from("id"), IndexColumnDef::from("name")],
     );
+    catalog
+}
+
+fn catalog_with_people_name_unique_constraint() -> Catalog {
+    let mut catalog = catalog();
+    let relation_oid = catalog.lookup_any_relation("people").unwrap().relation_oid;
+    let index = add_ready_people_index(
+        &mut catalog,
+        "people_name_key",
+        true,
+        false,
+        &[IndexColumnDef::from("name")],
+    );
+    catalog
+        .create_index_backed_constraint(
+            relation_oid,
+            index.relation_oid,
+            "people_name_key",
+            CONSTRAINT_UNIQUE,
+            &[],
+        )
+        .unwrap();
+    catalog
+}
+
+fn catalog_with_memberships_composite_primary_key() -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog.insert(
+        "memberships",
+        test_catalog_entry(
+            15020,
+            RelationDesc {
+                columns: vec![
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("tag", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("note", SqlType::new(SqlTypeKind::Text), true),
+                ],
+            },
+        ),
+    );
+    let relation_oid = catalog
+        .lookup_any_relation("memberships")
+        .unwrap()
+        .relation_oid;
+    let index = catalog
+        .create_index_for_relation_with_flags(
+            "memberships_pkey",
+            relation_oid,
+            true,
+            true,
+            &[IndexColumnDef::from("id"), IndexColumnDef::from("tag")],
+        )
+        .unwrap();
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .unwrap();
+    catalog
+        .create_index_backed_constraint(
+            relation_oid,
+            index.relation_oid,
+            "memberships_pkey",
+            CONSTRAINT_PRIMARY,
+            &[],
+        )
+        .unwrap();
+    catalog
+}
+
+fn catalog_with_products_primary_key_and_sales() -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog.insert(
+        "products",
+        test_catalog_entry(
+            15021,
+            RelationDesc {
+                columns: vec![
+                    column_desc("product_id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("name", SqlType::new(SqlTypeKind::Text), true),
+                    column_desc("price", SqlType::new(SqlTypeKind::Int4), true),
+                ],
+            },
+        ),
+    );
+    catalog.insert(
+        "sales",
+        test_catalog_entry(
+            15022,
+            RelationDesc {
+                columns: vec![
+                    column_desc("product_id", SqlType::new(SqlTypeKind::Int4), true),
+                    column_desc("units", SqlType::new(SqlTypeKind::Int4), true),
+                ],
+            },
+        ),
+    );
+    let relation_oid = catalog
+        .lookup_any_relation("products")
+        .unwrap()
+        .relation_oid;
+    let index = catalog
+        .create_index_for_relation_with_flags(
+            "products_pkey",
+            relation_oid,
+            true,
+            true,
+            &[IndexColumnDef::from("product_id")],
+        )
+        .unwrap();
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .unwrap();
+    catalog
+        .create_index_backed_constraint(
+            relation_oid,
+            index.relation_oid,
+            "products_pkey",
+            CONSTRAINT_PRIMARY,
+            &[],
+        )
+        .unwrap();
     catalog
 }
 
@@ -969,6 +1091,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
                 indoption: vec![0],
                 indexprs: None,
                 indpred: Some("(id > 0)".into()),
+                btree_options: None,
                 brin_options: None,
                 gin_options: None,
                 hash_options: None,
@@ -1034,6 +1157,7 @@ fn catalog_with_people_ctid_partial_unique_index() -> Catalog {
                 indoption: vec![0],
                 indexprs: None,
                 indpred: Some("ctid >= '(1000,0)'".into()),
+                btree_options: None,
                 brin_options: None,
                 gin_options: None,
                 hash_options: None,
@@ -1099,6 +1223,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
                 indoption: vec![0],
                 indexprs: Some(serde_json::to_string(&vec!["lower(name)"]).unwrap()),
                 indpred: None,
+                btree_options: None,
                 brin_options: None,
                 gin_options: None,
                 hash_options: None,
@@ -1279,6 +1404,7 @@ fn bind_expression_index_metadata_does_not_discover_heap_indexes() {
                 indoption: vec![0],
                 indexprs: Some(serde_json::to_string(&vec!["a * a"]).unwrap()),
                 indpred: None,
+                btree_options: None,
                 brin_options: None,
                 gin_options: None,
                 hash_options: None,
@@ -1352,6 +1478,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
                 indoption: vec![0],
                 indexprs: None,
                 indpred: None,
+                btree_options: None,
                 brin_options: None,
                 gin_options: None,
                 hash_options: None,
@@ -1425,6 +1552,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
                 indoption: vec![0],
                 indexprs: None,
                 indpred: None,
+                btree_options: None,
                 brin_options: None,
                 gin_options: None,
                 hash_options: None,
@@ -3239,6 +3367,32 @@ fn parse_alter_table_constraint_statements() {
             only: false,
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
+            cascade: false,
+        })
+    );
+
+    let stmt =
+        parse_statement("alter table items drop constraint items_id_check restrict").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableDropConstraint(AlterTableDropConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            constraint_name: "items_id_check".into(),
+            cascade: false,
+        })
+    );
+
+    let stmt = parse_statement("alter table items drop constraint items_id_check cascade").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableDropConstraint(AlterTableDropConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            constraint_name: "items_id_check".into(),
+            cascade: true,
         })
     );
 
@@ -14024,6 +14178,114 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Text),
         })
+    );
+}
+
+#[test]
+fn build_plan_allows_primary_key_functional_dependency_in_grouped_output() {
+    let stmt = parse_select("select id, name, note from people group by id").unwrap();
+    let plan = build_plan(&stmt, &catalog_with_people_primary_key()).unwrap();
+
+    match plan {
+        Plan::Projection { input, targets, .. } => {
+            assert_eq!(targets.len(), 3);
+            match *input {
+                Plan::Aggregate {
+                    group_by,
+                    passthrough_exprs,
+                    ..
+                } => {
+                    assert_eq!(group_by.len(), 1);
+                    assert!(is_outer_user_var(&group_by[0], 0));
+                    assert_eq!(passthrough_exprs.len(), 2);
+                    assert!(is_outer_user_var(&passthrough_exprs[0], 1));
+                    assert!(is_outer_user_var(&passthrough_exprs[1], 2));
+                }
+                other => panic!("expected aggregate below projection, got {other:?}"),
+            }
+        }
+        other => panic!("expected projection, got {other:?}"),
+    }
+}
+
+#[test]
+fn build_plan_does_not_use_unique_constraint_for_grouped_functional_dependency() {
+    let stmt = parse_select("select id from people group by name").unwrap();
+
+    assert!(matches!(
+        build_plan(&stmt, &catalog_with_people_name_unique_constraint()),
+        Err(ParseError::UngroupedColumn { token, .. }) if token == "id"
+    ));
+}
+
+#[test]
+fn build_plan_requires_all_composite_primary_key_columns_for_grouped_functional_dependency() {
+    let partial = parse_select("select note from memberships group by id").unwrap();
+    assert!(matches!(
+        build_plan(&partial, &catalog_with_memberships_composite_primary_key()),
+        Err(ParseError::UngroupedColumn { token, .. }) if token == "note"
+    ));
+
+    let full = parse_select("select note from memberships group by id, tag").unwrap();
+    let plan = build_plan(&full, &catalog_with_memberships_composite_primary_key()).unwrap();
+    match plan {
+        Plan::Projection { input, .. } => match *input {
+            Plan::Aggregate {
+                group_by,
+                passthrough_exprs,
+                ..
+            } => {
+                assert_eq!(group_by.len(), 2);
+                assert_eq!(passthrough_exprs.len(), 1);
+                assert!(is_outer_user_var(&passthrough_exprs[0], 2));
+            }
+            other => panic!("expected aggregate below projection, got {other:?}"),
+        },
+        other => panic!("expected projection, got {other:?}"),
+    }
+}
+
+#[test]
+fn build_plan_allows_joined_table_column_functionally_dependent_on_grouped_primary_key() {
+    let mut catalog = catalog_with_people_primary_key();
+    catalog.insert("pets", pets_entry());
+    let stmt = parse_select(
+        "select p.id, p.name, count(q.id)
+         from people p join pets q on q.owner_id = p.id
+         group by p.id",
+    )
+    .unwrap();
+
+    build_plan(&stmt, &catalog).unwrap();
+}
+
+#[test]
+fn build_plan_allows_using_merged_primary_key_for_grouped_functional_dependency() {
+    let stmt = parse_select(
+        "select product_id, p.name, count(s.units)
+         from products p left join sales s using (product_id)
+         group by product_id",
+    )
+    .unwrap();
+
+    build_plan(&stmt, &catalog_with_products_primary_key_and_sales()).unwrap();
+}
+
+#[test]
+fn parse_prepare_and_execute_statements() {
+    let stmt = parse_statement("prepare foo as select id from people group by id").unwrap();
+    match stmt {
+        Statement::Prepare(PrepareStatement { name, query, .. }) => {
+            assert_eq!(name, "foo");
+            assert_eq!(query.group_by.len(), 1);
+        }
+        other => panic!("expected PREPARE statement, got {other:?}"),
+    }
+
+    let stmt = parse_statement("execute foo").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Execute(ExecuteStatement { name: "foo".into() })
     );
 }
 

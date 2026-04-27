@@ -10485,6 +10485,87 @@ fn dependent_views_allow_add_column_but_block_drop() {
 }
 
 #[test]
+fn grouped_view_blocks_primary_key_constraint_drop_restrict() {
+    let dir = temp_dir("grouped_view_blocks_pkey_drop");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table articles(id int4 primary key, keywords text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view fdv as select id, keywords from articles group by id",
+        )
+        .unwrap();
+
+    match session.execute(
+        &db,
+        "alter table articles drop constraint articles_pkey restrict",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            hint: Some(hint),
+            sqlstate,
+        }) if message
+            == "cannot drop constraint articles_pkey on table articles because other objects depend on it"
+            && detail == "view fdv depends on constraint articles_pkey on table articles"
+            && hint == "Use DROP ... CASCADE to drop the dependent objects too."
+            && sqlstate == "2BP01" => {}
+        other => panic!("expected dependent grouped-view constraint error, got {other:?}"),
+    }
+
+    session.execute(&db, "drop view fdv").unwrap();
+    session
+        .execute(
+            &db,
+            "alter table articles drop constraint articles_pkey restrict",
+        )
+        .unwrap();
+}
+
+#[test]
+fn sql_prepare_execute_replans_after_primary_key_drop() {
+    let dir = temp_dir("sql_prepare_execute_replans");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table articles(id int4 primary key, keywords text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "prepare foo as select id, keywords from articles group by id",
+        )
+        .unwrap();
+    assert!(matches!(
+        session.execute(&db, "execute foo").unwrap(),
+        StatementResult::Query { .. }
+    ));
+
+    session
+        .execute(
+            &db,
+            "alter table articles drop constraint articles_pkey restrict",
+        )
+        .unwrap();
+    match session.execute(&db, "execute foo") {
+        Err(ExecError::Parse(ParseError::UngroupedColumn { token, .. })) if token == "keywords" => {
+        }
+        other => panic!("expected prepared EXECUTE to replan and fail, got {other:?}"),
+    }
+}
+
+#[test]
 fn drop_view_rejects_depended_on_view() {
     let dir = temp_dir("drop_view_rejects_depended_on_view");
     let db = Database::open(&dir, 128).unwrap();

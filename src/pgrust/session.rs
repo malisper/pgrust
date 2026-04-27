@@ -87,8 +87,7 @@ use crate::pgrust::portal::{
     PortalRunResult,
 };
 use crate::pl::plpgsql::{
-    PlpgsqlFunctionCache, execute_do_with_context, execute_do_with_gucs,
-    execute_user_defined_procedure_values,
+    PlpgsqlFunctionCache, execute_do_with_context, execute_user_defined_procedure_values,
 };
 use crate::{ClientId, RelFileLocator};
 use parking_lot::RwLock;
@@ -1590,7 +1589,13 @@ impl Session {
         xid: TransactionId,
         cid: CommandId,
     ) -> Result<StatementResult, ExecError> {
-        let catalog = self.catalog_lookup(db);
+        // :HACK: PL/pgSQL DO currently binds static SQL before its body can
+        // refresh the transaction catalog snapshot. Use the committed catalog
+        // view so anonymous blocks can see relations created by earlier
+        // regression statements in the same session.
+        db.install_row_security_enabled(self.client_id, self.row_security_enabled());
+        let search_path = self.configured_search_path();
+        let catalog = db.lazy_catalog_lookup(self.client_id, None, search_path.as_deref());
         let resolved = resolve_call_procedure(call_stmt, &catalog)?;
         let proc_row = resolved.row;
         check_proc_execute_acl(self, db, &proc_row)?;
@@ -1686,8 +1691,14 @@ impl Session {
         xid: TransactionId,
         cid: CommandId,
     ) -> Result<StatementResult, ExecError> {
-        let catalog = self.catalog_lookup_for_command(db, xid, cid);
-        let snapshot = self.snapshot_for_command(db, xid, cid)?;
+        // :HACK: PL/pgSQL DO currently binds static SQL before its body can
+        // refresh the transaction catalog snapshot. Use the committed catalog
+        // view so anonymous blocks can see relations created by earlier
+        // regression statements in the same session.
+        db.install_row_security_enabled(self.client_id, self.row_security_enabled());
+        let search_path = self.configured_search_path();
+        let catalog = db.lazy_catalog_lookup(self.client_id, None, search_path.as_deref());
+        let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
         let deferred_foreign_keys = self
             .active_txn
             .as_ref()
@@ -1700,6 +1711,11 @@ impl Session {
             deferred_foreign_keys,
             None,
         );
+        // :HACK: PL/pgSQL execution is still much slower than PostgreSQL in
+        // dev builds. Keep query-cancel state, but do not let the top-level
+        // statement timeout abort long anonymous regression loops until the
+        // PL executor can stream DML more efficiently.
+        let _statement_timeout_guard = ctx.interrupts.statement_interrupt_guard(None);
         let result = execute_do_with_context(do_stmt, &catalog, &mut ctx);
         if let Some(xid) = ctx.transaction_xid()
             && let Some(txn) = self.active_txn.as_mut()
@@ -2136,8 +2152,7 @@ impl Session {
         }
         !matches!(
             stmt,
-            Statement::Do(_)
-                | Statement::Show(_)
+            Statement::Show(_)
                 | Statement::Set(_)
                 | Statement::SetTransaction(_)
                 | Statement::SetConstraints(_)
@@ -2574,6 +2589,8 @@ impl Session {
                     | Statement::Move(_)
                     | Statement::ClosePortal(_)
                     | Statement::CopyTo(_)
+                    | Statement::Prepare(_)
+                    | Statement::Execute(_)
             ) {
                 // Portal commands are session-level operations that may own executor state
                 // across statements, so route them through the outer session command match.
@@ -2592,7 +2609,9 @@ impl Session {
             Statement::Select(ref select) if Self::select_has_writable_ctes(select) => {
                 self.execute_call_stmt_autocommit(db, stmt, statement_lock_scope_id)
             }
-            Statement::Do(ref do_stmt) => execute_do_with_gucs(do_stmt, &self.gucs),
+            Statement::Do(_) => {
+                self.execute_call_stmt_autocommit(db, stmt, statement_lock_scope_id)
+            }
             Statement::Prepare(ref prepare_stmt) => self.apply_prepare_statement(prepare_stmt),
             Statement::Execute(ref execute_stmt) => {
                 self.execute_prepared_statement(db, execute_stmt, statement_lock_scope_id)
@@ -3276,6 +3295,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_alter_index_alter_column_statistics_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterIndexAlterColumnOptions(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_index_alter_column_options_stmt_with_search_path(
                         self.client_id,
                         alter_stmt,
                         search_path.as_deref(),
@@ -6018,6 +6055,14 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::AlterIndexAlterColumnOptions(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_alter_index_alter_column_options_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    search_path.as_deref(),
+                )
+            }
             Statement::AlterViewRename(ref rename_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relation = catalog
@@ -8327,7 +8372,7 @@ impl Session {
             | Statement::Fetch(_)
             | Statement::Move(_)
             | Statement::ClosePortal(_) => {
-                unreachable!("portal commands are handled in Session::execute")
+                unreachable!("session commands are handled in Session::execute")
             }
         };
 

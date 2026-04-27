@@ -586,16 +586,35 @@ fn bind_row_comparison_expr(
 
     let mut parts = Vec::with_capacity(left_fields.len());
     for ((_, left), (_, right)) in left_fields.into_iter().zip(right_fields) {
-        let left_type = expr_sql_type_hint(&left).unwrap_or(SqlType::new(SqlTypeKind::Text));
-        let right_type = expr_sql_type_hint(&right).unwrap_or(SqlType::new(SqlTypeKind::Text));
+        let raw_left_type = expr_sql_type_hint(&left).unwrap_or(SqlType::new(SqlTypeKind::Text));
+        let raw_right_type = expr_sql_type_hint(&right).unwrap_or(SqlType::new(SqlTypeKind::Text));
+        let left_type =
+            coerce_bound_unknown_string_literal_type(&left, raw_left_type, raw_right_type);
+        let right_type =
+            coerce_bound_unknown_string_literal_type(&right, raw_right_type, left_type);
         parts.push(bind_lowered_comparison_expr(
-            op, make, left, left_type, left_type, right, right_type, right_type, None, None,
+            op,
+            make,
+            left,
+            raw_left_type,
+            left_type,
+            right,
+            raw_right_type,
+            right_type,
+            None,
+            None,
             catalog,
         )?);
     }
 
     if parts.len() == 1 {
         return Ok(parts.pop().expect("single row comparison part"));
+    }
+    if matches!(
+        make,
+        OpExprKind::Lt | OpExprKind::LtEq | OpExprKind::Gt | OpExprKind::GtEq
+    ) {
+        return build_row_ordering_comparison(make, parts);
     }
     Ok(Expr::bool_expr(
         if make == OpExprKind::Eq {
@@ -604,6 +623,55 @@ fn bind_row_comparison_expr(
             BoolExprType::Or
         },
         parts,
+    ))
+}
+
+fn coerce_bound_unknown_string_literal_type(
+    expr: &Expr,
+    expr_type: SqlType,
+    peer_type: SqlType,
+) -> SqlType {
+    if matches!(
+        expr,
+        Expr::Const(Value::Text(_) | Value::TextRef(_, _) | Value::Null)
+    ) {
+        return unknown_string_literal_peer_type(peer_type).unwrap_or(expr_type);
+    }
+    expr_type
+}
+
+fn build_row_ordering_comparison(make: OpExprKind, parts: Vec<Expr>) -> Result<Expr, ParseError> {
+    let mut left_fields = Vec::with_capacity(parts.len());
+    let mut right_fields = Vec::with_capacity(parts.len());
+    let mut collation_oid = None;
+    for (idx, part) in parts.into_iter().enumerate() {
+        let Expr::Op(op) = part else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "row comparison operator",
+                actual: format!("{part:?}"),
+            });
+        };
+        let [left, right] = op.args.as_slice() else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "binary row comparison operator",
+                actual: format!("{op:?}"),
+            });
+        };
+        if collation_oid.is_none() {
+            collation_oid = op.collation_oid;
+        }
+        let field_name = format!("f{}", idx + 1);
+        left_fields.push((field_name.clone(), left.clone()));
+        right_fields.push((field_name, right.clone()));
+    }
+    Ok(Expr::op_with_collation(
+        make,
+        SqlType::new(SqlTypeKind::Bool),
+        vec![
+            build_whole_row_expr(left_fields),
+            build_whole_row_expr(right_fields),
+        ],
+        collation_oid,
     ))
 }
 
@@ -2830,7 +2898,21 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::Lt(left, right) => {
-            if let Some(result) = bind_maybe_multirange_comparison(
+            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
+                (left.as_ref(), right.as_ref())
+            {
+                bind_row_comparison_expr(
+                    "<",
+                    OpExprKind::Lt,
+                    left_items,
+                    right_items,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else if let Some(result) = bind_maybe_multirange_comparison(
                 "<",
                 left,
                 right,
@@ -2878,7 +2960,21 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::LtEq(left, right) => {
-            if let Some(result) = bind_maybe_multirange_comparison(
+            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
+                (left.as_ref(), right.as_ref())
+            {
+                bind_row_comparison_expr(
+                    "<=",
+                    OpExprKind::LtEq,
+                    left_items,
+                    right_items,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else if let Some(result) = bind_maybe_multirange_comparison(
                 "<=",
                 left,
                 right,
@@ -2926,7 +3022,21 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::Gt(left, right) => {
-            if let Some(result) = bind_maybe_multirange_comparison(
+            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
+                (left.as_ref(), right.as_ref())
+            {
+                bind_row_comparison_expr(
+                    ">",
+                    OpExprKind::Gt,
+                    left_items,
+                    right_items,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else if let Some(result) = bind_maybe_multirange_comparison(
                 ">",
                 left,
                 right,
@@ -2974,7 +3084,21 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::GtEq(left, right) => {
-            if let Some(result) = bind_maybe_multirange_comparison(
+            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
+                (left.as_ref(), right.as_ref())
+            {
+                bind_row_comparison_expr(
+                    ">=",
+                    OpExprKind::GtEq,
+                    left_items,
+                    right_items,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else if let Some(result) = bind_maybe_multirange_comparison(
                 ">=",
                 left,
                 right,

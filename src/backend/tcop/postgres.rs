@@ -2089,7 +2089,7 @@ fn find_ungrouped_column_position(
     let (start, end) = match clause {
         UngroupedColumnClause::SelectTarget => {
             let start = lower.find("select")? + "select".len();
-            let end = lower.find(" from ").or_else(|| lower.find(" from"))?;
+            let end = find_top_level_keyword_after(sql, start, "from")?;
             (start, end)
         }
         UngroupedColumnClause::Having => {
@@ -2104,6 +2104,126 @@ fn find_ungrouped_column_position(
     };
     let segment = &sql[start..end];
     find_identifier_in_segment(segment, token).map(|offset| start + offset + 1)
+}
+
+fn find_top_level_keyword_after(sql: &str, start: usize, keyword: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut i = start;
+    let mut paren_depth = 0usize;
+    let mut single_quote = false;
+    let mut double_quote = false;
+    let mut line_comment = false;
+    let mut block_comment_depth = 0usize;
+
+    while i < bytes.len() {
+        if line_comment {
+            line_comment = bytes[i] != b'\n';
+            i += 1;
+            continue;
+        }
+        if block_comment_depth > 0 {
+            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                block_comment_depth += 1;
+                i += 2;
+                continue;
+            }
+            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                block_comment_depth -= 1;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if single_quote {
+            if bytes[i] == b'\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                } else {
+                    single_quote = false;
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if double_quote {
+            if bytes[i] == b'"' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                    i += 2;
+                } else {
+                    double_quote = false;
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if i + 1 < bytes.len() && bytes[i] == b'-' && bytes[i + 1] == b'-' {
+            line_comment = true;
+            i += 2;
+            continue;
+        }
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            block_comment_depth = 1;
+            i += 2;
+            continue;
+        }
+        match bytes[i] {
+            b'\'' => {
+                single_quote = true;
+                i += 1;
+                continue;
+            }
+            b'"' => {
+                double_quote = true;
+                i += 1;
+                continue;
+            }
+            b'(' => {
+                paren_depth += 1;
+                i += 1;
+                continue;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if paren_depth == 0 && ascii_keyword_at(bytes, i, keyword.as_bytes()) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn ascii_keyword_at(bytes: &[u8], index: usize, keyword: &[u8]) -> bool {
+    if index + keyword.len() > bytes.len() {
+        return false;
+    }
+    if !bytes[index..index + keyword.len()]
+        .iter()
+        .zip(keyword.iter())
+        .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+    {
+        return false;
+    }
+    let is_ident = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$');
+    let before_is_ident = index
+        .checked_sub(1)
+        .and_then(|before| bytes.get(before).copied())
+        .is_some_and(is_ident);
+    let after_is_ident = bytes
+        .get(index + keyword.len())
+        .copied()
+        .is_some_and(is_ident);
+    !before_is_ident && !after_is_ident
 }
 
 fn find_last_identifier_position(sql: &str, token: &str) -> Option<usize> {
@@ -11578,6 +11698,33 @@ ORDER BY 1, 2;";
         .unwrap();
 
         assert_eq!(first_error_response_position(&output), Some(91));
+    }
+
+    #[test]
+    fn simple_query_reports_position_for_grouped_output_error() {
+        let db = Database::open(temp_dir("grouped_output_error_position"), 16).unwrap();
+        db.execute(
+            1,
+            "create table articles(id int4 primary key, keywords text, title text unique not null)",
+        )
+        .unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "SELECT id, keywords, title\nFROM articles\nGROUP BY title;",
+        )
+        .unwrap();
+
+        assert_eq!(first_error_response_position(&output), Some(8));
     }
 
     #[test]

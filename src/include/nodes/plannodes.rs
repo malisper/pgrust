@@ -181,6 +181,7 @@ pub enum Plan {
         relispopulated: bool,
         toast: Option<ToastRelationRef>,
         desc: RelationDesc,
+        disabled: bool,
     },
     IndexOnlyScan {
         plan_info: PlanEstimate,

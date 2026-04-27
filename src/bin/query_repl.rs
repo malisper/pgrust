@@ -540,6 +540,7 @@ fn run_statement(
         | Statement::AlterTableAlterColumnOptions(_)
         | Statement::AlterTableAlterColumnStatistics(_)
         | Statement::AlterIndexAlterColumnStatistics(_)
+        | Statement::AlterIndexAlterColumnOptions(_)
         | Statement::AlterIndexAttachPartition(_)
         | Statement::ReindexIndex(_)
         | Statement::AlterTableAlterColumnStorage(_)

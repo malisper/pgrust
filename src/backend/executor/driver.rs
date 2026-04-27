@@ -249,7 +249,8 @@ fn execute_statement_with_source(
         | Statement::AlterViewRenameColumn(_)
         | Statement::AlterViewSetSchema(_)
         | Statement::AlterMaterializedViewSetSchema(_)
-        | Statement::AlterIndexAlterColumnStatistics(_) => {
+        | Statement::AlterIndexAlterColumnStatistics(_)
+        | Statement::AlterIndexAlterColumnOptions(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "ALTER TABLE/INDEX/VIEW handled by database/session layer",
                 actual: "ALTER TABLE/INDEX/VIEW".into(),

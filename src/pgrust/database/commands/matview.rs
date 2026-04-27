@@ -167,6 +167,7 @@ impl Database {
                 String::new(),
                 query_sql,
                 &referenced_relation_oids.into_iter().collect::<Vec<_>>(),
+                &[],
                 crate::backend::catalog::store::RuleOwnerDependency::Internal,
                 &rule_ctx,
             )

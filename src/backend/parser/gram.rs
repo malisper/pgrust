@@ -4255,6 +4255,12 @@ fn try_parse_index_statement(sql: &str) -> Result<Option<Statement>, ParseError>
         return build_alter_index_attach_partition_statement(trimmed)
             .map(|stmt| Some(Statement::AlterIndexAttachPartition(stmt)));
     }
+    if lowered.contains(" alter column ")
+        && (lowered.contains(" set (") || lowered.contains(" reset ("))
+    {
+        return build_alter_index_alter_column_options_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterIndexAlterColumnOptions(stmt)));
+    }
     if lowered.contains(" set statistics ") {
         return build_alter_index_alter_column_statistics_statement(trimmed)
             .map(|stmt| Some(Statement::AlterIndexAlterColumnStatistics(stmt)));
@@ -7098,6 +7104,113 @@ fn build_alter_index_alter_column_statistics_statement(
         column_number,
         statistics_target,
     })
+}
+
+fn build_alter_index_alter_column_options_statement(
+    sql: &str,
+) -> Result<AlterIndexAlterColumnOptionsStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "index").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(after_if, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF EXISTS",
+                actual: sql.into(),
+            });
+        }
+        if_exists = true;
+        rest = consume_keyword(after_if, "exists").trim_start();
+    }
+    let (parts, rest_after_name) = parse_qualified_identifier_parts(rest)?;
+    let index_name = parts.join(".");
+    let mut rest = rest_after_name.trim_start();
+    rest = consume_keyword(rest, "alter").trim_start();
+    if keyword_at_start(rest, "column") {
+        rest = consume_keyword(rest, "column").trim_start();
+    }
+    let (column_name, rest_after_column_name) = parse_sql_identifier(rest)?;
+    let rest = rest_after_column_name.trim_start();
+    let action = if keyword_at_start(rest, "set") {
+        let rest = consume_keyword(rest, "set").trim_start();
+        AlterColumnOptionsAction::Set(parse_assignment_reloption_list(rest)?)
+    } else if keyword_at_start(rest, "reset") {
+        let rest = consume_keyword(rest, "reset").trim_start();
+        AlterColumnOptionsAction::Reset(parse_identifier_parenthesized_list(rest)?)
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "SET or RESET",
+            actual: rest.into(),
+        });
+    };
+    Ok(AlterIndexAlterColumnOptionsStatement {
+        if_exists,
+        index_name,
+        column_name,
+        action,
+    })
+}
+
+fn parse_assignment_reloption_list(input: &str) -> Result<Vec<RelOption>, ParseError> {
+    let Some(inner) = input
+        .trim()
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "parenthesized option list",
+            actual: input.into(),
+        });
+    };
+    split_comma_separated_sql(inner)?
+        .into_iter()
+        .map(|part| {
+            let Some((name_sql, value_sql)) = part.split_once('=') else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "name=value option",
+                    actual: part.trim().into(),
+                });
+            };
+            let (name, tail) = parse_sql_identifier(name_sql.trim())?;
+            if !tail.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "option name",
+                    actual: tail.trim().into(),
+                });
+            }
+            Ok(RelOption {
+                name,
+                value: value_sql.trim().trim_matches('\'').to_string(),
+            })
+        })
+        .collect()
+}
+
+fn parse_identifier_parenthesized_list(input: &str) -> Result<Vec<String>, ParseError> {
+    let Some(inner) = input
+        .trim()
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "parenthesized identifier list",
+            actual: input.into(),
+        });
+    };
+    split_comma_separated_sql(inner)?
+        .into_iter()
+        .map(|part| {
+            let (name, tail) = parse_sql_identifier(part.trim())?;
+            if !tail.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "option name",
+                    actual: tail.trim().into(),
+                });
+            }
+            Ok(name)
+        })
+        .collect()
 }
 fn build_drop_sequence_statement(sql: &str) -> Result<DropSequenceStatement, ParseError> {
     let mut rest = consume_keyword(sql.trim_start(), "drop").trim_start();
@@ -17365,9 +17478,18 @@ fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, Parse
                 }
             }
             Rule::create_index_opclass if opclass.is_none() => {
-                opclass = Some(build_identifier(
-                    part.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
-                ))
+                let mut inner = part.into_inner();
+                let ident = inner.next().ok_or(ParseError::UnexpectedEof)?;
+                let opclass_name = build_identifier(ident);
+                if inner.any(|part| part.as_rule() == Rule::create_index_opclass_parameters) {
+                    return Err(ParseError::DetailedError {
+                        message: format!("operator class {opclass_name} has no options"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42601",
+                    });
+                }
+                opclass = Some(opclass_name);
             }
             Rule::collate_suffix if collation.is_none() => {
                 collation = Some(build_collation_name(
@@ -19640,6 +19762,7 @@ fn build_alter_table_drop_constraint(
 ) -> Result<AlterTableDropConstraintStatement, ParseError> {
     let mut if_exists = false;
     let mut only = false;
+    let mut cascade = false;
     let mut parts = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -19651,6 +19774,7 @@ fn build_alter_table_drop_constraint(
                 parts.push(parsed_table_name);
             }
             Rule::identifier => parts.push(build_identifier(part)),
+            Rule::drop_behavior => cascade = part.as_str().eq_ignore_ascii_case("cascade"),
             _ => {}
         }
     }
@@ -19660,6 +19784,7 @@ fn build_alter_table_drop_constraint(
         only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         constraint_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        cascade,
     })
 }
 

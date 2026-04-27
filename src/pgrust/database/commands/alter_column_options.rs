@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, lookup_heap_relation_for_alter_table,
@@ -184,5 +185,58 @@ impl Database {
         // pgrust does not model attoptions yet, so for now we validate and accept the syntax
         // without persisting option values.
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_alter_index_alter_column_options_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &crate::backend::parser::AlterIndexAlterColumnOptionsStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let Some(relation) = catalog.lookup_any_relation(&alter_stmt.index_name) else {
+            if alter_stmt.if_exists {
+                push_notice(format!(
+                    r#"relation "{}" does not exist, skipping"#,
+                    alter_stmt.index_name
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                alter_stmt.index_name.clone(),
+            )));
+        };
+        if !matches!(relation.relkind, 'i' | 'I') {
+            return Err(ExecError::Parse(ParseError::WrongObjectType {
+                name: alter_stmt.index_name.clone(),
+                expected: "index",
+            }));
+        }
+        ensure_relation_owner(self, client_id, &relation, &alter_stmt.index_name)?;
+        let display_name = self
+            .relation_display_name(
+                client_id,
+                None,
+                configured_search_path,
+                relation.relation_oid,
+            )
+            .unwrap_or_else(|| alter_stmt.index_name.clone());
+        let action = match alter_stmt.action {
+            crate::backend::parser::AlterColumnOptionsAction::Set(_) => "ALTER COLUMN ... SET",
+            crate::backend::parser::AlterColumnOptionsAction::Reset(_) => "ALTER COLUMN ... RESET",
+        };
+        let detail = if relation.relkind == 'I' {
+            "This operation is not supported for partitioned indexes."
+        } else {
+            "This operation is not supported for indexes."
+        };
+        Err(ExecError::DetailedError {
+            message: format!(
+                "ALTER action {action} cannot be performed on relation \"{display_name}\""
+            ),
+            detail: Some(detail.into()),
+            hint: None,
+            sqlstate: "42809",
+        })
     }
 }

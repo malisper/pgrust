@@ -25,6 +25,9 @@ pub(crate) struct ScopeColumn {
     pub(crate) relation_names: Vec<String>,
     pub(crate) hidden_invalid_relation_names: Vec<String>,
     pub(crate) hidden_missing_relation_names: Vec<String>,
+    pub(crate) source_relation_oid: Option<u32>,
+    pub(crate) source_attno: Option<AttrNumber>,
+    pub(crate) source_columns: Vec<(u32, AttrNumber)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +36,7 @@ pub(crate) struct ScopeRelation {
     pub(crate) hidden_invalid_relation_names: Vec<String>,
     pub(crate) hidden_missing_relation_names: Vec<String>,
     pub(crate) system_varno: Option<usize>,
+    pub(crate) relation_oid: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -695,7 +699,12 @@ pub(super) fn bind_from_item_with_ctes(
             plan.output_exprs = generated_relation_output_exprs(&desc, catalog)?;
             Ok((
                 plan,
-                scope_for_base_relation_with_generated(name, &desc, catalog)?,
+                scope_for_base_relation_with_generated(
+                    name,
+                    &desc,
+                    Some(entry.relation_oid),
+                    catalog,
+                )?,
             ))
         }
         FromItem::Values { rows } => {
@@ -2445,6 +2454,9 @@ pub(crate) fn scope_for_relation(relation_name: Option<&str>, desc: &RelationDes
                 relation_names: relation_name.into_iter().map(str::to_string).collect(),
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],
+                source_relation_oid: None,
+                source_attno: None,
+                source_columns: Vec::new(),
             })
             .collect(),
         relations: relation_name
@@ -2454,20 +2466,34 @@ pub(crate) fn scope_for_relation(relation_name: Option<&str>, desc: &RelationDes
                     hidden_invalid_relation_names: vec![],
                     hidden_missing_relation_names: vec![],
                     system_varno: None,
+                    relation_oid: None,
                 }]
             })
             .unwrap_or_default(),
     }
 }
 
-pub(super) fn scope_for_base_relation(relation_name: &str, desc: &RelationDesc) -> BoundScope {
+pub(super) fn scope_for_base_relation(
+    relation_name: &str,
+    desc: &RelationDesc,
+    relation_oid: Option<u32>,
+) -> BoundScope {
     let mut scope = scope_for_relation(Some(relation_name), desc);
+    for (index, column) in scope.columns.iter_mut().enumerate() {
+        let attno = user_attrno(index);
+        column.source_relation_oid = relation_oid;
+        column.source_attno = Some(attno);
+        column.source_columns = relation_oid
+            .map(|relation_oid| vec![(relation_oid, attno)])
+            .unwrap_or_default();
+    }
     scope.output_exprs = default_scope_output_exprs(1, desc);
     scope.relations = vec![ScopeRelation {
         relation_names: vec![relation_name.to_string()],
         hidden_invalid_relation_names: vec![],
         hidden_missing_relation_names: vec![],
         system_varno: Some(1),
+        relation_oid,
     }];
     scope
 }
@@ -2483,6 +2509,7 @@ pub(crate) fn scope_for_base_relation_with_optional_name(
         hidden_invalid_relation_names: vec![],
         hidden_missing_relation_names: vec![],
         system_varno: Some(1),
+        relation_oid: None,
     }];
     scope
 }
@@ -2597,6 +2624,26 @@ fn natural_join_columns(left_scope: &BoundScope, right_scope: &BoundScope) -> Ve
     out
 }
 
+fn scope_column_sources(column: &ScopeColumn) -> Vec<(u32, AttrNumber)> {
+    let mut sources = column.source_columns.clone();
+    if let (Some(relation_oid), Some(attno)) = (column.source_relation_oid, column.source_attno)
+        && !sources.contains(&(relation_oid, attno))
+    {
+        sources.push((relation_oid, attno));
+    }
+    sources
+}
+
+fn join_using_source_columns(left: &ScopeColumn, right: &ScopeColumn) -> Vec<(u32, AttrNumber)> {
+    let mut sources = scope_column_sources(left);
+    for source in scope_column_sources(right) {
+        if !sources.contains(&source) {
+            sources.push(source);
+        }
+    }
+    sources
+}
+
 fn bind_join_using_projection(
     columns: &[String],
     left_scope: &BoundScope,
@@ -2659,6 +2706,12 @@ fn bind_join_using_projection(
             relation_names: vec![],
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
+            source_relation_oid: None,
+            source_attno: None,
+            source_columns: join_using_source_columns(
+                &left_scope.columns[*left_index],
+                &right_scope.columns[*right_index],
+            ),
         });
     }
 
@@ -2850,6 +2903,7 @@ fn apply_relation_alias(
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],
                 system_varno: None,
+                relation_oid: None,
             });
         } else {
             for relation in &mut relations {
@@ -2954,6 +3008,7 @@ fn apply_relation_alias(
                 hidden_invalid_relation_names,
                 hidden_missing_relation_names,
                 system_varno: None,
+                relation_oid: None,
             }];
         }
     }

@@ -71,6 +71,7 @@ use crate::backend::utils::cache::system_views::{
     current_pg_stat_progress_copy_rows,
 };
 use agg::*;
+pub(crate) use agg_output::with_functional_grouping_constraint_tracking;
 use agg_output::*;
 use agg_scope::*;
 pub use coerce::is_binary_coercible_type;
@@ -2663,6 +2664,9 @@ pub(crate) fn bind_scalar_expr_in_named_relation_scope(
             relation_names: Vec::new(),
             hidden_invalid_relation_names: Vec::new(),
             hidden_missing_relation_names: Vec::new(),
+            source_relation_oid: None,
+            source_attno: None,
+            source_columns: Vec::new(),
         })
         .collect::<Vec<_>>();
     let mut relations = Vec::new();
@@ -2672,6 +2676,7 @@ pub(crate) fn bind_scalar_expr_in_named_relation_scope(
             hidden_invalid_relation_names: Vec::new(),
             hidden_missing_relation_names: Vec::new(),
             system_varno: None,
+            relation_oid: None,
         });
         for column in &desc.columns {
             desc_columns.push(column.clone());
@@ -2682,6 +2687,9 @@ pub(crate) fn bind_scalar_expr_in_named_relation_scope(
                 relation_names: vec![(*relation_name).to_string()],
                 hidden_invalid_relation_names: Vec::new(),
                 hidden_missing_relation_names: Vec::new(),
+                source_relation_oid: None,
+                source_attno: None,
+                source_columns: Vec::new(),
             });
         }
     }
@@ -2752,6 +2760,9 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
             relation_names: Vec::new(),
             hidden_invalid_relation_names: Vec::new(),
             hidden_missing_relation_names: Vec::new(),
+            source_relation_oid: None,
+            source_attno: None,
+            source_columns: Vec::new(),
         });
         output_exprs.push(Expr::Var(Var {
             varno: 1,
@@ -2767,6 +2778,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
             hidden_invalid_relation_names: Vec::new(),
             hidden_missing_relation_names: Vec::new(),
             system_varno: None,
+            relation_oid: None,
         });
         for column in relation_columns {
             desc_columns.push(column_desc(column.name.clone(), column.sql_type, true));
@@ -2777,6 +2789,9 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
                 relation_names: vec![relation_name.clone()],
                 hidden_invalid_relation_names: Vec::new(),
                 hidden_missing_relation_names: Vec::new(),
+                source_relation_oid: None,
+                source_attno: None,
+                source_columns: Vec::new(),
             });
             output_exprs.push(Expr::Var(Var {
                 varno: 1,
@@ -4428,7 +4443,20 @@ fn bind_select_query_with_outer(
             )?;
             reject_window_clause(predicate, "WHERE")?;
         }
-        let effective_group_by = normalize_group_by_exprs(stmt, &scope)?;
+        let lower_distinct_to_grouping = stmt.distinct
+            && stmt.distinct_on.is_empty()
+            && stmt.group_by.is_empty()
+            && target_aggs.is_empty()
+            && stmt.having.is_none()
+            && (stmt.limit.is_some() || stmt.offset.is_some());
+        let effective_group_by = if lower_distinct_to_grouping {
+            stmt.targets
+                .iter()
+                .map(|target| target.expr.clone())
+                .collect::<Vec<_>>()
+        } else {
+            normalize_group_by_exprs(stmt, &scope)?
+        };
 
         for group_expr in &effective_group_by {
             analyze_expr_aggregates_in_clause(
