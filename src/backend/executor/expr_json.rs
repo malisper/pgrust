@@ -101,7 +101,9 @@ impl ParsedJsonValue {
                 JsonbValue::Time(_) => "time without time zone",
                 JsonbValue::TimeTz(_) => "time with time zone",
                 JsonbValue::Timestamp(_) => "timestamp without time zone",
-                JsonbValue::TimestampTz(_) => "timestamp with time zone",
+                JsonbValue::TimestampTz(_) | JsonbValue::TimestampTzWithOffset(_, _) => {
+                    "timestamp with time zone"
+                }
                 JsonbValue::Array(_) => "array",
                 JsonbValue::Object(_) => "object",
             },
@@ -281,7 +283,8 @@ impl JsonbTsVectorBuilder<'_> {
             | JsonbValue::Time(_)
             | JsonbValue::TimeTz(_)
             | JsonbValue::Timestamp(_)
-            | JsonbValue::TimestampTz(_) => {
+            | JsonbValue::TimestampTz(_)
+            | JsonbValue::TimestampTzWithOffset(_, _) => {
                 if self.flags.string {
                     self.add_part(&render_temporal_jsonb_value(value), true)?;
                 }
@@ -962,17 +965,23 @@ pub(crate) fn eval_json_builtin_function(
                 )?)))
             }
             BuiltinScalarFunction::JsonbPathExists => {
-                eval_jsonpath_function(values, JsonPathFunctionKind::Exists)
+                eval_jsonpath_function(values, JsonPathFunctionKind::Exists, datetime_config, false)
             }
             BuiltinScalarFunction::JsonbPathMatch => {
-                eval_jsonpath_function(values, JsonPathFunctionKind::Match)
+                eval_jsonpath_function(values, JsonPathFunctionKind::Match, datetime_config, false)
             }
-            BuiltinScalarFunction::JsonbPathQueryArray => {
-                eval_jsonpath_function(values, JsonPathFunctionKind::QueryArray)
-            }
-            BuiltinScalarFunction::JsonbPathQueryFirst => {
-                eval_jsonpath_function(values, JsonPathFunctionKind::QueryFirst)
-            }
+            BuiltinScalarFunction::JsonbPathQueryArray => eval_jsonpath_function(
+                values,
+                JsonPathFunctionKind::QueryArray,
+                datetime_config,
+                false,
+            ),
+            BuiltinScalarFunction::JsonbPathQueryFirst => eval_jsonpath_function(
+                values,
+                JsonPathFunctionKind::QueryFirst,
+                datetime_config,
+                false,
+            ),
             BuiltinScalarFunction::JsonExists => eval_sql_json_exists_function(values),
             BuiltinScalarFunction::JsonValue => eval_sql_json_value_function(values),
             BuiltinScalarFunction::JsonQuery => eval_sql_json_query_function(values),
@@ -2426,6 +2435,8 @@ pub(crate) fn eval_jsonpath_operator(
     let eval_ctx = JsonPathEvaluationContext {
         root: &target,
         vars: None,
+        datetime_config: &ctx.datetime_config,
+        allow_timezone: false,
     };
     let result = evaluate_jsonpath(&parsed, &eval_ctx);
     if as_match {
@@ -2438,6 +2449,8 @@ pub(crate) fn eval_jsonpath_operator(
 fn eval_jsonpath_function(
     values: &[Value],
     kind: JsonPathFunctionKind,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+    allow_timezone: bool,
 ) -> Result<Value, ExecError> {
     let target = values.first().unwrap_or(&Value::Null);
     let path = values.get(1).unwrap_or(&Value::Null);
@@ -2467,6 +2480,8 @@ fn eval_jsonpath_function(
     let eval_ctx = JsonPathEvaluationContext {
         root: &target,
         vars: vars_json.as_ref(),
+        datetime_config,
+        allow_timezone,
     };
     let result = evaluate_jsonpath(&parsed, &eval_ctx);
     match kind {
@@ -2521,9 +2536,12 @@ fn eval_sql_json_query_path(values: &[Value]) -> Result<Option<Vec<JsonbValue>>,
 
     let target = parse_jsonpath_target_value(target)?;
     let parsed = parse_jsonpath(parse_jsonpath_value_text(path)?.as_str())?;
+    let datetime_config = crate::backend::utils::misc::guc_datetime::DateTimeConfig::default();
     let eval_ctx = JsonPathEvaluationContext {
         root: &target,
         vars: None,
+        datetime_config: &datetime_config,
+        allow_timezone: false,
     };
     // SQL/JSON query functions default to NULL/FALSE ON ERROR. Keep jsonpath
     // parse and input conversion errors visible, but suppress path evaluation
@@ -2836,7 +2854,8 @@ fn apply_jsonb_delete(target: &JsonbValue, key: &Value) -> Result<JsonbValue, Ex
                 | JsonbValue::Time(_)
                 | JsonbValue::TimeTz(_)
                 | JsonbValue::Timestamp(_)
-                | JsonbValue::TimestampTz(_) => {
+                | JsonbValue::TimestampTz(_)
+                | JsonbValue::TimestampTzWithOffset(_, _) => {
                     return Err(ExecError::InvalidStorageValue {
                         column: "jsonb".into(),
                         details: "cannot delete from scalar".into(),
@@ -2910,7 +2929,8 @@ fn delete_jsonb_array_index(target: &JsonbValue, index: i32) -> Result<JsonbValu
             | JsonbValue::Time(_)
             | JsonbValue::TimeTz(_)
             | JsonbValue::Timestamp(_)
-            | JsonbValue::TimestampTz(_) => Err(ExecError::InvalidStorageValue {
+            | JsonbValue::TimestampTz(_)
+            | JsonbValue::TimestampTzWithOffset(_, _) => Err(ExecError::InvalidStorageValue {
                 column: "jsonb".into(),
                 details: "cannot delete from scalar".into(),
             }),
@@ -2968,7 +2988,8 @@ fn delete_jsonb_path_inner(
             | JsonbValue::Time(_)
             | JsonbValue::TimeTz(_)
             | JsonbValue::Timestamp(_)
-            | JsonbValue::TimestampTz(_) => {
+            | JsonbValue::TimestampTz(_)
+            | JsonbValue::TimestampTzWithOffset(_, _) => {
                 return Err(ExecError::InvalidStorageValue {
                     column: "jsonb".into(),
                     details: "cannot delete path in scalar".into(),
@@ -3008,7 +3029,8 @@ fn delete_jsonb_path_inner(
         | JsonbValue::Time(_)
         | JsonbValue::TimeTz(_)
         | JsonbValue::Timestamp(_)
-        | JsonbValue::TimestampTz(_) => {
+        | JsonbValue::TimestampTz(_)
+        | JsonbValue::TimestampTzWithOffset(_, _) => {
             return Err(ExecError::InvalidStorageValue {
                 column: "jsonb".into(),
                 details: "cannot delete path in scalar".into(),
@@ -3848,12 +3870,19 @@ pub(crate) fn eval_json_table_function(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
-    if kind == JsonTableFunction::JsonbPathQuery {
+    if matches!(
+        kind,
+        JsonTableFunction::JsonbPathQuery | JsonTableFunction::JsonbPathQueryTz
+    ) {
         let values = args
             .iter()
             .map(|arg| eval_expr(arg, slot, ctx))
             .collect::<Result<Vec<_>, _>>()?;
-        return eval_jsonb_path_query_rows(&values);
+        return eval_jsonb_path_query_rows(
+            &values,
+            &ctx.datetime_config,
+            kind == JsonTableFunction::JsonbPathQueryTz,
+        );
     }
 
     let value = eval_expr(
@@ -4049,6 +4078,7 @@ pub(crate) fn eval_json_table_function(
                     JsonTableFunction::ArrayElements => "json_array_elements",
                     JsonTableFunction::ArrayElementsText => "json_array_elements_text",
                     JsonTableFunction::JsonbPathQuery => "jsonb_path_query",
+                    JsonTableFunction::JsonbPathQueryTz => "jsonb_path_query_tz",
                     JsonTableFunction::JsonbObjectKeys => "jsonb_object_keys",
                     JsonTableFunction::JsonbEach => "jsonb_each",
                     JsonTableFunction::JsonbEachText => "jsonb_each_text",
@@ -4068,6 +4098,7 @@ pub(crate) fn eval_json_table_function(
                     JsonTableFunction::ArrayElements => "json_array_elements",
                     JsonTableFunction::ArrayElementsText => "json_array_elements_text",
                     JsonTableFunction::JsonbPathQuery => "jsonb_path_query",
+                    JsonTableFunction::JsonbPathQueryTz => "jsonb_path_query_tz",
                     JsonTableFunction::JsonbObjectKeys => "jsonb_object_keys",
                     JsonTableFunction::JsonbEach => "jsonb_each",
                     JsonTableFunction::JsonbEachText => "jsonb_each_text",
@@ -4194,8 +4225,14 @@ fn eval_sql_json_path(
     error_on_error: bool,
 ) -> Result<Vec<JsonbValue>, ExecError> {
     let parsed = parse_jsonpath(path)?;
-    let ctx = JsonPathEvaluationContext { root: source, vars };
-    match evaluate_jsonpath(&parsed, &ctx) {
+    let datetime_config = crate::backend::utils::misc::guc_datetime::DateTimeConfig::default();
+    let eval_ctx = JsonPathEvaluationContext {
+        root: source,
+        vars,
+        datetime_config: &datetime_config,
+        allow_timezone: false,
+    };
+    match evaluate_jsonpath(&parsed, &eval_ctx) {
         Ok(values) => Ok(values),
         Err(err) if !error_on_error => {
             let _ = err;
@@ -4510,7 +4547,8 @@ fn jsonb_scalar_sql_text(value: &JsonbValue) -> String {
         | JsonbValue::Time(_)
         | JsonbValue::TimeTz(_)
         | JsonbValue::Timestamp(_)
-        | JsonbValue::TimestampTz(_) => render_temporal_jsonb_value(value),
+        | JsonbValue::TimestampTz(_)
+        | JsonbValue::TimestampTzWithOffset(_, _) => render_temporal_jsonb_value(value),
         JsonbValue::Null | JsonbValue::Array(_) | JsonbValue::Object(_) => value.render(),
     }
 }
@@ -4583,7 +4621,11 @@ fn cast_sql_json_text_value(
     )
 }
 
-fn eval_jsonb_path_query_rows(values: &[Value]) -> Result<Vec<TupleSlot>, ExecError> {
+fn eval_jsonb_path_query_rows(
+    values: &[Value],
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+    allow_timezone: bool,
+) -> Result<Vec<TupleSlot>, ExecError> {
     let target = values.first().unwrap_or(&Value::Null);
     let path = values.get(1).unwrap_or(&Value::Null);
     if matches!(target, Value::Null) || matches!(path, Value::Null) {
@@ -4611,6 +4653,8 @@ fn eval_jsonb_path_query_rows(values: &[Value]) -> Result<Vec<TupleSlot>, ExecEr
     let eval_ctx = JsonPathEvaluationContext {
         root: &target,
         vars: vars_json.as_ref(),
+        datetime_config,
+        allow_timezone,
     };
     let result = evaluate_jsonpath(&parsed, &eval_ctx);
     match result {

@@ -3928,6 +3928,7 @@ fn legacy_json_table_function_entries() -> &'static [(&'static str, JsonTableFun
             JsonTableFunction::ArrayElementsText,
         ),
         ("jsonb_path_query", JsonTableFunction::JsonbPathQuery),
+        ("jsonb_path_query_tz", JsonTableFunction::JsonbPathQueryTz),
         ("jsonb_object_keys", JsonTableFunction::JsonbObjectKeys),
         ("jsonb_each", JsonTableFunction::JsonbEach),
         ("jsonb_each_text", JsonTableFunction::JsonbEachText),

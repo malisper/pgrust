@@ -1172,6 +1172,9 @@ fn json_table_function_name(
             "json_array_elements_text"
         }
         crate::include::nodes::primnodes::JsonTableFunction::JsonbPathQuery => "jsonb_path_query",
+        crate::include::nodes::primnodes::JsonTableFunction::JsonbPathQueryTz => {
+            "jsonb_path_query_tz"
+        }
         crate::include::nodes::primnodes::JsonTableFunction::JsonbObjectKeys => "jsonb_object_keys",
         crate::include::nodes::primnodes::JsonTableFunction::JsonbEach => "jsonb_each",
         crate::include::nodes::primnodes::JsonTableFunction::JsonbEachText => "jsonb_each_text",

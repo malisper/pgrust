@@ -15,6 +15,9 @@ use crate::backend::executor::render_macaddr8_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::stack_depth::stack_depth_limit_error;
+use crate::backend::utils::time::datetime::{
+    format_time_usecs, timestamp_parts_from_usecs, ymd_from_days,
+};
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
 use crate::include::nodes::execnodes::{NumericValue, Value};
 use crate::pgrust::compact_string::CompactString;
@@ -68,6 +71,7 @@ pub(crate) enum JsonbValue {
     TimeTz(TimeTzADT),
     Timestamp(TimestampADT),
     TimestampTz(TimestampTzADT),
+    TimestampTzWithOffset(TimestampTzADT, i32),
     Array(Vec<JsonbValue>),
     Object(Vec<(String, JsonbValue)>),
 }
@@ -119,7 +123,8 @@ impl JsonbValue {
             | JsonbValue::Time(_)
             | JsonbValue::TimeTz(_)
             | JsonbValue::Timestamp(_)
-            | JsonbValue::TimestampTz(_) => {
+            | JsonbValue::TimestampTz(_)
+            | JsonbValue::TimestampTzWithOffset(_, _) => {
                 SerdeJsonValue::String(render_temporal_jsonb_value(self))
             }
             JsonbValue::Array(items) => {
@@ -144,24 +149,67 @@ impl JsonbValue {
 
 pub(crate) fn render_temporal_jsonb_value(value: &JsonbValue) -> String {
     match value {
-        JsonbValue::Date(v) => render_datetime_value_text(&Value::Date(*v)),
-        JsonbValue::Time(v) => render_datetime_value_text(&Value::Time(*v)),
-        JsonbValue::TimeTz(v) => render_datetime_value_text(&Value::TimeTz(*v)),
-        JsonbValue::Timestamp(v) => render_jsonpath_timestamp_text(
-            render_datetime_value_text(&Value::Timestamp(*v)).expect("datetime values render"),
+        JsonbValue::Date(v) => render_json_datetime_value_text_with_config(
+            &Value::Date(*v),
+            &DateTimeConfig::default(),
         ),
-        JsonbValue::TimestampTz(v) => render_jsonpath_timestamp_text(
-            render_datetime_value_text(&Value::TimestampTz(*v)).expect("datetime values render"),
+        JsonbValue::Time(v) => render_json_datetime_value_text_with_config(
+            &Value::Time(*v),
+            &DateTimeConfig::default(),
         ),
+        JsonbValue::TimeTz(v) => render_json_datetime_value_text_with_config(
+            &Value::TimeTz(*v),
+            &DateTimeConfig::default(),
+        ),
+        JsonbValue::Timestamp(v) => render_json_datetime_value_text_with_config(
+            &Value::Timestamp(*v),
+            &DateTimeConfig::default(),
+        ),
+        JsonbValue::TimestampTz(v) => render_json_datetime_value_text_with_config(
+            &Value::TimestampTz(*v),
+            &DateTimeConfig::default(),
+        ),
+        JsonbValue::TimestampTzWithOffset(v, offset_seconds) => {
+            Some(render_jsonpath_timestamptz_with_offset(*v, *offset_seconds))
+        }
         _ => unreachable!("temporal renderer only accepts temporal jsonb values"),
     }
     .expect("datetime values render")
 }
 
-fn render_jsonpath_timestamp_text(mut text: String) -> Option<String> {
-    let separator = text.find(' ')?;
-    text.replace_range(separator..=separator, "T");
-    Some(text)
+fn render_jsonpath_timestamptz_with_offset(value: TimestampTzADT, offset_seconds: i32) -> String {
+    let adjusted = value.0 + i64::from(offset_seconds) * 1_000_000;
+    let (days, time_usecs) = timestamp_parts_from_usecs(adjusted);
+    let (date, bc) = render_jsonpath_date_component(days);
+    let mut out = format!("{date}T{}", format_time_usecs(time_usecs));
+    out.push_str(&render_jsonpath_offset(offset_seconds));
+    if bc {
+        out.push_str(" BC");
+    }
+    out
+}
+
+fn render_jsonpath_date_component(pg_days: i32) -> (String, bool) {
+    let (mut year, month, day) = ymd_from_days(pg_days);
+    let bc = year <= 0;
+    if bc {
+        year = 1 - year;
+    }
+    (format!("{year:04}-{month:02}-{day:02}"), bc)
+}
+
+fn render_jsonpath_offset(offset_seconds: i32) -> String {
+    let sign = if offset_seconds < 0 { '-' } else { '+' };
+    let mut remaining = offset_seconds.abs();
+    let hour = remaining / 3600;
+    remaining %= 3600;
+    let minute = remaining / 60;
+    let second = remaining % 60;
+    if second != 0 {
+        format!("{sign}{hour:02}:{minute:02}:{second:02}")
+    } else {
+        format!("{sign}{hour:02}:{minute:02}")
+    }
 }
 
 pub(crate) fn parse_jsonb_text(text: &str) -> Result<Vec<u8>, ExecError> {
@@ -862,7 +910,8 @@ pub(crate) fn jsonb_to_text_value(value: &JsonbValue) -> Value {
         | JsonbValue::Time(_)
         | JsonbValue::TimeTz(_)
         | JsonbValue::Timestamp(_)
-        | JsonbValue::TimestampTz(_) => Value::Text(CompactString::from_owned(
+        | JsonbValue::TimestampTz(_)
+        | JsonbValue::TimestampTzWithOffset(_, _) => Value::Text(CompactString::from_owned(
             render_temporal_jsonb_value(value),
         )),
         other => Value::Text(CompactString::from_owned(other.render())),
@@ -887,7 +936,12 @@ pub(crate) fn compare_jsonb(left: &JsonbValue, right: &JsonbValue) -> Ordering {
             .cmp(&r.time)
             .then_with(|| l.offset_seconds.cmp(&r.offset_seconds)),
         (JsonbValue::Timestamp(l), JsonbValue::Timestamp(r)) => l.cmp(r),
-        (JsonbValue::TimestampTz(l), JsonbValue::TimestampTz(r)) => l.cmp(r),
+        (JsonbValue::TimestampTz(l), JsonbValue::TimestampTz(r))
+        | (JsonbValue::TimestampTz(l), JsonbValue::TimestampTzWithOffset(r, _))
+        | (JsonbValue::TimestampTzWithOffset(l, _), JsonbValue::TimestampTz(r))
+        | (JsonbValue::TimestampTzWithOffset(l, _), JsonbValue::TimestampTzWithOffset(r, _)) => {
+            l.cmp(r)
+        }
         (JsonbValue::Array(l), JsonbValue::Array(r)) => {
             let len_cmp = l.len().cmp(&r.len());
             if len_cmp != Ordering::Equal {
@@ -976,7 +1030,8 @@ pub(crate) fn jsonb_contains(left: &JsonbValue, right: &JsonbValue) -> bool {
             | JsonbValue::Time(_)
             | JsonbValue::TimeTz(_)
             | JsonbValue::Timestamp(_)
-            | JsonbValue::TimestampTz(_),
+            | JsonbValue::TimestampTz(_)
+            | JsonbValue::TimestampTzWithOffset(_, _),
         ) => {
             if let JsonbValue::Array(items) = left {
                 items.iter().any(|item| jsonb_contains(item, right))
@@ -1150,7 +1205,8 @@ fn encode_jsonb_value(
         | JsonbValue::Time(_)
         | JsonbValue::TimeTz(_)
         | JsonbValue::Timestamp(_)
-        | JsonbValue::TimestampTz(_) => {
+        | JsonbValue::TimestampTz(_)
+        | JsonbValue::TimestampTzWithOffset(_, _) => {
             if is_root {
                 encode_jsonb_array(out, header, std::slice::from_ref(value), level, true);
             } else {
@@ -1263,7 +1319,8 @@ fn encode_jsonb_scalar(out: &mut Vec<u8>, header: &mut u32, value: &JsonbValue) 
         | JsonbValue::Time(_)
         | JsonbValue::TimeTz(_)
         | JsonbValue::Timestamp(_)
-        | JsonbValue::TimestampTz(_) => {
+        | JsonbValue::TimestampTz(_)
+        | JsonbValue::TimestampTzWithOffset(_, _) => {
             let text = render_temporal_jsonb_value(value);
             out.extend_from_slice(text.as_bytes());
             *header = JENTRY_ISSTRING | text.len() as u32;
@@ -1689,7 +1746,8 @@ fn render_jsonb_value(out: &mut String, value: &JsonbValue) {
         | JsonbValue::Time(_)
         | JsonbValue::TimeTz(_)
         | JsonbValue::Timestamp(_)
-        | JsonbValue::TimestampTz(_) => {
+        | JsonbValue::TimestampTz(_)
+        | JsonbValue::TimestampTzWithOffset(_, _) => {
             render_jsonb_string(out, &render_temporal_jsonb_value(value))
         }
         JsonbValue::Array(items) => {
@@ -1767,7 +1825,7 @@ fn jsonb_type_rank(value: &JsonbValue) -> u8 {
         JsonbValue::Time(_) => 5,
         JsonbValue::TimeTz(_) => 6,
         JsonbValue::Timestamp(_) => 7,
-        JsonbValue::TimestampTz(_) => 8,
+        JsonbValue::TimestampTz(_) | JsonbValue::TimestampTzWithOffset(_, _) => 8,
         JsonbValue::Array(_) => 16,
         JsonbValue::Object(_) => 17,
     }

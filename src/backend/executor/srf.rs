@@ -489,6 +489,9 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &str {
             crate::include::nodes::primnodes::JsonTableFunction::JsonbPathQuery => {
                 "jsonb_path_query"
             }
+            crate::include::nodes::primnodes::JsonTableFunction::JsonbPathQueryTz => {
+                "jsonb_path_query_tz"
+            }
             crate::include::nodes::primnodes::JsonTableFunction::JsonbObjectKeys => {
                 "jsonb_object_keys"
             }

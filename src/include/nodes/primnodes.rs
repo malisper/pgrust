@@ -958,6 +958,7 @@ pub enum JsonTableFunction {
     ArrayElements,
     ArrayElementsText,
     JsonbPathQuery,
+    JsonbPathQueryTz,
     JsonbObjectKeys,
     JsonbEach,
     JsonbEachText,

@@ -5133,6 +5133,19 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             4,
         ),
         set_returning_proc_row(
+            1179,
+            "jsonb_path_query_tz",
+            JSONB_TYPE_OID,
+            &oid_argtypes(&[
+                JSONB_TYPE_OID,
+                JSONPATH_TYPE_OID,
+                JSONB_TYPE_OID,
+                BOOL_TYPE_OID,
+            ]),
+            "jsonb_path_query_tz",
+            4,
+        ),
+        set_returning_proc_row(
             6255,
             "jsonb_object_keys",
             TEXT_TYPE_OID,
