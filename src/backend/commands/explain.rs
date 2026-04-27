@@ -13,7 +13,7 @@ use crate::include::nodes::plannodes::{AggregateStrategy, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, Expr, ParamKind, ProjectSetTarget, ScalarFunctionImpl,
     SetReturningCall, SubPlan, TargetEntry, WindowClause, WindowFrameBound, WindowFuncKind,
-    set_returning_call_exprs,
+    attrno_index, set_returning_call_exprs,
 };
 use crate::include::storage::buf_internals::BufferUsageStats;
 
@@ -23,7 +23,7 @@ pub(crate) fn format_explain_lines(
     analyze: bool,
     lines: &mut Vec<String>,
 ) {
-    format_explain_lines_with_costs(state, indent, analyze, true, lines);
+    format_explain_lines_with_costs(state, indent, analyze, true, true, lines);
 }
 
 pub(crate) fn format_explain_lines_with_costs(
@@ -31,9 +31,10 @@ pub(crate) fn format_explain_lines_with_costs(
     indent: usize,
     analyze: bool,
     show_costs: bool,
+    show_timing: bool,
     lines: &mut Vec<String>,
 ) {
-    format_explain_lines_with_options(state, indent, analyze, show_costs, true, lines);
+    format_explain_lines_with_options(state, indent, analyze, show_costs, show_timing, lines);
 }
 
 pub(crate) fn format_explain_lines_with_options(
@@ -50,7 +51,7 @@ pub(crate) fn format_explain_lines_with_options(
     }
     push_explain_state_line(state, indent, analyze, show_costs, show_timing, lines);
     state.explain_details(indent, analyze, show_costs, lines);
-    state.explain_children(indent, analyze, show_costs, lines);
+    state.explain_children(indent, analyze, show_costs, show_timing, lines);
 }
 
 pub(crate) fn push_explain_line(
@@ -237,6 +238,9 @@ fn projection_targets_are_explain_passthrough(input: &Plan, targets: &[TargetEnt
     if matches!(input, Plan::WindowAgg { .. }) && targets.iter().all(|target| !target.resjunk) {
         return true;
     }
+    if targets.iter().all(|target| !target.resjunk) && !targets_have_direct_subplans(targets) {
+        return true;
+    }
     targets
         .iter()
         .all(|target| !target.resjunk && matches!(target.expr, Expr::Var(_)))
@@ -262,20 +266,19 @@ fn push_explain_state_line(
     let plan_info = state.plan_info();
     if analyze && show_costs && show_timing {
         let stats = state.node_stats();
+        let actual = format!(
+            " (actual time={:.3}..{:.3} rows={:.2} loops={})",
+            stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
+            stats.total_time.as_secs_f64() * 1000.0,
+            stats.rows as f64,
+            stats.loops,
+        );
         lines.push(format!(
-            "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={}) (actual time={:.3}..{:.3} rows={:.2} loops={})",
+            "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={}){actual}",
             plan_info.startup_cost.as_f64(),
             plan_info.total_cost.as_f64(),
             plan_info.plan_rows.as_f64().round() as u64,
             plan_info.plan_width,
-            stats
-                .first_tuple_time
-                .unwrap_or_default()
-                .as_secs_f64()
-                * 1000.0,
-            stats.total_time.as_secs_f64() * 1000.0,
-            stats.rows as f64,
-            stats.loops,
         ));
     } else if analyze && show_costs {
         let stats = state.node_stats();
@@ -296,13 +299,14 @@ fn push_explain_state_line(
         ));
     } else if analyze {
         let stats = state.node_stats();
-        lines.push(format!(
-            "{prefix}{label}  (actual time={:.3}..{:.3} rows={:.2} loops={})",
+        let actual = format!(
+            "actual time={:.3}..{:.3} rows={:.2} loops={}",
             stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
             stats.total_time.as_secs_f64() * 1000.0,
             stats.rows as f64,
             stats.loops,
-        ));
+        );
+        lines.push(format!("{prefix}{label} ({actual})"));
     } else if show_costs {
         lines.push(format!(
             "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={})",
@@ -349,18 +353,35 @@ fn push_nonverbose_plan_details(
             display_items,
             ..
         } => {
-            let sort_items = if display_items.is_empty() {
-                let input_names = plan_join_output_exprs(input, ctx, true);
-                items
-                    .iter()
-                    .map(|item| render_nonverbose_order_by_item(item, &input_names, ctx))
-                    .collect::<Vec<_>>()
-            } else {
-                display_items.clone()
-            };
+            let sort_items = nonverbose_sort_items(input, items, display_items, ctx);
             let sort_key = sort_items.join(", ");
             if !sort_key.is_empty() {
                 lines.push(format!("{prefix}Sort Key: {sort_key}"));
+            }
+            true
+        }
+        Plan::IncrementalSort {
+            input,
+            items,
+            presorted_count,
+            display_items,
+            presorted_display_items,
+            ..
+        } => {
+            let sort_items = nonverbose_sort_items(input, items, display_items, ctx);
+            let sort_key = sort_items.join(", ");
+            if !sort_key.is_empty() {
+                lines.push(format!("{prefix}Sort Key: {sort_key}"));
+            }
+            let presorted_items = nonverbose_sort_items(
+                input,
+                &items[..*presorted_count],
+                presorted_display_items,
+                ctx,
+            );
+            let presorted_key = presorted_items.join(", ");
+            if !presorted_key.is_empty() {
+                lines.push(format!("{prefix}Presorted Key: {presorted_key}"));
             }
             true
         }
@@ -372,26 +393,24 @@ fn push_nonverbose_plan_details(
             output_columns,
             ..
         } => {
-            let input_names = plan_join_output_exprs(input, ctx, true);
             if *disabled {
                 lines.push(format!("{prefix}Disabled: true"));
             }
             if !group_by.is_empty() {
-                let group_key = group_by
-                    .iter()
-                    .enumerate()
-                    .map(|(index, expr)| {
-                        render_nonverbose_group_key_expr(
-                            expr,
-                            output_columns.get(index).map(|column| column.sql_type),
-                            &input_names,
-                            ctx,
-                            *disabled,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                lines.push(format!("{prefix}Group Key: {group_key}"));
+                let mut group_items = Vec::new();
+                for (index, expr) in group_by.iter().enumerate() {
+                    let rendered = render_nonverbose_aggregate_group_key(
+                        expr,
+                        input,
+                        output_columns.get(index).map(|column| column.sql_type),
+                        ctx,
+                        *disabled,
+                    );
+                    if !group_items.contains(&rendered) {
+                        group_items.push(rendered);
+                    }
+                }
+                lines.push(format!("{prefix}Group Key: {}", group_items.join(", ")));
             }
             if let Some(having) = having {
                 lines.push(format!(
@@ -517,6 +536,191 @@ fn push_nonverbose_plan_details(
     }
 }
 
+fn targets_have_direct_subplans(targets: &[TargetEntry]) -> bool {
+    targets.iter().any(|target| {
+        let mut subplans = Vec::new();
+        collect_direct_expr_subplans(&target.expr, &mut subplans);
+        !subplans.is_empty()
+    })
+}
+
+fn nonverbose_sort_items(
+    input: &Plan,
+    items: &[crate::include::nodes::primnodes::OrderByEntry],
+    display_items: &[String],
+    ctx: &VerboseExplainContext,
+) -> Vec<String> {
+    if !display_items.is_empty() {
+        return display_items.to_vec();
+    }
+    let input_names = verbose_plan_output_exprs(input, ctx, true);
+    items
+        .iter()
+        .map(|item| render_nonverbose_sort_item(item, &input_names, ctx))
+        .collect()
+}
+
+fn render_nonverbose_sort_item(
+    item: &crate::include::nodes::primnodes::OrderByEntry,
+    input_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> String {
+    let mut rendered = render_verbose_expr(&item.expr, input_names, ctx);
+    if item.descending {
+        rendered.push_str(" DESC");
+    }
+    if let Some(nulls_first) = item.nulls_first {
+        rendered.push_str(if nulls_first {
+            " NULLS FIRST"
+        } else {
+            " NULLS LAST"
+        });
+    }
+    rendered
+}
+
+fn render_nonverbose_aggregate_group_key(
+    expr: &Expr,
+    input: &Plan,
+    sql_type: Option<crate::backend::parser::SqlType>,
+    ctx: &VerboseExplainContext,
+    force_xid_const: bool,
+) -> String {
+    if force_xid_const
+        || sql_type.is_some_and(|ty| matches!(ty.kind, crate::backend::parser::SqlTypeKind::Xid))
+    {
+        let input_names = nonverbose_aggregate_input_names(input, ctx);
+        return render_nonverbose_group_key_expr(
+            expr,
+            sql_type,
+            &input_names,
+            ctx,
+            force_xid_const,
+        );
+    }
+    let input_names = input.column_names();
+    let rendered = render_explain_expr(expr, &input_names);
+    if !rendered.contains("?column?") && !group_key_refs_projection_alias(expr, input, &rendered) {
+        return rendered;
+    }
+    let input_names = nonverbose_aggregate_input_names(input, ctx);
+    render_nonverbose_group_key_expr(expr, sql_type, &input_names, ctx, force_xid_const)
+}
+
+fn group_key_refs_projection_alias(expr: &Expr, input: &Plan, rendered: &str) -> bool {
+    let Expr::Var(var) = expr else {
+        return false;
+    };
+    let Plan::Projection { targets, .. } = input else {
+        return false;
+    };
+    let Some(index) = attrno_index(var.varattno) else {
+        return false;
+    };
+    let Some(target) = targets.get(index) else {
+        return false;
+    };
+    target.name == rendered || rendered == format!("({})", target.name)
+}
+
+fn nonverbose_aggregate_input_names(input: &Plan, ctx: &VerboseExplainContext) -> Vec<String> {
+    plan_join_output_exprs(input, ctx, true)
+        .into_iter()
+        .map(strip_self_qualified_identifiers)
+        .collect()
+}
+
+fn nonverbose_window_input_names(input: &Plan, ctx: &VerboseExplainContext) -> Vec<String> {
+    plan_join_output_exprs(input, ctx, true)
+        .into_iter()
+        .map(strip_qualified_identifiers)
+        .collect()
+}
+
+fn strip_self_qualified_identifiers(input: String) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if !is_explain_ident_start(chars[index]) {
+            output.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        let first_start = index;
+        index += 1;
+        while index < chars.len() && is_explain_ident_part(chars[index]) {
+            index += 1;
+        }
+        if chars.get(index) != Some(&'.') {
+            output.extend(chars[first_start..index].iter());
+            continue;
+        }
+        let second_start = index + 1;
+        let mut second_end = second_start;
+        if second_end >= chars.len() || !is_explain_ident_start(chars[second_end]) {
+            output.extend(chars[first_start..=index].iter());
+            index = second_start;
+            continue;
+        }
+        second_end += 1;
+        while second_end < chars.len() && is_explain_ident_part(chars[second_end]) {
+            second_end += 1;
+        }
+        if chars[first_start..index] == chars[second_start..second_end] {
+            output.extend(chars[first_start..index].iter());
+        } else {
+            output.extend(chars[first_start..second_end].iter());
+        }
+        index = second_end;
+    }
+    output
+}
+
+fn strip_qualified_identifiers(input: String) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if !is_explain_ident_start(chars[index]) {
+            output.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        let first_start = index;
+        index += 1;
+        while index < chars.len() && is_explain_ident_part(chars[index]) {
+            index += 1;
+        }
+        if chars.get(index) != Some(&'.') {
+            output.extend(chars[first_start..index].iter());
+            continue;
+        }
+        let second_start = index + 1;
+        let mut second_end = second_start;
+        if second_end >= chars.len() || !is_explain_ident_start(chars[second_end]) {
+            output.extend(chars[first_start..=index].iter());
+            index = second_start;
+            continue;
+        }
+        second_end += 1;
+        while second_end < chars.len() && is_explain_ident_part(chars[second_end]) {
+            second_end += 1;
+        }
+        output.extend(chars[second_start..second_end].iter());
+        index = second_end;
+    }
+    output
+}
+
+fn is_explain_ident_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn is_explain_ident_part(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
 fn render_hash_join_condition(
     outer_hash_keys: &[Expr],
     right: &Plan,
@@ -555,7 +759,7 @@ fn render_window_clause_for_explain(
     clause: &WindowClause,
     ctx: &VerboseExplainContext,
 ) -> String {
-    let input_names = verbose_plan_output_exprs(input, ctx, true);
+    let input_names = nonverbose_window_input_names(input, ctx);
     let mut parts = Vec::new();
     if !clause.spec.partition_by.is_empty() {
         parts.push(format!(
@@ -643,6 +847,9 @@ fn render_nonverbose_group_key_expr(
             .rsplit_once('.')
             .map(|(_, name)| name)
             .unwrap_or(&rendered);
+        if name.starts_with('(') && name.ends_with(')') {
+            return name.to_string();
+        }
         return format!("({name})");
     }
     if (matches!(expr, Expr::Op(_)) || rendered.contains(" || "))
@@ -825,6 +1032,9 @@ fn verbose_plan_label(plan: &Plan) -> Option<String> {
         Plan::Projection { input, .. } if matches!(input.as_ref(), Plan::Result { .. }) => {
             Some("Result".into())
         }
+        Plan::SeqScan { .. } | Plan::IndexOnlyScan { .. } | Plan::IndexScan { .. } => {
+            verbose_scan_plan_label(plan)
+        }
         Plan::Aggregate { strategy, .. } => match strategy {
             AggregateStrategy::Plain => Some("Aggregate".into()),
             AggregateStrategy::Sorted => Some("GroupAggregate".into()),
@@ -837,6 +1047,10 @@ fn verbose_plan_label(plan: &Plan) -> Option<String> {
         Plan::FunctionScan {
             call, table_alias, ..
         } => Some(verbose_function_scan_label(call, table_alias.as_deref())),
+        Plan::SubqueryScan { scan_name, .. } => Some(match scan_name {
+            Some(scan_name) => format!("Subquery Scan on {scan_name}"),
+            None => "Subquery Scan".into(),
+        }),
         _ => None,
     }
 }
@@ -865,6 +1079,9 @@ fn nonverbose_plan_label(plan: &Plan, ctx: &VerboseExplainContext) -> Option<Str
         Plan::Projection { input, .. } if matches!(input.as_ref(), Plan::Result { .. }) => {
             Some("Result".into())
         }
+        Plan::SubqueryScan { scan_name, .. } => scan_name
+            .as_ref()
+            .map(|scan_name| format!("Subquery Scan on {scan_name}")),
         Plan::Values { .. } => Some(format!(
             "Values Scan on {}",
             ctx.values_scan_name.as_deref().unwrap_or("\"*VALUES*\"")
@@ -963,7 +1180,7 @@ fn push_verbose_projected_scan_plan(
     let Plan::Projection { input, targets, .. } = plan else {
         return false;
     };
-    if !projection_targets_are_verbose_scan_projection(input, targets) {
+    if !projection_targets_are_verbose_scan_projection(input, targets, ctx) {
         return false;
     }
 
@@ -992,12 +1209,16 @@ fn push_verbose_projected_scan_plan(
     true
 }
 
-fn projection_targets_are_verbose_scan_projection(input: &Plan, targets: &[TargetEntry]) -> bool {
+fn projection_targets_are_verbose_scan_projection(
+    input: &Plan,
+    targets: &[TargetEntry],
+    ctx: &VerboseExplainContext,
+) -> bool {
     matches!(
         input,
         Plan::SeqScan { .. } | Plan::IndexOnlyScan { .. } | Plan::IndexScan { .. }
-    ) && targets.len() > input.column_names().len()
-        && targets.iter().all(|target| !target.resjunk)
+    ) && targets.iter().all(|target| !target.resjunk)
+        && (ctx.scan_output_override.is_some() || targets.len() > input.column_names().len())
 }
 
 fn verbose_scan_projection_input_names(input: &Plan) -> Vec<String> {
@@ -1124,6 +1345,7 @@ fn verbose_relation_name(relation_name: &str) -> String {
 #[derive(Clone, Default)]
 struct VerboseExplainContext {
     exec_params: Vec<VerboseExecParam>,
+    scan_output_override: Option<Vec<String>>,
     values_scan_name: Option<String>,
     function_scan_alias: Option<String>,
     relation_scan_alias: Option<String>,
@@ -1143,7 +1365,7 @@ fn push_verbose_plan_details(
     lines: &mut Vec<String>,
 ) {
     let prefix = explain_detail_prefix(indent);
-    let output = verbose_plan_output_exprs(plan, ctx, false);
+    let output = verbose_display_output_exprs(plan, ctx, false);
     if !output.is_empty() {
         lines.push(format!("{prefix}Output: {}", output.join(", ")));
     }
@@ -1160,6 +1382,36 @@ fn push_verbose_plan_details(
                 lines.push(format!("{prefix}Sort Key: {sort_key}"));
             }
         }
+        Plan::IncrementalSort {
+            input,
+            items,
+            presorted_count,
+            presorted_display_items,
+            ..
+        } => {
+            let input_names = verbose_plan_output_exprs(input, ctx, true);
+            let sort_key = items
+                .iter()
+                .map(|item| render_verbose_expr(&item.expr, &input_names, ctx))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !sort_key.is_empty() {
+                lines.push(format!("{prefix}Sort Key: {sort_key}"));
+            }
+            let presorted_key = if presorted_display_items.is_empty() {
+                items
+                    .iter()
+                    .take(*presorted_count)
+                    .map(|item| render_verbose_expr(&item.expr, &input_names, ctx))
+                    .collect::<Vec<_>>()
+            } else {
+                presorted_display_items.clone()
+            }
+            .join(", ");
+            if !presorted_key.is_empty() {
+                lines.push(format!("{prefix}Presorted Key: {presorted_key}"));
+            }
+        }
         Plan::Aggregate {
             input,
             group_by,
@@ -1168,11 +1420,14 @@ fn push_verbose_plan_details(
         } => {
             let input_names = verbose_plan_output_exprs(input, ctx, true);
             if !group_by.is_empty() {
-                let group_key = group_by
-                    .iter()
-                    .map(|expr| render_verbose_expr(expr, &input_names, ctx))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let mut group_items = Vec::new();
+                for expr in group_by {
+                    let rendered = render_verbose_expr(expr, &input_names, ctx);
+                    if !group_items.contains(&rendered) {
+                        group_items.push(rendered);
+                    }
+                }
+                let group_key = group_items.join(", ");
                 lines.push(format!("{prefix}Group Key: {group_key}"));
             }
             if let Some(having) = having {
@@ -1399,6 +1654,38 @@ fn explain_plan_children_with_context(
                 lines,
             );
         }
+        Plan::Aggregate {
+            input,
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            ..
+        } => {
+            let child_indent = indent + 1;
+            let child_ctx = if verbose {
+                let mut child_ctx = ctx.clone();
+                child_ctx.scan_output_override = Some(aggregate_child_output_exprs(
+                    input,
+                    group_by,
+                    passthrough_exprs,
+                    accumulators,
+                    ctx,
+                ));
+                child_ctx
+            } else {
+                ctx.clone()
+            };
+            format_explain_plan_with_subplans_inner(
+                input,
+                subplans,
+                child_indent,
+                show_costs,
+                verbose,
+                true,
+                &child_ctx,
+                lines,
+            );
+        }
         Plan::Hash { input, .. } => {
             let child_indent = if indent == 0 { 1 } else { indent + 3 };
             format_explain_plan_with_subplans_inner(
@@ -1412,10 +1699,33 @@ fn explain_plan_children_with_context(
                 lines,
             );
         }
+        Plan::OrderBy { .. }
+        | Plan::IncrementalSort { .. }
+        | Plan::Unique { .. }
+        | Plan::SubqueryScan { .. } => {
+            let child_indent = indent + 1;
+            for child in direct_plan_children(plan) {
+                format_explain_plan_with_subplans_inner(
+                    child,
+                    subplans,
+                    child_indent,
+                    show_costs,
+                    verbose,
+                    true,
+                    ctx,
+                    lines,
+                );
+            }
+        }
         _ => {
             let mut values_seen = 0usize;
             let mut functions_seen = BTreeMap::<String, usize>::new();
             let mut relations_seen = BTreeMap::<String, usize>::new();
+            let child_indent = if matches!(plan, Plan::SetOp { .. }) {
+                indent
+            } else {
+                indent + 1
+            };
             for child in direct_plan_children(plan) {
                 let child_ctx = context_for_sibling_scan(
                     ctx,
@@ -1427,7 +1737,7 @@ fn explain_plan_children_with_context(
                 format_explain_plan_with_subplans_inner(
                     child,
                     subplans,
-                    indent + 1,
+                    child_indent,
                     show_costs,
                     verbose,
                     true,
@@ -1682,11 +1992,12 @@ fn plan_join_output_exprs(
             desc,
             ..
         } => qualified_scan_output_exprs_with_context(relation_name, desc, ctx),
-        Plan::BitmapIndexScan { .. } => Vec::new(),
+        Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => Vec::new(),
         Plan::Hash { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::SubqueryScan { input, .. } => plan_join_output_exprs(input, ctx, for_parent_ref),
@@ -1808,6 +2119,56 @@ fn plan_join_output_exprs(
     }
 }
 
+fn verbose_display_output_exprs(
+    plan: &Plan,
+    ctx: &VerboseExplainContext,
+    for_parent_ref: bool,
+) -> Vec<String> {
+    match plan {
+        Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapHeapScan { .. } => ctx
+            .scan_output_override
+            .clone()
+            .unwrap_or_else(|| verbose_plan_output_exprs(plan, ctx, for_parent_ref)),
+        _ => verbose_plan_output_exprs(plan, ctx, for_parent_ref),
+    }
+}
+
+fn aggregate_child_output_exprs(
+    input: &Plan,
+    group_by: &[Expr],
+    passthrough_exprs: &[Expr],
+    accumulators: &[AggAccum],
+    ctx: &VerboseExplainContext,
+) -> Vec<String> {
+    let input_names = verbose_plan_output_exprs(input, ctx, true);
+    let mut output = Vec::new();
+    output.extend(
+        group_by
+            .iter()
+            .map(|expr| render_verbose_expr(expr, &input_names, ctx)),
+    );
+    output.extend(
+        passthrough_exprs
+            .iter()
+            .map(|expr| render_verbose_expr(expr, &input_names, ctx)),
+    );
+    for accum in accumulators {
+        output.extend(
+            accum
+                .args
+                .iter()
+                .map(|arg| render_verbose_expr(arg, &input_names, ctx)),
+        );
+        if let Some(filter) = &accum.filter {
+            output.push(render_verbose_expr(filter, &input_names, ctx));
+        }
+    }
+    output
+}
+
 fn verbose_plan_output_exprs(
     plan: &Plan,
     ctx: &VerboseExplainContext,
@@ -1815,30 +2176,42 @@ fn verbose_plan_output_exprs(
 ) -> Vec<String> {
     match plan {
         Plan::Result { .. } => Vec::new(),
-        Plan::Append { desc, .. }
-        | Plan::MergeAppend { desc, .. }
-        | Plan::SeqScan { desc, .. }
-        | Plan::IndexOnlyScan { desc, .. }
-        | Plan::IndexScan { desc, .. } => desc
+        Plan::Append { desc, .. } | Plan::MergeAppend { desc, .. } => desc
             .columns
             .iter()
             .map(|column| column.name.clone())
             .collect(),
-        Plan::BitmapHeapScan { desc, .. } => desc
-            .columns
-            .iter()
-            .map(|column| column.name.clone())
-            .collect(),
-        Plan::BitmapIndexScan { .. } => Vec::new(),
+        Plan::SeqScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexOnlyScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::BitmapHeapScan {
+            relation_name,
+            desc,
+            ..
+        } => qualified_base_scan_output_exprs(relation_name, desc),
+        Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => Vec::new(),
         Plan::Hash { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::SubqueryScan { input, .. } => verbose_plan_output_exprs(input, ctx, for_parent_ref),
         Plan::Projection { input, targets, .. } => {
-            let input_names = verbose_plan_output_exprs(input, ctx, true);
+            let input_names = plan_join_output_exprs(input, ctx, true);
             targets
                 .iter()
                 .filter(|target| !target.resjunk)
@@ -2339,6 +2712,7 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. }
         | Plan::Values { .. } => Vec::new(),
+        Plan::BitmapOr { children, .. } => children.iter().collect(),
         Plan::BitmapHeapScan { bitmapqual, .. } => vec![bitmapqual.as_ref()],
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
@@ -2357,6 +2731,7 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
         Plan::Hash { input, .. }
         | Plan::Unique { input, .. }
         | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::Projection { input, .. }
@@ -2385,8 +2760,32 @@ fn const_false_filter_result_plan(plan: &Plan) -> Option<PlanEstimate> {
             plan_info,
             input,
             predicate: Expr::Const(Value::Bool(false)),
-        } if matches!(input.as_ref(), Plan::SeqScan { .. }) => Some(*plan_info),
+        } if const_false_filter_input_can_render_as_result(input) => Some(*plan_info),
+        Plan::Append {
+            plan_info,
+            children,
+            ..
+        } if !children.is_empty()
+            && children
+                .iter()
+                .all(|child| const_false_filter_result_plan(child).is_some()) =>
+        {
+            Some(*plan_info)
+        }
+        Plan::Projection { input, targets, .. }
+            if projection_targets_are_explain_passthrough(input, targets) =>
+        {
+            const_false_filter_result_plan(input)
+        }
         _ => None,
+    }
+}
+
+fn const_false_filter_input_can_render_as_result(input: &Plan) -> bool {
+    match input {
+        Plan::SeqScan { .. } | Plan::Result { .. } => true,
+        Plan::Append { children, .. } => children.is_empty(),
+        _ => false,
     }
 }
 
@@ -2400,6 +2799,7 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
+        | Plan::BitmapOr { .. }
         | Plan::BitmapHeapScan { .. }
         | Plan::Limit { .. }
         | Plan::LockRows { .. }
@@ -2469,6 +2869,11 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
         }
         Plan::Filter { predicate, .. } => collect_direct_expr_subplans(predicate, &mut found),
         Plan::OrderBy { items, .. } => {
+            for item in items {
+                collect_direct_expr_subplans(&item.expr, &mut found);
+            }
+        }
+        Plan::IncrementalSort { items, .. } => {
             for item in items {
                 collect_direct_expr_subplans(&item.expr, &mut found);
             }

@@ -202,6 +202,7 @@ pub struct NodeExecStats {
     pub total_time: Duration,
     pub first_tuple_time: Option<Duration>,
     pub rows_removed_by_filter: u64,
+    pub index_searches: u64,
     pub stack_depth_checked: bool,
     pub buffer_usage: BufferUsageStats,
     pub buffer_usage_start: Option<BufferUsageStats>,
@@ -266,6 +267,7 @@ pub trait PlanNode: std::fmt::Debug {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     );
 }
@@ -476,6 +478,36 @@ impl std::fmt::Debug for BitmapIndexScanState {
     }
 }
 
+pub enum BitmapQualState {
+    Index(Box<BitmapIndexScanState>),
+    Or(Box<BitmapOrState>),
+}
+
+impl std::fmt::Debug for BitmapQualState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BitmapQualState::Index(state) => state.fmt(f),
+            BitmapQualState::Or(state) => state.fmt(f),
+        }
+    }
+}
+
+pub struct BitmapOrState {
+    pub(crate) children: Vec<BitmapQualState>,
+    pub(crate) bitmap: TidBitmap,
+    pub(crate) executed: bool,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+impl std::fmt::Debug for BitmapOrState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BitmapOrState")
+            .field("children", &self.children.len())
+            .finish()
+    }
+}
+
 pub struct BitmapHeapScanState {
     pub(crate) rel: RelFileLocator,
     pub(crate) relation_name: String,
@@ -483,7 +515,7 @@ pub struct BitmapHeapScanState {
     pub(crate) column_names: Vec<String>,
     pub(crate) desc: Rc<RelationDesc>,
     pub(crate) attr_descs: Rc<[AttributeDesc]>,
-    pub(crate) bitmap_index: Box<BitmapIndexScanState>,
+    pub(crate) bitmapqual: BitmapQualState,
     pub(crate) bitmap_pages: Vec<u32>,
     pub(crate) current_page_index: usize,
     pub(crate) current_page_offsets: Vec<u16>,
@@ -631,6 +663,21 @@ pub struct OrderByState {
     pub(crate) network_strict_less_tiebreak: bool,
     pub(crate) rows: Option<Vec<MaterializedRow>>,
     pub(crate) next_index: usize,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct IncrementalSortState {
+    pub(crate) input: PlanState,
+    pub(crate) items: Vec<OrderByEntry>,
+    pub(crate) presorted_count: usize,
+    pub(crate) display_items: Vec<String>,
+    pub(crate) presorted_display_items: Vec<String>,
+    pub(crate) rows: Vec<MaterializedRow>,
+    pub(crate) next_index: usize,
+    pub(crate) lookahead: Option<(Vec<Value>, MaterializedRow)>,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,

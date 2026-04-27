@@ -34,6 +34,7 @@ pub struct PlannerConfig {
     pub enable_indexscan: bool,
     pub enable_indexonlyscan: bool,
     pub enable_bitmapscan: bool,
+    pub retain_partial_index_filters: bool,
     pub enable_hashagg: bool,
     pub enable_sort: bool,
 }
@@ -46,6 +47,7 @@ impl Default for PlannerConfig {
             enable_indexscan: true,
             enable_indexonlyscan: true,
             enable_bitmapscan: true,
+            retain_partial_index_filters: false,
             enable_hashagg: true,
             enable_sort: true,
         }
@@ -490,6 +492,11 @@ pub enum Path {
         keys: Vec<IndexScanKey>,
         index_quals: Vec<Expr>,
     },
+    BitmapOr {
+        plan_info: PlanEstimate,
+        pathtarget: PathTarget,
+        children: Vec<Path>,
+    },
     BitmapHeapScan {
         plan_info: PlanEstimate,
         pathtarget: PathTarget,
@@ -555,6 +562,15 @@ pub enum Path {
         input: Box<Path>,
         items: Vec<OrderByEntry>,
         display_items: Vec<String>,
+    },
+    IncrementalSort {
+        plan_info: PlanEstimate,
+        pathtarget: PathTarget,
+        input: Box<Path>,
+        items: Vec<OrderByEntry>,
+        presorted_count: usize,
+        display_items: Vec<String>,
+        presorted_display_items: Vec<String>,
     },
     Limit {
         plan_info: PlanEstimate,

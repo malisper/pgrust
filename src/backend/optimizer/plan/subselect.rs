@@ -1190,6 +1190,16 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
         },
+        Plan::BitmapOr {
+            plan_info,
+            children,
+        } => Plan::BitmapOr {
+            plan_info,
+            children: children
+                .into_iter()
+                .map(|child| rebase_plan_subplan_ids(child, base))
+                .collect(),
+        },
         Plan::BitmapHeapScan {
             plan_info,
             source_id,
@@ -1386,6 +1396,30 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .collect(),
             display_items,
         },
+        Plan::IncrementalSort {
+            plan_info,
+            input,
+            items,
+            presorted_count,
+            display_items,
+            presorted_display_items,
+        } => Plan::IncrementalSort {
+            plan_info,
+            input: Box::new(rebase_plan_subplan_ids(*input, base)),
+            items: items
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                    expr: rebase_expr_subplan_ids(item.expr, base),
+                    ressortgroupref: item.ressortgroupref,
+                    descending: item.descending,
+                    nulls_first: item.nulls_first,
+                    collation_oid: item.collation_oid,
+                })
+                .collect(),
+            presorted_count,
+            display_items,
+            presorted_display_items,
+        },
         Plan::Limit {
             plan_info,
             input,
@@ -1474,10 +1508,12 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
         Plan::SubqueryScan {
             plan_info,
             input,
+            scan_name,
             output_columns,
         } => Plan::SubqueryScan {
             plan_info,
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
+            scan_name,
             output_columns,
         },
         Plan::CteScan {
@@ -1580,6 +1616,16 @@ pub(super) fn finalize_plan_subqueries(
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::WorkTableScan { .. } => plan,
+        Plan::BitmapOr {
+            plan_info,
+            children,
+        } => Plan::BitmapOr {
+            plan_info,
+            children: children
+                .into_iter()
+                .map(|child| finalize_plan_subqueries(child, catalog, subplans))
+                .collect(),
+        },
         Plan::MergeAppend {
             plan_info,
             source_id,
@@ -1807,6 +1853,30 @@ pub(super) fn finalize_plan_subqueries(
                 .collect(),
             display_items,
         },
+        Plan::IncrementalSort {
+            plan_info,
+            input,
+            items,
+            presorted_count,
+            display_items,
+            presorted_display_items,
+        } => Plan::IncrementalSort {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
+            items: items
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                    expr: finalize_expr_subqueries(item.expr, catalog, subplans),
+                    ressortgroupref: item.ressortgroupref,
+                    descending: item.descending,
+                    nulls_first: item.nulls_first,
+                    collation_oid: item.collation_oid,
+                })
+                .collect(),
+            presorted_count,
+            display_items,
+            presorted_display_items,
+        },
         Plan::Limit {
             plan_info,
             input,
@@ -1969,10 +2039,12 @@ pub(super) fn finalize_plan_subqueries(
         Plan::SubqueryScan {
             plan_info,
             input,
+            scan_name,
             output_columns,
         } => Plan::SubqueryScan {
             plan_info,
             input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
+            scan_name,
             output_columns,
         },
         Plan::CteScan {

@@ -2,12 +2,13 @@ use super::{Plan, PlanState, TupleSlot, expr, tuple_decoder};
 use crate::backend::executor::hashjoin::HashJoinPhase;
 use crate::backend::parser::SqlType;
 use crate::include::nodes::execnodes::{
-    AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, CteScanState,
-    FilterState, FunctionScanState, HashJoinState, HashState, IndexOnlyScanState, IndexScanState,
-    LimitState, LockRowsState, MergeAppendState, MergeJoinState, NestedLoopJoinState,
-    NodeExecStats, OrderByState, ProjectSetState, ProjectionState, RecursiveUnionState,
-    RecursiveWorkTable, ResultState, SeqScanState, SetOpState, SubqueryScanState, UniqueState,
-    ValuesState, WindowAggState, WorkTableScanState,
+    AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, BitmapOrState,
+    BitmapQualState, CteScanState, FilterState, FunctionScanState, HashJoinState, HashState,
+    IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState, LockRowsState,
+    MergeAppendState, MergeJoinState, NestedLoopJoinState, NodeExecStats, OrderByState,
+    ProjectSetState, ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState,
+    SeqScanState, SetOpState, SubqueryScanState, UniqueState, ValuesState, WindowAggState,
+    WorkTableScanState,
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{
@@ -223,6 +224,7 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
+        | Plan::BitmapOr { .. }
         | Plan::WorkTableScan { .. } => false,
         Plan::BitmapHeapScan {
             bitmapqual,
@@ -297,6 +299,10 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
             input, predicate, ..
         } => plan_uses_outer_columns(input) || expr_uses_outer_columns(predicate),
         Plan::OrderBy { input, items, .. } => {
+            plan_uses_outer_columns(input)
+                || items.iter().any(|item| expr_uses_outer_columns(&item.expr))
+        }
+        Plan::IncrementalSort { input, items, .. } => {
             plan_uses_outer_columns(input)
                 || items.iter().any(|item| expr_uses_outer_columns(&item.expr))
         }
@@ -600,6 +606,16 @@ pub fn executor_start(plan: Plan) -> PlanState {
             plan_info,
             stats: NodeExecStats::default(),
         }),
+        Plan::BitmapOr {
+            plan_info,
+            children,
+        } => Box::new(BitmapOrState {
+            children: children.into_iter().map(build_bitmap_qual_state).collect(),
+            bitmap: crate::include::access::tidbitmap::TidBitmap::new(),
+            executed: false,
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
         Plan::BitmapHeapScan {
             plan_info,
             source_id,
@@ -645,7 +661,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 column_names,
                 desc,
                 attr_descs,
-                bitmap_index: build_bitmap_index_state(*bitmapqual),
+                bitmapqual: build_bitmap_qual_state(*bitmapqual),
                 bitmap_pages: Vec::new(),
                 current_page_index: 0,
                 current_page_offsets: Vec::new(),
@@ -1081,6 +1097,26 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 stats: NodeExecStats::default(),
             })
         }
+        Plan::IncrementalSort {
+            plan_info,
+            input,
+            items,
+            presorted_count,
+            display_items,
+            presorted_display_items,
+        } => Box::new(IncrementalSortState {
+            input: executor_start(*input),
+            items,
+            presorted_count,
+            display_items,
+            presorted_display_items,
+            rows: Vec::new(),
+            next_index: 0,
+            lookahead: None,
+            current_bindings: Vec::new(),
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
         Plan::Limit {
             plan_info,
             input,
@@ -1190,6 +1226,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
         Plan::SubqueryScan {
             plan_info,
             input,
+            scan_name: _,
             output_columns,
         } => Box::new(SubqueryScanState {
             input: executor_start(*input),
@@ -1347,7 +1384,7 @@ fn build_hash_state(
     }
 }
 
-fn build_bitmap_index_state(plan: Plan) -> Box<BitmapIndexScanState> {
+fn build_bitmap_qual_state(plan: Plan) -> BitmapQualState {
     match plan {
         Plan::BitmapIndexScan {
             plan_info,
@@ -1362,7 +1399,7 @@ fn build_bitmap_index_state(plan: Plan) -> Box<BitmapIndexScanState> {
             index_meta,
             keys,
             index_quals,
-        } => Box::new(BitmapIndexScanState {
+        } => BitmapQualState::Index(Box::new(BitmapIndexScanState {
             rel,
             index_rel,
             index_name,
@@ -1377,7 +1414,17 @@ fn build_bitmap_index_state(plan: Plan) -> Box<BitmapIndexScanState> {
             executed: false,
             plan_info,
             stats: NodeExecStats::default(),
-        }),
+        })),
+        Plan::BitmapOr {
+            plan_info,
+            children,
+        } => BitmapQualState::Or(Box::new(BitmapOrState {
+            children: children.into_iter().map(build_bitmap_qual_state).collect(),
+            bitmap: crate::include::access::tidbitmap::TidBitmap::new(),
+            executed: false,
+            plan_info,
+            stats: NodeExecStats::default(),
+        })),
         other => panic!("bitmap heap scan requires bitmap index child, got {other:?}"),
     }
 }

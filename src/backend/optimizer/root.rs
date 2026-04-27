@@ -854,8 +854,11 @@ impl PlannerInfo {
     pub fn new_with_config(
         parse: Query,
         aggregate_layout: AggregateLayout,
-        config: PlannerConfig,
+        mut config: PlannerConfig,
     ) -> Self {
+        if !parse.row_marks.is_empty() {
+            config.retain_partial_index_filters = true;
+        }
         let processed_tlist = make_processed_tlist(&parse);
         let final_target = PathTarget::from_target_list(&parse.target_list);
         let query_pathkeys = PathTarget::from_sort_clause(&parse.sort_clause, &processed_tlist);

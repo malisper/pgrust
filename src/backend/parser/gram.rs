@@ -162,6 +162,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_statistics_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_text_search_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_partition_statement(&sql, options)? {
         return Ok(stmt);
     }
@@ -1107,6 +1110,270 @@ fn try_parse_statistics_statement(sql: &str) -> Result<Option<Statement>, ParseE
             .map(|stmt| Some(Statement::CommentOnStatistics(stmt)));
     }
     Ok(None)
+}
+
+fn try_parse_text_search_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create text search dictionary ") {
+        return build_create_text_search_dictionary_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateTextSearchDictionary(stmt)));
+    }
+    if lowered.starts_with("alter text search dictionary ") {
+        return build_alter_text_search_dictionary_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterTextSearchDictionary(stmt)));
+    }
+    if lowered.starts_with("create text search configuration ") {
+        return build_create_text_search_configuration_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateTextSearchConfiguration(stmt)));
+    }
+    if lowered.starts_with("alter text search configuration ") {
+        return build_alter_text_search_configuration_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterTextSearchConfiguration(stmt)));
+    }
+    if lowered.starts_with("drop text search configuration ") {
+        return build_drop_text_search_configuration_statement(trimmed)
+            .map(|stmt| Some(Statement::DropTextSearchConfiguration(stmt)));
+    }
+    Ok(None)
+}
+
+fn build_create_text_search_dictionary_statement(
+    sql: &str,
+) -> Result<CreateTextSearchDictionaryStatement, ParseError> {
+    let rest = sql["create text search dictionary".len()..].trim_start();
+    let ((schema_name, dictionary_name), rest) = parse_schema_qualified_name(rest)?;
+    let (options_sql, rest) = take_parenthesized_segment(rest)?;
+    require_empty_tail(rest, "end of CREATE TEXT SEARCH DICTIONARY")?;
+    Ok(CreateTextSearchDictionaryStatement {
+        schema_name,
+        dictionary_name,
+        options: parse_text_search_options(&options_sql)?,
+    })
+}
+
+fn build_alter_text_search_dictionary_statement(
+    sql: &str,
+) -> Result<AlterTextSearchDictionaryStatement, ParseError> {
+    let rest = sql["alter text search dictionary".len()..].trim_start();
+    let ((schema_name, dictionary_name), rest) = parse_schema_qualified_name(rest)?;
+    let (options_sql, rest) = take_parenthesized_segment(rest)?;
+    require_empty_tail(rest, "end of ALTER TEXT SEARCH DICTIONARY")?;
+    Ok(AlterTextSearchDictionaryStatement {
+        schema_name,
+        dictionary_name,
+        options: parse_text_search_options(&options_sql)?,
+    })
+}
+
+fn build_create_text_search_configuration_statement(
+    sql: &str,
+) -> Result<CreateTextSearchConfigurationStatement, ParseError> {
+    let rest = sql["create text search configuration".len()..].trim_start();
+    let ((schema_name, config_name), rest) = parse_schema_qualified_name(rest)?;
+    let (options_sql, rest) = take_parenthesized_segment(rest)?;
+    require_empty_tail(rest, "end of CREATE TEXT SEARCH CONFIGURATION")?;
+    let options = parse_text_search_options(&options_sql)?;
+    let copy_config_name = options
+        .iter()
+        .find(|option| option.name.eq_ignore_ascii_case("copy"))
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "COPY option",
+            actual: options_sql.clone(),
+        })?
+        .value
+        .clone();
+    Ok(CreateTextSearchConfigurationStatement {
+        schema_name,
+        config_name,
+        copy_config_name,
+    })
+}
+
+fn build_alter_text_search_configuration_statement(
+    sql: &str,
+) -> Result<AlterTextSearchConfigurationStatement, ParseError> {
+    let rest = sql["alter text search configuration".len()..].trim_start();
+    let ((schema_name, config_name), rest) = parse_schema_qualified_name(rest)?;
+    let action_sql = rest.trim_start();
+    let action = if let Some(rest) = consume_keywords(action_sql, &["alter", "mapping", "for"]) {
+        let (tokens_sql, dictionaries_sql) = split_text_search_keyword(rest, "with")?;
+        AlterTextSearchConfigurationAction::AlterMappingFor {
+            token_names: parse_text_search_name_list(tokens_sql)?,
+            dictionary_names: parse_text_search_name_list(dictionaries_sql)?,
+        }
+    } else if let Some(rest) = consume_keywords(action_sql, &["alter", "mapping", "replace"]) {
+        let (old_dictionary_name, rest) = parse_text_search_single_name(rest)?;
+        let Some(rest) = consume_keywords(rest, &["with"]) else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "WITH",
+                actual: rest.into(),
+            });
+        };
+        let (new_dictionary_name, rest) = parse_text_search_single_name(rest)?;
+        require_empty_tail(rest, "end of ALTER TEXT SEARCH CONFIGURATION")?;
+        AlterTextSearchConfigurationAction::AlterMappingReplace {
+            old_dictionary_name,
+            new_dictionary_name,
+        }
+    } else if let Some(rest) = consume_keywords(action_sql, &["add", "mapping", "for"]) {
+        let (tokens_sql, dictionaries_sql) = split_text_search_keyword(rest, "with")?;
+        AlterTextSearchConfigurationAction::AddMapping {
+            token_names: parse_text_search_name_list(tokens_sql)?,
+            dictionary_names: parse_text_search_name_list(dictionaries_sql)?,
+        }
+    } else if let Some(rest) =
+        consume_keywords(action_sql, &["drop", "mapping", "if", "exists", "for"])
+    {
+        AlterTextSearchConfigurationAction::DropMapping {
+            if_exists: true,
+            token_names: parse_text_search_name_list(rest)?,
+        }
+    } else if let Some(rest) = consume_keywords(action_sql, &["drop", "mapping", "for"]) {
+        AlterTextSearchConfigurationAction::DropMapping {
+            if_exists: false,
+            token_names: parse_text_search_name_list(rest)?,
+        }
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER/ADD/DROP MAPPING",
+            actual: action_sql.into(),
+        });
+    };
+    Ok(AlterTextSearchConfigurationStatement {
+        schema_name,
+        config_name,
+        action,
+    })
+}
+
+fn build_drop_text_search_configuration_statement(
+    sql: &str,
+) -> Result<DropTextSearchConfigurationStatement, ParseError> {
+    let mut rest = sql["drop text search configuration".len()..].trim_start();
+    let if_exists = if let Some(after) = strip_keyword_prefix(rest, "if exists") {
+        rest = after;
+        true
+    } else {
+        false
+    };
+    let ((schema_name, config_name), rest) = parse_schema_qualified_name(rest)?;
+    require_empty_tail(rest, "end of DROP TEXT SEARCH CONFIGURATION")?;
+    Ok(DropTextSearchConfigurationStatement {
+        if_exists,
+        schema_name,
+        config_name,
+    })
+}
+
+fn parse_text_search_options(input: &str) -> Result<Vec<TextSearchOption>, ParseError> {
+    split_top_level_items(input, ',')?
+        .into_iter()
+        .filter(|item| !item.is_empty())
+        .map(|item| {
+            let Some((name_sql, value_sql)) = item.split_once('=') else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "text search option",
+                    actual: item,
+                });
+            };
+            let (name, rest) = parse_sql_identifier(name_sql)?;
+            require_empty_tail(rest, "end of text search option name")?;
+            let (value, value_kind, rest) = parse_text_search_option_value(value_sql)?;
+            require_empty_tail(rest, "end of text search option value")?;
+            Ok(TextSearchOption {
+                name,
+                value,
+                value_kind,
+            })
+        })
+        .collect()
+}
+
+fn parse_text_search_option_value(
+    input: &str,
+) -> Result<(String, TextSearchOptionValueKind, &str), ParseError> {
+    let input = input.trim_start();
+    if input.starts_with('\'') {
+        let end = parse_delimited_token_end(input.as_bytes(), 0, b'\'');
+        let raw = &input[..end];
+        return Ok((
+            decode_string_literal(raw)?,
+            TextSearchOptionValueKind::String,
+            &input[end..],
+        ));
+    }
+    if input
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '+' || ch == '-' || ch.is_ascii_digit())
+    {
+        let mut end = 0usize;
+        for ch in input.chars() {
+            if (end == 0 && (ch == '+' || ch == '-')) || ch.is_ascii_digit() {
+                end += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if end > 0 && input[..end].chars().any(|ch| ch.is_ascii_digit()) {
+            return Ok((
+                input[..end].to_string(),
+                TextSearchOptionValueKind::Integer,
+                &input[end..],
+            ));
+        }
+    }
+    let (value, rest) = parse_sql_identifier(input)?;
+    Ok((value, TextSearchOptionValueKind::Identifier, rest))
+}
+
+fn parse_text_search_name_list(input: &str) -> Result<Vec<String>, ParseError> {
+    split_top_level_items(input, ',')?
+        .into_iter()
+        .map(|item| {
+            let (name, rest) = parse_text_search_single_name(&item)?;
+            require_empty_tail(rest, "end of text search name")?;
+            Ok(name)
+        })
+        .collect()
+}
+
+fn split_text_search_keyword<'a>(
+    input: &'a str,
+    keyword: &'static str,
+) -> Result<(&'a str, &'a str), ParseError> {
+    let Some(index) = find_top_level_keyword(input, keyword) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: keyword,
+            actual: input.into(),
+        });
+    };
+    Ok((
+        input[..index].trim(),
+        input[index + keyword.len()..].trim_start(),
+    ))
+}
+
+fn parse_text_search_single_name(input: &str) -> Result<(String, &str), ParseError> {
+    let ((schema_name, name), rest) = parse_schema_qualified_name(input)?;
+    Ok((
+        schema_name
+            .map(|schema| format!("{schema}.{name}"))
+            .unwrap_or(name),
+        rest,
+    ))
+}
+
+fn require_empty_tail(rest: &str, expected: &'static str) -> Result<(), ParseError> {
+    if rest.trim().is_empty() {
+        Ok(())
+    } else {
+        Err(ParseError::UnexpectedToken {
+            expected,
+            actual: rest.trim().into(),
+        })
+    }
 }
 
 fn try_parse_create_schema_statement(
@@ -13621,6 +13888,7 @@ fn build_set_operation_term(pair: Pair<'_, Rule>) -> Result<SelectStatement, Par
             match inner.as_rule() {
                 Rule::parenthesized_set_operation_term => build_set_operation_term(inner),
                 Rule::values_stmt => Ok(wrap_values_as_select(build_values_statement(inner)?)),
+                Rule::table_stmt => build_table_select(inner),
                 _ => build_select(inner),
             }
         }
@@ -13637,6 +13905,7 @@ fn build_set_operation_term(pair: Pair<'_, Rule>) -> Result<SelectStatement, Par
             Ok(wrap_values_as_select(build_values_statement(values)?))
         }
         Rule::values_stmt => Ok(wrap_values_as_select(build_values_statement(pair)?)),
+        Rule::table_stmt => build_table_select(pair),
         Rule::simple_select_core
         | Rule::simple_select_stmt
         | Rule::set_operation_stmt
@@ -19465,6 +19734,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             Rule::kw_not => negated = true,
                             Rule::select_stmt => {
                                 subquery = Some(build_select(part)?);
+                            }
+                            Rule::values_stmt => {
+                                subquery =
+                                    Some(wrap_values_as_select(build_values_statement(part)?));
                             }
                             _ => {}
                         }

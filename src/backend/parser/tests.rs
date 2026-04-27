@@ -2372,6 +2372,109 @@ fn parse_statistics_rejects_unparenthesized_expression_targets() {
 }
 
 #[test]
+fn parse_text_search_dictionary_ddl() {
+    let stmt = parse_statement(
+        "create text search dictionary ispell (Template=ispell, DictFile=ispell_sample)",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::CreateTextSearchDictionary(CreateTextSearchDictionaryStatement {
+            schema_name: None,
+            dictionary_name,
+            options,
+        }) if dictionary_name == "ispell"
+            && options.iter().any(|option| option.name == "template" && option.value == "ispell")
+            && options.iter().any(|option| option.name == "dictfile" && option.value == "ispell_sample")
+    ));
+
+    let stmt = parse_statement(
+        "CREATE TEXT SEARCH DICTIONARY ispell (
+                        Template=ispell,
+                        DictFile=ispell_sample,
+                        AffFile=ispell_sample
+);",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::CreateTextSearchDictionary(CreateTextSearchDictionaryStatement {
+            dictionary_name,
+            options,
+            ..
+        }) if dictionary_name == "ispell"
+            && options.iter().any(|option| option.name == "afffile" && option.value == "ispell_sample")
+    ));
+
+    let stmt =
+        parse_statement(r#"alter text search dictionary synonym (CaseSensitive = off)"#).unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::AlterTextSearchDictionary(AlterTextSearchDictionaryStatement {
+            schema_name: None,
+            dictionary_name,
+            options,
+        }) if dictionary_name == "synonym"
+            && options.iter().any(|option| option.name == "casesensitive" && option.value == "off")
+    ));
+}
+
+#[test]
+fn parse_text_search_configuration_ddl() {
+    let stmt = parse_statement("create text search configuration public.ispell_tst (copy=english)")
+        .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::CreateTextSearchConfiguration(CreateTextSearchConfigurationStatement {
+            schema_name: Some(schema_name),
+            config_name,
+            copy_config_name,
+        }) if schema_name == "public" && config_name == "ispell_tst" && copy_config_name == "english"
+    ));
+
+    let stmt = parse_statement(
+        "alter text search configuration ispell_tst alter mapping for word, asciiword with ispell, english_stem",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::AlterTextSearchConfiguration(AlterTextSearchConfigurationStatement {
+            config_name,
+            action: AlterTextSearchConfigurationAction::AlterMappingFor { token_names, dictionary_names },
+            ..
+        }) if config_name == "ispell_tst"
+            && token_names == vec!["word", "asciiword"]
+            && dictionary_names == vec!["ispell", "english_stem"]
+    ));
+
+    let stmt = parse_statement(
+        "alter text search configuration hunspell_tst alter mapping
+            replace ispell with hunspell",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::AlterTextSearchConfiguration(AlterTextSearchConfigurationStatement {
+            action: AlterTextSearchConfigurationAction::AlterMappingReplace {
+                old_dictionary_name,
+                new_dictionary_name,
+            },
+            ..
+        }) if old_dictionary_name == "ispell" && new_dictionary_name == "hunspell"
+    ));
+
+    let stmt = parse_statement("drop text search configuration if exists dummy_tst").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::DropTextSearchConfiguration(DropTextSearchConfigurationStatement {
+            if_exists: true,
+            config_name,
+            ..
+        }) if config_name == "dummy_tst"
+    ));
+}
+
+#[test]
 fn parse_comment_on_trigger_statement() {
     let stmt = parse_statement("comment on trigger trig1 on public.items is 'hello'").unwrap();
     assert_eq!(
@@ -11218,6 +11321,31 @@ fn parse_union_all_select_chain() {
 }
 
 #[test]
+fn parse_values_and_table_as_set_operation_terms() {
+    let stmt = parse_select(
+        "values (1, 2), (3, 4)
+         union all select 5, 6
+         union all table int8_tbl",
+    )
+    .unwrap();
+    let outer = stmt.set_operation.expect("set operation");
+    assert!(matches!(outer.op, SetOperator::Union { all: true }));
+    assert_eq!(outer.inputs.len(), 2);
+    assert!(
+        matches!(outer.inputs[1].from, Some(FromItem::Table { ref name, .. }) if name == "int8_tbl")
+    );
+    let inner = outer.inputs[0]
+        .set_operation
+        .as_ref()
+        .expect("left-nested set operation");
+    assert!(matches!(inner.op, SetOperator::Union { all: true }));
+    assert!(matches!(
+        inner.inputs[0].from,
+        Some(FromItem::Values { .. })
+    ));
+}
+
+#[test]
 fn parse_parenthesized_union_input_with_extra_parens() {
     let stmt = parse_select("((select 2)) union select 2").unwrap();
     let set_operation = stmt.set_operation.expect("set operation");
@@ -11476,11 +11604,13 @@ fn build_plan_for_recursive_mixed_cte_query() {
         match plan {
             Plan::CteScan { .. } => true,
             Plan::Append { children, .. }
+            | Plan::BitmapOr { children, .. }
             | Plan::MergeAppend { children, .. }
             | Plan::SetOp { children, .. } => children.iter().any(plan_contains_cte_scan),
             Plan::Hash { input, .. }
             | Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
+            | Plan::IncrementalSort { input, .. }
             | Plan::Limit { input, .. }
             | Plan::LockRows { input, .. }
             | Plan::Projection { input, .. }

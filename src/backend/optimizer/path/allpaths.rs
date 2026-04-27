@@ -8,6 +8,7 @@ use crate::backend::parser::{
     PartitionStrategy, SerializedPartitionValue, deserialize_partition_bound,
     partition_value_to_value, relation_partition_spec,
 };
+use crate::include::catalog::BTREE_AM_OID;
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
@@ -19,8 +20,8 @@ use crate::include::nodes::pathnodes::{
 };
 use crate::include::nodes::plannodes::{AggregateStrategy, PlanEstimate, SetOpStrategy};
 use crate::include::nodes::primnodes::{
-    Expr, JoinType, OrderByEntry, QueryColumn, RelationDesc, SortGroupClause, ToastRelationRef,
-    Var, attrno_index, expr_contains_set_returning, is_system_attr, user_attrno,
+    BoolExprType, Expr, JoinType, OrderByEntry, QueryColumn, RelationDesc, SortGroupClause,
+    ToastRelationRef, Var, attrno_index, expr_contains_set_returning, is_system_attr, user_attrno,
 };
 
 use super::super::bestpath;
@@ -40,9 +41,9 @@ use super::super::util::{
     required_query_pathkeys_for_rel,
 };
 use super::super::{
-    JoinBuildSpec, and_exprs, expand_join_rte_vars, expr_relids, flatten_and_conjuncts,
-    has_outer_joins, is_pushable_base_clause, path_relids, relids_disjoint, relids_overlap,
-    relids_subset, relids_union, reverse_join_type,
+    IndexPathSpec, JoinBuildSpec, and_exprs, expand_join_rte_vars, expr_relids,
+    flatten_and_conjuncts, has_outer_joins, is_pushable_base_clause, path_relids, relids_disjoint,
+    relids_overlap, relids_subset, relids_union, reverse_join_type,
 };
 use super::{
     build_index_path_spec, build_join_paths_with_root, estimate_bitmap_candidate,
@@ -379,6 +380,213 @@ fn access_method_supports_bitmap_scan(am_oid: u32) -> bool {
         .is_some_and(|routine| routine.amgetbitmap.is_some())
 }
 
+#[derive(Debug, Clone)]
+struct BitmapOrFilter {
+    arms: Vec<Expr>,
+    common_quals: Vec<Expr>,
+}
+
+fn bool_args(expr: &Expr, op: BoolExprType) -> Option<&[Expr]> {
+    match expr {
+        Expr::Bool(bool_expr) if bool_expr.boolop == op && bool_expr.args.len() >= 2 => {
+            Some(&bool_expr.args)
+        }
+        _ => None,
+    }
+}
+
+fn split_bitmap_or_filter(filter: &Expr) -> Option<BitmapOrFilter> {
+    if let Some(arms) = bool_args(filter, BoolExprType::Or) {
+        return Some(BitmapOrFilter {
+            arms: arms.to_vec(),
+            common_quals: Vec::new(),
+        });
+    }
+
+    let conjuncts = flatten_and_conjuncts(filter);
+    let mut found_or = None;
+    for (index, conjunct) in conjuncts.iter().enumerate() {
+        let Some(arms) = bool_args(conjunct, BoolExprType::Or) else {
+            continue;
+        };
+        if found_or.is_some() {
+            return None;
+        }
+        found_or = Some((index, arms.to_vec()));
+    }
+    let (or_index, arms) = found_or?;
+    let common_quals = conjuncts
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, conjunct)| (index != or_index).then_some(conjunct))
+        .collect();
+    Some(BitmapOrFilter { arms, common_quals })
+}
+
+fn or_exprs(mut exprs: Vec<Expr>) -> Option<Expr> {
+    if exprs.is_empty() {
+        return None;
+    }
+    let first = exprs.remove(0);
+    Some(exprs.into_iter().fold(first, Expr::or))
+}
+
+fn bitmap_or_arm_filter(arm: &Expr, common_quals: &[Expr]) -> Expr {
+    let mut quals = vec![arm.clone()];
+    quals.extend(common_quals.iter().cloned());
+    and_exprs(quals).unwrap_or_else(|| arm.clone())
+}
+
+fn bitmap_or_arm_recheck(spec: &IndexPathSpec) -> Option<Expr> {
+    and_exprs(if spec.recheck_quals.is_empty() {
+        spec.used_quals.clone()
+    } else {
+        spec.recheck_quals.clone()
+    })
+}
+
+fn bitmap_or_child_index_rel(child: &Path) -> Option<RelFileLocator> {
+    match child {
+        Path::BitmapIndexScan { index_rel, .. } => Some(*index_rel),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_bitmap_or_paths(
+    rtindex: usize,
+    heap_rel: RelFileLocator,
+    relation_name: String,
+    relation_oid: u32,
+    toast: Option<ToastRelationRef>,
+    desc: RelationDesc,
+    stats: &super::super::RelationStats,
+    filter: Option<&Expr>,
+    config: PlannerConfig,
+    catalog: &dyn CatalogLookup,
+) -> Vec<Path> {
+    if !config.enable_bitmapscan {
+        return Vec::new();
+    }
+    let Some(filter) = filter else {
+        return Vec::new();
+    };
+    let Some(or_filter) = split_bitmap_or_filter(filter) else {
+        return Vec::new();
+    };
+    if or_filter.arms.len() < 2 {
+        return Vec::new();
+    }
+
+    let indexes = catalog
+        .index_relations_for_heap(relation_oid)
+        .into_iter()
+        .filter(|index| {
+            index.index_meta.indisvalid
+                && index.index_meta.indisready
+                && !index.index_meta.indkey.is_empty()
+                && access_method_supports_bitmap_scan(index.index_meta.am_oid)
+        })
+        .collect::<Vec<_>>();
+    if indexes.is_empty() {
+        return Vec::new();
+    }
+
+    let mut children = Vec::new();
+    let mut recheck_arms = Vec::new();
+    for arm in &or_filter.arms {
+        let arm_filter = bitmap_or_arm_filter(arm, &or_filter.common_quals);
+        let mut best_child = None;
+        for index in &indexes {
+            let Some(spec) = build_index_path_spec(
+                Some(&arm_filter),
+                None,
+                index,
+                config.retain_partial_index_filters,
+            ) else {
+                continue;
+            };
+            if spec.keys.is_empty() {
+                continue;
+            }
+            let Some(recheck) = bitmap_or_arm_recheck(&spec) else {
+                continue;
+            };
+            let candidate = estimate_bitmap_candidate(
+                rtindex,
+                heap_rel,
+                relation_name.clone(),
+                relation_oid,
+                toast,
+                desc.clone(),
+                stats,
+                spec,
+                None,
+                catalog,
+            );
+            let Path::BitmapHeapScan { bitmapqual, .. } = candidate.plan else {
+                continue;
+            };
+            let child = *bitmapqual;
+            let child_cost = child.plan_info().total_cost.as_f64();
+            if best_child
+                .as_ref()
+                .is_none_or(|(best_cost, _, _)| child_cost < *best_cost)
+            {
+                best_child = Some((child_cost, child, recheck));
+            }
+        }
+        let Some((_, child, recheck)) = best_child else {
+            return Vec::new();
+        };
+        children.push(child);
+        recheck_arms.push(recheck);
+    }
+    let distinct_indexes = children
+        .iter()
+        .filter_map(bitmap_or_child_index_rel)
+        .collect::<BTreeSet<_>>();
+    if distinct_indexes.len() < 2 {
+        return Vec::new();
+    }
+
+    let Some(recheck_expr) = or_exprs(recheck_arms) else {
+        return Vec::new();
+    };
+    let rows = children
+        .iter()
+        .map(|child| child.plan_info().plan_rows.as_f64())
+        .sum::<f64>()
+        .clamp(1.0, stats.reltuples.max(1.0));
+    let startup_cost = children
+        .iter()
+        .map(|child| child.plan_info().startup_cost.as_f64())
+        .sum::<f64>();
+    let child_cost = children
+        .iter()
+        .map(|child| child.plan_info().total_cost.as_f64())
+        .sum::<f64>();
+    let total_cost = child_cost + rows * 0.01;
+    let bitmapqual = Path::BitmapOr {
+        plan_info: PlanEstimate::new(startup_cost, child_cost, rows, 0),
+        pathtarget: PathTarget::new(Vec::new()),
+        children,
+    };
+    vec![Path::BitmapHeapScan {
+        plan_info: PlanEstimate::new(startup_cost, total_cost, rows, stats.width),
+        pathtarget: slot_output_target(rtindex, &desc.columns, |column| column.sql_type),
+        source_id: rtindex,
+        rel: heap_rel,
+        relation_name,
+        relation_oid,
+        toast,
+        desc,
+        bitmapqual: Box::new(bitmapqual),
+        recheck_qual: vec![recheck_expr],
+        filter_qual: or_filter.common_quals,
+    }]
+}
+
 fn collect_required_index_only_attrs_for_root(
     root: &PlannerInfo,
     rtindex: usize,
@@ -610,7 +818,12 @@ fn collect_relation_access_paths(
     {
         let target_index_only =
             filter.is_none() && index_supports_index_only_attrs(index, required_index_only_attrs);
-        if let Some(spec) = build_index_path_spec(filter.as_ref(), None, index) {
+        if let Some(spec) = build_index_path_spec(
+            filter.as_ref(),
+            None,
+            index,
+            config.retain_partial_index_filters,
+        ) {
             if config.enable_indexscan && access_method_supports_index_scan(index.index_meta.am_oid)
             {
                 paths.push(
@@ -678,7 +891,12 @@ fn collect_relation_access_paths(
         }
         if config.enable_indexscan
             && let Some(order_items) = query_order_items.as_ref()
-            && let Some(spec) = build_index_path_spec(filter.as_ref(), Some(order_items), index)
+            && let Some(spec) = build_index_path_spec(
+                filter.as_ref(),
+                Some(order_items),
+                index,
+                config.retain_partial_index_filters,
+            )
             && access_method_supports_index_scan(index.index_meta.am_oid)
         {
             paths.push(
@@ -700,6 +918,18 @@ fn collect_relation_access_paths(
             );
         }
     }
+    paths.extend(collect_bitmap_or_paths(
+        rtindex,
+        heap_rel,
+        relation_name,
+        relation_oid,
+        toast,
+        desc.clone(),
+        &stats,
+        filter.as_ref(),
+        config,
+        catalog,
+    ));
     if paths.is_empty() {
         paths = seq_paths;
     }
@@ -736,7 +966,12 @@ fn collect_relation_ordered_index_paths(
         if !access_method_supports_index_scan(index.index_meta.am_oid) {
             continue;
         }
-        if let Some(spec) = build_index_path_spec(filter.as_ref(), Some(order_items), index) {
+        if let Some(spec) = build_index_path_spec(
+            filter.as_ref(),
+            Some(order_items),
+            index,
+            config.retain_partial_index_filters,
+        ) {
             if !spec.removes_order {
                 continue;
             }
@@ -812,6 +1047,92 @@ pub(super) fn relation_ordered_index_paths(
         }
         _ => Vec::new(),
     }
+}
+
+pub(super) fn relation_index_only_full_scan_paths(
+    root: &PlannerInfo,
+    rtindex: usize,
+    catalog: &dyn CatalogLookup,
+) -> Vec<Path> {
+    if !root.config.enable_indexonlyscan
+        || relation_uses_virtual_scan(relation_oid_for_rtindex(root, rtindex).unwrap_or(0))
+    {
+        return Vec::new();
+    }
+    let Some(rte) = root.parse.rtable.get(rtindex - 1) else {
+        return Vec::new();
+    };
+    let RangeTblEntryKind::Relation {
+        rel: heap_rel,
+        relation_oid,
+        relkind,
+        toast,
+        ..
+    } = &rte.kind
+    else {
+        return Vec::new();
+    };
+    if *relkind != 'r' {
+        return Vec::new();
+    }
+    let stats = relation_stats(catalog, *relation_oid, &rte.desc);
+    let relation_name = relation_display_name(catalog, rte, *relation_oid, *heap_rel);
+    let mut paths = Vec::new();
+    for index in catalog
+        .index_relations_for_heap(*relation_oid)
+        .iter()
+        .filter(|index| {
+            index.index_meta.indisvalid
+                && index.index_meta.indisready
+                && !index.index_meta.indkey.is_empty()
+                && index.index_meta.am_oid == BTREE_AM_OID
+        })
+    {
+        let rows = stats.reltuples.max(1.0);
+        let first_key_distinct = index
+            .index_meta
+            .indkey
+            .first()
+            .copied()
+            .and_then(|attnum| stats.stats_by_attnum.get(&attnum))
+            .map(|row| {
+                if row.stadistinct > 0.0 {
+                    row.stadistinct
+                } else if row.stadistinct < 0.0 {
+                    -row.stadistinct * rows
+                } else {
+                    rows
+                }
+            })
+            .unwrap_or(rows);
+        let total_cost = rows * 0.0001
+            + first_key_distinct * 0.00001
+            + if index.index_meta.indisunique {
+                1.0
+            } else {
+                0.0
+            };
+        paths.push(Path::IndexOnlyScan {
+            plan_info: PlanEstimate::new(0.0025, total_cost, rows, stats.width),
+            pathtarget: slot_output_target(rtindex, &rte.desc.columns, |column| column.sql_type),
+            source_id: rtindex,
+            rel: *heap_rel,
+            relation_name: relation_name.clone(),
+            relation_oid: *relation_oid,
+            index_rel: index.rel,
+            index_name: index.name.clone(),
+            am_oid: index.index_meta.am_oid,
+            toast: *toast,
+            desc: rte.desc.clone(),
+            index_desc: index.desc.clone(),
+            index_meta: index.index_meta.clone(),
+            keys: Vec::new(),
+            order_by_keys: Vec::new(),
+            direction: crate::include::access::relscan::ScanDirection::Forward,
+            pathkeys: Vec::new(),
+        });
+    }
+    paths
 }
 
 fn cheapest_relation_access_path(
@@ -2232,21 +2553,42 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 }
             }
         }
-        let append = optimize_path_with_config(
-            Path::Append {
-                plan_info: PlanEstimate::default(),
-                pathtarget: slot_output_target(rtindex, &rte.desc.columns, |column| {
-                    column.sql_type
-                }),
-                relids: vec![rtindex],
-                source_id: rtindex,
-                desc: rte.desc.clone(),
-                child_roots: Vec::new(),
-                children,
-            },
-            catalog,
-            root.config,
-        );
+        let append_target =
+            slot_output_target(rtindex, &rte.desc.columns, |column| column.sql_type);
+        let append = if children.is_empty() {
+            optimize_path_with_config(
+                Path::Filter {
+                    plan_info: PlanEstimate::default(),
+                    pathtarget: append_target.clone(),
+                    predicate: Expr::Const(Value::Bool(false)),
+                    input: Box::new(Path::Append {
+                        plan_info: PlanEstimate::default(),
+                        pathtarget: append_target,
+                        relids: vec![rtindex],
+                        source_id: rtindex,
+                        desc: rte.desc.clone(),
+                        child_roots: Vec::new(),
+                        children: Vec::new(),
+                    }),
+                },
+                catalog,
+                root.config,
+            )
+        } else {
+            optimize_path_with_config(
+                Path::Append {
+                    plan_info: PlanEstimate::default(),
+                    pathtarget: append_target,
+                    relids: vec![rtindex],
+                    source_id: rtindex,
+                    desc: rte.desc.clone(),
+                    child_roots: Vec::new(),
+                    children,
+                },
+                catalog,
+                root.config,
+            )
+        };
         let Some(rel) = root
             .simple_rel_array
             .get_mut(rtindex)
@@ -3167,6 +3509,7 @@ fn cross_join_left_relid_count(path: &Path) -> Option<usize> {
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => cross_join_left_relid_count(input),
         _ => None,

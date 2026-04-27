@@ -58,6 +58,7 @@ impl Path {
             | Self::IndexOnlyScan { plan_info, .. }
             | Self::IndexScan { plan_info, .. }
             | Self::BitmapIndexScan { plan_info, .. }
+            | Self::BitmapOr { plan_info, .. }
             | Self::BitmapHeapScan { plan_info, .. }
             | Self::Filter { plan_info, .. }
             | Self::NestedLoopJoin { plan_info, .. }
@@ -65,6 +66,7 @@ impl Path {
             | Self::MergeJoin { plan_info, .. }
             | Self::Projection { plan_info, .. }
             | Self::OrderBy { plan_info, .. }
+            | Self::IncrementalSort { plan_info, .. }
             | Self::Limit { plan_info, .. }
             | Self::LockRows { plan_info, .. }
             | Self::Aggregate { plan_info, .. }
@@ -104,7 +106,7 @@ impl Path {
                     wire_type_oid: None,
                 })
                 .collect(),
-            Self::BitmapIndexScan { .. } => Vec::new(),
+            Self::BitmapIndexScan { .. } | Self::BitmapOr { .. } => Vec::new(),
             Self::BitmapHeapScan { desc, .. } => desc
                 .columns
                 .iter()
@@ -116,6 +118,7 @@ impl Path {
                 .collect(),
             Self::Filter { input, .. }
             | Self::OrderBy { input, .. }
+            | Self::IncrementalSort { input, .. }
             | Self::Limit { input, .. }
             | Self::LockRows { input, .. } => input.columns(),
             Self::Projection { targets, .. } => targets
@@ -178,9 +181,10 @@ impl Path {
             | Self::BitmapHeapScan {
                 source_id, desc, ..
             } => slot_output_vars(*source_id, &desc.columns, |column| column.sql_type),
-            Self::BitmapIndexScan { .. } => Vec::new(),
+            Self::BitmapIndexScan { .. } | Self::BitmapOr { .. } => Vec::new(),
             Self::Filter { input, .. }
             | Self::OrderBy { input, .. }
+            | Self::IncrementalSort { input, .. }
             | Self::Limit { input, .. }
             | Self::LockRows { input, .. } => input.output_vars(),
             Self::Projection {
@@ -278,6 +282,7 @@ impl Path {
             Self::Unique { input, .. }
             | Self::Filter { input, .. }
             | Self::OrderBy { input, .. }
+            | Self::IncrementalSort { input, .. }
             | Self::Limit { input, .. }
             | Self::LockRows { input, .. } => input.output_target(),
             Self::Projection {
@@ -320,6 +325,7 @@ impl Path {
             | Self::IndexOnlyScan { pathtarget, .. }
             | Self::IndexScan { pathtarget, .. }
             | Self::BitmapIndexScan { pathtarget, .. }
+            | Self::BitmapOr { pathtarget, .. }
             | Self::BitmapHeapScan { pathtarget, .. }
             | Self::Filter { pathtarget, .. }
             | Self::NestedLoopJoin { pathtarget, .. }
@@ -328,6 +334,7 @@ impl Path {
             | Self::Projection { pathtarget, .. }
             | Self::OrderBy { pathtarget, .. }
             | Self::Limit { pathtarget, .. }
+            | Self::IncrementalSort { pathtarget, .. }
             | Self::LockRows { pathtarget, .. }
             | Self::Aggregate { pathtarget, .. }
             | Self::WindowAgg { pathtarget, .. }
@@ -348,6 +355,7 @@ impl Path {
             | Self::Append { .. }
             | Self::SeqScan { .. }
             | Self::BitmapIndexScan { .. }
+            | Self::BitmapOr { .. }
             | Self::BitmapHeapScan { .. }
             | Self::CteScan { .. }
             | Self::WorkTableScan { .. }
@@ -386,6 +394,16 @@ impl Path {
             } => project_pathkeys(*slot_id, input, targets, &input.pathkeys()),
             Self::WindowAgg { input, .. } => input.pathkeys(),
             Self::OrderBy { items, .. } => items
+                .iter()
+                .map(|item| PathKey {
+                    expr: item.expr.clone(),
+                    ressortgroupref: item.ressortgroupref,
+                    descending: item.descending,
+                    nulls_first: item.nulls_first,
+                    collation_oid: item.collation_oid,
+                })
+                .collect(),
+            Self::IncrementalSort { items, .. } => items
                 .iter()
                 .map(|item| PathKey {
                     expr: item.expr.clone(),

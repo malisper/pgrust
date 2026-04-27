@@ -4865,11 +4865,15 @@ fn explain_analyze_timing_off_still_reports_nonzero_actual_rows() {
                 .collect::<Vec<_>>();
             let plan_lines = rendered
                 .iter()
-                .filter(|line| line.contains("actual time="))
+                .filter(|line| line.contains("actual rows="))
                 .collect::<Vec<_>>();
             assert!(
                 !plan_lines.is_empty(),
                 "expected explain analyze plan lines"
+            );
+            assert!(
+                rendered.iter().all(|line| !line.contains("actual time=")),
+                "expected TIMING OFF to omit actual time, got {rendered:?}"
             );
             assert!(
                 plan_lines.iter().all(|line| !line.contains("rows=0.00")),
@@ -5022,9 +5026,7 @@ fn explain_indents_child_plan_nodes() {
                 "expected top-level sort line, got {rendered:?}"
             );
             assert!(
-                rendered
-                    .iter()
-                    .any(|line| line.trim() == "Sort Key: people_indent.name"),
+                rendered.iter().any(|line| line.trim() == "Sort Key: name"),
                 "expected stored sort key display, got {rendered:?}"
             );
             assert!(
@@ -5164,6 +5166,7 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
     fn collect_hash_clause_counts(plan: &Plan, counts: &mut Vec<usize>) {
         match plan {
             Plan::Append { children, .. }
+            | Plan::BitmapOr { children, .. }
             | Plan::MergeAppend { children, .. }
             | Plan::SetOp { children, .. } => {
                 for child in children {
@@ -5192,6 +5195,7 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
             | Plan::Unique { input, .. }
             | Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
+            | Plan::IncrementalSort { input, .. }
             | Plan::Projection { input, .. }
             | Plan::Aggregate { input, .. }
             | Plan::WindowAgg { input, .. }
@@ -11972,15 +11976,7 @@ fn lateral_values_can_reference_zero_column_whole_row() {
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(
-                rows,
-                vec![vec![Value::Record(
-                    crate::include::nodes::datum::RecordValue::from_descriptor(
-                        crate::backend::utils::record::assign_anonymous_record_descriptor(vec![]),
-                        vec![],
-                    )
-                )]]
-            );
+            assert_eq!(rows, vec![Vec::<Value>::new()]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -17206,6 +17202,74 @@ fn row_to_json_supports_row_constructor_and_whole_row_alias() {
         }
         other => panic!("expected query result, got {other:?}"),
     }
+}
+
+#[test]
+fn single_column_range_alias_binds_as_whole_row_record() {
+    let base = temp_dir("whole_row_single_alias");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select foo from (select 1 offset 0) as foo",
+        )
+        .unwrap(),
+        vec![vec![Value::Record(RecordValue::anonymous(vec![(
+            "?column?".into(),
+            Value::Int32(1),
+        )]))]],
+    );
+}
+
+#[test]
+fn values_qualified_star_expands_zero_column_rows() {
+    let mut harness = SeededSqlHarness::new("values_zero_column_star", catalog());
+    let xid = harness.txns.begin();
+    harness.execute(xid, "create temp table nocols()").unwrap();
+    harness
+        .execute(xid, "insert into nocols default values")
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select * from nocols n, lateral (values(n.*)) v",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { columns, rows, .. } => {
+            assert!(columns.is_empty());
+            assert_eq!(rows, vec![Vec::<Value>::new()]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn row_valued_in_subquery_compares_values_rows() {
+    let mut harness = SeededSqlHarness::new("row_in_values", catalog());
+    let xid = harness.txns.begin();
+    harness
+        .execute(
+            xid,
+            "insert into people (id, name, note) values
+             (1, 'alice', 'a'), (2, 'bob', 'b'), (3, 'carol', 'c')",
+        )
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select id from people
+                 where (id, name) in (values (1, 'alice'), (3, 'carol'), (4, 'dana'))
+                 order by id",
+            )
+            .unwrap(),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(3)]],
+    );
 }
 
 #[test]

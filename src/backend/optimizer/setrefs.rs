@@ -6,6 +6,9 @@ use super::pathnodes::{
 use super::plan::append_planned_subquery;
 use super::{expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base_and_config};
 use crate::backend::parser::CatalogLookup;
+use crate::backend::parser::analyze::{
+    bind_index_predicate, flatten_and_conjuncts, predicate_implies_index_predicate,
+};
 use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{Path, PlannerInfo, PlannerSubroot, RestrictInfo};
 use crate::include::nodes::plannodes::{
@@ -598,6 +601,7 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
         Path::Unique { input, .. }
         | Path::Filter { input, .. }
         | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => build_path_tlist(root, input),
         Path::Aggregate {
@@ -1184,10 +1188,12 @@ fn path_single_relid(path: &Path) -> Option<usize> {
         | Path::IndexScan { source_id, .. }
         | Path::BitmapIndexScan { source_id, .. }
         | Path::BitmapHeapScan { source_id, .. } => Some(*source_id),
+        Path::BitmapOr { .. } => None,
         Path::Unique { input, .. }
         | Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. }
         | Path::Aggregate { input, .. }
@@ -2518,11 +2524,15 @@ fn index_scan_can_use_index_only(
     ctx: &SetRefsContext<'_>,
     source_id: usize,
     am_oid: u32,
+    desc: &crate::include::nodes::primnodes::RelationDesc,
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
 ) -> bool {
     let Some(root) = ctx.root else {
         return false;
     };
+    if !root.parse.row_marks.is_empty() {
+        return false;
+    }
     if !matches!(
         am_oid,
         crate::include::catalog::BTREE_AM_OID
@@ -2547,15 +2557,21 @@ fn index_scan_can_use_index_only(
     if covered_columns.is_empty() {
         return false;
     }
+    let index_predicate = ctx.catalog.and_then(|catalog| {
+        bind_index_predicate(index_meta, desc, catalog)
+            .ok()
+            .flatten()
+    });
     root.parse
         .target_list
         .iter()
         .all(|target| expr_uses_only_index_keys(&target.expr, source_id, &covered_columns))
-        && root
-            .parse
-            .where_qual
-            .as_ref()
-            .is_none_or(|expr| expr_uses_only_index_keys(expr, source_id, &covered_columns))
+        && root.parse.where_qual.as_ref().is_none_or(|expr| {
+            flatten_and_conjuncts(expr).iter().all(|conjunct| {
+                expr_uses_only_index_keys(conjunct, source_id, &covered_columns)
+                    || predicate_implies_index_predicate(index_predicate.as_ref(), Some(conjunct))
+            })
+        })
         && root
             .parse
             .sort_clause
@@ -2964,6 +2980,9 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
                 allowed_exec_params,
             );
         }
+        Plan::BitmapOr { children, .. } => {
+            children.iter().for_each(validate_executable_plan);
+        }
         Plan::BitmapHeapScan {
             bitmapqual,
             recheck_qual,
@@ -3079,6 +3098,17 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
         Plan::OrderBy { input, items, .. } => {
             items.iter().for_each(|item| {
                 validate_executable_expr(&item.expr, "OrderBy", "items", allowed_exec_params)
+            });
+            validate_executable_plan_with_params(input, allowed_exec_params);
+        }
+        Plan::IncrementalSort { input, items, .. } => {
+            items.iter().for_each(|item| {
+                validate_executable_expr(
+                    &item.expr,
+                    "IncrementalSort",
+                    "items",
+                    allowed_exec_params,
+                )
             });
             validate_executable_plan_with_params(input, allowed_exec_params);
         }
@@ -3434,6 +3464,11 @@ fn validate_planner_path(path: &Path) {
         Path::BitmapIndexScan { keys, .. } => {
             validate_planner_index_scan_keys(keys, "BitmapIndexScan", "keys");
         }
+        Path::BitmapOr { children, .. } => {
+            for child in children {
+                validate_planner_path(child);
+            }
+        }
         Path::Append { children, .. } | Path::SetOp { children, .. } => {
             for child in children {
                 validate_planner_path(child);
@@ -3539,6 +3574,12 @@ fn validate_planner_path(path: &Path) {
         Path::OrderBy { input, items, .. } => {
             for item in items {
                 validate_planner_expr(&item.expr, "OrderBy", "items");
+            }
+            validate_planner_path(input);
+        }
+        Path::IncrementalSort { input, items, .. } => {
+            for item in items {
+                validate_planner_expr(&item.expr, "IncrementalSort", "items");
             }
             validate_planner_path(input);
         }
@@ -3869,8 +3910,8 @@ fn set_index_scan_references(
     direction: crate::include::access::relscan::ScanDirection,
     path_index_only: bool,
 ) -> Plan {
-    let index_only =
-        path_index_only || index_scan_can_use_index_only(ctx, source_id, am_oid, &index_meta);
+    let index_only = path_index_only
+        || index_scan_can_use_index_only(ctx, source_id, am_oid, &desc, &index_meta);
     let keys = lower_index_scan_keys(ctx, keys, LowerMode::Scalar);
     let order_by_keys = lower_index_scan_keys(ctx, order_by_keys, LowerMode::Scalar);
     Plan::IndexScan {
@@ -3939,6 +3980,20 @@ fn set_bitmap_index_scan_references(
         index_meta,
         keys,
         index_quals,
+    }
+}
+
+fn set_bitmap_or_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    children: Vec<Path>,
+) -> Plan {
+    Plan::BitmapOr {
+        plan_info,
+        children: children
+            .into_iter()
+            .map(|child| set_plan_refs(ctx, child))
+            .collect(),
     }
 }
 
@@ -4361,6 +4416,43 @@ fn set_order_references(
     }
 }
 
+fn set_incremental_sort_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    input: Box<Path>,
+    items: Vec<OrderByEntry>,
+    presorted_count: usize,
+    display_items: Vec<String>,
+    presorted_display_items: Vec<String>,
+) -> Plan {
+    let input_tlist = build_path_tlist(ctx.root, &input);
+    let items = items
+        .into_iter()
+        .map(|item| lower_order_by_expr_for_input(ctx.root, item, &input, &input_tlist))
+        .collect::<Vec<_>>();
+    let lowered_items = items
+        .into_iter()
+        .map(|item| {
+            lower_order_by_entry(
+                ctx,
+                item,
+                LowerMode::Input {
+                    path: Some(&input),
+                    tlist: &input_tlist,
+                },
+            )
+        })
+        .collect();
+    Plan::IncrementalSort {
+        plan_info,
+        input: Box::new(set_plan_refs(ctx, *input)),
+        items: lowered_items,
+        presorted_count,
+        display_items,
+        presorted_display_items,
+    }
+}
+
 fn set_limit_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
@@ -4694,20 +4786,29 @@ fn set_cte_scan_references(
 fn set_subquery_scan_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
+    rtindex: usize,
     subroot: PlannerSubroot,
     input: Box<Path>,
     output_columns: Vec<QueryColumn>,
+    force_display: bool,
 ) -> Plan {
     let input = recurse_with_root(ctx, Some(subroot.as_ref()), *input);
-    if input.columns() == output_columns {
+    if input.columns() == output_columns && !force_display {
         input
     } else {
         Plan::SubqueryScan {
             plan_info,
             input: Box::new(input),
+            scan_name: subquery_scan_name(ctx, rtindex),
             output_columns,
         }
     }
+}
+
+fn subquery_scan_name(ctx: &SetRefsContext<'_>, rtindex: usize) -> Option<String> {
+    ctx.root
+        .and_then(|root| root.parse.rtable.get(rtindex.saturating_sub(1)))
+        .and_then(|rte| rte.alias.clone())
 }
 
 fn set_worktable_scan_references(
@@ -4969,6 +5070,11 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             keys,
             index_quals,
         ),
+        Path::BitmapOr {
+            plan_info,
+            children,
+            ..
+        } => set_bitmap_or_references(ctx, plan_info, children),
         Path::BitmapHeapScan {
             plan_info,
             source_id,
@@ -5063,6 +5169,23 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             display_items,
             ..
         } => set_order_references(ctx, plan_info, input, items, display_items),
+        Path::IncrementalSort {
+            plan_info,
+            input,
+            items,
+            presorted_count,
+            display_items,
+            presorted_display_items,
+            ..
+        } => set_incremental_sort_references(
+            ctx,
+            plan_info,
+            input,
+            items,
+            presorted_count,
+            display_items,
+            presorted_display_items,
+        ),
         Path::Limit {
             plan_info,
             input,
@@ -5123,14 +5246,24 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
         } => set_function_scan_references(ctx, plan_info, call, table_alias),
         Path::SubqueryScan {
             plan_info,
+            rtindex,
             subroot,
             query,
             input,
             output_columns,
+            pathkeys,
             ..
         } => {
             let _ = query;
-            set_subquery_scan_references(ctx, plan_info, subroot, input, output_columns)
+            set_subquery_scan_references(
+                ctx,
+                plan_info,
+                rtindex,
+                subroot,
+                input,
+                output_columns,
+                !pathkeys.is_empty(),
+            )
         }
         Path::CteScan {
             plan_info,
@@ -5647,6 +5780,7 @@ fn expand_output_var(var: Var, path: &Path) -> Expr {
         Path::SubqueryScan { .. } => Expr::Var(var),
         Path::Filter { input, .. }
         | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => expand_output_var(var, input),
         Path::NestedLoopJoin { left, right, .. }

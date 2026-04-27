@@ -231,8 +231,9 @@ pub(super) fn build_index_path_spec(
     filter: Option<&Expr>,
     order_items: Option<&[OrderByEntry]>,
     index: &BoundIndexRelation,
+    retain_implied_predicate_quals: bool,
 ) -> Option<IndexPathSpec> {
-    costsize::build_index_path_spec(filter, order_items, index)
+    costsize::build_index_path_spec(filter, order_items, index, retain_implied_predicate_quals)
 }
 
 pub(super) fn relation_ordered_index_paths(
@@ -242,4 +243,12 @@ pub(super) fn relation_ordered_index_paths(
     catalog: &dyn CatalogLookup,
 ) -> Vec<Path> {
     allpaths::relation_ordered_index_paths(root, rtindex, pathkeys, catalog)
+}
+
+pub(super) fn relation_index_only_full_scan_paths(
+    root: &PlannerInfo,
+    rtindex: usize,
+    catalog: &dyn CatalogLookup,
+) -> Vec<Path> {
+    allpaths::relation_index_only_full_scan_paths(root, rtindex, catalog)
 }

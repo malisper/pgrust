@@ -1481,6 +1481,14 @@ run_one_regression_test() {
         return 0
     fi
 
+    if [[ "$test_name" == "select_distinct" ]] && ! run_select_distinct_index_setup; then
+        {
+            echo "ERROR: select_distinct index dependency setup failed"
+        } > "$output_file"
+        write_test_status "$status_file" "error" "$test_name" 0 0 0 0
+        return 1
+    fi
+
     prepare_test_fixture "$sql_file" "$expected_file" "$test_name"
     sql_file="$PREPARED_SQL_FILE"
     expected_file="$PREPARED_EXPECTED_FILE"
@@ -1611,6 +1619,22 @@ run_regression_dependency_setups() {
     done
 }
 
+run_select_distinct_index_setup() {
+    local output_file="$RESULTS_DIR/output/test_setup_dependency_select_distinct_indexes.out"
+    local setup_file="$RESULTS_DIR/output/test_setup_dependency_select_distinct_indexes.sql"
+
+    cat > "$setup_file" <<'SQL'
+CREATE INDEX IF NOT EXISTS tenk1_hundred ON tenk1 USING btree(hundred int4_ops);
+SQL
+    echo "Dependency setup for select_distinct: tenk1_hundred"
+    if run_psql_file "$TIMEOUT" "$setup_file" "$output_file" psql "${PG_ARGS[@]}" -a -q; then
+        return 0
+    fi
+    echo "ERROR: select_distinct index dependency setup failed" >&2
+    echo "See: $output_file" >&2
+    return 1
+}
+
 run_one_regression_test_isolated() (
     local sql_file="$1"
     local worker_slot="$2"
@@ -1668,6 +1692,16 @@ run_one_regression_test_isolated() (
     if ! run_regression_dependency_setups "$test_name"; then
         {
             echo "ERROR: isolated worker $worker_name failed dependency setup"
+            echo "port: $PORT"
+            echo "data dir: $DATA_DIR"
+        } > "$output_file"
+        write_test_status "$status_file" "error" "$test_name" 0 0 0 0
+        return 1
+    fi
+
+    if [[ "$test_name" == "select_distinct" ]] && ! run_select_distinct_index_setup; then
+        {
+            echo "ERROR: isolated worker $worker_name failed select_distinct index dependency setup"
             echo "port: $PORT"
             echo "data dir: $DATA_DIR"
         } > "$output_file"

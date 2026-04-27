@@ -247,6 +247,7 @@ fn contains_seq_scan(path: &Path) -> bool {
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. }
         | Path::Unique { input, .. }
@@ -261,6 +262,7 @@ fn contains_seq_scan(path: &Path) -> bool {
             cte_plan: input, ..
         } => contains_seq_scan(input),
         Path::Append { children, .. }
+        | Path::BitmapOr { children, .. }
         | Path::MergeAppend { children, .. }
         | Path::SetOp { children, .. } => children.iter().any(contains_seq_scan),
         Path::NestedLoopJoin { left, right, .. }
@@ -291,6 +293,7 @@ fn cross_join_left_relid_count(path: &Path) -> Option<usize> {
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => cross_join_left_relid_count(input),
         _ => None,

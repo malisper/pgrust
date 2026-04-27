@@ -988,6 +988,43 @@ fn mutually_recursive_sql_functions_respect_max_stack_depth_setting() {
 }
 
 #[test]
+fn sql_set_returning_function_accepts_values_body() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function sillysrf(int4) returns setof int4 as
+             'values (1),(10),(2),($1)' language sql immutable",
+        )
+        .expect("create values SQL function");
+
+    assert_single_int_column_rows(
+        session
+            .execute(&db, "select sillysrf(42)")
+            .expect("execute values SQL function"),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(10)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(42)],
+        ],
+    );
+    assert_single_int_column_rows(
+        session
+            .execute(&db, "select sillysrf(-1) order by 1")
+            .expect("execute sorted values SQL function"),
+        vec![
+            vec![Value::Int32(-1)],
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(10)],
+        ],
+    );
+}
+
+#[test]
 fn sql_function_from_item_resolves_qualified_utility_function() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -19258,7 +19295,7 @@ fn explain_verbose_count_nonnull_constant_elides_projection() {
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("Seq Scan on agg_simplify")),
+            .any(|line| line.contains("Seq Scan on") && line.contains("agg_simplify")),
         "expected seq scan on agg_simplify, got {lines:?}"
     );
     assert!(
@@ -24921,6 +24958,53 @@ fn set_guc_to_default_resets_runtime_value() {
         .execute(&db, "set enable_bitmapscan to default")
         .unwrap();
     assert!(session.planner_config().enable_bitmapscan);
+
+    session.execute(&db, "set enable_hashagg to off").unwrap();
+    assert!(!session.planner_config().enable_hashagg);
+
+    session
+        .execute(&db, "set enable_hashagg to default")
+        .unwrap();
+    assert!(session.planner_config().enable_hashagg);
+}
+
+#[test]
+fn disabled_hashagg_keeps_distinct_limit_sorted() {
+    let base = temp_dir("disabled_hashagg_distinct_limit");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table distinct_limit_test (x int4, y int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into distinct_limit_test \
+             select g % 10, g % 10 from generate_series(1, 1000) g",
+        )
+        .unwrap();
+    session.execute(&db, "set enable_hashagg to off").unwrap();
+
+    let lines = session_explain_lines(
+        &mut session,
+        &db,
+        "select distinct y, x from distinct_limit_test limit 10",
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("HashAggregate")),
+        "expected no HashAggregate with enable_hashagg off, got {lines:?}"
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select distinct y, x from distinct_limit_test limit 10",
+        ),
+        (0..10)
+            .map(|value| vec![Value::Int32(value), Value::Int32(value)])
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -28697,6 +28781,43 @@ fn temp_create_table_as_select_works() {
                     vec![Value::Int32(1), Value::Text("a".into())],
                     vec![Value::Int32(2), Value::Text("b".into())],
                 ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_table_as_select_star_preserves_name_type() {
+    let base = temp_dir("ctas_name_type");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table name_source (n name)")
+        .unwrap();
+    session
+        .execute(&db, "create table name_copy as select * from name_source")
+        .unwrap();
+
+    let catalog = db.catalog.read().catalog_snapshot().unwrap();
+    let relation = catalog.get("name_copy").unwrap();
+    assert_eq!(relation.desc.columns[0].sql_type.kind, SqlTypeKind::Name);
+    let visible = session.catalog_lookup(&db);
+    let relation = visible.lookup_any_relation("name_copy").unwrap();
+    assert_eq!(relation.desc.columns[0].sql_type.kind, SqlTypeKind::Name);
+
+    match session
+        .execute(
+            &db,
+            "explain (costs off) select * from name_copy where n = 'x'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows[1],
+                vec![Value::Text("  Filter: (n = 'x'::name)".into())]
             );
         }
         other => panic!("expected query result, got {:?}", other),

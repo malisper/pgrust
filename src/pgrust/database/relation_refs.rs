@@ -287,6 +287,7 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
     match plan {
         Plan::Result { .. } | Plan::WorkTableScan { .. } => {}
         Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => {
             for child in children {
@@ -389,6 +390,12 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
             collect_rels_from_expr(predicate, rels);
         }
         Plan::OrderBy { input, items, .. } => {
+            collect_rels_from_plan(input, rels);
+            for item in items {
+                collect_rels_from_expr(&item.expr, rels);
+            }
+        }
+        Plan::IncrementalSort { input, items, .. } => {
             collect_rels_from_plan(input, rels);
             for item in items {
                 collect_rels_from_expr(&item.expr, rels);
