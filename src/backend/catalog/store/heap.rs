@@ -552,6 +552,7 @@ impl CatalogStore {
             indclass: Vec::new(),
             indcollation: Vec::new(),
             indoption: Vec::new(),
+            reloptions: None,
             indnullsnotdistinct: false,
             indisexclusion: false,
             indimmediate: true,
@@ -617,7 +618,9 @@ impl CatalogStore {
         }
 
         let mut catalog = self.catalog_snapshot_with_control()?;
-        let entry = if options.indclass.is_empty()
+        let entry = if (options.am_oid == 0
+            || options.am_oid == crate::include::catalog::BTREE_AM_OID)
+            && options.indclass.is_empty()
             && options.indcollation.is_empty()
             && options.indoption.is_empty()
         {
@@ -4048,6 +4051,7 @@ impl CatalogStore {
             indclass: Vec::new(),
             indcollation: Vec::new(),
             indoption: Vec::new(),
+            reloptions: None,
             indnullsnotdistinct: false,
             indisexclusion: false,
             indimmediate: true,
@@ -5885,6 +5889,61 @@ impl CatalogStore {
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_oid(&mut effect.relation_oids, relation_oid);
         effect_record_oid(&mut effect.relation_oids, index_oid);
+        Ok(effect)
+    }
+
+    pub fn set_index_entry_constraint_flags_mvcc(
+        &mut self,
+        old_entry: &CatalogEntry,
+        indisprimary: bool,
+        indisunique: bool,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        if !matches!(old_entry.relkind, 'i' | 'I') {
+            return Err(CatalogError::UnknownTable(
+                old_entry.relation_oid.to_string(),
+            ));
+        }
+        let mut new_entry = old_entry.clone();
+        let index_meta = new_entry.index_meta.as_mut().ok_or(CatalogError::Corrupt(
+            "index relation missing index metadata",
+        ))?;
+        index_meta.indisprimary = indisprimary;
+        index_meta.indisunique = indisunique;
+
+        let control = self.control_state()?;
+        self.persist_control_values(control.next_oid, control.next_rel_number)?;
+        let kinds = vec![BootstrapCatalogKind::PgIndex];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                indexes: vec![index_row_for_entry(old_entry).ok_or(CatalogError::Corrupt(
+                    "index relation missing index metadata",
+                ))?],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                indexes: vec![index_row_for_entry(&new_entry).ok_or(CatalogError::Corrupt(
+                    "index relation missing index metadata",
+                ))?],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        self.control = control;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, old_entry.relation_oid);
+        if let Some(index_meta) = &new_entry.index_meta {
+            effect_record_oid(&mut effect.relation_oids, index_meta.indrelid);
+        }
         Ok(effect)
     }
 
@@ -7737,7 +7796,7 @@ fn build_index_entry_with_relkind(
         && options.indcollation.is_empty()
         && options.indoption.is_empty()
     {
-        default_index_build_options_for_relation(type_lookup, table, columns)?
+        default_index_build_options_for_relation(type_lookup, table, columns, options.am_oid)?
     } else {
         options.clone()
     };
@@ -7811,7 +7870,7 @@ fn build_index_entry_with_relkind(
         namespace_oid: table.namespace_oid,
         owner_oid: table.owner_oid,
         relacl: None,
-        reloptions: None,
+        reloptions: resolved_options.reloptions.clone(),
         of_type_oid: 0,
         row_type_oid: 0,
         array_type_oid: 0,
@@ -7956,6 +8015,7 @@ fn build_toast_catalog_changes(
             ],
             indcollation: vec![0, 0],
             indoption: vec![0, 0],
+            reloptions: None,
             indnullsnotdistinct: false,
             indisexclusion: false,
             indimmediate: true,
@@ -7994,7 +8054,13 @@ fn default_index_build_options_for_relation(
     type_lookup: &impl PgTypeLookup,
     table: &CatalogEntry,
     columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
+    am_oid: u32,
 ) -> Result<CatalogIndexBuildOptions, CatalogError> {
+    let am_oid = if am_oid == 0 {
+        crate::include::catalog::BTREE_AM_OID
+    } else {
+        am_oid
+    };
     let mut indclass = Vec::with_capacity(columns.len());
     let mut indcollation = Vec::with_capacity(columns.len());
     let mut indoption = Vec::with_capacity(columns.len());
@@ -8006,15 +8072,9 @@ fn default_index_build_options_for_relation(
             .find(|column| column.name.eq_ignore_ascii_case(&column_name.name))
             .ok_or_else(|| CatalogError::UnknownColumn(column_name.name.clone()))?;
         let type_oid = resolved_sql_type_oid(type_lookup, table, column.sql_type)?;
-        let opclass_oid = if matches!(
-            column.sql_type.element_type().kind,
-            crate::backend::parser::SqlTypeKind::Enum
-        ) {
-            crate::include::catalog::ENUM_BTREE_OPCLASS_OID
-        } else {
-            crate::include::catalog::default_btree_opclass_oid(type_oid)
-                .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?
-        };
+        let opclass_oid =
+            crate::include::catalog::default_opclass_oid_for_am(am_oid, type_oid, column.sql_type)
+                .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?;
         indclass.push(opclass_oid);
         indcollation.push(0);
         let mut option = 0i16;
@@ -8027,16 +8087,20 @@ fn default_index_build_options_for_relation(
         indoption.push(option);
     }
     Ok(CatalogIndexBuildOptions {
-        am_oid: crate::include::catalog::BTREE_AM_OID,
+        am_oid,
         indclass,
         indcollation,
         indoption,
+        reloptions: None,
         indnullsnotdistinct: false,
         indisexclusion: false,
         indimmediate: true,
-        brin_options: None,
-        gin_options: None,
-        hash_options: None,
+        brin_options: (am_oid == crate::include::catalog::BRIN_AM_OID)
+            .then(crate::include::access::brin::BrinOptions::default),
+        gin_options: (am_oid == crate::include::catalog::GIN_AM_OID)
+            .then(crate::include::access::gin::GinOptions::default),
+        hash_options: (am_oid == crate::include::catalog::HASH_AM_OID)
+            .then(crate::include::access::hash::HashOptions::default),
     })
 }
 

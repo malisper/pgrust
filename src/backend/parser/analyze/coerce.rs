@@ -710,9 +710,10 @@ pub(super) fn resolve_array_concat_element_type(
 }
 
 pub(super) fn infer_integer_literal_type(value: &str) -> SqlType {
-    if value.parse::<i32>().is_ok() {
+    let normalized = normalize_numeric_literal_token(value);
+    if normalized.parse::<i32>().is_ok() {
         SqlType::new(SqlTypeKind::Int4)
-    } else if value.parse::<i64>().is_ok() {
+    } else if normalized.parse::<i64>().is_ok() {
         SqlType::new(SqlTypeKind::Int8)
     } else {
         SqlType::new(SqlTypeKind::Numeric)
@@ -872,22 +873,32 @@ pub(super) fn infer_concat_sql_type(expr: &SqlExpr, left: SqlType, right: SqlTyp
 }
 
 pub(super) fn bind_integer_literal(value: &str) -> Result<Value, ParseError> {
-    if let Ok(parsed) = value.parse::<i32>() {
+    let normalized = normalize_numeric_literal_token(value);
+    if let Ok(parsed) = normalized.parse::<i32>() {
         Ok(Value::Int32(parsed))
-    } else if let Ok(parsed) = value.parse::<i64>() {
+    } else if let Ok(parsed) = normalized.parse::<i64>() {
         Ok(Value::Int64(parsed))
-    } else if value.chars().all(|ch| ch.is_ascii_digit()) {
-        Ok(Value::Numeric(value.into()))
+    } else if normalized.chars().all(|ch| ch.is_ascii_digit()) {
+        Ok(Value::Numeric(normalized.into_owned().into()))
     } else {
         Err(ParseError::InvalidInteger(value.to_string()))
     }
 }
 
 pub(super) fn bind_numeric_literal(value: &str) -> Result<Value, ParseError> {
-    value
+    let normalized = normalize_numeric_literal_token(value);
+    normalized
         .parse::<f64>()
-        .map(|_| Value::Numeric(value.into()))
+        .map(|_| Value::Numeric(normalized.into_owned().into()))
         .map_err(|_| ParseError::InvalidNumeric(value.to_string()))
+}
+
+pub(super) fn normalize_numeric_literal_token(value: &str) -> std::borrow::Cow<'_, str> {
+    if value.as_bytes().contains(&b'_') {
+        std::borrow::Cow::Owned(value.replace('_', ""))
+    } else {
+        std::borrow::Cow::Borrowed(value)
+    }
 }
 
 #[cfg(test)]

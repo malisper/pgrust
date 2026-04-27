@@ -234,6 +234,16 @@ fn created_relkind(lowered: &crate::backend::parser::LoweredCreateTable) -> char
     }
 }
 
+fn relation_persistence_char(persistence: TablePersistence) -> char {
+    match persistence {
+        TablePersistence::Permanent => 'p',
+        TablePersistence::Temporary => 't',
+        // :HACK: Unlogged tables currently use the normal heap storage path;
+        // catalog relpersistence is preserved for SQL-visible compatibility.
+        TablePersistence::Unlogged => 'u',
+    }
+}
+
 fn validate_partitioned_table_ddl(
     table_name: &str,
     lowered: &crate::backend::parser::LoweredCreateTable,
@@ -1387,6 +1397,7 @@ impl Database {
                     access_method_handler,
                     &build_options,
                     65_536,
+                    false,
                     catalog_effects,
                 )?;
                 let constraint_ctx = CatalogWriteContext {

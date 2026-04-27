@@ -371,6 +371,9 @@ fn relation_display_name(
 }
 
 fn access_method_supports_index_scan(am_oid: u32) -> bool {
+    if am_oid == crate::include::catalog::HASH_AM_OID {
+        return false;
+    }
     crate::backend::access::index::amapi::index_am_handler(am_oid)
         .is_some_and(|routine| routine.amgettuple.is_some())
 }

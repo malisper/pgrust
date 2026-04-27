@@ -103,10 +103,18 @@ fn build_catalog_index_entry(
         column.default_expr = None;
         push_unique_index_column(&mut index_columns, &mut used_index_column_names, column);
     }
-    let key_count = options.indclass.len();
+    let resolved_options = if options.indclass.is_empty()
+        && options.indcollation.is_empty()
+        && options.indoption.is_empty()
+    {
+        default_index_build_options_for_entry(table, columns, options.am_oid)?
+    } else {
+        options.clone()
+    };
+    let key_count = resolved_options.indclass.len();
     if key_count > columns.len()
-        || options.indcollation.len() != key_count
-        || options.indoption.len() != key_count
+        || resolved_options.indcollation.len() != key_count
+        || resolved_options.indoption.len() != key_count
     {
         return Err(CatalogError::Corrupt("index build options length mismatch"));
     }
@@ -129,7 +137,7 @@ fn build_catalog_index_entry(
         relhasindex: false,
         relpersistence: table.relpersistence,
         relkind,
-        am_oid: options.am_oid,
+        am_oid: resolved_options.am_oid,
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
@@ -154,16 +162,16 @@ fn build_catalog_index_entry(
             indrelid: table.relation_oid,
             indkey,
             indisunique: unique,
-            indnullsnotdistinct: options.indnullsnotdistinct,
+            indnullsnotdistinct: resolved_options.indnullsnotdistinct,
             indisprimary: primary,
-            indisexclusion: options.indisexclusion,
-            indimmediate: options.indimmediate,
+            indisexclusion: resolved_options.indisexclusion,
+            indimmediate: resolved_options.indimmediate,
             indisvalid,
             indisready,
             indislive: true,
-            indclass: options.indclass.clone(),
-            indcollation: options.indcollation.clone(),
-            indoption: options.indoption.clone(),
+            indclass: resolved_options.indclass,
+            indcollation: resolved_options.indcollation,
+            indoption: resolved_options.indoption,
             indexprs: (!expr_sqls.is_empty())
                 .then(|| serde_json::to_string(&expr_sqls))
                 .transpose()
@@ -172,9 +180,9 @@ fn build_catalog_index_entry(
                 .map(str::trim)
                 .filter(|pred| !pred.is_empty())
                 .map(str::to_string),
-            brin_options: options.brin_options.clone(),
-            gin_options: options.gin_options.clone(),
-            hash_options: options.hash_options,
+            brin_options: resolved_options.brin_options,
+            gin_options: resolved_options.gin_options,
+            hash_options: resolved_options.hash_options,
         }),
     })
 }
@@ -191,6 +199,69 @@ fn index_column_opckey_sql_type(
         return None;
     }
     builtin_type_row_by_oid(opclass.opckeytype).map(|row| row.sql_type)
+}
+
+fn default_index_build_options_for_entry(
+    table: &CatalogEntry,
+    columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
+    am_oid: u32,
+) -> Result<CatalogIndexBuildOptions, CatalogError> {
+    let am_oid = if am_oid == 0 {
+        crate::include::catalog::BTREE_AM_OID
+    } else {
+        am_oid
+    };
+    let mut indclass = Vec::with_capacity(columns.len());
+    let mut indcollation = Vec::with_capacity(columns.len());
+    let mut indoption = Vec::with_capacity(columns.len());
+    for column_name in columns {
+        let sql_type = if column_name.expr_sql.is_some() {
+            column_name
+                .expr_type
+                .ok_or(CatalogError::Corrupt("missing expression index sql type"))?
+        } else {
+            table
+                .desc
+                .columns
+                .iter()
+                .find(|column| column.name.eq_ignore_ascii_case(&column_name.name))
+                .ok_or_else(|| CatalogError::UnknownColumn(column_name.name.clone()))?
+                .sql_type
+        };
+        let type_oid = sql_type_oid(sql_type);
+        if type_oid == 0 {
+            return Err(CatalogError::UnknownType("index column type".into()));
+        }
+        let opclass_oid =
+            crate::include::catalog::default_opclass_oid_for_am(am_oid, type_oid, sql_type)
+                .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?;
+        indclass.push(opclass_oid);
+        indcollation.push(0);
+        let mut option = 0i16;
+        if column_name.descending {
+            option |= 0x0001;
+        }
+        if column_name.nulls_first.unwrap_or(false) {
+            option |= 0x0002;
+        }
+        indoption.push(option);
+    }
+    Ok(CatalogIndexBuildOptions {
+        am_oid,
+        indclass,
+        indcollation,
+        indoption,
+        reloptions: None,
+        indnullsnotdistinct: false,
+        indisexclusion: false,
+        indimmediate: true,
+        brin_options: (am_oid == crate::include::catalog::BRIN_AM_OID)
+            .then(crate::include::access::brin::BrinOptions::default),
+        gin_options: (am_oid == crate::include::catalog::GIN_AM_OID)
+            .then(crate::include::access::gin::GinOptions::default),
+        hash_options: (am_oid == crate::include::catalog::HASH_AM_OID)
+            .then(crate::include::access::hash::HashOptions::default),
+    })
 }
 
 fn push_unique_index_column(
@@ -245,6 +316,7 @@ pub struct CatalogIndexBuildOptions {
     pub indclass: Vec<u32>,
     pub indcollation: Vec<u32>,
     pub indoption: Vec<i16>,
+    pub reloptions: Option<Vec<String>>,
     pub indnullsnotdistinct: bool,
     pub indisexclusion: bool,
     pub indimmediate: bool,
@@ -1544,15 +1616,12 @@ impl Catalog {
             if type_oid == 0 {
                 return Err(CatalogError::UnknownType("index column type".into()));
             }
-            let opclass_oid = if matches!(
-                column.sql_type.element_type().kind,
-                crate::backend::parser::SqlTypeKind::Enum
-            ) {
-                crate::include::catalog::ENUM_BTREE_OPCLASS_OID
-            } else {
-                crate::include::catalog::default_btree_opclass_oid(type_oid)
-                    .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?
-            };
+            let opclass_oid = crate::include::catalog::default_opclass_oid_for_am(
+                crate::include::catalog::BTREE_AM_OID,
+                type_oid,
+                column.sql_type,
+            )
+            .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?;
             indclass.push(opclass_oid);
             indcollation.push(0);
             let mut option = 0i16;
@@ -1569,6 +1638,7 @@ impl Catalog {
             indclass,
             indcollation,
             indoption,
+            reloptions: None,
             indnullsnotdistinct: false,
             indisexclusion: false,
             indimmediate: true,

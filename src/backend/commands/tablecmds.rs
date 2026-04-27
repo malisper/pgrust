@@ -61,16 +61,23 @@ use crate::backend::executor::{
     compare_order_values, create_query_desc, executor_start,
 };
 use crate::include::access::amapi::IndexUniqueCheck;
+use crate::include::access::brin::BrinOptions;
+use crate::include::access::gin::GinOptions;
+use crate::include::access::hash::HashOptions;
 use crate::include::access::htup::HeapTuple;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
-    BOX_TYPE_OID, GIST_AM_OID, PG_CATALOG_NAMESPACE_OID, builtin_range_name_for_sql_type,
+    ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYRANGEOID, BOX_TYPE_OID, BRIN_AM_OID,
+    BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, PG_CATALOG_NAMESPACE_OID, PgAmRow,
+    PgOpclassRow, SPGIST_AM_OID, bootstrap_pg_am_rows, builtin_range_name_for_sql_type,
+    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
 };
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
+use crate::include::nodes::parsenodes::{IndexColumnDef, RelOption};
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, expr_sql_type_hint};
@@ -945,7 +952,7 @@ pub(crate) fn insert_index_key_values(
             )
             .then(|| {
                 crate::backend::executor::value_io::format_unique_key_detail(
-                    &insert_ctx.index_desc.columns[..key_count],
+                    &unique_detail_columns(index)[..key_count],
                     &insert_ctx.values[..key_count],
                 )
             });
@@ -955,6 +962,96 @@ pub(crate) fn insert_index_key_values(
     })?;
     record_deferred_unique_check(index, &insert_ctx, ctx);
     Ok(())
+}
+
+fn unique_detail_columns(
+    index: &BoundIndexRelation,
+) -> Vec<crate::include::nodes::primnodes::ColumnDesc> {
+    let mut columns = index.desc.columns.clone();
+    let expression_sqls = index
+        .index_meta
+        .indexprs
+        .as_deref()
+        .and_then(|sql| serde_json::from_str::<Vec<String>>(sql).ok())
+        .unwrap_or_default();
+    let mut expression_index = 0usize;
+    for (column_index, attnum) in index.index_meta.indkey.iter().enumerate() {
+        if *attnum != 0 {
+            continue;
+        }
+        if let Some(column) = columns.get_mut(column_index) {
+            let fallback_name = column.name.clone();
+            let expr_sql = expression_sqls
+                .get(expression_index)
+                .map(String::as_str)
+                .unwrap_or(fallback_name.as_str());
+            column.name = expression_detail_name(expr_sql);
+        }
+        expression_index += 1;
+    }
+    columns
+}
+
+fn expression_detail_name(expr_sql: &str) -> String {
+    let trimmed = expr_sql.trim();
+    if let Some(function_call) = normalized_function_call_expression(trimmed) {
+        return function_call;
+    }
+    if (trimmed.starts_with('(') && trimmed.ends_with(')')) || looks_like_function_call(trimmed) {
+        trimmed.to_string()
+    } else {
+        format!("({trimmed})")
+    }
+}
+
+fn normalized_function_call_expression(expr_sql: &str) -> Option<String> {
+    let trimmed = strip_outer_parens_once(expr_sql.trim());
+    if !looks_like_function_call(trimmed) {
+        return None;
+    }
+    let open = trimmed.find('(')?;
+    let name = trimmed[..open].trim();
+    let args = trimmed[open + 1..trimmed.len().saturating_sub(1)]
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("{name}({args})"))
+}
+
+fn strip_outer_parens_once(input: &str) -> &str {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
+        return trimmed;
+    }
+    let mut depth = 0i32;
+    for (idx, ch) in trimmed.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 && idx + ch.len_utf8() < trimmed.len() {
+                    return trimmed;
+                }
+            }
+            _ => {}
+        }
+    }
+    trimmed[1..trimmed.len().saturating_sub(1)].trim()
+}
+
+fn looks_like_function_call(expr_sql: &str) -> bool {
+    let Some(open_paren) = expr_sql.find('(') else {
+        return false;
+    };
+    expr_sql.ends_with(')')
+        && expr_sql[..open_paren].chars().enumerate().all(|(idx, ch)| {
+            if idx == 0 {
+                ch == '_' || ch.is_ascii_alphabetic()
+            } else {
+                ch == '_' || ch.is_ascii_alphanumeric()
+            }
+        })
 }
 
 pub(crate) fn row_matches_index_predicate(
@@ -2994,35 +3091,600 @@ pub fn execute_create_table(
     Ok(StatementResult::AffectedRows(0))
 }
 
+fn create_index_access_method_row(method: Option<&str>) -> Result<PgAmRow, ExecError> {
+    let method = method.unwrap_or("btree");
+    let method = if method.eq_ignore_ascii_case("rtree") {
+        crate::backend::utils::misc::notices::push_notice(
+            "substituting access method \"gist\" for obsolete method \"rtree\"",
+        );
+        "gist"
+    } else {
+        method
+    };
+    bootstrap_pg_am_rows()
+        .into_iter()
+        .find(|row| row.amtype == 'i' && row.amname.eq_ignore_ascii_case(method))
+        .ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "supported index access method",
+                actual: "unsupported index access method".into(),
+            })
+        })
+}
+
+fn access_method_can_include(access_method_oid: u32) -> bool {
+    matches!(
+        access_method_oid,
+        BTREE_AM_OID | GIST_AM_OID | SPGIST_AM_OID
+    )
+}
+
+fn resolve_brin_options(options: &[RelOption]) -> Result<BrinOptions, ExecError> {
+    let mut resolved = BrinOptions::default();
+    for option in options {
+        if option.name.eq_ignore_ascii_case("pages_per_range") {
+            let pages_per_range = option.value.parse::<u32>().map_err(|_| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "positive integer pages_per_range",
+                    actual: option.value.clone(),
+                })
+            })?;
+            if pages_per_range == 0 {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "positive integer pages_per_range",
+                    actual: option.value.clone(),
+                }));
+            }
+            resolved.pages_per_range = pages_per_range;
+            continue;
+        }
+
+        if option.name.eq_ignore_ascii_case("autosummarize") {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "BRIN option \"autosummarize\"".into(),
+            )));
+        }
+
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+            "BRIN option \"{}\"",
+            option.name
+        ))));
+    }
+    Ok(resolved)
+}
+
+fn resolve_gin_options(options: &[RelOption]) -> Result<GinOptions, ExecError> {
+    let mut resolved = GinOptions::default();
+    for option in options {
+        if option.name.eq_ignore_ascii_case("fastupdate") {
+            resolved.fastupdate = match option.value.to_ascii_lowercase().as_str() {
+                "on" | "true" | "yes" | "1" => true,
+                "off" | "false" | "no" | "0" => false,
+                _ => {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "boolean fastupdate",
+                        actual: option.value.clone(),
+                    }));
+                }
+            };
+            continue;
+        }
+
+        if option.name.eq_ignore_ascii_case("gin_pending_list_limit") {
+            let pending_list_limit_kb = option.value.parse::<u32>().map_err(|_| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "positive integer gin_pending_list_limit",
+                    actual: option.value.clone(),
+                })
+            })?;
+            if pending_list_limit_kb == 0 {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "positive integer gin_pending_list_limit",
+                    actual: option.value.clone(),
+                }));
+            }
+            resolved.pending_list_limit_kb = pending_list_limit_kb;
+            continue;
+        }
+
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+            "GIN option \"{}\"",
+            option.name
+        ))));
+    }
+    Ok(resolved)
+}
+
+fn resolve_hash_options(options: &[RelOption]) -> Result<HashOptions, ExecError> {
+    let mut resolved = HashOptions::default();
+    for option in options {
+        if option.name.eq_ignore_ascii_case("fillfactor") {
+            let fillfactor = option.value.parse::<u16>().map_err(|_| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "integer fillfactor between 10 and 100",
+                    actual: option.value.clone(),
+                })
+            })?;
+            if !(10..=100).contains(&fillfactor) {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "integer fillfactor between 10 and 100",
+                    actual: option.value.clone(),
+                }));
+            }
+            resolved.fillfactor = fillfactor;
+            continue;
+        }
+
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+            "hash index option \"{}\"",
+            option.name
+        ))));
+    }
+    Ok(resolved)
+}
+
+fn index_reloptions(options: &[RelOption]) -> Option<Vec<String>> {
+    (!options.is_empty()).then(|| {
+        options
+            .iter()
+            .map(|option| format!("{}={}", option.name.to_ascii_lowercase(), option.value))
+            .collect()
+    })
+}
+
+fn index_column_sql_type(
+    relation: &BoundRelation,
+    column: &IndexColumnDef,
+) -> Result<SqlType, ExecError> {
+    if column.expr_sql.is_some() {
+        return column.expr_type.ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "inferred expression index type",
+                actual: "missing expression index type".into(),
+            })
+        });
+    }
+    relation
+        .desc
+        .columns
+        .iter()
+        .find(|desc| desc.name.eq_ignore_ascii_case(&column.name))
+        .map(|desc| desc.sql_type)
+        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column.name.clone())))
+}
+
+fn index_system_column_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "index creation on system columns is not supported".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn reject_system_columns_in_index(
+    columns: &[IndexColumnDef],
+    predicate_sql: Option<&str>,
+) -> Result<(), ExecError> {
+    for column in columns {
+        if column
+            .expr_sql
+            .as_deref()
+            .is_some_and(crate::backend::parser::sql_expr_mentions_system_column)
+            || (column.expr_sql.is_none()
+                && crate::backend::parser::is_system_column_name(&column.name))
+        {
+            return Err(index_system_column_error());
+        }
+    }
+    if predicate_sql.is_some_and(crate::backend::parser::sql_expr_mentions_system_column) {
+        return Err(index_system_column_error());
+    }
+    Ok(())
+}
+
+fn index_column_type_oid(catalog: &Catalog, sql_type: SqlType) -> Option<u32> {
+    let catalog_oid = crate::backend::utils::cache::catcache::sql_type_oid(sql_type);
+    if catalog_oid != 0 {
+        return Some(catalog_oid);
+    }
+    if (sql_type.is_range() || sql_type.is_multirange()) && sql_type.type_oid != 0 {
+        return Some(sql_type.type_oid);
+    }
+    range_type_ref_for_sql_type(sql_type)
+        .map(|range_type| range_type.type_oid())
+        .or_else(|| {
+            multirange_type_ref_for_sql_type(sql_type)
+                .map(|multirange_type| multirange_type.type_oid())
+        })
+        .or_else(|| {
+            (matches!(sql_type.element_type().kind, SqlTypeKind::Enum)
+                && sql_type.element_type().type_oid != 0)
+                .then_some(sql_type.element_type().type_oid)
+        })
+        .or_else(|| {
+            catalog
+                .type_rows()
+                .into_iter()
+                .find(|row| row.sql_type == sql_type)
+                .map(|row| row.oid)
+        })
+}
+
+fn opclass_accepts_type(opclass: &PgOpclassRow, type_oid: u32, sql_type: SqlType) -> bool {
+    opclass.opcintype == type_oid
+        || (opclass.opcintype == ANYARRAYOID && sql_type.is_array)
+        || (opclass.opcintype == ANYRANGEOID
+            && (sql_type.is_range()
+                || range_type_ref_for_sql_type(sql_type).is_some()
+                || crate::include::catalog::builtin_range_rows()
+                    .iter()
+                    .any(|row| row.rngtypid == type_oid)))
+        || (opclass.opcintype == ANYMULTIRANGEOID
+            && (sql_type.is_multirange() || multirange_type_ref_for_sql_type(sql_type).is_some()))
+        || (opclass.opcintype == ANYENUMOID
+            && matches!(sql_type.element_type().kind, SqlTypeKind::Enum))
+}
+
+fn default_opclass_for_catalog_type(
+    catalog: &Catalog,
+    opclass_rows: &[PgOpclassRow],
+    access_method_oid: u32,
+    type_oid: u32,
+    sql_type: SqlType,
+) -> Option<PgOpclassRow> {
+    if matches!(sql_type.element_type().kind, SqlTypeKind::Enum)
+        || catalog
+            .enum_rows()
+            .iter()
+            .any(|row| row.enumtypid == type_oid)
+    {
+        let fallback_oid = match access_method_oid {
+            BTREE_AM_OID => Some(crate::include::catalog::ENUM_BTREE_OPCLASS_OID),
+            HASH_AM_OID => Some(crate::include::catalog::ENUM_HASH_OPCLASS_OID),
+            _ => None,
+        };
+        if let Some(fallback_oid) = fallback_oid {
+            return opclass_rows
+                .iter()
+                .find(|row| row.oid == fallback_oid)
+                .cloned();
+        }
+        return opclass_rows
+            .iter()
+            .find(|row| {
+                row.opcmethod == access_method_oid && row.opcdefault && row.opcintype == ANYENUMOID
+            })
+            .cloned();
+    }
+    opclass_rows
+        .iter()
+        .find(|row| {
+            row.opcmethod == access_method_oid
+                && row.opcdefault
+                && opclass_accepts_type(row, type_oid, sql_type)
+        })
+        .cloned()
+}
+
+fn resolve_create_index_build_options(
+    catalog: &Catalog,
+    relation: &BoundRelation,
+    access_method: &PgAmRow,
+    columns: &[IndexColumnDef],
+    options: &[RelOption],
+) -> Result<crate::backend::catalog::CatalogIndexBuildOptions, ExecError> {
+    let opclass_rows = catalog.opclass_rows();
+    let mut indclass = Vec::with_capacity(columns.len());
+    let mut indcollation = Vec::with_capacity(columns.len());
+    let mut indoption = Vec::with_capacity(columns.len());
+
+    for column in columns {
+        let sql_type = index_column_sql_type(relation, column)?;
+        let type_oid = index_column_type_oid(catalog, sql_type).ok_or_else(|| {
+            ExecError::Parse(ParseError::UnsupportedType(
+                column
+                    .expr_sql
+                    .clone()
+                    .unwrap_or_else(|| column.name.clone()),
+            ))
+        })?;
+        let type_name = catalog
+            .type_by_oid(type_oid)
+            .map(|row| row.typname)
+            .unwrap_or_else(|| type_oid.to_string());
+        let opclass = if let Some(opclass_name) = column.opclass.as_deref() {
+            opclass_rows
+                .iter()
+                .find(|row| {
+                    row.opcmethod == access_method.oid
+                        && row.opcname.eq_ignore_ascii_case(opclass_name)
+                        && opclass_accepts_type(row, type_oid, sql_type)
+                })
+                .cloned()
+        } else {
+            default_opclass_for_catalog_type(
+                catalog,
+                &opclass_rows,
+                access_method.oid,
+                type_oid,
+                sql_type,
+            )
+        }
+        .ok_or_else(|| {
+            ExecError::Parse(ParseError::MissingDefaultOpclass {
+                access_method: access_method.amname.clone(),
+                type_name,
+            })
+        })?;
+        indclass.push(opclass.oid);
+        indcollation.push(
+            column
+                .collation
+                .as_deref()
+                .map(|collation| crate::backend::parser::resolve_collation_oid(collation, catalog))
+                .transpose()
+                .map_err(ExecError::Parse)?
+                .unwrap_or(0),
+        );
+        let mut option = 0i16;
+        if column.descending {
+            option |= 0x0001;
+        }
+        if column.nulls_first.unwrap_or(false) {
+            option |= 0x0002;
+        }
+        indoption.push(option);
+    }
+
+    let (brin_options, gin_options, hash_options) = match access_method.oid {
+        BRIN_AM_OID => (Some(resolve_brin_options(options)?), None, None),
+        GIN_AM_OID => (None, Some(resolve_gin_options(options)?), None),
+        HASH_AM_OID => (None, None, Some(resolve_hash_options(options)?)),
+        _ => {
+            if !options.is_empty() {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "simple index definition",
+                    actual: "unsupported CREATE INDEX feature".into(),
+                }));
+            }
+            (None, None, None)
+        }
+    };
+
+    Ok(crate::backend::catalog::CatalogIndexBuildOptions {
+        am_oid: access_method.oid,
+        indclass,
+        indcollation,
+        indoption,
+        reloptions: index_reloptions(options),
+        indnullsnotdistinct: false,
+        indisexclusion: false,
+        indimmediate: true,
+        brin_options,
+        gin_options,
+        hash_options,
+    })
+}
+
+fn default_create_index_name(
+    catalog: &Catalog,
+    table_name: &str,
+    columns: &[IndexColumnDef],
+) -> String {
+    let schema = table_name.rsplit_once('.').map(|(schema, _)| schema);
+    let relname = table_name.rsplit('.').next().unwrap_or(table_name);
+    let key = columns
+        .iter()
+        .find_map(|column| {
+            (!column.name.trim().is_empty()).then(|| column.name.trim().to_ascii_lowercase())
+        })
+        .unwrap_or_else(|| "expr".into());
+    let key = key
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let base = format!("{relname}_{key}_idx").to_ascii_lowercase();
+    for suffix in 0usize.. {
+        let local = if suffix == 0 {
+            base.clone()
+        } else {
+            format!("{base}{suffix}")
+        };
+        let qualified = schema
+            .map(|schema| format!("{schema}.{local}"))
+            .unwrap_or_else(|| local.clone());
+        if catalog.get(&qualified).is_none() {
+            return qualified;
+        }
+    }
+    unreachable!("unbounded index name search should always return")
+}
+
 pub fn execute_create_index(
     stmt: crate::backend::parser::CreateIndexStatement,
     catalog: &mut Catalog,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
-    if stmt
-        .using_method
-        .as_deref()
-        .is_some_and(|method| !method.eq_ignore_ascii_case("btree"))
+    let _ = ctx;
+    let relation = catalog
+        .lookup_any_relation(&stmt.table_name)
+        .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(stmt.table_name.clone())))?;
+    if !matches!(relation.relkind, 'r' | 'm' | 't') {
+        return Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: stmt.table_name.clone(),
+            expected: "table or materialized view",
+        }));
+    }
+
+    let access_method = create_index_access_method_row(stmt.using_method.as_deref())?;
+    if access_method.oid == BRIN_AM_OID && stmt.predicate.is_some() {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "BRIN partial indexes".into(),
+        )));
+    }
+
+    let table_alias = stmt
+        .table_name
+        .rsplit('.')
+        .next()
+        .unwrap_or(&stmt.table_name)
+        .to_string();
+    let mut key_columns = stmt.columns.clone();
+    reject_system_columns_in_index(&key_columns, stmt.predicate_sql.as_deref())?;
+    for column in &mut key_columns {
+        if let Some(expr_sql) = column.expr_sql.as_deref() {
+            if access_method.oid == BRIN_AM_OID {
+                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                    "BRIN expression indexes".into(),
+                )));
+            }
+            column.expr_type = Some(
+                crate::backend::parser::infer_relation_expr_sql_type(
+                    expr_sql,
+                    Some(&table_alias),
+                    &relation.desc,
+                    catalog,
+                )
+                .map_err(ExecError::Parse)?,
+            );
+            if column
+                .expr_type
+                .is_some_and(|ty| ty.kind == SqlTypeKind::Record && !ty.is_array)
+            {
+                let name = expr_sql
+                    .trim()
+                    .trim_start_matches('(')
+                    .split(|ch: char| ch == '(' || ch.is_ascii_whitespace())
+                    .next()
+                    .filter(|part| !part.is_empty())
+                    .unwrap_or(expr_sql)
+                    .trim_matches('"');
+                return Err(ExecError::DetailedError {
+                    message: format!("column \"{name}\" has pseudo-type record"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P16",
+                });
+            }
+        }
+    }
+
+    let include_columns = stmt
+        .include_columns
+        .iter()
+        .map(|name| {
+            if crate::backend::parser::is_system_column_name(name) {
+                return Err(index_system_column_error());
+            }
+            if !relation
+                .desc
+                .columns
+                .iter()
+                .any(|column| column.name.eq_ignore_ascii_case(name))
+            {
+                return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
+            }
+            Ok(IndexColumnDef::from(name.clone()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if !include_columns.is_empty() && !access_method_can_include(access_method.oid) {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "access method \"{}\" does not support included columns",
+                access_method.amname
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+
+    if let Some(predicate_sql) = stmt.predicate_sql.as_deref() {
+        crate::backend::parser::bind_index_predicate_sql_expr(
+            predicate_sql,
+            Some(&table_alias),
+            &relation.desc,
+            catalog,
+        )
+        .map_err(ExecError::Parse)?;
+    }
+
+    let am_routine = crate::backend::access::index::amapi::index_am_handler(access_method.oid)
+        .ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "supported index access method",
+                actual: format!("unknown access method oid {}", access_method.oid),
+            })
+        })?;
+    if key_columns.len() > 1 && !am_routine.amcanmulticol {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "access method \"{}\" does not support multicolumn indexes",
+                access_method.amname
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    if access_method.oid == SPGIST_AM_OID
+        && key_columns.iter().any(|column| {
+            column.expr_sql.is_some() && !column.expr_type.is_some_and(SqlType::is_range)
+        })
     {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "unsupported index access method".into(),
-        )));
+        return Err(ExecError::DetailedError {
+            message: "access method \"spgist\" does not support expression indexes".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
     }
-    if !stmt.include_columns.is_empty() || stmt.predicate.is_some() || !stmt.options.is_empty() {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "CREATE INDEX options".into(),
-        )));
+    if stmt.unique && !am_routine.amcanunique {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+            "access method \"{}\" does not support unique indexes",
+            access_method.amname
+        ))));
     }
-    let entry = match catalog.create_index(
-        stmt.index_name,
-        &stmt.table_name,
+
+    let mut build_options = resolve_create_index_build_options(
+        catalog,
+        &relation,
+        &access_method,
+        &key_columns,
+        &stmt.options,
+    )?;
+    build_options.indnullsnotdistinct = stmt.nulls_not_distinct;
+    let mut index_columns = key_columns;
+    index_columns.extend(include_columns);
+    let index_name = if stmt.index_name.is_empty() {
+        default_create_index_name(catalog, &stmt.table_name, &index_columns)
+    } else {
+        stmt.index_name.clone()
+    };
+
+    let entry = match catalog.create_index_for_relation_with_options_and_flags(
+        index_name.clone(),
+        relation.relation_oid,
         stmt.unique,
-        &stmt.columns,
+        false,
+        &index_columns,
+        &build_options,
+        stmt.predicate_sql.as_deref(),
     ) {
         Ok(entry) => entry,
         Err(crate::backend::catalog::catalog::CatalogError::TableAlreadyExists(_))
             if stmt.if_not_exists =>
         {
+            crate::backend::utils::misc::notices::push_notice(format!(
+                r#"relation "{index_name}" already exists, skipping"#
+            ));
             return Ok(StatementResult::AffectedRows(0));
         }
         Err(crate::backend::catalog::catalog::CatalogError::TableAlreadyExists(name)) => {
@@ -3041,7 +3703,6 @@ pub fn execute_create_index(
             }));
         }
     };
-    let _ = ctx;
     let _ = entry;
     Ok(StatementResult::AffectedRows(0))
 }

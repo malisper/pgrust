@@ -747,6 +747,21 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableCompound(ref compound_stmt) => {
+                for action in &compound_stmt.actions {
+                    self.execute_statement_with_search_path_inner(
+                        client_id,
+                        action.clone(),
+                        statement_lock_scope_id,
+                        configured_search_path,
+                        datetime_config,
+                        gucs,
+                        planner_config,
+                        std::sync::Arc::clone(&random_state),
+                    )?;
+                }
+                Ok(StatementResult::AffectedRows(0))
+            }
             Statement::AlterViewOwner(ref alter_stmt) => self
                 .execute_alter_view_owner_stmt_with_search_path(
                     client_id,

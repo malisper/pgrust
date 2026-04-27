@@ -1,4 +1,5 @@
 mod box_ops;
+mod geometry_ops;
 mod multirange_ops;
 mod network_ops;
 mod point_ops;
@@ -16,10 +17,14 @@ use crate::backend::catalog::CatalogError;
 use crate::include::catalog::{
     GIST_BOX_CONSISTENT_PROC_OID, GIST_BOX_DISTANCE_PROC_OID, GIST_BOX_PENALTY_PROC_OID,
     GIST_BOX_PICKSPLIT_PROC_OID, GIST_BOX_SAME_PROC_OID, GIST_BOX_UNION_PROC_OID,
+    GIST_CIRCLE_CONSISTENT_PROC_OID, GIST_CIRCLE_DISTANCE_PROC_OID, GIST_CIRCLE_PENALTY_PROC_OID,
+    GIST_CIRCLE_PICKSPLIT_PROC_OID, GIST_CIRCLE_SAME_PROC_OID, GIST_CIRCLE_UNION_PROC_OID,
     GIST_NETWORK_CONSISTENT_PROC_OID, GIST_NETWORK_PENALTY_PROC_OID,
     GIST_NETWORK_PICKSPLIT_PROC_OID, GIST_NETWORK_SAME_PROC_OID, GIST_NETWORK_UNION_PROC_OID,
     GIST_POINT_CONSISTENT_PROC_OID, GIST_POINT_PENALTY_PROC_OID, GIST_POINT_PICKSPLIT_PROC_OID,
-    GIST_POINT_SAME_PROC_OID, GIST_POINT_UNION_PROC_OID, GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID,
+    GIST_POINT_SAME_PROC_OID, GIST_POINT_UNION_PROC_OID, GIST_POLY_CONSISTENT_PROC_OID,
+    GIST_POLY_DISTANCE_PROC_OID, GIST_POLY_PENALTY_PROC_OID, GIST_POLY_PICKSPLIT_PROC_OID,
+    GIST_POLY_SAME_PROC_OID, GIST_POLY_UNION_PROC_OID, GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID,
     MULTIRANGE_GIST_CONSISTENT_PROC_OID, MULTIRANGE_GIST_PENALTY_PROC_OID,
     MULTIRANGE_GIST_PICKSPLIT_PROC_OID, MULTIRANGE_GIST_SAME_PROC_OID,
     MULTIRANGE_GIST_UNION_PROC_OID, MULTIRANGE_SORTSUPPORT_PROC_OID,
@@ -66,6 +71,20 @@ pub(crate) fn consistent(
     match proc_oid {
         GIST_BOX_CONSISTENT_PROC_OID => box_ops::consistent(strategy, key, query, is_leaf),
         GIST_POINT_CONSISTENT_PROC_OID => point_ops::consistent(strategy, key, query, is_leaf),
+        GIST_POLY_CONSISTENT_PROC_OID => geometry_ops::consistent(
+            geometry_ops::GeometryKind::Polygon,
+            strategy,
+            key,
+            query,
+            is_leaf,
+        ),
+        GIST_CIRCLE_CONSISTENT_PROC_OID => geometry_ops::consistent(
+            geometry_ops::GeometryKind::Circle,
+            strategy,
+            key,
+            query,
+            is_leaf,
+        ),
         RANGE_GIST_CONSISTENT_PROC_OID => range_ops::consistent(strategy, key, query, is_leaf),
         GIST_NETWORK_CONSISTENT_PROC_OID => network_ops::consistent(strategy, key, query, is_leaf),
         MULTIRANGE_GIST_CONSISTENT_PROC_OID => {
@@ -86,6 +105,12 @@ pub(crate) fn union(proc_oid: u32, values: &[Value]) -> Result<Value, CatalogErr
         // value shape until pgrust's range and multirange support procs share
         // one implementation.
         RANGE_GIST_UNION_PROC_OID if has_multirange_value(values) => multirange_ops::union(values),
+        GIST_POLY_UNION_PROC_OID => {
+            geometry_ops::union(geometry_ops::GeometryKind::Polygon, values)
+        }
+        GIST_CIRCLE_UNION_PROC_OID => {
+            geometry_ops::union(geometry_ops::GeometryKind::Circle, values)
+        }
         RANGE_GIST_UNION_PROC_OID => range_ops::union(values),
         GIST_NETWORK_UNION_PROC_OID => network_ops::union(values),
         MULTIRANGE_GIST_UNION_PROC_OID => multirange_ops::union(values),
@@ -109,6 +134,9 @@ pub(crate) fn penalty(
         {
             multirange_ops::penalty(original, candidate)
         }
+        GIST_POLY_PENALTY_PROC_OID | GIST_CIRCLE_PENALTY_PROC_OID => {
+            geometry_ops::penalty(original, candidate)
+        }
         RANGE_GIST_PENALTY_PROC_OID => range_ops::penalty(original, candidate),
         GIST_NETWORK_PENALTY_PROC_OID => network_ops::penalty(original, candidate),
         MULTIRANGE_GIST_PENALTY_PROC_OID => multirange_ops::penalty(original, candidate),
@@ -128,6 +156,12 @@ pub(crate) fn picksplit(
         RANGE_GIST_PICKSPLIT_PROC_OID if has_multirange_value(values) => {
             multirange_ops::picksplit(values)
         }
+        GIST_POLY_PICKSPLIT_PROC_OID => {
+            geometry_ops::picksplit(geometry_ops::GeometryKind::Polygon, values)
+        }
+        GIST_CIRCLE_PICKSPLIT_PROC_OID => {
+            geometry_ops::picksplit(geometry_ops::GeometryKind::Circle, values)
+        }
         RANGE_GIST_PICKSPLIT_PROC_OID => range_ops::picksplit(values),
         GIST_NETWORK_PICKSPLIT_PROC_OID => network_ops::picksplit(values),
         MULTIRANGE_GIST_PICKSPLIT_PROC_OID => multirange_ops::picksplit(values),
@@ -146,6 +180,7 @@ pub(crate) fn same(proc_oid: u32, left: &Value, right: &Value) -> Result<bool, C
         {
             multirange_ops::same(left, right)
         }
+        GIST_POLY_SAME_PROC_OID | GIST_CIRCLE_SAME_PROC_OID => geometry_ops::same(left, right),
         RANGE_GIST_SAME_PROC_OID => range_ops::same(left, right),
         GIST_NETWORK_SAME_PROC_OID => network_ops::same(left, right),
         MULTIRANGE_GIST_SAME_PROC_OID => multirange_ops::same(left, right),
@@ -163,6 +198,12 @@ pub(crate) fn distance(
 ) -> Result<GistDistanceResult, CatalogError> {
     match proc_oid {
         GIST_BOX_DISTANCE_PROC_OID => box_ops::distance(key, query, is_leaf),
+        GIST_POLY_DISTANCE_PROC_OID => {
+            geometry_ops::distance(geometry_ops::GeometryKind::Polygon, key, query, is_leaf)
+        }
+        GIST_CIRCLE_DISTANCE_PROC_OID => {
+            geometry_ops::distance(geometry_ops::GeometryKind::Circle, key, query, is_leaf)
+        }
         _ => Err(CatalogError::Io(format!(
             "unsupported GiST distance proc {proc_oid}"
         ))),

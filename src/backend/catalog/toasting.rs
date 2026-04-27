@@ -252,6 +252,7 @@ pub fn new_relation_create_toast_table(
             indclass: vec![OID_BTREE_OPCLASS_OID, INT4_BTREE_OPCLASS_OID],
             indcollation: vec![0, 0],
             indoption: vec![0, 0],
+            reloptions: None,
             indnullsnotdistinct: false,
             indisexclusion: false,
             indimmediate: true,
