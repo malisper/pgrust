@@ -13,11 +13,11 @@ use crate::backend::parser::{
     CreateTableAsStatement, CteBody, FromItem, InsertSource, InsertStatement, OnConflictClause,
     OnConflictTarget, OrderByItem, ParseError, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
     RawXmlExpr, SelectItem, SelectStatement, SlotScopeColumn, SqlCallArgs, SqlCaseWhen, SqlExpr,
-    SqlType, SqlTypeKind, Statement, ValuesStatement, bind_delete_with_outer_scopes,
-    bind_insert_with_outer_scopes, bind_scalar_expr_in_named_slot_scope,
-    bind_update_with_outer_scopes, parse_expr, parse_statement, parse_type_name,
-    pg_plan_query_with_outer_scopes_and_ctes, pg_plan_values_query_with_outer_scopes_and_ctes,
-    resolve_raw_type_name,
+    SqlType, SqlTypeKind, Statement, ValuesStatement, XmlTableColumn,
+    bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
+    bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_expr,
+    parse_statement, parse_type_name, pg_plan_query_with_outer_scopes_and_ctes,
+    pg_plan_values_query_with_outer_scopes_and_ctes, resolve_raw_type_name,
 };
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{PgProcRow, RECORD_TYPE_OID};
@@ -3416,6 +3416,39 @@ fn normalize_plpgsql_from_item(item: FromItem, env: &CompileEnv) -> FromItem {
             func_variadic,
             with_ordinality,
         },
+        FromItem::XmlTable(mut table) => {
+            table.namespaces = table
+                .namespaces
+                .into_iter()
+                .map(|mut namespace| {
+                    namespace.uri = normalize_plpgsql_expr(namespace.uri, env);
+                    namespace
+                })
+                .collect();
+            table.row_path = normalize_plpgsql_expr(table.row_path, env);
+            table.document = normalize_plpgsql_expr(table.document, env);
+            table.columns = table
+                .columns
+                .into_iter()
+                .map(|column| match column {
+                    XmlTableColumn::Regular {
+                        name,
+                        type_name,
+                        path,
+                        default,
+                        not_null,
+                    } => XmlTableColumn::Regular {
+                        name,
+                        type_name,
+                        path: path.map(|expr| normalize_plpgsql_expr(expr, env)),
+                        default: default.map(|expr| normalize_plpgsql_expr(expr, env)),
+                        not_null,
+                    },
+                    XmlTableColumn::Ordinality { name } => XmlTableColumn::Ordinality { name },
+                })
+                .collect();
+            FromItem::XmlTable(table)
+        }
         FromItem::Lateral(source) => {
             FromItem::Lateral(Box::new(normalize_plpgsql_from_item(*source, env)))
         }

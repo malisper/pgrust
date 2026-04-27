@@ -7704,6 +7704,18 @@ fn raw_from_item_contains_pg_notify(from_item: &crate::backend::parser::FromItem
                         if raw_expr_contains_pg_notify(expr)
                 )
         }
+        crate::backend::parser::FromItem::XmlTable(table) => {
+            table
+                .namespaces
+                .iter()
+                .any(|namespace| raw_expr_contains_pg_notify(&namespace.uri))
+                || raw_expr_contains_pg_notify(&table.row_path)
+                || raw_expr_contains_pg_notify(&table.document)
+                || table
+                    .columns
+                    .iter()
+                    .any(raw_xml_table_column_contains_pg_notify)
+        }
         crate::backend::parser::FromItem::Lateral(inner)
         | crate::backend::parser::FromItem::Alias { source: inner, .. } => {
             raw_from_item_contains_pg_notify(inner)
@@ -7728,6 +7740,18 @@ fn raw_from_item_contains_pg_notify(from_item: &crate::backend::parser::FromItem
                     | crate::backend::parser::JoinConstraint::Natural => false,
                 }
         }
+    }
+}
+
+fn raw_xml_table_column_contains_pg_notify(
+    column: &crate::backend::parser::XmlTableColumn,
+) -> bool {
+    match column {
+        crate::backend::parser::XmlTableColumn::Regular { path, default, .. } => {
+            path.as_ref().is_some_and(raw_expr_contains_pg_notify)
+                || default.as_ref().is_some_and(raw_expr_contains_pg_notify)
+        }
+        crate::backend::parser::XmlTableColumn::Ordinality { .. } => false,
     }
 }
 

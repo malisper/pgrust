@@ -6,6 +6,7 @@ use super::expr_json::{
     eval_json_record_set_returning_function, eval_json_table_function, eval_sql_json_table,
 };
 use super::expr_txid::eval_txid_snapshot_xip_values;
+use super::expr_xml::eval_sql_xml_table;
 use super::pg_regex::{eval_regexp_matches_rows, eval_regexp_split_to_table_rows};
 use super::sqlfunc::execute_user_defined_sql_set_returning_function;
 use super::{ExecError, ExecutorContext, Expr, SetReturningCall, TupleSlot, Value, eval_expr};
@@ -62,6 +63,7 @@ pub(crate) fn eval_set_returning_call(
             eval_json_table_function(*kind, args, slot, ctx)
         }
         SetReturningCall::SqlJsonTable(table) => eval_sql_json_table(table, slot, ctx),
+        SetReturningCall::SqlXmlTable(table) => eval_sql_xml_table(table, slot, ctx),
         SetReturningCall::JsonRecordFunction {
             kind,
             args,
@@ -503,6 +505,7 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &str {
         },
         SetReturningCall::JsonRecordFunction { kind, .. } => kind.name(),
         SetReturningCall::SqlJsonTable(_) => "json_table",
+        SetReturningCall::SqlXmlTable(_) => "xmltable",
         SetReturningCall::RegexTableFunction { kind, .. } => match kind {
             crate::include::nodes::primnodes::RegexTableFunction::Matches => "regexp_matches",
             crate::include::nodes::primnodes::RegexTableFunction::SplitToTable => {

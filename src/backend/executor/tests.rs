@@ -12304,6 +12304,99 @@ fn xmlcomment_has_proc_oid_mapping() {
 }
 
 #[test]
+fn xml_table_extracts_rows_and_columns() {
+    let base = temp_dir("xml_table_extracts_rows");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            r#"select ord, id, name, qty, tag
+               from XMLTABLE('/rows/row'
+                 PASSING '<rows><row id="1"><name>a</name><qty>10</qty><tag>x</tag></row><row id="2"><name>b</name></row></rows>'::xml
+                 COLUMNS ord FOR ORDINALITY,
+                         id int PATH '@id',
+                         name text PATH 'name',
+                         qty int PATH 'qty' DEFAULT 7,
+                         tag text PATH 'tag' DEFAULT 'fallback')"#,
+        )
+        .unwrap(),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Int32(1),
+                Value::Text("a".into()),
+                Value::Int32(10),
+                Value::Text("x".into()),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Int32(2),
+                Value::Text("b".into()),
+                Value::Int32(7),
+                Value::Text("fallback".into()),
+            ],
+        ],
+    );
+}
+
+#[test]
+fn xml_table_handles_namespace_prefixed_paths() {
+    let base = temp_dir("xml_table_namespaces");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            r#"select id, label
+               from XMLTABLE(XMLNAMESPACES('urn:x' AS x), '/x:rows/x:row'
+                 PASSING '<x:rows xmlns:x="urn:x"><x:row id="2"><x:label>b</x:label></x:row></x:rows>'::xml
+                 COLUMNS id int PATH '@id',
+                         label text PATH 'x:label')"#,
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(2), Value::Text("b".into())]],
+    );
+}
+
+#[test]
+fn xml_table_reports_not_null_and_multiple_scalar_errors() {
+    let base = temp_dir("xml_table_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        r#"select missing
+           from XMLTABLE('/rows/row'
+             PASSING '<rows><row/></rows>'::xml
+             COLUMNS missing text PATH 'missing' NOT NULL)"#,
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "null is not allowed in column \"missing\""
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        r#"select item
+           from XMLTABLE('/rows/row'
+             PASSING '<rows><row><item>a</item><item>b</item></row></rows>'::xml
+             COLUMNS item text PATH 'item')"#,
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "more than one value returned by column XPath expression"
+    );
+}
+
+#[test]
 fn numeric_nan_division_by_zero_returns_nan() {
     let base = temp_dir("numeric_nan_division_by_zero");
     let txns = TransactionManager::new_durable(&base).unwrap();
