@@ -58,6 +58,14 @@ fn format_timestamp_date(pg_days: i32, config: &DateTimeConfig, include_weekday:
     }
 }
 
+fn format_sql_style_timestamp_date(pg_days: i32, config: &DateTimeConfig) -> String {
+    let mut sql_config = config.clone();
+    if matches!(sql_config.date_order, DateOrder::Ymd) {
+        sql_config.date_order = DateOrder::Mdy;
+    }
+    format_timestamp_date(pg_days, &sql_config, false)
+}
+
 fn format_timestamp_year_suffix(pg_days: i32) -> String {
     let (year, bc) = format_timestamp_year_parts(pg_days);
     if bc { format!("{year} BC") } else { year }
@@ -959,6 +967,19 @@ pub fn format_timestamp_text(value: TimestampADT, _config: &DateTimeConfig) -> S
             format_time_usecs(time_usecs),
             format_timestamp_year_suffix(days),
         ),
+        DateStyleFormat::Sql => {
+            let (_, bc) = format_timestamp_year_parts(days);
+            let rendered = format!(
+                "{} {}",
+                format_sql_style_timestamp_date(days, _config),
+                format_time_usecs(time_usecs)
+            );
+            if bc {
+                format!("{rendered} BC")
+            } else {
+                rendered
+            }
+        }
         _ => {
             let (_, bc) = format_timestamp_year_parts(days);
             let rendered = format!(
@@ -1009,6 +1030,22 @@ pub fn format_timestamptz_text(value: TimestampTzADT, config: &DateTimeConfig) -
             let rendered = format!(
                 "{} {} {}",
                 format_timestamp_date(days, config, false),
+                format_time_usecs(time_usecs),
+                zone
+            );
+            let (_, bc) = format_timestamp_year_parts(days);
+            if bc {
+                format!("{rendered} BC")
+            } else {
+                rendered
+            }
+        }
+        DateStyleFormat::Sql => {
+            let zone = timezone_abbrev_for_output(config, value.0, offset_seconds)
+                .unwrap_or_else(|| format_offset(offset_seconds));
+            let rendered = format!(
+                "{} {} {}",
+                format_sql_style_timestamp_date(days, config),
                 format_time_usecs(time_usecs),
                 zone
             );

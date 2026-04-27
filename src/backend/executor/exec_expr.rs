@@ -150,9 +150,9 @@ use crate::include::catalog::{
     PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID,
     PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
     PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, POLY_SPGIST_OPCLASS_OID,
-    QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_SPGIST_OPCLASS_OID, bootstrap_pg_am_rows,
-    builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid, default_btree_opclass_oid,
-    default_hash_opclass_oid,
+    QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID,
+    bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
+    default_btree_opclass_oid, default_hash_opclass_oid,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
@@ -1706,6 +1706,39 @@ fn eval_current_setting_without_context(values: &[Value]) -> Result<Value, ExecE
     Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
         name,
     )))
+}
+
+fn eval_pg_settings_get_flags(values: &[Value]) -> Result<Value, ExecError> {
+    let name = match values {
+        [Value::Text(name)] => normalize_guc_name(name),
+        [Value::Null] => return Ok(Value::Null),
+        [other] => {
+            return Err(ExecError::TypeMismatch {
+                op: "pg_settings_get_flags",
+                left: other.clone(),
+                right: Value::Text("".into()),
+            });
+        }
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "pg_settings_get_flags(name)",
+                actual: format!("pg_settings_get_flags({} args)", values.len()),
+            }));
+        }
+    };
+    let flags: &[&str] = match name.as_str() {
+        "default_statistics_target" => &[],
+        _ => return Ok(Value::Null),
+    };
+    Ok(Value::PgArray(
+        ArrayValue::from_1d(
+            flags
+                .iter()
+                .map(|flag| Value::Text((*flag).into()))
+                .collect(),
+        )
+        .with_element_type_oid(TEXT_TYPE_OID),
+    ))
 }
 
 fn quote_identifier_if_needed(identifier: &str) -> String {
@@ -6620,6 +6653,7 @@ fn eval_plpgsql_builtin_function(
             execute_builtin_scalar_function_value_call(func, &values)
         }
         BuiltinScalarFunction::CurrentSetting => eval_current_setting_without_context(&values),
+        BuiltinScalarFunction::PgSettingsGetFlags => eval_pg_settings_get_flags(&values),
         BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_values(&values),
         BuiltinScalarFunction::PgColumnToastChunkId => {
             eval_pg_column_toast_chunk_id_values(&values)
@@ -8589,6 +8623,7 @@ pub(crate) fn eval_builtin_function(
             Ok(Value::Bool(true))
         }
         BuiltinScalarFunction::CurrentSetting => eval_current_setting(&values, ctx),
+        BuiltinScalarFunction::PgSettingsGetFlags => eval_pg_settings_get_flags(&values),
         BuiltinScalarFunction::PgNotify => unreachable!("pg_notify handled earlier"),
         BuiltinScalarFunction::PgNotificationQueueUsage => {
             unreachable!("pg_notification_queue_usage handled earlier")

@@ -7,11 +7,39 @@ use crate::backend::parser::{
     FunctionVolatility, ParseError, RoutineKind, RoutineSignature, parse_type_name,
     resolve_raw_type_name,
 };
+use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::include::catalog::{INTERNAL_TYPE_OID, PgProcRow};
 use crate::pgrust::database::ddl::ensure_can_set_role;
 
 fn normalize_ident(name: &str) -> String {
     name.trim().trim_matches('"').to_ascii_lowercase()
+}
+
+fn set_proc_config(row: &mut PgProcRow, name: &str, value: &str) {
+    let normalized = normalize_guc_name(name);
+    let config = row.proconfig.get_or_insert_with(Vec::new);
+    config.retain(|entry| {
+        entry
+            .split_once('=')
+            .map(|(entry_name, _)| !entry_name.eq_ignore_ascii_case(&normalized))
+            .unwrap_or(true)
+    });
+    config.push(format!("{normalized}={value}"));
+}
+
+fn reset_proc_config(row: &mut PgProcRow, name: &str) {
+    let normalized = normalize_guc_name(name);
+    if let Some(config) = row.proconfig.as_mut() {
+        config.retain(|entry| {
+            entry
+                .split_once('=')
+                .map(|(entry_name, _)| !entry_name.eq_ignore_ascii_case(&normalized))
+                .unwrap_or(true)
+        });
+        if config.is_empty() {
+            row.proconfig = None;
+        }
+    }
 }
 
 fn routine_arg_type_oid(
@@ -432,12 +460,9 @@ fn apply_routine_options(
                 row.prosupport =
                     resolve_support_proc_oid(db, client_id, txn_ctx, catalog, signature)?;
             }
-            AlterRoutineOption::SetConfig { .. }
-            | AlterRoutineOption::ResetConfig(_)
-            | AlterRoutineOption::ResetAll => {
-                // :HACK: pg_proc.proconfig and dependency-on-extension metadata are not yet
-                // represented in PgProcRow. Accept the grammar and leave catalog shape stable.
-            }
+            AlterRoutineOption::SetConfig { name, value } => set_proc_config(row, name, value),
+            AlterRoutineOption::ResetConfig(name) => reset_proc_config(row, name),
+            AlterRoutineOption::ResetAll => row.proconfig = None,
         }
     }
     Ok(())

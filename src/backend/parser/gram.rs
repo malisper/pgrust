@@ -7186,6 +7186,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     let mut leakproof = false;
     let mut volatility = crate::backend::parser::FunctionVolatility::Volatile;
     let mut parallel = crate::backend::parser::FunctionParallel::Unsafe;
+    let mut config = Vec::new();
 
     while !rest.trim_start().is_empty() {
         rest = rest.trim_start();
@@ -7294,6 +7295,12 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
             rest = next_rest;
             continue;
         }
+        if keyword_at_start(rest, "set") {
+            let (parsed, next_rest) = parse_create_function_set_config(rest)?;
+            config.push(parsed);
+            rest = next_rest;
+            continue;
+        }
         return Err(ParseError::FeatureNotSupported(format!(
             "unsupported CREATE FUNCTION clause: {}",
             rest.split_whitespace().next().unwrap_or(rest)
@@ -7337,6 +7344,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         language: language.ok_or(ParseError::UnexpectedEof)?,
         body: body.ok_or(ParseError::UnexpectedEof)?,
         link_symbol,
+        config,
     })
 }
 
@@ -7359,6 +7367,21 @@ fn parse_create_function_support(input: &str) -> Result<(RoutineSignature, &str)
     let rest = consume_keyword(input, "support").trim_start();
     let (value, rest) = take_next_word(rest)?;
     Ok((parse_support_routine_signature(&value)?, rest))
+}
+
+fn parse_create_function_set_config(input: &str) -> Result<(AlterRoutineOption, &str), ParseError> {
+    let rest = consume_keyword(input, "set").trim_start();
+    let (name, rest) = take_next_word(rest)?;
+    let rest = rest.trim_start();
+    let rest = if keyword_at_start(rest, "to") {
+        consume_keyword(rest, "to").trim_start()
+    } else if rest.starts_with('=') {
+        rest[1..].trim_start()
+    } else {
+        rest
+    };
+    let (value, rest) = take_next_word(rest)?;
+    Ok((AlterRoutineOption::SetConfig { name, value }, rest))
 }
 
 fn build_drop_function_statement(sql: &str) -> Result<DropFunctionStatement, ParseError> {
@@ -12972,6 +12995,8 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::notify_stmt => Ok(Statement::Notify(build_notify(inner)?)),
         Rule::listen_stmt => Ok(Statement::Listen(build_listen(inner)?)),
         Rule::unlisten_stmt => Ok(Statement::Unlisten(build_unlisten(inner)?)),
+        Rule::load_stmt => Ok(Statement::Load(build_load(inner)?)),
+        Rule::discard_stmt => Ok(Statement::Discard(build_discard(inner)?)),
         Rule::show_stmt => Ok(Statement::Show(build_show(inner)?)),
         Rule::declare_cursor_stmt => Ok(Statement::DeclareCursor(build_declare_cursor(inner)?)),
         Rule::fetch_stmt => Ok(Statement::Fetch(build_fetch(inner)?)),
@@ -13148,12 +13173,50 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::commit_stmt => Ok(Statement::Commit),
         Rule::savepoint_stmt => Ok(Statement::Savepoint(build_transaction_marker_name(inner)?)),
         Rule::rollback_to_stmt => Ok(Statement::RollbackTo(build_transaction_marker_name(inner)?)),
+        Rule::release_savepoint_stmt => Ok(Statement::ReleaseSavepoint(
+            build_transaction_marker_name(inner)?,
+        )),
         Rule::rollback_stmt => Ok(Statement::Rollback),
         _ => Err(ParseError::UnexpectedToken {
             expected: "statement",
             actual: inner.as_str().into(),
         }),
     }
+}
+
+fn build_load(pair: Pair<'_, Rule>) -> Result<LoadStatement, ParseError> {
+    let filename = pair
+        .into_inner()
+        .find(|part| {
+            matches!(
+                part.as_rule(),
+                Rule::quoted_string_literal
+                    | Rule::string_literal
+                    | Rule::escape_string_literal
+                    | Rule::unicode_string_literal
+            )
+        })
+        .map(decode_string_literal_pair)
+        .ok_or(ParseError::UnexpectedEof)??;
+    Ok(LoadStatement { filename })
+}
+
+fn build_discard(pair: Pair<'_, Rule>) -> Result<DiscardStatement, ParseError> {
+    let words = pair
+        .as_str()
+        .split_ascii_whitespace()
+        .map(|word| word.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let target = match words.as_slice() {
+        [discard, all] if discard == "discard" && all == "all" => DiscardTarget::All,
+        [discard, temp]
+            if discard == "discard" && matches!(temp.as_str(), "temp" | "temporary") =>
+        {
+            DiscardTarget::Temp
+        }
+        _ => return Err(ParseError::UnexpectedEof),
+    };
+    Ok(DiscardStatement { target })
 }
 
 fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
@@ -13341,7 +13404,7 @@ fn build_set(pair: Pair<'_, Rule>) -> Result<SetStatement, ParseError> {
             | Rule::set_xml_option_clause => {
                 for clause_part in part.into_inner() {
                     match clause_part.as_rule() {
-                        Rule::identifier | Rule::time_zone_guc_name if name.is_none() => {
+                        Rule::guc_name | Rule::time_zone_guc_name if name.is_none() => {
                             name = Some(build_set_guc_name(clause_part));
                         }
                         Rule::kw_xml if name.is_none() => name = Some("xmloption".to_string()),
@@ -13372,16 +13435,29 @@ fn build_set(pair: Pair<'_, Rule>) -> Result<SetStatement, ParseError> {
 fn build_set_guc_name(pair: Pair<'_, Rule>) -> String {
     match pair.as_rule() {
         Rule::time_zone_guc_name => "timezone".to_string(),
-        Rule::identifier => build_identifier(pair),
+        Rule::guc_name => build_guc_name(pair),
         _ => pair.as_str().to_ascii_lowercase(),
     }
+}
+
+fn build_guc_name(pair: Pair<'_, Rule>) -> String {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::guc_name_part)
+        .map(|part| {
+            part.into_inner()
+                .next()
+                .map(build_identifier)
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 fn build_show(pair: Pair<'_, Rule>) -> Result<ShowStatement, ParseError> {
     let mut name = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::guc_name => name = Some(build_guc_name(part)),
             Rule::show_transaction_isolation_clause => {
                 name = Some("transaction_isolation".to_string())
             }
@@ -13681,7 +13757,7 @@ fn build_reset(pair: Pair<'_, Rule>) -> Result<ResetStatement, ParseError> {
     let mut name = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::guc_name => name = Some(build_guc_name(part)),
             Rule::time_zone_guc_name => name = Some("timezone".to_string()),
             _ => {}
         }

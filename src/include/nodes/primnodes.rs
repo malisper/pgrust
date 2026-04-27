@@ -393,6 +393,7 @@ pub enum BuiltinScalarFunction {
     PgRustTestPtInWidget,
     PgRustIsCatalogTextUniqueIndexOid,
     CurrentSetting,
+    PgSettingsGetFlags,
     PgNotify,
     PgNotificationQueueUsage,
     PgTypeof,
