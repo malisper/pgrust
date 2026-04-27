@@ -24,12 +24,13 @@ use crate::backend::parser::{
     BoundInsertStatement, BoundMergeAction, BoundMergeStatement, BoundMergeWhenClause,
     BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey, BoundRelation,
     BoundRelationConstraints, BoundTemporalConstraint, BoundUpdateStatement, BoundUpdateTarget,
-    Catalog, CatalogLookup, CreateTableAsStatement, DropTableStatement, ExplainStatement,
-    ForeignKeyAction, MaintenanceTarget, MergeStatement, OverridingKind, ParseError,
-    SelectStatement, SqlType, SqlTypeKind, Statement, TableAsObjectType, TruncateTableStatement,
-    UpdateStatement, VacuumStatement, bind_create_table, bind_expr_with_outer_and_ctes,
-    bind_generated_expr, bind_referenced_by_foreign_keys, bind_relation_constraints,
-    bind_scalar_expr_in_scope, bind_update, parse_expr, scope_for_relation,
+    Catalog, CatalogLookup, CreateTableAsStatement, DropTableStatement, ExplainFormat,
+    ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement, OverridingKind,
+    ParseError, SelectStatement, SqlType, SqlTypeKind, Statement, TableAsObjectType,
+    TruncateTableStatement, UpdateStatement, VacuumStatement, bind_create_table,
+    bind_expr_with_outer_and_ctes, bind_generated_expr, bind_referenced_by_foreign_keys,
+    bind_relation_constraints, bind_scalar_expr_in_scope, bind_update, parse_expr,
+    scope_for_relation,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -44,8 +45,8 @@ use crate::pl::plpgsql::TriggerOperation;
 use super::copyto::{capture_copy_to_dml_notices, capture_copy_to_dml_returning_row};
 use super::explain::{
     format_buffer_usage, format_explain_lines_with_costs, format_explain_lines_with_options,
-    format_explain_plan_with_subplans, format_verbose_explain_plan_with_subplans,
-    push_explain_line,
+    format_explain_plan_with_subplans, format_verbose_explain_plan_json_with_catalog,
+    format_verbose_explain_plan_with_catalog, push_explain_line,
 };
 use super::partition::{exec_find_partition, exec_setup_partition_tuple_routing};
 use super::trigger::RuntimeTriggers;
@@ -420,6 +421,7 @@ pub(crate) fn execute_explain(
         buffers,
         costs,
         summary,
+        format,
         timing,
         verbose,
         statement,
@@ -577,9 +579,15 @@ pub(crate) fn execute_explain(
             );
             format_explain_lines_with_costs(state.as_ref(), 1, false, costs, true, &mut lines);
         } else {
-            if verbose {
-                format_verbose_explain_plan_with_subplans(
-                    &plan_tree, &subplans, 0, costs, &mut lines,
+            if matches!(format, ExplainFormat::Json)
+                && verbose
+                && let Some(json) =
+                    format_verbose_explain_plan_json_with_catalog(&plan_tree, &subplans, catalog)
+            {
+                lines.push(json);
+            } else if verbose {
+                format_verbose_explain_plan_with_catalog(
+                    &plan_tree, &subplans, 0, costs, catalog, &mut lines,
                 );
             } else {
                 format_explain_plan_with_subplans(&plan_tree, &subplans, 0, costs, &mut lines);

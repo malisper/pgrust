@@ -730,6 +730,9 @@ fn rewrite_set_returning_call(
             output_columns,
             with_ordinality,
         },
+        sql @ SetReturningCall::SqlJsonTable(_) => sql.try_map_exprs(|expr| {
+            rewrite_semantic_expr(expr, catalog, expanded_views, active_policy_relations)
+        })?,
     })
 }
 

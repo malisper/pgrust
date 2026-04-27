@@ -3437,6 +3437,19 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 Ok(())
             }
+            FromItem::JsonTable(table) => {
+                self.visit_expr(&table.context, context)?;
+                for arg in &table.passing {
+                    self.visit_expr(&arg.expr, context)?;
+                }
+                for column in &table.columns {
+                    self.visit_json_table_column(column, context)?;
+                }
+                if let Some(JsonTableBehavior::Default(expr)) = &table.on_error {
+                    self.visit_expr(expr, context)?;
+                }
+                Ok(())
+            }
             FromItem::Lateral(source) | FromItem::Alias { source, .. } => {
                 self.visit_from(source, context)
             }
@@ -3471,6 +3484,32 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
             }
         }
+    }
+
+    fn visit_json_table_column(
+        &mut self,
+        column: &JsonTableColumn,
+        context: RecursiveReferenceContext,
+    ) -> Result<(), ParseError> {
+        match column {
+            JsonTableColumn::Regular {
+                on_empty, on_error, ..
+            } => {
+                if let Some(JsonTableBehavior::Default(expr)) = on_empty {
+                    self.visit_expr(expr, context)?;
+                }
+                if let Some(JsonTableBehavior::Default(expr)) = on_error {
+                    self.visit_expr(expr, context)?;
+                }
+            }
+            JsonTableColumn::Nested { columns, .. } => {
+                for column in columns {
+                    self.visit_json_table_column(column, context)?;
+                }
+            }
+            JsonTableColumn::Ordinality { .. } | JsonTableColumn::Exists { .. } => {}
+        }
+        Ok(())
     }
 
     fn visit_expr(
@@ -3788,7 +3827,44 @@ fn from_item_references_table(item: &FromItem, table_name: &str) -> bool {
             from_item_references_table(left, table_name)
                 || from_item_references_table(right, table_name)
         }
+        FromItem::JsonTable(table) => json_table_expr_references_table(table, table_name),
         FromItem::Values { .. } | FromItem::FunctionCall { .. } => false,
+    }
+}
+
+fn json_table_expr_references_table(table: &JsonTableExpr, table_name: &str) -> bool {
+    sql_expr_references_table(&table.context, table_name)
+        || table
+            .passing
+            .iter()
+            .any(|arg| sql_expr_references_table(&arg.expr, table_name))
+        || table
+            .columns
+            .iter()
+            .any(|column| json_table_column_references_table(column, table_name))
+        || matches!(
+            &table.on_error,
+            Some(JsonTableBehavior::Default(expr)) if sql_expr_references_table(expr, table_name)
+        )
+}
+
+fn json_table_column_references_table(column: &JsonTableColumn, table_name: &str) -> bool {
+    match column {
+        JsonTableColumn::Regular {
+            on_empty, on_error, ..
+        } => {
+            matches!(
+                on_empty,
+                Some(JsonTableBehavior::Default(expr)) if sql_expr_references_table(expr, table_name)
+            ) || matches!(
+                on_error,
+                Some(JsonTableBehavior::Default(expr)) if sql_expr_references_table(expr, table_name)
+            )
+        }
+        JsonTableColumn::Nested { columns, .. } => columns
+            .iter()
+            .any(|column| json_table_column_references_table(column, table_name)),
+        JsonTableColumn::Ordinality { .. } | JsonTableColumn::Exists { .. } => false,
     }
 }
 

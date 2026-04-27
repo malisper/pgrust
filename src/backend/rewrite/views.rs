@@ -1,3 +1,5 @@
+use crate::backend::executor::jsonb::render_jsonb_bytes;
+use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{parse_interval_text_value, render_interval_text_with_config};
 use crate::backend::parser::analyze::analyze_select_query_with_outer;
 use crate::backend::parser::{
@@ -18,8 +20,10 @@ use crate::include::nodes::parsenodes::{
 use crate::include::nodes::primnodes::{
     Aggref, BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, JoinType, OpExprKind,
     RelationDesc, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, ScalarFunctionImpl,
-    SetReturningCall, SubLink, SubLinkType, TABLE_OID_ATTR_NO, TargetEntry, Var, WindowClause,
-    WindowFrameBound, WindowFuncExpr, WindowFuncKind, attrno_index, expr_sql_type_hint,
+    SetReturningCall, SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn,
+    SqlJsonTableColumnKind, SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SubLink,
+    SubLinkType, TABLE_OID_ATTR_NO, TargetEntry, Var, WindowClause, WindowFrameBound,
+    WindowFuncExpr, WindowFuncKind, attrno_index, expr_sql_type_hint,
 };
 
 const RETURN_RULE_NAME: &str = "_RETURN";
@@ -599,11 +603,36 @@ fn render_target_entry(target: &TargetEntry, query: &Query, catalog: &dyn Catalo
 }
 
 fn rendered_matches_target_name(rendered: &str, target_name: &str) -> bool {
-    let quoted = quote_identifier_if_needed(target_name);
-    rendered == quoted
+    rendered_identifier_matches_target_name(rendered, target_name)
         || rendered
             .rsplit_once('.')
-            .is_some_and(|(_, column)| column == quoted)
+            .is_some_and(|(_, column)| rendered_identifier_matches_target_name(column, target_name))
+}
+
+fn rendered_identifier_matches_target_name(rendered: &str, target_name: &str) -> bool {
+    if rendered == quote_identifier_if_needed(target_name) {
+        return true;
+    }
+    unquote_delimited_identifier(rendered).is_some_and(|identifier| identifier == target_name)
+}
+
+fn unquote_delimited_identifier(rendered: &str) -> Option<String> {
+    if !rendered.starts_with('"') || !rendered.ends_with('"') {
+        return None;
+    }
+    let mut chars = rendered[1..rendered.len() - 1].chars().peekable();
+    let mut unquoted = String::new();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            if chars.peek() == Some(&'"') {
+                chars.next();
+            } else {
+                return None;
+            }
+        }
+        unquoted.push(ch);
+    }
+    Some(unquoted)
 }
 
 fn render_from_node(
@@ -754,13 +783,18 @@ fn render_rte(query: &Query, index: usize, catalog: &dyn CatalogLookup) -> Strin
             let mut rendered = render_set_returning_call(call, query, catalog);
             if let Some(alias) = &rte.alias {
                 rendered.push(' ');
+                let column_list_mode = if matches!(call, SetReturningCall::SqlJsonTable(_)) {
+                    AliasColumnListMode::IfNeeded
+                } else {
+                    AliasColumnListMode::Always
+                };
                 rendered.push_str(&render_alias_clause(
                     query,
                     index,
                     catalog,
                     rte,
                     Some(alias),
-                    AliasColumnListMode::Always,
+                    column_list_mode,
                 ));
             }
             rendered
@@ -923,6 +957,9 @@ fn render_set_returning_call(
     query: &Query,
     catalog: &dyn CatalogLookup,
 ) -> String {
+    if let SetReturningCall::SqlJsonTable(table) = call {
+        return render_sql_json_table_call(table, query, catalog);
+    }
     let (name, args, with_ordinality) = match call {
         SetReturningCall::GenerateSeries {
             start,
@@ -1047,6 +1084,7 @@ fn render_set_returning_call(
             args.iter().collect(),
             *with_ordinality,
         ),
+        SetReturningCall::SqlJsonTable(_) => unreachable!("handled above"),
     };
     let mut rendered = format!(
         "{}({})",
@@ -1060,6 +1098,310 @@ fn render_set_returning_call(
         rendered.push_str(" WITH ORDINALITY");
     }
     rendered
+}
+
+fn render_sql_json_table_call(
+    table: &SqlJsonTable,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let mut rendered = String::new();
+    rendered.push_str("JSON_TABLE(\n");
+    rendered.push_str(&format!(
+        "            {}, '{}' AS {}",
+        render_sql_json_table_expr(&table.context, query, catalog),
+        render_sql_json_table_path(&table.root_path).replace('\'', "''"),
+        quote_identifier_if_needed(&table.root_path_name)
+    ));
+    if !table.passing.is_empty() {
+        rendered.push_str("\n            PASSING\n");
+        rendered.push_str(
+            &table
+                .passing
+                .iter()
+                .enumerate()
+                .map(|(index, arg)| {
+                    let suffix = if index + 1 == table.passing.len() {
+                        ""
+                    } else {
+                        ","
+                    };
+                    format!(
+                        "                {} AS {}{suffix}",
+                        render_expr(&arg.expr, query, catalog),
+                        quote_identifier_if_needed(&arg.name)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    rendered.push_str("\n            COLUMNS (\n");
+    rendered.push_str(
+        &render_sql_json_table_path_scan_columns(table, &table.plan, query, catalog, 16)
+            .join(",\n"),
+    );
+    rendered.push_str("\n            )");
+    if matches!(table.on_error, SqlJsonTableBehavior::Error) {
+        rendered.push_str(" ERROR ON ERROR");
+    }
+    rendered.push_str("\n        )");
+    rendered
+}
+
+fn render_sql_json_table_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> String {
+    match expr {
+        Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)) => {
+            format!("{}::text", render_expr(expr, query, catalog))
+        }
+        _ => render_expr(expr, query, catalog),
+    }
+}
+
+fn render_sql_json_table_path(path: &str) -> String {
+    canonicalize_jsonpath(path).unwrap_or_else(|_| path.to_string())
+}
+
+fn render_sql_json_table_path_scan_columns(
+    table: &SqlJsonTable,
+    plan: &SqlJsonTablePlan,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    indent: usize,
+) -> Vec<String> {
+    match plan {
+        SqlJsonTablePlan::PathScan {
+            column_indexes,
+            child,
+            ..
+        } => {
+            let mut rendered = column_indexes
+                .iter()
+                .filter_map(|index| table.columns.get(*index))
+                .map(|column| render_sql_json_table_column(column, query, catalog, indent))
+                .collect::<Vec<_>>();
+            if let Some(child) = child {
+                rendered.extend(render_sql_json_table_nested_plans(
+                    table, child, query, catalog, indent,
+                ));
+            }
+            rendered
+        }
+        SqlJsonTablePlan::SiblingJoin { left, right } => {
+            let mut rendered =
+                render_sql_json_table_path_scan_columns(table, left, query, catalog, indent);
+            rendered.extend(render_sql_json_table_path_scan_columns(
+                table, right, query, catalog, indent,
+            ));
+            rendered
+        }
+    }
+}
+
+fn render_sql_json_table_nested_plans(
+    table: &SqlJsonTable,
+    plan: &SqlJsonTablePlan,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    indent: usize,
+) -> Vec<String> {
+    match plan {
+        SqlJsonTablePlan::PathScan {
+            path,
+            path_name,
+            child,
+            column_indexes,
+            ..
+        } => {
+            let prefix = " ".repeat(indent);
+            let mut lines = column_indexes
+                .iter()
+                .filter_map(|index| table.columns.get(*index))
+                .map(|column| render_sql_json_table_column(column, query, catalog, indent + 4))
+                .collect::<Vec<_>>();
+            if let Some(child) = child {
+                lines.extend(render_sql_json_table_nested_plans(
+                    table,
+                    child,
+                    query,
+                    catalog,
+                    indent + 4,
+                ));
+            }
+            vec![format!(
+                "{prefix}NESTED PATH '{}' AS {}\n{prefix}COLUMNS (\n{}\n{prefix})",
+                render_sql_json_table_path(path).replace('\'', "''"),
+                quote_identifier_if_needed(path_name),
+                lines.join(",\n")
+            )]
+        }
+        SqlJsonTablePlan::SiblingJoin { left, right } => {
+            let mut rendered =
+                render_sql_json_table_nested_plans(table, left, query, catalog, indent);
+            rendered.extend(render_sql_json_table_nested_plans(
+                table, right, query, catalog, indent,
+            ));
+            rendered
+        }
+    }
+}
+
+fn render_sql_json_table_column(
+    column: &SqlJsonTableColumn,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    indent: usize,
+) -> String {
+    let prefix = " ".repeat(indent);
+    let name = quote_json_table_column_name(&column.name);
+    let ty = render_sql_json_table_type(column.sql_type, catalog);
+    match &column.kind {
+        SqlJsonTableColumnKind::Ordinality => format!("{prefix}{name} FOR ORDINALITY"),
+        SqlJsonTableColumnKind::Scalar {
+            path,
+            on_empty,
+            on_error,
+        } => {
+            let mut rendered = format!(
+                "{prefix}{name} {ty} PATH '{}'",
+                render_sql_json_table_path(path).replace('\'', "''")
+            );
+            append_sql_json_table_behavior(
+                &mut rendered,
+                on_empty,
+                "EMPTY",
+                matches!(on_empty, SqlJsonTableBehavior::Null),
+                query,
+                catalog,
+            );
+            append_sql_json_table_behavior(
+                &mut rendered,
+                on_error,
+                "ERROR",
+                matches!(on_error, SqlJsonTableBehavior::Null),
+                query,
+                catalog,
+            );
+            rendered
+        }
+        SqlJsonTableColumnKind::Formatted {
+            path,
+            format_json,
+            wrapper,
+            quotes,
+            on_empty,
+            on_error,
+        } => {
+            let mut rendered = format!("{prefix}{name} {ty}");
+            if *format_json && sql_json_table_column_renders_format_json(column) {
+                rendered.push_str(" FORMAT JSON");
+            }
+            rendered.push_str(&format!(
+                " PATH '{}'",
+                render_sql_json_table_path(path).replace('\'', "''")
+            ));
+            rendered.push_str(match wrapper {
+                SqlJsonTableWrapper::Unspecified | SqlJsonTableWrapper::Without => {
+                    " WITHOUT WRAPPER"
+                }
+                SqlJsonTableWrapper::Conditional => " WITH CONDITIONAL WRAPPER",
+                SqlJsonTableWrapper::Unconditional => " WITH UNCONDITIONAL WRAPPER",
+            });
+            rendered.push_str(match quotes {
+                SqlJsonTableQuotes::Unspecified | SqlJsonTableQuotes::Keep => " KEEP QUOTES",
+                SqlJsonTableQuotes::Omit => " OMIT QUOTES",
+            });
+            append_sql_json_table_behavior(
+                &mut rendered,
+                on_empty,
+                "EMPTY",
+                matches!(on_empty, SqlJsonTableBehavior::Null),
+                query,
+                catalog,
+            );
+            append_sql_json_table_behavior(
+                &mut rendered,
+                on_error,
+                "ERROR",
+                matches!(on_error, SqlJsonTableBehavior::Null),
+                query,
+                catalog,
+            );
+            rendered
+        }
+        SqlJsonTableColumnKind::Exists { path, on_error } => {
+            let mut rendered = format!(
+                "{prefix}{name} {ty} EXISTS PATH '{}'",
+                render_sql_json_table_path(path).replace('\'', "''")
+            );
+            append_sql_json_table_behavior(
+                &mut rendered,
+                on_error,
+                "ERROR",
+                matches!(on_error, SqlJsonTableBehavior::False),
+                query,
+                catalog,
+            );
+            rendered
+        }
+    }
+}
+
+fn sql_json_table_column_renders_format_json(column: &SqlJsonTableColumn) -> bool {
+    !column.sql_type.is_array
+        && !matches!(
+            column.sql_type.kind,
+            SqlTypeKind::Json | SqlTypeKind::Jsonb | SqlTypeKind::Composite | SqlTypeKind::Record
+        )
+}
+
+fn append_sql_json_table_behavior(
+    rendered: &mut String,
+    behavior: &SqlJsonTableBehavior,
+    target: &str,
+    omit_default: bool,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+) {
+    if omit_default {
+        return;
+    }
+    match behavior {
+        SqlJsonTableBehavior::Null => rendered.push_str(&format!(" NULL ON {target}")),
+        SqlJsonTableBehavior::Error => rendered.push_str(&format!(" ERROR ON {target}")),
+        SqlJsonTableBehavior::Empty => rendered.push_str(&format!(" EMPTY ON {target}")),
+        SqlJsonTableBehavior::EmptyArray => rendered.push_str(&format!(" EMPTY ARRAY ON {target}")),
+        SqlJsonTableBehavior::EmptyObject => {
+            rendered.push_str(&format!(" EMPTY OBJECT ON {target}"))
+        }
+        SqlJsonTableBehavior::Default(expr) => rendered.push_str(&format!(
+            " DEFAULT {} ON {target}",
+            render_expr(expr, query, catalog)
+        )),
+        SqlJsonTableBehavior::True => rendered.push_str(&format!(" TRUE ON {target}")),
+        SqlJsonTableBehavior::False => rendered.push_str(&format!(" FALSE ON {target}")),
+        SqlJsonTableBehavior::Unknown => rendered.push_str(&format!(" UNKNOWN ON {target}")),
+    }
+}
+
+fn quote_json_table_column_name(name: &str) -> String {
+    match name.to_ascii_lowercase().as_str() {
+        "int" | "integer" | "numeric" | "json" | "jsonb" | "char" | "character" | "varchar"
+        | "path" | "exists" | "nested" | "columns" => {
+            format!("\"{}\"", name.replace('"', "\"\""))
+        }
+        _ => quote_identifier_if_needed(name),
+    }
+}
+
+fn render_sql_json_table_type(ty: SqlType, catalog: &dyn CatalogLookup) -> String {
+    if ty.type_oid != 0
+        && let Some(row) = catalog.type_by_oid(ty.type_oid)
+        && matches!(row.typtype, 'c' | 'd' | 'e')
+    {
+        return quote_identifier_if_needed(&row.typname);
+    }
+    render_sql_type(ty)
 }
 
 fn json_table_function_name(
@@ -1662,6 +2004,11 @@ fn render_literal(value: &Value) -> String {
                 value.as_text().unwrap_or_default().replace('\'', "''")
             )
         }
+        Value::Json(json) => format!("'{}'::json", json.replace('\'', "''")),
+        Value::JsonPath(jsonpath) => format!("'{}'::jsonpath", jsonpath.replace('\'', "''")),
+        Value::Jsonb(bytes) => render_jsonb_bytes(bytes)
+            .map(|text| format!("'{}'::jsonb", text.replace('\'', "''")))
+            .unwrap_or_else(|_| "'null'::jsonb".into()),
         Value::Numeric(numeric) => numeric.render(),
         Value::Interval(interval) => {
             format!(
@@ -1675,7 +2022,7 @@ fn render_literal(value: &Value) -> String {
 
 fn render_sql_type(ty: SqlType) -> String {
     if ty.is_array {
-        return "array".into();
+        return format!("{}[]", render_sql_type(ty.element_type()));
     }
     if let Some((precision, scale)) = ty.numeric_precision_scale() {
         return format!("numeric({precision},{scale})");
@@ -1751,6 +2098,11 @@ fn var_name(var: &Var, query: &Query, catalog: &dyn CatalogLookup) -> Option<Str
                 && column_is_unambiguous(query, rtindex, &column_name) =>
         {
             Some(quote_identifier_if_needed(&column_name))
+        }
+        RangeTblEntryKind::Function {
+            call: SetReturningCall::SqlJsonTable(_),
+        } if rte.alias.is_none() && column_is_unambiguous(query, rtindex, &column_name) => {
+            Some(quote_json_table_column_name(&column_name))
         }
         RangeTblEntryKind::Result => Some(quote_identifier_if_needed(&column_name)),
         _ => Some(qualify_column(&rte.eref.aliasname, &column_name)),

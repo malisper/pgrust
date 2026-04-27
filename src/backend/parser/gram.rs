@@ -271,6 +271,21 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
         let from_offset = leading + "select distinct ".len();
         return Some(syntax_error_at(sql, from_offset, "from"));
     }
+    if lowered.starts_with("select json_table(")
+        && let Some(paren) = trimmed.find('(')
+    {
+        return Some(syntax_error_at(sql, leading + paren, "("));
+    }
+    if lowered.starts_with("select ")
+        && lowered.contains("json_table")
+        && let Some(columns_idx) = lowered.find("columns ()")
+    {
+        return Some(syntax_error_at(
+            sql,
+            leading + columns_idx + "columns (".len(),
+            ")",
+        ));
+    }
 
     if lowered.starts_with("select ")
         && keyword_boundary(trimmed, "group by grouping sets").is_some()
@@ -14598,6 +14613,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
     let mut buffers = false;
     let mut costs = true;
     let mut summary = true;
+    let mut format = ExplainFormat::Text;
     let mut timing = true;
     let mut verbose = false;
     let mut statement = None;
@@ -14606,6 +14622,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
             Rule::kw_analyze => analyze = true,
             Rule::explain_option => {
                 let mut name_rule = None;
+                let mut value_rule = None;
                 let mut bool_val = true;
                 for child in part.into_inner() {
                     match child.as_rule() {
@@ -14615,6 +14632,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
                         Rule::explain_option_value => {
                             let val = child.into_inner().next();
                             if let Some(v) = val {
+                                value_rule = Some(v.as_rule());
                                 match v.as_rule() {
                                     Rule::kw_off | Rule::kw_false => bool_val = false,
                                     _ => bool_val = true,
@@ -14631,7 +14649,12 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
                     Some(Rule::kw_summary) => summary = bool_val,
                     Some(Rule::kw_timing) => timing = bool_val,
                     Some(Rule::kw_verbose) => verbose = bool_val,
-                    _ => {} // FORMAT: parsed but ignored
+                    Some(Rule::kw_format) => {
+                        if matches!(value_rule, Some(Rule::kw_json)) {
+                            format = ExplainFormat::Json;
+                        }
+                    }
+                    _ => {} // Non-JSON FORMAT variants are parsed but ignored.
                 }
             }
             Rule::select_stmt => statement = Some(Statement::Select(build_select(part)?)),
@@ -14653,6 +14676,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
         buffers,
         costs,
         summary,
+        format,
         timing,
         verbose,
         statement: Box::new(statement.ok_or(ParseError::UnexpectedEof)?),
@@ -15300,6 +15324,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                     matches!(
                         part.as_rule(),
                         Rule::values_from_item
+                            | Rule::json_table_from_item
                             | Rule::srf_from_item
                             | Rule::derived_from_item
                             | Rule::parenthesized_from_item
@@ -15375,6 +15400,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                     | Rule::table_from_item
                     | Rule::lateral_from_item
                     | Rule::values_from_item
+                    | Rule::json_table_from_item
                     | Rule::parenthesized_table_from_item
                     | Rule::srf_from_item
                     | Rule::derived_from_item
@@ -15423,6 +15449,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 .map(build_values_row)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
+        Rule::json_table_from_item => build_json_table_from_item(pair),
         Rule::srf_from_item => {
             let mut name = None;
             let mut parsed_args = ParsedFunctionArgs::default();
@@ -15471,6 +15498,278 @@ fn build_qualified_srf_name(pair: Pair<'_, Rule>) -> Result<String, ParseError> 
         return Err(ParseError::UnexpectedEof);
     }
     Ok(parts.join("."))
+}
+
+fn build_json_table_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
+    let expr = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::json_table_expr)
+        .ok_or(ParseError::UnexpectedEof)?;
+    build_json_table_expr(expr).map(FromItem::JsonTable)
+}
+
+fn build_json_table_expr(pair: Pair<'_, Rule>) -> Result<JsonTableExpr, ParseError> {
+    let mut context = None;
+    let mut root_path = None;
+    let mut passing = Vec::new();
+    let mut columns = None;
+    let mut on_error = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr if context.is_none() => context = Some(build_expr(part)?),
+            Rule::json_table_path_spec if root_path.is_none() => {
+                root_path = Some(build_json_table_path_spec(part)?);
+            }
+            Rule::json_table_passing_clause => {
+                passing = part
+                    .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::json_table_passing_arg)
+                    .map(build_json_table_passing_arg)
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            Rule::json_table_column_definition_list => {
+                columns = Some(build_json_table_column_list(part)?);
+            }
+            Rule::json_table_on_error_clause => {
+                on_error = Some(build_json_table_behavior_clause(part)?.0);
+            }
+            _ => {}
+        }
+    }
+    Ok(JsonTableExpr {
+        context: context.ok_or(ParseError::UnexpectedEof)?,
+        root_path: root_path.ok_or(ParseError::UnexpectedEof)?,
+        passing,
+        columns: columns.ok_or(ParseError::UnexpectedEof)?,
+        on_error,
+    })
+}
+
+fn build_json_table_path_spec(pair: Pair<'_, Rule>) -> Result<JsonTablePathSpec, ParseError> {
+    let mut path = None;
+    let mut name = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::quoted_string_literal | Rule::string_literal | Rule::unicode_string_literal => {
+                path = Some(decode_string_literal_pair(part)?);
+            }
+            Rule::identifier => name = Some(build_identifier(part)),
+            _ => {}
+        }
+    }
+    Ok(JsonTablePathSpec {
+        path: path.ok_or(ParseError::UnexpectedEof)?,
+        name,
+    })
+}
+
+fn build_json_table_passing_arg(pair: Pair<'_, Rule>) -> Result<JsonTablePassingArg, ParseError> {
+    let mut expr = None;
+    let mut name = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr => expr = Some(build_expr(part)?),
+            Rule::identifier => name = Some(build_identifier(part)),
+            _ => {}
+        }
+    }
+    Ok(JsonTablePassingArg {
+        expr: expr.ok_or(ParseError::UnexpectedEof)?,
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_json_table_column_list(pair: Pair<'_, Rule>) -> Result<Vec<JsonTableColumn>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::json_table_column_definition)
+        .map(build_json_table_column)
+        .collect()
+}
+
+fn build_json_table_column(pair: Pair<'_, Rule>) -> Result<JsonTableColumn, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match inner.as_rule() {
+        Rule::json_table_ordinality_column => {
+            let name = inner
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(JsonTableColumn::Ordinality { name })
+        }
+        Rule::json_table_nested_column => {
+            let mut path = None;
+            let mut columns = None;
+            for part in inner.into_inner() {
+                match part.as_rule() {
+                    Rule::json_table_path_spec => path = Some(build_json_table_path_spec(part)?),
+                    Rule::json_table_column_definition_list => {
+                        columns = Some(build_json_table_column_list(part)?);
+                    }
+                    _ => {}
+                }
+            }
+            Ok(JsonTableColumn::Nested {
+                path: path.ok_or(ParseError::UnexpectedEof)?,
+                columns: columns.ok_or(ParseError::UnexpectedEof)?,
+            })
+        }
+        Rule::json_table_regular_column => build_json_table_regular_column(inner),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "JSON_TABLE column",
+            actual: inner.as_str().into(),
+        }),
+    }
+}
+
+fn build_json_table_regular_column(pair: Pair<'_, Rule>) -> Result<JsonTableColumn, ParseError> {
+    let mut name = None;
+    let mut type_name = None;
+    let mut exists = false;
+    let mut format_json = false;
+    let mut path = None;
+    let mut wrapper = JsonTableWrapper::Unspecified;
+    let mut quotes = JsonTableQuotes::Unspecified;
+    let mut on_empty = None;
+    let mut on_error = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::type_name => type_name = Some(build_type_name(part)),
+            Rule::json_table_exists_marker => exists = true,
+            Rule::json_table_format_clause => format_json = true,
+            Rule::json_table_path_clause => {
+                path = Some(
+                    part.into_inner()
+                        .find(|inner| inner.as_rule() == Rule::json_table_path_spec)
+                        .ok_or(ParseError::UnexpectedEof)
+                        .and_then(build_json_table_path_spec)?,
+                );
+            }
+            Rule::json_table_wrapper_clause => wrapper = build_json_table_wrapper(part)?,
+            Rule::json_table_quotes_clause => quotes = build_json_table_quotes(part)?,
+            Rule::json_table_column_behavior_clause => {
+                let (behavior, target) = build_json_table_behavior_clause(part)?;
+                match target {
+                    JsonTableBehaviorTarget::Empty => on_empty = Some(behavior),
+                    JsonTableBehaviorTarget::Error => on_error = Some(behavior),
+                }
+            }
+            _ => {}
+        }
+    }
+    let name = name.ok_or(ParseError::UnexpectedEof)?;
+    let type_name = type_name.ok_or(ParseError::UnexpectedEof)?;
+    if exists {
+        if on_empty.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "ON ERROR behavior for JSON_TABLE EXISTS column",
+                actual: "ON EMPTY".into(),
+            });
+        }
+        Ok(JsonTableColumn::Exists {
+            name,
+            type_name,
+            path,
+            on_error,
+        })
+    } else {
+        Ok(JsonTableColumn::Regular {
+            name,
+            type_name,
+            path,
+            format_json,
+            wrapper,
+            quotes,
+            on_empty,
+            on_error,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonTableBehaviorTarget {
+    Empty,
+    Error,
+}
+
+fn build_json_table_behavior_clause(
+    pair: Pair<'_, Rule>,
+) -> Result<(JsonTableBehavior, JsonTableBehaviorTarget), ParseError> {
+    let raw = pair.as_str().to_ascii_lowercase();
+    let behavior = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::json_table_behavior)
+        .ok_or(ParseError::UnexpectedEof)
+        .and_then(build_json_table_behavior)?;
+    let target = if raw.ends_with("on empty") {
+        JsonTableBehaviorTarget::Empty
+    } else if raw.ends_with("on error") {
+        JsonTableBehaviorTarget::Error
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON EMPTY or ON ERROR",
+            actual: raw,
+        });
+    };
+    Ok((behavior, target))
+}
+
+fn build_json_table_behavior(pair: Pair<'_, Rule>) -> Result<JsonTableBehavior, ParseError> {
+    let raw = pair.as_str().trim().to_ascii_lowercase();
+    if raw.starts_with("default") {
+        let expr = pair
+            .into_inner()
+            .find(|part| part.as_rule() == Rule::expr)
+            .ok_or(ParseError::UnexpectedEof)?;
+        return Ok(JsonTableBehavior::Default(build_expr(expr)?));
+    }
+    match raw.as_str() {
+        "null" => Ok(JsonTableBehavior::Null),
+        "error" => Ok(JsonTableBehavior::Error),
+        "empty" => Ok(JsonTableBehavior::Empty),
+        "empty array" => Ok(JsonTableBehavior::EmptyArray),
+        "empty object" => Ok(JsonTableBehavior::EmptyObject),
+        "true" => Ok(JsonTableBehavior::True),
+        "false" => Ok(JsonTableBehavior::False),
+        "unknown" => Ok(JsonTableBehavior::Unknown),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "JSON_TABLE behavior",
+            actual: raw,
+        }),
+    }
+}
+
+fn build_json_table_wrapper(pair: Pair<'_, Rule>) -> Result<JsonTableWrapper, ParseError> {
+    let raw = pair.as_str().to_ascii_lowercase();
+    if raw.starts_with("without") {
+        Ok(JsonTableWrapper::Without)
+    } else if raw.contains("unconditional") {
+        Ok(JsonTableWrapper::Unconditional)
+    } else if raw.contains("conditional") {
+        Ok(JsonTableWrapper::Conditional)
+    } else if raw.starts_with("with") {
+        Ok(JsonTableWrapper::Unconditional)
+    } else {
+        Err(ParseError::UnexpectedToken {
+            expected: "JSON_TABLE wrapper",
+            actual: raw,
+        })
+    }
+}
+
+fn build_json_table_quotes(pair: Pair<'_, Rule>) -> Result<JsonTableQuotes, ParseError> {
+    let raw = pair.as_str().to_ascii_lowercase();
+    if raw.starts_with("keep") {
+        Ok(JsonTableQuotes::Keep)
+    } else if raw.starts_with("omit") {
+        Ok(JsonTableQuotes::Omit)
+    } else {
+        Err(ParseError::UnexpectedToken {
+            expected: "JSON_TABLE quotes",
+            actual: raw,
+        })
+    }
 }
 
 fn build_join_clause(
@@ -16064,16 +16363,14 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                         }
                         Rule::on_commit_clause => on_commit = build_on_commit_action(inner)?,
                         Rule::table_storage_clause => validate_table_storage_clause(inner)?,
-                        Rule::ctas_query | Rule::select_stmt | Rule::execute_prepared_stmt => {
+                        Rule::ctas_query
+                        | Rule::select_stmt
+                        | Rule::parenthesized_values_stmt
+                        | Rule::values_stmt
+                        | Rule::execute_prepared_stmt => {
                             let (parsed_query, parsed_sql) = build_ctas_query(inner)?;
                             query = Some(parsed_query);
                             query_sql = parsed_sql;
-                        }
-                        Rule::values_stmt => {
-                            query_sql = Some(inner.as_str().trim().to_string());
-                            query = Some(CreateTableAsQuery::Select(wrap_values_as_select(
-                                build_values_statement(inner)?,
-                            )));
                         }
                         Rule::matview_data_clause => {
                             skip_data = inner.as_str().to_ascii_lowercase().contains("no");
@@ -16148,6 +16445,17 @@ fn build_ctas_query(
             let sql = pair.as_str().trim().to_string();
             Ok((
                 CreateTableAsQuery::Select(wrap_values_as_select(build_values_statement(pair)?)),
+                Some(sql),
+            ))
+        }
+        Rule::parenthesized_values_stmt => {
+            let sql = pair.as_str().trim().to_string();
+            let values = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::values_stmt)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok((
+                CreateTableAsQuery::Select(wrap_values_as_select(build_values_statement(values)?)),
                 Some(sql),
             ))
         }
@@ -23857,6 +24165,17 @@ mod tests {
             "select sum(id) over (rows between unbounded preceding and current row exclude ties) from people",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn parse_json_table_from_item() {
+        let sql = "SELECT * FROM JSON_TABLE('[]', 'strict $.a' COLUMNS (js2 int PATH '$') EMPTY ON ERROR)";
+        match parse_statement(sql).unwrap() {
+            Statement::Select(select) => {
+                assert!(matches!(select.from, Some(FromItem::JsonTable(_))));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

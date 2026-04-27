@@ -526,6 +526,9 @@ fn finalize_set_returning_call(
             output_columns,
             with_ordinality,
         },
+        sql @ SetReturningCall::SqlJsonTable(_) => {
+            sql.map_exprs(|arg| finalize_expr_subqueries(arg, catalog, subplans))
+        }
     }
 }
 
@@ -1018,6 +1021,9 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
             output_columns,
             with_ordinality,
         },
+        sql @ SetReturningCall::SqlJsonTable(_) => {
+            sql.map_exprs(|arg| rebase_expr_subplan_ids(arg, base))
+        }
     }
 }
 

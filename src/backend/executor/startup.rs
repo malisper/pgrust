@@ -192,6 +192,9 @@ fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
         | SetReturningCall::StringTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => args.iter().any(expr_uses_outer_columns),
+        SetReturningCall::SqlJsonTable(_) => set_returning_call_exprs(call)
+            .iter()
+            .any(|expr| expr_uses_outer_columns(expr)),
     }
 }
 

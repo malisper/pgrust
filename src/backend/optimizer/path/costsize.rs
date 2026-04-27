@@ -3088,6 +3088,9 @@ fn set_returning_call_uses_immediate_outer_columns(call: &SetReturningCall) -> b
         | SetReturningCall::UserDefined { args, .. } => {
             args.iter().any(expr_uses_immediate_outer_columns)
         }
+        SetReturningCall::SqlJsonTable(_) => set_returning_call_exprs(call)
+            .iter()
+            .any(|expr| expr_uses_immediate_outer_columns(expr)),
     }
 }
 
