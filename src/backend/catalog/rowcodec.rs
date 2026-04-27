@@ -511,29 +511,43 @@ pub(crate) fn pg_trigger_row_from_values(values: Vec<Value>) -> Result<PgTrigger
 pub(crate) fn pg_publication_row_from_values(
     values: Vec<Value>,
 ) -> Result<PgPublicationRow, CatalogError> {
+    let has_puballsequences = values.len() >= 11;
+    let action_offset = if has_puballsequences { 1 } else { 0 };
     Ok(PgPublicationRow {
         oid: expect_oid(&values[0])?,
         pubname: expect_text(&values[1])?,
         pubowner: expect_oid(&values[2])?,
         puballtables: expect_bool(&values[3])?,
-        pubinsert: expect_bool(&values[4])?,
-        pubupdate: expect_bool(&values[5])?,
-        pubdelete: expect_bool(&values[6])?,
-        pubtruncate: expect_bool(&values[7])?,
-        pubviaroot: expect_bool(&values[8])?,
-        pubgencols: expect_char(&values[9], "pubgencols")?,
+        puballsequences: if has_puballsequences {
+            expect_bool(&values[4])?
+        } else {
+            false
+        },
+        pubinsert: expect_bool(&values[4 + action_offset])?,
+        pubupdate: expect_bool(&values[5 + action_offset])?,
+        pubdelete: expect_bool(&values[6 + action_offset])?,
+        pubtruncate: expect_bool(&values[7 + action_offset])?,
+        pubviaroot: expect_bool(&values[8 + action_offset])?,
+        pubgencols: expect_char(&values[9 + action_offset], "pubgencols")?,
     })
 }
 
 pub(crate) fn pg_publication_rel_row_from_values(
     values: Vec<Value>,
 ) -> Result<PgPublicationRelRow, CatalogError> {
+    let has_prexcept = values.len() >= 6;
+    let varlena_offset = if has_prexcept { 1 } else { 0 };
     Ok(PgPublicationRelRow {
         oid: expect_oid(&values[0])?,
         prpubid: expect_oid(&values[1])?,
         prrelid: expect_oid(&values[2])?,
-        prqual: expect_nullable_text(&values[3])?,
-        prattrs: match values.get(4) {
+        prexcept: if has_prexcept {
+            expect_bool(&values[3])?
+        } else {
+            false
+        },
+        prqual: expect_nullable_text(&values[3 + varlena_offset])?,
+        prattrs: match values.get(4 + varlena_offset) {
             Some(Value::Null) | None => None,
             Some(value) => Some(parse_indkey_value(value)?),
         },
@@ -2058,6 +2072,7 @@ fn pg_publication_row_values(row: PgPublicationRow) -> Vec<Value> {
         Value::Text(row.pubname.into()),
         Value::Int32(row.pubowner as i32),
         Value::Bool(row.puballtables),
+        Value::Bool(row.puballsequences),
         Value::Bool(row.pubinsert),
         Value::Bool(row.pubupdate),
         Value::Bool(row.pubdelete),
@@ -2072,6 +2087,7 @@ fn pg_publication_rel_row_values(row: PgPublicationRelRow) -> Vec<Value> {
         Value::Int32(row.oid as i32),
         Value::Int32(row.prpubid as i32),
         Value::Int32(row.prrelid as i32),
+        Value::Bool(row.prexcept),
         nullable_text_value(row.prqual),
         nullable_array_value(row.prattrs.map(int16_vector_value)),
     ]

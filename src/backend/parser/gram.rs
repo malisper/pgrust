@@ -2673,7 +2673,7 @@ fn build_alter_publication_statement(sql: &str) -> Result<AlterPublicationStatem
             let (options, rest) = parse_publication_options_clause(rest)?;
             (AlterPublicationAction::SetOptions(options), rest)
         } else {
-            let (target, rest) = parse_publication_target_spec(rest)?;
+            let (target, rest) = parse_alter_publication_set_target(rest)?;
             (AlterPublicationAction::SetObjects(target), rest)
         }
     } else if keyword_at_start(rest, "add") {
@@ -3176,16 +3176,140 @@ fn build_comment_on_constraint_statement(
 fn parse_create_publication_target(
     input: &str,
 ) -> Result<(PublicationTargetSpec, &str), ParseError> {
-    if let Some(rest) = consume_keywords(input, &["all", "tables"]) {
-        return Ok((
-            PublicationTargetSpec {
-                for_all_tables: true,
-                objects: Vec::new(),
-            },
-            rest,
-        ));
+    if let Some(target) = parse_publication_all_target_spec(input)? {
+        return Ok(target);
     }
     parse_publication_target_spec(input)
+}
+
+fn parse_alter_publication_set_target(
+    input: &str,
+) -> Result<(PublicationTargetSpec, &str), ParseError> {
+    if let Some(target) = parse_publication_all_target_spec(input)? {
+        return Ok(target);
+    }
+    parse_publication_target_spec(input)
+}
+
+fn parse_publication_all_target_spec(
+    input: &str,
+) -> Result<Option<(PublicationTargetSpec, &str)>, ParseError> {
+    let mut rest = input.trim_start();
+    let mut for_all_tables = false;
+    let mut for_all_sequences = false;
+    let mut except_tables = Vec::new();
+    let mut parsed_any = false;
+
+    loop {
+        if let Some(next) = consume_keywords(rest, &["all", "tables"]) {
+            if for_all_tables {
+                return Err(duplicate_publication_all_target_error("ALL TABLES"));
+            }
+            for_all_tables = true;
+            parsed_any = true;
+            let (tables, next) = parse_publication_except_clause(next)?;
+            except_tables = tables;
+            rest = next.trim_start();
+        } else if let Some(next) = consume_keywords(rest, &["all", "sequences"]) {
+            if for_all_sequences {
+                return Err(duplicate_publication_all_target_error("ALL SEQUENCES"));
+            }
+            for_all_sequences = true;
+            parsed_any = true;
+            rest = next.trim_start();
+        } else if parsed_any {
+            return Err(ParseError::UnexpectedToken {
+                expected: "ALL TABLES or ALL SEQUENCES",
+                actual: rest.into(),
+            });
+        } else {
+            return Ok(None);
+        }
+
+        let Some(after_comma) = rest.strip_prefix(',') else {
+            break;
+        };
+        rest = after_comma.trim_start();
+    }
+
+    Ok(Some((
+        PublicationTargetSpec {
+            for_all_tables,
+            for_all_sequences,
+            except_tables,
+            objects: Vec::new(),
+        },
+        rest,
+    )))
+}
+
+fn parse_publication_except_clause(
+    input: &str,
+) -> Result<(Vec<PublicationTableSpec>, &str), ParseError> {
+    let rest = input.trim_start();
+    if !keyword_at_start(rest, "except") {
+        return Ok((Vec::new(), input));
+    }
+
+    let rest = consume_keyword(rest, "except").trim_start();
+    let (segment, rest) = take_parenthesized_segment(rest)?;
+    if !keyword_at_start(&segment, "table") {
+        return Err(publication_missing_object_kind_error());
+    }
+    let (target, trailing) = parse_publication_target_spec(&segment)?;
+    if !trailing.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of publication EXCEPT list",
+            actual: trailing.trim().into(),
+        });
+    }
+    if target.objects.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "TABLE ...",
+            actual: segment,
+        });
+    }
+    let except_tables = target
+        .objects
+        .into_iter()
+        .map(|object| match object {
+            PublicationObjectSpec::Table(table) => {
+                if !table.column_names.is_empty() || table.where_clause.is_some() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "publication EXCEPT table name",
+                        actual: table.relation_name,
+                    });
+                }
+                Ok(table)
+            }
+            PublicationObjectSpec::Schema(_) => Err(ParseError::UnexpectedToken {
+                expected: "TABLE ...",
+                actual: segment.clone(),
+            }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((except_tables, rest))
+}
+
+fn duplicate_publication_all_target_error(target: &'static str) -> ParseError {
+    ParseError::DetailedError {
+        message: "invalid publication object list".into(),
+        detail: Some(format!("{target} can be specified only once.")),
+        hint: None,
+        sqlstate: "42601",
+    }
+}
+
+fn publication_missing_object_kind_error() -> ParseError {
+    ParseError::DetailedError {
+        message: "invalid publication object list".into(),
+        detail: Some(
+            "One of TABLE or TABLES IN SCHEMA must be specified before a standalone table or schema name."
+                .into(),
+        ),
+        hint: None,
+        sqlstate: "42601",
+    }
 }
 
 fn parse_publication_target_spec(input: &str) -> Result<(PublicationTargetSpec, &str), ParseError> {
@@ -3202,10 +3326,7 @@ fn parse_publication_target_spec(input: &str) -> Result<(PublicationTargetSpec, 
         rest = next;
         PublicationObjectMode::Schema
     } else {
-        return Err(ParseError::UnexpectedToken {
-            expected: "TABLE ... or TABLES IN SCHEMA ...",
-            actual: rest.into(),
-        });
+        return Err(publication_missing_object_kind_error());
     };
 
     let mut objects = Vec::new();
@@ -3255,6 +3376,8 @@ fn parse_publication_target_spec(input: &str) -> Result<(PublicationTargetSpec, 
     Ok((
         PublicationTargetSpec {
             for_all_tables: false,
+            for_all_sequences: false,
+            except_tables: Vec::new(),
             objects,
         },
         rest,

@@ -3008,6 +3008,8 @@ pub enum PublicationObjectSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PublicationTargetSpec {
     pub for_all_tables: bool,
+    pub for_all_sequences: bool,
+    pub except_tables: Vec<PublicationTableSpec>,
     pub objects: Vec<PublicationObjectSpec>,
 }
 

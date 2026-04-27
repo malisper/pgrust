@@ -11,6 +11,7 @@ use crate::backend::parser::{
     PublicationTableSpec, PublicationTargetSpec, PublishGeneratedColumns, RawTypeName, SqlExpr,
     SqlType, SqlTypeKind, function_arg_values, parse_expr,
 };
+use crate::backend::utils::cache::catcache::CatCache;
 use crate::include::catalog::{
     CURRENT_DATABASE_NAME, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID, PUBLISH_GENCOLS_NONE,
     PUBLISH_GENCOLS_STORED, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow,
@@ -88,7 +89,12 @@ impl Database {
                 "must be superuser to create FOR ALL TABLES publication",
             ));
         }
-        let resolved = resolve_publication_targets(
+        if stmt.target.for_all_sequences && !current_role.rolsuper {
+            return Err(must_be_superuser_error(
+                "must be superuser to create FOR ALL SEQUENCES publication",
+            ));
+        }
+        let mut resolved = resolve_publication_targets(
             self,
             client_id,
             xid,
@@ -98,6 +104,16 @@ impl Database {
             DuplicateHandling::Error,
             true,
         )?;
+        if stmt.target.for_all_tables {
+            resolved.relation_rows = resolve_publication_except_tables(
+                self,
+                client_id,
+                xid,
+                cid,
+                configured_search_path,
+                &stmt.target.except_tables,
+            )?;
+        }
         if !resolved.namespace_rows.is_empty() && !current_role.rolsuper {
             return Err(must_be_superuser_error(
                 "must be superuser to create FOR TABLES IN SCHEMA publication",
@@ -106,6 +122,7 @@ impl Database {
 
         let mut row = publication_row_defaults(&stmt.publication_name, auth.current_user_oid());
         row.puballtables = stmt.target.for_all_tables;
+        row.puballsequences = stmt.target.for_all_sequences;
         apply_publication_options(&mut row, &stmt.options)?;
 
         let ctx = CatalogWriteContext {
@@ -208,13 +225,14 @@ impl Database {
                     return Err(permission_denied_for_database_error());
                 }
                 if (publication.puballtables
+                    || publication.puballsequences
                     || !catcache
                         .publication_namespace_rows_for_publication(publication.oid)
                         .is_empty())
                     && !new_owner_row.rolsuper
                 {
                     return Err(must_be_superuser_error(
-                        "new owner of FOR ALL TABLES or schema publication must be superuser",
+                        "new owner of FOR ALL TABLES or ALL SEQUENCES or TABLES IN SCHEMA publication must be superuser",
                     ));
                 }
                 // :HACK: PostgreSQL tracks publication ownership through shared
@@ -391,36 +409,94 @@ impl Database {
                     .map_err(map_catalog_error)?
             }
             AlterPublicationAction::SetObjects(target) => {
-                if publication.puballtables {
-                    return Err(publication_all_tables_membership_error(
-                        &publication.pubname,
-                        publication_membership_kind(target),
-                    ));
+                if publication_target_is_all_kind(target) {
+                    if target.for_all_tables && !current_role.rolsuper {
+                        return Err(must_be_superuser_error(
+                            "must be superuser to set ALL TABLES",
+                        ));
+                    }
+                    if target.for_all_sequences && !current_role.rolsuper {
+                        return Err(must_be_superuser_error(
+                            "must be superuser to set ALL SEQUENCES",
+                        ));
+                    }
+                    if !publication_supports_all_target_operations(&publication, &catcache) {
+                        return Err(publication_all_target_unsupported_error(
+                            &publication.pubname,
+                            if target.for_all_tables {
+                                "ALL TABLES"
+                            } else {
+                                "ALL SEQUENCES"
+                            },
+                        ));
+                    }
+                    let relation_rows = if target.for_all_tables {
+                        resolve_publication_except_tables(
+                            self,
+                            client_id,
+                            xid,
+                            cid,
+                            configured_search_path,
+                            &target.except_tables,
+                        )?
+                    } else {
+                        Vec::new()
+                    };
+                    let membership_effect = self
+                        .catalog
+                        .write()
+                        .replace_publication_memberships_mvcc(
+                            publication.oid,
+                            relation_rows,
+                            Vec::new(),
+                            &ctx,
+                        )
+                        .map_err(map_catalog_error)?;
+                    let row_effect = self
+                        .catalog
+                        .write()
+                        .replace_publication_row_mvcc(
+                            PgPublicationRow {
+                                puballtables: target.for_all_tables,
+                                puballsequences: target.for_all_sequences,
+                                ..publication
+                            },
+                            &ctx,
+                        )
+                        .map_err(map_catalog_error)?;
+                    merge_catalog_effects(membership_effect, row_effect)
+                } else {
+                    if publication.puballtables {
+                        return Err(publication_all_tables_membership_error(
+                            &publication.pubname,
+                            publication_membership_kind(target),
+                        ));
+                    }
+                    let resolved = resolve_publication_targets(
+                        self,
+                        client_id,
+                        xid,
+                        cid,
+                        configured_search_path,
+                        target,
+                        DuplicateHandling::Dedup,
+                        true,
+                    )?;
+                    if !resolved.namespace_rows.is_empty() && !current_role.rolsuper {
+                        return Err(must_be_superuser_error(
+                            "must be superuser to set TABLES IN SCHEMA for publication",
+                        ));
+                    }
+                    self.catalog
+                        .write()
+                        .replace_publication_memberships_mvcc(
+                            publication.oid,
+                            resolved.relation_rows,
+                            resolved.namespace_rows,
+                            &ctx,
+                        )
+                        .map_err(map_catalog_error)?
                 }
-                let resolved = resolve_publication_targets(
-                    self,
-                    client_id,
-                    xid,
-                    cid,
-                    configured_search_path,
-                    target,
-                    DuplicateHandling::Dedup,
-                    true,
-                )?;
-                if !resolved.namespace_rows.is_empty() && !current_role.rolsuper {
-                    return Err(must_be_superuser_error(
-                        "must be superuser to set TABLES IN SCHEMA for publication",
-                    ));
-                }
-                self.catalog
-                    .write()
-                    .replace_publication_memberships_mvcc(
-                        publication.oid,
-                        resolved.relation_rows,
-                        resolved.namespace_rows,
-                        &ctx,
-                    )
-                    .map_err(map_catalog_error)?
             }
         };
 
@@ -629,6 +705,7 @@ fn resolve_publication_targets(
                     oid: 0,
                     prpubid: 0,
                     prrelid: relation.relation_oid,
+                    prexcept: false,
                     prqual,
                     prattrs: publication_column_numbers(
                         &relation,
@@ -665,6 +742,42 @@ fn resolve_publication_targets(
         relation_rows,
         namespace_rows,
     })
+}
+
+fn resolve_publication_except_tables(
+    db: &Database,
+    client_id: ClientId,
+    xid: TransactionId,
+    cid: CommandId,
+    configured_search_path: Option<&[String]>,
+    except_tables: &[PublicationTableSpec],
+) -> Result<Vec<PgPublicationRelRow>, ExecError> {
+    let target = PublicationTargetSpec {
+        for_all_tables: false,
+        for_all_sequences: false,
+        except_tables: Vec::new(),
+        objects: except_tables
+            .iter()
+            .cloned()
+            .map(PublicationObjectSpec::Table)
+            .collect(),
+    };
+    let mut resolved = resolve_publication_targets(
+        db,
+        client_id,
+        xid,
+        cid,
+        configured_search_path,
+        &target,
+        DuplicateHandling::Error,
+        true,
+    )?;
+    for row in &mut resolved.relation_rows {
+        row.prexcept = true;
+        row.prqual = None;
+        row.prattrs = None;
+    }
+    Ok(resolved.relation_rows)
 }
 
 fn reject_publication_drop_filters(target: &PublicationTargetSpec) -> Result<(), ExecError> {
@@ -1239,12 +1352,45 @@ fn publication_membership_kind(target: &PublicationTargetSpec) -> PublicationMem
     }
 }
 
+fn publication_target_is_all_kind(target: &PublicationTargetSpec) -> bool {
+    target.for_all_tables || target.for_all_sequences
+}
+
+fn publication_supports_all_target_operations(
+    publication: &PgPublicationRow,
+    catcache: &CatCache,
+) -> bool {
+    publication.puballtables
+        || publication.puballsequences
+        || (catcache
+            .publication_rel_rows_for_publication(publication.oid)
+            .is_empty()
+            && catcache
+                .publication_namespace_rows_for_publication(publication.oid)
+                .is_empty())
+}
+
+fn merge_catalog_effects(
+    mut left: CatalogMutationEffect,
+    right: CatalogMutationEffect,
+) -> CatalogMutationEffect {
+    left.touched_catalogs.extend(right.touched_catalogs);
+    left.created_rels.extend(right.created_rels);
+    left.dropped_rels.extend(right.dropped_rels);
+    left.relation_oids.extend(right.relation_oids);
+    left.namespace_oids.extend(right.namespace_oids);
+    left.type_oids.extend(right.type_oids);
+    left.full_reset |= right.full_reset;
+    left
+}
+
 fn publication_row_defaults(publication_name: &str, owner_oid: u32) -> PgPublicationRow {
     PgPublicationRow {
         oid: 0,
         pubname: publication_name.to_ascii_lowercase(),
         pubowner: owner_oid,
         puballtables: false,
+        puballsequences: false,
         pubinsert: true,
         pubupdate: true,
         pubdelete: true,
@@ -1383,12 +1529,24 @@ fn publication_all_tables_membership_error(
         message: format!("publication \"{publication_name}\" is defined as FOR ALL TABLES"),
         detail: Some(match membership_kind {
             PublicationMembershipKind::Table => {
-                "Tables cannot be added to or dropped from FOR ALL TABLES publications.".into()
+                "Tables or sequences cannot be added to or dropped from FOR ALL TABLES publications.".into()
             }
             PublicationMembershipKind::Schema => {
                 "Schemas cannot be added to or dropped from FOR ALL TABLES publications.".into()
             }
         }),
+        hint: None,
+        sqlstate: "55000",
+    }
+}
+
+fn publication_all_target_unsupported_error(publication_name: &str, target: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("publication \"{publication_name}\" does not support {target} operations"),
+        detail: Some(
+            "This operation requires the publication to be defined as FOR ALL TABLES/SEQUENCES or to be empty."
+                .into(),
+        ),
         hint: None,
         sqlstate: "55000",
     }
@@ -1571,6 +1729,286 @@ mod tests {
             .unwrap()
     }
 
+    fn publication_all_flags(
+        db: &Database,
+        session: &mut Session,
+        publication_name: &str,
+    ) -> (bool, bool) {
+        let result = session
+            .execute(
+                db,
+                &format!(
+                    "select puballtables, puballsequences from pg_publication where pubname = '{publication_name}'"
+                ),
+            )
+            .unwrap();
+        let StatementResult::Query { rows, .. } = result else {
+            panic!("expected query result, got {result:?}");
+        };
+        assert_eq!(rows.len(), 1);
+        match (&rows[0][0], &rows[0][1]) {
+            (Value::Bool(all_tables), Value::Bool(all_sequences)) => (*all_tables, *all_sequences),
+            other => panic!("expected boolean publication flags, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_publication_for_all_sequences_sets_catalog_flag() {
+        let base = temp_dir("create_all_sequences");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "create publication pub for all sequences")
+            .unwrap();
+
+        assert_eq!(
+            publication_all_flags(&db, &mut session, "pub"),
+            (false, true)
+        );
+    }
+
+    #[test]
+    fn alter_publication_set_all_sequences_toggles_all_target_flags() {
+        let base = temp_dir("alter_all_sequences");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create publication pub").unwrap();
+
+        session
+            .execute(&db, "alter publication pub set all tables, all sequences")
+            .unwrap();
+        assert_eq!(
+            publication_all_flags(&db, &mut session, "pub"),
+            (true, true)
+        );
+
+        session
+            .execute(&db, "alter publication pub set all tables")
+            .unwrap();
+        assert_eq!(
+            publication_all_flags(&db, &mut session, "pub"),
+            (true, false)
+        );
+
+        session
+            .execute(&db, "alter publication pub set all sequences")
+            .unwrap();
+        assert_eq!(
+            publication_all_flags(&db, &mut session, "pub"),
+            (false, true)
+        );
+    }
+
+    #[test]
+    fn alter_publication_set_all_sequences_rejects_non_empty_publication() {
+        let base = temp_dir("alter_all_sequences_non_empty");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table widgets (id int4)")
+            .unwrap();
+        session
+            .execute(&db, "create publication pub for table widgets")
+            .unwrap();
+
+        let err = session
+            .execute(&db, "alter publication pub set all sequences")
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError { message, .. } => assert_eq!(
+                message,
+                "publication \"pub\" does not support ALL SEQUENCES operations"
+            ),
+            other => panic!("expected detailed error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_publication_for_all_tables_except_records_excluded_tables() {
+        let base = temp_dir("create_all_tables_except");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table widgets (id int4)")
+            .unwrap();
+        session
+            .execute(&db, "create table gadgets (id int4)")
+            .unwrap();
+
+        session
+            .execute(
+                &db,
+                "create publication pub for all tables except (table widgets, gadgets)",
+            )
+            .unwrap();
+
+        assert_eq!(
+            publication_all_flags(&db, &mut session, "pub"),
+            (true, false)
+        );
+        let result = session
+            .execute(
+                &db,
+                "select c.relname, pr.prexcept \
+                 from pg_publication p \
+                 join pg_publication_rel pr on p.oid = pr.prpubid \
+                 join pg_class c on c.oid = pr.prrelid \
+                 where p.pubname = 'pub' \
+                 order by c.relname",
+            )
+            .unwrap();
+        let StatementResult::Query { rows, .. } = result else {
+            panic!("expected query result, got {result:?}");
+        };
+        assert_eq!(
+            rows,
+            vec![
+                vec![Value::Text("gadgets".into()), Value::Bool(true)],
+                vec![Value::Text("widgets".into()), Value::Bool(true)],
+            ]
+        );
+
+        let result = session
+            .execute(
+                &db,
+                "select n.nspname || '.' || c.relname \
+                 from pg_class c \
+                 join pg_namespace n on n.oid = c.relnamespace \
+                 join pg_publication_rel pr on c.oid = pr.prrelid \
+                 join pg_publication p on p.oid = pr.prpubid \
+                 where p.pubname = 'pub' and pr.prexcept \
+                 order by 1",
+            )
+            .unwrap();
+        let StatementResult::Query { rows, .. } = result else {
+            panic!("expected query result, got {result:?}");
+        };
+        assert_eq!(
+            rows,
+            vec![
+                vec![Value::Text("public.gadgets".into())],
+                vec![Value::Text("public.widgets".into())],
+            ]
+        );
+    }
+
+    #[test]
+    fn alter_publication_set_all_tables_except_replaces_and_clears_exclusions() {
+        let base = temp_dir("alter_all_tables_except");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table widgets (id int4)")
+            .unwrap();
+        session
+            .execute(&db, "create table gadgets (id int4)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create publication pub for all tables except (table widgets)",
+            )
+            .unwrap();
+
+        session
+            .execute(
+                &db,
+                "alter publication pub set all tables except (table gadgets)",
+            )
+            .unwrap();
+        let result = session
+            .execute(
+                &db,
+                "select c.relname \
+                 from pg_publication p \
+                 join pg_publication_rel pr on p.oid = pr.prpubid \
+                 join pg_class c on c.oid = pr.prrelid \
+                 where p.pubname = 'pub' and pr.prexcept \
+                 order by c.relname",
+            )
+            .unwrap();
+        let StatementResult::Query { rows, .. } = result else {
+            panic!("expected query result, got {result:?}");
+        };
+        assert_eq!(rows, vec![vec![Value::Text("gadgets".into())]]);
+
+        session
+            .execute(&db, "alter publication pub set all tables")
+            .unwrap();
+        let result = session
+            .execute(
+                &db,
+                "select count(*) from pg_publication p \
+                 join pg_publication_rel pr on p.oid = pr.prpubid \
+                 where p.pubname = 'pub'",
+            )
+            .unwrap();
+        let StatementResult::Query { rows, .. } = result else {
+            panic!("expected query result, got {result:?}");
+        };
+        assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        assert_eq!(
+            publication_all_flags(&db, &mut session, "pub"),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn publication_describe_queries_separate_included_and_except_publications() {
+        let base = temp_dir("describe_all_tables_except");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table widgets (id int4)")
+            .unwrap();
+        session
+            .execute(&db, "create publication pub_all for all tables")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create publication pub_except for all tables except (table widgets)",
+            )
+            .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widgets")
+            .unwrap();
+
+        let included_sql = format!(
+            "select pubname \
+             from pg_publication p \
+             where p.puballtables \
+               and pg_relation_is_publishable('{}') \
+               and not exists ( \
+                   select 1 \
+                   from pg_publication_rel pr \
+                   where pr.prpubid = p.oid and pr.prrelid = '{}' and pr.prexcept) \
+             order by 1",
+            entry.relation_oid, entry.relation_oid
+        );
+        let result = session.execute(&db, &included_sql).unwrap();
+        let StatementResult::Query { rows, .. } = result else {
+            panic!("expected query result, got {result:?}");
+        };
+        assert_eq!(rows, vec![vec![Value::Text("pub_all".into())]]);
+
+        let except_sql = format!(
+            "select pubname \
+             from pg_publication p \
+             join pg_publication_rel pr on p.oid = pr.prpubid \
+             where pr.prrelid = '{}' and pr.prexcept \
+             order by 1",
+            entry.relation_oid
+        );
+        let result = session.execute(&db, &except_sql).unwrap();
+        let StatementResult::Query { rows, .. } = result else {
+            panic!("expected query result, got {result:?}");
+        };
+        assert_eq!(rows, vec![vec![Value::Text("pub_except".into())]]);
+    }
+
     #[test]
     fn alter_publication_owner_to_checks_database_create_on_target_role() {
         let base = temp_dir("owner_target_create");
@@ -1672,8 +2110,9 @@ mod tests {
             .execute(&db, "alter publication pub owner to target")
             .unwrap_err();
         assert!(
-            format!("{err:?}")
-                .contains("new owner of FOR ALL TABLES or schema publication must be superuser")
+            format!("{err:?}").contains(
+                "new owner of FOR ALL TABLES or ALL SEQUENCES or TABLES IN SCHEMA publication must be superuser"
+            )
         );
         assert_eq!(publication_owner_name(&db, "pub"), "postgres");
     }
@@ -1696,8 +2135,9 @@ mod tests {
             .execute(&db, "alter publication pub owner to target")
             .unwrap_err();
         assert!(
-            format!("{err:?}")
-                .contains("new owner of FOR ALL TABLES or schema publication must be superuser")
+            format!("{err:?}").contains(
+                "new owner of FOR ALL TABLES or ALL SEQUENCES or TABLES IN SCHEMA publication must be superuser"
+            )
         );
         assert_eq!(publication_owner_name(&db, "pub"), "postgres");
     }
@@ -1720,7 +2160,9 @@ mod tests {
         match table_err {
             ExecError::DetailedError { detail, .. } => assert_eq!(
                 detail.as_deref(),
-                Some("Tables cannot be added to or dropped from FOR ALL TABLES publications.")
+                Some(
+                    "Tables or sequences cannot be added to or dropped from FOR ALL TABLES publications."
+                )
             ),
             other => panic!("expected detailed error, got {other:?}"),
         }
