@@ -363,6 +363,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::Parse(crate::backend::parser::ParseError::AmbiguousColumn(name)) => {
             return find_last_identifier_position(sql, name);
         }
+        ExecError::Parse(crate::backend::parser::ParseError::InvalidFromClauseReference(name))
+        | ExecError::Parse(crate::backend::parser::ParseError::MissingFromClauseEntry(name)) => {
+            return find_last_relation_reference_position(sql, name)
+                .or_else(|| find_case_insensitive_token_position(sql, name));
+        }
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
             expected: "GROUP BY position in select list",
             actual,
@@ -1968,8 +1973,26 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
             "CTE \"{cte_name}\" is below the aggregate's semantic level."
         ));
     }
+    if response.detail.is_none()
+        && let Some(table_name) = invalid_from_clause_reference_table(e)
+    {
+        response.detail = Some(format!(
+            "There is an entry for table \"{table_name}\", but it cannot be referenced from this part of the query."
+        ));
+    }
 
     response
+}
+
+fn invalid_from_clause_reference_table(e: &ExecError) -> Option<&str> {
+    match e {
+        ExecError::WithContext { source, .. } => invalid_from_clause_reference_table(source),
+        ExecError::Parse(parse_error) => match parse_error.unpositioned() {
+            crate::backend::parser::ParseError::InvalidFromClauseReference(name) => Some(name),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn apply_errors_regression_syntax_compat(sql: &str, response: &mut ExecErrorResponse) {
@@ -2277,6 +2300,25 @@ fn find_last_identifier_position(sql: &str, token: &str) -> Option<usize> {
         let after = sql[idx + token.len()..].chars().next();
         let is_ident = |ch: char| ch.is_ascii_alphanumeric() || ch == '_' || ch == '.';
         if !before.is_some_and(is_ident) && !after.is_some_and(is_ident) {
+            last = Some(idx + 1);
+        }
+        from = idx + token.len();
+    }
+    last
+}
+
+fn find_last_relation_reference_position(sql: &str, token: &str) -> Option<usize> {
+    let token_lower = token.to_ascii_lowercase();
+    let sql_lower = sql.to_ascii_lowercase();
+    let mut from = 0;
+    let mut last = None;
+    while let Some(found) = sql_lower[from..].find(&token_lower) {
+        let idx = from + found;
+        let before = sql[..idx].chars().next_back();
+        let after = sql[idx + token.len()..].chars().next();
+        let before_is_ident = before.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+        let after_is_ident = after.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+        if !before_is_ident && (!after_is_ident || after == Some('.')) {
             last = Some(idx + 1);
         }
         from = idx + token.len();
@@ -11842,6 +11884,41 @@ ORDER BY 1, 2;";
 
         let response = exec_error_response("CREATE TABLE", &err);
         assert_eq!(response.message, "syntax error at end of input");
+    }
+
+    #[test]
+    fn exec_error_response_formats_from_clause_reference_errors() {
+        let sql = "SELECT * FROM (J1_TBL JOIN J2_TBL USING (i)) AS x WHERE J1_TBL.t = 'one';";
+        let err = ExecError::Parse(
+            crate::backend::parser::ParseError::InvalidFromClauseReference("j1_tbl".into()),
+        );
+        let response = exec_error_response(sql, &err);
+        assert_eq!(
+            response.message,
+            "invalid reference to FROM-clause entry for table \"j1_tbl\""
+        );
+        assert_eq!(
+            response.detail.as_deref(),
+            Some(
+                "There is an entry for table \"j1_tbl\", but it cannot be referenced from this part of the query."
+            )
+        );
+        assert_eq!(
+            response.position,
+            sql.find("J1_TBL.t").map(|index| index + 1)
+        );
+
+        let sql = "SELECT * FROM (J1_TBL JOIN J2_TBL USING (i) AS x) AS xx WHERE x.i = 1;";
+        let err = ExecError::Parse(crate::backend::parser::ParseError::MissingFromClauseEntry(
+            "x".into(),
+        ));
+        let response = exec_error_response(sql, &err);
+        assert_eq!(
+            response.message,
+            "missing FROM-clause entry for table \"x\""
+        );
+        assert_eq!(response.detail, None);
+        assert_eq!(response.position, sql.rfind("x.i").map(|index| index + 1));
     }
 
     #[test]
