@@ -3,6 +3,12 @@
 target-dir = "/tmp/pgrust-target"
 rustc-wrapper = "scripts/rustc_sccache_wrapper.sh"
 
+[unstable]
+codegen-backend = true
+
+[profile.dev]
+codegen-backend = "cranelift"
+
 [target.aarch64-apple-darwin]
 linker = "scripts/macos-rust-lld-linker.sh"
 

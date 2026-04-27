@@ -575,7 +575,17 @@ class BenchmarkRunner:
 
     def build_pgrust_binaries(self) -> None:
         self.run_command(
-            ["cargo", "build", "--release", "--bin", "pgrust_server", "--bin", "pgbench_like"],
+            [
+                "cargo",
+                "build",
+                "--release",
+                "--features",
+                "tools",
+                "--bin",
+                "pgrust_server",
+                "--bin",
+                "pgbench_like",
+            ],
             artifact_stem="build_pgrust_bench",
             env=self.cargo_env(),
             check=True,
@@ -583,7 +593,7 @@ class BenchmarkRunner:
 
     def build_pgbench_like(self) -> None:
         self.run_command(
-            ["cargo", "build", "--release", "--bin", "pgbench_like"],
+            ["cargo", "build", "--release", "--features", "tools", "--bin", "pgbench_like"],
             artifact_stem="build_pgbench_like",
             env=self.cargo_env(),
             check=True,

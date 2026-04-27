@@ -1,4 +1,4 @@
 [toolchain]
-channel = "1.94.1"
-components = ["rustfmt", "clippy"]
+channel = "nightly"
+components = ["rustfmt", "clippy", "rustc-codegen-cranelift"]
 profile = "minimal"
