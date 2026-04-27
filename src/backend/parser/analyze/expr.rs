@@ -90,6 +90,45 @@ pub(super) fn bind_typed_expr_with_outer_and_ctes(
     })
 }
 
+fn quantified_function_arg(expr: &SqlExpr) -> Option<(bool, &SqlExpr)> {
+    let SqlExpr::FuncCall {
+        name,
+        args,
+        order_by,
+        within_group,
+        distinct,
+        func_variadic,
+        filter,
+        over,
+    } = expr
+    else {
+        return None;
+    };
+    if !order_by.is_empty()
+        || within_group.is_some()
+        || *distinct
+        || *func_variadic
+        || filter.is_some()
+        || over.is_some()
+    {
+        return None;
+    }
+    let is_all = if name.eq_ignore_ascii_case("any") {
+        false
+    } else if name.eq_ignore_ascii_case("all") {
+        true
+    } else {
+        return None;
+    };
+    let [arg] = args.args() else {
+        return None;
+    };
+    if arg.name.is_some() {
+        return None;
+    }
+    Some((is_all, &arg.value))
+}
+
 fn set_returning_not_allowed_error(context: &'static str) -> ParseError {
     ParseError::FeatureNotSupported(format!(
         "set-returning functions are not allowed in {context}"
@@ -2748,7 +2787,19 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             )
         }
         SqlExpr::Eq(left, right) => {
-            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
+            if let Some((is_all, array)) = quantified_function_arg(right) {
+                bind_quantified_array_expr(
+                    left,
+                    SubqueryComparisonOp::Eq,
+                    is_all,
+                    array,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
                 (left.as_ref(), right.as_ref())
             {
                 bind_row_comparison_expr(
@@ -2823,7 +2874,19 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::NotEq(left, right) => {
-            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
+            if let Some((is_all, array)) = quantified_function_arg(right) {
+                bind_quantified_array_expr(
+                    left,
+                    SubqueryComparisonOp::NotEq,
+                    is_all,
+                    array,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
                 (left.as_ref(), right.as_ref())
             {
                 bind_row_comparison_expr(

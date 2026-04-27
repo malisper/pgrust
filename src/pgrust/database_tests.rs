@@ -9578,6 +9578,155 @@ fn create_view_selects_and_persists_rewrite_rule() {
 }
 
 #[test]
+fn create_view_allows_grouped_primary_key_dependency_and_rejects_pk_drop() {
+    let dir = temp_dir("create_view_grouped_pk_dep");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table view_base_table(key int4 primary key, data text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view key_dependent_view as select * from view_base_table group by key",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view key_dependent_view_no_cols as \
+             select from view_base_table group by key having length(data) > 0",
+        )
+        .unwrap();
+
+    let err = session
+        .execute(
+            &db,
+            "alter table view_base_table drop constraint view_base_table_pkey",
+        )
+        .unwrap_err();
+    match err {
+        ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => {
+            assert_eq!(
+                message,
+                "cannot drop constraint view_base_table_pkey on table view_base_table because other objects depend on it"
+            );
+            assert_eq!(
+                detail.as_deref(),
+                Some(
+                    "view key_dependent_view depends on constraint view_base_table_pkey on table view_base_table"
+                )
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some("Use DROP ... CASCADE to drop the dependent objects too.")
+            );
+            assert_eq!(sqlstate, "2BP01");
+        }
+        other => panic!("expected dependent constraint error, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_view_finalizes_explicit_unknown_and_null_outputs_to_text() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create view unspecified_types as select 'foo'::unknown as u2, null as n",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select pg_typeof(u2), pg_typeof(n), u2, n from unspecified_types",
+        ),
+        vec![vec![
+            Value::Text("text".into()),
+            Value::Text("text".into()),
+            Value::Text("foo".into()),
+            Value::Null,
+        ]]
+    );
+}
+
+#[test]
+fn create_view_values_preserves_varchar_common_typmods() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create view tt1 as \
+             select * from (values \
+             ('abc'::varchar(3), '0123456789'::varchar, 42, 'abcd'::varchar(4)), \
+             ('0123456789'::varchar, 'abc'::varchar(3), 42.12, 'abc'::varchar(4))) \
+             vv(a, b, c, d)",
+        )
+        .unwrap();
+
+    let result = session
+        .execute(&db, "select * from tt1 where false")
+        .unwrap();
+    let StatementResult::Query { columns, .. } = result else {
+        panic!("expected SELECT result");
+    };
+    assert_eq!(columns[0].sql_type, SqlType::new(SqlTypeKind::Varchar));
+    assert_eq!(columns[1].sql_type, SqlType::new(SqlTypeKind::Varchar));
+    assert_eq!(
+        columns[3].sql_type,
+        SqlType::with_char_len(SqlTypeKind::Varchar, 4)
+    );
+}
+
+#[test]
+fn scalar_array_any_rejects_uncast_array_subselect() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let err = session
+        .execute(
+            &db,
+            "select 'foo'::text = any((select array['abc','def','foo']::text[]))",
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::Parse(ParseError::UndefinedOperator {
+                op: "=",
+                ref left_type,
+                ref right_type,
+            }) if left_type == "text" && right_type == "text[]"
+        ),
+        "{err:?}"
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select 'foo'::text = any((select array['abc','def','foo']::text[])::text[])",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
 fn comment_on_view_upserts_and_clears_pg_description() {
     let dir = temp_dir("comment_on_view");
     let db = Database::open(&dir, 128).unwrap();
@@ -10666,8 +10815,18 @@ fn dependent_views_allow_safe_add_and_drop_column() {
         .unwrap();
 
     match session.execute(&db, "alter table items drop column note") {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
-            if actual.contains("dependent view uses column note") => {}
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        }) if message
+            == "cannot drop column note of table items because other objects depend on it"
+            && detail.as_deref()
+                == Some("view item_view depends on column note of table items")
+            && hint.as_deref()
+                == Some("Use DROP ... CASCADE to drop the dependent objects too.")
+            && sqlstate == "2BP01" => {}
         other => panic!("expected dependent-view drop-column restriction, got {other:?}"),
     }
 }
@@ -35270,15 +35429,25 @@ fn pg_get_viewdef_renders_window_functions_and_function_rtes() {
         panic!("expected text view definition, got {def:?}");
     };
 
-    assert!(sql.contains("generate_series(1, 10) i(i)"));
+    assert!(sql.contains("generate_series(1, 10) i(i)"), "{sql}");
     assert!(
-        sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW)")
+        sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW)"),
+        "{sql}"
     );
-    assert!(sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE GROUP)"));
-    assert!(sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE TIES)"));
-    assert!(sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING)"));
-    assert!(!sql.contains("WindowFunc"));
-    assert!(!sql.contains("function_call"));
+    assert!(
+        sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE GROUP)"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE TIES)"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING)"),
+        "{sql}"
+    );
+    assert!(!sql.contains("WindowFunc"), "{sql}");
+    assert!(!sql.contains("function_call"), "{sql}");
 }
 
 #[test]
@@ -35339,6 +35508,94 @@ fn create_or_replace_temp_window_view_keeps_rewrite_rule() {
     assert!(sql.contains("min(i.i) OVER (ORDER BY i.i RANGE BETWEEN"));
     assert!(sql.contains("generate_series(now(),"));
     assert!(!sql.contains("missing rewrite rule"));
+}
+
+#[test]
+fn pg_get_viewdef_qualifies_correlated_subquery_vars() {
+    let dir = temp_dir("pg_get_viewdef_correlated_vars");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table tt1 (f1 int4, f2 int4)")
+        .unwrap();
+    db.execute(1, "create table tx1 (x1 int4)").unwrap();
+    db.execute(
+        1,
+        "create view v_corr as \
+         select * from tt1 where exists \
+         (select 1 from tx1 where tt1.f1 = tx1.x1)",
+    )
+    .unwrap();
+
+    let rows = query_rows(&db, 1, "select pg_get_viewdef('v_corr'::regclass)");
+    let Value::Text(sql) = &rows[0][0] else {
+        panic!("expected text view definition, got {rows:?}");
+    };
+    assert!(sql.contains("tt1.f1 = tx1.x1"), "{sql}");
+    assert!(!sql.contains("x1 = x1"), "{sql}");
+}
+
+#[test]
+fn pg_get_viewdef_renders_values_rows_and_set_operation_inputs() {
+    let dir = temp_dir("pg_get_viewdef_values_setops");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table src_setop (x int4)").unwrap();
+    db.execute(
+        1,
+        "create view v_values as select * from (values (1,2), (3,4)) vv(a,b)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view v_union (a) as select x from src_setop union select 42",
+    )
+    .unwrap();
+
+    let values_rows = query_rows(&db, 1, "select pg_get_viewdef('v_values'::regclass)");
+    let Value::Text(values_sql) = &values_rows[0][0] else {
+        panic!("expected text view definition, got {values_rows:?}");
+    };
+    assert!(values_sql.contains("VALUES (1,2), (3,4)"), "{values_sql}");
+    assert!(!values_sql.contains("VALUES (...)"), "{values_sql}");
+
+    let union_rows = query_rows(&db, 1, "select pg_get_viewdef('v_union'::regclass)");
+    let Value::Text(union_sql) = &union_rows[0][0] else {
+        panic!("expected text view definition, got {union_rows:?}");
+    };
+    assert!(union_sql.contains("UNION"), "{union_sql}");
+    assert!(union_sql.contains("src_setop.x AS a"), "{union_sql}");
+    assert!(union_sql.contains("42 AS a"), "{union_sql}");
+    assert!(!union_sql.contains("var1"), "{union_sql}");
+}
+
+#[test]
+fn pg_get_viewdef_renders_function_rtes_and_row_exprs_without_debug() {
+    let dir = temp_dir("pg_get_viewdef_function_row");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type nestedcomposite as (x int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view v_func as select * from generate_series(1,2) g",
+    )
+    .unwrap();
+    db.execute(1, "create view v_row as select row(1)::nestedcomposite")
+        .unwrap();
+
+    let func_rows = query_rows(&db, 1, "select pg_get_viewdef('v_func'::regclass)");
+    let Value::Text(func_sql) = &func_rows[0][0] else {
+        panic!("expected text view definition, got {func_rows:?}");
+    };
+    assert!(func_sql.contains("generate_series(1, 2"), "{func_sql}");
+    assert!(!func_sql.contains("function_call"), "{func_sql}");
+
+    let row_rows = query_rows(&db, 1, "select pg_get_viewdef('v_row'::regclass)");
+    let Value::Text(row_sql) = &row_rows[0][0] else {
+        panic!("expected text view definition, got {row_rows:?}");
+    };
+    assert!(row_sql.contains("ROW(1)::nestedcomposite"), "{row_sql}");
+    assert!(!row_sql.contains("RecordDescriptor"), "{row_sql}");
 }
 
 #[test]

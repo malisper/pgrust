@@ -1001,6 +1001,7 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
         // Ungrouped aggregate queries always produce at most one row, so any
         // outer ORDER BY is semantically redundant after the rewrite.
         sort_clause: Vec::new(),
+        constraint_deps: query.constraint_deps,
         limit_count: query.limit_count,
         limit_offset: query.limit_offset,
         locking_clause: query.locking_clause,
@@ -1362,6 +1363,7 @@ fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
         window_clauses: Vec::new(),
         having_qual: None,
         sort_clause,
+        constraint_deps: query.constraint_deps.clone(),
         limit_count: Some(1),
         limit_offset: 0,
         locking_clause: None,

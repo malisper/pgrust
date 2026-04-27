@@ -71,7 +71,6 @@ use crate::backend::utils::cache::system_views::{
     current_pg_stat_progress_copy_rows,
 };
 use agg::*;
-pub(crate) use agg_output::with_functional_grouping_constraint_tracking;
 use agg_output::*;
 use agg_scope::*;
 pub use coerce::is_binary_coercible_type;
@@ -2409,6 +2408,90 @@ fn normalize_group_by_exprs(
         .collect()
 }
 
+fn expand_group_by_with_primary_key_dependencies(
+    group_by_exprs: &mut Vec<SqlExpr>,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+) -> Vec<u32> {
+    let mut constraint_deps = Vec::new();
+    for relation in &scope.relations {
+        let Some(relation_name) = relation.relation_names.first() else {
+            continue;
+        };
+        let Some(bound_relation) = catalog.lookup_any_relation(relation_name) else {
+            continue;
+        };
+        let Some(primary) = catalog
+            .constraint_rows_for_relation(bound_relation.relation_oid)
+            .into_iter()
+            .find(|row| row.contype == crate::include::catalog::CONSTRAINT_PRIMARY)
+        else {
+            continue;
+        };
+        let Some(conkey) = primary.conkey.as_deref() else {
+            continue;
+        };
+        let pk_scope_indexes = conkey
+            .iter()
+            .filter_map(|attnum| {
+                bound_relation
+                    .desc
+                    .columns
+                    .get((*attnum).saturating_sub(1) as usize)
+                    .and_then(|column| {
+                        scope_index_for_relation_column(scope, relation_name, &column.name)
+                    })
+            })
+            .collect::<Vec<_>>();
+        if pk_scope_indexes.len() != conkey.len()
+            || !pk_scope_indexes
+                .iter()
+                .all(|index| group_by_contains_scope_index(group_by_exprs, scope, *index))
+        {
+            continue;
+        }
+        for column in &bound_relation.desc.columns {
+            let Some(scope_index) =
+                scope_index_for_relation_column(scope, relation_name, &column.name)
+            else {
+                continue;
+            };
+            if !group_by_contains_scope_index(group_by_exprs, scope, scope_index) {
+                group_by_exprs.push(SqlExpr::Column(format!("{relation_name}.{}", column.name)));
+            }
+        }
+        constraint_deps.push(primary.oid);
+    }
+    constraint_deps.sort_unstable();
+    constraint_deps.dedup();
+    constraint_deps
+}
+
+fn scope_index_for_relation_column(
+    scope: &BoundScope,
+    relation_name: &str,
+    column_name: &str,
+) -> Option<usize> {
+    scope.columns.iter().position(|column| {
+        !column.hidden
+            && column.output_name.eq_ignore_ascii_case(column_name)
+            && column
+                .relation_names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(relation_name))
+    })
+}
+
+fn group_by_contains_scope_index(
+    group_by_exprs: &[SqlExpr],
+    scope: &BoundScope,
+    scope_index: usize,
+) -> bool {
+    group_by_exprs.iter().any(|expr| {
+        matches!(expr, SqlExpr::Column(name) if resolve_column(scope, name).ok() == Some(scope_index))
+    })
+}
+
 pub(crate) fn raw_type_name_hint(raw: &RawTypeName) -> SqlType {
     match raw {
         RawTypeName::Builtin(ty) => *ty,
@@ -2456,6 +2539,16 @@ pub(crate) fn resolve_raw_type_name(
             }
         ))),
         RawTypeName::Record => Ok(SqlType::record(RECORD_TYPE_OID)),
+        RawTypeName::Named { name, array_bounds }
+            if name.eq_ignore_ascii_case("unknown")
+                || name.eq_ignore_ascii_case("pg_catalog.unknown") =>
+        {
+            if *array_bounds == 0 {
+                Ok(SqlType::new(SqlTypeKind::Text))
+            } else {
+                Ok(SqlType::array_of(SqlType::new(SqlTypeKind::Text)))
+            }
+        }
         RawTypeName::Named { name, array_bounds } => {
             let (base_name, typmod_args) = split_named_type_typmod(name);
             let mut ty = if let Some(alias) = builtin_named_type_alias(base_name) {
@@ -3134,6 +3227,7 @@ fn bind_ctes(
                         window_clauses: Vec::new(),
                         having_qual: None,
                         sort_clause: Vec::new(),
+                        constraint_deps: Vec::new(),
                         limit_count: None,
                         limit_offset: 0,
                         locking_clause: None,
@@ -3205,6 +3299,7 @@ fn bind_ctes(
                         window_clauses: Vec::new(),
                         having_qual: None,
                         sort_clause: Vec::new(),
+                        constraint_deps: Vec::new(),
                         limit_count: None,
                         limit_offset: 0,
                         locking_clause: None,
@@ -4270,6 +4365,7 @@ pub(crate) fn bound_cte_from_materialized_rows(
             window_clauses: Vec::new(),
             having_qual: None,
             sort_clause: Vec::new(),
+            constraint_deps: Vec::new(),
             limit_count: None,
             limit_offset: 0,
             locking_clause: None,
@@ -4317,6 +4413,7 @@ pub(crate) fn bound_cte_from_query_rows(
             window_clauses: Vec::new(),
             having_qual: None,
             sort_clause: Vec::new(),
+            constraint_deps: Vec::new(),
             limit_count: None,
             limit_offset: 0,
             locking_clause: None,
@@ -4410,6 +4507,7 @@ fn bind_values_query_with_outer(
             window_clauses: Vec::new(),
             having_qual: None,
             sort_clause,
+            constraint_deps: Vec::new(),
             limit_count: stmt.limit,
             limit_offset: stmt.offset.unwrap_or(0),
             locking_clause: None,
@@ -4525,7 +4623,7 @@ fn bind_select_query_with_outer(
             && target_aggs.is_empty()
             && stmt.having.is_none()
             && (stmt.limit.is_some() || stmt.offset.is_some());
-        let effective_group_by = if lower_distinct_to_grouping {
+        let mut effective_group_by = if lower_distinct_to_grouping {
             stmt.targets
                 .iter()
                 .map(|target| target.expr.clone())
@@ -4533,6 +4631,8 @@ fn bind_select_query_with_outer(
         } else {
             normalize_group_by_exprs(stmt, &scope)?
         };
+        let constraint_deps =
+            expand_group_by_with_primary_key_dependencies(&mut effective_group_by, &scope, catalog);
 
         for group_expr in &effective_group_by {
             analyze_expr_aggregates_in_clause(
@@ -5134,6 +5234,7 @@ fn bind_select_query_with_outer(
                         window_clauses,
                         having_qual: having,
                         sort_clause,
+                        constraint_deps,
                         limit_count: stmt.limit,
                         limit_offset: stmt.offset.unwrap_or(0),
                         locking_clause: stmt.locking_clause,
@@ -5142,7 +5243,11 @@ fn bind_select_query_with_outer(
                         recursive_union: None,
                         set_operation: None,
                     };
-                    let query = apply_select_distinct(query, stmt.distinct, distinct_on);
+                    let query = apply_select_distinct(
+                        query,
+                        stmt.distinct && !lower_distinct_to_grouping,
+                        distinct_on,
+                    );
                     Ok((query, scope))
                 });
             } else {
@@ -5223,6 +5328,7 @@ fn bind_select_query_with_outer(
                     window_clauses,
                     having_qual: None,
                     sort_clause,
+                    constraint_deps: Vec::new(),
                     limit_count: stmt.limit,
                     limit_offset: stmt.offset.unwrap_or(0),
                     locking_clause: stmt.locking_clause,
@@ -5457,6 +5563,7 @@ fn bind_set_operation_query_with_outer(
             window_clauses: Vec::new(),
             having_qual: None,
             sort_clause,
+            constraint_deps: Vec::new(),
             limit_count: stmt.limit,
             limit_offset: stmt.offset.unwrap_or(0),
             locking_clause: stmt.locking_clause,

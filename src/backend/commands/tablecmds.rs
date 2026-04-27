@@ -5236,6 +5236,7 @@ fn execute_insert_project_set_row(
         window_clauses: Vec::new(),
         having_qual: None,
         sort_clause: Vec::new(),
+        constraint_deps: Vec::new(),
         limit_count: None,
         limit_offset: 0,
         locking_clause: None,

@@ -100,6 +100,14 @@ pub fn lower_create_table(
             .iter()
             .enumerate()
             .map(|(index, column)| {
+                if super::raw_type_name_is_unknown(&column.ty) {
+                    return Err(ParseError::DetailedError {
+                        message: format!("column \"{}\" has pseudo-type unknown", column.name),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P16",
+                    });
+                }
                 let sql_type = match column.ty {
                     crate::backend::parser::RawTypeName::Serial(_) => {
                         raw_type_name_hint(&column.ty)

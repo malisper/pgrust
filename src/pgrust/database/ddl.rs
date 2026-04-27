@@ -500,8 +500,9 @@ pub(crate) fn append_view_check_option(
     sql: String,
     check_option: crate::include::nodes::parsenodes::ViewCheckOption,
 ) -> String {
+    let sql = sql.trim().trim_end_matches(';').trim();
     match check_option {
-        crate::include::nodes::parsenodes::ViewCheckOption::None => sql,
+        crate::include::nodes::parsenodes::ViewCheckOption::None => sql.to_string(),
         crate::include::nodes::parsenodes::ViewCheckOption::Local => {
             format!("{sql} WITH LOCAL CHECK OPTION")
         }
@@ -844,6 +845,106 @@ pub(crate) fn reject_column_with_trigger_dependencies(
         ),
         detail: Some(details.join("\n")),
         hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+        sqlstate: "2BP01",
+    })
+}
+
+pub(crate) fn reject_column_with_rule_dependencies(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    relation_oid: u32,
+    column_name: &str,
+    attnum: i16,
+) -> Result<(), ExecError> {
+    let rewrites = ensure_rewrite_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+    let classes = ensure_class_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+    let relation_name = classes
+        .get(&relation_oid)
+        .map(|row| row.relname.clone())
+        .unwrap_or_else(|| relation_oid.to_string());
+    let mut details = ensure_depend_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .filter(|row| {
+            row.classid == PG_REWRITE_RELATION_OID
+                && row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjid == relation_oid
+                && row.refobjsubid == i32::from(attnum)
+                && row.deptype == DEPENDENCY_NORMAL
+        })
+        .filter_map(|row| {
+            let rewrite = rewrites.get(&row.objid)?;
+            let view = classes.get(&rewrite.ev_class)?;
+            Some(format!(
+                "view {} depends on column {} of table {}",
+                view.relname, column_name, relation_name
+            ))
+        })
+        .collect::<Vec<_>>();
+    details.sort();
+    details.dedup();
+    if details.is_empty() {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!(
+            "cannot drop column {column_name} of table {relation_name} because other objects depend on it"
+        ),
+        detail: Some(details.join("\n")),
+        hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+        sqlstate: "2BP01",
+    })
+}
+
+pub(crate) fn reject_column_type_change_with_rule_dependencies(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    relation_oid: u32,
+    column_name: &str,
+    attnum: i16,
+) -> Result<(), ExecError> {
+    let rewrites = ensure_rewrite_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+    let classes = ensure_class_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+    let mut details = ensure_depend_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .filter(|row| {
+            row.classid == PG_REWRITE_RELATION_OID
+                && row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjid == relation_oid
+                && row.refobjsubid == i32::from(attnum)
+                && row.deptype == DEPENDENCY_NORMAL
+        })
+        .filter_map(|row| {
+            let rewrite = rewrites.get(&row.objid)?;
+            let view = classes.get(&rewrite.ev_class)?;
+            Some(format!(
+                "rule {} on view {} depends on column \"{}\"",
+                rewrite.rulename, view.relname, column_name
+            ))
+        })
+        .collect::<Vec<_>>();
+    details.sort();
+    details.dedup();
+    if details.is_empty() {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: "cannot alter type of a column used by a view or rule".into(),
+        detail: Some(details.join("\n")),
+        hint: None,
         sqlstate: "2BP01",
     })
 }

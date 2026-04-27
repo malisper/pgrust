@@ -547,6 +547,7 @@ pub struct Query {
     pub window_clauses: Vec<WindowClause>,
     pub having_qual: Option<Expr>,
     pub sort_clause: Vec<SortGroupClause>,
+    pub constraint_deps: Vec<u32>,
     pub limit_count: Option<usize>,
     pub limit_offset: usize,
     pub locking_clause: Option<SelectLockingClause>,
@@ -2178,6 +2179,7 @@ pub struct CreateSequenceStatement {
 pub struct CreateViewStatement {
     pub schema_name: Option<String>,
     pub view_name: String,
+    pub column_names: Vec<String>,
     pub persistence: TablePersistence,
     pub options: Vec<RelOption>,
     pub query: SelectStatement,

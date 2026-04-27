@@ -10,7 +10,8 @@ use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{BTREE_AM_OID, PG_CATALOG_NAMESPACE_OID, default_btree_opclass_oid};
 use crate::pgrust::database::ddl::{
-    lookup_heap_relation_for_alter_table, validate_alter_table_alter_column_type,
+    lookup_heap_relation_for_alter_table, reject_column_type_change_with_rule_dependencies,
+    validate_alter_table_alter_column_type,
 };
 use std::collections::BTreeSet;
 
@@ -248,6 +249,14 @@ fn collect_alter_column_type_targets(
             } else {
                 None
             },
+        )?;
+        reject_column_type_change_with_rule_dependencies(
+            db,
+            client_id,
+            Some((xid, cid)),
+            target_relation.relation_oid,
+            &target_relation.desc.columns[plan.column_index].name,
+            (plan.column_index + 1) as i16,
         )?;
         reject_inherited_type_change_conflicts(
             catalog,

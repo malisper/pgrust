@@ -771,6 +771,7 @@ mod tests {
             window_clauses: Vec::new(),
             having_qual: None,
             sort_clause: Vec::new(),
+            constraint_deps: Vec::new(),
             limit_count: None,
             limit_offset: 0,
             has_target_srfs: false,

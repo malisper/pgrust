@@ -3470,6 +3470,12 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
             )));
         }
         "pg_node_tree" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::PgNodeTree))),
+        "unknown" | "pg_catalog.unknown" => {
+            return Ok(RawTypeName::Named {
+                name: "unknown".to_string(),
+                array_bounds: 0,
+            });
+        }
         "trigger" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Trigger))),
         "void" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Void))),
         "cstring" | "pg_catalog.cstring" => {
@@ -16567,6 +16573,7 @@ fn build_create_materialized_view(
 
 fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseError> {
     let mut relation_name = None;
+    let mut column_names = Vec::new();
     let mut persistence = TablePersistence::Permanent;
     let mut options = Vec::new();
     let mut query = None;
@@ -16579,6 +16586,13 @@ fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseE
             Rule::temp_clause => persistence = TablePersistence::Temporary,
             Rule::identifier if relation_name.is_none() => {
                 relation_name = Some(build_relation_name(part))
+            }
+            Rule::create_matview_column_list => {
+                column_names = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::ident_list)
+                    .map(|inner| inner.into_inner().map(build_identifier).collect())
+                    .unwrap_or_default();
             }
             Rule::view_options_clause => {
                 for option in part
@@ -16613,6 +16627,7 @@ fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseE
     Ok(CreateViewStatement {
         schema_name,
         view_name,
+        column_names,
         persistence,
         options,
         query: query.ok_or(ParseError::UnexpectedEof)?,
@@ -21056,6 +21071,10 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
         Rule::kw_xml => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Xml)),
         Rule::kw_tsvector => RawTypeName::Builtin(SqlType::new(SqlTypeKind::TsVector)),
         Rule::kw_tsquery => RawTypeName::Builtin(SqlType::new(SqlTypeKind::TsQuery)),
+        Rule::kw_unknown => RawTypeName::Named {
+            name: "unknown".to_string(),
+            array_bounds: 0,
+        },
         Rule::kw_regproc => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegProc)),
         Rule::kw_regclass => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegClass)),
         Rule::kw_regconfig => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegConfig)),
