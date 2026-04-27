@@ -38,6 +38,9 @@ Runtime behavior:
   constraints on foreign tables before creating catalog rows
 - emits missing-relation notices for `ALTER TABLE/FOREIGN TABLE IF EXISTS`
   paths that share the table lookup helpers
+- lets superusers reassign foreign server owners without the target role
+  needing FDW usage, and blocks `DROP ROLE` while FDW/server ownership or ACL
+  dependencies still reference the role
 
 Tests run:
 - `cargo fmt`
@@ -75,9 +78,14 @@ Tests run:
 - `scripts/cargo_isolated.sh check`
 - `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
 - `scripts/run_regression.sh --skip-build --port 55445 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-alter-missing-notices`
+- `scripts/cargo_isolated.sh test --lib --quiet foreign_data_dependencies_block_role_drop`
+- `scripts/cargo_isolated.sh test --lib --quiet foreign_data_usage_controls_server_mapping_and_table_creation`
+- `scripts/cargo_isolated.sh check`
+- `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
+- `scripts/run_regression.sh --skip-build --port 55446 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-role-deps`
 
 Remaining:
-`foreign_data` still fails, but improved to 343/539 matching queries. Biggest
+`foreign_data` still fails, but improved to 379/539 matching queries. Biggest
 remaining groups:
 - FDW dependency reporting for handler functions and owners
 - full `IMPORT FOREIGN SCHEMA` callback behavior beyond missing-handler errors

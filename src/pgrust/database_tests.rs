@@ -32414,6 +32414,72 @@ fn foreign_data_usage_controls_server_mapping_and_table_creation() {
 }
 
 #[test]
+fn foreign_data_dependencies_block_role_drop() {
+    let base = temp_dir("foreign_data_role_dependencies");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create role fdw_server_owner").unwrap();
+    db.execute(1, "create role fdw_acl_dep").unwrap();
+    db.execute(1, "create foreign data wrapper fdw_dep")
+        .unwrap();
+    db.execute(1, "create server fdw_dep_srv foreign data wrapper fdw_dep")
+        .unwrap();
+
+    db.execute(1, "alter server fdw_dep_srv owner to fdw_server_owner")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select r.rolname from pg_foreign_server s join pg_roles r on r.oid = s.srvowner where s.srvname = 'fdw_dep_srv'",
+        ),
+        vec![vec![Value::Text("fdw_server_owner".into())]]
+    );
+
+    db.execute(
+        1,
+        "grant usage on foreign data wrapper fdw_dep to fdw_acl_dep",
+    )
+    .unwrap();
+
+    match db.execute(1, "drop role fdw_server_owner") {
+        Err(ExecError::DetailedError {
+            message, detail, ..
+        }) => {
+            assert_eq!(
+                message,
+                "role \"fdw_server_owner\" cannot be dropped because some objects depend on it"
+            );
+            assert!(
+                detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("owner of server fdw_dep_srv")),
+                "{detail:?}"
+            );
+        }
+        other => panic!("expected foreign server owner dependency, got {other:?}"),
+    }
+
+    match db.execute(1, "drop role fdw_acl_dep") {
+        Err(ExecError::DetailedError {
+            message, detail, ..
+        }) => {
+            assert_eq!(
+                message,
+                "role \"fdw_acl_dep\" cannot be dropped because some objects depend on it"
+            );
+            assert!(
+                detail.as_deref().is_some_and(
+                    |detail| detail.contains("privileges for foreign-data wrapper fdw_dep")
+                ),
+                "{detail:?}"
+            );
+        }
+        other => panic!("expected FDW ACL dependency, got {other:?}"),
+    }
+}
+
+#[test]
 fn import_foreign_schema_requires_fdw_handler() {
     let base = temp_dir("import_foreign_schema_handler");
     let db = Database::open(&base, 64).unwrap();
