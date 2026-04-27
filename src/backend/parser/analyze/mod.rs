@@ -4804,11 +4804,6 @@ fn bind_select_query_with_outer(
                         )
                     })
                     .collect::<Result<_, _>>()?;
-                if group_keys.iter().any(expr_contains_set_returning) {
-                    return Err(ParseError::FeatureNotSupportedMessage(
-                        "set-returning functions are not allowed in GROUP BY".into(),
-                    ));
-                }
                 let rewritten_group_keys = group_keys.clone();
 
                 return with_grouped_agg_cte_context(&visible_ctes, &local_ctes, || {

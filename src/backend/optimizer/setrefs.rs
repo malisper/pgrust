@@ -3720,24 +3720,20 @@ fn set_filter_references(
         Path::SubqueryScan {
             rtindex,
             subroot,
-            query,
             input,
             output_columns,
             pathkeys,
             ..
-        } => {
-            let force_display = subquery_scan_requires_display(&query, &pathkeys);
-            set_subquery_scan_references(
-                ctx,
-                plan_info,
-                rtindex,
-                subroot,
-                input,
-                output_columns,
-                Some(predicate),
-                force_display,
-            )
-        }
+        } => set_subquery_scan_references(
+            ctx,
+            plan_info,
+            rtindex,
+            subroot,
+            input,
+            output_columns,
+            Some(predicate),
+            !pathkeys.is_empty(),
+        ),
         input => Plan::Filter {
             plan_info,
             input: Box::new(set_plan_refs(ctx, input)),
@@ -4854,26 +4850,6 @@ fn subquery_scan_name(ctx: &SetRefsContext<'_>, rtindex: usize) -> Option<String
         .and_then(|rte| rte.alias.clone())
 }
 
-fn subquery_scan_requires_display(
-    query: &Query,
-    pathkeys: &[crate::include::nodes::pathnodes::PathKey],
-) -> bool {
-    !pathkeys.is_empty()
-        || query.distinct
-        || !query.group_by.is_empty()
-        || !query.accumulators.is_empty()
-        || !query.window_clauses.is_empty()
-        || query.having_qual.is_some()
-        || !query.sort_clause.is_empty()
-        || query.limit_count.is_some()
-        || query.limit_offset != 0
-        || query.locking_clause.is_some()
-        || !query.row_marks.is_empty()
-        || query.has_target_srfs
-        || query.recursive_union.is_some()
-        || query.set_operation.is_some()
-}
-
 fn set_worktable_scan_references(
     plan_info: PlanEstimate,
     worktable_id: usize,
@@ -5313,24 +5289,20 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             rtindex,
             subroot,
-            query,
             input,
             output_columns,
             pathkeys,
             ..
-        } => {
-            let force_display = subquery_scan_requires_display(&query, &pathkeys);
-            set_subquery_scan_references(
-                ctx,
-                plan_info,
-                rtindex,
-                subroot,
-                input,
-                output_columns,
-                None,
-                force_display,
-            )
-        }
+        } => set_subquery_scan_references(
+            ctx,
+            plan_info,
+            rtindex,
+            subroot,
+            input,
+            output_columns,
+            None,
+            !pathkeys.is_empty(),
+        ),
         Path::CteScan {
             plan_info,
             cte_id,
