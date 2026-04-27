@@ -7,6 +7,10 @@
 
 - Workflow: `.github/workflows/regression-tests.yml`
 - Normal cadence: twice daily, with cron times in UTC.
+- Runner: the org `32x` larger-runner label. This maps to a GitHub-hosted
+  Ubuntu runner with 32 cores, 128 GB RAM, and 1.2 TB storage. The full suite
+  runs multiple isolated `pgrust_server` processes and staged database-cluster
+  copies, which can starve standard private-repo runners.
 - Manual dispatch inputs:
   - `command_timeout`: wall-clock timeout for the whole regression command.
     Normal runs use `210m`; short values are useful for abort-path smoke tests.
