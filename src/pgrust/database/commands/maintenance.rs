@@ -261,7 +261,7 @@ fn lookup_table_or_partitioned_relation_for_comment(
     name: &str,
 ) -> Result<crate::backend::parser::BoundRelation, ExecError> {
     match catalog.lookup_any_relation(name) {
-        Some(entry) if matches!(entry.relkind, 'r' | 'p') => Ok(entry),
+        Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'f') => Ok(entry),
         Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
             name: name.to_string(),
             expected: "table",

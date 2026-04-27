@@ -7211,7 +7211,7 @@ impl Session {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relation = catalog
                     .lookup_any_relation(&comment_stmt.table_name)
-                    .filter(|relation| matches!(relation.relkind, 'r' | 'p'))
+                    .filter(|relation| matches!(relation.relkind, 'r' | 'p' | 'f'))
                     .ok_or_else(|| ExecError::DetailedError {
                         message: format!("relation \"{}\" does not exist", comment_stmt.table_name),
                         detail: None,
@@ -7234,7 +7234,7 @@ impl Session {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relation = catalog
                     .lookup_any_relation(&comment_stmt.table_name)
-                    .filter(|relation| matches!(relation.relkind, 'r' | 'p'))
+                    .filter(|relation| matches!(relation.relkind, 'r' | 'p' | 'f'))
                     .ok_or_else(|| ExecError::DetailedError {
                         message: format!("relation \"{}\" does not exist", comment_stmt.table_name),
                         detail: None,
