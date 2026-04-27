@@ -36,10 +36,11 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgConstraintRow, PgEnumRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
-    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgPartitionedTableRow, PgProcRow, PgRangeRow,
-    PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTsConfigMapRow,
-    PgTsConfigRow, PgTsDictRow, PgTsTemplateRow, PgTypeRow, RECORD_TYPE_OID,
+    PgCollationRow, PgConstraintRow, PgEnumRow, PgForeignDataWrapperRow, PgForeignServerRow,
+    PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
+    PgOperatorRow, PgPartitionedTableRow, PgProcRow, PgRangeRow, PgRewriteRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTsConfigMapRow, PgTsConfigRow,
+    PgTsDictRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow, RECORD_TYPE_OID,
     bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
     bootstrap_pg_enum_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
     bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
@@ -67,7 +68,7 @@ static NEXT_CTE_ID: AtomicUsize = AtomicUsize::new(1);
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
-    build_pg_rules_rows, build_pg_stats_rows, build_pg_views_rows,
+    build_pg_rules_rows, build_pg_stats_rows, build_pg_user_mappings_rows, build_pg_views_rows,
     current_pg_stat_progress_copy_rows,
 };
 use agg::*;
@@ -1246,6 +1247,10 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn class_rows(&self) -> Vec<PgClassRow> {
+        Vec::new()
+    }
+
     fn partitioned_table_row(&self, _relation_oid: u32) -> Option<PgPartitionedTableRow> {
         None
     }
@@ -1296,6 +1301,22 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn foreign_data_wrapper_rows(&self) -> Vec<PgForeignDataWrapperRow> {
+        Vec::new()
+    }
+
+    fn foreign_server_rows(&self) -> Vec<PgForeignServerRow> {
+        Vec::new()
+    }
+
+    fn foreign_table_rows(&self) -> Vec<PgForeignTableRow> {
+        Vec::new()
+    }
+
+    fn user_mapping_rows(&self) -> Vec<PgUserMappingRow> {
+        Vec::new()
+    }
+
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }
@@ -1322,6 +1343,15 @@ pub trait CatalogLookup {
 
     fn pg_settings_rows(&self) -> Vec<Vec<Value>> {
         default_pg_settings_rows()
+    }
+
+    fn pg_user_mappings_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_user_mappings_rows(
+            self.authid_rows(),
+            self.foreign_server_rows(),
+            self.user_mapping_rows(),
+            self.current_user_oid(),
+        )
     }
 
     fn pg_stat_activity_rows(&self) -> Vec<Vec<Value>> {
@@ -1963,6 +1993,10 @@ impl CatalogLookup for Catalog {
         catcache.class_by_oid(relation_oid).cloned()
     }
 
+    fn class_rows(&self) -> Vec<PgClassRow> {
+        CatCache::from_catalog(self).class_rows()
+    }
+
     fn partitioned_table_row(&self, relation_oid: u32) -> Option<PgPartitionedTableRow> {
         let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
         catcache.partitioned_table_row(relation_oid).cloned()
@@ -1996,6 +2030,22 @@ impl CatalogLookup for Catalog {
             .into_iter()
             .filter(|row| row.starelid == relation_oid)
             .collect()
+    }
+
+    fn foreign_data_wrapper_rows(&self) -> Vec<PgForeignDataWrapperRow> {
+        CatCache::from_catalog(self).foreign_data_wrapper_rows()
+    }
+
+    fn foreign_server_rows(&self) -> Vec<PgForeignServerRow> {
+        CatCache::from_catalog(self).foreign_server_rows()
+    }
+
+    fn foreign_table_rows(&self) -> Vec<PgForeignTableRow> {
+        CatCache::from_catalog(self).foreign_table_rows()
+    }
+
+    fn user_mapping_rows(&self) -> Vec<PgUserMappingRow> {
+        CatCache::from_catalog(self).user_mapping_rows()
     }
 
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {

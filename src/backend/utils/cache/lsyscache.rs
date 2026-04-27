@@ -1978,6 +1978,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             .unwrap_or_default()
     }
 
+    fn class_rows(&self) -> Vec<PgClassRow> {
+        ensure_class_rows(self.db, self.client_id, self.txn_ctx)
+    }
+
     fn partitioned_table_row(
         &self,
         relation_oid: u32,
@@ -2037,6 +2041,30 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         stxdinherit: bool,
     ) -> Option<PgStatisticExtDataRow> {
         statistic_ext_data_row(self.db, self.client_id, self.txn_ctx, stxoid, stxdinherit)
+    }
+
+    fn foreign_data_wrapper_rows(&self) -> Vec<crate::include::catalog::PgForeignDataWrapperRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.foreign_data_wrapper_rows())
+            .unwrap_or_default()
+    }
+
+    fn foreign_server_rows(&self) -> Vec<crate::include::catalog::PgForeignServerRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.foreign_server_rows())
+            .unwrap_or_default()
+    }
+
+    fn foreign_table_rows(&self) -> Vec<crate::include::catalog::PgForeignTableRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.foreign_table_rows())
+            .unwrap_or_default()
+    }
+
+    fn user_mapping_rows(&self) -> Vec<crate::include::catalog::PgUserMappingRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.user_mapping_rows())
+            .unwrap_or_default()
     }
 
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {

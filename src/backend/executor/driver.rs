@@ -356,6 +356,7 @@ fn execute_statement_with_source(
             actual: "COMMENT ON CONVERSION".into(),
         })),
         Statement::CommentOnForeignDataWrapper(_)
+        | Statement::CommentOnForeignServer(_)
         | Statement::CreateForeignDataWrapper(_)
         | Statement::CreateForeignServer(_)
         | Statement::AlterForeignServerRename(_)

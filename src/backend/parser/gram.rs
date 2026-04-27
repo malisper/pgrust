@@ -4495,6 +4495,10 @@ fn try_parse_foreign_data_wrapper_statement(sql: &str) -> Result<Option<Statemen
         return build_comment_on_foreign_data_wrapper_statement(trimmed)
             .map(|stmt| Some(Statement::CommentOnForeignDataWrapper(stmt)));
     }
+    if lowered.starts_with("comment on server ") {
+        return build_comment_on_foreign_server_statement(trimmed)
+            .map(|stmt| Some(Statement::CommentOnForeignServer(stmt)));
+    }
     Ok(None)
 }
 
@@ -5496,6 +5500,34 @@ fn build_comment_on_foreign_data_wrapper_statement(
     })
 }
 
+fn build_comment_on_foreign_server_statement(
+    sql: &str,
+) -> Result<CommentOnForeignServerStatement, ParseError> {
+    let lower = sql.to_ascii_lowercase();
+    let Some(is_offset) = lower.find(" is ") else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "COMMENT ON SERVER name IS ...",
+            actual: sql.into(),
+        });
+    };
+    let object = sql["comment on server ".len()..is_offset].trim();
+    let value = sql[is_offset + 4..].trim();
+    let comment = if value.eq_ignore_ascii_case("null") {
+        None
+    } else if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+        Some(value[1..value.len() - 1].replace("''", "'"))
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "quoted string or NULL",
+            actual: value.into(),
+        });
+    };
+    Ok(CommentOnForeignServerStatement {
+        server_name: object.to_string(),
+        comment,
+    })
+}
+
 fn parse_create_generic_options(input: &str) -> Result<Vec<RelOption>, ParseError> {
     let rest = consume_keyword(input.trim_start(), "options").trim_start();
     let Some(inner) = rest
@@ -5850,6 +5882,22 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("grant usage on type ") {
         return Ok(Statement::GrantObject(build_grant_type_usage(sql)?));
     }
+    if lowered.starts_with("grant usage on foreign data wrapper ")
+        || lowered.starts_with("grant all on foreign data wrapper ")
+        || lowered.starts_with("grant all privileges on foreign data wrapper ")
+    {
+        return Ok(Statement::GrantObject(
+            build_grant_foreign_data_wrapper_usage(sql)?,
+        ));
+    }
+    if lowered.starts_with("grant usage on foreign server ")
+        || lowered.starts_with("grant all on foreign server ")
+        || lowered.starts_with("grant all privileges on foreign server ")
+    {
+        return Ok(Statement::GrantObject(build_grant_foreign_server_usage(
+            sql,
+        )?));
+    }
     if lowered.starts_with("grant execute on function ") {
         return Ok(Statement::GrantObject(build_grant_function_execute(sql)?));
     }
@@ -5885,6 +5933,22 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     }
     if lowered.starts_with("revoke usage on type ") {
         return Ok(Statement::RevokeObject(build_revoke_type_usage(sql)?));
+    }
+    if lowered.starts_with("revoke usage on foreign data wrapper ")
+        || lowered.starts_with("revoke all on foreign data wrapper ")
+        || lowered.starts_with("revoke all privileges on foreign data wrapper ")
+    {
+        return Ok(Statement::RevokeObject(
+            build_revoke_foreign_data_wrapper_usage(sql)?,
+        ));
+    }
+    if lowered.starts_with("revoke usage on foreign server ")
+        || lowered.starts_with("revoke all on foreign server ")
+        || lowered.starts_with("revoke all privileges on foreign server ")
+    {
+        return Ok(Statement::RevokeObject(build_revoke_foreign_server_usage(
+            sql,
+        )?));
     }
     if lowered.starts_with("revoke execute on function ") {
         return Ok(Statement::RevokeObject(build_revoke_function_execute(sql)?));
@@ -6202,6 +6266,76 @@ fn build_grant_type_usage(sql: &str) -> Result<GrantObjectStatement, ParseError>
     })
 }
 
+fn grant_foreign_usage_prefix<'a>(
+    sql: &'a str,
+    object: &'static str,
+) -> Result<(&'a str, GrantObjectPrivilege), ParseError> {
+    let lower = sql.to_ascii_lowercase();
+    for (prefix, privilege) in [
+        (
+            format!("grant usage on {object} "),
+            if object == "foreign data wrapper" {
+                GrantObjectPrivilege::UsageOnForeignDataWrapper
+            } else {
+                GrantObjectPrivilege::UsageOnForeignServer
+            },
+        ),
+        (
+            format!("grant all on {object} "),
+            if object == "foreign data wrapper" {
+                GrantObjectPrivilege::AllPrivilegesOnForeignDataWrapper
+            } else {
+                GrantObjectPrivilege::AllPrivilegesOnForeignServer
+            },
+        ),
+        (
+            format!("grant all privileges on {object} "),
+            if object == "foreign data wrapper" {
+                GrantObjectPrivilege::AllPrivilegesOnForeignDataWrapper
+            } else {
+                GrantObjectPrivilege::AllPrivilegesOnForeignServer
+            },
+        ),
+    ] {
+        if lower.starts_with(&prefix) {
+            return Ok((
+                sql.get(prefix.len()..)
+                    .ok_or(ParseError::UnexpectedEof)?
+                    .trim_start(),
+                privilege,
+            ));
+        }
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "GRANT USAGE ON foreign object",
+        actual: sql.into(),
+    })
+}
+
+fn build_grant_foreign_data_wrapper_usage(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let (rest, privilege) = grant_foreign_usage_prefix(sql, "foreign data wrapper")?;
+    let (object_names, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege,
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
+fn build_grant_foreign_server_usage(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let (rest, privilege) = grant_foreign_usage_prefix(sql, "foreign server")?;
+    let (object_names, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege,
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
 fn build_grant_function_execute(sql: &str) -> Result<GrantObjectStatement, ParseError> {
     let prefix = "grant execute on function ";
     let rest = sql
@@ -6314,6 +6448,76 @@ fn build_revoke_type_usage(sql: &str) -> Result<RevokeObjectStatement, ParseErro
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnType,
         columns: Vec::new(),
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        cascade,
+    })
+}
+
+fn revoke_foreign_usage_prefix<'a>(
+    sql: &'a str,
+    object: &'static str,
+) -> Result<(&'a str, GrantObjectPrivilege), ParseError> {
+    let lower = sql.to_ascii_lowercase();
+    for (prefix, privilege) in [
+        (
+            format!("revoke usage on {object} "),
+            if object == "foreign data wrapper" {
+                GrantObjectPrivilege::UsageOnForeignDataWrapper
+            } else {
+                GrantObjectPrivilege::UsageOnForeignServer
+            },
+        ),
+        (
+            format!("revoke all on {object} "),
+            if object == "foreign data wrapper" {
+                GrantObjectPrivilege::AllPrivilegesOnForeignDataWrapper
+            } else {
+                GrantObjectPrivilege::AllPrivilegesOnForeignServer
+            },
+        ),
+        (
+            format!("revoke all privileges on {object} "),
+            if object == "foreign data wrapper" {
+                GrantObjectPrivilege::AllPrivilegesOnForeignDataWrapper
+            } else {
+                GrantObjectPrivilege::AllPrivilegesOnForeignServer
+            },
+        ),
+    ] {
+        if lower.starts_with(&prefix) {
+            return Ok((
+                sql.get(prefix.len()..)
+                    .ok_or(ParseError::UnexpectedEof)?
+                    .trim_start(),
+                privilege,
+            ));
+        }
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "REVOKE USAGE ON foreign object",
+        actual: sql.into(),
+    })
+}
+
+fn build_revoke_foreign_data_wrapper_usage(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let (rest, privilege) = revoke_foreign_usage_prefix(sql, "foreign data wrapper")?;
+    let (object_names, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege,
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        cascade,
+    })
+}
+
+fn build_revoke_foreign_server_usage(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let (rest, privilege) = revoke_foreign_usage_prefix(sql, "foreign server")?;
+    let (object_names, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege,
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade,

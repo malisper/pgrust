@@ -1336,6 +1336,9 @@ impl Database {
             Statement::CommentOnForeignDataWrapper(ref comment_stmt) => {
                 self.execute_comment_on_foreign_data_wrapper_stmt(client_id, comment_stmt)
             }
+            Statement::CommentOnForeignServer(ref comment_stmt) => {
+                self.execute_comment_on_foreign_server_stmt(client_id, comment_stmt)
+            }
             Statement::CommentOnPublication(ref comment_stmt) => self
                 .execute_comment_on_publication_stmt_with_search_path(
                     client_id,

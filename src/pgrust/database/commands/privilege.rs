@@ -9,6 +9,7 @@ use crate::backend::parser::{
 use crate::include::catalog::pg_proc::{is_bootstrap_proc_oid, set_bootstrap_proc_execute_acl};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_NAME, CURRENT_DATABASE_OID, PgAuthIdRow,
+    PgForeignDataWrapperRow, PgForeignServerRow,
 };
 use std::collections::{BTreeSet, VecDeque};
 
@@ -25,6 +26,7 @@ const SCHEMA_ALL_PRIVILEGE_CHARS: &str = "UC";
 const SCHEMA_USAGE_PRIVILEGE_CHARS: &str = "U";
 const TYPE_USAGE_PRIVILEGE_CHARS: &str = "U";
 const FUNCTION_EXECUTE_PRIVILEGE_CHARS: &str = "X";
+const FOREIGN_USAGE_PRIVILEGE_CHARS: &str = "U";
 
 fn table_privilege_chars(privilege: &GrantObjectPrivilege) -> Option<&str> {
     match privilege {
@@ -50,6 +52,42 @@ fn object_privilege_chars(privilege: GrantObjectPrivilege) -> Option<&'static st
         GrantObjectPrivilege::ExecuteOnFunction
         | GrantObjectPrivilege::ExecuteOnProcedure
         | GrantObjectPrivilege::ExecuteOnRoutine => Some(FUNCTION_EXECUTE_PRIVILEGE_CHARS),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ForeignUsageObjectKind {
+    ForeignDataWrapper,
+    ForeignServer,
+}
+
+impl ForeignUsageObjectKind {
+    fn owner_error_label(self) -> &'static str {
+        match self {
+            Self::ForeignDataWrapper => "foreign-data wrapper",
+            Self::ForeignServer => "foreign server",
+        }
+    }
+
+    fn usage_privilege_object_type(self) -> &'static str {
+        match self {
+            Self::ForeignDataWrapper => "foreign-data wrapper",
+            Self::ForeignServer => "server",
+        }
+    }
+}
+
+fn foreign_usage_object_kind(privilege: GrantObjectPrivilege) -> Option<ForeignUsageObjectKind> {
+    match privilege {
+        GrantObjectPrivilege::UsageOnForeignDataWrapper
+        | GrantObjectPrivilege::AllPrivilegesOnForeignDataWrapper => {
+            Some(ForeignUsageObjectKind::ForeignDataWrapper)
+        }
+        GrantObjectPrivilege::UsageOnForeignServer
+        | GrantObjectPrivilege::AllPrivilegesOnForeignServer => {
+            Some(ForeignUsageObjectKind::ForeignServer)
+        }
         _ => None,
     }
 }
@@ -188,8 +226,75 @@ pub(crate) fn function_owner_default_acl(owner_name: &str) -> Vec<String> {
     ]
 }
 
+fn foreign_usage_owner_default_acl(owner_name: &str) -> Vec<String> {
+    vec![format!(
+        "{owner_name}={FOREIGN_USAGE_PRIVILEGE_CHARS}/{owner_name}"
+    )]
+}
+
 fn collapse_acl_defaults(acl: Vec<String>, defaults: &[String]) -> Option<Vec<String>> {
     if acl == defaults { None } else { Some(acl) }
+}
+
+fn usage_acl_has_grant_option(privileges: &str) -> bool {
+    let mut chars = privileges.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == 'U' {
+            return matches!(chars.peek(), Some('*'));
+        }
+    }
+    false
+}
+
+fn usage_acl_privileges(grantable: bool) -> &'static str {
+    if grantable { "U*" } else { "U" }
+}
+
+fn grant_usage_acl_entry(acl: &mut Vec<String>, grantee: &str, grantor: &str, grantable: bool) {
+    if let Some(existing) = acl.iter_mut().find(|item| {
+        parse_acl_item(item)
+            .map(|(item_grantee, _, item_grantor)| {
+                item_grantee == grantee && item_grantor == grantor
+            })
+            .unwrap_or(false)
+    }) {
+        let (_, existing_privileges, _) = parse_acl_item(existing).expect("validated above");
+        let grantable = grantable || usage_acl_has_grant_option(&existing_privileges);
+        *existing = format!("{grantee}={}/{grantor}", usage_acl_privileges(grantable));
+        return;
+    }
+    acl.push(format!(
+        "{grantee}={}/{grantor}",
+        usage_acl_privileges(grantable)
+    ));
+}
+
+fn revoke_usage_acl_entry(acl: &mut Vec<String>, grantee: &str) {
+    acl.retain_mut(|item| {
+        let Some((item_grantee, existing_privileges, grantor)) = parse_acl_item(item) else {
+            return true;
+        };
+        if item_grantee != grantee {
+            return true;
+        }
+        let mut remaining = String::new();
+        let mut chars = existing_privileges.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == 'U' {
+                if matches!(chars.peek(), Some('*')) {
+                    chars.next();
+                }
+                continue;
+            }
+            remaining.push(ch);
+        }
+        if !remaining.contains(FOREIGN_USAGE_PRIVILEGE_CHARS) {
+            return false;
+        }
+        let grantable = usage_acl_has_grant_option(&remaining);
+        *item = format!("{grantee}={}/{grantor}", usage_acl_privileges(grantable));
+        true
+    });
 }
 
 fn grant_acl_entry(
@@ -487,6 +592,12 @@ impl Database {
                     stmt,
                     configured_search_path,
                 ),
+            GrantObjectPrivilege::UsageOnForeignDataWrapper
+            | GrantObjectPrivilege::AllPrivilegesOnForeignDataWrapper
+            | GrantObjectPrivilege::UsageOnForeignServer
+            | GrantObjectPrivilege::AllPrivilegesOnForeignServer => {
+                self.execute_grant_foreign_usage_acl_stmt(client_id, stmt)
+            }
         }
     }
 
@@ -557,6 +668,21 @@ impl Database {
                     xid,
                     cid,
                     configured_search_path,
+                    catalog_effects,
+                    true,
+                ),
+            GrantObjectPrivilege::UsageOnForeignDataWrapper
+            | GrantObjectPrivilege::AllPrivilegesOnForeignDataWrapper
+            | GrantObjectPrivilege::UsageOnForeignServer
+            | GrantObjectPrivilege::AllPrivilegesOnForeignServer => self
+                .execute_foreign_usage_acl_stmt_in_transaction(
+                    client_id,
+                    stmt.privilege.clone(),
+                    &stmt.object_names,
+                    &stmt.grantee_names,
+                    false,
+                    xid,
+                    cid,
                     catalog_effects,
                     true,
                 ),
@@ -633,6 +759,21 @@ impl Database {
                     catalog_effects,
                     false,
                 ),
+            GrantObjectPrivilege::UsageOnForeignDataWrapper
+            | GrantObjectPrivilege::AllPrivilegesOnForeignDataWrapper
+            | GrantObjectPrivilege::UsageOnForeignServer
+            | GrantObjectPrivilege::AllPrivilegesOnForeignServer => self
+                .execute_foreign_usage_acl_stmt_in_transaction(
+                    client_id,
+                    stmt.privilege.clone(),
+                    &stmt.object_names,
+                    &stmt.grantee_names,
+                    stmt.with_grant_option,
+                    xid,
+                    cid,
+                    catalog_effects,
+                    false,
+                ),
         }
     }
 
@@ -682,6 +823,12 @@ impl Database {
                     stmt,
                     configured_search_path,
                 ),
+            GrantObjectPrivilege::UsageOnForeignDataWrapper
+            | GrantObjectPrivilege::AllPrivilegesOnForeignDataWrapper
+            | GrantObjectPrivilege::UsageOnForeignServer
+            | GrantObjectPrivilege::AllPrivilegesOnForeignServer => {
+                self.execute_revoke_foreign_usage_acl_stmt(client_id, stmt)
+            }
         }
     }
 
@@ -1696,6 +1843,305 @@ impl Database {
             catalog_effects.push(effect);
         }
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn execute_grant_foreign_usage_acl_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &GrantObjectStatement,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_foreign_usage_acl_stmt_in_transaction(
+            client_id,
+            stmt.privilege.clone(),
+            &stmt.object_names,
+            &stmt.grantee_names,
+            stmt.with_grant_option,
+            xid,
+            0,
+            &mut catalog_effects,
+            false,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    fn execute_revoke_foreign_usage_acl_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &RevokeObjectStatement,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_foreign_usage_acl_stmt_in_transaction(
+            client_id,
+            stmt.privilege.clone(),
+            &stmt.object_names,
+            &stmt.grantee_names,
+            false,
+            xid,
+            0,
+            &mut catalog_effects,
+            true,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_foreign_usage_acl_stmt_in_transaction(
+        &self,
+        client_id: ClientId,
+        privilege: GrantObjectPrivilege,
+        object_names: &[String],
+        grantee_names: &[String],
+        with_grant_option: bool,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        revoke: bool,
+    ) -> Result<StatementResult, ExecError> {
+        let kind = foreign_usage_object_kind(privilege)
+            .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
+        if object_names.is_empty() {
+            return Err(ExecError::Parse(ParseError::UnexpectedEof));
+        }
+        let auth = self.auth_state(client_id);
+        let mut current_cid = cid;
+        for object_name in object_names {
+            let normalized_object_name = object_name.trim_matches('"').to_ascii_lowercase();
+            let auth_catalog = self
+                .auth_catalog(client_id, Some((xid, current_cid)))
+                .map_err(map_catalog_error)?;
+            let current_user_is_superuser = auth_catalog
+                .role_by_oid(auth.current_user_oid())
+                .is_some_and(|entry| entry.rolsuper);
+            let grantor_name = auth_catalog
+                .role_by_oid(auth.current_user_oid())
+                .map(|entry| entry.rolname.clone())
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: "current user does not exist".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+            let grantee_acl_names = grantee_names
+                .iter()
+                .map(|grantee_name| {
+                    if grantee_name.eq_ignore_ascii_case("public") {
+                        Ok(String::new())
+                    } else {
+                        auth_catalog
+                            .role_by_name(grantee_name)
+                            .map(|entry| entry.rolname.clone())
+                            .ok_or_else(|| {
+                                ExecError::Parse(role_management_error(format!(
+                                    "role \"{}\" does not exist",
+                                    grantee_name
+                                )))
+                            })
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let catcache = self
+                .backend_catcache(client_id, Some((xid, current_cid)))
+                .map_err(map_catalog_error)?;
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: current_cid,
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            match kind {
+                ForeignUsageObjectKind::ForeignDataWrapper => {
+                    let existing = catcache
+                        .foreign_data_wrapper_rows()
+                        .into_iter()
+                        .find(|row| row.fdwname.eq_ignore_ascii_case(&normalized_object_name))
+                        .ok_or_else(|| ExecError::DetailedError {
+                            message: format!(
+                                "foreign-data wrapper \"{}\" does not exist",
+                                object_name
+                            ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42704",
+                        })?;
+                    let (_, effect) = self.replace_foreign_data_wrapper_acl(
+                        existing,
+                        object_name,
+                        &auth_catalog,
+                        current_user_is_superuser,
+                        &auth,
+                        &grantor_name,
+                        &grantee_acl_names,
+                        with_grant_option,
+                        revoke,
+                        &ctx,
+                    )?;
+                    catalog_effects.push(effect);
+                }
+                ForeignUsageObjectKind::ForeignServer => {
+                    let existing = catcache
+                        .foreign_server_rows()
+                        .into_iter()
+                        .find(|row| row.srvname.eq_ignore_ascii_case(&normalized_object_name))
+                        .ok_or_else(|| ExecError::DetailedError {
+                            message: format!("server \"{}\" does not exist", object_name),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42704",
+                        })?;
+                    let (_, effect) = self.replace_foreign_server_acl(
+                        existing,
+                        object_name,
+                        &auth_catalog,
+                        current_user_is_superuser,
+                        &auth,
+                        &grantor_name,
+                        &grantee_acl_names,
+                        with_grant_option,
+                        revoke,
+                        &ctx,
+                    )?;
+                    catalog_effects.push(effect);
+                }
+            }
+            current_cid = current_cid.saturating_add(1);
+        }
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn replace_foreign_data_wrapper_acl(
+        &self,
+        existing: PgForeignDataWrapperRow,
+        object_name: &str,
+        auth_catalog: &crate::pgrust::auth::AuthCatalog,
+        current_user_is_superuser: bool,
+        auth: &crate::pgrust::auth::AuthState,
+        grantor_name: &str,
+        grantee_acl_names: &[String],
+        with_grant_option: bool,
+        revoke: bool,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), ExecError> {
+        if !current_user_is_superuser
+            && !auth.has_effective_membership(existing.fdwowner, auth_catalog)
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "must be owner of {} {}",
+                    ForeignUsageObjectKind::ForeignDataWrapper.owner_error_label(),
+                    object_name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
+        let owner_name = auth_catalog
+            .role_by_oid(existing.fdwowner)
+            .map(|entry| entry.rolname.clone())
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!(
+                    "owner for {} \"{}\" does not exist",
+                    ForeignUsageObjectKind::ForeignDataWrapper.usage_privilege_object_type(),
+                    object_name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        let defaults = foreign_usage_owner_default_acl(&owner_name);
+        let mut acl = if revoke {
+            existing.fdwacl.clone().unwrap_or_default()
+        } else {
+            existing.fdwacl.clone().unwrap_or_else(|| defaults.clone())
+        };
+        for grantee_acl_name in grantee_acl_names {
+            if revoke {
+                revoke_usage_acl_entry(&mut acl, grantee_acl_name);
+            } else {
+                grant_usage_acl_entry(&mut acl, grantee_acl_name, grantor_name, with_grant_option);
+            }
+        }
+        let mut replacement = existing.clone();
+        replacement.fdwacl = collapse_acl_defaults(acl, &defaults);
+        self.catalog
+            .write()
+            .replace_foreign_data_wrapper_mvcc(&existing, replacement, ctx)
+            .map_err(map_catalog_error)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn replace_foreign_server_acl(
+        &self,
+        existing: PgForeignServerRow,
+        object_name: &str,
+        auth_catalog: &crate::pgrust::auth::AuthCatalog,
+        current_user_is_superuser: bool,
+        auth: &crate::pgrust::auth::AuthState,
+        grantor_name: &str,
+        grantee_acl_names: &[String],
+        with_grant_option: bool,
+        revoke: bool,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), ExecError> {
+        if !current_user_is_superuser
+            && !auth.has_effective_membership(existing.srvowner, auth_catalog)
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "must be owner of {} {}",
+                    ForeignUsageObjectKind::ForeignServer.owner_error_label(),
+                    object_name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
+        let owner_name = auth_catalog
+            .role_by_oid(existing.srvowner)
+            .map(|entry| entry.rolname.clone())
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!(
+                    "owner for {} \"{}\" does not exist",
+                    ForeignUsageObjectKind::ForeignServer.usage_privilege_object_type(),
+                    object_name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        let defaults = foreign_usage_owner_default_acl(&owner_name);
+        let mut acl = if revoke {
+            existing.srvacl.clone().unwrap_or_default()
+        } else {
+            existing.srvacl.clone().unwrap_or_else(|| defaults.clone())
+        };
+        for grantee_acl_name in grantee_acl_names {
+            if revoke {
+                revoke_usage_acl_entry(&mut acl, grantee_acl_name);
+            } else {
+                grant_usage_acl_entry(&mut acl, grantee_acl_name, grantor_name, with_grant_option);
+            }
+        }
+        let mut replacement = existing.clone();
+        replacement.srvacl = collapse_acl_defaults(acl, &defaults);
+        self.catalog
+            .write()
+            .replace_foreign_server_mvcc(&existing, replacement, ctx)
+            .map_err(map_catalog_error)
     }
 
     pub(crate) fn execute_grant_role_membership_stmt(

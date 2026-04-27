@@ -582,6 +582,7 @@ fn run_statement(
         Statement::CommentOnRole(_)
         | Statement::CommentOnConversion(_)
         | Statement::CommentOnForeignDataWrapper(_)
+        | Statement::CommentOnForeignServer(_)
         | Statement::CreateForeignDataWrapper(_)
         | Statement::CreateForeignServer(_)
         | Statement::AlterForeignServerRename(_)

@@ -146,6 +146,8 @@ fn execute_user_defined_set_returning_function_by_language(
         execute_user_defined_sql_set_returning_function(&row, args, output_columns, slot, ctx)
     } else if let Some(kind) = text_search_table_function_for_proc_src(&row.prosrc) {
         eval_text_search_table_function(kind, args, slot, ctx)
+    } else if row.prosrc == "pg_options_to_table" {
+        eval_pg_options_to_table(args, slot, ctx)
     } else {
         execute_user_defined_set_returning_function(proc_oid, args, output_columns, slot, ctx)
     }
@@ -1517,6 +1519,63 @@ fn eval_unnest(
             }
         }
         rows.push(TupleSlot::virtual_row(row));
+    }
+    Ok(rows)
+}
+
+fn eval_pg_options_to_table(
+    args: &[Expr],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    if args.len() != 1 {
+        return Err(ExecError::DetailedError {
+            message: format!("pg_options_to_table expects 1 argument, got {}", args.len()),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
+        });
+    }
+
+    let value = eval_expr(&args[0], slot, ctx)?;
+    let values = match value {
+        Value::Null => return Ok(Vec::new()),
+        Value::Array(values) => values,
+        Value::PgArray(array) => array.to_nested_values(),
+        other => {
+            if let Some(array) = normalize_array_value(&other) {
+                array.to_nested_values()
+            } else {
+                return Err(ExecError::TypeMismatch {
+                    op: "pg_options_to_table",
+                    left: other,
+                    right: Value::Null,
+                });
+            }
+        }
+    };
+
+    let mut rows = Vec::with_capacity(values.len());
+    for value in values {
+        ctx.check_for_interrupts()?;
+        if matches!(value, Value::Null) {
+            continue;
+        }
+        let Some(option) = value.as_text() else {
+            return Err(ExecError::TypeMismatch {
+                op: "pg_options_to_table",
+                left: value,
+                right: Value::Null,
+            });
+        };
+        let (name, option_value) = option
+            .split_once('=')
+            .map(|(name, value)| (name, Value::Text(value.into())))
+            .unwrap_or((option, Value::Null));
+        rows.push(TupleSlot::virtual_row(vec![
+            Value::Text(name.into()),
+            option_value,
+        ]));
     }
     Ok(rows)
 }

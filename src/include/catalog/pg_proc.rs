@@ -1541,6 +1541,28 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
                 'v',
             )
         },
+        PgProcRow {
+            prorows: 3.0,
+            proallargtypes: Some(vec![TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TEXT_TYPE_OID]),
+            proargmodes: Some(vec![b'i', b'o', b'o']),
+            proargnames: Some(vec![
+                "options_array".into(),
+                "option_name".into(),
+                "option_value".into(),
+            ]),
+            ..proc_row(
+                2289,
+                "pg_options_to_table",
+                RECORD_TYPE_OID,
+                &oid_argtypes(&[TEXT_ARRAY_TYPE_OID]),
+                "pg_options_to_table",
+                1,
+                true,
+                false,
+                'f',
+                's',
+            )
+        },
         proc_row(
             6400,
             "pg_rust_internal_binary_coercible",

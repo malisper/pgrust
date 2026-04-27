@@ -5541,6 +5541,9 @@ impl Session {
             Statement::CommentOnForeignDataWrapper(ref comment_stmt) => {
                 db.execute_comment_on_foreign_data_wrapper_stmt(client_id, comment_stmt)
             }
+            Statement::CommentOnForeignServer(ref comment_stmt) => {
+                db.execute_comment_on_foreign_server_stmt(client_id, comment_stmt)
+            }
             Statement::CommentOnPublication(ref comment_stmt) => {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();

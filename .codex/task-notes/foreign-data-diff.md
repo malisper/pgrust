@@ -1,5 +1,5 @@
 Goal:
-Add the first FDW support slice needed by the `foreign_data` regression.
+Add FDW support slices needed by the `foreign_data` regression.
 
 Key decisions:
 Implemented the real catalog-backed path for foreign servers, user mappings, and
@@ -25,6 +25,10 @@ Runtime behavior:
 - validates `postgresql_fdw_validator` server and user-mapping options
 - cascades FDW/server drops through dependent user mappings and foreign tables
 - deletes `pg_foreign_table` rows when the relation is dropped
+- expands FDW option arrays through `pg_options_to_table`
+- exposes `pg_user_mappings` and information_schema FDW views
+- supports `COMMENT ON SERVER`
+- stores `GRANT/REVOKE USAGE` ACLs for foreign data wrappers and servers
 
 Tests run:
 - `cargo fmt`
@@ -34,14 +38,21 @@ Tests run:
 - `scripts/cargo_isolated.sh test --lib --quiet copy_freeze_rejects_foreign_tables`
 - `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
 - `scripts/run_regression.sh --skip-build --port 55434 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results`
+- `scripts/cargo_isolated.sh test --lib --quiet pg_options_to_table_expands_foreign_data_options`
+- `scripts/cargo_isolated.sh test --lib --quiet pg_user_mappings_view_reports_servers_users_and_visible_options`
+- `scripts/cargo_isolated.sh test --lib --quiet information_schema_foreign_data_views_report_catalog_rows`
+- `scripts/cargo_isolated.sh test --lib --quiet comment_on_server_uses_pg_description_rows`
+- `scripts/cargo_isolated.sh test --lib --quiet foreign_data_usage_grant_revoke_updates_acl_views`
+- `scripts/cargo_isolated.sh test --lib --quiet parse_grant_usage_on_foreign`
+- `scripts/cargo_isolated.sh test --lib --quiet parse_revoke_all_on_foreign_data_wrapper_statement`
+- `scripts/run_regression.sh --skip-build --port 55436 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-fdw-acl`
 
 Remaining:
-`foreign_data` still fails, but improved to 240/539 matching queries. Biggest
+`foreign_data` still fails, but improved to 260/539 matching queries. Biggest
 remaining groups:
-- `pg_options_to_table` set-returning function for `\dew+`, `\des+`, `\deu+`
-- `pg_user_mappings` and information_schema FDW views
-- `GRANT/REVOKE USAGE ON FOREIGN DATA WRAPPER/SERVER` ACL behavior
-- `COMMENT ON SERVER`
+- `pg_catalog.quote_ident` for psql `\dew+`, `\des+`, `\deu+` descriptions
+- `has_foreign_data_wrapper_privilege` and `has_server_privilege`
 - FDW dependency reporting for handler functions and owners
 - `IMPORT FOREIGN SCHEMA`
+- foreign table DDL/partition forms and psql helper functions
 - Notices and exact PostgreSQL error/caret wording

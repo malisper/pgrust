@@ -4809,6 +4809,37 @@ fn parse_grant_usage_on_type_statement() {
 }
 
 #[test]
+fn parse_grant_usage_on_foreign_data_wrapper_statement() {
+    let stmt =
+        parse_statement("grant usage on foreign data wrapper foo to regress_test_role").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnForeignDataWrapper,
+            object_names: vec!["foo".into()],
+            grantee_names: vec!["regress_test_role".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_usage_on_foreign_server_with_grant_option_statement() {
+    let stmt =
+        parse_statement("grant usage on foreign server s1 to regress_test_role with grant option")
+            .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnForeignServer,
+            object_names: vec!["s1".into()],
+            grantee_names: vec!["regress_test_role".into()],
+            with_grant_option: true,
+        })
+    );
+}
+
+#[test]
 fn parse_grant_select_on_table_statement() {
     let stmt = parse_statement("grant select on uaccount to public").unwrap();
     assert_eq!(
@@ -5022,6 +5053,21 @@ fn parse_revoke_usage_on_type_statement() {
             columns: Vec::new(),
             object_names: vec!["custom_t".into()],
             grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_all_on_foreign_data_wrapper_statement() {
+    let stmt =
+        parse_statement("revoke all on foreign data wrapper foo from regress_test_role").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::AllPrivilegesOnForeignDataWrapper,
+            object_names: vec!["foo".into()],
+            grantee_names: vec!["regress_test_role".into()],
             cascade: false,
         })
     );
@@ -13177,6 +13223,14 @@ fn parse_foreign_data_wrapper_statements() {
     };
     assert_eq!(comment.fdw_name, "foo");
     assert_eq!(comment.comment.as_deref(), Some("hello"));
+
+    let Statement::CommentOnForeignServer(comment) =
+        parse_statement("comment on server srv is 'foreign server'").unwrap()
+    else {
+        panic!("expected comment on server");
+    };
+    assert_eq!(comment.server_name, "srv");
+    assert_eq!(comment.comment.as_deref(), Some("foreign server"));
 
     let Statement::CreateForeignServer(create_server) = parse_statement(
         "create server if not exists srv type 'postgres' version '17' foreign data wrapper foo options (host 'localhost', dbname 'regression')",

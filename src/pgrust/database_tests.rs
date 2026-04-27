@@ -31857,6 +31857,339 @@ fn foreign_data_catalogs_track_servers_mappings_and_tables() {
 }
 
 #[test]
+fn pg_options_to_table_expands_foreign_data_options() {
+    let base = temp_dir("pg_options_to_table_fdw");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create foreign data wrapper fdw_opts")
+        .unwrap();
+    db.execute(
+        1,
+        "create server fdw_opts_srv foreign data wrapper fdw_opts options (host 'localhost', dbname 'regression')",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select option_name, option_value from pg_options_to_table((select srvoptions from pg_foreign_server where srvname = 'fdw_opts_srv')) order by option_name",
+        ),
+        vec![
+            vec![
+                Value::Text("dbname".into()),
+                Value::Text("regression".into())
+            ],
+            vec![Value::Text("host".into()), Value::Text("localhost".into())],
+        ]
+    );
+}
+
+#[test]
+fn pg_user_mappings_view_reports_servers_users_and_visible_options() {
+    let base = temp_dir("pg_user_mappings_view");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create foreign data wrapper fdw_um").unwrap();
+    db.execute(1, "create server fdw_um_srv foreign data wrapper fdw_um")
+        .unwrap();
+    db.execute(
+        1,
+        "create user mapping for current_user server fdw_um_srv options (user 'alice')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create user mapping for public server fdw_um_srv options (user 'guest')",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select srvname, usename, option_name, option_value \
+             from pg_user_mappings, pg_options_to_table(umoptions) \
+             order by srvname, usename, option_name",
+        ),
+        vec![
+            vec![
+                Value::Text("fdw_um_srv".into()),
+                Value::Text("postgres".into()),
+                Value::Text("user".into()),
+                Value::Text("alice".into()),
+            ],
+            vec![
+                Value::Text("fdw_um_srv".into()),
+                Value::Text("public".into()),
+                Value::Text("user".into()),
+                Value::Text("guest".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn information_schema_foreign_data_views_report_catalog_rows() {
+    let base = temp_dir("information_schema_fdw_views");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create schema foreign_schema").unwrap();
+    db.execute(
+        1,
+        "create foreign data wrapper fdw_info options (wrapper_opt 'true')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create server fdw_info_srv foreign data wrapper fdw_info options (host 'localhost')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create user mapping for current_user server fdw_info_srv options (user 'alice')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create foreign table foreign_schema.fdw_info_table (a int4) server fdw_info_srv options (table_name 'remote_table')",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select foreign_data_wrapper_name, authorization_identifier, foreign_data_wrapper_language \
+             from information_schema.foreign_data_wrappers \
+             where foreign_data_wrapper_name = 'fdw_info'",
+        ),
+        vec![vec![
+            Value::Text("fdw_info".into()),
+            Value::Text("postgres".into()),
+            Value::Text("c".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select option_name, option_value \
+             from information_schema.foreign_data_wrapper_options \
+             where foreign_data_wrapper_name = 'fdw_info'",
+        ),
+        vec![vec![
+            Value::Text("wrapper_opt".into()),
+            Value::Text("true".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select foreign_server_name, foreign_data_wrapper_name, authorization_identifier \
+             from information_schema.foreign_servers \
+             where foreign_server_name = 'fdw_info_srv'",
+        ),
+        vec![vec![
+            Value::Text("fdw_info_srv".into()),
+            Value::Text("fdw_info".into()),
+            Value::Text("postgres".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select option_name, option_value \
+             from information_schema.foreign_server_options \
+             where foreign_server_name = 'fdw_info_srv'",
+        ),
+        vec![vec![
+            Value::Text("host".into()),
+            Value::Text("localhost".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select authorization_identifier, foreign_server_name \
+             from information_schema.user_mappings \
+             where foreign_server_name = 'fdw_info_srv'",
+        ),
+        vec![vec![
+            Value::Text("postgres".into()),
+            Value::Text("fdw_info_srv".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select option_name, option_value \
+             from information_schema.user_mapping_options \
+             where foreign_server_name = 'fdw_info_srv'",
+        ),
+        vec![vec![
+            Value::Text("user".into()),
+            Value::Text("alice".into())
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select foreign_table_schema, foreign_table_name, foreign_server_name \
+             from information_schema.foreign_tables \
+             where foreign_table_name = 'fdw_info_table'",
+        ),
+        vec![vec![
+            Value::Text("foreign_schema".into()),
+            Value::Text("fdw_info_table".into()),
+            Value::Text("fdw_info_srv".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select option_name, option_value \
+             from information_schema.foreign_table_options \
+             where foreign_table_name = 'fdw_info_table'",
+        ),
+        vec![vec![
+            Value::Text("table_name".into()),
+            Value::Text("remote_table".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select object_name, object_type, privilege_type, is_grantable \
+             from information_schema.usage_privileges \
+             where object_name in ('fdw_info', 'fdw_info_srv') \
+             order by object_name",
+        ),
+        vec![
+            vec![
+                Value::Text("fdw_info".into()),
+                Value::Text("FOREIGN DATA WRAPPER".into()),
+                Value::Text("USAGE".into()),
+                Value::Text("YES".into()),
+            ],
+            vec![
+                Value::Text("fdw_info_srv".into()),
+                Value::Text("FOREIGN SERVER".into()),
+                Value::Text("USAGE".into()),
+                Value::Text("YES".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn foreign_data_usage_grant_revoke_updates_acl_views() {
+    let base = temp_dir("foreign_data_usage_acl");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create role fdw_acl_role").unwrap();
+    db.execute(1, "create foreign data wrapper fdw_acl")
+        .unwrap();
+    db.execute(1, "create server fdw_acl_srv foreign data wrapper fdw_acl")
+        .unwrap();
+
+    db.execute(
+        1,
+        "grant usage on foreign data wrapper fdw_acl to fdw_acl_role",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "grant usage on foreign server fdw_acl_srv to fdw_acl_role with grant option",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select object_name, object_type, privilege_type, is_grantable \
+             from information_schema.usage_privileges \
+             where grantee = 'fdw_acl_role' \
+             order by object_name",
+        ),
+        vec![
+            vec![
+                Value::Text("fdw_acl".into()),
+                Value::Text("FOREIGN DATA WRAPPER".into()),
+                Value::Text("USAGE".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("fdw_acl_srv".into()),
+                Value::Text("FOREIGN SERVER".into()),
+                Value::Text("USAGE".into()),
+                Value::Text("YES".into()),
+            ],
+        ]
+    );
+
+    db.execute(
+        1,
+        "revoke all on foreign data wrapper fdw_acl from fdw_acl_role",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "revoke usage on foreign server fdw_acl_srv from fdw_acl_role",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from information_schema.usage_privileges \
+             where grantee = 'fdw_acl_role'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn comment_on_server_uses_pg_description_rows() {
+    let base = temp_dir("comment_on_server");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create foreign data wrapper comment_fdw")
+        .unwrap();
+    db.execute(
+        1,
+        "create server comment_srv foreign data wrapper comment_fdw",
+    )
+    .unwrap();
+    db.execute(1, "comment on server comment_srv is 'foreign server'")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!(
+                "select d.description \
+                 from pg_description d \
+                 join pg_foreign_server s on s.oid = d.objoid \
+                 where d.classoid = {} and s.srvname = 'comment_srv'",
+                crate::include::catalog::PG_FOREIGN_SERVER_RELATION_OID
+            ),
+        ),
+        vec![vec![Value::Text("foreign server".into())]]
+    );
+}
+
+#[test]
 fn copy_freeze_rejects_foreign_tables() {
     let base = temp_dir("copy_freeze_foreign_table");
     let db = Database::open(&base, 16).unwrap();

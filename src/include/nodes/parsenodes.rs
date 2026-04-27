@@ -437,6 +437,7 @@ pub enum Statement {
     CommentOnDomain(CommentOnDomainStatement),
     CommentOnConversion(CommentOnConversionStatement),
     CommentOnForeignDataWrapper(CommentOnForeignDataWrapperStatement),
+    CommentOnForeignServer(CommentOnForeignServerStatement),
     CommentOnPublication(CommentOnPublicationStatement),
     CommentOnStatistics(CommentOnStatisticsStatement),
     CommentOnAggregate(CommentOnAggregateStatement),
@@ -3079,6 +3080,12 @@ pub struct CommentOnForeignDataWrapperStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnForeignServerStatement {
+    pub server_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateConversionStatement {
     pub conversion_name: String,
     pub for_encoding: String,
@@ -3349,6 +3356,10 @@ pub enum GrantObjectPrivilege {
     ExecuteOnFunction,
     ExecuteOnProcedure,
     ExecuteOnRoutine,
+    UsageOnForeignDataWrapper,
+    UsageOnForeignServer,
+    AllPrivilegesOnForeignDataWrapper,
+    AllPrivilegesOnForeignServer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
