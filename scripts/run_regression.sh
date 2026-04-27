@@ -624,6 +624,10 @@ if [[ -n "$SINGLE_TEST" && "$SINGLE_TEST" != "alter_table" ]]; then
     BUILD_ARGS=(--bin pgrust_server)
 fi
 
+if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
+    export CARGO_TARGET_DIR="$("$PGRUST_DIR/scripts/cargo_isolated.sh" --print-target-dir)"
+fi
+
 make_temp_dir() {
     local prefix="$1"
     mktemp -d "${TMPDIR:-/tmp}/${prefix}.${WORKTREE_NAME}.XXXXXX"
