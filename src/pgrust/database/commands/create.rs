@@ -2014,23 +2014,16 @@ impl Database {
         };
         let (normalized, object_name, namespace_oid) = self
             .normalize_domain_name_for_create(&create_stmt.domain_name, configured_search_path)?;
-        let mut domains = self.domains.write();
+        let domains = self.domains.write();
         if domains.contains_key(&normalized) {
             return Err(ExecError::Parse(ParseError::UnsupportedType(
                 create_stmt.domain_name.clone(),
             )));
         }
-        let (oid, array_oid) = {
-            let next_catalog_oid = self.catalog.read().next_oid();
-            let oid = domains
-                .values()
-                .flat_map(|domain| [domain.oid, domain.array_oid])
-                .map(|oid| oid.saturating_add(1))
-                .max()
-                .unwrap_or(next_catalog_oid)
-                .max(next_catalog_oid);
-            (oid, oid.saturating_add(1))
-        };
+        drop(domains);
+        let oid = self.allocate_dynamic_type_oids(2, None, None)?;
+        let array_oid = oid.saturating_add(1);
+        let mut domains = self.domains.write();
         domains.insert(
             normalized,
             DomainEntry {

@@ -8,14 +8,16 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::optimizer::finalize_expr_subqueries;
 use crate::backend::parser::analyze::scope_for_relation;
 use crate::backend::parser::{
-    ArraySubscript, BoundCte, BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement,
-    CatalogLookup, CreateTableAsStatement, CteBody, FromItem, OrderByItem, ParseError,
-    RawWindowFrame, RawWindowFrameBound, RawWindowSpec, RawXmlExpr, SelectStatement,
-    SlotScopeColumn, SqlCallArgs, SqlCaseWhen, SqlExpr, SqlType, SqlTypeKind, Statement,
-    ValuesStatement, bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
-    bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_expr,
-    parse_statement, parse_type_name, pg_plan_query_with_outer_scopes_and_ctes,
-    pg_plan_values_query_with_outer_scopes_and_ctes, resolve_raw_type_name,
+    ArraySubscript, Assignment, AssignmentTarget, AssignmentTargetIndirection, BoundCte,
+    BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup,
+    CreateTableAsStatement, CteBody, FromItem, InsertSource, InsertStatement, OnConflictClause,
+    OnConflictTarget, OrderByItem, ParseError, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
+    RawXmlExpr, SelectItem, SelectStatement, SlotScopeColumn, SqlCallArgs, SqlCaseWhen, SqlExpr,
+    SqlType, SqlTypeKind, Statement, ValuesStatement, bind_delete_with_outer_scopes,
+    bind_insert_with_outer_scopes, bind_scalar_expr_in_named_slot_scope,
+    bind_update_with_outer_scopes, parse_expr, parse_statement, parse_type_name,
+    pg_plan_query_with_outer_scopes_and_ctes, pg_plan_values_query_with_outer_scopes_and_ctes,
+    resolve_raw_type_name,
 };
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{PgProcRow, RECORD_TYPE_OID};
@@ -3202,6 +3204,9 @@ fn normalize_plpgsql_cte_body(body: CteBody, env: &CompileEnv) -> CteBody {
             CteBody::Select(Box::new(normalize_plpgsql_select(*select, env)))
         }
         CteBody::Values(values) => CteBody::Values(normalize_plpgsql_values(values, env)),
+        CteBody::Insert(insert) => {
+            CteBody::Insert(Box::new(normalize_plpgsql_insert(*insert, env)))
+        }
         CteBody::RecursiveUnion {
             all,
             anchor,
@@ -3212,6 +3217,47 @@ fn normalize_plpgsql_cte_body(body: CteBody, env: &CompileEnv) -> CteBody {
             recursive: Box::new(normalize_plpgsql_select(*recursive, env)),
         },
     }
+}
+
+fn normalize_plpgsql_insert(mut stmt: InsertStatement, env: &CompileEnv) -> InsertStatement {
+    stmt.with = stmt
+        .with
+        .into_iter()
+        .map(|mut cte| {
+            cte.body = normalize_plpgsql_cte_body(cte.body, env);
+            cte
+        })
+        .collect();
+    stmt.columns = stmt.columns.map(|columns| {
+        columns
+            .into_iter()
+            .map(|target| normalize_plpgsql_assignment_target(target, env))
+            .collect()
+    });
+    stmt.source = match stmt.source {
+        InsertSource::Values(rows) => InsertSource::Values(
+            rows.into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|expr| normalize_plpgsql_expr(expr, env))
+                        .collect()
+                })
+                .collect(),
+        ),
+        InsertSource::DefaultValues => InsertSource::DefaultValues,
+        InsertSource::Select(select) => {
+            InsertSource::Select(Box::new(normalize_plpgsql_select(*select, env)))
+        }
+    };
+    stmt.on_conflict = stmt
+        .on_conflict
+        .map(|clause| normalize_plpgsql_on_conflict(clause, env));
+    stmt.returning = stmt
+        .returning
+        .into_iter()
+        .map(|item| normalize_plpgsql_select_item(item, env))
+        .collect();
+    stmt
 }
 
 fn normalize_plpgsql_values(mut values: ValuesStatement, env: &CompileEnv) -> ValuesStatement {
@@ -3241,6 +3287,73 @@ fn normalize_plpgsql_values(mut values: ValuesStatement, env: &CompileEnv) -> Va
         })
         .collect();
     values
+}
+
+fn normalize_plpgsql_on_conflict(
+    mut clause: OnConflictClause,
+    env: &CompileEnv,
+) -> OnConflictClause {
+    clause.target = clause.target.map(|target| match target {
+        OnConflictTarget::Inference(mut inference) => {
+            inference.elements = inference
+                .elements
+                .into_iter()
+                .map(|mut elem| {
+                    elem.expr = normalize_plpgsql_expr(elem.expr, env);
+                    elem
+                })
+                .collect();
+            inference.predicate = inference
+                .predicate
+                .map(|expr| normalize_plpgsql_expr(expr, env));
+            OnConflictTarget::Inference(inference)
+        }
+        OnConflictTarget::Constraint(name) => OnConflictTarget::Constraint(name),
+    });
+    clause.assignments = clause
+        .assignments
+        .into_iter()
+        .map(|assignment| normalize_plpgsql_assignment(assignment, env))
+        .collect();
+    clause.where_clause = clause
+        .where_clause
+        .map(|expr| normalize_plpgsql_expr(expr, env));
+    clause
+}
+
+fn normalize_plpgsql_select_item(mut item: SelectItem, env: &CompileEnv) -> SelectItem {
+    item.expr = normalize_plpgsql_expr(item.expr, env);
+    item
+}
+
+fn normalize_plpgsql_assignment(mut assignment: Assignment, env: &CompileEnv) -> Assignment {
+    assignment.target = normalize_plpgsql_assignment_target(assignment.target, env);
+    assignment.expr = normalize_plpgsql_expr(assignment.expr, env);
+    assignment
+}
+
+fn normalize_plpgsql_assignment_target(
+    mut target: AssignmentTarget,
+    env: &CompileEnv,
+) -> AssignmentTarget {
+    target.subscripts = target
+        .subscripts
+        .into_iter()
+        .map(|subscript| normalize_plpgsql_array_subscript(subscript, env))
+        .collect();
+    target.indirection = target
+        .indirection
+        .into_iter()
+        .map(|step| match step {
+            AssignmentTargetIndirection::Subscript(subscript) => {
+                AssignmentTargetIndirection::Subscript(normalize_plpgsql_array_subscript(
+                    subscript, env,
+                ))
+            }
+            AssignmentTargetIndirection::Field(field) => AssignmentTargetIndirection::Field(field),
+        })
+        .collect();
+    target
 }
 
 fn normalize_plpgsql_from_item(item: FromItem, env: &CompileEnv) -> FromItem {

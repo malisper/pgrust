@@ -305,6 +305,7 @@ fn eval_conflict_update_values(
                     column_index: assignment.column_index,
                     subscripts: assignment.subscripts.clone(),
                     field_path: assignment.field_path.clone(),
+                    indirection: assignment.indirection.clone(),
                     target_sql_type: assignment.target_sql_type,
                 },
                 value,

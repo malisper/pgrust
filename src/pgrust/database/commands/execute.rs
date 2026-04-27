@@ -4,11 +4,13 @@ use crate::backend::executor::{
     execute_readonly_statement_with_config,
 };
 use crate::backend::parser::{
-    CatalogLookup, CteBody, FromItem, InsertSource, InsertStatement, ParseOptions, SelectStatement,
+    CatalogLookup, CommonTableExpr, CteBody, FromItem, InsertSource, InsertStatement, ParseOptions,
+    SelectStatement, bind_insert_with_outer_scopes_and_ctes, bound_cte_from_query_rows,
 };
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::stack_depth::StackDepthGuard;
 use crate::include::nodes::pathnodes::PlannerConfig;
+use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::execute_do_with_gucs;
 
 fn restrict_nonsystem_view_enabled(gucs: &std::collections::HashMap<String, String>) -> bool {
@@ -63,6 +65,7 @@ fn reject_restricted_views_in_cte_body(
     match body {
         CteBody::Select(select) => reject_restricted_views_in_select(select, catalog),
         CteBody::Values(_) => Ok(()),
+        CteBody::Insert(insert) => reject_restricted_views_in_insert(insert, catalog),
         CteBody::RecursiveUnion {
             anchor, recursive, ..
         } => {
@@ -94,6 +97,9 @@ fn reject_restricted_views_in_insert(
     insert: &InsertStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ExecError> {
+    for cte in &insert.with {
+        reject_restricted_views_in_cte_body(&cte.body, catalog)?;
+    }
     reject_restricted_view_access(&insert.table_name, catalog)?;
     if let InsertSource::Select(select) = &insert.source {
         reject_restricted_views_in_select(select, catalog)?;
@@ -118,6 +124,29 @@ fn statement_timestamp_usecs(config: &DateTimeConfig) -> i64 {
     config
         .statement_timestamp_usecs
         .unwrap_or_else(crate::backend::utils::time::datetime::current_postgres_timestamp_usecs)
+}
+
+fn apply_writable_cte_column_aliases(
+    cte: &CommonTableExpr,
+    mut columns: Vec<QueryColumn>,
+) -> Result<Vec<QueryColumn>, ExecError> {
+    if cte.column_names.is_empty() {
+        return Ok(columns);
+    }
+    if cte.column_names.len() != columns.len() {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CTE column alias count matching query width",
+            actual: format!(
+                "CTE query has {} columns but {} column aliases were specified",
+                columns.len(),
+                cte.column_names.len()
+            ),
+        }));
+    }
+    for (column, name) in columns.iter_mut().zip(cte.column_names.iter()) {
+        column.name = name.clone();
+    }
+    Ok(columns)
 }
 
 impl Database {
@@ -706,6 +735,25 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableAddColumns(ref alter_stmt) => {
+                let mut result = Ok(StatementResult::AffectedRows(0));
+                for column in &alter_stmt.columns {
+                    result = self.execute_alter_table_add_column_stmt_with_search_path(
+                        client_id,
+                        &AlterTableAddColumnStatement {
+                            if_exists: alter_stmt.if_exists,
+                            only: alter_stmt.only,
+                            table_name: alter_stmt.table_name.clone(),
+                            column: column.clone(),
+                        },
+                        configured_search_path,
+                    );
+                    if result.is_err() {
+                        break;
+                    }
+                }
+                result
+            }
             Statement::AlterTableDropColumn(ref drop_stmt) => self
                 .execute_alter_table_drop_column_stmt_with_search_path(
                     client_id,
@@ -1412,20 +1460,6 @@ impl Database {
                 if restrict_nonsystem_view_enabled(gucs) {
                     reject_restricted_views_in_insert(insert_stmt, &catalog)?;
                 }
-                let bound = bind_insert(insert_stmt, &catalog)?;
-                let prepared = super::rules::prepare_bound_insert_for_execution(bound, &catalog)?;
-                let lock_requests = merge_table_lock_requests(
-                    &insert_foreign_key_lock_requests(&prepared.stmt),
-                    &prepared.extra_lock_requests,
-                );
-                crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                    &self.table_locks,
-                    client_id,
-                    &lock_requests,
-                    interrupts.as_ref(),
-                )?;
-                let locked_rels = table_lock_relations(&lock_requests);
-
                 let xid = self.txns.write().begin();
                 let guard =
                     AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
@@ -1485,13 +1519,134 @@ impl Database {
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                     trigger_depth: 0,
                 };
-                let result = super::rules::execute_bound_insert_with_rules(
-                    prepared.stmt,
-                    &catalog,
-                    &mut ctx,
-                    xid,
-                    0,
-                );
+                let mut locked_rels = Vec::new();
+                let result = (|| {
+                    let has_writable_ctes = insert_stmt
+                        .with
+                        .iter()
+                        .any(|cte| matches!(cte.body, CteBody::Insert(_)));
+                    if !has_writable_ctes {
+                        let bound = bind_insert(insert_stmt, &catalog)?;
+                        let prepared =
+                            super::rules::prepare_bound_insert_for_execution(bound, &catalog)?;
+                        let lock_requests = merge_table_lock_requests(
+                            &insert_foreign_key_lock_requests(&prepared.stmt),
+                            &prepared.extra_lock_requests,
+                        );
+                        crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                            &self.table_locks,
+                            client_id,
+                            &lock_requests,
+                            interrupts.as_ref(),
+                        )?;
+                        locked_rels.extend(table_lock_relations(&lock_requests));
+                        return super::rules::execute_bound_insert_with_rules(
+                            prepared.stmt,
+                            &catalog,
+                            &mut ctx,
+                            xid,
+                            0,
+                        );
+                    }
+
+                    if insert_stmt.with_recursive {
+                        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                            "WITH RECURSIVE containing data-modifying statements is not supported"
+                                .into(),
+                        )));
+                    }
+
+                    let mut materialized_ctes = Vec::new();
+                    let mut outer_insert = insert_stmt.clone();
+                    outer_insert.with.clear();
+
+                    for cte in &insert_stmt.with {
+                        let CteBody::Insert(cte_insert) = &cte.body else {
+                            outer_insert.with.push(cte.clone());
+                            continue;
+                        };
+                        if cte_insert.with_recursive
+                            || cte_insert
+                                .with
+                                .iter()
+                                .any(|nested| matches!(nested.body, CteBody::Insert(_)))
+                        {
+                            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                                "nested writable CTEs are not supported".into(),
+                            )));
+                        }
+                        if cte_insert.returning.is_empty() {
+                            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                                "writable CTE without RETURNING is not supported".into(),
+                            )));
+                        }
+
+                        let bound = bind_insert_with_outer_scopes_and_ctes(
+                            cte_insert,
+                            &catalog,
+                            &[],
+                            &materialized_ctes,
+                        )?;
+                        let prepared =
+                            super::rules::prepare_bound_insert_for_execution(bound, &catalog)?;
+                        let lock_requests = merge_table_lock_requests(
+                            &insert_foreign_key_lock_requests(&prepared.stmt),
+                            &prepared.extra_lock_requests,
+                        );
+                        crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                            &self.table_locks,
+                            client_id,
+                            &lock_requests,
+                            interrupts.as_ref(),
+                        )?;
+                        locked_rels.extend(table_lock_relations(&lock_requests));
+                        let result = super::rules::execute_bound_insert_with_rules(
+                            prepared.stmt,
+                            &catalog,
+                            &mut ctx,
+                            xid,
+                            0,
+                        )?;
+                        let StatementResult::Query { columns, rows, .. } = result else {
+                            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                                "writable CTE without RETURNING is not supported".into(),
+                            )));
+                        };
+                        let columns = apply_writable_cte_column_aliases(cte, columns)?;
+                        materialized_ctes.push(bound_cte_from_query_rows(
+                            cte.name.clone(),
+                            columns,
+                            &rows,
+                        ));
+                    }
+
+                    let bound = bind_insert_with_outer_scopes_and_ctes(
+                        &outer_insert,
+                        &catalog,
+                        &[],
+                        &materialized_ctes,
+                    )?;
+                    let prepared =
+                        super::rules::prepare_bound_insert_for_execution(bound, &catalog)?;
+                    let lock_requests = merge_table_lock_requests(
+                        &insert_foreign_key_lock_requests(&prepared.stmt),
+                        &prepared.extra_lock_requests,
+                    );
+                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                        &self.table_locks,
+                        client_id,
+                        &lock_requests,
+                        interrupts.as_ref(),
+                    )?;
+                    locked_rels.extend(table_lock_relations(&lock_requests));
+                    super::rules::execute_bound_insert_with_rules(
+                        prepared.stmt,
+                        &catalog,
+                        &mut ctx,
+                        xid,
+                        0,
+                    )
+                })();
                 let pending_async_notifications =
                     std::mem::take(&mut ctx.pending_async_notifications);
                 drop(ctx);

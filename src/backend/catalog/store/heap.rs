@@ -5187,7 +5187,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, control| {
-                if entry.relkind != 'r' {
+                if !matches!(entry.relkind, 'r' | 'p') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 if entry
@@ -5912,6 +5912,32 @@ impl CatalogStore {
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
                 entry.relacl = relacl;
                 Ok(((), vec![BootstrapCatalogKind::PgClass]))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
+    pub fn alter_attribute_acl_mvcc(
+        &mut self,
+        relation_oid: u32,
+        attnum: i16,
+        attacl: Option<Vec<String>>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, _new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                let Some(column) = entry
+                    .desc
+                    .columns
+                    .get_mut(attnum.saturating_sub(1) as usize)
+                else {
+                    return Err(CatalogError::Corrupt("unknown attribute"));
+                };
+                column.attacl = attacl;
+                Ok(((), vec![BootstrapCatalogKind::PgAttribute]))
             })?;
 
         let mut effect = CatalogMutationEffect::default();
@@ -7635,7 +7661,7 @@ fn rows_for_new_relation_entry(
                         entry.relation_oid,
                         column.collation_oid,
                     ),
-                    attacl: None,
+                    attacl: column.attacl.clone(),
                     attoptions: None,
                     attfdwoptions: None,
                     attmissingval: None,
@@ -9355,6 +9381,13 @@ fn resolved_sql_type_oid(
         {
             return Ok(row.typarray);
         }
+    }
+    if sql_type.is_array
+        && sql_type.type_oid != 0
+        && let Some(row) = type_lookup.type_by_oid(sql_type.type_oid)?
+        && row.typarray != 0
+    {
+        return Ok(row.typarray);
     }
     Ok(sql_type_oid(sql_type))
 }

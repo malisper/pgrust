@@ -1,6 +1,6 @@
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::parser::analyze::bound_index_relation_from_relcache_entry;
-use crate::backend::parser::{BoundRelation, CatalogLookup};
+use crate::backend::parser::{BoundRelation, CatalogLookup, DomainLookup};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
@@ -33,6 +33,7 @@ pub struct VisibleCatalog {
     enum_rows: Vec<PgEnumRow>,
     uncommitted_enum_label_oids: BTreeSet<u32>,
     domain_checks: BTreeMap<u32, (String, Vec<u32>)>,
+    domain_lookups: BTreeMap<u32, DomainLookup>,
     dynamic_type_rows: Vec<PgTypeRow>,
     dynamic_range_rows: Vec<PgRangeRow>,
 }
@@ -54,6 +55,7 @@ impl VisibleCatalog {
             enum_rows: Vec::new(),
             uncommitted_enum_label_oids: BTreeSet::new(),
             domain_checks: BTreeMap::new(),
+            domain_lookups: BTreeMap::new(),
             dynamic_type_rows: Vec::new(),
             dynamic_range_rows: Vec::new(),
         }
@@ -75,6 +77,11 @@ impl VisibleCatalog {
 
     pub fn with_domain_checks(mut self, checks: BTreeMap<u32, (String, Vec<u32>)>) -> Self {
         self.domain_checks = checks;
+        self
+    }
+
+    pub fn with_domain_lookups(mut self, domains: BTreeMap<u32, DomainLookup>) -> Self {
+        self.domain_lookups = domains;
         self
     }
 
@@ -126,6 +133,14 @@ impl VisibleCatalog {
             .as_ref()
             .map(|catcache| catcache.trigger_rows_for_relation(relation_oid))
             .unwrap_or_default()
+    }
+
+    pub fn rewrite_row_by_oid(&self, rewrite_oid: u32) -> Option<PgRewriteRow> {
+        self.catcache
+            .as_ref()?
+            .rewrite_rows()
+            .into_iter()
+            .find(|row| row.oid == rewrite_oid)
     }
 
     pub fn depend_rows(&self) -> Vec<PgDependRow> {
@@ -536,7 +551,13 @@ impl CatalogLookup for VisibleCatalog {
     }
 
     fn domain_check_by_type_oid(&self, oid: u32) -> Option<String> {
-        self.domain_checks.get(&oid).map(|(name, _)| name.clone())
+        self.domain_lookups
+            .get(&oid)
+            .and_then(|domain| domain.check.clone())
+    }
+
+    fn domain_by_type_oid(&self, oid: u32) -> Option<DomainLookup> {
+        self.domain_lookups.get(&oid).cloned()
     }
 
     fn range_rows(&self) -> Vec<PgRangeRow> {
@@ -633,6 +654,20 @@ impl CatalogLookup for VisibleCatalog {
         self.catcache
             .as_ref()
             .and_then(|catcache| catcache.class_by_oid(relation_oid).cloned())
+    }
+
+    fn attribute_rows_for_relation(
+        &self,
+        relation_oid: u32,
+    ) -> Vec<crate::include::catalog::PgAttributeRow> {
+        self.catcache
+            .as_ref()
+            .and_then(|catcache| {
+                catcache
+                    .attributes_by_relid(relation_oid)
+                    .map(|attrs| attrs.to_vec())
+            })
+            .unwrap_or_default()
     }
 
     fn partitioned_table_row(&self, relation_oid: u32) -> Option<PgPartitionedTableRow> {

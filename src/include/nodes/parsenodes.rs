@@ -167,10 +167,12 @@ impl fmt::Display for ParseError {
             ParseError::UnsupportedQualifiedName(name) => {
                 write!(f, "unsupported qualified name: {name}")
             }
-            ParseError::InvalidInsertTargetCount { expected, actual } => write!(
-                f,
-                "INSERT has {actual} values but target list requires {expected}"
-            ),
+            ParseError::InvalidInsertTargetCount { expected, actual } if expected > actual => {
+                write!(f, "INSERT has more target columns than expressions")
+            }
+            ParseError::InvalidInsertTargetCount { .. } => {
+                write!(f, "INSERT has more expressions than target columns")
+            }
             ParseError::TableAlreadyExists(name) => write!(f, "table already exists: {name}"),
             ParseError::TableDoesNotExist(name) => write!(f, "table \"{name}\" does not exist"),
             ParseError::UnsupportedType(name) => write!(f, "type \"{name}\" does not exist"),
@@ -359,6 +361,7 @@ pub enum Statement {
     AlterIndexAttachPartition(AlterIndexAttachPartitionStatement),
     AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
+    AlterTableAddColumns(AlterTableAddColumnsStatement),
     AlterTableMulti(Vec<String>),
     AlterTableAddConstraint(AlterTableAddConstraintStatement),
     AlterTableDropColumn(AlterTableDropColumnStatement),
@@ -1474,6 +1477,7 @@ pub struct SqlCaseWhen {
 pub enum CteBody {
     Select(Box<SelectStatement>),
     Values(ValuesStatement),
+    Insert(Box<InsertStatement>),
     RecursiveUnion {
         all: bool,
         anchor: Box<CteBody>,
@@ -2200,6 +2204,14 @@ pub struct AlterTableAddColumnStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAddColumnsStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub columns: Vec<ColumnDef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableAddConstraintStatement {
     pub if_exists: bool,
     pub only: bool,
@@ -2920,6 +2932,7 @@ pub enum GrantObjectPrivilege {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantObjectStatement {
     pub privilege: GrantObjectPrivilege,
+    pub columns: Vec<String>,
     pub object_names: Vec<String>,
     pub grantee_names: Vec<String>,
     pub with_grant_option: bool,
@@ -2928,6 +2941,7 @@ pub struct GrantObjectStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevokeObjectStatement {
     pub privilege: GrantObjectPrivilege,
+    pub columns: Vec<String>,
     pub object_names: Vec<String>,
     pub grantee_names: Vec<String>,
     pub cascade: bool,
@@ -3993,6 +4007,13 @@ pub struct AssignmentTarget {
     pub column: String,
     pub subscripts: Vec<ArraySubscript>,
     pub field_path: Vec<String>,
+    pub indirection: Vec<AssignmentTargetIndirection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignmentTargetIndirection {
+    Subscript(ArraySubscript),
+    Field(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

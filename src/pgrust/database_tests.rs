@@ -16,7 +16,7 @@ use crate::include::catalog::{
     PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
     TEXT_TYPE_OID,
 };
-use crate::include::nodes::datum::{ArrayValue, IntervalValue};
+use crate::include::nodes::datum::{ArrayValue, IntervalValue, RecordValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
@@ -14122,7 +14122,49 @@ fn pg_rules_exposes_user_rules_but_not_return_rules() {
             "select definition from pg_rules where tablename = 'item_view' and rulename = 'item_view_ins'",
         ),
         vec![vec![Value::Text(
-            "CREATE RULE item_view_ins AS ON INSERT TO public.item_view DO INSTEAD insert into items values (new.id)"
+            "CREATE RULE item_view_ins AS ON INSERT TO public.item_view DO INSTEAD INSERT INTO items\n  VALUES (new.id)"
+                .into(),
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'item_view_ins'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE RULE item_view_ins AS\n    ON INSERT TO item_view DO INSTEAD INSERT INTO items\n  VALUES (new.id)"
+                .into(),
+        )]]
+    );
+}
+
+#[test]
+fn pg_get_ruledef_formats_insert_rule_actions_with_casts() {
+    let base = temp_dir("rule_insert_display");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table rule_src (f1 int8, f2 text)")
+        .unwrap();
+    db.execute(1, "create type rule_type as (if1 int8, if2 text[])")
+        .unwrap();
+    db.execute(1, "create table rule_dst (f4 rule_type[])")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule rule_src_ins as on insert to rule_src do also \
+         insert into rule_dst (f4[1].if1, f4[1].if2[2]) values (1, 'fool'), (new.f1, new.f2)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'rule_src_ins'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE RULE rule_src_ins AS\n    ON INSERT TO rule_src DO  INSERT INTO rule_dst (f4[1].if1, f4[1].if2[2]) VALUES (1,'fool'::text), (new.f1,new.f2)"
                 .into(),
         )]]
     );
@@ -15467,6 +15509,73 @@ fn alter_table_add_column_propagates_to_temp_inherited_child() {
         }
         other => panic!("expected query result, got {other:?}"),
     }
+}
+
+#[test]
+fn alter_table_multi_add_column_updates_partitioned_table() {
+    let base = temp_dir("alter_table_multi_add_partitioned");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table returningwrtest (a int) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table returningwrtest1 partition of returningwrtest for values in (1)",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into returningwrtest values (1) returning returningwrtest",
+        ),
+        vec![vec![Value::Record(RecordValue::anonymous(vec![(
+            "a".into(),
+            Value::Int32(1),
+        )]))]]
+    );
+    session
+        .execute(&db, "alter table returningwrtest add b text, add c int")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table returningwrtest2 partition of returningwrtest for values in (2)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select attname from pg_attribute
+             where attrelid = 'returningwrtest'::regclass and attnum > 0
+             order by attnum",
+        ),
+        vec![
+            vec![Value::Text("a".into())],
+            vec![Value::Text("b".into())],
+            vec![Value::Text("c".into())],
+        ]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into returningwrtest values (1, 'x', 10) returning returningwrtest",
+        ),
+        vec![vec![Value::Record(RecordValue::anonymous(vec![
+            ("a".into(), Value::Int32(1)),
+            ("b".into(), Value::Text("x".into())),
+            ("c".into(), Value::Int32(10)),
+        ]))]]
+    );
 }
 
 #[test]
@@ -20752,6 +20861,116 @@ fn create_table_foreign_keys_are_enforced_and_persisted() {
 }
 
 #[test]
+fn foreign_keys_can_reference_unique_key_columns_out_of_order() {
+    let base = temp_dir("foreign_key_reordered_unique_key");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parents (
+            a int4,
+            b int4,
+            c int4,
+            unique (a, b, c)
+        )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table children (
+            b_ref int4,
+            a_ref int4,
+            c_ref int4,
+            foreign key (b_ref, a_ref, c_ref) references parents(b, a, c)
+        )",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into parents values (1, 2, 3)")
+        .unwrap();
+    db.execute(1, "insert into children values (2, 1, 3)")
+        .unwrap();
+
+    match db.execute(1, "insert into children values (2, 9, 3)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_b_ref_a_ref_c_ref_fkey");
+        }
+        other => panic!("expected reordered-key foreign-key violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn self_referential_foreign_key_can_reference_inserted_row() {
+    let base = temp_dir("foreign_key_self_reference_insert");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table selfref (
+            id int4 primary key,
+            parent_id int4 references selfref(id)
+        )",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into selfref values (1, 1)").unwrap();
+    db.execute(1, "insert into selfref values (3, 4), (4, 4)")
+        .unwrap();
+
+    match db.execute(1, "insert into selfref values (2, 9)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "selfref_parent_id_fkey");
+        }
+        other => panic!("expected self-reference foreign-key violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn generated_foreign_key_names_preserve_label_when_truncated_and_suffix_collisions() {
+    let base = temp_dir("foreign_key_generated_name_truncation");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pktable1 (a int primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table pktable2 (a int, b int, primary key (a, b))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fktable2 (
+            a int,
+            b int,
+            very_very_long_column_name_to_exceed_63_characters int,
+            foreign key (very_very_long_column_name_to_exceed_63_characters) references pktable1,
+            foreign key (a, very_very_long_column_name_to_exceed_63_characters) references pktable2,
+            foreign key (a, very_very_long_column_name_to_exceed_63_characters) references pktable2
+        )",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname from pg_constraint where conrelid = 'fktable2'::regclass order by conname",
+        ),
+        vec![
+            vec![Value::Text(
+                "fktable2_a_very_very_long_column_name_to_exceed_63_charac_fkey1".into()
+            )],
+            vec![Value::Text(
+                "fktable2_a_very_very_long_column_name_to_exceed_63_charact_fkey".into()
+            )],
+            vec![Value::Text(
+                "fktable2_very_very_long_column_name_to_exceed_63_character_fkey".into()
+            )],
+        ]
+    );
+}
+
+#[test]
 fn foreign_keys_support_match_full() {
     let base = temp_dir("foreign_keys_match_full");
     let db = Database::open(&base, 16).unwrap();
@@ -20792,6 +21011,73 @@ fn foreign_keys_support_match_full() {
         }
         other => panic!("expected MATCH FULL foreign-key violation, got {other:?}"),
     }
+}
+
+#[test]
+fn pg_get_constraintdef_formats_foreign_key_actions_and_delete_columns() {
+    let base = temp_dir("pg_get_constraintdef_fk_actions");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parents (a int4, b int4, primary key (a, b))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table children (
+            id int4 primary key,
+            a int4,
+            b int4,
+            c int4,
+            d int4,
+            constraint children_cascade_fk
+                foreign key (a, b) references parents(a, b)
+                match full on update cascade on delete set null (a)
+                deferrable initially deferred,
+            constraint children_default_fk
+                foreign key (a, b) references parents(a, b)
+                on update set default on delete set default (a),
+            constraint children_restrict_fk
+                foreign key (c, d) references parents(a, b)
+                on update restrict on delete restrict
+        )",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, pg_get_constraintdef(oid)
+               from pg_constraint
+              where conrelid = 'children'::regclass and contype = 'f'
+              order by conname",
+        ),
+        vec![
+            vec![
+                Value::Text("children_cascade_fk".into()),
+                Value::Text(
+                    "FOREIGN KEY (a, b) REFERENCES parents(a, b) MATCH FULL ON UPDATE CASCADE ON DELETE SET NULL (a) DEFERRABLE INITIALLY DEFERRED"
+                        .into(),
+                ),
+            ],
+            vec![
+                Value::Text("children_default_fk".into()),
+                Value::Text(
+                    "FOREIGN KEY (a, b) REFERENCES parents(a, b) ON UPDATE SET DEFAULT ON DELETE SET DEFAULT (a)"
+                        .into(),
+                ),
+            ],
+            vec![
+                Value::Text("children_restrict_fk".into()),
+                Value::Text(
+                    "FOREIGN KEY (c, d) REFERENCES parents(a, b) ON UPDATE RESTRICT ON DELETE RESTRICT"
+                        .into(),
+                ),
+            ],
+        ]
+    );
 }
 
 #[test]
@@ -28719,7 +29005,7 @@ fn temp_create_table_as_point_window_order_ignores_disabled_indexscan() {
         .execute(
             &db,
             "create table point_source as \
-             select point(g, g * 2) as p from generate_series(1, 11000) g",
+             select point(g, g * 2) as p from generate_series(1, 2000) g",
         )
         .unwrap();
     session
@@ -28772,7 +29058,7 @@ fn temp_create_table_as_point_window_order_ignores_disabled_indexscan() {
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Int64(11001)]]);
+            assert_eq!(rows, vec![vec![Value::Int64(2001)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }

@@ -69,6 +69,14 @@ struct TypeDropDependent {
     object: TypeDropDependentObject,
 }
 
+fn domain_sql_type_depends_on_type(sql_type: SqlType, type_oid: u32) -> bool {
+    sql_type.type_oid == type_oid
+        || sql_type.typrelid == type_oid
+        || sql_type.range_subtype_oid == type_oid
+        || sql_type.range_multitype_oid == type_oid
+        || sql_type.multirange_range_oid == type_oid
+}
+
 impl Database {
     pub(crate) fn execute_create_type_stmt_with_search_path(
         &self,
@@ -278,6 +286,7 @@ impl Database {
                             })?;
                     ensure_relation_owner(self, client_id, &relation, &display_name)?;
                     let mut next_cid = cid;
+                    let dependent_domains = self.dependent_domains_for_type_oid(type_oid);
                     if drop_stmt.cascade {
                         let catcache = self
                             .backend_catcache(client_id, Some((xid, cid)))
@@ -348,7 +357,18 @@ impl Database {
                                 range_types.remove(&key);
                             }
                         }
+                        self.drop_dependent_domains(
+                            client_id,
+                            configured_search_path,
+                            &dependent_domains,
+                        );
                     } else {
+                        if let Some((_, domain_name)) = dependent_domains.first() {
+                            return Err(type_has_range_dependents_error(
+                                &display_name,
+                                domain_name,
+                            ));
+                        }
                         reject_type_with_dependents(
                             self,
                             client_id,
@@ -530,11 +550,17 @@ impl Database {
                     display_name,
                 }) => {
                     let dependent_ranges = self.dependent_range_types_for_type_oid(type_oid);
+                    let dependent_domains = self.dependent_domains_for_type_oid(type_oid);
                     if !dependent_ranges.is_empty() && !drop_stmt.cascade {
                         return Err(type_has_range_dependents_error(
                             &display_name,
                             &dependent_ranges[0].1,
                         ));
+                    }
+                    if let (false, Some((_, domain_name))) =
+                        (drop_stmt.cascade, dependent_domains.first())
+                    {
+                        return Err(type_has_range_dependents_error(&display_name, domain_name));
                     }
                     if drop_stmt.cascade {
                         self.drop_dependent_range_types(
@@ -542,6 +568,11 @@ impl Database {
                             configured_search_path,
                             &dependent_ranges,
                         )?;
+                        self.drop_dependent_domains(
+                            client_id,
+                            configured_search_path,
+                            &dependent_domains,
+                        );
                     } else {
                         reject_type_with_dependents(
                             self,
@@ -570,11 +601,17 @@ impl Database {
                     display_name,
                 }) => {
                     let dependent_ranges = self.dependent_range_types_for_type_oid(type_oid);
+                    let dependent_domains = self.dependent_domains_for_type_oid(type_oid);
                     if !dependent_ranges.is_empty() && !drop_stmt.cascade {
                         return Err(type_has_range_dependents_error(
                             &display_name,
                             &dependent_ranges[0].1,
                         ));
+                    }
+                    if let (false, Some((_, domain_name))) =
+                        (drop_stmt.cascade, dependent_domains.first())
+                    {
+                        return Err(type_has_range_dependents_error(&display_name, domain_name));
                     }
                     if drop_stmt.cascade {
                         self.drop_dependent_range_types(
@@ -582,6 +619,11 @@ impl Database {
                             configured_search_path,
                             &dependent_ranges,
                         )?;
+                        self.drop_dependent_domains(
+                            client_id,
+                            configured_search_path,
+                            &dependent_domains,
+                        );
                     } else {
                         reject_type_with_dependents(
                             self,
@@ -632,6 +674,37 @@ impl Database {
             })
             .map(|(key, entry)| (key.clone(), entry.name.clone()))
             .collect()
+    }
+
+    fn dependent_domains_for_type_oid(&self, type_oid: u32) -> Vec<(String, String)> {
+        self.domains
+            .read()
+            .iter()
+            .filter(|(_, domain)| domain_sql_type_depends_on_type(domain.sql_type, type_oid))
+            .map(|(key, domain)| (key.clone(), domain.name.clone()))
+            .collect()
+    }
+
+    fn drop_dependent_domains(
+        &self,
+        client_id: ClientId,
+        configured_search_path: Option<&[String]>,
+        dependent_domains: &[(String, String)],
+    ) {
+        if dependent_domains.is_empty() {
+            return;
+        }
+        {
+            let mut domains = self.domains.write();
+            for (key, name) in dependent_domains {
+                if domains.remove(key).is_some() {
+                    push_notice(format!("drop cascades to type {name}"));
+                }
+            }
+        }
+        self.refresh_catalog_store_dynamic_type_rows(client_id, configured_search_path);
+        self.invalidate_backend_cache_state(client_id);
+        self.plan_cache.invalidate_all();
     }
 
     fn drop_dependent_range_types(
@@ -2519,7 +2592,7 @@ impl Database {
             .domains
             .read()
             .values()
-            .map(|domain| domain.oid.saturating_add(1))
+            .map(|domain| domain.array_oid.saturating_add(1))
             .chain(
                 existing_enum_types
                     .into_iter()
