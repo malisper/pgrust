@@ -1417,6 +1417,14 @@ impl Database {
             .map_err(map_catalog_error)?;
         let signature = drop_proc_signature_text(proc_row, catalog);
         let mut details = Vec::new();
+        for fdw in catcache.foreign_data_wrapper_rows() {
+            if fdw.fdwhandler == proc_row.oid || fdw.fdwvalidator == proc_row.oid {
+                details.push(format!(
+                    "foreign-data wrapper {} depends on {object_kind} {signature}",
+                    fdw.fdwname
+                ));
+            }
+        }
         let type_rows = catcache
             .type_rows()
             .into_iter()

@@ -47,6 +47,8 @@ Runtime behavior:
 - preserves `pg_attribute.attfdwoptions` when relation descriptors are rebuilt
   through relcache/syscache paths, and displays foreign column FDW options plus
   column comments in psql `\d`/`\d+` describe fast paths
+- reports FDW handler/validator dependencies when `DROP FUNCTION` targets a
+  function referenced by `pg_foreign_data_wrapper`
 
 Tests run:
 - `cargo fmt`
@@ -100,12 +102,16 @@ Tests run:
 - `scripts/cargo_isolated.sh check`
 - `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
 - `scripts/run_regression.sh --skip-build --port 55451 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-relcache-fdw-options`
+- `scripts/cargo_isolated.sh test --lib --quiet drop_function_reports_foreign_data_wrapper_dependency`
+- `scripts/cargo_isolated.sh check`
+- `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
+- `scripts/run_regression.sh --skip-build --port 55452 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-fdw-function-deps`
 
 Remaining:
-`foreign_data` still fails, but improved to 390/539 matching queries and 1524
+`foreign_data` still fails, but improved to 391/539 matching queries and 1516
 diff lines in the latest run. Biggest
 remaining groups:
-- FDW dependency reporting for handler functions and owners
+- owner dependency reporting beyond the handled FDW function dependencies
 - full `IMPORT FOREIGN SCHEMA` callback behavior beyond missing-handler errors
 - foreign table DDL/partition forms and partition catalog state
 - psql describe output compatibility beyond the helper-function lookups
