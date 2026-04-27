@@ -31,6 +31,31 @@ struct ResolvedIndexSupportMetadata {
     amproc_entries: Vec<Vec<IndexAmProcEntry>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReindexCatalogFilter {
+    All,
+    SystemOnly,
+    UserOnly,
+}
+
+fn is_system_catalog_relation_oid(relation_oid: u32) -> bool {
+    crate::backend::catalog::bootstrap::bootstrap_catalog_kinds()
+        .into_iter()
+        .any(|kind| {
+            kind.relation_oid() == relation_oid
+                || (kind.toast_relation_oid() != 0 && kind.toast_relation_oid() == relation_oid)
+        })
+}
+
+fn cannot_reindex_system_catalogs_concurrently_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "cannot reindex system catalogs concurrently".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
 fn map_unique_index_build_violation(
     constraint: String,
     fallback_detail: Option<String>,
@@ -1903,6 +1928,11 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
+        let leave_invalid_on_failure = create_stmt.concurrently
+            && self
+                .lazy_catalog_lookup(client_id, Some((xid, 0)), configured_search_path)
+                .lookup_any_relation(&create_stmt.table_name)
+                .is_some_and(|entry| entry.relpersistence != 't');
         let result = self.execute_create_index_stmt_in_transaction_with_search_path(
             client_id,
             create_stmt,
@@ -1912,7 +1942,7 @@ impl Database {
             maintenance_work_mem_kb,
             &mut catalog_effects,
         );
-        if create_stmt.concurrently && result.is_err() && !catalog_effects.is_empty() {
+        if leave_invalid_on_failure && result.is_err() && !catalog_effects.is_empty() {
             let err = result.err().expect("checked is_err");
             // :HACK: PostgreSQL leaves an invalid catalog entry behind when
             // CREATE INDEX CONCURRENTLY fails after the catalog stub is visible.
@@ -1984,6 +2014,7 @@ impl Database {
                 expected: "table or materialized view",
             }));
         }
+        let effective_concurrently = create_stmt.concurrently && entry.relpersistence != 't';
         ensure_relation_owner(self, client_id, &entry, &create_stmt.table_name)?;
         let mut access_method_name = create_stmt
             .using_method
@@ -2195,7 +2226,7 @@ impl Database {
             access_method_handler,
             &build_options,
             maintenance_work_mem_kb,
-            create_stmt.concurrently,
+            effective_concurrently,
             catalog_effects,
         ) {
             Ok(_) => {}
@@ -2454,6 +2485,7 @@ impl Database {
                     client_id,
                     &catalog,
                     &reindex_stmt.index_name,
+                    reindex_stmt.concurrently,
                     xid,
                     cid,
                     catalog_effects,
@@ -2473,6 +2505,11 @@ impl Database {
                         name: reindex_stmt.index_name.clone(),
                         expected: "table or materialized view",
                     }));
+                }
+                if reindex_stmt.concurrently
+                    && is_system_catalog_relation_oid(relation.relation_oid)
+                {
+                    return Err(cannot_reindex_system_catalogs_concurrently_error());
                 }
                 ensure_relation_owner(self, client_id, &relation, &reindex_stmt.index_name)?;
                 self.reindex_table_indexes_in_transaction(
@@ -2518,7 +2555,8 @@ impl Database {
                     client_id,
                     &catalog,
                     Some(namespace_oid),
-                    false,
+                    ReindexCatalogFilter::All,
+                    reindex_stmt.concurrently,
                     xid,
                     cid,
                     catalog_effects,
@@ -2541,7 +2579,8 @@ impl Database {
                     client_id,
                     &catalog,
                     None,
-                    false,
+                    ReindexCatalogFilter::UserOnly,
+                    reindex_stmt.concurrently,
                     xid,
                     cid,
                     catalog_effects,
@@ -2577,7 +2616,8 @@ impl Database {
                     client_id,
                     &catalog,
                     pg_catalog_oid,
-                    true,
+                    ReindexCatalogFilter::SystemOnly,
+                    reindex_stmt.concurrently,
                     xid,
                     cid,
                     catalog_effects,
@@ -2592,6 +2632,7 @@ impl Database {
         client_id: ClientId,
         catalog: &dyn crate::backend::parser::CatalogLookup,
         index_name: &str,
+        concurrently: bool,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -2620,6 +2661,9 @@ impl Database {
                     index.index_meta.indrelid.to_string(),
                 ))
             })?;
+        if concurrently && is_system_catalog_relation_oid(heap.relation_oid) {
+            return Err(cannot_reindex_system_catalogs_concurrently_error());
+        }
         self.rebuild_index_relation_in_transaction(
             client_id,
             &heap,
@@ -2725,7 +2769,8 @@ impl Database {
         client_id: ClientId,
         catalog: &dyn crate::backend::parser::CatalogLookup,
         namespace_oid: Option<u32>,
-        system_only: bool,
+        catalog_filter: ReindexCatalogFilter,
+        concurrently: bool,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -2733,6 +2778,7 @@ impl Database {
         let catcache = self
             .backend_catcache(client_id, Some((xid, cid)))
             .map_err(map_catalog_error)?;
+        let mut warned_catalog_concurrent = false;
         for class_row in catcache.class_rows() {
             if !matches!(class_row.relkind, 'r' | 'm' | 't') {
                 continue;
@@ -2740,7 +2786,18 @@ impl Database {
             if namespace_oid.is_some_and(|oid| class_row.relnamespace != oid) {
                 continue;
             }
-            if system_only && namespace_oid.is_none() && class_row.oid >= 16_384 {
+            let is_system_catalog = is_system_catalog_relation_oid(class_row.oid);
+            match catalog_filter {
+                ReindexCatalogFilter::All => {}
+                ReindexCatalogFilter::SystemOnly if !is_system_catalog => continue,
+                ReindexCatalogFilter::UserOnly if is_system_catalog => continue,
+                ReindexCatalogFilter::SystemOnly | ReindexCatalogFilter::UserOnly => {}
+            }
+            if concurrently && is_system_catalog {
+                if !warned_catalog_concurrent {
+                    push_warning("cannot reindex system catalogs concurrently, skipping all");
+                    warned_catalog_concurrent = true;
+                }
                 continue;
             }
             let Some(relation) = catalog.lookup_relation_by_oid(class_row.oid) else {

@@ -3752,9 +3752,24 @@ impl Database {
                 create_stmt,
                 configured_search_path,
             )?;
-        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let mut table_cid = cid;
+        if persistence == TablePersistence::Temporary {
+            self.ensure_temp_namespace(
+                client_id,
+                xid,
+                &mut table_cid,
+                catalog_effects,
+                temp_effects,
+            )?;
+        }
+        let catalog =
+            self.lazy_catalog_lookup(client_id, Some((xid, table_cid)), configured_search_path);
         let lowered = lower_create_table_with_catalog(create_stmt, &catalog, persistence)?;
-        self.ensure_create_table_type_usage(client_id, Some((xid, cid)), &lowered.relation_desc)?;
+        self.ensure_create_table_type_usage(
+            client_id,
+            Some((xid, table_cid)),
+            &lowered.relation_desc,
+        )?;
         if create_stmt.if_not_exists
             && relation_exists_in_namespace(&catalog, &table_name, namespace_oid)
         {
@@ -3784,7 +3799,7 @@ impl Database {
                 persistence,
                 serial_column,
                 xid,
-                cid,
+                table_cid,
                 &mut used_sequence_names,
                 catalog_effects,
                 temp_effects,
@@ -3804,7 +3819,6 @@ impl Database {
             column.missing_default_value = None;
         }
 
-        let table_cid = cid;
         let relation_relkind = created_relkind(&lowered);
         let reloptions = create_table_reloptions(&create_stmt.options)?;
         if relation_relkind == 'p' && persistence == TablePersistence::Unlogged {
@@ -4606,7 +4620,18 @@ impl Database {
                 create_stmt,
                 configured_search_path,
             )?;
-        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let mut table_cid = cid;
+        if persistence == TablePersistence::Temporary {
+            self.ensure_temp_namespace(
+                client_id,
+                xid,
+                &mut table_cid,
+                catalog_effects,
+                temp_effects,
+            )?;
+        }
+        let catalog =
+            self.lazy_catalog_lookup(client_id, Some((xid, table_cid)), configured_search_path);
         if catalog
             .lookup_any_relation(&table_name)
             .is_some_and(|relation| relation.namespace_oid == namespace_oid)
@@ -4636,7 +4661,7 @@ impl Database {
             }
         };
 
-        let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
+        let snapshot = self.txns.read().snapshot_for_command(xid, table_cid)?;
         let mut ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
             data_dir: None,
@@ -4667,7 +4692,7 @@ impl Database {
             session_replication_role: self.session_replication_role(client_id),
             statement_lock_scope_id: None,
             transaction_lock_scope_id: None,
-            next_command_id: cid,
+            next_command_id: table_cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             random_state: crate::backend::executor::PgPrngState::shared(),
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -4774,7 +4799,7 @@ impl Database {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
                     xid,
-                    cid,
+                    cid: table_cid,
                     client_id,
                     waiter: None,
                     interrupts: Arc::clone(&interrupts),
@@ -4811,7 +4836,7 @@ impl Database {
                     desc.clone(),
                     create_stmt.on_commit,
                     xid,
-                    cid,
+                    table_cid,
                     catalog_effects,
                     temp_effects,
                 )?;
@@ -4829,8 +4854,8 @@ impl Database {
         }
 
         let insert_catalog =
-            self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
+            self.lazy_catalog_lookup(client_id, Some((xid, table_cid)), configured_search_path);
+        let snapshot = self.txns.read().snapshot_for_command(xid, table_cid)?;
         let mut insert_ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
             data_dir: None,
@@ -4861,7 +4886,7 @@ impl Database {
             session_replication_role: self.session_replication_role(client_id),
             statement_lock_scope_id: None,
             transaction_lock_scope_id: None,
-            next_command_id: cid,
+            next_command_id: table_cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             random_state: crate::backend::executor::PgPrngState::shared(),
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),

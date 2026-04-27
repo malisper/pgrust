@@ -2310,7 +2310,7 @@ impl Drop for ConnectionCleanupGuard<'_> {
         let client_id = self.state.session.client_id;
         let temp_backend_id = self.state.session.temp_backend_id;
         self.state.session.cleanup_on_disconnect(self.db);
-        self.db.cleanup_client_temp_relations(client_id);
+        let _ = self.db.cleanup_client_temp_relations(client_id);
         self.db.clear_temp_backend_id(client_id);
         self.db.clear_session_activity(client_id);
         self.db.clear_interrupt_state(client_id);
@@ -9722,6 +9722,36 @@ mod tests {
 
         waiter.execute(&db, "set statement_timeout = '1s'").unwrap();
         match waiter.execute(&db, "select count(*) from widgets").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminate_message_removes_backend_temp_relations() {
+        let cluster = Cluster::open(temp_dir("terminate_temp_cleanup"), 16).unwrap();
+        let db = cluster.connect_database("postgres").unwrap();
+
+        let mut input = startup_packet("postgres", "postgres");
+        input.extend(query_message(
+            "create temp table temp_disconnect (id int4); \
+             create index temp_disconnect_id_idx on temp_disconnect (id);",
+        ));
+        input.extend(terminate_message());
+
+        let mut output = Vec::new();
+        handle_connection_with_io(Cursor::new(input), &mut output, &cluster, 41).unwrap();
+
+        match db
+            .execute(
+                2,
+                "select count(*) from pg_class \
+                 where relname in ('temp_disconnect', 'temp_disconnect_id_idx')",
+            )
+            .unwrap()
+        {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Int64(0)]]);
             }
