@@ -156,6 +156,11 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
                 collect_rels_from_expr(child, rels);
             }
         }
+        Expr::SqlJsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                collect_rels_from_expr(child, rels);
+            }
+        }
     }
 }
 
@@ -961,6 +966,11 @@ fn collect_direct_relation_oids_from_sql_expr(
         }
         SqlExpr::Xml(xml) => {
             for child in xml.child_exprs() {
+                collect_direct_relation_oids_from_sql_expr(child, catalog, visible_ctes, rels);
+            }
+        }
+        SqlExpr::JsonQueryFunction(func) => {
+            for child in func.child_exprs() {
                 collect_direct_relation_oids_from_sql_expr(child, catalog, visible_ctes, rels);
             }
         }

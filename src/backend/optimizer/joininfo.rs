@@ -711,6 +711,11 @@ fn collect_expr_relids_at_level(expr: &Expr, levelsup: usize, relids: &mut Vec<u
                 collect_expr_relids_at_level(arg, levelsup, relids);
             }
         }
+        Expr::SqlJsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                collect_expr_relids_at_level(child, levelsup, relids);
+            }
+        }
         Expr::SetReturning(srf) => {
             for arg in set_returning_call_exprs(&srf.call) {
                 collect_expr_relids_at_level(arg, levelsup, relids);

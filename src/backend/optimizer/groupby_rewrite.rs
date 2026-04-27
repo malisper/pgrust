@@ -143,6 +143,11 @@ fn collect_passthrough_expr(expr: &Expr, group_by: &[Expr], passthrough_exprs: &
                 collect_passthrough_expr(arg, group_by, passthrough_exprs);
             }
         }
+        Expr::SqlJsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                collect_passthrough_expr(child, group_by, passthrough_exprs);
+            }
+        }
         Expr::SetReturning(srf) => {
             for arg in set_returning_call_exprs(&srf.call) {
                 collect_passthrough_expr(arg, group_by, passthrough_exprs);
@@ -359,6 +364,10 @@ fn expr_references_group_output(expr: &Expr, target: &Expr) -> bool {
         Expr::Func(func) => func
             .args
             .iter()
+            .any(|arg| expr_references_group_output(arg, target)),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
             .any(|arg| expr_references_group_output(arg, target)),
         Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
             .into_iter()

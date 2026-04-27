@@ -677,6 +677,12 @@ fn expr_srf_depth(expr: &Expr) -> usize {
             .max()
             .unwrap_or(0),
         Expr::Func(func) => func.args.iter().map(expr_srf_depth).max().unwrap_or(0),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .map(expr_srf_depth)
+            .max()
+            .unwrap_or(0),
         Expr::SubLink(sublink) => sublink.testexpr.as_deref().map(expr_srf_depth).unwrap_or(0),
         Expr::SubPlan(subplan) => subplan
             .testexpr
@@ -799,6 +805,11 @@ fn collect_srfs_at_depth(expr: &Expr, depth: usize, out: &mut Vec<Expr>) {
         Expr::Func(func) => {
             for arg in &func.args {
                 collect_srfs_at_depth(arg, depth, out);
+            }
+        }
+        Expr::SqlJsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                collect_srfs_at_depth(child, depth, out);
             }
         }
         Expr::SubLink(sublink) => {

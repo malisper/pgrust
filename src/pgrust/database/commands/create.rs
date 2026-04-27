@@ -558,6 +558,12 @@ fn collect_expr_rule_dependencies(
                 collect_expr_rule_dependencies(expr, query, catalog, deps);
             }
         }
+        Expr::SqlJsonQueryFunction(func) => {
+            collect_sql_type_rule_dependency(func.result_type, deps);
+            for expr in func.child_exprs() {
+                collect_expr_rule_dependencies(expr, query, catalog, deps);
+            }
+        }
         Expr::SetReturning(srf) => {
             collect_set_returning_call_rule_dependencies(&srf.call, query, catalog, deps);
             collect_sql_type_rule_dependency(srf.sql_type, deps);

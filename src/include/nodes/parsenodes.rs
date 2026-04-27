@@ -1698,6 +1698,48 @@ pub struct JsonTablePassingArg {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonQueryFunctionKind {
+    Exists,
+    Value,
+    Query,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonQueryReturning {
+    pub type_name: RawTypeName,
+    pub format_json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonQueryFunctionExpr {
+    pub kind: JsonQueryFunctionKind,
+    pub context: SqlExpr,
+    pub path: SqlExpr,
+    pub passing: Vec<JsonTablePassingArg>,
+    pub returning: Option<JsonQueryReturning>,
+    pub wrapper: JsonTableWrapper,
+    pub quotes: JsonTableQuotes,
+    pub on_empty: Option<JsonTableBehavior>,
+    pub on_error: Option<JsonTableBehavior>,
+}
+
+impl JsonQueryFunctionExpr {
+    pub fn child_exprs(&self) -> Vec<&SqlExpr> {
+        let mut exprs = Vec::with_capacity(2 + self.passing.len() + 2);
+        exprs.push(&self.context);
+        exprs.push(&self.path);
+        exprs.extend(self.passing.iter().map(|arg| &arg.expr));
+        if let Some(JsonTableBehavior::Default(expr)) = &self.on_empty {
+            exprs.push(expr);
+        }
+        if let Some(JsonTableBehavior::Default(expr)) = &self.on_error {
+            exprs.push(expr);
+        }
+        exprs
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JsonTableColumn {
     Ordinality {
@@ -4681,6 +4723,7 @@ pub enum SqlExpr {
         subscripts: Vec<ArraySubscript>,
     },
     Xml(Box<RawXmlExpr>),
+    JsonQueryFunction(Box<JsonQueryFunctionExpr>),
     Random,
     JsonGet(Box<SqlExpr>, Box<SqlExpr>),
     JsonGetText(Box<SqlExpr>, Box<SqlExpr>),

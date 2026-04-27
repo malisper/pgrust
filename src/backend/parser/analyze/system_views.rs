@@ -964,6 +964,9 @@ fn expr_contains_sublink(expr: &Expr) -> bool {
         Expr::Op(op) => op.args.iter().any(expr_contains_sublink),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_sublink),
         Expr::Func(func) => func.args.iter().any(expr_contains_sublink),
+        Expr::SqlJsonQueryFunction(func) => {
+            func.child_exprs().into_iter().any(expr_contains_sublink)
+        }
         Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
             .into_iter()
             .any(expr_contains_sublink),

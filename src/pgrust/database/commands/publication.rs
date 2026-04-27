@@ -962,6 +962,11 @@ fn validate_publication_filter_expr(expr: &SqlExpr) -> Result<(), ExecError> {
                 validate_publication_filter_expr(child)?;
             }
         }
+        JsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                validate_publication_filter_expr(child)?;
+            }
+        }
         Column(_)
         | Default
         | Const(_)

@@ -17,7 +17,8 @@ use crate::include::nodes::parsenodes::{
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, Aggref, BoolExpr, BoolExprType, BuiltinScalarFunction, CaseExpr, CaseWhen,
     Expr, ExprArraySubscript, FuncExpr, OpExpr, OpExprKind, OrderByEntry, ScalarFunctionImpl,
-    SetReturningCall, SortGroupClause, TargetEntry, WindowClause, WindowFrame, WindowFrameBound,
+    SetReturningCall, SortGroupClause, SqlJsonQueryFunction, SqlJsonTableBehavior,
+    SqlJsonTablePassingArg, TargetEntry, WindowClause, WindowFrame, WindowFrameBound,
     WindowFuncExpr, WindowFuncKind, XmlExpr,
 };
 
@@ -612,6 +613,25 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
         Expr::Bool(bool_expr) => simplify_bool_expr(*bool_expr, case_test_value),
         Expr::Case(case_expr) => simplify_case_expr(*case_expr, case_test_value),
         Expr::Func(func) => simplify_func_expr(*func, case_test_value),
+        Expr::SqlJsonQueryFunction(func) => {
+            Ok(Expr::SqlJsonQueryFunction(Box::new(SqlJsonQueryFunction {
+                context: simplify_expr(func.context, case_test_value)?,
+                path: simplify_expr(func.path, case_test_value)?,
+                passing: func
+                    .passing
+                    .into_iter()
+                    .map(|arg| {
+                        Ok(SqlJsonTablePassingArg {
+                            name: arg.name,
+                            expr: simplify_expr(arg.expr, case_test_value)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ParseError>>()?,
+                on_empty: simplify_sql_json_behavior(func.on_empty, case_test_value)?,
+                on_error: simplify_sql_json_behavior(func.on_error, case_test_value)?,
+                ..*func
+            })))
+        }
         Expr::SetReturning(srf) => Ok(Expr::SetReturning(Box::new(
             crate::include::nodes::primnodes::SetReturningExpr {
                 call: simplify_set_returning_call(srf.call)?,
@@ -780,6 +800,19 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
                 .map(|subscript| simplify_array_subscript(subscript, case_test_value))
                 .collect::<Result<Vec<_>, _>>()?,
         }),
+    }
+}
+
+fn simplify_sql_json_behavior(
+    behavior: SqlJsonTableBehavior,
+    case_test_value: Option<&Value>,
+) -> Result<SqlJsonTableBehavior, ParseError> {
+    match behavior {
+        SqlJsonTableBehavior::Default(expr) => Ok(SqlJsonTableBehavior::Default(simplify_expr(
+            expr,
+            case_test_value,
+        )?)),
+        other => Ok(other),
     }
 }
 

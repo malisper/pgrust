@@ -3690,6 +3690,11 @@ fn collect_direct_expr_subplans<'a>(expr: &'a Expr, out: &mut Vec<&'a SubPlan>) 
                 collect_direct_expr_subplans(arg, out);
             }
         }
+        Expr::SqlJsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                collect_direct_expr_subplans(child, out);
+            }
+        }
         Expr::SetReturning(srf) => {
             for arg in set_returning_call_exprs(&srf.call) {
                 collect_direct_expr_subplans(arg, out);

@@ -52,6 +52,9 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
         }
         Expr::CaseTest(_) => false,
         Expr::Func(func) => func.args.iter().any(expr_uses_outer_columns),
+        Expr::SqlJsonQueryFunction(func) => {
+            func.child_exprs().into_iter().any(expr_uses_outer_columns)
+        }
         Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
             .into_iter()
             .any(expr_uses_outer_columns),

@@ -653,6 +653,10 @@ fn collect_expr_attrs_for_rel(expr: &Expr, rtindex: usize, attrs: &mut BTreeSet<
             .args
             .iter()
             .for_each(|arg| collect_expr_attrs_for_rel(arg, rtindex, attrs)),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .for_each(|arg| collect_expr_attrs_for_rel(arg, rtindex, attrs)),
         Expr::ScalarArrayOp(saop) => {
             collect_expr_attrs_for_rel(&saop.left, rtindex, attrs);
             collect_expr_attrs_for_rel(&saop.right, rtindex, attrs);
@@ -2380,6 +2384,7 @@ fn rewrite_filter_for_subquery(
         | Expr::SetReturning(_)
         | Expr::SubLink(_)
         | Expr::SubPlan(_)
+        | Expr::SqlJsonQueryFunction(_)
         | Expr::Xml(_) => None,
     }
 }

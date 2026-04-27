@@ -1823,6 +1823,16 @@ fn sql_expr_contains_set_returning_call(
                 ctes,
             )
         }),
+        SqlExpr::JsonQueryFunction(func) => func.child_exprs().iter().any(|expr| {
+            sql_expr_contains_set_returning_call(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+        }),
     }
 }
 

@@ -665,6 +665,18 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             }
         }
         SqlExpr::JsonGetText(_, _) | SqlExpr::JsonPathText(_, _) => SqlType::new(SqlTypeKind::Text),
+        SqlExpr::JsonQueryFunction(func) => {
+            if let Some(returning) = &func.returning {
+                resolve_raw_type_name(&returning.type_name, catalog)
+                    .unwrap_or_else(|_| raw_type_name_hint(&returning.type_name))
+            } else {
+                match func.kind {
+                    JsonQueryFunctionKind::Exists => SqlType::new(SqlTypeKind::Bool),
+                    JsonQueryFunctionKind::Value => SqlType::new(SqlTypeKind::Text),
+                    JsonQueryFunctionKind::Query => SqlType::new(SqlTypeKind::Jsonb),
+                }
+            }
+        }
         SqlExpr::ArrayLiteral(elements) => infer_array_literal_type_with_ctes(
             elements,
             scope,

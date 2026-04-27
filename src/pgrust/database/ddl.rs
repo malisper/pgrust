@@ -699,6 +699,10 @@ fn expr_references_relation_column(
             .args
             .iter()
             .any(|arg| expr_references_relation_column(arg, query, relation_oid, attnum)),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(|expr| expr_references_relation_column(expr, query, relation_oid, attnum)),
         Expr::SetReturning(_) => false,
         Expr::SubLink(sublink) => {
             sublink.testexpr.as_ref().is_some_and(|expr| {

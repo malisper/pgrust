@@ -383,7 +383,7 @@ fn lookup_var<'a>(ctx: &'a RuntimeContext<'_>, name: &str) -> Result<&'a JsonbVa
         .iter()
         .find(|(key, _)| key == name)
         .map(|(_, value)| value)
-        .ok_or_else(|| exec_jsonpath_error(&format!("jsonpath variable \"{name}\" not found")))
+        .ok_or_else(|| exec_jsonpath_error(&format!("could not find jsonpath variable \"{name}\"")))
 }
 
 fn apply_step(
@@ -420,7 +420,7 @@ fn apply_step_single(
             }
             _ if matches!(ctx.mode, PathMode::Strict) => {
                 return Err(exec_jsonpath_error(
-                    "jsonpath member access requires object",
+                    "jsonpath member accessor can only be applied to an object",
                 ));
             }
             _ => {}
@@ -2376,7 +2376,9 @@ impl<'a> Parser<'a> {
         }
         if self.peek() == Some('$') {
             self.bump();
-            let base = if let Some(ident) = self.parse_optional_ident() {
+            let base = if let Some(ident) = self.parse_string()? {
+                Base::Var(ident)
+            } else if let Some(ident) = self.parse_optional_ident() {
                 Base::Var(ident)
             } else {
                 Base::Root

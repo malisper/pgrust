@@ -7936,6 +7936,10 @@ fn raw_expr_contains_pg_notify(expr: &crate::backend::parser::SqlExpr) -> bool {
         crate::backend::parser::SqlExpr::Xml(xml) => {
             xml.child_exprs().any(raw_expr_contains_pg_notify)
         }
+        crate::backend::parser::SqlExpr::JsonQueryFunction(func) => func
+            .child_exprs()
+            .iter()
+            .any(|expr| raw_expr_contains_pg_notify(expr)),
         crate::backend::parser::SqlExpr::FuncCall {
             name,
             args,

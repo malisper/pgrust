@@ -1185,6 +1185,20 @@ fn analyze_expr_internal(
                 )?);
             }
         }
+        SqlExpr::JsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                info.merge(analyze_expr_internal(
+                    child,
+                    AggregateClauseKind::Other,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                    expanded_views,
+                )?);
+            }
+        }
     }
     if clause != AggregateClauseKind::Other
         && info

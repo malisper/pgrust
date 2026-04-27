@@ -52,7 +52,7 @@ use super::expr_datetime::{
 use super::expr_geometry::eval_geometry_function;
 use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_json_record_builtin_function,
-    eval_jsonpath_operator, jsonb_to_tsvector_value,
+    eval_jsonpath_operator, eval_sql_json_query_function_expr, jsonb_to_tsvector_value,
 };
 use super::expr_locks::eval_advisory_lock_builtin_function;
 use super::expr_mac::eval_macaddr_function;
@@ -5713,6 +5713,7 @@ pub fn eval_expr(
             .cloned()
             .ok_or_else(|| malformed_expr_error("CASE test")),
         Expr::Func(func) => eval_func_expr(func, slot, ctx),
+        Expr::SqlJsonQueryFunction(func) => eval_sql_json_query_function_expr(func, slot, ctx),
         Expr::SetReturning(_) => Err(ExecError::DetailedError {
             message: "set-returning function reached scalar expression evaluation".into(),
             detail: Some(
