@@ -159,6 +159,8 @@ fn commuted_builtin_function(func: BuiltinScalarFunction) -> Option<BuiltinScala
         BuiltinScalarFunction::RangeAdjacent => BuiltinScalarFunction::RangeAdjacent,
         BuiltinScalarFunction::RangeContains => BuiltinScalarFunction::RangeContainedBy,
         BuiltinScalarFunction::RangeContainedBy => BuiltinScalarFunction::RangeContains,
+        BuiltinScalarFunction::TsQueryContains => BuiltinScalarFunction::TsQueryContainedBy,
+        BuiltinScalarFunction::TsQueryContainedBy => BuiltinScalarFunction::TsQueryContains,
         BuiltinScalarFunction::NetworkSubnet => BuiltinScalarFunction::NetworkSupernet,
         BuiltinScalarFunction::NetworkSubnetEq => BuiltinScalarFunction::NetworkSupernetEq,
         BuiltinScalarFunction::NetworkSupernet => BuiltinScalarFunction::NetworkSubnet,

@@ -1,21 +1,25 @@
+use crate::backend::executor::{parse_interval_text_value, render_interval_text_with_config};
 use crate::backend::parser::analyze::analyze_select_query_with_outer;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, Statement, SubqueryComparisonOp,
 };
-use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, DateTimeConfig};
+use crate::backend::utils::misc::guc_datetime::{
+    DateOrder, DateStyleFormat, DateTimeConfig, IntervalStyle,
+};
 use crate::backend::utils::time::timestamp::{
     format_timestamp_text, format_timestamptz_text, parse_timestamp_text, parse_timestamptz_text,
 };
 use crate::include::catalog::PUBLIC_NAMESPACE_OID;
-use crate::include::nodes::datum::Value;
+use crate::include::nodes::datum::{IntervalValue, Value};
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, SelectStatement, SetOperationQuery,
-    ViewCheckOption,
+    ViewCheckOption, WindowFrameExclusion, WindowFrameMode,
 };
 use crate::include::nodes::primnodes::{
     Aggref, BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, JoinType, OpExprKind,
     RelationDesc, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, ScalarFunctionImpl,
-    SetReturningCall, SubLink, SubLinkType, TABLE_OID_ATTR_NO, TargetEntry, Var, attrno_index,
+    SetReturningCall, SubLink, SubLinkType, TABLE_OID_ATTR_NO, TargetEntry, Var, WindowClause,
+    WindowFrameBound, WindowFuncExpr, WindowFuncKind, attrno_index, expr_sql_type_hint,
 };
 
 const RETURN_RULE_NAME: &str = "_RETURN";
@@ -774,7 +778,10 @@ fn render_set_returning_call(
             with_ordinality,
             ..
         } => {
-            let mut args = vec![start, stop, step];
+            let mut args = vec![start, stop];
+            if !is_default_generate_series_step(step) || timezone.is_some() {
+                args.push(step);
+            }
             if let Some(timezone) = timezone {
                 args.push(timezone);
             }
@@ -891,7 +898,7 @@ fn render_set_returning_call(
         "{}({})",
         quote_identifier_if_needed(&name),
         args.into_iter()
-            .map(|arg| render_expr(arg, query, catalog))
+            .map(|arg| render_wrapped_expr(arg, query, catalog))
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -944,6 +951,13 @@ fn string_table_function_name(
     }
 }
 
+fn is_default_generate_series_step(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Const(Value::Int16(1) | Value::Int32(1) | Value::Int64(1))
+    )
+}
+
 fn render_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> String {
     match expr {
         Expr::Var(var) => {
@@ -991,6 +1005,7 @@ fn render_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> Strin
         Expr::SubLink(sublink) => render_sublink(sublink, query, catalog),
         Expr::ScalarArrayOp(saop) => render_scalar_array_op(saop, query, catalog),
         Expr::Func(func) => render_function(func, query, catalog),
+        Expr::WindowFunc(window_func) => render_window_function(window_func, query, catalog),
         Expr::IsNull(inner) => format!("{} IS NULL", render_wrapped_expr(inner, query, catalog)),
         Expr::IsNotNull(inner) => {
             format!("{} IS NOT NULL", render_wrapped_expr(inner, query, catalog))
@@ -1041,6 +1056,12 @@ fn render_datetime_cast_literal(expr: &Expr, ty: SqlType) -> Option<String> {
                 format_timestamptz_text(timestamp, &config).replace('\'', "''")
             )
         }),
+        SqlTypeKind::Interval => parse_interval_text_value(text).ok().map(|interval| {
+            format!(
+                "'{}'::interval",
+                render_view_interval_text(interval).replace('\'', "''")
+            )
+        }),
         _ => None,
     }
 }
@@ -1049,8 +1070,13 @@ fn postgres_utc_datetime_config() -> DateTimeConfig {
     let mut config = DateTimeConfig::default();
     config.date_style_format = DateStyleFormat::Postgres;
     config.date_order = DateOrder::Mdy;
+    config.interval_style = IntervalStyle::PostgresVerbose;
     config.time_zone = "UTC".into();
     config
+}
+
+fn render_view_interval_text(interval: IntervalValue) -> String {
+    render_interval_text_with_config(interval, &postgres_utc_datetime_config())
 }
 
 fn render_wrapped_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> String {
@@ -1133,6 +1159,179 @@ fn render_scalar_array_rhs(expr: &Expr, query: &Query, catalog: &dyn CatalogLook
     }
 }
 
+fn render_window_function(
+    func: &WindowFuncExpr,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let call = match &func.kind {
+        WindowFuncKind::Aggregate(aggref) => render_aggregate(aggref, query, catalog),
+        WindowFuncKind::Builtin(kind) => format!(
+            "{}({})",
+            kind.name(),
+            func.args
+                .iter()
+                .map(|arg| render_expr(arg, query, catalog))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    let over = query
+        .window_clauses
+        .get(func.winref.saturating_sub(1))
+        .map(|clause| render_window_clause(clause, query, catalog))
+        .unwrap_or_default();
+    format!("{call} OVER ({over})")
+}
+
+fn render_window_clause(
+    clause: &WindowClause,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let mut parts = Vec::new();
+    if !clause.spec.partition_by.is_empty() {
+        parts.push(format!(
+            "PARTITION BY {}",
+            clause
+                .spec
+                .partition_by
+                .iter()
+                .map(|expr| render_expr(expr, query, catalog))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !clause.spec.order_by.is_empty() {
+        parts.push(format!(
+            "ORDER BY {}",
+            clause
+                .spec
+                .order_by
+                .iter()
+                .map(|item| render_window_order_by_item(item, query, catalog))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some(frame) = render_window_frame(clause, query, catalog) {
+        parts.push(frame);
+    }
+    parts.join(" ")
+}
+
+fn render_window_order_by_item(
+    item: &crate::include::nodes::primnodes::OrderByEntry,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let mut rendered = render_expr(&item.expr, query, catalog);
+    if item.descending {
+        rendered.push_str(" DESC");
+    }
+    match item.nulls_first {
+        Some(true) => rendered.push_str(" NULLS FIRST"),
+        Some(false) => rendered.push_str(" NULLS LAST"),
+        None => {}
+    }
+    rendered
+}
+
+fn render_window_frame(
+    clause: &WindowClause,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
+    let frame = &clause.spec.frame;
+    if frame.mode == WindowFrameMode::Range
+        && matches!(frame.start_bound, WindowFrameBound::UnboundedPreceding)
+        && matches!(frame.end_bound, WindowFrameBound::CurrentRow)
+        && frame.exclusion == WindowFrameExclusion::NoOthers
+    {
+        return None;
+    }
+    let mode = match frame.mode {
+        WindowFrameMode::Rows => "ROWS",
+        WindowFrameMode::Range => "RANGE",
+        WindowFrameMode::Groups => "GROUPS",
+    };
+    let mut rendered = if matches!(frame.end_bound, WindowFrameBound::CurrentRow) {
+        format!(
+            "{mode} {}",
+            render_window_frame_start_bound(&frame.start_bound, frame.mode, query, catalog)
+        )
+    } else {
+        format!(
+            "{mode} BETWEEN {} AND {}",
+            render_window_frame_bound(&frame.start_bound, frame.mode, query, catalog),
+            render_window_frame_bound(&frame.end_bound, frame.mode, query, catalog)
+        )
+    };
+    match frame.exclusion {
+        WindowFrameExclusion::NoOthers => {}
+        WindowFrameExclusion::CurrentRow => rendered.push_str(" EXCLUDE CURRENT ROW"),
+        WindowFrameExclusion::Group => rendered.push_str(" EXCLUDE GROUP"),
+        WindowFrameExclusion::Ties => rendered.push_str(" EXCLUDE TIES"),
+    }
+    Some(rendered)
+}
+
+fn render_window_frame_start_bound(
+    bound: &WindowFrameBound,
+    mode: WindowFrameMode,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    match bound {
+        WindowFrameBound::UnboundedPreceding => "UNBOUNDED PRECEDING".into(),
+        WindowFrameBound::OffsetPreceding(offset) => {
+            format!(
+                "{} PRECEDING",
+                render_window_frame_offset_expr(&offset.expr, mode, query, catalog)
+            )
+        }
+        WindowFrameBound::CurrentRow => "CURRENT ROW".into(),
+        WindowFrameBound::OffsetFollowing(offset) => {
+            format!(
+                "{} FOLLOWING",
+                render_window_frame_offset_expr(&offset.expr, mode, query, catalog)
+            )
+        }
+        WindowFrameBound::UnboundedFollowing => "UNBOUNDED FOLLOWING".into(),
+    }
+}
+
+fn render_window_frame_bound(
+    bound: &WindowFrameBound,
+    mode: WindowFrameMode,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    render_window_frame_start_bound(bound, mode, query, catalog)
+}
+
+fn render_window_frame_offset_expr(
+    expr: &Expr,
+    mode: WindowFrameMode,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    if matches!(mode, WindowFrameMode::Rows | WindowFrameMode::Groups)
+        && let Expr::Cast(inner, ty) = expr
+        && ty.kind == SqlTypeKind::Int8
+        && !ty.is_array
+        && expr_sql_type_hint(inner).is_some_and(|inner_type| {
+            matches!(
+                inner_type.kind,
+                SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
+            ) && !inner_type.is_array
+        })
+    {
+        return render_expr(inner, query, catalog);
+    }
+    render_expr(expr, query, catalog)
+}
+
 fn render_function(func: &FuncExpr, query: &Query, catalog: &dyn CatalogLookup) -> String {
     if matches!(
         func.implementation,
@@ -1203,6 +1402,9 @@ fn render_aggregate(aggref: &Aggref, query: &Query, catalog: &dyn CatalogLookup)
         .iter()
         .map(|arg| render_expr(arg, query, catalog))
         .collect::<Vec<_>>();
+    if name.eq_ignore_ascii_case("count") && args.is_empty() {
+        args.push("*".into());
+    }
     if aggref.aggdistinct && !args.is_empty() {
         args[0] = format!("DISTINCT {}", args[0]);
     }
@@ -1307,6 +1509,12 @@ fn render_literal(value: &Value) -> String {
             )
         }
         Value::Numeric(numeric) => numeric.render(),
+        Value::Interval(interval) => {
+            format!(
+                "'{}'::interval",
+                render_view_interval_text(*interval).replace('\'', "''")
+            )
+        }
         other => format!("{other:?}"),
     }
 }
@@ -1487,6 +1695,10 @@ fn render_builtin_function_name(func: BuiltinScalarFunction) -> &'static str {
         BuiltinScalarFunction::PgGetRuleDef => "pg_get_ruledef",
         BuiltinScalarFunction::PgGetViewDef => "pg_get_viewdef",
         BuiltinScalarFunction::CurrentSetting => "current_setting",
+        BuiltinScalarFunction::Now => "now",
+        BuiltinScalarFunction::TransactionTimestamp => "transaction_timestamp",
+        BuiltinScalarFunction::StatementTimestamp => "statement_timestamp",
+        BuiltinScalarFunction::ClockTimestamp => "clock_timestamp",
         BuiltinScalarFunction::Timezone => "timezone",
         BuiltinScalarFunction::DatePart => "date_part",
         BuiltinScalarFunction::Extract => "extract",

@@ -170,6 +170,9 @@ pub(crate) fn to_tsquery_with_config_name(
     catalog: Option<&dyn CatalogLookup>,
 ) -> Result<TsQuery, String> {
     let config = resolve_config(config_name, catalog)?;
+    if text.trim().is_empty() {
+        return Ok(empty_tsquery());
+    }
     let query = TsQuery::parse(text)?;
     Ok(normalize_tsquery_with_config(query, &config))
 }
@@ -203,19 +206,22 @@ pub(crate) fn phraseto_tsquery_with_config_name(
     let config = resolve_config(config_name, catalog)?;
     let mut terms = tokenize_document(text)
         .into_iter()
-        .filter_map(|(token, _)| {
+        .filter_map(|(token, position)| {
             let source = TsQueryOperand::new(token.clone());
             node_from_lexize_outcome(lexize_token_with_config(&config, &token), &source)
+                .map(|node| (position, node))
         });
-    let Some(mut root) = terms.next() else {
+    let Some((mut previous_position, mut root)) = terms.next() else {
         return Ok(empty_tsquery());
     };
-    for term in terms {
+    for (position, term) in terms {
+        let distance = position.saturating_sub(previous_position).max(1);
         root = TsQueryNode::Phrase {
             left: Box::new(root),
             right: Box::new(term),
-            distance: 1,
+            distance,
         };
+        previous_position = position;
     }
     Ok(TsQuery::new(root))
 }
@@ -233,41 +239,85 @@ pub(crate) fn websearch_to_tsquery_with_config_name(
 
 fn normalize_tsquery_with_config(query: TsQuery, config: &TextSearchConfig) -> TsQuery {
     normalize_query_node_with_config(query.root, config)
+        .node
         .map(TsQuery::new)
         .unwrap_or_else(empty_tsquery)
+}
+
+struct NormalizedQueryNode {
+    node: Option<TsQueryNode>,
+    leading_gap: u16,
+    trailing_gap: u16,
+    width: u16,
+}
+
+impl NormalizedQueryNode {
+    fn operand(node: TsQueryNode) -> Self {
+        Self {
+            node: Some(node),
+            leading_gap: 0,
+            trailing_gap: 0,
+            width: 1,
+        }
+    }
+
+    fn stop_word() -> Self {
+        Self {
+            node: None,
+            leading_gap: 0,
+            trailing_gap: 0,
+            width: 1,
+        }
+    }
 }
 
 fn normalize_query_node_with_config(
     node: TsQueryNode,
     config: &TextSearchConfig,
-) -> Option<TsQueryNode> {
+) -> NormalizedQueryNode {
     match node {
-        TsQueryNode::Operand(operand) => node_from_lexize_outcome(
-            lexize_token_with_config(config, operand.lexeme.as_str()),
-            &operand,
-        ),
+        TsQueryNode::Operand(operand) => normalize_query_operand(operand, config),
         TsQueryNode::And(left, right) => {
             let left = normalize_query_node_with_config(*left, config);
             let right = normalize_query_node_with_config(*right, config);
-            match (left, right) {
+            let node = match (left.node, right.node) {
                 (Some(left), Some(right)) => {
                     Some(TsQueryNode::And(Box::new(left), Box::new(right)))
                 }
                 (Some(node), None) | (None, Some(node)) => Some(node),
                 (None, None) => None,
+            };
+            NormalizedQueryNode {
+                node,
+                leading_gap: 0,
+                trailing_gap: 0,
+                width: 1,
             }
         }
         TsQueryNode::Or(left, right) => {
             let left = normalize_query_node_with_config(*left, config);
             let right = normalize_query_node_with_config(*right, config);
-            match (left, right) {
+            let node = match (left.node, right.node) {
                 (Some(left), Some(right)) => Some(TsQueryNode::Or(Box::new(left), Box::new(right))),
                 (Some(node), None) | (None, Some(node)) => Some(node),
                 (None, None) => None,
+            };
+            NormalizedQueryNode {
+                node,
+                leading_gap: 0,
+                trailing_gap: 0,
+                width: 1,
             }
         }
-        TsQueryNode::Not(inner) => normalize_query_node_with_config(*inner, config)
-            .map(|inner| TsQueryNode::Not(Box::new(inner))),
+        TsQueryNode::Not(inner) => {
+            let inner = normalize_query_node_with_config(*inner, config);
+            NormalizedQueryNode {
+                node: inner.node.map(|inner| TsQueryNode::Not(Box::new(inner))),
+                leading_gap: 0,
+                trailing_gap: 0,
+                width: 1,
+            }
+        }
         TsQueryNode::Phrase {
             left,
             right,
@@ -275,16 +325,98 @@ fn normalize_query_node_with_config(
         } => {
             let left = normalize_query_node_with_config(*left, config);
             let right = normalize_query_node_with_config(*right, config);
-            match (left, right) {
-                (Some(left), Some(right)) => Some(TsQueryNode::Phrase {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                    distance,
-                }),
-                (Some(node), None) | (None, Some(node)) => Some(node),
-                (None, None) => None,
-            }
+            normalize_phrase_node(left, right, distance)
         }
+    }
+}
+
+fn normalize_query_operand(
+    operand: TsQueryOperand,
+    config: &TextSearchConfig,
+) -> NormalizedQueryNode {
+    let tokens = tokenize_document(operand.lexeme.as_str());
+    if tokens.len() <= 1 {
+        return node_from_lexize_outcome(
+            lexize_token_with_config(config, operand.lexeme.as_str()),
+            &operand,
+        )
+        .map(NormalizedQueryNode::operand)
+        .unwrap_or_else(NormalizedQueryNode::stop_word);
+    }
+
+    let mut terms = tokens.into_iter().filter_map(|(token, position)| {
+        let source = TsQueryOperand {
+            lexeme: token.clone().into(),
+            weights: operand.weights.clone(),
+            prefix: operand.prefix,
+        };
+        node_from_lexize_outcome(lexize_token_with_config(config, &token), &source)
+            .map(|node| (position, node))
+    });
+    let Some((mut previous_position, mut root)) = terms.next() else {
+        return NormalizedQueryNode::stop_word();
+    };
+    for (position, term) in terms {
+        root = TsQueryNode::Phrase {
+            left: Box::new(root),
+            right: Box::new(term),
+            distance: position.saturating_sub(previous_position).max(1),
+        };
+        previous_position = position;
+    }
+    NormalizedQueryNode::operand(root)
+}
+
+fn normalize_phrase_node(
+    left: NormalizedQueryNode,
+    right: NormalizedQueryNode,
+    distance: u16,
+) -> NormalizedQueryNode {
+    let width = left
+        .width
+        .saturating_add(distance)
+        .saturating_add(right.width)
+        .saturating_sub(1);
+    match (left.node, right.node) {
+        (Some(left_node), Some(right_node)) => NormalizedQueryNode {
+            node: Some(TsQueryNode::Phrase {
+                left: Box::new(left_node),
+                right: Box::new(right_node),
+                distance: left
+                    .trailing_gap
+                    .saturating_add(distance)
+                    .saturating_add(right.leading_gap),
+            }),
+            leading_gap: left.leading_gap,
+            trailing_gap: right.trailing_gap,
+            width,
+        },
+        (Some(node), None) => NormalizedQueryNode {
+            node: Some(node),
+            leading_gap: left.leading_gap,
+            trailing_gap: left
+                .trailing_gap
+                .saturating_add(distance)
+                .saturating_add(right.width)
+                .saturating_sub(1),
+            width,
+        },
+        (None, Some(node)) => NormalizedQueryNode {
+            node: Some(node),
+            leading_gap: left
+                .width
+                .saturating_add(distance)
+                .saturating_add(right.leading_gap)
+                .saturating_sub(1),
+            trailing_gap: right.trailing_gap,
+            width,
+        },
+        (None, None) => NormalizedQueryNode {
+            node: None,
+            leading_gap: 0,
+            trailing_gap: 0,
+            width,
+        },
     }
 }
 
@@ -674,6 +806,38 @@ mod tests {
     }
 
     #[test]
+    fn phrase_queries_count_removed_stop_words() {
+        assert_eq!(
+            phraseto_tsquery_with_config_name(Some("english"), "1 the 2", None)
+                .unwrap()
+                .render(),
+            "'1' <2> '2'"
+        );
+        assert_eq!(
+            to_tsquery_with_config_name(Some("english"), "1 <-> the <-> 2", None)
+                .unwrap()
+                .render(),
+            "'1' <2> '2'"
+        );
+    }
+
+    #[test]
+    fn to_tsquery_tokenizes_quoted_operands_as_phrases() {
+        assert_eq!(
+            to_tsquery_with_config_name(Some("english"), "'New York'", None)
+                .unwrap()
+                .render(),
+            "'new' <-> 'york'"
+        );
+        assert_eq!(
+            to_tsquery_with_config_name(Some("english"), "'fat the cat'", None)
+                .unwrap()
+                .render(),
+            "'fat' <2> 'cat'"
+        );
+    }
+
+    #[test]
     fn websearch_ignores_tsquery_syntax_and_weights() {
         assert_eq!(
             websearch("simple", "I have a fat:*ABCD cat"),
@@ -684,7 +848,7 @@ mod tests {
             "'fat' & 'a' & 'cat' & 'b' & 'rat' & 'c'"
         );
         assert_eq!(websearch("simple", "abc : def"), "'abc' & 'def'");
-        assert_eq!(websearch("simple", ":"), "''");
+        assert_eq!(websearch("simple", ":"), "");
         assert_eq!(websearch("simple", "abc & def"), "'abc' & 'def'");
         assert_eq!(websearch("simple", "abc <-> def"), "'abc' & 'def'");
     }

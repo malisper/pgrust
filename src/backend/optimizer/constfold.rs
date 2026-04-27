@@ -496,6 +496,7 @@ fn simplify_window_frame(frame: WindowFrame) -> Result<WindowFrame, ParseError> 
         mode: frame.mode,
         start_bound: simplify_window_frame_bound(frame.start_bound)?,
         end_bound: simplify_window_frame_bound(frame.end_bound)?,
+        exclusion: frame.exclusion,
     })
 }
 

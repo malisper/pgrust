@@ -2942,6 +2942,23 @@ fn select_sql_text_cast() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn select_sql_bool_to_integer_cast() {
+    let base = temp_dir("select_sql_bool_to_integer_cast");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select true::integer, false::integer, ('foo' < 'foobar')::integer",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(1), Value::Int32(0), Value::Int32(1)]],
+    );
+}
+
 #[test]
 fn select_sql_varchar_cast_truncates() {
     let base = temp_dir("select_sql_varchar_cast");
@@ -16103,6 +16120,107 @@ fn window_rows_range_and_groups_frames_are_respected() {
                         Value::Int64(4),
                         Value::Int32(1),
                         Value::Int32(4),
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn window_frame_exclusion_filters_aggregate_and_value_frames() {
+    let base = temp_dir("window_frame_exclusion");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                sum(id) over (
+                    order by id
+                    rows between unbounded preceding and current row
+                    exclude current row
+                ),
+                sum(id) over (
+                    order by grp
+                    range between unbounded preceding and current row
+                    exclude group
+                ),
+                sum(id) over (
+                    order by grp
+                    groups between current row and 1 following
+                    exclude ties
+                ),
+                first_value(id) over (
+                    order by grp
+                    groups between unbounded preceding and current row
+                    exclude group
+                ),
+                last_value(id) over (
+                    order by grp
+                    range between unbounded preceding and current row
+                    exclude ties
+                ),
+                nth_value(id, 2) over (
+                    order by id
+                    range between unbounded preceding and current row
+                    exclude current row
+                )
+         from (values (1, 'a'), (2, 'a'), (3, 'b'), (4, 'b'), (5, 'c')) v(id, grp)
+         order by id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Int32(1),
+                        Value::Null,
+                        Value::Null,
+                        Value::Int64(8),
+                        Value::Null,
+                        Value::Int32(1),
+                        Value::Null,
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int64(1),
+                        Value::Null,
+                        Value::Int64(9),
+                        Value::Null,
+                        Value::Int32(2),
+                        Value::Null,
+                    ],
+                    vec![
+                        Value::Int32(3),
+                        Value::Int64(3),
+                        Value::Int64(3),
+                        Value::Int64(8),
+                        Value::Int32(1),
+                        Value::Int32(3),
+                        Value::Int32(2),
+                    ],
+                    vec![
+                        Value::Int32(4),
+                        Value::Int64(6),
+                        Value::Int64(3),
+                        Value::Int64(9),
+                        Value::Int32(1),
+                        Value::Int32(4),
+                        Value::Int32(2),
+                    ],
+                    vec![
+                        Value::Int32(5),
+                        Value::Int64(10),
+                        Value::Int64(10),
+                        Value::Int64(5),
+                        Value::Int32(1),
+                        Value::Int32(5),
+                        Value::Int32(2),
                     ],
                 ]
             );

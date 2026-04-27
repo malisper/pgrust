@@ -2227,6 +2227,7 @@ impl Database {
                 let guard =
                     AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let mut catalog_effects = Vec::new();
+                let mut temp_effects = Vec::new();
                 let result = self.execute_drop_view_stmt_in_transaction_with_search_path(
                     client_id,
                     drop_stmt,
@@ -2234,8 +2235,10 @@ impl Database {
                     0,
                     configured_search_path,
                     &mut catalog_effects,
+                    &mut temp_effects,
                 );
-                let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+                let result =
+                    self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects, &[]);
                 guard.disarm();
                 result
             }

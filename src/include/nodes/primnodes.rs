@@ -901,11 +901,15 @@ pub enum BuiltinScalarFunction {
     PhraseToTsQuery,
     WebSearchToTsQuery,
     TsLexize,
+    TsHeadline,
     TsQueryAnd,
     TsQueryOr,
     TsQueryNot,
     TsQueryPhrase,
+    TsQueryContains,
+    TsQueryContainedBy,
     TsQueryNumnode,
+    TsRewrite,
     TsVectorIn,
     TsVectorOut,
     TsQueryIn,
@@ -1525,6 +1529,7 @@ pub struct WindowFrame {
     pub mode: crate::include::nodes::parsenodes::WindowFrameMode,
     pub start_bound: WindowFrameBound,
     pub end_bound: WindowFrameBound,
+    pub exclusion: crate::include::nodes::parsenodes::WindowFrameExclusion,
 }
 
 impl WindowFrame {
@@ -1533,6 +1538,7 @@ impl WindowFrame {
             mode: crate::include::nodes::parsenodes::WindowFrameMode::Range,
             start_bound: WindowFrameBound::UnboundedPreceding,
             end_bound: WindowFrameBound::CurrentRow,
+            exclusion: crate::include::nodes::parsenodes::WindowFrameExclusion::NoOthers,
         }
     }
 }

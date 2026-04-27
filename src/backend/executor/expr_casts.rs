@@ -4360,9 +4360,12 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => cast_text_value(if v { "true" } else { "false" }, ty, true),
             SqlType {
+                kind: SqlTypeKind::Int4,
+                ..
+            } => Ok(Value::Int32(if v { 1 } else { 0 })),
+            SqlType {
                 kind:
                     SqlTypeKind::Int2
-                    | SqlTypeKind::Int4
                     | SqlTypeKind::Int8
                     | SqlTypeKind::Oid
                     | SqlTypeKind::RegProc

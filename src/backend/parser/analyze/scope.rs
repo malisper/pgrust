@@ -1,4 +1,4 @@
-use super::expr::bind_resolved_scalar_function_call;
+use super::expr::{bind_legacy_scalar_function_call, bind_resolved_scalar_function_call};
 use super::query::{AnalyzedFrom, JoinAliasInfo, shift_expr_rtindexes};
 use super::*;
 use crate::backend::storage::smgr::RelFileLocator;
@@ -171,9 +171,15 @@ pub(super) fn bind_values_rows(
                     inferred
                 }
                 Some(existing) => {
-                    let existing = common_expr
-                        .map(|expr| coerce_unknown_string_literal_type(expr, existing, inferred))
-                        .unwrap_or(existing);
+                    let existing = if is_text_like_type(existing) {
+                        common_expr
+                            .map(|expr| {
+                                coerce_unknown_string_literal_type(expr, existing, inferred)
+                            })
+                            .unwrap_or(existing)
+                    } else {
+                        existing
+                    };
                     let adjusted = row[col_idx]
                         .raw_expr()
                         .map(|expr| coerce_unknown_string_literal_type(expr, inferred, existing))
@@ -971,7 +977,7 @@ fn bind_function_from_item_with_ctes(
                 grouped_outer,
                 ctes,
             );
-            let step_type = if args.len() >= 3 {
+            let raw_step_type = if args.len() >= 3 {
                 Some(infer_sql_expr_type_with_ctes(
                     &args[2],
                     &call_scope,
@@ -983,6 +989,24 @@ fn bind_function_from_item_with_ctes(
             } else {
                 None
             };
+            let step_type = raw_step_type.map(|inferred| {
+                let has_timestamp_bound = matches!(
+                    start_type.kind,
+                    SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+                ) || matches!(
+                    stop_type.kind,
+                    SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+                );
+                if has_timestamp_bound {
+                    coerce_unknown_string_literal_type(
+                        &args[2],
+                        inferred,
+                        SqlType::new(SqlTypeKind::Interval),
+                    )
+                } else {
+                    inferred
+                }
+            });
             let timezone_type = if args.len() == 4 {
                 Some(infer_sql_expr_type_with_ctes(
                     &args[3],
@@ -1011,7 +1035,7 @@ fn bind_function_from_item_with_ctes(
                     grouped_outer,
                     ctes,
                 )?;
-                let step_type = step_type.expect("generate_series step type");
+                let step_type = raw_step_type.expect("generate_series step type");
                 let step_target = if matches!(
                     common.kind,
                     SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
@@ -1600,6 +1624,45 @@ fn bind_function_from_item_with_ctes(
                     scope,
                     alias_single_function_output,
                 ))
+            } else if let Some(kind) = resolve_text_search_table_function(other) {
+                let empty_scope = empty_scope();
+                let bound_args = args
+                    .iter()
+                    .map(|arg| {
+                        bind_expr_with_outer_and_ctes(
+                            arg,
+                            &empty_scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut output_columns = text_search_table_function_columns(kind);
+                let mut desc_columns = output_columns
+                    .iter()
+                    .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                    .collect::<Vec<_>>();
+                maybe_append_function_ordinality(
+                    with_ordinality,
+                    &mut output_columns,
+                    &mut desc_columns,
+                );
+                let desc = RelationDesc {
+                    columns: desc_columns,
+                };
+                let scope = scope_for_relation(Some(name), &desc);
+                Ok((
+                    AnalyzedFrom::function(SetReturningCall::TextSearchTableFunction {
+                        kind,
+                        args: bound_args,
+                        output_columns,
+                        with_ordinality,
+                    }),
+                    scope,
+                    false,
+                ))
             } else if let Some(resolved) = resolved.as_ref() {
                 if resolved.prokind != 'f' {
                     return Err(ParseError::UnknownTable(other.to_string()));
@@ -1838,6 +1901,42 @@ fn bind_function_from_item_with_ctes(
                     scope,
                     alias_single_function_output,
                 ))
+            } else if let Some(typed) = bind_legacy_scalar_function_call(
+                other,
+                &args,
+                func_variadic,
+                &call_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )? {
+                let mut plan = AnalyzedFrom::result().with_projection(vec![TargetEntry::new(
+                    other.to_string(),
+                    typed.expr,
+                    typed.sql_type,
+                    1,
+                )]);
+                let alias_single_function_output = !with_ordinality;
+                if with_ordinality {
+                    let base_expr = plan.output_exprs[0].clone();
+                    let ordinality_type = SqlType::new(SqlTypeKind::Int8);
+                    plan = plan.with_projection(vec![
+                        TargetEntry::new(other.to_string(), base_expr, typed.sql_type, 1),
+                        TargetEntry::new(
+                            "ordinality",
+                            Expr::Const(Value::Int64(1)),
+                            ordinality_type,
+                            2,
+                        ),
+                    ]);
+                }
+                let desc = plan.desc();
+                let scope = scope_with_output_exprs(
+                    scope_for_relation(Some(other), &desc),
+                    &plan.output_exprs,
+                );
+                Ok((plan, scope, alias_single_function_output))
             } else {
                 Err(ParseError::UnknownTable(other.to_string()))
             }

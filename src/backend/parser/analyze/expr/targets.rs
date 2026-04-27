@@ -418,7 +418,7 @@ fn bind_select_list_srf_call(
                 grouped_outer,
                 ctes,
             );
-            let step_type = if args.len() >= 3 {
+            let raw_step_type = if args.len() >= 3 {
                 Some(infer_sql_expr_type_with_ctes(
                     &args[2],
                     scope,
@@ -430,6 +430,24 @@ fn bind_select_list_srf_call(
             } else {
                 None
             };
+            let step_type = raw_step_type.map(|inferred| {
+                let has_timestamp_bound = matches!(
+                    start_type.kind,
+                    SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+                ) || matches!(
+                    stop_type.kind,
+                    SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+                );
+                if has_timestamp_bound {
+                    coerce_unknown_string_literal_type(
+                        &args[2],
+                        inferred,
+                        SqlType::new(SqlTypeKind::Interval),
+                    )
+                } else {
+                    inferred
+                }
+            });
             let timezone_type = if args.len() == 4 {
                 Some(infer_sql_expr_type_with_ctes(
                     &args[3],
@@ -458,7 +476,7 @@ fn bind_select_list_srf_call(
                     grouped_outer,
                     ctes,
                 )?;
-                let step_type = step_type.expect("generate_series step type");
+                let step_type = raw_step_type.expect("generate_series step type");
                 let step_target = if matches!(
                     common.kind,
                     SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
@@ -855,6 +873,26 @@ fn bind_select_list_srf_call(
                         kind,
                         args: bound_args,
                         output_columns,
+                        with_ordinality: false,
+                    })
+                } else if let Some(kind) = resolve_text_search_table_function(other) {
+                    let bound_args = args
+                        .iter()
+                        .map(|arg| {
+                            bind_expr_with_outer_and_ctes(
+                                arg,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(SetReturningCall::TextSearchTableFunction {
+                        kind,
+                        args: bound_args,
+                        output_columns: text_search_table_function_columns(kind),
                         with_ordinality: false,
                     })
                 } else if let Some(resolved) = resolved.as_ref() {

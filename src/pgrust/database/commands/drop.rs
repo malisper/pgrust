@@ -1793,6 +1793,7 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         self.execute_drop_relation_stmt_in_transaction_with_search_path(
             client_id,
@@ -1802,7 +1803,7 @@ impl Database {
             cid,
             configured_search_path,
             catalog_effects,
-            None,
+            Some(temp_effects),
             'v',
             "view",
         )
@@ -2475,7 +2476,21 @@ impl Database {
             };
             match drop_result {
                 Ok(effect) => {
-                    if expected_relkind != 'v' {
+                    if maybe_entry
+                        .as_ref()
+                        .is_some_and(|entry| entry.relpersistence == 't')
+                    {
+                        self.apply_catalog_mutation_effect_immediate(&effect)?;
+                        if expected_relkind == 'v' {
+                            self.remove_temp_entry_after_catalog_drop(
+                                client_id,
+                                relation_name,
+                                temp_effects
+                                    .as_deref_mut()
+                                    .expect("temp effects required for DROP VIEW"),
+                            )?;
+                        }
+                    } else if expected_relkind != 'v' {
                         self.apply_catalog_mutation_effect_immediate(&effect)?;
                     }
                     if matches!(expected_relkind, 'r' | 'm') {

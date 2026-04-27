@@ -36,9 +36,9 @@ use self::ops::bind_order_by_using_direction;
 use self::ops::{
     bind_arithmetic_expr, bind_bitwise_expr, bind_catalog_binary_operator_expr,
     bind_comparison_expr, bind_concat_expr, bind_maybe_network_arithmetic,
-    bind_maybe_network_bitwise, bind_maybe_network_operator, bind_overloaded_binary_expr,
-    bind_prefix_operator_expr, bind_shift_expr, bind_text_pattern_comparison_expr,
-    bind_text_starts_with_expr, supports_comparison_operator,
+    bind_maybe_network_bitwise, bind_maybe_network_operator, bind_maybe_tsquery_contains,
+    bind_overloaded_binary_expr, bind_prefix_operator_expr, bind_shift_expr,
+    bind_text_pattern_comparison_expr, bind_text_starts_with_expr, supports_comparison_operator,
 };
 use self::subquery::{
     bind_array_subquery_expr, bind_exists_subquery_expr, bind_in_subquery_expr,
@@ -161,6 +161,101 @@ pub(super) fn bind_resolved_scalar_function_call(
         grouped_outer,
         ctes,
     )
+}
+
+pub(super) fn bind_legacy_scalar_function_call(
+    name: &str,
+    args: &[SqlExpr],
+    func_variadic: bool,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Option<TypedExpr>, ParseError> {
+    let Some(legacy_func) = resolve_scalar_function(name) else {
+        return Ok(None);
+    };
+    validate_scalar_function_arity(legacy_func, args)?;
+
+    let actual_types = args
+        .iter()
+        .map(|arg| {
+            infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes)
+        })
+        .collect::<Vec<_>>();
+    let legacy_result_type = if matches!(legacy_func, BuiltinScalarFunction::RangeConstructor) {
+        resolve_function_cast_type(catalog, name)
+            .filter(|ty| range_type_ref_for_sql_type(*ty).is_some())
+    } else if matches!(
+        legacy_func,
+        BuiltinScalarFunction::Greatest | BuiltinScalarFunction::Least
+    ) {
+        infer_common_scalar_expr_type_with_ctes(
+            args,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+            "GREATEST/LEAST arguments with a common type",
+        )
+        .ok()
+    } else {
+        None
+    };
+    let legacy_vatype_oid = if func_variadic
+        && matches!(
+            legacy_func,
+            BuiltinScalarFunction::Concat
+                | BuiltinScalarFunction::ConcatWs
+                | BuiltinScalarFunction::Format
+                | BuiltinScalarFunction::JsonBuildArray
+                | BuiltinScalarFunction::JsonBuildObject
+                | BuiltinScalarFunction::JsonbBuildArray
+                | BuiltinScalarFunction::JsonbBuildObject
+        ) {
+        ANYOID
+    } else {
+        0
+    };
+    let legacy_declared_arg_types =
+        if let Some(range_type) = legacy_result_type.and_then(range_type_ref_for_sql_type) {
+            let mut declared = vec![range_type.subtype, range_type.subtype];
+            if args.len() == 3 {
+                declared.push(SqlType::new(SqlTypeKind::Text));
+            }
+            declared
+        } else {
+            actual_types.clone()
+        };
+    let expr = bind_scalar_function_call(
+        legacy_func,
+        0,
+        legacy_result_type,
+        func_variadic,
+        0,
+        legacy_vatype_oid,
+        &legacy_declared_arg_types,
+        args,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let sql_type = expr_sql_type_hint(&expr)
+        .or(legacy_result_type)
+        .or_else(|| fixed_scalar_return_type(legacy_func))
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "scalar function with a known result type",
+            actual: name.to_string(),
+        })?;
+    Ok(Some(TypedExpr {
+        expr,
+        sql_type,
+        contains_srf: false,
+    }))
 }
 
 fn supports_array_subscripts(array_type: SqlType) -> bool {
@@ -1346,9 +1441,13 @@ fn bind_window_func_call(
     }
     let resolved = resolve_function_call(catalog, name, &resolution_types, func_variadic)?;
     if resolved.proretset || !matches!(resolved.prokind, 'w' | 'a') {
-        return Err(ParseError::UnexpectedToken {
-            expected: "window or aggregate function",
-            actual: name.to_string(),
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "OVER specified, but {name} is not a window function nor an aggregate function"
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
         });
     }
     let spec = bind_window_spec(over, catalog, |expr| {
@@ -3432,6 +3531,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 ctes,
             ) {
                 result?
+            } else if let Some(result) = bind_maybe_tsquery_contains(
+                "@>",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
             } else if let Some(result) = bind_maybe_array_membership_expr(
                 OpExprKind::ArrayContains,
                 left,
@@ -3468,6 +3578,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             ) {
                 result?
             } else if let Some(result) = bind_maybe_range_contains(
+                "<@",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_tsquery_contains(
                 "<@",
                 left,
                 right,
@@ -3571,6 +3692,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 return Err(not_ordered_set_aggregate_error(name));
             }
             if let Some(func) = resolve_builtin_aggregate(name) {
+                reject_explicit_empty_aggregate_call(name, args)?;
                 if let Some(raw_over) = over {
                     return bind_window_agg_call(
                         func,

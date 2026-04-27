@@ -3133,6 +3133,248 @@ fn copy_from_file_loads_tsvector_rows() {
 }
 
 #[test]
+fn tsearch_match_operator_is_null_strict() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select null::tsvector @@ to_tsquery('foo'), to_tsvector('foo') @@ null::tsquery"
+        ),
+        vec![vec![Value::Null, Value::Null]]
+    );
+}
+
+#[test]
+fn tsquery_containment_operators_use_lexeme_sets() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select 'new <-> york'::tsquery @> 'new'::tsquery, \
+                    'new'::tsquery <@ 'new <-> york'::tsquery, \
+                    'new'::tsquery @> 'moscow'::tsquery, \
+                    null::tsquery @> 'new'::tsquery"
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Null,
+        ]]
+    );
+}
+
+#[test]
+fn scalar_tsearch_function_can_be_used_in_from() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select query from to_tsquery('english', 'new') as query"
+        ),
+        vec![vec![Value::TsQuery(
+            crate::include::nodes::tsearch::TsQuery::parse("new").unwrap()
+        )]]
+    );
+}
+
+#[test]
+fn text_tsearch_match_operator_accepts_tsquery() {
+    let db = Database::open_ephemeral(64).unwrap();
+    db.execute(1, "create table text_match_docs(txtsample text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into text_match_docs values ('new york'), ('moscow hotel')",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from text_match_docs, to_tsquery('english', 'new') q \
+             where txtsample @@ q"
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+}
+
+#[test]
+fn empty_tsearch_query_builders_emit_postgres_notices() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    clear_backend_notices();
+    assert_eq!(
+        query_rows(&db, 1, "select to_tsquery('english', '')::text"),
+        vec![vec![Value::Text("".into())]]
+    );
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(
+            "text-search query doesn't contain lexemes: \"\""
+        )]
+    );
+
+    clear_backend_notices();
+    assert_eq!(
+        query_rows(&db, 1, "select websearch_to_tsquery('simple', ':')::text"),
+        vec![vec![Value::Text("".into())]]
+    );
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(
+            "text-search query contains only stop words or doesn't contain lexemes, ignored"
+        )]
+    );
+}
+
+#[test]
+fn ts_rewrite_replaces_tsquery_subtrees() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ts_rewrite('foo & bar'::tsquery, 'bar'::tsquery, 'baz'::tsquery)::text"
+        ),
+        vec![vec![Value::Text("'foo' & 'baz'".into())]]
+    );
+    clear_backend_notices();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ts_rewrite(to_tsquery('5 & (6 | 5)'), to_tsquery('5'), to_tsquery(''))::text"
+        ),
+        vec![vec![Value::Text("'6'".into())]]
+    );
+}
+
+#[test]
+fn ts_headline_handles_empty_and_basic_queries() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    clear_backend_notices();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ts_headline('english', 'foo bar', to_tsquery('english', ''))"
+        ),
+        vec![vec![Value::Text("foo bar".into())]]
+    );
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(
+            "text-search query doesn't contain lexemes: \"\""
+        )]
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ts_headline('english', 'painted water', to_tsquery('english', 'paint&water'))"
+        ),
+        vec![vec![Value::Text("<b>painted</b> <b>water</b>".into())]]
+    );
+}
+
+#[test]
+fn one_arg_tsearch_functions_use_default_text_search_config() {
+    let dir = temp_dir("one_arg_tsearch_default_config");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set default_text_search_config=english")
+        .unwrap();
+
+    let StatementResult::Query { rows, .. } = session
+        .execute(
+            &db,
+            "select to_tsvector('SKIES My booKs'), \
+                    plainto_tsquery('SKIES My booKs'), \
+                    to_tsquery('SKIES & My | booKs'), \
+                    to_tsquery('''New York''')",
+        )
+        .unwrap()
+    else {
+        panic!("expected query result");
+    };
+
+    assert_eq!(
+        rows,
+        vec![vec![
+            Value::TsVector(
+                crate::include::nodes::tsearch::TsVector::parse("'book':3 'sky':1").unwrap()
+            ),
+            Value::TsQuery(crate::include::nodes::tsearch::TsQuery::parse("sky & book").unwrap()),
+            Value::TsQuery(crate::include::nodes::tsearch::TsQuery::parse("sky | book").unwrap()),
+            Value::TsQuery(crate::include::nodes::tsearch::TsQuery::parse("new <-> york").unwrap()),
+        ]]
+    );
+}
+
+#[test]
+fn tsearch_parser_table_functions_return_rows() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from ts_token_type('default')"),
+        vec![vec![Value::Int64(23)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select * from ts_parse('default', 'foo 123')"),
+        vec![
+            vec![Value::Int32(1), Value::Text("foo".into())],
+            vec![Value::Int32(12), Value::Text(" ".into())],
+            vec![Value::Int32(22), Value::Text("123".into())],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select alias, token, dictionary, lexemes from ts_debug('english', 'a title')"
+        ),
+        vec![
+            vec![
+                Value::Text("asciiword".into()),
+                Value::Text("a".into()),
+                Value::Text("english_stem".into()),
+                Value::PgArray(
+                    ArrayValue::from_1d(Vec::new()).with_element_type_oid(TEXT_TYPE_OID)
+                ),
+            ],
+            vec![
+                Value::Text("blank".into()),
+                Value::Text(" ".into()),
+                Value::Null,
+                Value::Null,
+            ],
+            vec![
+                Value::Text("asciiword".into()),
+                Value::Text("title".into()),
+                Value::Text("english_stem".into()),
+                Value::PgArray(
+                    ArrayValue::from_1d(vec![Value::Text("titl".into())])
+                        .with_element_type_oid(TEXT_TYPE_OID)
+                ),
+            ],
+        ]
+    );
+}
+
+#[test]
 fn copy_to_file_writes_selected_rows() {
     let dir = temp_dir("copy_to_file");
     let db = Database::open(&dir, 128).unwrap();
@@ -33959,6 +34201,99 @@ fn pg_get_viewdef_renders_sublinks_as_sql() {
     };
     assert!(in_sql.contains(" IN ( SELECT"));
     assert!(!in_sql.contains("SubLink("));
+}
+
+#[test]
+fn pg_get_viewdef_renders_window_functions_and_function_rtes() {
+    let dir = temp_dir("pg_get_viewdef_windows");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create view v_window as
+         select i,
+                sum(i) over (order by i rows unbounded preceding exclude current row) as s_current,
+                sum(i) over (order by i rows unbounded preceding exclude group) as s_group,
+                sum(i) over (order by i rows unbounded preceding exclude ties) as s_ties,
+                sum(i) over (order by i rows unbounded preceding exclude no others) as s_all
+         from generate_series(1, 10) i(i)",
+    )
+    .unwrap();
+
+    let def = query_rows(&db, 1, "select pg_get_viewdef('v_window'::regclass)");
+    let Value::Text(sql) = &def[0][0] else {
+        panic!("expected text view definition, got {def:?}");
+    };
+
+    assert!(sql.contains("generate_series(1, 10) i(i)"));
+    assert!(
+        sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW)")
+    );
+    assert!(sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE GROUP)"));
+    assert!(sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE TIES)"));
+    assert!(sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING)"));
+    assert!(!sql.contains("WindowFunc"));
+    assert!(!sql.contains("function_call"));
+}
+
+#[test]
+fn create_or_replace_temp_window_view_keeps_rewrite_rule() {
+    let dir = temp_dir("replace_temp_window_view");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create temp view v_window as
+         select i,
+                sum(i) over (order by i rows between 1 preceding and 1 following) as sum_rows
+         from generate_series(1, 10) i(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create or replace temp view v_window as
+         select i,
+                sum(i) over (
+                    order by i
+                    rows between 1 preceding and 1 following
+                    exclude current row
+                ) as sum_rows
+         from generate_series(1, 10) i(i)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from v_window where i = 1"),
+        vec![vec![Value::Int32(1), Value::Int64(2)]]
+    );
+
+    let def = query_rows(&db, 1, "select pg_get_viewdef('v_window'::regclass)");
+    let Value::Text(sql) = &def[0][0] else {
+        panic!("expected text view definition, got {def:?}");
+    };
+    assert!(sql.contains("EXCLUDE CURRENT ROW"));
+    assert!(!sql.contains("missing rewrite rule"));
+
+    db.execute(1, "drop view v_window").unwrap();
+    db.execute(
+        1,
+        "create temp view v_window as
+         select i,
+                min(i) over (
+                    order by i
+                    range between '1 day' preceding and '10 days' following
+                ) as min_i
+         from generate_series(now(), now() + '100 days'::interval, '1 hour') i",
+    )
+    .unwrap();
+
+    let def = query_rows(&db, 1, "select pg_get_viewdef('v_window'::regclass)");
+    let Value::Text(sql) = &def[0][0] else {
+        panic!("expected text view definition, got {def:?}");
+    };
+    assert!(sql.contains("min(i.i) OVER (ORDER BY i.i RANGE BETWEEN"));
+    assert!(sql.contains("generate_series(now(),"));
+    assert!(!sql.contains("missing rewrite rule"));
 }
 
 #[test]

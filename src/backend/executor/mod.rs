@@ -75,6 +75,7 @@ pub(crate) use expr_agg_support::execute_scalar_function_value_call;
 pub(crate) use expr_bit::render_bit_text;
 pub(crate) use expr_casts::cast_value_with_source_type_catalog_and_config;
 pub(crate) use expr_casts::parse_bytea_text;
+pub(crate) use expr_casts::parse_interval_text_value;
 pub(crate) use expr_casts::parse_text_array_literal_with_catalog_and_op;
 pub(crate) use expr_casts::parse_text_array_literal_with_op;
 pub use expr_casts::render_internal_char_text;
@@ -132,8 +133,9 @@ pub(crate) use tsearch::{
     eval_tsquery_matches_tsvector, eval_tsvector_matches_tsquery, filter_tsvector, numnode,
     parse_ts_weight, parse_tsquery_text, parse_tsvector_text, render_tsquery_text,
     render_tsvector_text, setweight_tsvector, strip_tsvector, text_array_items, ts_rank,
-    ts_rank_cd, tsquery_and, tsquery_input_error, tsquery_not, tsquery_or, tsquery_phrase,
-    tsvector_input_error, tsvector_to_array, unnest_tsvector,
+    ts_rank_cd, tsquery_and, tsquery_contained_by, tsquery_contains, tsquery_input_error,
+    tsquery_not, tsquery_or, tsquery_phrase, tsquery_rewrite, tsvector_input_error,
+    tsvector_to_array, unnest_tsvector,
 };
 pub use value_io::{format_array_value_text, render_uuid_text};
 

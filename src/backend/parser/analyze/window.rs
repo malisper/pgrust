@@ -1,5 +1,7 @@
 use super::*;
-use crate::include::nodes::parsenodes::{RawWindowFrame, RawWindowFrameBound, WindowFrameMode};
+use crate::include::nodes::parsenodes::{
+    RawWindowFrame, RawWindowFrameBound, WindowFrameExclusion, WindowFrameMode,
+};
 use crate::include::nodes::primnodes::{
     WindowClause, WindowFrame, WindowFrameBound, WindowFrameOffset, WindowFuncExpr, WindowFuncKind,
     WindowSpec, expr_sql_type_hint,
@@ -403,6 +405,26 @@ fn bind_window_frame_offset(
     order_by: &[OrderByEntry],
 ) -> Result<WindowFrameOffset, ParseError> {
     if frame_mode != WindowFrameMode::Range {
+        if expr_contains_current_level_var(&expr, 0) {
+            let construct_name = match frame_mode {
+                WindowFrameMode::Rows => "ROWS",
+                WindowFrameMode::Groups => "GROUPS",
+                WindowFrameMode::Range => unreachable!("range handled above"),
+            };
+            return Err(ParseError::DetailedError {
+                message: format!("argument of {construct_name} must not contain variables"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P10",
+            });
+        }
+        let target_type = SqlType::new(SqlTypeKind::Int8);
+        let offset_type = expr_sql_type_hint(&expr).unwrap_or(target_type);
+        let expr = if offset_type == target_type {
+            expr
+        } else {
+            Expr::Cast(Box::new(expr), target_type)
+        };
         return Ok(WindowFrameOffset::rows_or_groups(expr));
     }
 
@@ -422,6 +444,205 @@ fn bind_window_frame_offset(
         offset_type: target_type,
         in_range_func: None,
     })
+}
+
+fn expr_contains_current_level_var(expr: &Expr, sublevels_up: usize) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup == sublevels_up,
+        Expr::Aggref(aggref) => {
+            aggref
+                .direct_args
+                .iter()
+                .any(|expr| expr_contains_current_level_var(expr, sublevels_up))
+                || aggref
+                    .args
+                    .iter()
+                    .any(|expr| expr_contains_current_level_var(expr, sublevels_up))
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|entry| expr_contains_current_level_var(&entry.expr, sublevels_up))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_current_level_var(expr, sublevels_up))
+        }
+        Expr::WindowFunc(window_func) => window_func
+            .args
+            .iter()
+            .any(|expr| expr_contains_current_level_var(expr, sublevels_up)),
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(|expr| expr_contains_current_level_var(expr, sublevels_up)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|expr| expr_contains_current_level_var(expr, sublevels_up)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|expr| expr_contains_current_level_var(expr, sublevels_up))
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_current_level_var(&arm.expr, sublevels_up)
+                        || expr_contains_current_level_var(&arm.result, sublevels_up)
+                })
+                || expr_contains_current_level_var(&case_expr.defresult, sublevels_up)
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(|expr| expr_contains_current_level_var(expr, sublevels_up)),
+        Expr::SetReturning(set_returning) => {
+            crate::include::nodes::primnodes::set_returning_call_exprs(&set_returning.call)
+                .into_iter()
+                .any(|expr| expr_contains_current_level_var(expr, sublevels_up))
+        }
+        Expr::SubLink(sublink) => {
+            sublink
+                .testexpr
+                .as_ref()
+                .is_some_and(|expr| expr_contains_current_level_var(expr, sublevels_up))
+                || query_contains_current_level_var(&sublink.subselect, sublevels_up + 1)
+        }
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_ref()
+                .is_some_and(|expr| expr_contains_current_level_var(expr, sublevels_up))
+                || subplan
+                    .args
+                    .iter()
+                    .any(|expr| expr_contains_current_level_var(expr, sublevels_up))
+        }
+        Expr::ScalarArrayOp(op) => {
+            expr_contains_current_level_var(&op.left, sublevels_up)
+                || expr_contains_current_level_var(&op.right, sublevels_up)
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(|expr| expr_contains_current_level_var(expr, sublevels_up)),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => {
+            expr_contains_current_level_var(inner, sublevels_up)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_current_level_var(expr, sublevels_up)
+                || expr_contains_current_level_var(pattern, sublevels_up)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_current_level_var(expr, sublevels_up))
+        }
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
+            expr_contains_current_level_var(left, sublevels_up)
+                || expr_contains_current_level_var(right, sublevels_up)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|expr| expr_contains_current_level_var(expr, sublevels_up)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_current_level_var(expr, sublevels_up)),
+        Expr::Coalesce(left, right) => {
+            expr_contains_current_level_var(left, sublevels_up)
+                || expr_contains_current_level_var(right, sublevels_up)
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_current_level_var(array, sublevels_up)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|expr| expr_contains_current_level_var(expr, sublevels_up))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| expr_contains_current_level_var(expr, sublevels_up))
+                })
+        }
+        Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+fn query_contains_current_level_var(
+    query: &crate::backend::parser::Query,
+    sublevels_up: usize,
+) -> bool {
+    query
+        .target_list
+        .iter()
+        .any(|target| expr_contains_current_level_var(&target.expr, sublevels_up))
+        || query
+            .where_qual
+            .as_ref()
+            .is_some_and(|expr| expr_contains_current_level_var(expr, sublevels_up))
+        || query
+            .group_by
+            .iter()
+            .any(|expr| expr_contains_current_level_var(expr, sublevels_up))
+        || query.accumulators.iter().any(|accum| {
+            accum
+                .args
+                .iter()
+                .any(|expr| expr_contains_current_level_var(expr, sublevels_up))
+                || accum
+                    .filter
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_current_level_var(expr, sublevels_up))
+        })
+        || query.window_clauses.iter().any(|clause| {
+            clause
+                .spec
+                .partition_by
+                .iter()
+                .any(|expr| expr_contains_current_level_var(expr, sublevels_up))
+                || clause
+                    .spec
+                    .order_by
+                    .iter()
+                    .any(|entry| expr_contains_current_level_var(&entry.expr, sublevels_up))
+                || clause.functions.iter().any(|func| {
+                    func.args
+                        .iter()
+                        .any(|expr| expr_contains_current_level_var(expr, sublevels_up))
+                })
+        })
+        || query
+            .having_qual
+            .as_ref()
+            .is_some_and(|expr| expr_contains_current_level_var(expr, sublevels_up))
+        || query
+            .sort_clause
+            .iter()
+            .any(|clause| expr_contains_current_level_var(&clause.expr, sublevels_up))
 }
 
 fn range_offset_target_type(
@@ -512,6 +733,7 @@ fn bind_window_frame(
             mode: WindowFrameMode::Range,
             start_bound: WindowFrameBound::UnboundedPreceding,
             end_bound: WindowFrameBound::CurrentRow,
+            exclusion: WindowFrameExclusion::NoOthers,
         });
     };
 
@@ -549,6 +771,7 @@ fn bind_window_frame(
             order_by,
             bind_expr,
         )?,
+        exclusion: raw_frame.exclusion,
     };
     validate_window_frame(&frame)?;
     Ok(frame)

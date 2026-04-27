@@ -976,7 +976,7 @@ fn render_window_frame_for_explain(
         WindowFrameMode::Range => "RANGE",
         WindowFrameMode::Groups => "GROUPS",
     };
-    match (&frame.start_bound, &frame.end_bound) {
+    let rendered = match (&frame.start_bound, &frame.end_bound) {
         (WindowFrameBound::UnboundedPreceding, WindowFrameBound::CurrentRow) => (frame.mode
             == WindowFrameMode::Rows
             || (frame.mode == WindowFrameMode::Range
@@ -992,6 +992,24 @@ fn render_window_frame_for_explain(
             render_window_frame_bound(start, column_names, ctx)?,
             render_window_frame_bound(end, column_names, ctx)?
         )),
+    }?;
+    Some(format!(
+        "{}{}",
+        rendered,
+        render_window_frame_exclusion_for_explain(frame.exclusion)
+    ))
+}
+
+fn render_window_frame_exclusion_for_explain(
+    exclusion: crate::include::nodes::parsenodes::WindowFrameExclusion,
+) -> &'static str {
+    match exclusion {
+        crate::include::nodes::parsenodes::WindowFrameExclusion::NoOthers => "",
+        crate::include::nodes::parsenodes::WindowFrameExclusion::CurrentRow => {
+            " EXCLUDE CURRENT ROW"
+        }
+        crate::include::nodes::parsenodes::WindowFrameExclusion::Group => " EXCLUDE GROUP",
+        crate::include::nodes::parsenodes::WindowFrameExclusion::Ties => " EXCLUDE TIES",
     }
 }
 

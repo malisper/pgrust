@@ -13722,7 +13722,42 @@ fn parse_window_frame_clause_and_inherited_reference() {
             && frame.mode == WindowFrameMode::Rows
             && matches!(frame.start_bound, RawWindowFrameBound::OffsetPreceding(_))
             && matches!(frame.end_bound, RawWindowFrameBound::CurrentRow)
+            && frame.exclusion == WindowFrameExclusion::NoOthers
     ));
+}
+
+#[test]
+fn parse_window_frame_exclusion_variants() {
+    for (sql, expected) in [
+        (
+            "select sum(id) over (order by id rows unbounded preceding exclude current row) from people",
+            WindowFrameExclusion::CurrentRow,
+        ),
+        (
+            "select sum(id) over (order by id rows unbounded preceding exclude group) from people",
+            WindowFrameExclusion::Group,
+        ),
+        (
+            "select sum(id) over (order by id rows unbounded preceding exclude ties) from people",
+            WindowFrameExclusion::Ties,
+        ),
+        (
+            "select sum(id) over (order by id rows unbounded preceding exclude no others) from people",
+            WindowFrameExclusion::NoOthers,
+        ),
+    ] {
+        let stmt = parse_select(sql).unwrap();
+        assert!(matches!(
+            &stmt.targets[0].expr,
+            SqlExpr::FuncCall {
+                over: Some(RawWindowSpec {
+                    frame: Some(frame),
+                    ..
+                }),
+                ..
+            } if frame.exclusion == expected
+        ));
+    }
 }
 
 #[test]
@@ -13746,6 +13781,66 @@ fn build_plan_with_aggregate() {
         }
         other => panic!("expected projection, got {:?}", other),
     }
+}
+
+#[test]
+fn build_plan_rejects_explicit_empty_count_window_call() {
+    let stmt = parse_select("select count() over () from people").unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::DetailedError { message, sqlstate, .. }
+            if message == "count(*) must be used to call a parameterless aggregate function"
+                && sqlstate == "42809"
+    ));
+}
+
+#[test]
+fn build_plan_rejects_over_for_non_window_function() {
+    let stmt = parse_select("select generate_series(1, 5) over ()").unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::DetailedError { message, sqlstate, .. }
+            if message
+                == "OVER specified, but generate_series is not a window function nor an aggregate function"
+                && sqlstate == "42809"
+    ));
+}
+
+#[test]
+fn build_plan_rejects_rows_frame_offsets_with_variables() {
+    let stmt = parse_select(
+        "select sum(id) over (rows between x preceding and current row) \
+         from people, (values (1)) v(x)",
+    )
+    .unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::DetailedError { message, sqlstate, .. }
+            if message == "argument of ROWS must not contain variables"
+                && sqlstate == "42P10"
+    ));
+}
+
+#[test]
+fn analyze_values_common_type_preserves_unknown_literal_targets() {
+    let stmt = parse_select("select x from (values (1::numeric), ('NaN'), (2)) v(x)").unwrap();
+    let (_, scope) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+    assert_eq!(
+        scope.desc.columns[0].sql_type,
+        SqlType::new(SqlTypeKind::Numeric)
+    );
+
+    let stmt = parse_select("select x from (values (interval '1 day'), ('2 days')) v(x)").unwrap();
+    let (_, scope) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+    assert_eq!(
+        scope.desc.columns[0].sql_type,
+        SqlType::new(SqlTypeKind::Interval)
+    );
 }
 
 #[test]
