@@ -512,6 +512,7 @@ impl RelCache {
                     desc.attislocal = attr.attislocal;
                     desc.attacl = attr.attacl.clone();
                     desc.collation_oid = attr.attcollation;
+                    desc.fdw_options = attr.attfdwoptions.clone();
                     desc.identity =
                         crate::include::nodes::parsenodes::ColumnIdentityKind::from_catalog_char(
                             attr.attidentity,

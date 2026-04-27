@@ -44,6 +44,9 @@ Runtime behavior:
 - supports `COMMENT ON FOREIGN TABLE` through relation descriptions and emits
   missing/duplicate FDW, server, and user-mapping notices plus FDW
   handler/validator change warnings
+- preserves `pg_attribute.attfdwoptions` when relation descriptors are rebuilt
+  through relcache/syscache paths, and displays foreign column FDW options plus
+  column comments in psql `\d`/`\d+` describe fast paths
 
 Tests run:
 - `cargo fmt`
@@ -92,9 +95,15 @@ Tests run:
 - `scripts/cargo_isolated.sh check`
 - `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
 - `scripts/run_regression.sh --skip-build --port 55448 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-notices`
+- `scripts/cargo_isolated.sh test --lib --quiet psql_describe_columns_query_reports_foreign_column_options_and_comments`
+- `scripts/cargo_isolated.sh test --lib --quiet foreign_data_catalogs_track_servers_mappings_and_tables`
+- `scripts/cargo_isolated.sh check`
+- `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
+- `scripts/run_regression.sh --skip-build --port 55451 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-relcache-fdw-options`
 
 Remaining:
-`foreign_data` still fails, but improved to 390/539 matching queries. Biggest
+`foreign_data` still fails, but improved to 390/539 matching queries and 1524
+diff lines in the latest run. Biggest
 remaining groups:
 - FDW dependency reporting for handler functions and owners
 - full `IMPORT FOREIGN SCHEMA` callback behavior beyond missing-handler errors

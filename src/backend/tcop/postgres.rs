@@ -43,13 +43,13 @@ use crate::backend::utils::sql_deparse::{
     normalize_index_expression_sql, normalize_index_predicate_sql,
 };
 use crate::include::access::htup::TupleError;
-use crate::include::catalog::{ANYELEMENTOID, RECORD_TYPE_OID};
+use crate::include::catalog::{ANYELEMENTOID, PG_CLASS_RELATION_OID, RECORD_TYPE_OID};
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value,
 };
 use crate::include::nodes::parsenodes::{CopyFormat, CopyToStatement};
-use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc, user_attrno};
+use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices};
@@ -5052,6 +5052,17 @@ fn psql_describe_columns_query(
             index_meta.indrelid,
         )
     });
+    let fdw_options_by_attnum = backend_catcache(db, session.client_id, session.catalog_txn_ctx())
+        .ok()
+        .and_then(|cache| {
+            cache.attributes_by_relid(entry.relation_oid).map(|attrs| {
+                attrs
+                    .iter()
+                    .map(|attr| (attr.attnum, attr.attfdwoptions.clone()))
+                    .collect::<HashMap<_, _>>()
+            })
+        })
+        .unwrap_or_default();
 
     let mut columns = vec![
         QueryColumn::text("attname"),
@@ -5123,6 +5134,7 @@ fn psql_describe_columns_query(
         .columns
         .iter()
         .enumerate()
+        .filter(|(_, column)| !column.dropped)
         .map(|(index, column)| {
             let base_column = entry
                 .index
@@ -5138,6 +5150,7 @@ fn psql_describe_columns_query(
                     })
                 });
             let display_column = base_column.unwrap_or(column);
+            let attnum = (index + 1) as i16;
             let index_display = index_display_columns
                 .as_ref()
                 .and_then(|columns| columns.get(index));
@@ -5221,7 +5234,15 @@ fn psql_describe_columns_query(
                 ));
             }
             if include_attfdwoptions {
-                row.push(Value::Text("".into()));
+                row.push(Value::Text(
+                    psql_format_fdw_options(
+                        fdw_options_by_attnum
+                            .get(&attnum)
+                            .and_then(|options| options.as_deref())
+                            .or(column.fdw_options.as_deref()),
+                    )
+                    .into(),
+                ));
             }
             if include_attstorage {
                 row.push(Value::InternalChar(
@@ -5246,15 +5267,56 @@ fn psql_describe_columns_query(
                 row.push(catalog_description_value(
                     db,
                     session,
-                    oid,
-                    crate::include::catalog::PG_CLASS_RELATION_OID,
-                    i32::from(user_attrno(index)),
+                    entry.relation_oid,
+                    PG_CLASS_RELATION_OID,
+                    attnum as i32,
                 ));
             }
             row
         })
         .collect::<Vec<_>>();
     Some((columns, rows))
+}
+
+fn psql_format_fdw_options(options: Option<&[String]>) -> String {
+    let Some(options) = options else {
+        return String::new();
+    };
+    if options.is_empty() {
+        return String::new();
+    }
+    let parts = options
+        .iter()
+        .filter_map(|option| option.split_once('='))
+        .map(|(name, value)| {
+            format!(
+                "{} '{}'",
+                psql_quote_ident_if_needed(name),
+                value.replace('\'', "''")
+            )
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("({})", parts.join(", "))
+    }
+}
+
+fn psql_quote_ident_if_needed(ident: &str) -> String {
+    let mut chars = ident.chars();
+    let Some(first) = chars.next() else {
+        return "\"\"".into();
+    };
+    let is_simple_start = first == '_' || first.is_ascii_lowercase();
+    let is_simple_rest =
+        chars.all(|ch| ch == '_' || ch.is_ascii_lowercase() || ch.is_ascii_digit());
+    let is_keyword = matches!(ident, "user");
+    if is_simple_start && is_simple_rest && !is_keyword {
+        ident.to_string()
+    } else {
+        quote_identifier(ident)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10271,6 +10333,78 @@ ORDER BY 1, 2;";
         assert_eq!(rows[0][7], Value::InternalChar(b'p'));
         assert_eq!(rows[0][8], Value::InternalChar(0));
         assert_eq!(rows[0][9], Value::Null);
+    }
+
+    #[test]
+    fn psql_describe_columns_query_reports_foreign_column_options_and_comments() {
+        let db = Database::open(temp_dir("describe_columns_foreign_options"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create foreign data wrapper fdw_describe")
+            .unwrap();
+        db.execute(
+            1,
+            "create server fdw_describe_srv foreign data wrapper fdw_describe",
+        )
+        .unwrap();
+        db.execute(
+            1,
+            "create foreign table fdw_describe_ft (\
+                a int4 options (\"param 1\" 'val1'), \
+                b text options (user 'secret')) \
+             server fdw_describe_srv",
+        )
+        .unwrap();
+        db.execute(1, "comment on column fdw_describe_ft.a is 'remote id'")
+            .unwrap();
+        db.execute(1, "alter foreign table fdw_describe_ft add column c int4")
+            .unwrap();
+        db.execute(
+            1,
+            "alter foreign table fdw_describe_ft alter column b options (add encoding 'utf8')",
+        )
+        .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("fdw_describe_ft")
+            .unwrap();
+
+        let sql = format!(
+            "SELECT a.attname, \
+                 pg_catalog.format_type(a.atttypid, a.atttypmod), \
+                 CASE WHEN attfdwoptions IS NULL THEN '' ELSE \
+                 '(' || pg_catalog.array_to_string(ARRAY(SELECT pg_catalog.quote_ident(option_name) || ' ' || pg_catalog.quote_literal(option_value) \
+                   FROM pg_catalog.pg_options_to_table(attfdwoptions)), ', ') || ')' END AS attfdwoptions, \
+                 pg_catalog.col_description(a.attrelid, a.attnum) \
+             FROM pg_catalog.pg_attribute a \
+             WHERE a.attrelid = '{}' AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY a.attnum",
+            entry.relation_oid
+        );
+        let (columns, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(columns.len(), 4);
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    Value::Text("a".into()),
+                    Value::Text("integer".into()),
+                    Value::Text("(\"param 1\" 'val1')".into()),
+                    Value::Text("remote id".into()),
+                ],
+                vec![
+                    Value::Text("b".into()),
+                    Value::Text("text".into()),
+                    Value::Text("(\"user\" 'secret', encoding 'utf8')".into()),
+                    Value::Null,
+                ],
+                vec![
+                    Value::Text("c".into()),
+                    Value::Text("integer".into()),
+                    Value::Text("".into()),
+                    Value::Null,
+                ],
+            ]
+        );
     }
 
     #[test]

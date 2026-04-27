@@ -31887,16 +31887,30 @@ fn foreign_data_catalogs_track_servers_mappings_and_tables() {
         "alter foreign table fdw_ft alter column b options (set column_name 'remote_b2', add encoding 'utf8')",
     )
     .unwrap();
+    db.execute(1, "alter foreign table fdw_ft alter column b type text")
+        .unwrap();
     assert_eq!(
         query_rows(
             &db,
             1,
-            "select attfdwoptions from pg_attribute where attrelid = 'fdw_ft'::regclass and attname = 'b'",
+            "select attname, attfdwoptions from pg_attribute where attrelid = 'fdw_ft'::regclass and attname in ('a', 'b') order by attnum",
         ),
-        vec![vec![typed_text_array_value(
-            &["column_name=remote_b2", "encoding=utf8"],
-            crate::include::catalog::TEXT_TYPE_OID,
-        )]]
+        vec![
+            vec![
+                Value::Text("a".into()),
+                typed_text_array_value(
+                    &["column_name=remote_a"],
+                    crate::include::catalog::TEXT_TYPE_OID,
+                ),
+            ],
+            vec![
+                Value::Text("b".into()),
+                typed_text_array_value(
+                    &["column_name=remote_b2", "encoding=utf8"],
+                    crate::include::catalog::TEXT_TYPE_OID,
+                ),
+            ],
+        ]
     );
 
     db.execute(
