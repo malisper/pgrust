@@ -36,6 +36,10 @@ env:
   REGRESS_ARTIFACT_DIR: ${{ github.workspace }}/regress-artifact
   REGRESS_COMMAND_TIMEOUT: ${{ inputs.command_timeout || '210m' }}
   REGRESS_JOBS: ${{ inputs.jobs || '4' }}
+  # Keep the explicit build step and run_regression.sh --skip-build looking at
+  # the same target directory. Otherwise the script may fall back to an isolated
+  # target pool and fail to find the binary that CI just built.
+  CARGO_TARGET_DIR: ${{ github.workspace }}/pgrust/target
   # Pin to the PG18 SHA the project currently develops against. Bump when the
   # team decides to track a newer upstream — fixtures (.out files) are tied to
   # this revision.
