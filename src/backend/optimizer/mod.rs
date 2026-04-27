@@ -80,10 +80,12 @@ struct IndexPathSpec {
     order_by_keys: Vec<IndexScanKey>,
     residual: Option<Expr>,
     used_quals: Vec<Expr>,
+    scan_quals: Vec<Expr>,
     recheck_quals: Vec<Expr>,
     filter_quals: Vec<Expr>,
     direction: crate::include::access::relscan::ScanDirection,
     removes_order: bool,
+    btree_prefix_columns: usize,
     row_prefix: bool,
 }
 

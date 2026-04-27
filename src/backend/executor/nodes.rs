@@ -498,7 +498,7 @@ pub(crate) fn render_index_scan_condition_with_key_names_and_runtime_renderer(
     key_column_names: Option<&[String]>,
     runtime_renderer: Option<&dyn Fn(&Expr) -> String>,
 ) -> Option<String> {
-    let rendered = keys
+    let mut rendered = keys
         .iter()
         .filter_map(|key| {
             render_index_scan_key(
@@ -509,7 +509,23 @@ pub(crate) fn render_index_scan_condition_with_key_names_and_runtime_renderer(
                 key_column_names,
                 runtime_renderer,
             )
+            .map(|rendered| (key, rendered))
         })
+        .collect::<Vec<_>>();
+    if rendered.iter().any(|(key, _)| key.attribute_number == 0)
+        && rendered
+            .iter()
+            .all(|(key, _)| key.attribute_number == 0 || key.strategy == 3)
+        && let Some(index) = rendered
+            .iter()
+            .position(|(key, _)| key.attribute_number == 0)
+    {
+        let row_key = rendered.remove(index);
+        rendered.insert(0, row_key);
+    }
+    let rendered = rendered
+        .into_iter()
+        .map(|(_, rendered)| rendered)
         .collect::<Vec<_>>();
     match rendered.len() {
         0 => None,
@@ -1539,14 +1555,16 @@ impl PlanNode for SeqScanState {
         _show_costs: bool,
         lines: &mut Vec<String>,
     ) {
+        let prefix = explain_detail_prefix(indent);
+        if self.disabled {
+            lines.push(format!("{prefix}Disabled: true"));
+        }
         if let Some(qual_expr) = &self.qual_expr {
-            let prefix = explain_detail_prefix(indent);
             lines.push(format!(
                 "{prefix}Filter: {}",
                 render_explain_expr(qual_expr, &self.column_names)
             ));
         }
-        let prefix = explain_detail_prefix(indent);
         if analyze && self.stats.rows_removed_by_filter > 0 {
             lines.push(format!(
                 "{prefix}Rows Removed by Filter: {}",
@@ -2221,7 +2239,7 @@ fn render_index_scan_key(
         }
     }
     let display_type = index_key_argument_display_type(&key.argument, column_type);
-    let right_type_oid = display_type.map(crate::backend::utils::cache::catcache::sql_type_oid);
+    let right_type_oid = display_type.and_then(index_scan_operator_type_oid_for_sql_type);
     let left_sql = if matches!(display_type.map(|ty| ty.kind), Some(SqlTypeKind::Char))
         && column_type.kind == SqlTypeKind::Char
     {
@@ -2232,12 +2250,10 @@ fn render_index_scan_key(
         column_name
     };
     let right_type_oid = right_type_oid.or_else(|| match &key.argument {
-        IndexScanKeyArgument::Const(value) => value
-            .sql_type_hint()
-            .map(crate::backend::utils::cache::catcache::sql_type_oid),
+        IndexScanKeyArgument::Const(value) => index_scan_operator_type_oid_for_value(value),
         IndexScanKeyArgument::Runtime(expr) => {
             crate::include::nodes::primnodes::expr_sql_type_hint(expr)
-                .map(crate::backend::utils::cache::catcache::sql_type_oid)
+                .and_then(index_scan_operator_type_oid_for_sql_type)
         }
     });
     let operator_name = lookup_index_scan_operator_name(
@@ -2269,6 +2285,14 @@ fn render_index_scan_key(
             .map(|render| render(expr))
             .unwrap_or_else(|| render_explain_expr(expr, &[])),
     };
+    if key.strategy == 3
+        && matches!(
+            &key.argument,
+            IndexScanKeyArgument::Const(Value::Array(_) | Value::PgArray(_))
+        )
+    {
+        return Some(format!("{left_sql} {operator_name} ANY ({value_sql})"));
+    }
     Some(format!("{left_sql} {operator_name} {value_sql}"))
 }
 
@@ -2305,6 +2329,25 @@ fn render_index_display_expr(expr: &Expr, column_names: &[String]) -> String {
     };
     let right_sql = render_explain_infix_operand(right, None, column_names);
     format!("{left_sql} {op_text} {right_sql}")
+}
+
+fn index_scan_operator_type_oid_for_sql_type(sql_type: SqlType) -> Option<u32> {
+    let sql_type = if sql_type.is_array {
+        sql_type.element_type()
+    } else {
+        sql_type
+    };
+    Some(match sql_type.kind {
+        SqlTypeKind::Int2Vector => crate::include::catalog::INT2VECTOR_TYPE_OID,
+        SqlTypeKind::OidVector => crate::include::catalog::OIDVECTOR_TYPE_OID,
+        _ => crate::backend::utils::cache::catcache::sql_type_oid(sql_type),
+    })
+}
+
+fn index_scan_operator_type_oid_for_value(value: &Value) -> Option<u32> {
+    value
+        .sql_type_hint()
+        .and_then(index_scan_operator_type_oid_for_sql_type)
 }
 
 fn lookup_index_scan_operator_name(
@@ -4439,6 +4482,9 @@ fn render_explain_cast(
         return rendered;
     }
     if let Expr::Const(value) = expr {
+        if matches!(ty.kind, SqlTypeKind::Oid) {
+            return format!("'{}'::oid", render_explain_literal(value));
+        }
         return format!(
             "{}::{}",
             render_explain_literal(value),
@@ -4487,6 +4533,9 @@ fn render_explain_join_cast(
     inner_names: &[String],
 ) -> String {
     if let Expr::Const(value) = expr {
+        if matches!(ty.kind, SqlTypeKind::Oid) {
+            return format!("'{}'::oid", render_explain_literal(value));
+        }
         return format!(
             "{}::{}",
             render_explain_literal(value),
@@ -4529,17 +4578,15 @@ fn render_explain_literal(value: &Value) -> String {
                 .unwrap_or_else(|| format!("{value:?}"));
             format!("'{rendered}'")
         }
+        Value::PgArray(array) => {
+            let rendered = crate::backend::executor::value_io::format_array_value_text(array);
+            format!("'{}'", rendered.replace('\'', "''"))
+        }
         Value::Date(date) => {
             format!("'{}'", format_date_text(*date, &DateTimeConfig::default()))
         }
         Value::Inet(value) => format!("'{}'", value.render_inet()),
         Value::Cidr(value) => format!("'{}'", value.render_cidr()),
-        Value::PgArray(array) => {
-            format!(
-                "'{}'",
-                crate::backend::executor::format_array_value_text(array)
-            )
-        }
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
@@ -4666,6 +4713,8 @@ fn render_explain_sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::DateRange => "daterange".into(),
         SqlTypeKind::TimestampRange => "tsrange".into(),
         SqlTypeKind::TimestampTzRange => "tstzrange".into(),
+        SqlTypeKind::Int2Vector => "int2vector".into(),
+        SqlTypeKind::OidVector => "oidvector".into(),
         _ => "text".into(),
     };
     if ty.is_array {

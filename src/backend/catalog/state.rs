@@ -23,6 +23,7 @@ use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::access::brin::BrinOptions;
 use crate::include::access::gin::GinOptions;
 use crate::include::access::hash::HashOptions;
+use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE,
     DEPENDENCY_INTERNAL, PG_CONSTRAINT_RELATION_OID, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
@@ -129,8 +130,11 @@ fn build_catalog_index_entry(
         namespace_oid: table.namespace_oid,
         owner_oid: table.owner_oid,
         relacl: None,
-        reloptions: None,
         of_type_oid: 0,
+        reloptions: resolved_options
+            .reloptions
+            .clone()
+            .or_else(|| btree_reloptions(resolved_options.btree_options)),
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,
@@ -180,6 +184,7 @@ fn build_catalog_index_entry(
                 .map(str::trim)
                 .filter(|pred| !pred.is_empty())
                 .map(str::to_string),
+            btree_options: resolved_options.btree_options,
             brin_options: resolved_options.brin_options,
             gin_options: resolved_options.gin_options,
             hash_options: resolved_options.hash_options,
@@ -199,6 +204,54 @@ fn index_column_opckey_sql_type(
         return None;
     }
     builtin_type_row_by_oid(opclass.opckeytype).map(|row| row.sql_type)
+}
+
+fn btree_reloptions(options: Option<BtreeOptions>) -> Option<Vec<String>> {
+    options.map(|options| {
+        vec![
+            format!("fillfactor={}", options.fillfactor),
+            format!(
+                "deduplicate_items={}",
+                if options.deduplicate_items {
+                    "on"
+                } else {
+                    "off"
+                }
+            ),
+        ]
+    })
+}
+
+fn explicit_btree_opclass_oid(opclass_name: &str, type_oid: u32) -> Option<u32> {
+    let opclass_name = opclass_name
+        .rsplit_once('.')
+        .map(|(_, name)| name)
+        .unwrap_or(opclass_name);
+    crate::include::catalog::bootstrap_pg_opclass_rows()
+        .into_iter()
+        .find(|row| {
+            row.opcmethod == crate::include::catalog::BTREE_AM_OID
+                && row.opcname.eq_ignore_ascii_case(opclass_name)
+                && btree_opclass_accepts_type(row.opcintype, type_oid)
+        })
+        .map(|row| row.oid)
+}
+
+fn btree_opclass_accepts_type(opcintype: u32, type_oid: u32) -> bool {
+    use crate::include::catalog::{
+        ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, BPCHAR_TYPE_OID,
+        TEXT_TYPE_OID, VARCHAR_TYPE_OID,
+    };
+
+    opcintype == type_oid
+        || matches!(
+            opcintype,
+            ANYOID | ANYARRAYOID | ANYENUMOID | ANYRANGEOID | ANYMULTIRANGEOID
+        )
+        || (matches!(
+            opcintype,
+            TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID
+        ) && matches!(type_oid, TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID))
 }
 
 fn default_index_build_options_for_entry(
@@ -232,9 +285,13 @@ fn default_index_build_options_for_entry(
         if type_oid == 0 {
             return Err(CatalogError::UnknownType("index column type".into()));
         }
-        let opclass_oid =
+        let opclass_oid = if let Some(opclass_name) = column_name.opclass.as_deref() {
+            explicit_btree_opclass_oid(opclass_name, type_oid)
+                .ok_or_else(|| CatalogError::UnknownType("index operator class".into()))?
+        } else {
             crate::include::catalog::default_opclass_oid_for_am(am_oid, type_oid, sql_type)
-                .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?;
+                .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?
+        };
         indclass.push(opclass_oid);
         indcollation.push(0);
         let mut option = 0i16;
@@ -255,6 +312,7 @@ fn default_index_build_options_for_entry(
         indnullsnotdistinct: false,
         indisexclusion: false,
         indimmediate: true,
+        btree_options: None,
         brin_options: (am_oid == crate::include::catalog::BRIN_AM_OID)
             .then(crate::include::access::brin::BrinOptions::default),
         gin_options: (am_oid == crate::include::catalog::GIN_AM_OID)
@@ -305,6 +363,7 @@ pub struct CatalogIndexMeta {
     pub indoption: Vec<i16>,
     pub indexprs: Option<String>,
     pub indpred: Option<String>,
+    pub btree_options: Option<BtreeOptions>,
     pub brin_options: Option<BrinOptions>,
     pub gin_options: Option<GinOptions>,
     pub hash_options: Option<HashOptions>,
@@ -320,6 +379,7 @@ pub struct CatalogIndexBuildOptions {
     pub indnullsnotdistinct: bool,
     pub indisexclusion: bool,
     pub indimmediate: bool,
+    pub btree_options: Option<BtreeOptions>,
     pub brin_options: Option<BrinOptions>,
     pub gin_options: Option<GinOptions>,
     pub hash_options: Option<HashOptions>,
@@ -1594,7 +1654,7 @@ impl Catalog {
         Ok(())
     }
 
-    fn default_index_build_options(
+    pub fn default_index_build_options(
         &self,
         relation_oid: u32,
         columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
@@ -1616,12 +1676,17 @@ impl Catalog {
             if type_oid == 0 {
                 return Err(CatalogError::UnknownType("index column type".into()));
             }
-            let opclass_oid = crate::include::catalog::default_opclass_oid_for_am(
-                crate::include::catalog::BTREE_AM_OID,
-                type_oid,
-                column.sql_type,
-            )
-            .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?;
+            let opclass_oid = if let Some(opclass_name) = column_name.opclass.as_deref() {
+                explicit_btree_opclass_oid(opclass_name, type_oid)
+                    .ok_or_else(|| CatalogError::UnknownType("index operator class".into()))?
+            } else {
+                crate::include::catalog::default_opclass_oid_for_am(
+                    crate::include::catalog::BTREE_AM_OID,
+                    type_oid,
+                    column.sql_type,
+                )
+                .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?
+            };
             indclass.push(opclass_oid);
             indcollation.push(0);
             let mut option = 0i16;
@@ -1642,6 +1707,7 @@ impl Catalog {
             indnullsnotdistinct: false,
             indisexclusion: false,
             indimmediate: true,
+            btree_options: None,
             brin_options: None,
             gin_options: None,
             hash_options: None,

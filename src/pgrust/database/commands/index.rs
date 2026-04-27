@@ -14,6 +14,7 @@ use crate::include::access::amapi::{
 use crate::include::access::brin::BrinOptions;
 use crate::include::access::gin::GinOptions;
 use crate::include::access::hash::HashOptions;
+use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::{
     ANYMULTIRANGEOID, ANYRANGEOID, BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID,
     GIST_RANGE_FAMILY_OID, HASH_AM_OID, SPGIST_AM_OID, builtin_range_rows,
@@ -303,8 +304,8 @@ pub(super) fn catalog_entry_from_bound_index_relation(
         namespace_oid,
         owner_oid,
         relacl: None,
-        reloptions: None,
         of_type_oid: 0,
+        reloptions: btree_reloptions(index.index_meta.btree_options),
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,
@@ -342,11 +343,28 @@ pub(super) fn catalog_entry_from_bound_index_relation(
             indoption: index.index_meta.indoption.clone(),
             indexprs: index.index_meta.indexprs.clone(),
             indpred: index.index_meta.indpred.clone(),
+            btree_options: index.index_meta.btree_options,
             brin_options: index.index_meta.brin_options.clone(),
             gin_options: index.index_meta.gin_options.clone(),
             hash_options: index.index_meta.hash_options,
         }),
     }
+}
+
+fn btree_reloptions(options: Option<BtreeOptions>) -> Option<Vec<String>> {
+    options.map(|options| {
+        vec![
+            format!("fillfactor={}", options.fillfactor),
+            format!(
+                "deduplicate_items={}",
+                if options.deduplicate_items {
+                    "on"
+                } else {
+                    "off"
+                }
+            ),
+        ]
+    })
 }
 
 fn type_oid_for_temporal_index_type(
@@ -375,6 +393,23 @@ fn type_oid_for_temporal_index_type(
                 })
                 .map(|row| row.oid)
         })
+}
+
+fn btree_opclass_accepts_type(opcintype: u32, type_oid: u32) -> bool {
+    use crate::include::catalog::{
+        ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, BPCHAR_TYPE_OID,
+        TEXT_TYPE_OID, VARCHAR_TYPE_OID,
+    };
+
+    opcintype == type_oid
+        || matches!(
+            opcintype,
+            ANYOID | ANYARRAYOID | ANYENUMOID | ANYRANGEOID | ANYMULTIRANGEOID
+        )
+        || (matches!(
+            opcintype,
+            TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID
+        ) && matches!(type_oid, TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID))
 }
 
 fn catalog_type_oid(
@@ -465,6 +500,7 @@ impl Database {
             indpred: meta.indpred.clone(),
             rd_indexprs: None,
             rd_indpred: None,
+            btree_options: meta.btree_options,
             brin_options: meta.brin_options.clone(),
             gin_options: meta.gin_options.clone(),
             hash_options: meta.hash_options,
@@ -568,6 +604,57 @@ impl Database {
             ))));
         }
         Ok(resolved)
+    }
+
+    fn resolve_btree_options(
+        &self,
+        options: &[RelOption],
+    ) -> Result<Option<BtreeOptions>, ExecError> {
+        if options.is_empty() {
+            return Ok(None);
+        }
+
+        let mut resolved = BtreeOptions::default();
+        for option in options {
+            if option.name.eq_ignore_ascii_case("fillfactor") {
+                let fillfactor = option.value.parse::<u16>().map_err(|_| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "integer fillfactor between 10 and 100",
+                        actual: option.value.clone(),
+                    })
+                })?;
+                if !(10..=100).contains(&fillfactor) {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "integer fillfactor between 10 and 100",
+                        actual: option.value.clone(),
+                    }));
+                }
+                resolved.fillfactor = fillfactor;
+                continue;
+            }
+
+            if option.name.eq_ignore_ascii_case("deduplicate_items") {
+                // :HACK: btree deduplication reloption is preserved for catalog
+                // compatibility, but posting-list deduplication is not built yet.
+                resolved.deduplicate_items = match option.value.to_ascii_lowercase().as_str() {
+                    "on" | "true" | "yes" | "1" => true,
+                    "off" | "false" | "no" | "0" => false,
+                    _ => {
+                        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "boolean deduplicate_items",
+                            actual: option.value.clone(),
+                        }));
+                    }
+                };
+                continue;
+            }
+
+            return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                "btree index option \"{}\"",
+                option.name
+            ))));
+        }
+        Ok(Some(resolved))
     }
 
     fn access_method_can_include(access_method_oid: u32) -> bool {
@@ -814,13 +901,19 @@ impl Database {
                 let is_range_type = builtin_range_rows()
                     .iter()
                     .any(|row| row.rngtypid == type_oid);
+                let opclass_lookup_name = opclass_name
+                    .rsplit_once('.')
+                    .map(|(_, name)| name)
+                    .unwrap_or(opclass_name);
                 opclass_rows
                     .iter()
                     .find(|row| {
                         row.opcmethod == access_method.oid
-                            && row.opcname.eq_ignore_ascii_case(opclass_name)
+                            && row.opcname.eq_ignore_ascii_case(opclass_lookup_name)
                             && (row.opcintype == type_oid
-                                || (is_range_type && row.opcfamily == GIST_RANGE_FAMILY_OID))
+                                || (is_range_type && row.opcfamily == GIST_RANGE_FAMILY_OID)
+                                || (access_method.oid == BTREE_AM_OID
+                                    && btree_opclass_accepts_type(row.opcintype, type_oid)))
                     })
                     .cloned()
             } else {
@@ -886,10 +979,11 @@ impl Database {
             indoption.push(option);
         }
 
-        let (brin_options, gin_options, hash_options) = match access_method.oid {
-            BRIN_AM_OID => (Some(self.resolve_brin_options(options)?), None, None),
-            GIN_AM_OID => (None, Some(self.resolve_gin_options(options)?), None),
-            HASH_AM_OID => (None, None, Some(self.resolve_hash_options(options)?)),
+        let (btree_options, brin_options, gin_options, hash_options) = match access_method.oid {
+            BTREE_AM_OID => (self.resolve_btree_options(options)?, None, None, None),
+            BRIN_AM_OID => (None, Some(self.resolve_brin_options(options)?), None, None),
+            GIN_AM_OID => (None, None, Some(self.resolve_gin_options(options)?), None),
+            HASH_AM_OID => (None, None, None, Some(self.resolve_hash_options(options)?)),
             _ => {
                 if !options.is_empty() {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -897,7 +991,7 @@ impl Database {
                         actual: "unsupported CREATE INDEX feature".into(),
                     }));
                 }
-                (None, None, None)
+                (None, None, None, None)
             }
         };
 
@@ -913,6 +1007,7 @@ impl Database {
                 indnullsnotdistinct: false,
                 indisexclusion: false,
                 indimmediate: true,
+                btree_options,
                 brin_options,
                 gin_options,
                 hash_options,
@@ -977,6 +1072,7 @@ impl Database {
                 indnullsnotdistinct: false,
                 indisexclusion: true,
                 indimmediate: true,
+                btree_options: None,
                 brin_options: None,
                 gin_options: None,
                 hash_options: None,

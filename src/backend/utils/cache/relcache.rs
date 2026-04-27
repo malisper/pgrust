@@ -13,6 +13,7 @@ use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, s
 use crate::include::access::brin::BrinOptions;
 use crate::include::access::gin::GinOptions;
 use crate::include::access::hash::HashOptions;
+use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::PgTypeRow;
 use crate::include::catalog::{
     ANYELEMENTOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
@@ -75,6 +76,7 @@ pub struct IndexRelCacheEntry {
     pub rd_indexprs: Option<Vec<Expr>>,
     #[serde(skip)]
     pub rd_indpred: Option<Option<Expr>>,
+    pub btree_options: Option<BtreeOptions>,
     pub brin_options: Option<BrinOptions>,
     pub gin_options: Option<GinOptions>,
     pub hash_options: Option<HashOptions>,
@@ -613,6 +615,7 @@ impl RelCache {
                             indpred: None,
                             rd_indexprs: None,
                             rd_indpred: None,
+                            btree_options: None,
                             brin_options: None,
                             gin_options: None,
                             hash_options: None,
@@ -651,6 +654,7 @@ impl RelCache {
                         indpred: index.indpred.clone(),
                         rd_indexprs: None,
                         rd_indpred: None,
+                        btree_options: None,
                         brin_options: None,
                         gin_options: None,
                         hash_options: None,
@@ -838,6 +842,7 @@ fn from_catalog_entry(entry: &CatalogEntry, support_lookup: &IndexSupportLookup)
                 indpred: index.indpred.clone(),
                 rd_indexprs: None,
                 rd_indpred: None,
+                btree_options: index.btree_options,
                 brin_options: index.brin_options.clone(),
                 gin_options: index.gin_options.clone(),
                 hash_options: index.hash_options,
@@ -929,6 +934,7 @@ mod tests {
                     indnullsnotdistinct: false,
                     indisexclusion: false,
                     indimmediate: true,
+                    btree_options: None,
                     brin_options: None,
                     gin_options: None,
                     hash_options: None,
@@ -985,6 +991,7 @@ mod tests {
                     indnullsnotdistinct: false,
                     indisexclusion: false,
                     indimmediate: true,
+                    btree_options: None,
                     brin_options: None,
                     gin_options: None,
                     hash_options: None,
@@ -1006,6 +1013,7 @@ mod tests {
                     indnullsnotdistinct: false,
                     indisexclusion: false,
                     indimmediate: true,
+                    btree_options: None,
                     brin_options: None,
                     gin_options: None,
                     hash_options: None,
@@ -1066,6 +1074,7 @@ mod tests {
                     indnullsnotdistinct: true,
                     indisexclusion: false,
                     indimmediate: true,
+                    btree_options: None,
                     brin_options: None,
                     gin_options: None,
                     hash_options: None,
@@ -1125,6 +1134,7 @@ mod tests {
             indpred: None,
             rd_indexprs: None,
             rd_indpred: None,
+            btree_options: None,
             brin_options: None,
             gin_options: None,
             hash_options: None,
@@ -1192,6 +1202,7 @@ mod tests {
             indpred: None,
             rd_indexprs: None,
             rd_indpred: None,
+            btree_options: None,
             brin_options: None,
             gin_options: None,
             hash_options: None,

@@ -4430,7 +4430,20 @@ fn bind_select_query_with_outer(
             )?;
             reject_window_clause(predicate, "WHERE")?;
         }
-        let effective_group_by = normalize_group_by_exprs(stmt, &scope)?;
+        let lower_distinct_to_grouping = stmt.distinct
+            && stmt.distinct_on.is_empty()
+            && stmt.group_by.is_empty()
+            && target_aggs.is_empty()
+            && stmt.having.is_none()
+            && (stmt.limit.is_some() || stmt.offset.is_some());
+        let effective_group_by = if lower_distinct_to_grouping {
+            stmt.targets
+                .iter()
+                .map(|target| target.expr.clone())
+                .collect::<Vec<_>>()
+        } else {
+            normalize_group_by_exprs(stmt, &scope)?
+        };
 
         for group_expr in &effective_group_by {
             analyze_expr_aggregates_in_clause(

@@ -739,10 +739,12 @@ fn full_index_scan_spec(
         order_by_keys: Vec::new(),
         residual: filter,
         used_quals: Vec::new(),
+        scan_quals: Vec::new(),
         recheck_quals: Vec::new(),
         filter_quals,
         direction: crate::include::access::relscan::ScanDirection::Forward,
         removes_order: false,
+        btree_prefix_columns: 0,
         row_prefix: false,
     }
 }
@@ -934,9 +936,22 @@ fn collect_relation_access_paths(
         catalog,
     ));
     if paths.is_empty() {
+        if !config.enable_seqscan && relkind == 'r' {
+            for path in &mut seq_paths {
+                mark_seqscan_disabled(path);
+            }
+        }
         paths = seq_paths;
     }
     paths
+}
+
+fn mark_seqscan_disabled(path: &mut Path) {
+    match path {
+        Path::SeqScan { disabled, .. } => *disabled = true,
+        Path::Filter { input, .. } | Path::OrderBy { input, .. } => mark_seqscan_disabled(input),
+        _ => {}
+    }
 }
 
 fn collect_relation_ordered_index_paths(

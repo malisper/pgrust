@@ -44,6 +44,7 @@ fn toast_index_relation_from_changes(changes: &ToastCatalogChanges) -> Option<Bo
             indpred: meta.indpred.clone(),
             rd_indexprs: None,
             rd_indpred: None,
+            btree_options: meta.btree_options,
             brin_options: meta.brin_options.clone(),
             gin_options: meta.gin_options.clone(),
             hash_options: meta.hash_options,
