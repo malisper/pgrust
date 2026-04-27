@@ -35,22 +35,23 @@ use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow,
-    PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgEnumRow,
-    PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow,
-    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgPartitionedTableRow, PgProcRow,
-    PgRangeRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
-    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow,
-    RECORD_TYPE_OID, bootstrap_pg_aggregate_rows, bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows,
-    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_database_rows,
-    bootstrap_pg_enum_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
-    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
-    bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
-    bootstrap_pg_ts_template_rows, builtin_range_rows, builtin_type_row_by_name,
-    builtin_type_row_by_oid, builtin_type_rows, is_synthetic_range_proc_name,
-    multirange_type_ref_for_sql_type, proc_oid_for_builtin_aggregate_function,
-    proc_oid_for_builtin_hypothetical_aggregate_function, range_type_ref_for_sql_type,
-    relkind_is_analyzable, synthetic_range_proc_row_by_oid, synthetic_range_proc_rows_by_name,
+    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAmopRow, PgAmprocRow, PgAttributeRow, PgAuthIdRow,
+    PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow,
+    PgDependRow, PgEnumRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow,
+    PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
+    PgPartitionedTableRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticExtDataRow,
+    PgStatisticExtRow, PgStatisticRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
+    PgTsTemplateRow, PgTypeRow, PgUserMappingRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows,
+    bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
+    bootstrap_pg_collation_rows, bootstrap_pg_database_rows, bootstrap_pg_enum_rows,
+    bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, bootstrap_pg_ts_config_map_rows,
+    bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_template_rows,
+    builtin_range_rows, builtin_type_row_by_name, builtin_type_row_by_oid, builtin_type_rows,
+    is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
+    proc_oid_for_builtin_aggregate_function, proc_oid_for_builtin_hypothetical_aggregate_function,
+    range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_proc_row_by_oid,
+    synthetic_range_proc_rows_by_name,
 };
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
@@ -69,7 +70,8 @@ static NEXT_CTE_ID: AtomicUsize = AtomicUsize::new(1);
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
-    build_pg_rules_rows, build_pg_stats_rows, build_pg_user_mappings_rows, build_pg_views_rows,
+    build_pg_rules_rows, build_pg_stats_ext_exprs_rows, build_pg_stats_ext_rows,
+    build_pg_stats_rows, build_pg_user_mappings_rows, build_pg_views_rows,
     current_pg_stat_progress_copy_rows,
 };
 use agg::*;
@@ -1300,6 +1302,13 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn attribute_rows(&self) -> Vec<PgAttributeRow> {
+        self.class_rows()
+            .into_iter()
+            .flat_map(|class| self.attribute_rows_for_relation(class.oid))
+            .collect()
+    }
+
     fn class_rows(&self) -> Vec<PgClassRow> {
         Vec::new()
     }
@@ -1398,6 +1407,27 @@ pub trait CatalogLookup {
 
     fn pg_stats_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
+    }
+
+    fn pg_stats_ext_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_stats_ext_rows(
+            self.namespace_rows(),
+            self.authid_rows(),
+            self.class_rows(),
+            self.attribute_rows(),
+            self.statistic_ext_rows(),
+            self.statistic_ext_data_rows(),
+        )
+    }
+
+    fn pg_stats_ext_exprs_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_stats_ext_exprs_rows(
+            self.namespace_rows(),
+            self.authid_rows(),
+            self.class_rows(),
+            self.statistic_ext_rows(),
+            self.statistic_ext_data_rows(),
+        )
     }
 
     fn pg_settings_rows(&self) -> Vec<Vec<Value>> {

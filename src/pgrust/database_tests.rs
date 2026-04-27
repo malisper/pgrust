@@ -19939,6 +19939,39 @@ fn create_table_like_copies_statistics_only_when_requested() {
 }
 
 #[test]
+fn pg_stats_ext_views_exist_and_bind_columns() {
+    let base = temp_dir("pg_stats_ext_views_exist");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table stats_ext_view_t (a int4, b int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_ext_view_stat on a, b from stats_ext_view_t",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select statistics_name, dependencies from pg_stats_ext
+             where statistics_name = 'stats_ext_view_stat'",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select statistics_name, expr from pg_stats_ext_exprs
+             where statistics_name = 'stats_ext_view_stat'",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
 fn alter_table_add_without_overlaps_on_inherited_columns() {
     let base = temp_dir("without_overlaps_inherited_alter");
     let db = Database::open(&base, 16).unwrap();

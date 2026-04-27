@@ -4,10 +4,11 @@ use crate::backend::executor::Value;
 use crate::backend::rewrite::format_stored_rule_definition;
 use crate::backend::utils::cache::system_view_registry::synthetic_system_views;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, NAME_TYPE_OID, PG_LANGUAGE_INTERNAL_OID, PgAmRow, PgAttributeRow,
-    PgAuthIdRow, PgClassRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow,
-    PgIndexRow, PgNamespaceRow, PgPolicyRow, PgProcRow, PgRewriteRow, PgStatisticRow,
-    PgUserMappingRow, PolicyCommand,
+    BOOTSTRAP_SUPERUSER_OID, INTERNAL_CHAR_TYPE_OID, NAME_TYPE_OID, PG_LANGUAGE_INTERNAL_OID,
+    PgAmRow, PgAttributeRow, PgAuthIdRow, PgClassRow, PgForeignDataWrapperRow, PgForeignServerRow,
+    PgForeignTableRow, PgIndexRow, PgNamespaceRow, PgPolicyRow, PgProcRow, PgRewriteRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgUserMappingRow, PolicyCommand,
+    TEXT_TYPE_OID,
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::pgrust::database::DatabaseStatsStore;
@@ -561,8 +562,273 @@ pub fn build_pg_stats_rows(
     rows.into_iter().map(|(_, _, _, _, row)| row).collect()
 }
 
+pub fn build_pg_stats_ext_rows(
+    namespaces: Vec<PgNamespaceRow>,
+    authids: Vec<PgAuthIdRow>,
+    classes: Vec<PgClassRow>,
+    attributes: Vec<PgAttributeRow>,
+    statistics_ext: Vec<PgStatisticExtRow>,
+    statistics_ext_data: Vec<PgStatisticExtDataRow>,
+) -> Vec<Vec<Value>> {
+    let namespace_names = namespaces
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<BTreeMap<_, _>>();
+    let role_names = authids
+        .into_iter()
+        .map(|row| (row.oid, row.rolname))
+        .collect::<BTreeMap<_, _>>();
+    let classes_by_oid = classes
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+    let attributes_by_relation = attributes_by_relation(attributes);
+    let data_by_statistics_oid = statistics_ext_data.into_iter().fold(
+        BTreeMap::<u32, Vec<PgStatisticExtDataRow>>::new(),
+        |mut acc, row| {
+            acc.entry(row.stxoid).or_default().push(row);
+            acc
+        },
+    );
+
+    let mut rows = statistics_ext
+        .into_iter()
+        .filter_map(|stat| {
+            let class = classes_by_oid.get(&stat.stxrelid)?;
+            let data_rows = data_by_statistics_oid.get(&stat.oid)?;
+            let table_schema = namespace_names
+                .get(&class.relnamespace)
+                .cloned()
+                .unwrap_or_else(|| "public".to_string());
+            let statistics_schema = namespace_names
+                .get(&stat.stxnamespace)
+                .cloned()
+                .unwrap_or_else(|| "public".to_string());
+            let owner = role_names
+                .get(&stat.stxowner)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            let attnames = statistics_attribute_names(&stat, &attributes_by_relation);
+            let exprs = statistics_expression_array(&stat);
+            let kinds = statistics_kind_array(&stat);
+            let rows = data_rows
+                .iter()
+                .map(|data| {
+                    vec![
+                        Value::Text(table_schema.clone().into()),
+                        Value::Text(class.relname.clone().into()),
+                        Value::Text(statistics_schema.clone().into()),
+                        Value::Text(stat.stxname.clone().into()),
+                        Value::Text(owner.clone().into()),
+                        attnames.clone(),
+                        exprs.clone(),
+                        kinds.clone(),
+                        Value::Bool(data.stxdinherit),
+                        optional_bytea(data.stxdndistinct.clone()),
+                        optional_bytea(data.stxddependencies.clone()),
+                        Value::Null,
+                        Value::Null,
+                        Value::Null,
+                        Value::Null,
+                    ]
+                })
+                .collect::<Vec<_>>();
+            Some((
+                table_schema,
+                class.relname.clone(),
+                stat.stxname.clone(),
+                rows,
+            ))
+        })
+        .flat_map(|(schema, table, statistics, rows)| {
+            rows.into_iter()
+                .map(move |row| (schema.clone(), table.clone(), statistics.clone(), row))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    rows.into_iter().map(|(_, _, _, row)| row).collect()
+}
+
+pub fn build_pg_stats_ext_exprs_rows(
+    namespaces: Vec<PgNamespaceRow>,
+    authids: Vec<PgAuthIdRow>,
+    classes: Vec<PgClassRow>,
+    statistics_ext: Vec<PgStatisticExtRow>,
+    statistics_ext_data: Vec<PgStatisticExtDataRow>,
+) -> Vec<Vec<Value>> {
+    let namespace_names = namespaces
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<BTreeMap<_, _>>();
+    let role_names = authids
+        .into_iter()
+        .map(|row| (row.oid, row.rolname))
+        .collect::<BTreeMap<_, _>>();
+    let classes_by_oid = classes
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+    let data_by_statistics_oid = statistics_ext_data.into_iter().fold(
+        BTreeMap::<u32, Vec<PgStatisticExtDataRow>>::new(),
+        |mut acc, row| {
+            acc.entry(row.stxoid).or_default().push(row);
+            acc
+        },
+    );
+
+    let mut rows = statistics_ext
+        .into_iter()
+        .filter_map(|stat| {
+            let class = classes_by_oid.get(&stat.stxrelid)?;
+            let data_rows = data_by_statistics_oid.get(&stat.oid)?;
+            let expressions = statistics_expression_texts(&stat);
+            if expressions.is_empty() {
+                return None;
+            }
+            let table_schema = namespace_names
+                .get(&class.relnamespace)
+                .cloned()
+                .unwrap_or_else(|| "public".to_string());
+            let statistics_schema = namespace_names
+                .get(&stat.stxnamespace)
+                .cloned()
+                .unwrap_or_else(|| "public".to_string());
+            let owner = role_names
+                .get(&stat.stxowner)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            let rows = data_rows
+                .iter()
+                .flat_map(|data| {
+                    let Some(expr_stats) = data.stxdexpr.as_ref() else {
+                        return Vec::new();
+                    };
+                    expressions
+                        .iter()
+                        .zip(expr_stats.iter())
+                        .map(|(expr, expr_stat)| {
+                            vec![
+                                Value::Text(table_schema.clone().into()),
+                                Value::Text(class.relname.clone().into()),
+                                Value::Text(statistics_schema.clone().into()),
+                                Value::Text(stat.stxname.clone().into()),
+                                Value::Text(owner.clone().into()),
+                                Value::Text(expr.clone().into()),
+                                Value::Bool(data.stxdinherit),
+                                Value::Float64(expr_stat.stanullfrac),
+                                Value::Int32(expr_stat.stawidth),
+                                Value::Float64(expr_stat.stadistinct),
+                                slot_values(expr_stat, STATISTIC_KIND_MCV),
+                                slot_numbers(expr_stat, STATISTIC_KIND_MCV),
+                                slot_values(expr_stat, STATISTIC_KIND_HISTOGRAM),
+                                slot_first_number(expr_stat, STATISTIC_KIND_CORRELATION),
+                                slot_values(expr_stat, STATISTIC_KIND_MCELEM),
+                                slot_numbers(expr_stat, STATISTIC_KIND_MCELEM),
+                                slot_numbers(expr_stat, STATISTIC_KIND_DECHIST),
+                            ]
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            Some((
+                table_schema,
+                class.relname.clone(),
+                stat.stxname.clone(),
+                rows,
+            ))
+        })
+        .flat_map(|(schema, table, statistics, rows)| {
+            rows.into_iter()
+                .map(move |row| (schema.clone(), table.clone(), statistics.clone(), row))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    rows.into_iter().map(|(_, _, _, row)| row).collect()
+}
+
 pub fn build_pg_locks_rows(rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
     rows
+}
+
+fn attributes_by_relation(attributes: Vec<PgAttributeRow>) -> BTreeMap<u32, BTreeMap<i16, String>> {
+    let mut out = BTreeMap::<u32, BTreeMap<i16, String>>::new();
+    for attribute in attributes {
+        if attribute.attnum <= 0 || attribute.attisdropped {
+            continue;
+        }
+        out.entry(attribute.attrelid)
+            .or_default()
+            .insert(attribute.attnum, attribute.attname);
+    }
+    out
+}
+
+fn statistics_attribute_names(
+    stat: &PgStatisticExtRow,
+    attributes_by_relation: &BTreeMap<u32, BTreeMap<i16, String>>,
+) -> Value {
+    let names = stat
+        .stxkeys
+        .iter()
+        .filter_map(|attnum| {
+            attributes_by_relation
+                .get(&stat.stxrelid)
+                .and_then(|attrs| attrs.get(attnum))
+                .cloned()
+        })
+        .map(|name| Value::Text(name.into()))
+        .collect::<Vec<_>>();
+    Value::PgArray(ArrayValue::from_1d(names).with_element_type_oid(NAME_TYPE_OID))
+}
+
+fn statistics_expression_texts(stat: &PgStatisticExtRow) -> Vec<String> {
+    stat.stxexprs
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<Vec<String>>(text).ok())
+        .unwrap_or_default()
+}
+
+fn statistics_expression_array(stat: &PgStatisticExtRow) -> Value {
+    let expressions = statistics_expression_texts(stat);
+    if expressions.is_empty() {
+        return Value::Null;
+    }
+    Value::PgArray(
+        ArrayValue::from_1d(
+            expressions
+                .into_iter()
+                .map(|expr| Value::Text(expr.into()))
+                .collect(),
+        )
+        .with_element_type_oid(TEXT_TYPE_OID),
+    )
+}
+
+fn statistics_kind_array(stat: &PgStatisticExtRow) -> Value {
+    Value::PgArray(
+        ArrayValue::from_1d(
+            stat.stxkind
+                .iter()
+                .copied()
+                .map(Value::InternalChar)
+                .collect(),
+        )
+        .with_element_type_oid(INTERNAL_CHAR_TYPE_OID),
+    )
+}
+
+fn optional_bytea(bytes: Option<Vec<u8>>) -> Value {
+    bytes.map(Value::Bytea).unwrap_or(Value::Null)
 }
 
 fn slot_index(stat: &PgStatisticRow, kind: i16) -> Option<usize> {
