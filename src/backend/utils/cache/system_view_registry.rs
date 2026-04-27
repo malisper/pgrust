@@ -14,6 +14,7 @@ pub enum SyntheticSystemViewKind {
     PgStats,
     PgSettings,
     PgUserMappings,
+    PgRoles,
     PgStatActivity,
     PgStatAllTables,
     PgStatUserTables,
@@ -117,6 +118,7 @@ const PG_RULES_ALIASES: &[&str] = &["pg_rules", "pg_catalog.pg_rules"];
 const PG_STATS_ALIASES: &[&str] = &["pg_stats", "pg_catalog.pg_stats"];
 const PG_SETTINGS_ALIASES: &[&str] = &["pg_settings", "pg_catalog.pg_settings"];
 const PG_USER_MAPPINGS_ALIASES: &[&str] = &["pg_user_mappings", "pg_catalog.pg_user_mappings"];
+const PG_ROLES_ALIASES: &[&str] = &["pg_roles", "pg_catalog.pg_roles"];
 const PG_STAT_ACTIVITY_ALIASES: &[&str] = &["pg_stat_activity", "pg_catalog.pg_stat_activity"];
 const PG_STAT_ALL_TABLES_ALIASES: &[&str] =
     &["pg_stat_all_tables", "pg_catalog.pg_stat_all_tables"];
@@ -319,6 +321,11 @@ const PG_USER_MAPPINGS_COLUMNS: &[SyntheticSystemViewColumn] = &[
         "umoptions",
         SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
     ),
+];
+
+const PG_ROLES_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("rolname", SqlType::new(SqlTypeKind::Name)),
+    SyntheticSystemViewColumn::new("oid", SqlType::new(SqlTypeKind::Oid)),
 ];
 
 const PG_STAT_ACTIVITY_COLUMNS: &[SyntheticSystemViewColumn] = &[
@@ -616,7 +623,7 @@ const INFORMATION_SCHEMA_FOREIGN_TABLE_OPTIONS_COLUMNS: &[SyntheticSystemViewCol
     SyntheticSystemViewColumn::text("option_value"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 34] = [
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 35] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgEnum,
         canonical_name: "pg_catalog.pg_enum",
@@ -692,6 +699,13 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 34] = [
         canonical_name: "pg_catalog.pg_user_mappings",
         aliases: PG_USER_MAPPINGS_ALIASES,
         columns: PG_USER_MAPPINGS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgRoles,
+        canonical_name: "pg_catalog.pg_roles",
+        aliases: PG_ROLES_ALIASES,
+        columns: PG_ROLES_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {

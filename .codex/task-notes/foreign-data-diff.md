@@ -51,11 +51,11 @@ Tests run:
 - `scripts/run_regression.sh --skip-build --port 55439 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-priv-funcs`
 - `scripts/cargo_isolated.sh test --lib --quiet import_foreign_schema_requires_fdw_handler`
 - `scripts/run_regression.sh --skip-build --port 55440 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-import`
+- `scripts/run_regression.sh --skip-build --port 55441 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-pg-roles`
 
 Remaining:
-`foreign_data` still fails, but improved to 282/539 matching queries. Biggest
+`foreign_data` still fails, but improved to 284/539 matching queries. Biggest
 remaining groups:
-- `pg_roles` synthetic view for OID-subquery privilege checks
 - `pg_catalog.pg_table_is_visible` and `pg_catalog.pg_get_partkeydef`
 - FDW dependency reporting for handler functions and owners
 - full `IMPORT FOREIGN SCHEMA` callback behavior beyond missing-handler errors

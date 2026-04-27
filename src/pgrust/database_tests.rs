@@ -32149,6 +32149,16 @@ fn foreign_data_usage_grant_revoke_updates_acl_views() {
             Value::Bool(true)
         ]]
     );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select has_foreign_data_wrapper_privilege( \
+                    (select oid from pg_roles where rolname = 'fdw_acl_role'), \
+                    'fdw_acl', 'USAGE')",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
 
     db.execute(
         1,

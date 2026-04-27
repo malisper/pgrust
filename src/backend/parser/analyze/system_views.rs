@@ -201,6 +201,16 @@ pub(super) fn bind_builtin_system_view(
         SyntheticSystemViewKind::PgStats => catalog.pg_stats_rows(),
         SyntheticSystemViewKind::PgSettings => catalog.pg_settings_rows(),
         SyntheticSystemViewKind::PgUserMappings => catalog.pg_user_mappings_rows(),
+        SyntheticSystemViewKind::PgRoles => catalog
+            .authid_rows()
+            .into_iter()
+            .map(|row| {
+                vec![
+                    Value::Text(row.rolname.into()),
+                    Value::Int64(i64::from(row.oid)),
+                ]
+            })
+            .collect(),
         SyntheticSystemViewKind::PgStatActivity => catalog.pg_stat_activity_rows(),
         SyntheticSystemViewKind::PgStatAllTables => catalog.pg_stat_all_tables_rows(),
         SyntheticSystemViewKind::PgStatUserTables => catalog.pg_stat_user_tables_rows(),
